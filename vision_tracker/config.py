@@ -20,19 +20,20 @@ RESIZE_SCALE = 0.7  # Frame downscale factor for processing speed
 # Green color detection (HSV)
 # Tune these under your actual lab lighting.
 # H: 0-179,  S: 0-255,  V: 0-255
-HSV_LOWER = np.array([0, 41, 169])
-HSV_UPPER = np.array([179, 255, 255])
+HSV_LOWER = np.array([35, 30, 100])
+HSV_UPPER = np.array([85, 255, 255])
 
 # Blob filtering
-MIN_CONTOUR_AREA = 100  # Minimum contour area in pixels² (ignore noise)
-MIN_RADIUS = 5  # Minimum enclosing circle radius in pixels
-MIN_CIRCULARITY = 0.6  # 4πA/P²  —  1.0 is a perfect circle
+MIN_CONTOUR_AREA = 30  # Minimum contour area in pixels² (ignore noise)
+MIN_RADIUS = 3  # Minimum enclosing circle radius in pixels
+MAX_RADIUS = 30  # Maximum radius to prevent picking up huge green reflections
+MIN_CIRCULARITY = 0.4  # 4πA/P²  —  1.0 is a perfect circle
 MORPH_KERNEL_SIZE = 5  # Kernel size for morphological open/close
 
 # Robot marker geometry
-# Forward offset (meters) from the rear-marker midpoint to the actual robot
+# Forward offset (meters) from the rear marker to the actual robot
 # center along the heading direction.  Adjust to match your marker placement.
-CENTER_FORWARD_OFFSET = 0.047  # 6 cm forward of rear midpoint
+CENTER_FORWARD_OFFSET = 0.067  # 6.7 cm forward of rear marker
 
 # Calibration — real-world reference rectangle
 # Four corners of a known rectangle on the floor/table, in meters.
@@ -42,8 +43,8 @@ WORLD_RECT_METERS = np.array(
     [
         [0.0, 0.0],
         [1.0, 0.0],
-        [1.0, 1.0],
-        [0.0, 1.0],
+        [1.0, 0.7],
+        [0.0, 0.7],
     ],
     dtype=np.float32,
 )

@@ -47,7 +47,7 @@ def detect_markers(frame):
             continue
 
         (x, y), radius = cv2.minEnclosingCircle(contour)
-        if radius < config.MIN_RADIUS:
+        if radius < config.MIN_RADIUS or radius > config.MAX_RADIUS:
             continue
 
         perimeter = cv2.arcLength(contour, True)
@@ -60,8 +60,33 @@ def detect_markers(frame):
 
         centers.append((int(x), int(y), float(radius)))
 
-    # Keep the 3 largest blobs (by radius)
-    centers = sorted(centers, key=lambda c: c[2], reverse=True)[:3]
+    # Sort all detected centers by radius descending
+    centers = sorted(centers, key=lambda c: c[2], reverse=True)
+
+    if len(centers) >= 3:
+        # Assume the 2 largest blobs are the confident markers on the robot
+        m0, m1 = centers[0], centers[1]
+        mid_x = (m0[0] + m1[0]) / 2.0
+        mid_y = (m0[1] + m1[1]) / 2.0
+        
+        # Look for the third marker that is closest to the robot's midpoint
+        best_m2 = None
+        min_dist = float('inf')
+        
+        for c in centers[2:]:
+            dist = np.hypot(c[0] - mid_x, c[1] - mid_y)
+            # The robot is small, so the third marker must be nearby (<200 pixels)
+            if dist < 200 and dist < min_dist:
+                min_dist = dist
+                best_m2 = c
+                
+        if best_m2:
+            centers = [m0, m1, best_m2]
+        else:
+            centers = [m0, m1]
+    else:
+        # If 1 or 2 are detected, just return them
+        pass
 
     return centers, mask
 

@@ -11,7 +11,7 @@ Requires a saved homography (run ``python3 calibration.py`` first).
 
 CSV output schema:
     timestamp, pose_x, pose_y, pose_yaw,
-    left_x, left_y, right_x, right_y, front_x, front_y,
+    front_left_x, front_left_y, front_right_x, front_right_y, rear_x, rear_y,
     num_detected, valid_pose
 
 If fewer than 3 markers are detected, a row is written with
@@ -37,12 +37,12 @@ CSV_HEADER = [
     "pose_x",
     "pose_y",
     "pose_yaw",
-    "left_x",
-    "left_y",
-    "right_x",
-    "right_y",
-    "front_x",
-    "front_y",
+    "front_left_x",
+    "front_left_y",
+    "front_right_x",
+    "front_right_y",
+    "rear_x",
+    "rear_y",
     "num_detected",
     "valid_pose",
 ]
@@ -115,12 +115,12 @@ def main():
                         f"{x:.5f}",
                         f"{y:.5f}",
                         f"{yaw:.5f}",
-                        f"{classified['left'][0]:.5f}",
-                        f"{classified['left'][1]:.5f}",
-                        f"{classified['right'][0]:.5f}",
-                        f"{classified['right'][1]:.5f}",
-                        f"{classified['front'][0]:.5f}",
-                        f"{classified['front'][1]:.5f}",
+                        f"{classified['front_left'][0]:.5f}",
+                        f"{classified['front_left'][1]:.5f}",
+                        f"{classified['front_right'][0]:.5f}",
+                        f"{classified['front_right'][1]:.5f}",
+                        f"{classified['rear'][0]:.5f}",
+                        f"{classified['rear'][1]:.5f}",
                         num_detected,
                         1,
                     ]
