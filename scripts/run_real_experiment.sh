@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+
+set -e
+
+if [ -z "$1" ]; then
+  echo "Usage: ./scripts/run_real_experiment.sh real_run_01"
+  exit 1
+fi
+
+RUN_ID="$1"
+
+cd /workspace/mii-amr
+
+source /opt/ros/humble/setup.bash
+source /opt/tb3_src_ws/install/setup.bash
+
+export ROS_DOMAIN_ID=30
+export ROS_LOCALHOST_ONLY=0
+export TURTLEBOT3_MODEL=burger
+export LDS_MODEL=LDS-01
+
+mkdir -p bags/real results
+
+echo "Checking robot topics..."
+ros2 topic list | grep /cmd_vel >/dev/null
+ros2 topic list | grep /odom >/dev/null
+
+echo "Make sure the robot is placed at the start pose."
+echo "Press ENTER to start run $RUN_ID, or Ctrl+C to cancel."
+read
+
+echo "Starting bag recording for $RUN_ID..."
+ros2 bag record -o "bags/real/$RUN_ID" /cmd_vel /odom /imu /battery_state > "results/${RUN_ID}_bag.log" 2>&1 &
+BAG_PID=$!
+
+sleep 2
+
+echo "Running real scripted drive..."
+python3 scripts/real_scripted_drive.py "$RUN_ID"
+
+sleep 1
+
+echo "Stopping bag recording..."
+kill -INT "$BAG_PID"
+wait "$BAG_PID" || true
+
+echo "Experiment $RUN_ID finished."

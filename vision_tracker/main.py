@@ -110,6 +110,14 @@ def main():
                 if classified is not None:
                     x, y, yaw = pose_estimator.estimate_pose(classified)
 
+                    # Write latest external tracker pose for real experiment scripts
+                    pose_estimator.write_latest_pose(
+                        x,
+                        y,
+                        yaw,
+                        path="results/latest_tracker_pose.csv",
+                    )
+
                     row = [
                         f"{ts:.4f}",
                         f"{x:.5f}",

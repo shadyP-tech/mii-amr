@@ -17,6 +17,10 @@ Pose computation:
     - Yaw = atan2 of the heading vector (rear marker → front midpoint).
 """
 
+import csv
+import os
+from datetime import datetime
+
 import numpy as np
 import config
 
@@ -133,3 +137,31 @@ def estimate_pose(classified):
     center = rear + config.CENTER_FORWARD_OFFSET * heading_unit
 
     return float(center[0]), float(center[1]), yaw
+
+
+def write_latest_pose(x, y, yaw, path="results/latest_tracker_pose.csv"):
+    """Write latest estimated robot pose for experiment scripts.
+
+    Parameters
+    ----------
+    x, y : float
+        Robot position in world meters.
+    yaw : float
+        Robot yaw in radians.
+    path : str
+        Output CSV path.
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    yaw_deg = float(np.degrees(yaw))
+
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["timestamp", "x", "y", "yaw_rad", "yaw_deg"])
+        writer.writerow([
+            datetime.now().isoformat(),
+            f"{x:.6f}",
+            f"{y:.6f}",
+            f"{yaw:.6f}",
+            f"{yaw_deg:.6f}",
+        ])
