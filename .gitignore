@@ -9,6 +9,17 @@ ENV/
 env.bak/
 venv.bak/
 
+# binary files
+*.db3
+*.bag
+*.bag.active
+*.log
+
 /vision_tracker/data/*
 
+# bag files
 bags/
+scripts/bags/
+
+# experiment logs
+results/*_bag.log
