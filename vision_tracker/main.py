@@ -28,6 +28,7 @@ import numpy as np
 from datetime import datetime
 
 import config
+import camera
 import tracker
 import calibration
 import pose_estimator
@@ -67,9 +68,10 @@ def main():
         sys.exit(1)
 
     # open camera
-    cap = cv2.VideoCapture(config.CAMERA_INDEX)
-    if not cap.isOpened():
-        print(f"ERROR: Cannot open camera {config.CAMERA_INDEX}")
+    try:
+        cap = camera.open_camera()
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}")
         sys.exit(1)
 
     csv_path = _make_csv_path()

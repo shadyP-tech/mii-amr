@@ -12,6 +12,7 @@ annotated detections and prints pixel coordinates to stdout.
 import cv2
 import numpy as np
 import config
+import camera
 
 
 def score_exposure(frame, hsv_lower, hsv_upper):
@@ -230,9 +231,10 @@ def draw_markers(frame, centers):
 
 def main():
     """Open camera, detect markers, display and print in a loop."""
-    cap = cv2.VideoCapture(config.CAMERA_INDEX)
-    if not cap.isOpened():
-        print(f"ERROR: Cannot open camera {config.CAMERA_INDEX}")
+    try:
+        cap = camera.open_camera()
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}")
         return
     
     if config.AUTO_SELECT_EXPOSURE:

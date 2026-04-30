@@ -18,14 +18,47 @@ LATEST_TRACKER_POSE_FILE = os.path.join(RESULTS_DIR, "latest_tracker_pose.csv")
 START_POSE_CHECKS_FILE = os.path.join(RESULTS_DIR, "real_start_pose_checks.csv")
 
 # Camera
-CAMERA_INDEX = 1  # cv2.VideoCapture source (int or device path)
+CAMERA_INDEX = 0  # D435i grayscale/IR endpoint via OpenCV/AVFoundation
 RESIZE_SCALE = 0.7  # Frame downscale factor for processing speed
+
+# Camera stream negotiation.  On macOS, some USB cameras can expose both color
+# and monochrome/IR modes; retrying with explicit settings helps avoid opening
+# the wrong stream after reconnects.
+CAMERA_BACKEND = "opencv"  # "auto", "realsense", or "opencv"
+CAMERA_FORCE_AVFOUNDATION = True
+CAMERA_FOURCC = "MJPG"
+CAMERA_FRAME_WIDTH = 1280
+CAMERA_FRAME_HEIGHT = 720
+CAMERA_FPS = 30
+
+# D435i RGB can output 1920x1080@30, while its depth/IR stream is commonly
+# 1280x720.  Briefly requesting this mode can nudge AVFoundation toward the RGB
+# endpoint, then the camera helper switches back to the configured mode above.
+CAMERA_USE_RGB_WAKEUP_MODE = True
+CAMERA_RGB_WAKEUP_FRAME_WIDTH = 1920
+CAMERA_RGB_WAKEUP_FRAME_HEIGHT = 1080
+CAMERA_RGB_WAKEUP_FPS = 30
+
+CAMERA_OPEN_RETRIES = 5
+CAMERA_RETRY_DELAY_SEC = 0.5
+CAMERA_WARMUP_FRAMES = 15
+CAMERA_REQUIRE_COLOR = True
+CAMERA_MIN_MEAN_SATURATION = 5.0
+CAMERA_MIN_CHANNEL_DIFF = 1.0
+
+# Intel RealSense D435i.  If pyrealsense2 is installed, CAMERA_BACKEND="auto"
+# tries the hardware color stream before falling back to OpenCV/AVFoundation.
+# If pyrealsense2 segfaults on macOS, keep CAMERA_BACKEND="opencv".
+REALSENSE_SERIAL = None
+REALSENSE_ENABLE_AUTO_EXPOSURE = True
+REALSENSE_EXPOSURE = None
+REALSENSE_GAIN = None
 
 # Green color detection (HSV)
 # Tune these under your actual lab lighting.
 # H: 0-179,  S: 0-255,  V: 0-255
-HSV_LOWER = np.array([0, 0, 240])
-HSV_UPPER = np.array([95, 255, 255])
+HSV_LOWER = np.array([37, 20, 148])
+HSV_UPPER = np.array([179, 255, 255])
 
 MIN_CONTOUR_AREA = 100
 MIN_RADIUS = 8
@@ -50,9 +83,9 @@ CENTER_FORWARD_OFFSET = 0.067  # 6.7 cm forward of rear marker
 
 # Real-run start pose gate
 # Seeded from the current clean real runs; keep fixed during an experiment batch.
-START_POSE_REF_X = 0.238
-START_POSE_REF_Y = 0.155
-START_POSE_REF_YAW_DEG = -90
+START_POSE_REF_X = 0.482
+START_POSE_REF_Y = 0.183
+START_POSE_REF_YAW_DEG = -0.1
 START_POSE_POSITION_TOLERANCE_M = 0.04
 START_POSE_YAW_TOLERANCE_DEG = 4.0
 START_POSE_STABLE_TIME_SEC = 1.0
@@ -67,9 +100,9 @@ START_POSE_REQUIRED_MARKERS = 3
 WORLD_RECT_METERS = np.array(
     [
         [0.0, 0.0],
-        [0.34, 0.0],
-        [0.34, 0.2],
-        [0.0, 0.2],
+        [0.5, 0.0],
+        [0.5, 0.25],
+        [0.0, 0.25],
     ],
     dtype=np.float32,
 )
