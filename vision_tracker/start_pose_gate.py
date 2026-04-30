@@ -69,6 +69,11 @@ def wait_for_start_pose(run_id, timeout_sec):
         f"tolerance={config.START_POSE_POSITION_TOLERANCE_M:.3f} m/"
         f"{config.START_POSE_YAW_TOLERANCE_DEG:.1f} deg"
     )
+    print(
+        f"Stable requirement: {config.START_POSE_STABLE_TIME_SEC:.1f} s; "
+        f"timeout: {timeout_sec:.0f} s"
+    )
+    print(f"Reading latest pose from: {config.LATEST_TRACKER_POSE_FILE}")
 
     try:
         while True:

@@ -117,6 +117,14 @@ class StartPoseTest(unittest.TestCase):
             self.assertAlmostEqual(pose.x, 1.0)
             self.assertAlmostEqual(pose.yaw_deg, 179.0)
 
+    def test_latest_pose_path_is_repo_absolute(self):
+        config_text = (ROOT / "vision_tracker" / "config.py").read_text()
+        self.assertIn("PROJECT_ROOT = os.path.dirname(BASE_DIR)", config_text)
+        self.assertIn(
+            'LATEST_TRACKER_POSE_FILE = os.path.join(RESULTS_DIR, "latest_tracker_pose.csv")',
+            config_text,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
