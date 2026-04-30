@@ -203,7 +203,7 @@ def main():
             node.get_logger().warn("No tracker start pose found.")
 
         node.get_logger().info("Driving forward")
-        node.send_cmd(0.1, 0.0, 1.0)
+        node.send_cmd(0.1, 0.0, 3.0)
 
         node.get_logger().info("Done")
         node.stop()
