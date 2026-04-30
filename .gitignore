@@ -23,4 +23,4 @@ scripts/bags/
 
 # experiment logs
 results/*_bag.log
-results/*.csv
+results/*.csvresults/latest_tracker_pose.csv
