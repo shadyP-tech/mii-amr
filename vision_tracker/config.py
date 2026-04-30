@@ -10,10 +10,12 @@ import os
 
 # Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(BASE_DIR)
 DATA_DIR = os.path.join(BASE_DIR, "data")
 HOMOGRAPHY_FILE = os.path.join(DATA_DIR, "homography.npz")
-LATEST_TRACKER_POSE_FILE = os.path.join("results", "latest_tracker_pose.csv")
-START_POSE_CHECKS_FILE = os.path.join("results", "real_start_pose_checks.csv")
+RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
+LATEST_TRACKER_POSE_FILE = os.path.join(RESULTS_DIR, "latest_tracker_pose.csv")
+START_POSE_CHECKS_FILE = os.path.join(RESULTS_DIR, "real_start_pose_checks.csv")
 
 # Camera
 CAMERA_INDEX = 1  # cv2.VideoCapture source (int or device path)
@@ -48,9 +50,9 @@ CENTER_FORWARD_OFFSET = 0.067  # 6.7 cm forward of rear marker
 
 # Real-run start pose gate
 # Seeded from the current clean real runs; keep fixed during an experiment batch.
-START_POSE_REF_X = 0.786072
-START_POSE_REF_Y = 0.624328
-START_POSE_REF_YAW_DEG = -91.498214
+START_POSE_REF_X = 0.238
+START_POSE_REF_Y = 0.155
+START_POSE_REF_YAW_DEG = -90
 START_POSE_POSITION_TOLERANCE_M = 0.04
 START_POSE_YAW_TOLERANCE_DEG = 4.0
 START_POSE_STABLE_TIME_SEC = 1.0
