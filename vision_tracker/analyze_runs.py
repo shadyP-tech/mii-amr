@@ -1,235 +1,78 @@
-"""
-analyze_runs.py — Compare vision tracking data against odometry.
-
-Usage:
-    python3 analyze_runs.py data/vision_*.csv data/odom_*.csv
-    python3 analyze_runs.py data/vision_20260424_120000.csv data/odom_20260424_120000.csv
-
-Produces:
-    - X-Y trajectory overlay (vision vs odom)
-    - Yaw over time
-    - Position error over time
-    - Final-position error summary
-
-Supports multiple vision+odom pairs for building a probabilistic model
-of the final position (Aufgabe 2).
-"""
+#!/usr/bin/env python3
 
 import csv
-import sys
 import math
-import numpy as np
+import statistics as stats
 
-try:
-    import matplotlib.pyplot as plt
-    HAS_MPL = True
-except ImportError:
-    HAS_MPL = False
-    print("WARNING: matplotlib not found — plots will be skipped.")
-    print("         Install with:  pip install matplotlib\n")
+CSV_PATH = "results/real_scripted_drive_runs.csv"
 
 
-def load_vision_csv(path):
-    """Load a vision CSV and return arrays of valid poses.
-
-    Returns
-    -------
-    dict with keys: t, x, y, yaw  (numpy arrays, only valid_pose==1 rows)
-    """
-    t, x, y, yaw = [], [], [], []
-    with open(path, newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            if int(row["valid_pose"]) != 1:
-                continue
-            t.append(float(row["timestamp"]))
-            x.append(float(row["pose_x"]))
-            y.append(float(row["pose_y"]))
-            yaw.append(float(row["pose_yaw"]))
-    return {
-        "t": np.array(t),
-        "x": np.array(x),
-        "y": np.array(y),
-        "yaw": np.array(yaw),
-    }
+def f(row, key):
+    return float(row[key])
 
 
-def load_odom_csv(path):
-    """Load an odometry CSV.
+with open(CSV_PATH, newline="") as file:
+    rows = list(csv.DictReader(file))
 
-    Returns
-    -------
-    dict with keys: t, x, y, yaw  (numpy arrays)
-    """
-    t, x, y, yaw = [], [], [], []
-    with open(path, newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            t.append(float(row["timestamp"]))
-            x.append(float(row["odom_x"]))
-            y.append(float(row["odom_y"]))
-            yaw.append(float(row["odom_yaw"]))
-    return {
-        "t": np.array(t),
-        "x": np.array(x),
-        "y": np.array(y),
-        "yaw": np.array(yaw),
-    }
+# Use only clean rows
+rows = [r for r in rows if r["run_id"] in {
+    "run_real_06",
+    "run_real_07",
+    "run_real_08",
+    "run_real_09",
+    "run_real_10",
+}]
 
+print(f"Number of runs: {len(rows)}")
 
-def align_by_time(vision, odom):
-    """Align odom data to vision timestamps using nearest-neighbor.
+tracker_final_x = [f(r, "tracker_final_x") for r in rows]
+tracker_final_y = [f(r, "tracker_final_y") for r in rows]
+tracker_final_yaw = [f(r, "tracker_final_yaw_deg") for r in rows]
 
-    Returns
-    -------
-    (vision, odom_aligned) with same length arrays.
-    """
-    aligned_x, aligned_y, aligned_yaw = [], [], []
+tracker_start_x = [f(r, "tracker_start_x") for r in rows]
+tracker_start_y = [f(r, "tracker_start_y") for r in rows]
+tracker_start_yaw = [f(r, "tracker_start_yaw_deg") for r in rows]
 
-    for vt in vision["t"]:
-        idx = np.argmin(np.abs(odom["t"] - vt))
-        aligned_x.append(odom["x"][idx])
-        aligned_y.append(odom["y"][idx])
-        aligned_yaw.append(odom["yaw"][idx])
-
-    odom_aligned = {
-        "t": vision["t"].copy(),
-        "x": np.array(aligned_x),
-        "y": np.array(aligned_y),
-        "yaw": np.array(aligned_yaw),
-    }
-    return vision, odom_aligned
+odom_final_x = [f(r, "odom_final_x") for r in rows]
+odom_final_y = [f(r, "odom_final_y") for r in rows]
+odom_final_yaw = [f(r, "odom_final_yaw_deg") for r in rows]
 
 
-def compute_errors(vision, odom):
-    """Compute per-timestep position and yaw errors.
-
-    Returns
-    -------
-    dict with keys: pos_error, yaw_error  (numpy arrays)
-    """
-    dx = vision["x"] - odom["x"]
-    dy = vision["y"] - odom["y"]
-    pos_error = np.sqrt(dx ** 2 + dy ** 2)
-
-    # Wrap yaw difference to [-π, π]
-    yaw_diff = vision["yaw"] - odom["yaw"]
-    yaw_error = np.abs(np.arctan2(np.sin(yaw_diff), np.cos(yaw_diff)))
-
-    return {
-        "pos_error": pos_error,
-        "yaw_error": yaw_error,
-    }
+def summarize(name, values):
+    print(f"{name}:")
+    print(f"  mean = {stats.mean(values):.6f}")
+    print(f"  std  = {stats.stdev(values):.6f}" if len(values) > 1 else "  std  = 0.000000")
 
 
-def print_summary(vision, odom, errors):
-    """Print a text summary of the comparison."""
-    print("=" * 60)
-    print("  Vision vs Odometry — Summary")
-    print("=" * 60)
+print("\nTracker start pose:")
+summarize("start_x", tracker_start_x)
+summarize("start_y", tracker_start_y)
+summarize("start_yaw_deg", tracker_start_yaw)
 
-    if len(vision["t"]) == 0:
-        print("  No valid vision data.")
-        return
+print("\nTracker final pose:")
+summarize("final_x", tracker_final_x)
+summarize("final_y", tracker_final_y)
+summarize("final_yaw_deg", tracker_final_yaw)
 
-    t_rel = vision["t"] - vision["t"][0]
+print("\nOdometry final pose:")
+summarize("odom_final_x", odom_final_x)
+summarize("odom_final_y", odom_final_y)
+summarize("odom_final_yaw_deg", odom_final_yaw)
 
-    print(f"  Duration:         {t_rel[-1]:.1f} s")
-    print(f"  Valid frames:     {len(vision['t'])}")
-    print()
+mean_x = stats.mean(tracker_final_x)
+mean_y = stats.mean(tracker_final_y)
 
-    # Final positions
-    print(f"  Vision  final:    x={vision['x'][-1]:.4f}  y={vision['y'][-1]:.4f}  "
-          f"yaw={math.degrees(vision['yaw'][-1]):.1f}°")
-    print(f"  Odom    final:    x={odom['x'][-1]:.4f}  y={odom['y'][-1]:.4f}  "
-          f"yaw={math.degrees(odom['yaw'][-1]):.1f}°")
+print("\nPer-run tracker final deviation from mean:")
+for r in rows:
+    dx = f(r, "tracker_final_x") - mean_x
+    dy = f(r, "tracker_final_y") - mean_y
+    dist = math.sqrt(dx * dx + dy * dy)
+    print(f"{r['run_id']}: dx={dx:.6f}, dy={dy:.6f}, distance={dist:.6f}")
 
-    final_err = errors["pos_error"][-1]
-    final_yaw_err = math.degrees(errors["yaw_error"][-1])
-    print(f"\n  Final pos error:  {final_err:.4f} m")
-    print(f"  Final yaw error:  {final_yaw_err:.1f}°")
-
-    print(f"\n  Mean pos error:   {np.mean(errors['pos_error']):.4f} m")
-    print(f"  Max pos error:    {np.max(errors['pos_error']):.4f} m")
-    print(f"  Mean yaw error:   {math.degrees(np.mean(errors['yaw_error'])):.1f}°")
-    print("=" * 60)
-
-
-def plot_comparison(vision, odom, errors):
-    """Create a 3-panel comparison plot."""
-    if not HAS_MPL:
-        return
-
-    t_rel = vision["t"] - vision["t"][0]
-
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
-
-    # 1) X-Y trajectory
-    ax = axes[0]
-    ax.plot(vision["x"], vision["y"], "g.-", label="Vision", alpha=0.7)
-    ax.plot(odom["x"], odom["y"], "b.-", label="Odometry", alpha=0.7)
-    ax.plot(vision["x"][0], vision["y"][0], "ko", ms=8, label="Start")
-    ax.plot(vision["x"][-1], vision["y"][-1], "rs", ms=8, label="Vision end")
-    ax.plot(odom["x"][-1], odom["y"][-1], "bs", ms=8, label="Odom end")
-    ax.set_xlabel("x (m)")
-    ax.set_ylabel("y (m)")
-    ax.set_title("Trajectory")
-    ax.legend(fontsize=8)
-    ax.set_aspect("equal")
-    ax.grid(True, alpha=0.3)
-
-    # 2) Yaw over time
-    ax = axes[1]
-    ax.plot(t_rel, np.degrees(vision["yaw"]), "g-", label="Vision")
-    ax.plot(t_rel, np.degrees(odom["yaw"]), "b-", label="Odometry")
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Yaw (°)")
-    ax.set_title("Heading")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-
-    # 3) Position error
-    ax = axes[2]
-    ax.plot(t_rel, errors["pos_error"] * 100, "r-")
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Position error (cm)")
-    ax.set_title("Vision–Odom error")
-    ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.savefig("data/comparison_plot.png", dpi=150)
-    print(f"Plot saved to data/comparison_plot.png")
-    plt.show()
-
-
-def main():
-    if len(sys.argv) < 3:
-        print("Usage:  python3 analyze_runs.py <vision.csv> <odom.csv>")
-        print("        python3 analyze_runs.py data/vision_*.csv data/odom_*.csv")
-        sys.exit(1)
-
-    vision_path = sys.argv[1]
-    odom_path = sys.argv[2]
-
-    print(f"Vision: {vision_path}")
-    print(f"Odom:   {odom_path}\n")
-
-    vision = load_vision_csv(vision_path)
-    odom = load_odom_csv(odom_path)
-
-    if len(vision["t"]) == 0:
-        print("ERROR: No valid vision data in CSV.")
-        sys.exit(1)
-    if len(odom["t"]) == 0:
-        print("ERROR: No odom data in CSV.")
-        sys.exit(1)
-
-    vision, odom_aligned = align_by_time(vision, odom)
-    errors = compute_errors(vision, odom_aligned)
-
-    print_summary(vision, odom_aligned, errors)
-    plot_comparison(vision, odom_aligned, errors)
-
-
-if __name__ == "__main__":
-    main()
+print("\nNet tracker displacement per run:")
+for r in rows:
+    dx = f(r, "tracker_final_x") - f(r, "tracker_start_x")
+    dy = f(r, "tracker_final_y") - f(r, "tracker_start_y")
+    dist = math.sqrt(dx * dx + dy * dy)
+    dyaw = f(r, "tracker_final_yaw_deg") - f(r, "tracker_start_yaw_deg")
+    print(f"{r['run_id']}: dx={dx:.6f}, dy={dy:.6f}, distance={dist:.6f}, dyaw={dyaw:.3f} deg")

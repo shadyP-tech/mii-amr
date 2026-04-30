@@ -1,0 +1,48 @@
+Number of runs: 5
+
+Tracker start pose:
+start_x:
+  mean = 0.786072
+  std  = 0.001148
+start_y:
+  mean = 0.624328
+  std  = 0.002823
+start_yaw_deg:
+  mean = -91.498214
+  std  = 0.897171
+
+Tracker final pose:
+final_x:
+  mean = 0.751278
+  std  = 0.002196
+final_y:
+  mean = 0.405484
+  std  = 0.002220
+final_yaw_deg:
+  mean = -108.526363
+  std  = 0.471211
+
+Odometry final pose:
+odom_final_x:
+  mean = -2.012720
+  std  = 0.314519
+odom_final_y:
+  mean = 0.202513
+  std  = 0.026362
+odom_final_yaw_deg:
+  mean = -176.201556
+  std  = 0.935055
+
+Per-run tracker final deviation from mean:
+run_real_06: dx=-0.003212, dy=0.001294, distance=0.003463
+run_real_07: dx=0.001959, dy=0.003268, distance=0.003810
+run_real_08: dx=-0.000952, dy=-0.002048, distance=0.002259
+run_real_09: dx=0.002049, dy=-0.001203, distance=0.002376
+run_real_10: dx=0.000155, dy=-0.001310, distance=0.001319
+
+Net tracker displacement per run:
+run_real_06: dx=-0.037238, dy=-0.215546, distance=0.218739, dyaw=-16.264 deg
+run_real_07: dx=-0.032693, dy=-0.220350, distance=0.222762, dyaw=-17.123 deg
+run_real_08: dx=-0.034788, dy=-0.218848, distance=0.221596, dyaw=-17.057 deg
+run_real_09: dx=-0.034680, dy=-0.220248, distance=0.222962, dyaw=-17.875 deg
+run_real_10: dx=-0.034574, dy=-0.219225, distance=0.221935, dyaw=-16.821 deg
