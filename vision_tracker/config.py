@@ -57,7 +57,7 @@ REALSENSE_GAIN = None
 # Green color detection (HSV)
 # Tune these under your actual lab lighting.
 # H: 0-179,  S: 0-255,  V: 0-255
-HSV_LOWER = np.array([37, 20, 148])
+HSV_LOWER = np.array([28, 20, 187])
 HSV_UPPER = np.array([179, 255, 255])
 
 MIN_CONTOUR_AREA = 100
