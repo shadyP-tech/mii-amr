@@ -12,6 +12,8 @@ import os
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 HOMOGRAPHY_FILE = os.path.join(DATA_DIR, "homography.npz")
+LATEST_TRACKER_POSE_FILE = os.path.join("results", "latest_tracker_pose.csv")
+START_POSE_CHECKS_FILE = os.path.join("results", "real_start_pose_checks.csv")
 
 # Camera
 CAMERA_INDEX = 1  # cv2.VideoCapture source (int or device path)
@@ -43,6 +45,18 @@ MAX_CLIPPED_FRACTION = 0.005
 # Forward offset (meters) from the rear marker to the actual robot
 # center along the heading direction.  Adjust to match your marker placement.
 CENTER_FORWARD_OFFSET = 0.067  # 6.7 cm forward of rear marker
+
+# Real-run start pose gate
+# Seeded from the current clean real runs; keep fixed during an experiment batch.
+START_POSE_REF_X = 0.786072
+START_POSE_REF_Y = 0.624328
+START_POSE_REF_YAW_DEG = -91.498214
+START_POSE_POSITION_TOLERANCE_M = 0.04
+START_POSE_YAW_TOLERANCE_DEG = 4.0
+START_POSE_STABLE_TIME_SEC = 1.0
+START_POSE_MAX_AGE_SEC = 1.0
+START_POSE_GATE_TIMEOUT_SEC = 60.0
+START_POSE_REQUIRED_MARKERS = 3
 
 # Calibration — real-world reference rectangle
 # Four corners of a known rectangle on the floor/table, in meters.

@@ -31,6 +31,7 @@ import config
 import tracker
 import calibration
 import pose_estimator
+import start_pose
 
 CSV_HEADER = [
     "timestamp",
@@ -115,7 +116,8 @@ def main():
                         x,
                         y,
                         yaw,
-                        path="results/latest_tracker_pose.csv",
+                        valid_pose=True,
+                        num_detected=num_detected,
                     )
 
                     row = [
@@ -134,31 +136,28 @@ def main():
                     ]
                     writer.writerow(row)
 
-                    # On-screen overlay
-                    info = f"x={x:.3f}  y={y:.3f}  yaw={math.degrees(yaw):.1f} deg"
-                    cv2.putText(
-                        frame,
-                        info,
-                        (10, 25),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        (0, 255, 0),
-                        2,
+                    tracker_pose = start_pose.TrackerPose(
+                        timestamp="",
+                        x=x,
+                        y=y,
+                        yaw_rad=yaw,
+                        yaw_deg=math.degrees(yaw),
+                        valid_pose=True,
+                        num_detected=num_detected,
+                        timestamp_epoch=ts,
+                        file_mtime=ts,
                     )
+                    check = start_pose.check_start_pose(tracker_pose, now=ts)
+                    _draw_start_overlay(frame, tracker_pose, check)
                 else:
                     # Classification failed (shouldn't happen with 3 markers)
                     _write_invalid_row(writer, ts, num_detected)
+                    _write_invalid_latest_pose(num_detected)
+                    _draw_invalid_start_overlay(frame, num_detected)
             else:
                 _write_invalid_row(writer, ts, num_detected)
-                cv2.putText(
-                    frame,
-                    f"MARKERS: {num_detected}/3",
-                    (10, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 0, 255),
-                    2,
-                )
+                _write_invalid_latest_pose(num_detected)
+                _draw_invalid_start_overlay(frame, num_detected)
 
             cv2.imshow("tracking", frame)
             cv2.imshow("mask", mask)
@@ -193,6 +192,61 @@ def _write_invalid_row(writer, ts, num_detected):
             0,
         ]
     )
+
+
+def _write_invalid_latest_pose(num_detected):
+    pose_estimator.write_latest_pose(
+        NAN,
+        NAN,
+        NAN,
+        valid_pose=False,
+        num_detected=num_detected,
+    )
+
+
+def _draw_start_overlay(frame, tracker_pose, check):
+    status = "START OK" if check["accepted"] else "ADJUST START"
+    color = (0, 180, 0) if check["accepted"] else (0, 0, 255)
+
+    lines = [
+        status,
+        (
+            f"x={tracker_pose.x:.3f}  y={tracker_pose.y:.3f}  "
+            f"yaw={tracker_pose.yaw_deg:.1f} deg"
+        ),
+        (
+            f"dx={check['dx']:+.3f}  dy={check['dy']:+.3f}  "
+            f"pos_err={check['position_error_m']:.3f} m"
+        ),
+        (
+            f"yaw_err={check['yaw_error_deg']:+.1f} deg  "
+            f"markers={tracker_pose.num_detected}/"
+            f"{config.START_POSE_REQUIRED_MARKERS}  valid=1"
+        ),
+    ]
+    _draw_overlay_lines(frame, lines, color)
+
+
+def _draw_invalid_start_overlay(frame, num_detected):
+    lines = [
+        "ADJUST START",
+        "pose invalid",
+        f"markers={num_detected}/{config.START_POSE_REQUIRED_MARKERS}  valid=0",
+    ]
+    _draw_overlay_lines(frame, lines, (0, 0, 255))
+
+
+def _draw_overlay_lines(frame, lines, color):
+    for i, line in enumerate(lines):
+        cv2.putText(
+            frame,
+            line,
+            (10, 25 + i * 24),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            color,
+            2,
+        )
 
 
 if __name__ == "__main__":

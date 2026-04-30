@@ -139,7 +139,14 @@ def estimate_pose(classified):
     return float(center[0]), float(center[1]), yaw
 
 
-def write_latest_pose(x, y, yaw, path="results/latest_tracker_pose.csv"):
+def write_latest_pose(
+    x,
+    y,
+    yaw,
+    path=None,
+    valid_pose=True,
+    num_detected=3,
+):
     """Write latest estimated robot pose for experiment scripts.
 
     Parameters
@@ -151,17 +158,33 @@ def write_latest_pose(x, y, yaw, path="results/latest_tracker_pose.csv"):
     path : str
         Output CSV path.
     """
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    path = path or config.LATEST_TRACKER_POSE_FILE
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
 
     yaw_deg = float(np.degrees(yaw))
+    tmp_path = os.path.splitext(path)[0] + ".tmp"
 
-    with open(path, "w", newline="") as f:
+    with open(tmp_path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["timestamp", "x", "y", "yaw_rad", "yaw_deg"])
+        writer.writerow([
+            "timestamp",
+            "x",
+            "y",
+            "yaw_rad",
+            "yaw_deg",
+            "valid_pose",
+            "num_detected",
+        ])
         writer.writerow([
             datetime.now().isoformat(),
             f"{x:.6f}",
             f"{y:.6f}",
             f"{yaw:.6f}",
             f"{yaw_deg:.6f}",
+            1 if valid_pose else 0,
+            int(num_detected),
         ])
+
+    os.replace(tmp_path, path)

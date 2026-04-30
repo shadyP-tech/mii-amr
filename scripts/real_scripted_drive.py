@@ -24,13 +24,29 @@ def read_tracker_pose(path="results/latest_tracker_pose.csv"):
         return None
 
     row = rows[-1]
-    return {
-        "timestamp": row.get("timestamp", ""),
-        "x": float(row["x"]),
-        "y": float(row["y"]),
-        "yaw_rad": float(row["yaw_rad"]),
-        "yaw_deg": float(row["yaw_deg"]),
-    }
+    valid_pose = row.get("valid_pose")
+    if valid_pose is not None and valid_pose.strip().lower() not in {"1", "true"}:
+        return None
+
+    try:
+        num_detected = int(float(row.get("num_detected", 3) or 0))
+        pose = {
+            "timestamp": row.get("timestamp", ""),
+            "x": float(row["x"]),
+            "y": float(row["y"]),
+            "yaw_rad": float(row["yaw_rad"]),
+            "yaw_deg": float(row["yaw_deg"]),
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    if num_detected < 3:
+        return None
+
+    if not all(math.isfinite(pose[key]) for key in ("x", "y", "yaw_rad", "yaw_deg")):
+        return None
+
+    return pose
 
 
 def odom_to_xy_yaw(msg):

@@ -25,9 +25,9 @@ echo "Checking robot topics..."
 ros2 topic list | grep /cmd_vel >/dev/null
 ros2 topic list | grep /odom >/dev/null
 
-echo "Make sure the robot is placed at the start pose."
-echo "Press ENTER to start run $RUN_ID, or Ctrl+C to cancel."
-read
+echo "Checking camera start pose for $RUN_ID..."
+echo "Start vision_tracker/main.py in another terminal before continuing."
+python3 vision_tracker/start_pose_gate.py "$RUN_ID"
 
 echo "Starting bag recording for $RUN_ID..."
 ros2 bag record -o "bags/real/$RUN_ID" /cmd_vel /odom /imu /battery_state > "results/${RUN_ID}_bag.log" 2>&1 &
