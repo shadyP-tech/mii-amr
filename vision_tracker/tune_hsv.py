@@ -55,9 +55,12 @@ def main():
         mask = cv2.inRange(hsv, lower, upper)
         
         # Cleanup mask slightly for easier viewing
-        kernel = np.ones((config.MORPH_KERNEL_SIZE, config.MORPH_KERNEL_SIZE), np.uint8)
-        mask_clean = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-        mask_clean = cv2.morphologyEx(mask_clean, cv2.MORPH_CLOSE, kernel)
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (config.MORPH_KERNEL_SIZE, config.MORPH_KERNEL_SIZE),
+        )
+        mask_clean = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        mask_clean = cv2.morphologyEx(mask_clean, cv2.MORPH_OPEN, kernel, iterations=1)
 
         cv2.imshow('frame', frame)
         cv2.imshow('mask', mask_clean)

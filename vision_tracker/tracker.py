@@ -132,10 +132,15 @@ def detect_markers(frame):
 
     mask = cv2.inRange(hsv, config.HSV_LOWER, config.HSV_UPPER)
 
-    # Morphological cleanup — remove noise, fill small holes
-    kernel = np.ones((config.MORPH_KERNEL_SIZE, config.MORPH_KERNEL_SIZE), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    # Fill gaps before removing noise.  The green markers often have glare or
+    # camera noise that makes their masks slightly broken; opening first can
+    # split a real marker into irregular fragments.
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (config.MORPH_KERNEL_SIZE, config.MORPH_KERNEL_SIZE),
+    )
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
@@ -151,26 +156,34 @@ def detect_markers(frame):
         if perimeter > 0:
             circularity = 4 * np.pi * area / (perimeter * perimeter)
 
+        circle_area = np.pi * radius * radius
+        fill_ratio = area / circle_area if circle_area > 0 else 0.0
+
         if config.DEBUG_CONTOURS:
             print(
                 f"contour: x={x:.0f}, y={y:.0f}, "
-                f"area={area:.1f}, r={radius:.1f}, circ={circularity:.2f}"
+                f"area={area:.1f}, r={radius:.1f}, "
+                f"circ={circularity:.2f}, fill={fill_ratio:.2f}"
             )
 
         if area < config.MIN_CONTOUR_AREA:
-            print("  rejected: area")
+            if config.DEBUG_CONTOURS:
+                print("  rejected: area")
             continue
 
         if radius < config.MIN_RADIUS or radius > config.MAX_RADIUS:
-            print("  rejected: radius")
+            if config.DEBUG_CONTOURS:
+                print("  rejected: radius")
             continue
 
         if perimeter == 0:
-            print("  rejected: perimeter")
+            if config.DEBUG_CONTOURS:
+                print("  rejected: perimeter")
             continue
 
-        if circularity < config.MIN_CIRCULARITY:
-            print("  rejected: circularity")
+        if circularity < config.MIN_CIRCULARITY and fill_ratio < config.MIN_FILL_RATIO:
+            if config.DEBUG_CONTOURS:
+                print("  rejected: shape")
             continue
 
         centers.append((int(x), int(y), float(radius)))
