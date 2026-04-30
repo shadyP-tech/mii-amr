@@ -2,14 +2,22 @@
 
 set -e
 
-if [ -z "$1" ]; then
-  echo "Usage: ./scripts/run_real_experiment.sh real_run_01"
+if [ "$#" -gt 1 ]; then
+  echo "Usage: ./scripts/run_real_experiment.sh [run_id]"
   exit 1
 fi
 
-RUN_ID="$1"
+RUN_ID="${1:-}"
 
 cd /workspace/mii-amr
+
+mkdir -p bags/real results
+
+if [ -z "$RUN_ID" ]; then
+  RUN_ID="$(python3 scripts/next_real_run_id.py)"
+fi
+
+echo "Using run ID: $RUN_ID"
 
 source /opt/ros/humble/setup.bash
 source /opt/tb3_src_ws/install/setup.bash
@@ -18,8 +26,6 @@ export ROS_DOMAIN_ID=30
 export ROS_LOCALHOST_ONLY=0
 export TURTLEBOT3_MODEL=burger
 export LDS_MODEL=LDS-01
-
-mkdir -p bags/real results
 
 echo "Checking robot topics..."
 ros2 topic list | grep /cmd_vel >/dev/null
