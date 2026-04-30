@@ -83,9 +83,9 @@ CENTER_FORWARD_OFFSET = 0.067  # 6.7 cm forward of rear marker
 
 # Real-run start pose gate
 # Seeded from the current clean real runs; keep fixed during an experiment batch.
-START_POSE_REF_X = 0.482
-START_POSE_REF_Y = 0.183
-START_POSE_REF_YAW_DEG = -0.1
+START_POSE_REF_X = 0.498
+START_POSE_REF_Y = 0.053
+START_POSE_REF_YAW_DEG = -0.1797
 START_POSE_POSITION_TOLERANCE_M = 0.04
 START_POSE_YAW_TOLERANCE_DEG = 4.0
 START_POSE_STABLE_TIME_SEC = 1.0
