@@ -17,6 +17,7 @@ import cv2
 import numpy as np
 import os
 import config
+import camera
 
 # globals for mouse callback
 _clicked_points = []
@@ -100,9 +101,7 @@ def calibrate_interactive():
     _clicked_points = []
     _click_done = False
 
-    cap = cv2.VideoCapture(config.CAMERA_INDEX)
-    if not cap.isOpened():
-        raise RuntimeError(f"Cannot open camera {config.CAMERA_INDEX}")
+    cap = camera.open_camera()
 
     print("Capturing calibration frame…  Press SPACE to freeze.")
 
@@ -178,9 +177,7 @@ def verify_interactive(H=None):
         print("ERROR: No homography found.  Run calibration first.")
         return
 
-    cap = cv2.VideoCapture(config.CAMERA_INDEX)
-    if not cap.isOpened():
-        raise RuntimeError(f"Cannot open camera {config.CAMERA_INDEX}")
+    cap = camera.open_camera()
 
     print("Verification mode — press SPACE to freeze frame, then click points.")
     print("Press ESC to quit.\n")

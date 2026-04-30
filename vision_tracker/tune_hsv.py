@@ -1,14 +1,16 @@
 import cv2
 import numpy as np
 import config
+import camera
 
 def nothing(x):
     pass
 
 def main():
-    cap = cv2.VideoCapture(config.CAMERA_INDEX)
-    if not cap.isOpened():
-        print(f"ERROR: Cannot open camera {config.CAMERA_INDEX}")
+    try:
+        cap = camera.open_camera()
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}")
         return
 
     cv2.namedWindow('Trackbars')
