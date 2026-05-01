@@ -28,3 +28,4 @@ results/latest_tracker_pose.csv
 results/real_start_pose_checks.csv
 results/latest_tracker_pose.sample.csv
 .codex/
+.codex
