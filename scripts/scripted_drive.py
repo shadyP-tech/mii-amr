@@ -114,12 +114,6 @@ def main():
         node.get_logger().info("Driving forward")
         node.send_cmd(0.10, 0.0, 3.0)
 
-        node.get_logger().info("Rotating")
-        node.send_cmd(0.0, 0.5, 2.0)
-
-        node.get_logger().info("Driving forward again")
-        node.send_cmd(0.10, 0.0, 3.0)
-
         node.get_logger().info("Done")
         node.stop()
 
