@@ -20,7 +20,14 @@ ros2 service call /reset_simulation std_srvs/srv/Empty || true
 sleep 2
 
 echo "Starting bag recording for $RUN_ID..."
-ros2 bag record -o "bags/$RUN_ID" /cmd_vel /odom > "results/${RUN_ID}_bag.log" 2>&1 &
+BAG_TOPICS=(/cmd_vel /odom)
+for OPTIONAL_TOPIC in /imu /battery_state; do
+  if ros2 topic list | grep -qx "$OPTIONAL_TOPIC"; then
+    BAG_TOPICS+=("$OPTIONAL_TOPIC")
+  fi
+done
+echo "Recording topics: ${BAG_TOPICS[*]}"
+ros2 bag record -o "bags/$RUN_ID" "${BAG_TOPICS[@]}" > "results/${RUN_ID}_bag.log" 2>&1 &
 BAG_PID=$!
 
 sleep 2
