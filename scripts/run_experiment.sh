@@ -12,9 +12,19 @@ RUN_COUNT="$1"
 RUN_MODE="${RUN_MODE:-linear-forward}"
 RUN_SPEED="${RUN_SPEED:-0.1}"
 RUN_DISTANCE="${RUN_DISTANCE:-30cm}"
+SIM_MODEL_NAME="${SIM_MODEL_NAME:-${TURTLEBOT3_MODEL:-burger}}"
+SIM_SET_ENTITY_SERVICE="${SIM_SET_ENTITY_SERVICE:-}"
+SIM_START_X="${SIM_START_X:-0.5}"
+SIM_START_Y="${SIM_START_Y:-0.05}"
+SIM_START_Z="${SIM_START_Z:-0.01}"
+SIM_START_YAW_DEG="${SIM_START_YAW_DEG:-180.0}"
+SIM_RESET_SETTLE_SEC="${SIM_RESET_SETTLE_SEC:-1}"
 RUN_NUMBER_WIDTH="${#RUN_COUNT}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+
+export RUN_MODE RUN_SPEED RUN_DISTANCE
+export SIM_START_X SIM_START_Y SIM_START_YAW_DEG
 
 if [ "$RUN_NUMBER_WIDTH" -lt 2 ]; then
   RUN_NUMBER_WIDTH=2
@@ -68,6 +78,73 @@ source_ros_setup
 
 mkdir -p bags results
 
+require_ros_graph() {
+  local missing=0
+  local service_names
+
+  service_names="$(ros2 service list)"
+
+  if ! ros2 topic list | grep -qx "/cmd_vel"; then
+    echo "Missing required topic: /cmd_vel"
+    missing=1
+  fi
+
+  if ! ros2 topic list | grep -qx "/odom"; then
+    echo "Missing required topic: /odom"
+    missing=1
+  fi
+
+  if ! grep -qx "/reset_simulation" <<< "$service_names"; then
+    echo "Missing required service: /reset_simulation"
+    missing=1
+  fi
+
+  if [ -z "$SIM_SET_ENTITY_SERVICE" ]; then
+    if grep -qx "/gazebo/set_entity_state" <<< "$service_names"; then
+      SIM_SET_ENTITY_SERVICE="/gazebo/set_entity_state"
+    elif grep -qx "/set_entity_state" <<< "$service_names"; then
+      SIM_SET_ENTITY_SERVICE="/set_entity_state"
+    fi
+  fi
+
+  if [ -z "$SIM_SET_ENTITY_SERVICE" ] || ! grep -qx "$SIM_SET_ENTITY_SERVICE" <<< "$service_names"; then
+    echo "Missing required SetEntityState service."
+    echo "Set SIM_SET_ENTITY_SERVICE if your Gazebo launch exposes a different SetEntityState service."
+    missing=1
+  fi
+
+  if [ "$missing" -ne 0 ]; then
+    echo "Start Gazebo/TurtleBot simulation before running experiments."
+    return 1
+  fi
+}
+
+set_simulation_pose() {
+  local qz
+  local qw
+  local request
+  local output
+
+  read -r qz qw < <(
+    python3 -c 'import math, sys; yaw = math.radians(float(sys.argv[1])); print(f"{math.sin(yaw / 2.0):.12g} {math.cos(yaw / 2.0):.12g}")' "$SIM_START_YAW_DEG"
+  )
+
+  request="{state: {name: '${SIM_MODEL_NAME}', pose: {position: {x: ${SIM_START_X}, y: ${SIM_START_Y}, z: ${SIM_START_Z}}, orientation: {x: 0.0, y: 0.0, z: ${qz}, w: ${qw}}}, twist: {linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}, reference_frame: world}}"
+
+  if ! output="$(ros2 service call "$SIM_SET_ENTITY_SERVICE" gazebo_msgs/srv/SetEntityState "$request" 2>&1)"; then
+    echo "$output"
+    return 1
+  fi
+
+  echo "$output"
+
+  if [[ "$output" != *"success=True"* && "$output" != *"success: true"* && "$output" != *"success: True"* ]]; then
+    echo "Gazebo did not confirm pose reset for model '$SIM_MODEL_NAME'."
+    echo "Check the model name with: ros2 service call $SIM_SET_ENTITY_SERVICE gazebo_msgs/srv/SetEntityState ..."
+    return 1
+  fi
+}
+
 run_experiment() {
   local run_id="$1"
   local bag_pid
@@ -81,10 +158,15 @@ run_experiment() {
     exit 1
   fi
 
-  echo "Resetting simulation..."
-  ros2 service call /reset_simulation std_srvs/srv/Empty || true
+  require_ros_graph
 
-  sleep 2
+  echo "Resetting simulation..."
+  ros2 service call /reset_simulation std_srvs/srv/Empty
+
+  echo "Setting simulation model pose..."
+  set_simulation_pose
+
+  sleep "$SIM_RESET_SETTLE_SEC"
 
   echo "Starting bag recording for $run_id..."
   bag_topics=(/cmd_vel /odom)
