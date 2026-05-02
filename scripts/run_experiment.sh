@@ -82,14 +82,15 @@ require_ros_graph() {
   local missing=0
   local service_names
 
+  ROS_TOPIC_NAMES="$(ros2 topic list)"
   service_names="$(ros2 service list)"
 
-  if ! ros2 topic list | grep -qx "/cmd_vel"; then
+  if ! grep -qx "/cmd_vel" <<< "$ROS_TOPIC_NAMES"; then
     echo "Missing required topic: /cmd_vel"
     missing=1
   fi
 
-  if ! ros2 topic list | grep -qx "/odom"; then
+  if ! grep -qx "/odom" <<< "$ROS_TOPIC_NAMES"; then
     echo "Missing required topic: /odom"
     missing=1
   fi
@@ -171,7 +172,7 @@ run_experiment() {
   echo "Starting bag recording for $run_id..."
   bag_topics=(/cmd_vel /odom)
   for optional_topic in /imu /battery_state; do
-    if ros2 topic list | grep -qx "$optional_topic"; then
+    if grep -qx "$optional_topic" <<< "$ROS_TOPIC_NAMES"; then
       bag_topics+=("$optional_topic")
     fi
   done
