@@ -1,0 +1,170 @@
+{
+  "units": {
+    "position": "m",
+    "angle": "deg"
+  },
+  "coordinate_frames": {
+    "absolute_endpoint_model": "camera/world tracker frame",
+    "motion_primitive_error_model": "robot local start frame"
+  },
+  "data_selection": {
+    "real_csv": "results/real_scripted_drive_runs.csv",
+    "real_run_range": "21:50",
+    "selected_real_run_ids": [
+      "run_real_021",
+      "run_real_022",
+      "run_real_023",
+      "run_real_024",
+      "run_real_025",
+      "run_real_026",
+      "run_real_027",
+      "run_real_028",
+      "run_real_029",
+      "run_real_030",
+      "run_real_031",
+      "run_real_032",
+      "run_real_033",
+      "run_real_034",
+      "run_real_035",
+      "run_real_036",
+      "run_real_037",
+      "run_real_038",
+      "run_real_039",
+      "run_real_040",
+      "run_real_041",
+      "run_real_042",
+      "run_real_043",
+      "run_real_044",
+      "run_real_045",
+      "run_real_046",
+      "run_real_047",
+      "run_real_048",
+      "run_real_049",
+      "run_real_050"
+    ],
+    "skipped_real_rows": [],
+    "sim_csv": "results/scripted_drive_runs.csv",
+    "sim_last_n": 15,
+    "selected_sim_run_ids": [
+      "simulation_run_linear-forward_0.1_30cm_01",
+      "simulation_run_linear-forward_0.1_30cm_02",
+      "simulation_run_linear-forward_0.1_30cm_03",
+      "simulation_run_linear-forward_0.1_30cm_04",
+      "simulation_run_linear-forward_0.1_30cm_05",
+      "simulation_run_linear-forward_0.1_30cm_06",
+      "simulation_run_linear-forward_0.1_30cm_07",
+      "simulation_run_linear-forward_0.1_30cm_08",
+      "simulation_run_linear-forward_0.1_30cm_09",
+      "simulation_run_linear-forward_0.1_30cm_10",
+      "simulation_run_linear-forward_0.1_30cm_11",
+      "simulation_run_linear-forward_0.1_30cm_12",
+      "simulation_run_linear-forward_0.1_30cm_13",
+      "simulation_run_linear-forward_0.1_30cm_14",
+      "simulation_run_linear-forward_0.1_30cm_15"
+    ],
+    "skipped_sim_rows": []
+  },
+  "absolute_endpoint_model": {
+    "n": 30,
+    "mu": [
+      0.19624676666666666,
+      0.051867699999999996
+    ],
+    "sigma": [
+      [
+        5.473444943678169e-06,
+        -1.6119052448275846e-06
+      ],
+      [
+        -1.6119052448275846e-06,
+        7.459992355172417e-06
+      ]
+    ],
+    "std": [
+      0.002339539472562532,
+      0.0027312986572640527
+    ],
+    "ellipse_95": {
+      "center": [
+        0.19624676666666666,
+        0.051867699999999996
+      ],
+      "chi2_value": 5.991,
+      "semi_major_m": 0.007077094133922455,
+      "semi_minor_m": 0.0052344017305719125,
+      "major_axis_length_m": 0.01415418826784491,
+      "minor_axis_length_m": 0.010468803461143825,
+      "orientation_deg": 119.17908429038744,
+      "area_m2": 0.00011637826969858794
+    },
+    "outliers_95": [
+      {
+        "run_id": "run_real_021",
+        "mahalanobis_squared": 16.37556815825232
+      },
+      {
+        "run_id": "run_real_029",
+        "mahalanobis_squared": 6.333587515902567
+      }
+    ]
+  },
+  "motion_primitive_error_model": {
+    "step_distance_m": 0.3,
+    "mu_error": [
+      0.0018087656225980002,
+      -0.0018510836293532322
+    ],
+    "sigma_error": [
+      [
+        7.179226197269747e-07,
+        -5.5947776174444285e-08
+      ],
+      [
+        -5.5947776174444285e-08,
+        3.1317874087443237e-06
+      ]
+    ],
+    "std_error": [
+      0.0008473031451180709,
+      0.0017696856807762004
+    ],
+    "ellipse_95": {
+      "center": [
+        0.0018087656225980002,
+        -0.0018510836293532322
+      ],
+      "chi2_value": 5.991,
+      "semi_major_m": 0.0043324707688331245,
+      "semi_minor_m": 0.0020720303612104885,
+      "major_axis_length_m": 0.008664941537666249,
+      "minor_axis_length_m": 0.004144060722420977,
+      "orientation_deg": 91.3270330444119,
+      "area_m2": 2.8202111721078923e-05
+    },
+    "outliers_95": [
+      {
+        "run_id": "run_real_026",
+        "mahalanobis_squared": 6.264508329289189
+      },
+      {
+        "run_id": "run_real_035",
+        "mahalanobis_squared": 6.19877047050539
+      }
+    ]
+  },
+  "yaw_summary": {
+    "mean_deg": -179.8758616138019,
+    "std_deg": 0.5049841369199375
+  },
+  "sim2real_displacement_bias": {
+    "dx_m": -0.006053367716321937,
+    "dy_m": -0.0018494877678102122,
+    "magnitude_m": 0.006329602334451056
+  },
+  "warnings": [],
+  "limitations": [
+    "The model propagates only the empirical 30 cm forward-motion error.",
+    "Turn uncertainty at waypoint corners is not modeled.",
+    "Segment errors are assumed independent."
+  ]
+}
