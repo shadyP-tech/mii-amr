@@ -25,6 +25,27 @@ class ScriptedDriveConfigTest(unittest.TestCase):
         self.assertAlmostEqual(config["speed_mps"], 0.1)
         self.assertAlmostEqual(config["distance_m"], 0.3)
         self.assertAlmostEqual(config["duration_sec"], 3.0)
+        self.assertAlmostEqual(config["timeout_sec"], 120.0)
+
+    def test_motion_configuration_ignores_wall_clock_drive_duration(self):
+        config = scripted_drive.configured_motion({
+            "RUN_MODE": "linear-forward",
+            "RUN_SPEED": "0.1",
+            "RUN_DISTANCE": "30cm",
+            "RUN_DURATION_SEC": "40",
+        })
+
+        self.assertAlmostEqual(config["duration_sec"], 3.0)
+
+    def test_motion_configuration_accepts_timeout_override(self):
+        config = scripted_drive.configured_motion({
+            "RUN_MODE": "linear-forward",
+            "RUN_SPEED": "0.1",
+            "RUN_DISTANCE": "30cm",
+            "RUN_TIMEOUT_SEC": "45",
+        })
+
+        self.assertAlmostEqual(config["timeout_sec"], 45.0)
 
     def test_start_pose_validation_accepts_real_world_aligned_start(self):
         checks = scripted_drive.validation_config({})

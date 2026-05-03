@@ -25,6 +25,7 @@ DEFAULT_LINEAR_SPEED_MPS = 0.10
 DEFAULT_RUN_DISTANCE = "30cm"
 ANGULAR_SPEED_RADPS = 0.0
 RESULTS_CSV = "results/scripted_drive_runs.csv"
+DEFAULT_DRIVE_TIMEOUT_SEC = 120.0
 DEFAULT_SIM_START_X = 0.5
 DEFAULT_SIM_START_Y = 0.05
 DEFAULT_SIM_START_YAW_DEG = 180.0
@@ -121,15 +122,17 @@ def configured_motion(env=os.environ):
     if distance_m <= 0.0:
         raise ValueError("RUN_DISTANCE must be greater than zero")
 
-    duration_sec = parse_float_env(env, "RUN_DURATION_SEC", distance_m / speed_mps)
-    if duration_sec <= 0.0:
-        raise ValueError("RUN_DURATION_SEC must be greater than zero")
+    nominal_duration_sec = distance_m / speed_mps
+    timeout_sec = parse_float_env(env, "RUN_TIMEOUT_SEC", DEFAULT_DRIVE_TIMEOUT_SEC)
+    if timeout_sec <= 0.0:
+        raise ValueError("RUN_TIMEOUT_SEC must be greater than zero")
 
     return {
         "run_mode": run_mode,
         "speed_mps": speed_mps,
         "distance_m": distance_m,
-        "duration_sec": duration_sec,
+        "duration_sec": nominal_duration_sec,
+        "timeout_sec": timeout_sec,
         "angular_speed_radps": ANGULAR_SPEED_RADPS,
     }
 
@@ -391,6 +394,62 @@ class ScriptedDrive(Node):
 
         self.stop()
 
+    def drive_until_forward_distance(
+        self,
+        start_pose,
+        target_distance_m: float,
+        linear_x: float,
+        angular_z: float,
+        timeout_sec: float,
+    ):
+        start_time = time.time()
+        last_summary = None
+        last_log_time = start_time
+
+        while rclpy.ok():
+            if self.last_odom is not None:
+                current_pose = odom_to_xy_yaw(self.last_odom)
+                last_summary = motion_summary(start_pose, current_pose)
+
+                if last_summary["forward_m"] >= target_distance_m:
+                    self.get_logger().info(
+                        "Reached odometry target: "
+                        f"forward={last_summary['forward_m']:.3f} m, "
+                        f"target={target_distance_m:.3f} m"
+                    )
+                    self.stop()
+                    return self.last_odom
+
+            elapsed = time.time() - start_time
+            if elapsed > timeout_sec:
+                progress = (
+                    f"{last_summary['forward_m']:.3f} m"
+                    if last_summary is not None
+                    else "unknown"
+                )
+                self.stop()
+                raise RuntimeError(
+                    "Timed out before reaching odometry target: "
+                    f"progress={progress}, target={target_distance_m:.3f} m, "
+                    f"timeout={timeout_sec:.1f} s"
+                )
+
+            if time.time() - last_log_time >= 5.0:
+                if last_summary is not None:
+                    self.get_logger().info(
+                        "Driving toward odometry target: "
+                        f"forward={last_summary['forward_m']:.3f} m / "
+                        f"{target_distance_m:.3f} m"
+                    )
+                last_log_time = time.time()
+
+            self.publish_velocity(linear_x, angular_z)
+            rclpy.spin_once(self, timeout_sec=0.05)
+            time.sleep(0.05)
+
+        self.stop()
+        raise RuntimeError("ROS shutdown before reaching odometry target.")
+
     def stop(self):
         msg = Twist()
         for _ in range(10):
@@ -462,9 +521,16 @@ def main():
         node.get_logger().info(f"Starting run: {run_id}")
         node.get_logger().info(
             "Configured drive: "
-            f"{motion['speed_mps']:.3f} m/s for {motion['duration_sec']:.3f} s "
-            f"({motion['distance_m']:.3f} m target)"
+            f"{motion['speed_mps']:.3f} m/s until odometry reaches "
+            f"{motion['distance_m']:.3f} m "
+            f"(nominal {motion['duration_sec']:.3f} s, "
+            f"timeout {motion['timeout_sec']:.1f} s)"
         )
+        if "RUN_DURATION_SEC" in os.environ:
+            node.get_logger().warn(
+                "RUN_DURATION_SEC is ignored; simulation now stops from odometry. "
+                "Use RUN_TIMEOUT_SEC only to change the safety timeout."
+            )
 
         node.get_logger().info("Waiting for initial odometry...")
         odom_start_msg = node.wait_for_odom()
@@ -479,10 +545,12 @@ def main():
             )
 
         node.get_logger().info("Driving forward")
-        node.send_cmd(
+        node.drive_until_forward_distance(
+            odom_start,
+            motion["distance_m"],
             motion["speed_mps"],
             motion["angular_speed_radps"],
-            motion["duration_sec"],
+            motion["timeout_sec"],
         )
 
         node.get_logger().info("Done")
