@@ -81,10 +81,11 @@ MAX_CLIPPED_FRACTION = 0.005
 # The three markers form a right-angle layout:
 # - rear/small marker to the nearest large front marker: 78 mm
 # - distance between the two large front markers: 114 mm
-# The tracked robot center is approximated as the center of this rectangle.
+# The two large front markers are approximately on the wheel axis, so the
+# tracked robot center is approximated as their midpoint.
 MARKER_FORWARD_SPACING_M = 0.078
 MARKER_LATERAL_SPACING_M = 0.114
-CENTER_FORWARD_OFFSET = MARKER_FORWARD_SPACING_M / 2.0
+CENTER_FORWARD_OFFSET = MARKER_FORWARD_SPACING_M
 CENTER_LATERAL_OFFSET = MARKER_LATERAL_SPACING_M / 2.0
 
 # Real-run start pose gate

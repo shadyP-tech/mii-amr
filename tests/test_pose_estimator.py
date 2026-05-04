@@ -18,7 +18,7 @@ except ModuleNotFoundError as exc:
 
 
 class PoseEstimatorCenterCalibrationTest(unittest.TestCase):
-    def test_center_uses_marker_rectangle_midpoint_when_heading_along_x(self):
+    def test_center_uses_big_marker_midpoint_when_heading_along_x(self):
         rear = np.array([0.0, 0.0])
         straight_front = np.array([config.MARKER_FORWARD_SPACING_M, 0.0])
         diagonal_front = np.array([
@@ -33,11 +33,11 @@ class PoseEstimatorCenterCalibrationTest(unittest.TestCase):
         ])
         x, y, yaw = pose_estimator.estimate_pose(classified)
 
-        self.assertAlmostEqual(x, 0.039)
+        self.assertAlmostEqual(x, 0.078)
         self.assertAlmostEqual(y, 0.057)
         self.assertAlmostEqual(yaw, 0.0)
 
-    def test_center_uses_marker_rectangle_midpoint_when_heading_along_y(self):
+    def test_center_uses_big_marker_midpoint_when_heading_along_y(self):
         rear = np.array([1.0, 2.0])
         straight_front = np.array([1.0, 2.0 + config.MARKER_FORWARD_SPACING_M])
         diagonal_front = np.array([
@@ -53,7 +53,7 @@ class PoseEstimatorCenterCalibrationTest(unittest.TestCase):
         x, y, yaw = pose_estimator.estimate_pose(classified)
 
         self.assertAlmostEqual(x, 1.0 - 0.057)
-        self.assertAlmostEqual(y, 2.0 + 0.039)
+        self.assertAlmostEqual(y, 2.0 + 0.078)
         self.assertAlmostEqual(yaw, math.pi / 2)
 
 

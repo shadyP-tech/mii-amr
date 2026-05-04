@@ -70,6 +70,27 @@ def pixel_to_world(pixel, H):
     return world[0, 0]  # shape (2,)
 
 
+def world_to_pixel(point, H):
+    """Convert a single world coordinate to image pixel coordinates.
+
+    Parameters
+    ----------
+    point : tuple of (float, float)
+        (x, y) in world meters.
+    H : np.ndarray
+        3x3 homography matrix (pixel -> world).
+
+    Returns
+    -------
+    np.ndarray
+        [x, y] in image pixels.
+    """
+    H_inv = np.linalg.inv(H)
+    world = np.array([[[point[0], point[1]]]], dtype=np.float32)
+    pixel = cv2.perspectiveTransform(world, H_inv)
+    return pixel[0, 0]  # shape (2,)
+
+
 def pixels_to_world(pixels, H):
     """Convert multiple pixel coordinates to world coordinates.
 

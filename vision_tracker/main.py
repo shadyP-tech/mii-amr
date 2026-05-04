@@ -50,6 +50,8 @@ CSV_HEADER = [
 ]
 
 NAN = float("nan")
+POSE_ARROW_LENGTH_M = 0.06
+POSE_CENTER_COLOR = (255, 0, 255)
 
 
 def _make_csv_path():
@@ -112,6 +114,7 @@ def main():
 
                 if classified is not None:
                     x, y, yaw = pose_estimator.estimate_pose(classified)
+                    _draw_pose_center_overlay(frame, H, x, y, yaw)
 
                     # Write latest external tracker pose for real experiment scripts
                     pose_estimator.write_latest_pose(
@@ -236,6 +239,73 @@ def _draw_invalid_start_overlay(frame, num_detected):
         f"markers={num_detected}/{config.START_POSE_REQUIRED_MARKERS}  valid=0",
     ]
     _draw_overlay_lines(frame, lines, (0, 0, 255))
+
+
+def _pose_center_overlay_points(frame_shape, H, x, y, yaw):
+    center_world = np.array([x, y], dtype=float)
+    tip_world = np.array(
+        [
+            x + POSE_ARROW_LENGTH_M * math.cos(yaw),
+            y + POSE_ARROW_LENGTH_M * math.sin(yaw),
+        ],
+        dtype=float,
+    )
+
+    try:
+        center_pixel = calibration.world_to_pixel(center_world, H)
+        tip_pixel = calibration.world_to_pixel(tip_world, H)
+    except (cv2.error, np.linalg.LinAlgError, ValueError, TypeError):
+        return None
+
+    if not (
+        _is_reasonable_pixel(center_pixel, frame_shape)
+        and _is_reasonable_pixel(tip_pixel, frame_shape)
+    ):
+        return None
+
+    center = tuple(int(round(value)) for value in center_pixel)
+    tip = tuple(int(round(value)) for value in tip_pixel)
+    return center, tip
+
+
+def _is_reasonable_pixel(pixel, frame_shape):
+    if pixel is None or len(pixel) != 2:
+        return False
+
+    if not np.all(np.isfinite(pixel)):
+        return False
+
+    height, width = frame_shape[:2]
+    margin = max(width, height)
+    x, y = float(pixel[0]), float(pixel[1])
+    return -margin <= x <= width + margin and -margin <= y <= height + margin
+
+
+def _draw_pose_center_overlay(frame, H, x, y, yaw):
+    points = _pose_center_overlay_points(frame.shape, H, x, y, yaw)
+    if points is None:
+        return
+
+    center, tip = points
+    cv2.circle(frame, center, 8, POSE_CENTER_COLOR, 2)
+    cv2.drawMarker(
+        frame,
+        center,
+        POSE_CENTER_COLOR,
+        markerType=cv2.MARKER_CROSS,
+        markerSize=18,
+        thickness=2,
+    )
+    cv2.arrowedLine(frame, center, tip, POSE_CENTER_COLOR, 2, tipLength=0.35)
+    cv2.putText(
+        frame,
+        "center",
+        (center[0] + 10, center[1] - 10),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        POSE_CENTER_COLOR,
+        2,
+    )
 
 
 def _draw_overlay_lines(frame, lines, color):
