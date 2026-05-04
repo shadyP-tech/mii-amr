@@ -78,9 +78,14 @@ EXPOSURE_CANDIDATES = [-11, -10, -9, -8, -7, -6, -5, -4, -3]
 MAX_CLIPPED_FRACTION = 0.005
 
 # Robot marker geometry
-# Forward offset (meters) from the rear marker to the actual robot
-# center along the heading direction.  Adjust to match your marker placement.
-CENTER_FORWARD_OFFSET = 0.067  # 6.7 cm forward of rear marker
+# The three markers form a right-angle layout:
+# - rear/small marker to the nearest large front marker: 78 mm
+# - distance between the two large front markers: 114 mm
+# The tracked robot center is approximated as the center of this rectangle.
+MARKER_FORWARD_SPACING_M = 0.078
+MARKER_LATERAL_SPACING_M = 0.114
+CENTER_FORWARD_OFFSET = MARKER_FORWARD_SPACING_M / 2.0
+CENTER_LATERAL_OFFSET = MARKER_LATERAL_SPACING_M / 2.0
 
 # Real-run start pose gate
 # Seeded from the current clean real runs; keep fixed during an experiment batch.

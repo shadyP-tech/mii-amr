@@ -12,9 +12,10 @@ Marker classification:
       correct classification regardless of robot orientation.
 
 Pose computation:
-    - Robot center = rear marker + configurable forward offset along
-      the heading direction.
-    - Yaw = atan2 of the heading vector (rear marker → front midpoint).
+    - Heading = rear marker → nearest large front marker.
+    - Robot center = marker-rectangle center using configurable forward and
+      lateral offsets from the rear marker.
+    - Yaw = atan2 of the heading vector.
 """
 
 import csv
@@ -73,7 +74,7 @@ def classify_markers(centers_world):
 
     # Classify left / right using cross product.
     # If cross product > 0, the diagonal vector is to the LEFT of the heading
-    cross_prod = np.cross(heading, vec_diagonal)
+    cross_prod = heading[0] * vec_diagonal[1] - heading[1] * vec_diagonal[0]
 
     if cross_prod > 0:
         front_left = diagonal_front
@@ -108,18 +109,24 @@ def estimate_pose(classified):
     front_right = classified["front_right"]
     rear = classified["rear"]
 
-    # Since the layout is a right triangle, the true heading is formed by
-    # either (front_left - rear) or (front_right - rear), depending on which
-    # is the straight edge. We recreate that straight heading.
+    # Since the layout is a right triangle, the true heading is formed by the
+    # nearer front marker.  The other large marker gives the lateral direction
+    # across the marker rectangle.
     dist_left = np.linalg.norm(front_left - rear)
     dist_right = np.linalg.norm(front_right - rear)
     
     if dist_left < dist_right:
-        heading = front_left - rear
+        straight_front = front_left
+        diagonal_front = front_right
     else:
-        heading = front_right - rear
+        straight_front = front_right
+        diagonal_front = front_left
+
+    heading = straight_front - rear
+    lateral = diagonal_front - straight_front
 
     heading_norm = np.linalg.norm(heading)
+    lateral_norm = np.linalg.norm(lateral)
 
     if heading_norm < 1e-6:
         # Degenerate case — markers are coincident
@@ -128,13 +135,16 @@ def estimate_pose(classified):
     heading_unit = heading / heading_norm
     yaw = float(np.arctan2(heading_unit[1], heading_unit[0]))
 
-    # Apply forward offset to get approximate robot center.
-    # Note: Because the rear marker is on the side of the robot (forming the straight edge),
-    # adding the forward offset purely along the heading will place the 'center'
-    # on that same side edge, not the physical center of the chassis.
-    # If a true geometric center is needed, consider calculating a lateral shift
-    # perpendicular to the heading vector.
-    center = rear + config.CENTER_FORWARD_OFFSET * heading_unit
+    if lateral_norm < 1e-6:
+        lateral_unit = np.array([-heading_unit[1], heading_unit[0]])
+    else:
+        lateral_unit = lateral / lateral_norm
+
+    center = (
+        rear
+        + config.CENTER_FORWARD_OFFSET * heading_unit
+        + config.CENTER_LATERAL_OFFSET * lateral_unit
+    )
 
     return float(center[0]), float(center[1]), yaw
 
