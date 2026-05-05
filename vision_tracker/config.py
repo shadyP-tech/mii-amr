@@ -90,9 +90,9 @@ CENTER_LATERAL_OFFSET = MARKER_LATERAL_SPACING_M / 2.0
 
 # Real-run start pose gate
 # Seeded from the current clean real runs; keep fixed during an experiment batch.
-START_POSE_REF_X = 0.201
-START_POSE_REF_Y = 0.157
-START_POSE_REF_YAW_DEG = 90
+START_POSE_REF_X = 0.493
+START_POSE_REF_Y = 0.121
+START_POSE_REF_YAW_DEG = -178.0
 START_POSE_POSITION_TOLERANCE_M = 0.04
 START_POSE_YAW_TOLERANCE_DEG = 4.0
 START_POSE_STABLE_TIME_SEC = 1.0
@@ -107,9 +107,9 @@ START_POSE_REQUIRED_MARKERS = 3
 WORLD_RECT_METERS = np.array(
     [
         [0.0, 0.0],
-        [0.5, 0.0],
-        [0.5, 0.25],
-        [0.0, 0.25],
+        [0.55, 0.0],
+        [0.55, 0.30],
+        [0.0, 0.30],
     ],
     dtype=np.float32,
 )
