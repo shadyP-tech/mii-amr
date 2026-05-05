@@ -85,7 +85,185 @@
       "run_real_rot_ccw90_014",
       "run_real_rot_ccw90_015"
     ],
-    "skipped_ccw_rows": []
+    "skipped_ccw_rows": [],
+    "primitive_sources": {
+      "F30": {
+        "csv": "results/real_scripted_drive_runs.csv",
+        "run_range": "21:50",
+        "run_id_prefix": null,
+        "selected_run_ids": [
+          "run_real_021",
+          "run_real_022",
+          "run_real_023",
+          "run_real_024",
+          "run_real_025",
+          "run_real_026",
+          "run_real_027",
+          "run_real_028",
+          "run_real_029",
+          "run_real_030",
+          "run_real_031",
+          "run_real_032",
+          "run_real_033",
+          "run_real_034",
+          "run_real_035",
+          "run_real_036",
+          "run_real_037",
+          "run_real_038",
+          "run_real_039",
+          "run_real_040",
+          "run_real_041",
+          "run_real_042",
+          "run_real_043",
+          "run_real_044",
+          "run_real_045",
+          "run_real_046",
+          "run_real_047",
+          "run_real_048",
+          "run_real_049",
+          "run_real_050"
+        ],
+        "skipped_rows": []
+      },
+      "CW90": {
+        "csv": "results/real_rotation_runs.csv",
+        "run_range": "18:32",
+        "run_id_prefix": "run_real_rot_cw90_",
+        "selected_run_ids": [
+          "run_real_rot_cw90_018",
+          "run_real_rot_cw90_019",
+          "run_real_rot_cw90_020",
+          "run_real_rot_cw90_021",
+          "run_real_rot_cw90_022",
+          "run_real_rot_cw90_023",
+          "run_real_rot_cw90_024",
+          "run_real_rot_cw90_025",
+          "run_real_rot_cw90_026",
+          "run_real_rot_cw90_027",
+          "run_real_rot_cw90_028",
+          "run_real_rot_cw90_029",
+          "run_real_rot_cw90_030",
+          "run_real_rot_cw90_031",
+          "run_real_rot_cw90_032"
+        ],
+        "skipped_rows": []
+      },
+      "CCW90": {
+        "csv": "results/real_rotation_runs.csv",
+        "run_range": "1:15",
+        "run_id_prefix": "run_real_rot_ccw90_",
+        "selected_run_ids": [
+          "run_real_rot_ccw90_001",
+          "run_real_rot_ccw90_002",
+          "run_real_rot_ccw90_003",
+          "run_real_rot_ccw90_004",
+          "run_real_rot_ccw90_005",
+          "run_real_rot_ccw90_006",
+          "run_real_rot_ccw90_007",
+          "run_real_rot_ccw90_008",
+          "run_real_rot_ccw90_009",
+          "run_real_rot_ccw90_010",
+          "run_real_rot_ccw90_011",
+          "run_real_rot_ccw90_012",
+          "run_real_rot_ccw90_013",
+          "run_real_rot_ccw90_014",
+          "run_real_rot_ccw90_015"
+        ],
+        "skipped_rows": []
+      },
+      "F50": {
+        "csv": "results/real_scripted_drive_runs.csv",
+        "run_range": "1:15",
+        "run_id_prefix": "run_real_fwd50_",
+        "selected_run_ids": [
+          "run_real_fwd50_001",
+          "run_real_fwd50_002",
+          "run_real_fwd50_003",
+          "run_real_fwd50_004",
+          "run_real_fwd50_005",
+          "run_real_fwd50_006",
+          "run_real_fwd50_007",
+          "run_real_fwd50_008",
+          "run_real_fwd50_009",
+          "run_real_fwd50_010",
+          "run_real_fwd50_011",
+          "run_real_fwd50_012",
+          "run_real_fwd50_013",
+          "run_real_fwd50_014",
+          "run_real_fwd50_015"
+        ],
+        "skipped_rows": []
+      },
+      "CCW45": {
+        "csv": "results/real_rotation_runs.csv",
+        "run_range": "1:15",
+        "run_id_prefix": "run_real_rot_ccw45_",
+        "selected_run_ids": [
+          "run_real_rot_ccw45_001",
+          "run_real_rot_ccw45_002",
+          "run_real_rot_ccw45_003",
+          "run_real_rot_ccw45_004",
+          "run_real_rot_ccw45_005",
+          "run_real_rot_ccw45_006",
+          "run_real_rot_ccw45_007",
+          "run_real_rot_ccw45_008",
+          "run_real_rot_ccw45_009",
+          "run_real_rot_ccw45_010",
+          "run_real_rot_ccw45_011",
+          "run_real_rot_ccw45_012",
+          "run_real_rot_ccw45_013",
+          "run_real_rot_ccw45_014",
+          "run_real_rot_ccw45_015"
+        ],
+        "skipped_rows": []
+      },
+      "CW45": {
+        "csv": "results/real_rotation_runs.csv",
+        "run_range": "1:15",
+        "run_id_prefix": "run_real_rot_cw45_",
+        "selected_run_ids": [
+          "run_real_rot_cw45_001",
+          "run_real_rot_cw45_002",
+          "run_real_rot_cw45_003",
+          "run_real_rot_cw45_004",
+          "run_real_rot_cw45_005",
+          "run_real_rot_cw45_006",
+          "run_real_rot_cw45_007",
+          "run_real_rot_cw45_008",
+          "run_real_rot_cw45_009",
+          "run_real_rot_cw45_010",
+          "run_real_rot_cw45_011",
+          "run_real_rot_cw45_012",
+          "run_real_rot_cw45_013",
+          "run_real_rot_cw45_014",
+          "run_real_rot_cw45_015"
+        ],
+        "skipped_rows": []
+      },
+      "CCW180": {
+        "csv": "results/real_rotation_runs.csv",
+        "run_range": "1:15",
+        "run_id_prefix": "run_real_rot_ccw180_",
+        "selected_run_ids": [
+          "run_real_rot_ccw180_001",
+          "run_real_rot_ccw180_002",
+          "run_real_rot_ccw180_003",
+          "run_real_rot_ccw180_004",
+          "run_real_rot_ccw180_005",
+          "run_real_rot_ccw180_006",
+          "run_real_rot_ccw180_007",
+          "run_real_rot_ccw180_008",
+          "run_real_rot_ccw180_009",
+          "run_real_rot_ccw180_010",
+          "run_real_rot_ccw180_011",
+          "run_real_rot_ccw180_012",
+          "run_real_rot_ccw180_013",
+          "run_real_rot_ccw180_014",
+          "run_real_rot_ccw180_015"
+        ],
+        "skipped_rows": []
+      }
+    }
   },
   "primitives": {
     "F30": {
@@ -230,6 +408,178 @@
         "run_real_rot_ccw90_013",
         "run_real_rot_ccw90_014",
         "run_real_rot_ccw90_015"
+      ]
+    },
+    "F50": {
+      "type": "forward",
+      "local_delta_mu": [
+        0.501315666500372,
+        -0.0017316381876066632
+      ],
+      "local_delta_sigma": [
+        [
+          7.925101789662691e-07,
+          9.883052467115565e-07
+        ],
+        [
+          9.883052467115565e-07,
+          9.949865901461618e-06
+        ]
+      ],
+      "local_delta_std": [
+        0.0008902304077969193,
+        0.003154340802998563
+      ],
+      "yaw_delta_mean_deg": 0.7989625627586179,
+      "yaw_delta_std_deg": 0.4094115411765025,
+      "yaw_delta_min_deg": -0.055925000000002,
+      "yaw_delta_max_deg": 1.5887430000000222,
+      "n": 15,
+      "selected_run_ids": [
+        "run_real_fwd50_001",
+        "run_real_fwd50_002",
+        "run_real_fwd50_003",
+        "run_real_fwd50_004",
+        "run_real_fwd50_005",
+        "run_real_fwd50_006",
+        "run_real_fwd50_007",
+        "run_real_fwd50_008",
+        "run_real_fwd50_009",
+        "run_real_fwd50_010",
+        "run_real_fwd50_011",
+        "run_real_fwd50_012",
+        "run_real_fwd50_013",
+        "run_real_fwd50_014",
+        "run_real_fwd50_015"
+      ]
+    },
+    "CCW45": {
+      "type": "rotation",
+      "local_delta_mu": [
+        -0.0024378697466522,
+        -0.005727724518021114
+      ],
+      "local_delta_sigma": [
+        [
+          2.435731242347798e-07,
+          -1.1565820617762227e-07
+        ],
+        [
+          -1.1565820617762227e-07,
+          2.3840331578428797e-07
+        ]
+      ],
+      "local_delta_std": [
+        0.0004935312798949828,
+        0.00048826562011295446
+      ],
+      "yaw_delta_mean_deg": 43.216076370707896,
+      "yaw_delta_std_deg": 0.3974347133285016,
+      "yaw_delta_min_deg": 42.45442400000002,
+      "yaw_delta_max_deg": 44.004378,
+      "n": 15,
+      "selected_run_ids": [
+        "run_real_rot_ccw45_001",
+        "run_real_rot_ccw45_002",
+        "run_real_rot_ccw45_003",
+        "run_real_rot_ccw45_004",
+        "run_real_rot_ccw45_005",
+        "run_real_rot_ccw45_006",
+        "run_real_rot_ccw45_007",
+        "run_real_rot_ccw45_008",
+        "run_real_rot_ccw45_009",
+        "run_real_rot_ccw45_010",
+        "run_real_rot_ccw45_011",
+        "run_real_rot_ccw45_012",
+        "run_real_rot_ccw45_013",
+        "run_real_rot_ccw45_014",
+        "run_real_rot_ccw45_015"
+      ]
+    },
+    "CW45": {
+      "type": "rotation",
+      "local_delta_mu": [
+        -0.0016876141283244804,
+        0.006494509918602592
+      ],
+      "local_delta_sigma": [
+        [
+          3.173770491082544e-07,
+          1.219763331892874e-07
+        ],
+        [
+          1.219763331892874e-07,
+          1.4698766987620927e-07
+        ]
+      ],
+      "local_delta_std": [
+        0.0005633622716407751,
+        0.00038338971018561424
+      ],
+      "yaw_delta_mean_deg": -42.98716171102234,
+      "yaw_delta_std_deg": 0.28060305517113737,
+      "yaw_delta_min_deg": -43.49842100000001,
+      "yaw_delta_max_deg": -42.532749000000024,
+      "n": 15,
+      "selected_run_ids": [
+        "run_real_rot_cw45_001",
+        "run_real_rot_cw45_002",
+        "run_real_rot_cw45_003",
+        "run_real_rot_cw45_004",
+        "run_real_rot_cw45_005",
+        "run_real_rot_cw45_006",
+        "run_real_rot_cw45_007",
+        "run_real_rot_cw45_008",
+        "run_real_rot_cw45_009",
+        "run_real_rot_cw45_010",
+        "run_real_rot_cw45_011",
+        "run_real_rot_cw45_012",
+        "run_real_rot_cw45_013",
+        "run_real_rot_cw45_014",
+        "run_real_rot_cw45_015"
+      ]
+    },
+    "CCW180": {
+      "type": "rotation",
+      "local_delta_mu": [
+        -0.018844122288361954,
+        -0.0007653130989677064
+      ],
+      "local_delta_sigma": [
+        [
+          2.2917065735505912e-07,
+          1.21481826071241e-07
+        ],
+        [
+          1.21481826071241e-07,
+          2.6101331601141874e-07
+        ]
+      ],
+      "local_delta_std": [
+        0.0004787177219981094,
+        0.0005108946231968181
+      ],
+      "yaw_delta_mean_deg": 175.11079706630238,
+      "yaw_delta_std_deg": 0.4453230286085407,
+      "yaw_delta_min_deg": 174.43189600000005,
+      "yaw_delta_max_deg": 176.08232600000002,
+      "n": 15,
+      "selected_run_ids": [
+        "run_real_rot_ccw180_001",
+        "run_real_rot_ccw180_002",
+        "run_real_rot_ccw180_003",
+        "run_real_rot_ccw180_004",
+        "run_real_rot_ccw180_005",
+        "run_real_rot_ccw180_006",
+        "run_real_rot_ccw180_007",
+        "run_real_rot_ccw180_008",
+        "run_real_rot_ccw180_009",
+        "run_real_rot_ccw180_010",
+        "run_real_rot_ccw180_011",
+        "run_real_rot_ccw180_012",
+        "run_real_rot_ccw180_013",
+        "run_real_rot_ccw180_014",
+        "run_real_rot_ccw180_015"
       ]
     }
   },

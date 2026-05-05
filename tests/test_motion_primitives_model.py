@@ -158,6 +158,68 @@ class MotionPrimitivesModelTest(unittest.TestCase):
         self.assertLess(model["primitives"]["CW90"]["yaw_delta_mean_deg"], 0.0)
         self.assertGreater(model["primitives"]["CCW90"]["yaw_delta_mean_deg"], 0.0)
 
+    def test_builds_optional_route_primitives_by_prefix(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            forward_csv = root / "forward.csv"
+            rotation_csv = root / "rotation.csv"
+            self.write_rows(
+                forward_csv,
+                FORWARD_HEADER,
+                [
+                    self.forward_row("run_real_021", 0.31, 0.02, 1.0),
+                    self.forward_row("run_real_022", 0.35, 0.04, 2.0),
+                    self.forward_row("run_real_fwd50_001", 0.51, 0.03, 0.5),
+                    self.forward_row("run_real_fwd50_002", 0.53, 0.05, 0.8),
+                ],
+            )
+            self.write_rows(
+                rotation_csv,
+                ROTATION_HEADER,
+                [
+                    self.rotation_row("run_real_rot_cw90_018", 85.0, 0.01, 0.02),
+                    self.rotation_row("run_real_rot_cw90_019", 83.0, 0.02, 0.03),
+                    self.rotation_row("run_real_rot_ccw90_001", -86.0, -0.01, 0.02),
+                    self.rotation_row("run_real_rot_ccw90_002", -84.0, -0.02, 0.03),
+                    self.rotation_row("run_real_rot_ccw45_001", -44.0, -0.01, 0.01),
+                    self.rotation_row("run_real_rot_ccw45_002", -42.0, -0.02, 0.02),
+                ],
+            )
+
+            model = builder.build_motion_primitives_model(
+                forward_csv=forward_csv,
+                forward_run_range="21:22",
+                rotation_csv=rotation_csv,
+                cw_prefix="run_real_rot_cw90_",
+                cw_run_range="18:19",
+                ccw_prefix="run_real_rot_ccw90_",
+                ccw_run_range="1:2",
+                tracker_yaw_sign=-1.0,
+                extra_forward_specs=[
+                    {
+                        "name": "F50",
+                        "run_id_prefix": "run_real_fwd50_",
+                        "run_range": "1:2",
+                    }
+                ],
+                extra_rotation_specs=[
+                    {
+                        "name": "CCW45",
+                        "run_id_prefix": "run_real_rot_ccw45_",
+                        "run_range": "1:2",
+                    }
+                ],
+            )
+
+        self.assertIn("F50", model["primitives"])
+        self.assertIn("CCW45", model["primitives"])
+        self.assertAlmostEqual(model["primitives"]["F50"]["local_delta_mu"][0], 0.52)
+        self.assertGreater(model["primitives"]["CCW45"]["yaw_delta_mean_deg"], 0.0)
+        self.assertEqual(
+            model["data_selection"]["primitive_sources"]["F50"]["selected_run_ids"],
+            ["run_real_fwd50_001", "run_real_fwd50_002"],
+        )
+
     def test_covariance_validation_rejects_invalid_matrices(self):
         with self.assertRaises(builder.PrimitiveModelError):
             builder.validate_covariance("X", [[1.0, 0.1], [0.0, 1.0]])

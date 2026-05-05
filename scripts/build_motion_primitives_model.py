@@ -4,7 +4,7 @@ Build empirical motion primitives for probabilistic path endpoint prediction.
 
 The script is independent of ROS and camera hardware.  It uses already-recorded
 tracker CSV rows to estimate local-frame displacement and yaw-change models for
-F30, CW90, and CCW90 commands.
+named forward and rotation commands.
 """
 
 import argparse
@@ -141,11 +141,11 @@ def validate_primitive(name, primitive):
     validate_covariance(name, sigma)
 
     yaw_mean = primitive["yaw_delta_mean_deg"]
-    if name == "CW90" and yaw_mean >= 0.0:
+    if name.startswith("CW") and yaw_mean >= 0.0:
         raise PrimitiveModelError(
             f"{name} yaw_delta_mean_deg must be negative, got {yaw_mean:.6f}"
         )
-    if name == "CCW90" and yaw_mean <= 0.0:
+    if name.startswith("CCW") and yaw_mean <= 0.0:
         raise PrimitiveModelError(
             f"{name} yaw_delta_mean_deg must be positive, got {yaw_mean:.6f}"
         )
@@ -174,10 +174,24 @@ def validate_covariance(name, sigma):
         )
 
 
-def load_forward_rows(path, run_range):
+def filter_rows_by_run_range_and_prefix(rows, run_range_text=None, run_id_prefix=None):
+    selected = endpoint_model.filter_rows_by_run_range(rows, run_range_text)
+    if run_id_prefix:
+        selected = [
+            row for row in selected
+            if row.get("run_id", "").startswith(run_id_prefix)
+        ]
+    return selected
+
+
+def load_forward_rows(path, run_range, run_id_prefix=None):
     fieldnames, rows = endpoint_model.read_csv_rows(path)
     endpoint_model.require_columns(fieldnames, FORWARD_COLUMNS, path)
-    selected_rows = endpoint_model.filter_rows_by_run_range(rows, run_range)
+    selected_rows = filter_rows_by_run_range_and_prefix(
+        rows,
+        run_range_text=run_range,
+        run_id_prefix=run_id_prefix,
+    )
     valid_rows, skipped_rows = endpoint_model.valid_rows_with_columns(
         selected_rows,
         FORWARD_COLUMNS,
@@ -209,6 +223,8 @@ def build_motion_primitives_model(
     ccw_prefix,
     ccw_run_range,
     tracker_yaw_sign,
+    extra_forward_specs=None,
+    extra_rotation_specs=None,
 ):
     forward_rows, skipped_forward = load_forward_rows(
         forward_csv,
@@ -245,6 +261,72 @@ def build_motion_primitives_model(
         ),
     }
 
+    primitive_sources = {
+        "F30": {
+            "csv": str(forward_csv),
+            "run_range": forward_run_range,
+            "run_id_prefix": None,
+            "selected_run_ids": endpoint_model.run_ids(forward_rows),
+            "skipped_rows": skipped_forward,
+        },
+        "CW90": {
+            "csv": str(rotation_csv),
+            "run_range": cw_run_range,
+            "run_id_prefix": cw_prefix,
+            "selected_run_ids": endpoint_model.run_ids(cw_rows),
+            "skipped_rows": skipped_cw,
+        },
+        "CCW90": {
+            "csv": str(rotation_csv),
+            "run_range": ccw_run_range,
+            "run_id_prefix": ccw_prefix,
+            "selected_run_ids": endpoint_model.run_ids(ccw_rows),
+            "skipped_rows": skipped_ccw,
+        },
+    }
+
+    for spec in extra_forward_specs or []:
+        rows, skipped_rows = load_forward_rows(
+            forward_csv,
+            spec["run_range"],
+            run_id_prefix=spec["run_id_prefix"],
+        )
+        primitives[spec["name"]] = build_primitive(
+            spec["name"],
+            "forward",
+            rows,
+            "tracker",
+            tracker_yaw_sign,
+        )
+        primitive_sources[spec["name"]] = {
+            "csv": str(forward_csv),
+            "run_range": spec["run_range"],
+            "run_id_prefix": spec["run_id_prefix"],
+            "selected_run_ids": endpoint_model.run_ids(rows),
+            "skipped_rows": skipped_rows,
+        }
+
+    for spec in extra_rotation_specs or []:
+        rows, skipped_rows = load_rotation_rows(
+            rotation_csv,
+            spec["run_range"],
+            spec["run_id_prefix"],
+        )
+        primitives[spec["name"]] = build_primitive(
+            spec["name"],
+            "rotation",
+            rows,
+            "tracker",
+            tracker_yaw_sign,
+        )
+        primitive_sources[spec["name"]] = {
+            "csv": str(rotation_csv),
+            "run_range": spec["run_range"],
+            "run_id_prefix": spec["run_id_prefix"],
+            "selected_run_ids": endpoint_model.run_ids(rows),
+            "skipped_rows": skipped_rows,
+        }
+
     return {
         "units": {
             "position": "m",
@@ -270,6 +352,7 @@ def build_motion_primitives_model(
             "ccw_run_range": ccw_run_range,
             "selected_ccw_run_ids": endpoint_model.run_ids(ccw_rows),
             "skipped_ccw_rows": skipped_ccw,
+            "primitive_sources": primitive_sources,
         },
         "primitives": primitives,
         "assumptions": [
@@ -363,7 +446,7 @@ def print_report(model):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Build empirical F30/CW90/CCW90 motion primitives.",
+        description="Build empirical forward and rotation motion primitives.",
     )
     parser.add_argument(
         "--forward-csv",
@@ -378,6 +461,14 @@ def parse_args():
     parser.add_argument("--cw-run-range", default="18:32")
     parser.add_argument("--ccw-prefix", default="run_real_rot_ccw90_")
     parser.add_argument("--ccw-run-range", default="1:15")
+    parser.add_argument("--f50-prefix", default=None)
+    parser.add_argument("--f50-run-range", default="1:15")
+    parser.add_argument("--ccw45-prefix", default=None)
+    parser.add_argument("--ccw45-run-range", default="1:15")
+    parser.add_argument("--cw45-prefix", default=None)
+    parser.add_argument("--cw45-run-range", default="1:15")
+    parser.add_argument("--ccw180-prefix", default=None)
+    parser.add_argument("--ccw180-run-range", default="1:15")
     parser.add_argument("--tracker-yaw-sign", type=float, default=-1.0)
     parser.add_argument(
         "--output-json",
@@ -392,6 +483,42 @@ def parse_args():
 
 def main():
     args = parse_args()
+    extra_forward_specs = []
+    if args.f50_prefix:
+        extra_forward_specs.append(
+            {
+                "name": "F50",
+                "run_id_prefix": args.f50_prefix,
+                "run_range": args.f50_run_range,
+            }
+        )
+
+    extra_rotation_specs = []
+    if args.ccw45_prefix:
+        extra_rotation_specs.append(
+            {
+                "name": "CCW45",
+                "run_id_prefix": args.ccw45_prefix,
+                "run_range": args.ccw45_run_range,
+            }
+        )
+    if args.cw45_prefix:
+        extra_rotation_specs.append(
+            {
+                "name": "CW45",
+                "run_id_prefix": args.cw45_prefix,
+                "run_range": args.cw45_run_range,
+            }
+        )
+    if args.ccw180_prefix:
+        extra_rotation_specs.append(
+            {
+                "name": "CCW180",
+                "run_id_prefix": args.ccw180_prefix,
+                "run_range": args.ccw180_run_range,
+            }
+        )
+
     model = build_motion_primitives_model(
         forward_csv=args.forward_csv,
         forward_run_range=args.forward_run_range,
@@ -401,6 +528,8 @@ def main():
         ccw_prefix=args.ccw_prefix,
         ccw_run_range=args.ccw_run_range,
         tracker_yaw_sign=args.tracker_yaw_sign,
+        extra_forward_specs=extra_forward_specs,
+        extra_rotation_specs=extra_rotation_specs,
     )
     write_json(args.output_json, model)
     write_summary_csv(args.summary_csv, model)

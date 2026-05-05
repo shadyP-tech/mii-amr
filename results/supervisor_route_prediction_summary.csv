@@ -1,0 +1,15 @@
+metric,value,unit
+actions,"F30,F50,CCW45,F50,F50,CW90,F30,F30,F30,F30,CCW45,F50,F50,F50,F50,CCW180,F50",
+samples,10000,count
+seed,7,
+endpoint_mu_x,3.9085219977198467,m
+endpoint_mu_y,0.12933106377062786,m
+endpoint_sigma_xx,0.00044054254725766116,m^2
+endpoint_sigma_xy,0.0016773686410077135,m^2
+endpoint_sigma_yy,0.010048565273297401,m^2
+endpoint_std_x,0.02098910544205401,m
+endpoint_std_y,0.10024253225700856,m
+endpoint_ellipse_95_major_axis,0.4976138641853177,m
+endpoint_ellipse_95_minor_axis,0.061167164249601065,m
+final_yaw_mean,-175.40126788182812,deg
+final_yaw_std,2.5386828783241056,deg

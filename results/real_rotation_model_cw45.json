@@ -1,0 +1,114 @@
+{
+  "units": {
+    "position": "m",
+    "angle": "deg",
+    "covariance": "m^2"
+  },
+  "data_selection": {
+    "rotation_csv": "results/real_rotation_runs.csv",
+    "run_range": "1:15",
+    "run_id_prefix": "run_real_rot_cw45_",
+    "selected_run_ids": [
+      "run_real_rot_cw45_001",
+      "run_real_rot_cw45_002",
+      "run_real_rot_cw45_003",
+      "run_real_rot_cw45_004",
+      "run_real_rot_cw45_005",
+      "run_real_rot_cw45_006",
+      "run_real_rot_cw45_007",
+      "run_real_rot_cw45_008",
+      "run_real_rot_cw45_009",
+      "run_real_rot_cw45_010",
+      "run_real_rot_cw45_011",
+      "run_real_rot_cw45_012",
+      "run_real_rot_cw45_013",
+      "run_real_rot_cw45_014",
+      "run_real_rot_cw45_015"
+    ],
+    "skipped_rows": []
+  },
+  "tracker_yaw_sign_correction": -1.0,
+  "command_angle_deg": {
+    "mean": -45.0,
+    "std": 0.0,
+    "min": -45.0,
+    "max": -45.0
+  },
+  "tracker_rotation_model": {
+    "n": 15,
+    "corrected_yaw_change_deg": {
+      "mean": -42.987162000000005,
+      "std": 0.28060305517097794,
+      "min": -43.49842100000001,
+      "max": -42.532749000000024
+    },
+    "corrected_yaw_error_deg": {
+      "mean": 2.0128379999999972,
+      "std": 0.28060305517097794,
+      "min": 1.5015789999999924,
+      "max": 2.467250999999976
+    },
+    "drift_mu": [
+      -0.006493733333333335,
+      -0.0016917333333333303
+    ],
+    "drift_sigma": [
+      [
+        1.4752635238095055e-07,
+        -1.2319586190476347e-07
+      ],
+      [
+        -1.2319586190476347e-07,
+        3.127307809523859e-07
+      ]
+    ],
+    "drift_std": [
+      0.00038409159373898114,
+      0.0005592233730383467
+    ],
+    "local_drift_mu": [
+      -0.0016876141283244804,
+      0.006494509918602592
+    ],
+    "local_drift_sigma": [
+      [
+        3.173770491082544e-07,
+        1.219763331892874e-07
+      ],
+      [
+        1.219763331892874e-07,
+        1.4698766987620927e-07
+      ]
+    ],
+    "local_drift_std": [
+      0.0005633622716407751,
+      0.00038338971018561424
+    ],
+    "drift_magnitude_m": {
+      "mean": 0.006735811012046988,
+      "std": 0.0003087259707014877,
+      "min": 0.00628268541310163,
+      "max": 0.007319634553719172
+    }
+  },
+  "odom_reference": {
+    "yaw_change_deg": {
+      "mean": -42.93322846267259,
+      "std": 0.25254324115345095,
+      "min": -43.47896252030685,
+      "max": -42.646489046353054
+    },
+    "yaw_error_deg": {
+      "mean": 2.0667715373274103,
+      "std": 0.25254324115345095,
+      "min": 1.521037479693149,
+      "max": 2.3535109536469463
+    },
+    "drift_magnitude_m": {
+      "mean": 0.00026383348846968163,
+      "std": 0.00019969724828098478,
+      "min": 4.22539044255166e-05,
+      "max": 0.0006953064708064717
+    }
+  }
+}
