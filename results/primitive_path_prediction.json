@@ -1,0 +1,109 @@
+{
+  "units": {
+    "position": "m",
+    "angle": "deg",
+    "covariance": "m^2"
+  },
+  "model": "results/probabilistic_motion_primitives_model.json",
+  "actions": [
+    "F30",
+    "CW90",
+    "F30",
+    "CCW90",
+    "F30"
+  ],
+  "start_pose": {
+    "x": 0.0,
+    "y": 0.0,
+    "yaw_deg": 0.0
+  },
+  "fixed_points": [
+    [
+      0.0,
+      0.0
+    ],
+    [
+      0.3,
+      0.0
+    ],
+    [
+      0.3,
+      -0.3
+    ],
+    [
+      0.6,
+      -0.3
+    ]
+  ],
+  "monte_carlo": {
+    "samples": 10000,
+    "seed": 7
+  },
+  "prediction": {
+    "endpoint_mu": [
+      0.6120819447112006,
+      -0.28560403573918414
+    ],
+    "endpoint_sigma": [
+      [
+        0.00010750699578494797,
+        0.00010985367989129224
+      ],
+      [
+        0.00010985367989129224,
+        0.00028127351416705747
+      ]
+    ],
+    "endpoint_std": [
+      0.01036855803788299,
+      0.016771210873608902
+    ],
+    "endpoint_ellipse_95": {
+      "center": [
+        0.6120819447112006,
+        -0.28560403573918414
+      ],
+      "chi2_value": 5.991,
+      "semi_major_m": 0.04476254754400411,
+      "semi_minor_m": 0.0180415734483785,
+      "major_axis_length_m": 0.08952509508800822,
+      "minor_axis_length_m": 0.036083146896757,
+      "orientation_deg": 64.17023354669942,
+      "area_m2": 0.0025371087242492614
+    },
+    "final_yaw_mean_deg": 0.5956218507014341,
+    "final_yaw_std_deg": 3.0945464985651743,
+    "mean_path_points": [
+      [
+        0.0,
+        0.0
+      ],
+      [
+        0.30180876562259795,
+        -0.0018510836293532322
+      ],
+      [
+        0.29438515687002714,
+        0.008190573831817908
+      ],
+      [
+        0.32063182850714367,
+        -0.2924804586026561
+      ],
+      [
+        0.3107511695138764,
+        -0.28531871716910795
+      ],
+      [
+        0.6125649935400963,
+        -0.285929572232998
+      ]
+    ]
+  },
+  "validation": null,
+  "assumptions": [
+    "Primitive samples are independent.",
+    "Yaw uncertainty is sampled separately from x/y displacement.",
+    "The action sequence approximates the fixed-point path."
+  ]
+}

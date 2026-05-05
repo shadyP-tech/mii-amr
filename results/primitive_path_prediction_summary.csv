@@ -1,0 +1,15 @@
+metric,value,unit
+actions,"F30,CW90,F30,CCW90,F30",
+samples,10000,count
+seed,7,
+endpoint_mu_x,0.6120819447112006,m
+endpoint_mu_y,-0.28560403573918414,m
+endpoint_sigma_xx,0.00010750699578494797,m^2
+endpoint_sigma_xy,0.00010985367989129224,m^2
+endpoint_sigma_yy,0.00028127351416705747,m^2
+endpoint_std_x,0.01036855803788299,m
+endpoint_std_y,0.016771210873608902,m
+endpoint_ellipse_95_major_axis,0.08952509508800822,m
+endpoint_ellipse_95_minor_axis,0.036083146896757,m
+final_yaw_mean,0.5956218507014341,deg
+final_yaw_std,3.0945464985651743,deg
