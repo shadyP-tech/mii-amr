@@ -106,10 +106,10 @@ START_POSE_REQUIRED_MARKERS = 3
 # the camera's perspective — the click order in calibration.py must match).
 WORLD_RECT_METERS = np.array(
     [
-        [4.188, -0.33],
-        [3.287, -0.3],
-        [3.287, 0.2],
-        [4.188, 0.15],
+        [4.143, -0.5],
+        [3.224, -0.5],
+        [3.222, 0.0],
+        [4.144, 0.0],
     ],
     dtype=np.float32,
 )
