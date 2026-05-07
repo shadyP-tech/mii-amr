@@ -40,8 +40,14 @@ if [ ! -f "$PREDICTION_FILE" ]; then
   exit 1
 fi
 
-source /opt/ros/humble/setup.bash
-source /opt/tb3_src_ws/install/setup.bash
+source_setup() {
+  set +u
+  source "$1"
+  set -u
+}
+
+source_setup /opt/ros/humble/setup.bash
+source_setup /opt/tb3_src_ws/install/setup.bash
 
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-30}"
 export ROS_LOCALHOST_ONLY="${ROS_LOCALHOST_ONLY:-0}"
