@@ -57,11 +57,11 @@ REALSENSE_GAIN = None
 # Green color detection (HSV)
 # Tune these under your actual lab lighting.
 # H: 0-179,  S: 0-255,  V: 0-255
-HSV_LOWER = np.array([30, 31, 176])
-HSV_UPPER = np.array([95, 255, 255])
+HSV_LOWER = np.array([60, 62, 160])
+HSV_UPPER = np.array([91, 255, 255])
 
-MIN_CONTOUR_AREA = 100
-MIN_RADIUS = 8
+MIN_CONTOUR_AREA = 50
+MIN_RADIUS = 5
 MAX_RADIUS = 120
 MIN_CIRCULARITY = 0.35
 MIN_FILL_RATIO = 0.35
@@ -90,9 +90,9 @@ CENTER_LATERAL_OFFSET = MARKER_LATERAL_SPACING_M / 2.0
 
 # Real-run start pose gate
 # Seeded from the current clean real runs; keep fixed during an experiment batch.
-START_POSE_REF_X = 0.275
-START_POSE_REF_Y = 0.131
-START_POSE_REF_YAW_DEG = -179.2
+START_POSE_REF_X = 0.0
+START_POSE_REF_Y = 0.0
+START_POSE_REF_YAW_DEG = 0.0
 START_POSE_POSITION_TOLERANCE_M = 0.04
 START_POSE_YAW_TOLERANCE_DEG = 4.0
 START_POSE_STABLE_TIME_SEC = 1.0
@@ -106,10 +106,10 @@ START_POSE_REQUIRED_MARKERS = 3
 # the camera's perspective — the click order in calibration.py must match).
 WORLD_RECT_METERS = np.array(
     [
-        [0.0, 0.0],
-        [0.55, 0.0],
-        [0.55, 0.30],
-        [0.0, 0.30],
+        [4.188, -0.33],
+        [3.287, -0.3],
+        [3.287, 0.2],
+        [4.188, 0.15],
     ],
     dtype=np.float32,
 )
