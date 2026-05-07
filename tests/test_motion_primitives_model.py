@@ -77,6 +77,47 @@ VALIDATION_HEADER = [
     "notes",
 ]
 
+SUPERVISOR_VALIDATION_HEADER = [
+    "timestamp",
+    "run_id",
+    "prediction_file",
+    "actions",
+    "model_actions",
+    "num_actions",
+    "nominal_final_x",
+    "nominal_final_y",
+    "predicted_final_x",
+    "predicted_final_y",
+    "predicted_final_yaw_deg",
+    "comparison_frame",
+    "tracker_final_timestamp",
+    "tracker_final_x",
+    "tracker_final_y",
+    "tracker_final_yaw_deg",
+    "tracker_final_x_model",
+    "tracker_final_y_model",
+    "tracker_final_yaw_model_deg",
+    "tracker_error_dx",
+    "tracker_error_dy",
+    "tracker_error_m",
+    "tracker_yaw_error_deg",
+    "odom_start_x",
+    "odom_start_y",
+    "odom_start_yaw_deg",
+    "odom_final_x",
+    "odom_final_y",
+    "odom_final_yaw_deg",
+    "odom_final_x_model",
+    "odom_final_y_model",
+    "odom_final_yaw_model_deg",
+    "odom_dx",
+    "odom_dy",
+    "odom_distance_m",
+    "linear_speed_mps",
+    "angular_speed_radps",
+    "notes",
+]
+
 
 class MotionPrimitivesModelTest(unittest.TestCase):
     def test_pose_delta_wraps_yaw_before_sign_correction(self):
@@ -269,6 +310,37 @@ class MotionPrimitivesModelTest(unittest.TestCase):
 
         self.assertEqual(first["final_poses"], second["final_poses"])
 
+    def test_fixed_points_are_mirrored_for_model_frame_overlay(self):
+        output = {
+            "actions": ["F30", "CCW45", "F50"],
+            "execution_actions": ["F30", "CW45", "F50"],
+            "fixed_points": [[0.0, 0.0], [1.0, -0.5], [2.0, 0.25]],
+            "validation": None,
+        }
+
+        self.assertEqual(predictor.output_plot_frame(output), "model_mirror_y")
+        self.assertEqual(predictor.fixed_points_frame(output), "physical")
+        self.assertEqual(
+            predictor.fixed_points_for_plot(output),
+            [[0.0, -0.0], [1.0, 0.5], [2.0, -0.25]],
+        )
+        self.assertEqual(output["fixed_points"][1], [1.0, -0.5])
+
+    def test_fixed_points_stay_unchanged_when_model_and_execution_actions_match(self):
+        output = {
+            "actions": ["F30", "CCW45", "F50"],
+            "execution_actions": ["F30", "CCW45", "F50"],
+            "fixed_points": [[0.0, 0.0], [1.0, -0.5]],
+            "validation": None,
+        }
+
+        self.assertEqual(predictor.output_plot_frame(output), "model")
+        self.assertEqual(predictor.fixed_points_frame(output), "model")
+        self.assertEqual(
+            predictor.fixed_points_for_plot(output),
+            [[0.0, 0.0], [1.0, -0.5]],
+        )
+
     def test_validation_csv_row_is_loaded(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "validation.csv"
@@ -299,6 +371,71 @@ class MotionPrimitivesModelTest(unittest.TestCase):
 
         self.assertEqual(row["run_id"], "path_real_001")
         self.assertEqual(row["tracker_final_pose"], [1.0, 1.0, 90.0])
+        self.assertIsNone(row["warning"])
+
+    def test_supervisor_validation_csv_row_is_loaded_without_start_pose(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "supervisor_validation.csv"
+            self.write_rows(
+                path,
+                SUPERVISOR_VALIDATION_HEADER,
+                [
+                    {
+                        "timestamp": "2026-05-07T14:32:50",
+                        "run_id": "supervisor_validation_003",
+                        "prediction_file": "results/supervisor_route_prediction.json",
+                        "actions": "F30,CW45",
+                        "model_actions": "F30,CCW45",
+                        "num_actions": "2",
+                        "nominal_final_x": "0.0",
+                        "nominal_final_y": "0.0",
+                        "predicted_final_x": "0.0",
+                        "predicted_final_y": "0.0",
+                        "predicted_final_yaw_deg": "0.0",
+                        "comparison_frame": "model_mirror_y",
+                        "tracker_final_timestamp": "2026-05-07T14:32:49",
+                        "tracker_final_x": "3.7",
+                        "tracker_final_y": "-0.2",
+                        "tracker_final_yaw_deg": "-174.0",
+                        "tracker_final_x_model": "3.7",
+                        "tracker_final_y_model": "0.2",
+                        "tracker_final_yaw_model_deg": "174.0",
+                        "tracker_error_dx": "",
+                        "tracker_error_dy": "",
+                        "tracker_error_m": "",
+                        "tracker_yaw_error_deg": "",
+                        "odom_start_x": "",
+                        "odom_start_y": "",
+                        "odom_start_yaw_deg": "",
+                        "odom_final_x": "",
+                        "odom_final_y": "",
+                        "odom_final_yaw_deg": "",
+                        "odom_final_x_model": "",
+                        "odom_final_y_model": "",
+                        "odom_final_yaw_model_deg": "",
+                        "odom_dx": "",
+                        "odom_dy": "",
+                        "odom_distance_m": "",
+                        "linear_speed_mps": "0.1",
+                        "angular_speed_radps": "0.3",
+                        "notes": "supervisor_route_validation",
+                    }
+                ],
+            )
+
+            row = predictor.load_validation_row(
+                path,
+                "supervisor_validation_003",
+                ["F30", "CCW45"],
+            )
+
+        self.assertEqual(row["run_id"], "supervisor_validation_003")
+        self.assertIsNone(row["tracker_start_pose"])
+        self.assertEqual(row["actions"], "F30,CW45")
+        self.assertEqual(row["model_actions"], "F30,CCW45")
+        self.assertEqual(row["comparison_frame"], "model_mirror_y")
+        self.assertEqual(row["tracker_final_pose"], [3.7, 0.2, 174.0])
+        self.assertEqual(row["tracker_final_pose_raw"], [3.7, -0.2, -174.0])
         self.assertIsNone(row["warning"])
 
     def write_rows(self, path, header, rows):

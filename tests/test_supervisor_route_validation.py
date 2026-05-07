@@ -84,13 +84,106 @@ class SupervisorRouteValidationTest(unittest.TestCase):
         values = dict(zip(validation.CSV_HEADER, row))
 
         self.assertEqual(values["run_id"], "run_a")
+        self.assertEqual(values["actions"], "F30")
+        self.assertEqual(values["model_actions"], "F30")
+        self.assertEqual(values["comparison_frame"], "model_mirror_y")
+        self.assertAlmostEqual(values["tracker_final_x"], 0.34)
+        self.assertAlmostEqual(values["tracker_final_y"], -0.02)
+        self.assertAlmostEqual(values["tracker_final_yaw_deg"], 12.0)
+        self.assertAlmostEqual(values["tracker_final_x_model"], 0.34)
+        self.assertAlmostEqual(values["tracker_final_y_model"], 0.02)
+        self.assertAlmostEqual(values["tracker_final_yaw_model_deg"], -12.0)
         self.assertAlmostEqual(values["tracker_error_dx"], 0.03)
-        self.assertAlmostEqual(values["tracker_error_dy"], -0.04)
-        self.assertAlmostEqual(values["tracker_error_m"], 0.05)
-        self.assertAlmostEqual(values["tracker_yaw_error_deg"], 2.0)
+        self.assertAlmostEqual(values["tracker_error_dy"], 0.0)
+        self.assertAlmostEqual(values["tracker_error_m"], 0.03)
+        self.assertAlmostEqual(values["tracker_yaw_error_deg"], -22.0)
+        self.assertAlmostEqual(values["odom_final_x_model"], 1.3)
+        self.assertAlmostEqual(values["odom_final_y_model"], -2.4)
+        self.assertAlmostEqual(values["odom_final_yaw_model_deg"], -5.0)
         self.assertAlmostEqual(values["odom_dx"], 0.3)
         self.assertAlmostEqual(values["odom_dy"], 0.4)
         self.assertAlmostEqual(values["odom_distance_m"], 0.5)
+
+    def test_append_csv_row_migrates_legacy_supervisor_schema(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "runs.csv"
+            legacy_row = {
+                field: ""
+                for field in validation.LEGACY_CSV_HEADER
+            }
+            legacy_row.update({
+                "timestamp": "2026-05-07T12:00:00",
+                "run_id": "run_legacy",
+                "prediction_file": "results/example_prediction.json",
+                "actions": "F30",
+                "num_actions": "1",
+                "nominal_final_x": "0.3",
+                "nominal_final_y": "0.0",
+                "predicted_final_x": "0.31",
+                "predicted_final_y": "0.02",
+                "predicted_final_yaw_deg": "10.0",
+                "tracker_final_timestamp": "2026-05-07T12:00:01",
+                "tracker_final_x": "0.34",
+                "tracker_final_y": "-0.02",
+                "tracker_final_yaw_deg": "12.0",
+                "odom_start_x": "0.0",
+                "odom_start_y": "0.0",
+                "odom_start_yaw_deg": "0.0",
+                "odom_final_x": "0.3",
+                "odom_final_y": "-0.1",
+                "odom_final_yaw_deg": "5.0",
+                "linear_speed_mps": "0.1",
+                "angular_speed_radps": "0.3",
+                "notes": "legacy",
+            })
+            with path.open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=validation.LEGACY_CSV_HEADER)
+                writer.writeheader()
+                writer.writerow(legacy_row)
+
+            new_row = [""] * len(validation.CSV_HEADER)
+            validation.append_csv_row(path, validation.CSV_HEADER, new_row)
+
+            with path.open(newline="") as f:
+                rows = list(csv.DictReader(f))
+
+        self.assertEqual(rows[0]["comparison_frame"], "model_mirror_y")
+        self.assertEqual(rows[0]["actions"], "F30")
+        self.assertEqual(rows[0]["model_actions"], "F30")
+        self.assertEqual(rows[0]["tracker_final_y"], "-0.02")
+        self.assertEqual(float(rows[0]["tracker_final_y_model"]), 0.02)
+        self.assertEqual(float(rows[0]["tracker_error_dy"]), 0.0)
+        self.assertEqual(len(rows), 2)
+
+    def test_legacy_migration_mirrors_rotation_labels_for_model_actions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "runs.csv"
+            legacy_row = {
+                field: ""
+                for field in validation.LEGACY_CSV_HEADER
+            }
+            legacy_row.update({
+                "run_id": "run_legacy",
+                "prediction_file": "results/example_prediction.json",
+                "actions": "F30,CW45,CCW90,CCW180,F180",
+                "num_actions": "5",
+                "predicted_final_x": "0.0",
+                "predicted_final_y": "0.0",
+                "predicted_final_yaw_deg": "0.0",
+                "notes": "legacy",
+            })
+            with path.open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=validation.LEGACY_CSV_HEADER)
+                writer.writeheader()
+                writer.writerow(legacy_row)
+
+            validation.append_csv_row(path, validation.CSV_HEADER, [""] * len(validation.CSV_HEADER))
+
+            with path.open(newline="") as f:
+                rows = list(csv.DictReader(f))
+
+        self.assertEqual(rows[0]["actions"], "F30,CW45,CCW90,CCW180,F180")
+        self.assertEqual(rows[0]["model_actions"], "F30,CCW45,CW90,CCW180,F180")
 
     def test_append_csv_row_rejects_schema_mismatch(self):
         with tempfile.TemporaryDirectory() as tmpdir:

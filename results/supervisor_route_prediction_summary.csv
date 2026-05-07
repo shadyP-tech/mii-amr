@@ -1,5 +1,8 @@
 metric,value,unit
 actions,"F30,F50,CCW45,F50,F50,CW90,F30,F30,F30,F30,CCW45,F50,F50,F50,F50,CCW180,F50",
+execution_actions,"F30,F50,CW45,F50,F50,CCW90,F30,F30,F30,F30,CW45,F50,F50,F50,F50,CCW180,F50",
+plot_frame,model_mirror_y,
+fixed_points_frame,physical,
 samples,10000,count
 seed,7,
 endpoint_mu_x,3.9085219977198467,m
@@ -13,3 +16,10 @@ endpoint_ellipse_95_major_axis,0.4976138641853177,m
 endpoint_ellipse_95_minor_axis,0.061167164249601065,m
 final_yaw_mean,-175.40126788182812,deg
 final_yaw_std,2.5386828783241056,deg
+validation_run_id,supervisor_validation_003,
+validation_comparison_frame,model_mirror_y,
+validation_residual_x,-0.1647399977198467,m
+validation_residual_y,0.10433793622937212,m
+validation_residual_magnitude,0.195001722518904,m
+validation_mahalanobis_squared,207.76006570626066,
+validation_inside_95_endpoint_ellipse,False,bool

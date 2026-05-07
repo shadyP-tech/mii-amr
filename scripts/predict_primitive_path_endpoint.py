@@ -17,7 +17,7 @@ from pathlib import Path
 import analyze_probabilistic_endpoint_model as endpoint_model
 
 
-VALIDATION_COLUMNS = [
+LEGACY_VALIDATION_COLUMNS = [
     "timestamp",
     "run_id",
     "actions",
@@ -30,6 +30,26 @@ VALIDATION_COLUMNS = [
     "notes",
 ]
 
+FINAL_ONLY_VALIDATION_COLUMNS = [
+    "timestamp",
+    "run_id",
+    "actions",
+    "tracker_final_x",
+    "tracker_final_y",
+    "tracker_final_yaw_deg",
+    "notes",
+]
+
+MODEL_FRAME_FINAL_COLUMNS = [
+    "tracker_final_x_model",
+    "tracker_final_y_model",
+    "tracker_final_yaw_model_deg",
+]
+
+MODEL_MIRROR_Y_FRAME = "model_mirror_y"
+MODEL_FRAME = "model"
+PHYSICAL_FRAME = "physical"
+
 
 def parse_actions(text):
     actions = [action.strip().upper() for action in str(text or "").split(",")]
@@ -41,6 +61,10 @@ def parse_actions(text):
 
 def normalized_actions_text(actions):
     return ",".join(parse_actions(",".join(actions)))
+
+
+def has_columns(fieldnames, columns):
+    return all(column in fieldnames for column in columns)
 
 
 def parse_pose(text):
@@ -71,6 +95,38 @@ def parse_fixed_points(text):
             raise ValueError(f"Invalid fixed point: {item}") from exc
 
     return points
+
+
+def mirror_y_points(points):
+    return [[point[0], -point[1]] for point in points]
+
+
+def output_plot_frame(output):
+    if output.get("execution_actions") != output.get("actions"):
+        return MODEL_MIRROR_Y_FRAME
+
+    validation = output.get("validation")
+    if validation is not None:
+        return validation.get("comparison_frame") or MODEL_FRAME
+
+    return MODEL_FRAME
+
+
+def fixed_points_frame(output):
+    if output.get("execution_actions") != output.get("actions"):
+        return PHYSICAL_FRAME
+    return output_plot_frame(output)
+
+
+def fixed_points_for_plot(output):
+    fixed_points = output["fixed_points"]
+    plot_frame = output_plot_frame(output)
+    source_frame = fixed_points_frame(output)
+
+    if source_frame == PHYSICAL_FRAME and plot_frame == MODEL_MIRROR_Y_FRAME:
+        return mirror_y_points(fixed_points)
+
+    return fixed_points
 
 
 def load_primitive_model(path):
@@ -228,14 +284,20 @@ def load_validation_row(path, run_id, expected_actions):
         raise ValueError("--validation-csv and --validation-run-id must be used together")
 
     fieldnames, rows = endpoint_model.read_csv_rows(path)
-    endpoint_model.require_columns(fieldnames, VALIDATION_COLUMNS, path)
+    if has_columns(fieldnames, LEGACY_VALIDATION_COLUMNS):
+        has_start_pose = True
+    else:
+        endpoint_model.require_columns(fieldnames, FINAL_ONLY_VALIDATION_COLUMNS, path)
+        has_start_pose = False
+    has_model_frame = has_columns(fieldnames, MODEL_FRAME_FINAL_COLUMNS)
 
     for row in rows:
         if row.get("run_id") != run_id:
             continue
 
         warning = None
-        row_actions = normalized_actions_text([row.get("actions", "")])
+        row_actions_source = row.get("model_actions") or row.get("actions", "")
+        row_actions = normalized_actions_text([row_actions_source])
         expected = normalized_actions_text(expected_actions)
         if row_actions != expected:
             warning = (
@@ -243,19 +305,38 @@ def load_validation_row(path, run_id, expected_actions):
                 f"prediction actions {expected!r}"
             )
 
+        raw_final_pose = [
+            endpoint_model.finite_float(row, "tracker_final_x"),
+            endpoint_model.finite_float(row, "tracker_final_y"),
+            endpoint_model.finite_float(row, "tracker_final_yaw_deg"),
+        ]
+        if has_model_frame:
+            tracker_final_pose = [
+                endpoint_model.finite_float(row, "tracker_final_x_model"),
+                endpoint_model.finite_float(row, "tracker_final_y_model"),
+                endpoint_model.finite_float(row, "tracker_final_yaw_model_deg"),
+            ]
+            comparison_frame = row.get("comparison_frame") or "model_mirror_y"
+        else:
+            tracker_final_pose = raw_final_pose
+            comparison_frame = "raw_tracker"
+
         return {
             "run_id": row["run_id"],
             "actions": row.get("actions", ""),
-            "tracker_start_pose": [
-                endpoint_model.finite_float(row, "tracker_start_x"),
-                endpoint_model.finite_float(row, "tracker_start_y"),
-                endpoint_model.finite_float(row, "tracker_start_yaw_deg"),
-            ],
-            "tracker_final_pose": [
-                endpoint_model.finite_float(row, "tracker_final_x"),
-                endpoint_model.finite_float(row, "tracker_final_y"),
-                endpoint_model.finite_float(row, "tracker_final_yaw_deg"),
-            ],
+            "model_actions": row.get("model_actions", ""),
+            "tracker_start_pose": (
+                [
+                    endpoint_model.finite_float(row, "tracker_start_x"),
+                    endpoint_model.finite_float(row, "tracker_start_y"),
+                    endpoint_model.finite_float(row, "tracker_start_yaw_deg"),
+                ]
+                if has_start_pose
+                else None
+            ),
+            "tracker_final_pose": tracker_final_pose,
+            "tracker_final_pose_raw": raw_final_pose,
+            "comparison_frame": comparison_frame,
             "notes": row.get("notes", ""),
             "warning": warning,
         }
@@ -290,6 +371,7 @@ def validation_metrics(validation, endpoint_mu, endpoint_sigma):
 def build_output_model(
     model_path,
     actions,
+    execution_actions,
     start_pose,
     fixed_points,
     samples,
@@ -306,6 +388,14 @@ def build_output_model(
         prediction["endpoint_mu"],
         prediction["endpoint_sigma"],
     )
+    frame_context = {
+        "actions": actions,
+        "execution_actions": execution_actions,
+        "fixed_points": fixed_points,
+        "validation": validation,
+    }
+    plot_frame = output_plot_frame(frame_context)
+    fixed_points_source_frame = fixed_points_frame(frame_context)
 
     return {
         "units": {
@@ -315,12 +405,15 @@ def build_output_model(
         },
         "model": str(model_path),
         "actions": actions,
+        "execution_actions": execution_actions,
         "start_pose": {
             "x": start_pose[0],
             "y": start_pose[1],
             "yaw_deg": start_pose[2],
         },
         "fixed_points": fixed_points,
+        "fixed_points_frame": fixed_points_source_frame,
+        "plot_frame": plot_frame,
         "monte_carlo": {
             "samples": samples,
             "seed": seed,
@@ -336,6 +429,8 @@ def build_output_model(
         },
         "validation": validation,
         "assumptions": [
+            "actions are model-frame labels; execution_actions are physical route commands.",
+            "Validation tracker_final_pose uses the comparison_frame reported by the CSV.",
             "Primitive samples are independent.",
             "Yaw uncertainty is sampled separately from x/y displacement.",
             "The action sequence approximates the fixed-point path.",
@@ -359,6 +454,13 @@ def write_summary_csv(path, output):
     ellipse = pred["endpoint_ellipse_95"]
     rows = [
         ("actions", ",".join(output["actions"]), ""),
+        ("execution_actions", ",".join(output["execution_actions"]), ""),
+        ("plot_frame", output.get("plot_frame", output_plot_frame(output)), ""),
+        (
+            "fixed_points_frame",
+            output.get("fixed_points_frame", fixed_points_frame(output)),
+            "",
+        ),
         ("samples", output["monte_carlo"]["samples"], "count"),
         ("seed", output["monte_carlo"]["seed"], ""),
         ("endpoint_mu_x", pred["endpoint_mu"][0], "m"),
@@ -380,6 +482,13 @@ def write_summary_csv(path, output):
             [
                 ("validation_run_id", validation["run_id"], ""),
                 (
+                    "validation_comparison_frame",
+                    validation.get("comparison_frame", "raw_tracker"),
+                    "",
+                ),
+                ("validation_residual_x", validation["residual_xy_m"][0], "m"),
+                ("validation_residual_y", validation["residual_xy_m"][1], "m"),
+                (
                     "validation_residual_magnitude",
                     validation["residual_magnitude_m"],
                     "m",
@@ -398,13 +507,14 @@ def write_summary_csv(path, output):
         )
 
     with path.open("w", newline="") as file:
-        writer = csv.writer(file)
+        writer = csv.writer(file, lineterminator="\n")
         writer.writerow(["metric", "value", "unit"])
         writer.writerows(rows)
 
 
 def plot_prediction(prediction, output, plot_path):
-    fixed_points = output["fixed_points"]
+    fixed_points = fixed_points_for_plot(output)
+    plot_frame = output.get("plot_frame", output_plot_frame(output))
     validation = output["validation"]
     sampled_points = prediction["final_points"]
     endpoint_mu = prediction["endpoint_mu"]
@@ -441,11 +551,14 @@ def plot_prediction(prediction, output, plot_path):
 
     fig, ax = plt.subplots()
     if fixed_points:
+        fixed_points_label = "fixed-point path"
+        if output.get("fixed_points_frame") == PHYSICAL_FRAME:
+            fixed_points_label += f" ({plot_frame})"
         ax.plot(
             [point[0] for point in fixed_points],
             [point[1] for point in fixed_points],
             marker="o",
-            label="fixed-point path",
+            label=fixed_points_label,
         )
     ax.plot(
         [point[0] for point in mean_path],
@@ -469,12 +582,13 @@ def plot_prediction(prediction, output, plot_path):
     )
     if validation is not None:
         final_pose = validation["tracker_final_pose"]
+        frame = validation.get("comparison_frame", "raw_tracker")
         ax.scatter(
             [final_pose[0]],
             [final_pose[1]],
             marker="*",
             s=140,
-            label="measured validation final",
+            label=f"measured validation final ({frame})",
         )
 
     patch = Ellipse(
@@ -487,7 +601,7 @@ def plot_prediction(prediction, output, plot_path):
         label="95% endpoint ellipse",
     )
     ax.add_patch(patch)
-    ax.set_title("Primitive path endpoint prediction")
+    ax.set_title(f"Primitive path endpoint prediction ({plot_frame})")
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")
     ax.axis("equal")
@@ -501,6 +615,8 @@ def print_report(output):
     pred = output["prediction"]
     print("Primitive path endpoint prediction:")
     print(f"  actions = {','.join(output['actions'])}")
+    if output["execution_actions"] != output["actions"]:
+        print(f"  execution_actions = {','.join(output['execution_actions'])}")
     print(f"  samples = {output['monte_carlo']['samples']}")
     print(
         "  endpoint_mu = "
@@ -525,6 +641,13 @@ def print_report(output):
     if validation is not None:
         print("\nValidation endpoint:")
         print(f"  run_id = {validation['run_id']}")
+        print(f"  comparison_frame = {validation.get('comparison_frame', 'raw_tracker')}")
+        print(
+            "  tracker_final_pose = "
+            f"[{validation['tracker_final_pose'][0]:.6f}, "
+            f"{validation['tracker_final_pose'][1]:.6f}, "
+            f"{validation['tracker_final_pose'][2]:.3f} deg]"
+        )
         print(
             "  residual = "
             f"{validation['residual_magnitude_m']:.6f} m, "
@@ -543,6 +666,14 @@ def parse_args():
         default="results/probabilistic_motion_primitives_model.json",
     )
     parser.add_argument("--actions", required=True)
+    parser.add_argument(
+        "--execution-actions",
+        default=None,
+        help=(
+            "Optional physical route actions to store for the real runner when "
+            "they differ from the model-frame action labels."
+        ),
+    )
     parser.add_argument("--start-pose", default="0,0,0")
     parser.add_argument("--fixed-points", default=None)
     parser.add_argument("--samples", type=int, default=10000)
@@ -568,6 +699,13 @@ def main():
     args = parse_args()
     model = load_primitive_model(args.model)
     actions = parse_actions(args.actions)
+    execution_actions = (
+        parse_actions(args.execution_actions)
+        if args.execution_actions is not None
+        else actions
+    )
+    if len(execution_actions) != len(actions):
+        raise ValueError("--execution-actions must have the same length as --actions")
     start_pose = parse_pose(args.start_pose)
     fixed_points = parse_fixed_points(args.fixed_points)
     validation = load_validation_row(
@@ -586,6 +724,7 @@ def main():
     output = build_output_model(
         args.model,
         actions,
+        execution_actions,
         start_pose,
         fixed_points,
         args.samples,

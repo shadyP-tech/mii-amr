@@ -46,8 +46,9 @@ DEFAULT_FINAL_TRACKER_TIMEOUT_SEC = 90.0
 COMMAND_PERIOD_SEC = 0.05
 
 ACTION_RE = re.compile(r"^(F|CW|CCW)([0-9]+(?:p[0-9]+)?(?:\.[0-9]+)?)$")
+COMPARISON_FRAME = "model_mirror_y"
 
-CSV_HEADER = [
+LEGACY_CSV_HEADER = [
     "timestamp",
     "run_id",
     "prediction_file",
@@ -80,9 +81,94 @@ CSV_HEADER = [
     "notes",
 ]
 
+CSV_HEADER_V1 = [
+    "timestamp",
+    "run_id",
+    "prediction_file",
+    "actions",
+    "num_actions",
+    "nominal_final_x",
+    "nominal_final_y",
+    "predicted_final_x",
+    "predicted_final_y",
+    "predicted_final_yaw_deg",
+    "comparison_frame",
+    "tracker_final_timestamp",
+    "tracker_final_x",
+    "tracker_final_y",
+    "tracker_final_yaw_deg",
+    "tracker_final_x_model",
+    "tracker_final_y_model",
+    "tracker_final_yaw_model_deg",
+    "tracker_error_dx",
+    "tracker_error_dy",
+    "tracker_error_m",
+    "tracker_yaw_error_deg",
+    "odom_start_x",
+    "odom_start_y",
+    "odom_start_yaw_deg",
+    "odom_final_x",
+    "odom_final_y",
+    "odom_final_yaw_deg",
+    "odom_final_x_model",
+    "odom_final_y_model",
+    "odom_final_yaw_model_deg",
+    "odom_dx",
+    "odom_dy",
+    "odom_distance_m",
+    "linear_speed_mps",
+    "angular_speed_radps",
+    "notes",
+]
+
+CSV_HEADER = [
+    "timestamp",
+    "run_id",
+    "prediction_file",
+    "actions",
+    "model_actions",
+    "num_actions",
+    "nominal_final_x",
+    "nominal_final_y",
+    "predicted_final_x",
+    "predicted_final_y",
+    "predicted_final_yaw_deg",
+    "comparison_frame",
+    "tracker_final_timestamp",
+    "tracker_final_x",
+    "tracker_final_y",
+    "tracker_final_yaw_deg",
+    "tracker_final_x_model",
+    "tracker_final_y_model",
+    "tracker_final_yaw_model_deg",
+    "tracker_error_dx",
+    "tracker_error_dy",
+    "tracker_error_m",
+    "tracker_yaw_error_deg",
+    "odom_start_x",
+    "odom_start_y",
+    "odom_start_yaw_deg",
+    "odom_final_x",
+    "odom_final_y",
+    "odom_final_yaw_deg",
+    "odom_final_x_model",
+    "odom_final_y_model",
+    "odom_final_yaw_model_deg",
+    "odom_dx",
+    "odom_dy",
+    "odom_distance_m",
+    "linear_speed_mps",
+    "angular_speed_radps",
+    "notes",
+]
+
 
 def shortest_angle_delta_deg(start_deg, end_deg):
     return (end_deg - start_deg + 180.0) % 360.0 - 180.0
+
+
+def normalize_angle_deg(angle_deg):
+    return (angle_deg + 180.0) % 360.0 - 180.0
 
 
 def parse_action_number(text):
@@ -119,6 +205,31 @@ def parse_actions(actions):
     return [parse_action(action) for action in actions]
 
 
+def mirror_action_label(action):
+    parsed = parse_action(action)
+    raw = parsed["raw"]
+    if raw.startswith("F"):
+        return raw
+    match = ACTION_RE.match(raw)
+    _kind, amount_text = match.groups()
+    amount = parse_action_number(amount_text)
+    if math.isclose(amount % 360.0, 180.0, abs_tol=1e-9):
+        return "CCW" + amount_text
+    if raw.startswith("CW"):
+        return "CCW" + raw[2:]
+    if raw.startswith("CCW"):
+        return "CW" + raw[3:]
+    return raw
+
+
+def mirror_action_labels(actions):
+    return [mirror_action_label(action) for action in actions]
+
+
+def normalized_action_labels(actions):
+    return [parse_action(action)["raw"] for action in actions]
+
+
 def load_prediction(path):
     path = Path(path)
     with path.open() as f:
@@ -133,14 +244,23 @@ def load_prediction(path):
     if endpoint_mu is None or len(endpoint_mu) != 2:
         raise ValueError(f"{path} is missing prediction.endpoint_mu")
 
+    model_actions = normalized_action_labels(actions)
+    execution_actions = data.get("execution_actions") or model_actions
+    execution_actions = normalized_action_labels(execution_actions)
+    if len(execution_actions) != len(model_actions):
+        raise ValueError(
+            f"{path} execution_actions length does not match actions length"
+        )
+
     fixed_points = data.get("fixed_points") or []
     nominal_final = fixed_points[-1] if fixed_points else None
     final_yaw_mean_deg = prediction.get("final_yaw_mean_deg")
 
     return {
         "path": path,
-        "actions": [str(action) for action in actions],
-        "parsed_actions": parse_actions(actions),
+        "actions": execution_actions,
+        "model_actions": model_actions,
+        "parsed_actions": parse_actions(execution_actions),
         "nominal_final": nominal_final,
         "predicted_final": [float(endpoint_mu[0]), float(endpoint_mu[1])],
         "predicted_final_yaw_deg": (
@@ -228,6 +348,17 @@ def pose_fields(pose):
     return [pose["x"], pose["y"], pose["yaw_deg"]]
 
 
+def model_frame_pose(pose):
+    """Reflect a tracker/physical pose into the mirrored model frame."""
+    if pose is None:
+        return None
+    result = dict(pose)
+    result["x"] = pose["x"]
+    result["y"] = -pose["y"]
+    result["yaw_deg"] = normalize_angle_deg(-pose["yaw_deg"])
+    return result
+
+
 def xy_delta(start_pose, final_pose):
     if start_pose is None or final_pose is None:
         return "", "", ""
@@ -255,6 +386,87 @@ def tracker_error(prediction, tracker_final):
     return dx, dy, error_m, yaw_error
 
 
+def migrate_legacy_results_file(path):
+    with path.open(newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    migrated = []
+    for row in rows:
+        tracker_final = row_pose(row, "tracker_final")
+        tracker_model = model_frame_pose(tracker_final)
+        odom_final = row_pose(row, "odom_final")
+        odom_model = model_frame_pose(odom_final)
+
+        upgraded = {field: row.get(field, "") for field in CSV_HEADER}
+        upgraded["comparison_frame"] = COMPARISON_FRAME
+        if not upgraded["model_actions"] and row.get("actions"):
+            upgraded["model_actions"] = ",".join(
+                mirror_action_labels(row["actions"].split(","))
+            )
+        fill_pose_fields(upgraded, "tracker_final", tracker_final)
+        fill_pose_fields(upgraded, "tracker_final", tracker_model, suffix="_model")
+        fill_pose_fields(upgraded, "odom_final", odom_final)
+        fill_pose_fields(upgraded, "odom_final", odom_model, suffix="_model")
+        recompute_tracker_error(upgraded)
+        migrated.append(upgraded)
+
+    tmp_path = path.with_suffix(".tmp")
+    with tmp_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_HEADER)
+        writer.writeheader()
+        writer.writerows(migrated)
+    tmp_path.replace(path)
+
+
+def row_pose(row, prefix):
+    try:
+        x = float(row[f"{prefix}_x"])
+        y = float(row[f"{prefix}_y"])
+        yaw = float(row[f"{prefix}_yaw_deg"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not all(math.isfinite(value) for value in (x, y, yaw)):
+        return None
+    return {"x": x, "y": y, "yaw_deg": yaw}
+
+
+def fill_pose_fields(row, prefix, pose, suffix=""):
+    if pose is None:
+        return
+    row[f"{prefix}_x{suffix}"] = pose["x"]
+    row[f"{prefix}_y{suffix}"] = pose["y"]
+    row[f"{prefix}_yaw{suffix}_deg"] = pose["yaw_deg"]
+
+
+def recompute_tracker_error(row):
+    try:
+        predicted = {
+            "predicted_final": [
+                float(row["predicted_final_x"]),
+                float(row["predicted_final_y"]),
+            ],
+            "predicted_final_yaw_deg": float(row["predicted_final_yaw_deg"]),
+        }
+        tracker_final = {
+            "x": float(row["tracker_final_x_model"]),
+            "y": float(row["tracker_final_y_model"]),
+            "yaw_deg": float(row["tracker_final_yaw_model_deg"]),
+        }
+    except (KeyError, TypeError, ValueError):
+        row["tracker_error_dx"] = ""
+        row["tracker_error_dy"] = ""
+        row["tracker_error_m"] = ""
+        row["tracker_yaw_error_deg"] = ""
+        return
+
+    dx, dy, error_m, yaw_error = tracker_error(predicted, tracker_final)
+    row["tracker_error_dx"] = dx
+    row["tracker_error_dy"] = dy
+    row["tracker_error_m"] = error_m
+    row["tracker_yaw_error_deg"] = yaw_error
+
+
 def append_csv_row(path, header, row):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -264,10 +476,13 @@ def append_csv_row(path, header, row):
         with path.open(newline="") as f:
             existing_header = next(csv.reader(f), None)
         if existing_header != header:
-            raise RuntimeError(
-                f"{path} has an unrecognized schema. Move or migrate it before "
-                "appending supervisor validation results."
-            )
+            if existing_header in (LEGACY_CSV_HEADER, CSV_HEADER_V1):
+                migrate_legacy_results_file(path)
+            else:
+                raise RuntimeError(
+                    f"{path} has an unrecognized schema. Move or migrate it before "
+                    "appending supervisor validation results."
+                )
 
     with path.open("a", newline="") as f:
         writer = csv.writer(f)
@@ -286,18 +501,22 @@ def build_result_row(
     angular_speed_radps,
     notes,
 ):
+    tracker_final_model = model_frame_pose(tracker_final)
+    odom_final_model = model_frame_pose(odom_final)
     tracker_dx, tracker_dy, tracker_error_m, tracker_yaw_error = tracker_error(
         prediction,
-        tracker_final,
+        tracker_final_model,
     )
     odom_dx, odom_dy, odom_distance = xy_delta(odom_start, odom_final)
     nominal_final = prediction["nominal_final"] or ["", ""]
+    model_actions = prediction.get("model_actions", prediction["actions"])
 
     return [
         datetime.now().isoformat(),
         run_id,
         str(prediction["path"]),
         ",".join(prediction["actions"]),
+        ",".join(model_actions),
         len(prediction["actions"]),
         nominal_final[0],
         nominal_final[1],
@@ -308,14 +527,17 @@ def build_result_row(
             if prediction["predicted_final_yaw_deg"] is not None
             else ""
         ),
+        COMPARISON_FRAME,
         tracker_final["timestamp"] if tracker_final is not None else "",
         *(pose_fields(tracker_final)),
+        *(pose_fields(tracker_final_model)),
         tracker_dx,
         tracker_dy,
         tracker_error_m,
         tracker_yaw_error,
         *(pose_fields(odom_start)),
         *(pose_fields(odom_final)),
+        *(pose_fields(odom_final_model)),
         odom_dx,
         odom_dy,
         odom_distance,
@@ -502,14 +724,20 @@ def require_motion_confirmation(args, prediction):
     print("  - keep an operator near the robot")
     print("  - keep Ctrl+C and physical stop available")
     print(f"Run ID: {args.run_id}")
-    print(f"Actions: {','.join(prediction['actions'])}")
+    print(f"Execution actions: {','.join(prediction['actions'])}")
+    model_actions = prediction.get("model_actions", prediction["actions"])
+    if model_actions != prediction["actions"]:
+        print(f"Model actions: {','.join(model_actions)}")
     response = input("Type RUN to start the validation route: ").strip()
     return response == "RUN"
 
 
 def print_dry_run(prediction, args):
     print(f"Prediction file: {prediction['path']}")
-    print(f"Actions: {','.join(prediction['actions'])}")
+    print(f"Execution actions: {','.join(prediction['actions'])}")
+    model_actions = prediction.get("model_actions", prediction["actions"])
+    if model_actions != prediction["actions"]:
+        print(f"Model actions: {','.join(model_actions)}")
     print(
         "Predicted final: "
         f"x={prediction['predicted_final'][0]:.3f} m, "

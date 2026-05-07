@@ -8,6 +8,25 @@
   "actions": [
     "F30",
     "F50",
+    "CCW45",
+    "F50",
+    "F50",
+    "CW90",
+    "F30",
+    "F30",
+    "F30",
+    "F30",
+    "CCW45",
+    "F50",
+    "F50",
+    "F50",
+    "F50",
+    "CCW180",
+    "F50"
+  ],
+  "execution_actions": [
+    "F30",
+    "F50",
     "CW45",
     "F50",
     "F50",
@@ -40,21 +59,23 @@
     ],
     [
       1.507107,
-      0.707107
+      -0.707107
     ],
     [
       2.355635,
-      -0.141421
+      0.141421
     ],
     [
       4.355635,
-      -0.141421
+      0.141421
     ],
     [
       3.855635,
-      -0.141421
+      0.141421
     ]
   ],
+  "fixed_points_frame": "physical",
+  "plot_frame": "model_mirror_y",
   "monte_carlo": {
     "samples": 10000,
     "seed": 7
@@ -168,8 +189,35 @@
       ]
     ]
   },
-  "validation": null,
+  "validation": {
+    "run_id": "supervisor_validation_003",
+    "actions": "F30,F50,CW45,F50,F50,CCW90,F30,F30,F30,F30,CW45,F50,F50,F50,F50,CCW180,F50",
+    "model_actions": "F30,F50,CCW45,F50,F50,CW90,F30,F30,F30,F30,CCW45,F50,F50,F50,F50,CCW180,F50",
+    "tracker_start_pose": null,
+    "tracker_final_pose": [
+      3.743782,
+      0.233669,
+      174.386163
+    ],
+    "tracker_final_pose_raw": [
+      3.743782,
+      -0.233669,
+      -174.386163
+    ],
+    "comparison_frame": "model_mirror_y",
+    "notes": "supervisor_route_validation",
+    "warning": null,
+    "residual_xy_m": [
+      -0.1647399977198467,
+      0.10433793622937212
+    ],
+    "residual_magnitude_m": 0.195001722518904,
+    "mahalanobis_squared": 207.76006570626066,
+    "inside_95_endpoint_ellipse": false
+  },
   "assumptions": [
+    "actions are model-frame labels; execution_actions are physical route commands.",
+    "Validation tracker_final_pose uses the comparison_frame reported by the CSV.",
     "Primitive samples are independent.",
     "Yaw uncertainty is sampled separately from x/y displacement.",
     "The action sequence approximates the fixed-point path."
