@@ -190,29 +190,29 @@
     ]
   },
   "validation": {
-    "run_id": "supervisor_validation_003",
+    "run_id": "supervisor_validation_004",
     "actions": "F30,F50,CW45,F50,F50,CCW90,F30,F30,F30,F30,CW45,F50,F50,F50,F50,CCW180,F50",
     "model_actions": "F30,F50,CCW45,F50,F50,CW90,F30,F30,F30,F30,CCW45,F50,F50,F50,F50,CCW180,F50",
     "tracker_start_pose": null,
     "tracker_final_pose": [
-      3.743782,
-      0.233669,
-      174.386163
+      3.759587,
+      0.133307,
+      173.889854
     ],
     "tracker_final_pose_raw": [
-      3.743782,
-      -0.233669,
-      -174.386163
+      3.759587,
+      -0.133307,
+      -173.889854
     ],
     "comparison_frame": "model_mirror_y",
     "notes": "supervisor_route_validation",
     "warning": null,
     "residual_xy_m": [
-      -0.1647399977198467,
-      0.10433793622937212
+      -0.14893499771984686,
+      0.003975936229372146
     ],
-    "residual_magnitude_m": 0.195001722518904,
-    "mahalanobis_squared": 207.76006570626066,
+    "residual_magnitude_m": 0.14898805863125683,
+    "mahalanobis_squared": 139.39959083142972,
     "inside_95_endpoint_ellipse": false
   },
   "assumptions": [

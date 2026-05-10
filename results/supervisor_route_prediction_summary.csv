@@ -16,10 +16,10 @@ endpoint_ellipse_95_major_axis,0.4976138641853177,m
 endpoint_ellipse_95_minor_axis,0.061167164249601065,m
 final_yaw_mean,-175.40126788182812,deg
 final_yaw_std,2.5386828783241056,deg
-validation_run_id,supervisor_validation_003,
+validation_run_id,supervisor_validation_004,
 validation_comparison_frame,model_mirror_y,
-validation_residual_x,-0.1647399977198467,m
-validation_residual_y,0.10433793622937212,m
-validation_residual_magnitude,0.195001722518904,m
-validation_mahalanobis_squared,207.76006570626066,
+validation_residual_x,-0.14893499771984686,m
+validation_residual_y,0.003975936229372146,m
+validation_residual_magnitude,0.14898805863125683,m
+validation_mahalanobis_squared,139.39959083142972,
 validation_inside_95_endpoint_ellipse,False,bool
