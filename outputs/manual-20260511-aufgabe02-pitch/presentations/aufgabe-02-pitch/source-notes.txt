@@ -1,0 +1,36 @@
+Sources inspected:
+- docs/tasks/Aufgabe_02.pdf
+- scripts/scripted_drive.py
+- scripts/real_scripted_drive.py
+- scripts/run_real_experiment.sh
+- scripts/analyze_probabilistic_endpoint_model.py
+- scripts/build_motion_primitives_model.py
+- scripts/predict_primitive_path_endpoint.py
+- scripts/supervisor_route_validation.py
+- vision_tracker/main.py
+- vision_tracker/tracker.py
+- vision_tracker/pose_estimator.py
+- vision_tracker/calibration.py
+- vision_tracker/start_pose.py
+- vision_tracker/start_pose_gate.py
+- vision_tracker/config.py
+- results/real_scripted_drive_runs.csv
+- results/real_start_pose_checks.csv
+- results/probabilistic_endpoint_model_summary.csv
+- results/probabilistic_motion_primitives_model_summary.csv
+- results/supervisor_route_prediction_summary.csv
+- results/supervisor_route_validation_runs.csv
+
+Numbers used in deck:
+- Start gate tolerance: 0.04 m and 4.0 deg from vision_tracker/config.py.
+- F30 primitive: n=30, mean local dx=0.3018087656 m, dy=-0.0018510836 m, yaw mean=0.3244052623 deg.
+- F50 primitive: n=15, mean local dx=0.5013156665 m.
+- CW90 primitive: mean yaw=-84.9840862867 deg, std=1.9652975223 deg.
+- CCW90 primitive: mean yaw=84.5707201066 deg, std=2.3478900185 deg.
+- Supervisor route prediction: 10000 samples, endpoint mean x=3.9085219977 m, y=0.1293310638 m.
+- Supervisor route validation 004: residual magnitude=0.1489880586 m, inside 95 endpoint ellipse=False, yaw residual about -10.7 deg.
+
+Visual assets:
+- results/supervisor_route_prediction.png
+- results/real_endpoint_gaussian_ellipse.png
+- results/sim_vs_real_displacement_error_scatter.png

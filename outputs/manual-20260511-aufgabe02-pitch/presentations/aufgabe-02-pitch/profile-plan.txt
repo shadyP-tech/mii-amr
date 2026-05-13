@@ -1,0 +1,24 @@
+task mode: create
+primary deck-profile: engineering-platform
+secondary gates: analytics narrative, oral-exam defensibility
+
+required proof objects:
+- task wording from docs/tasks/Aufgabe_02.pdf
+- camera tracker architecture from vision_tracker/main.py, tracker.py, calibration.py, pose_estimator.py
+- start-pose gate thresholds and log from vision_tracker/start_pose_gate.py and results/real_start_pose_checks.csv
+- simulation/real command logging from scripts/scripted_drive.py and scripts/real_scripted_drive.py
+- empirical model metrics from results/probabilistic_endpoint_model_summary.csv and results/probabilistic_motion_primitives_model_summary.csv
+- final supervisor route validation from results/supervisor_route_prediction_summary.csv and results/supervisor_route_validation_runs.csv
+
+source/asset requirements:
+- Use repo plots only as evidence images.
+- Keep text editable wherever possible.
+- No invented robot screenshots or logos.
+
+known missing inputs:
+- No personal anecdote log from the user; deck infers problems from code and result artifacts.
+
+profile-specific QA gates:
+- Slide titles must be claims, not topics.
+- Diagrams must preserve real data flow and command flow.
+- Every number must trace to a repo file.

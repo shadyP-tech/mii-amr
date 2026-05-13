@@ -310,7 +310,7 @@ class MotionPrimitivesModelTest(unittest.TestCase):
 
         self.assertEqual(first["final_poses"], second["final_poses"])
 
-    def test_fixed_points_are_mirrored_for_model_frame_overlay(self):
+    def test_mirrored_execution_uses_physical_plot_frame(self):
         output = {
             "actions": ["F30", "CCW45", "F50"],
             "execution_actions": ["F30", "CW45", "F50"],
@@ -318,13 +318,20 @@ class MotionPrimitivesModelTest(unittest.TestCase):
             "validation": None,
         }
 
-        self.assertEqual(predictor.output_plot_frame(output), "model_mirror_y")
+        self.assertEqual(predictor.output_plot_frame(output), "physical")
         self.assertEqual(predictor.fixed_points_frame(output), "physical")
         self.assertEqual(
             predictor.fixed_points_for_plot(output),
-            [[0.0, -0.0], [1.0, 0.5], [2.0, -0.25]],
+            [[0.0, 0.0], [1.0, -0.5], [2.0, 0.25]],
         )
-        self.assertEqual(output["fixed_points"][1], [1.0, -0.5])
+        self.assertEqual(
+            predictor.model_points_for_plot([[1.0, -0.5]], output),
+            [[1.0, 0.5]],
+        )
+        self.assertEqual(
+            predictor.model_sigma_for_plot([[1.0, 0.25], [0.25, 2.0]], output),
+            [[1.0, -0.25], [-0.25, 2.0]],
+        )
 
     def test_fixed_points_stay_unchanged_when_model_and_execution_actions_match(self):
         output = {
@@ -340,6 +347,44 @@ class MotionPrimitivesModelTest(unittest.TestCase):
             predictor.fixed_points_for_plot(output),
             [[0.0, 0.0], [1.0, -0.5]],
         )
+
+    def test_target_endpoint_uses_plotted_fixed_point_frame(self):
+        output = {
+            "actions": ["F30", "CCW45", "F50"],
+            "execution_actions": ["F30", "CW45", "F50"],
+            "fixed_points": [[0.0, 0.0], [1.0, -0.5]],
+            "validation": None,
+        }
+
+        self.assertEqual(predictor.target_endpoint_for_plot(output), [1.0, -0.5])
+
+    def test_physical_plot_uses_raw_validation_pose(self):
+        output = {
+            "actions": ["F30", "CCW45"],
+            "execution_actions": ["F30", "CW45"],
+            "fixed_points": [],
+            "validation": None,
+        }
+        validation = {
+            "tracker_final_pose": [3.7, 0.2, 174.0],
+            "tracker_final_pose_raw": [3.7, -0.2, -174.0],
+        }
+
+        self.assertEqual(
+            predictor.validation_pose_for_plot(validation, output),
+            [3.7, -0.2, -174.0],
+        )
+
+    def test_confidence_contours_increase_to_95_percent(self):
+        contours = predictor.confidence_contours(
+            [0.0, 0.0],
+            [[0.01, 0.0], [0.0, 0.04]],
+        )
+        chi2_values = [contour["ellipse"]["chi2_value"] for contour in contours]
+
+        self.assertEqual([contour["label"] for contour in contours], ["50%", "68%", "80%", "95%"])
+        self.assertEqual(chi2_values, sorted(chi2_values))
+        self.assertAlmostEqual(chi2_values[-1], 5.991)
 
     def test_validation_csv_row_is_loaded(self):
         with tempfile.TemporaryDirectory() as tmpdir:

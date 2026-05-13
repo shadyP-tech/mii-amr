@@ -1,0 +1,763 @@
+{
+  "schema": "openai.presentation.layout/v4",
+  "unit": "px",
+  "slide": {
+    "aid": "sl/evqep1",
+    "id": "evqep1",
+    "slide": 1,
+    "layoutId": "3bfd3ee5-8678-4008-b2d2-f73656dfe218",
+    "layoutName": "Title Slide",
+    "layoutType": "title",
+    "masterLayoutId": "6f68fd83-3aa9-4019-b1ea-2883958a6197",
+    "masterLayoutName": "Master",
+    "frame": {
+      "left": 0,
+      "top": 0,
+      "width": 1280,
+      "height": 720
+    }
+  },
+  "theme": {
+    "colorSchemeName": "ChatGPT",
+    "colors": {
+      "accent1": "#156082",
+      "accent2": "#E97132",
+      "accent3": "#196B24",
+      "accent4": "#0F9ED5",
+      "accent5": "#A02B93",
+      "accent6": "#4EA72E",
+      "bg1": "#FFFFFF",
+      "bg2": "#000000",
+      "tx1": "#1F1F1F",
+      "tx2": "#FFFFFF",
+      "dk1": "#000000",
+      "lt1": "#FFFFFF",
+      "dk2": "#0E2841",
+      "lt2": "#E8E8E8",
+      "hlink": "#467886",
+      "folHlink": "#96607D"
+    },
+    "typefaces": [
+      "Aptos",
+      "Aptos Display",
+      "Aptos Mono"
+    ]
+  },
+  "inheritedLayers": [
+    {
+      "scope": "layout",
+      "id": "3bfd3ee5-8678-4008-b2d2-f73656dfe218",
+      "name": "Title Slide",
+      "type": "title",
+      "parentLayoutId": "6f68fd83-3aa9-4019-b1ea-2883958a6197",
+      "elements": []
+    },
+    {
+      "scope": "master",
+      "id": "6f68fd83-3aa9-4019-b1ea-2883958a6197",
+      "name": "Master",
+      "type": "master",
+      "elements": []
+    }
+  ],
+  "elements": [
+    {
+      "order": 1,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/onyd0z61",
+      "id": "1",
+      "bbox": [
+        0,
+        0,
+        1280,
+        720
+      ],
+      "geometry": "rect",
+      "fillColor": "#F7F3E8",
+      "lineColor": "rgba(0, 0, 0, 0)",
+      "lineWidth": 0
+    },
+    {
+      "order": 2,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/z25kb6xk",
+      "id": "2",
+      "name": "kicker-marker",
+      "bbox": [
+        54,
+        42,
+        10,
+        10
+      ],
+      "geometry": "rect",
+      "fillColor": "#0F766E",
+      "lineColor": "rgba(0, 0, 0, 0)",
+      "lineWidth": 0
+    },
+    {
+      "order": 3,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/6hcrmhk3",
+      "id": "3",
+      "name": "kicker-label",
+      "bbox": [
+        76,
+        34,
+        320,
+        26
+      ],
+      "geometry": "rect",
+      "text": "PITCH SPINE",
+      "textPreview": "PITCH SPINE",
+      "resolvedFontSize": 15,
+      "resolvedTextStyle": {
+        "fontSize": 15,
+        "typeface": "Aptos",
+        "bold": true,
+        "alignment": "left"
+      },
+      "textLayout": {
+        "lineCount": 1,
+        "lines": [
+          {
+            "index": 1,
+            "text": "PITCH SPINE"
+          }
+        ]
+      },
+      "paragraphs": [
+        {
+          "index": 1,
+          "text": "PITCH SPINE",
+          "runs": [
+            {
+              "index": 1,
+              "text": "PITCH SPINE",
+              "fontSize": 15,
+              "typeface": "Aptos",
+              "color": "#0F766E",
+              "bold": true
+            }
+          ]
+        }
+      ],
+      "fillColor": "rgba(0, 0, 0, 0)",
+      "lineColor": "rgba(0, 0, 0, 0)",
+      "lineWidth": 0
+    },
+    {
+      "order": 4,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/dg7adsji",
+      "id": "4",
+      "bbox": [
+        54,
+        66,
+        1172,
+        1.5
+      ],
+      "geometry": "rect",
+      "fillColor": "#D7D3C8",
+      "lineColor": "rgba(0, 0, 0, 0)",
+      "lineWidth": 0
+    },
+    {
+      "order": 5,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/ovahoza1",
+      "id": "5",
+      "bbox": [
+        1182,
+        654,
+        44,
+        26
+      ],
+      "geometry": "rect",
+      "text": "1",
+      "textPreview": "1",
+      "resolvedFontSize": 16,
+      "resolvedTextStyle": {
+        "fontSize": 16,
+        "typeface": "Aptos",
+        "alignment": "right"
+      },
+      "textLayout": {
+        "lineCount": 1,
+        "lines": [
+          {
+            "index": 1,
+            "text": "1"
+          }
+        ]
+      },
+      "paragraphs": [
+        {
+          "index": 1,
+          "text": "1",
+          "runs": [
+            {
+              "index": 1,
+              "text": "1",
+              "fontSize": 16,
+              "typeface": "Aptos",
+              "color": "#706B61"
+            }
+          ]
+        }
+      ],
+      "fillColor": "rgba(0, 0, 0, 0)",
+      "lineColor": "rgba(0, 0, 0, 0)",
+      "lineWidth": 0
+    },
+    {
+      "order": 6,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/vahoza1g",
+      "id": "6",
+      "bbox": [
+        54,
+        104,
+        860,
+        156
+      ],
+      "geometry": "rect",
+      "text": "The assignment became a measurement problem before it became a modeling problem.",
+      "textPreview": "The assignment became a measurement problem before it became a modeling problem.",
+      "resolvedFontSize": 50,
+      "resolvedTextStyle": {
+        "fontSize": 50,
+        "typeface": "Aptos Display",
+        "bold": true,
+        "alignment": "left"
+      },
+      "textLayout": {
+        "lineCount": 3,
+        "lines": [
+          {
+            "index": 1,
+            "text": "The assignment became a"
+          },
+          {
+            "index": 2,
+            "text": "measurement problem before it"
+          },
+          {
+            "index": 3,
+            "text": "became a modeling problem."
+          }
+        ]
+      },
+      "paragraphs": [
+        {
+          "index": 1,
+          "text": "The assignment became a measurement problem before it became a modeling problem.",
+          "runs": [
+            {
+              "index": 1,
+              "text": "The assignment became a measurement problem before it became a modeling problem.",
+              "fontSize": 50,
+              "typeface": "Aptos Display",
+              "color": "#17202A",
+              "bold": true
+            }
+          ]
+        }
+      ],
+      "fillColor": "rgba(0, 0, 0, 0)",
+      "lineColor": "rgba(0, 0, 0, 0)",
+      "lineWidth": 0
+    },
+    {
+      "order": 7,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/6tovahoz",
+      "id": "7",
+      "bbox": [
+        58,
+        292,
+        760,
+        54
+      ],
+      "geometry": "rect",
+      "text": "5-10 minute pitch: the concrete problems, the decisions I made, and why those decisions were defensible.",
+      "textPreview": "5-10 minute pitch: the concrete problems, the decisions I made, and why those decisions were defensible.",
+      "resolvedFontSize": 24,
+      "resolvedTextStyle": {
+        "fontSize": 24,
+        "typeface": "Aptos",
+        "alignment": "left"
+      },
+      "textLayout": {
+        "lineCount": 2,
+        "lines": [
+          {
+            "index": 1,
+            "text": "5-10 minute pitch: the concrete problems, the decisions I made, and"
+          },
+          {
+            "index": 2,
+            "text": "why those decisions were defensible."
+          }
+        ]
+      },
+      "paragraphs": [
+        {
+          "index": 1,
+          "text": "5-10 minute pitch: the concrete problems, the decisions I made, and why those decisions were defensible.",
+          "runs": [
+            {
+              "index": 1,
+              "text": "5-10 minute pitch: the concrete problems, the decisions I made, and why those decisions were defensible.",
+              "fontSize": 24,
+              "typeface": "Aptos",
+              "color": "#706B61"
+            }
+          ]
+        }
+      ],
+      "fillColor": "rgba(0, 0, 0, 0)",
+      "lineColor": "rgba(0, 0, 0, 0)",
+      "lineWidth": 0
+    },
+    {
+      "order": 8,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/dsji5sne",
+      "id": "8",
+      "bbox": [
+        76,
+        394,
+        6,
+        118
+      ],
+      "geometry": "rect",
+      "fillColor": "#B91C1C",
+      "lineColor": "rgba(0, 0, 0, 0)",
+      "lineWidth": 0
+    },
+    {
+      "order": 9,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/o7qpg3ex",
+      "id": "9",
+      "bbox": [
+        96,
+        396,
+        300,
+        30
+      ],
+      "geometry": "rect",
+      "text": "Problem",
+      "textPreview": "Problem",
+      "resolvedFontSize": 18,
+      "resolvedTextStyle": {
+        "fontSize": 18,
+        "typeface": "Aptos",
+        "bold": true,
+        "alignment": "left"
+      },
+      "textLayout": {
+        "lineCount": 1,
+        "lines": [
+          {
+            "index": 1,
+            "text": "Problem"
+          }
+        ]
+      },
+      "paragraphs": [
+        {
+          "index": 1,
+          "text": "Problem",
+          "runs": [
+            {
+              "index": 1,
+              "text": "Problem",
+              "fontSize": 18,
+              "typeface": "Aptos",
+              "color": "#B91C1C",
+              "bold": true
+            }
+          ]
+        }
+      ],
+      "fillColor": "rgba(0, 0, 0, 0)",
+      "lineColor": "rgba(0, 0, 0, 0)",
+      "lineWidth": 0
+    },
+    {
+      "order": 10,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/q5o7qpg3",
+      "id": "10",
+      "bbox": [
+        96,
+        432,
+        300,
+        76
+      ],
+      "geometry": "rect",
+      "text": "The task asks for real final pose, but the robot does not give a clean absolute endpoint alone.",
+      "textPreview": "The task asks for real final pose, but the robot does not give a clean absolute endpoint alone.",
+      "resolvedFontSize": 21,
+      "resolvedTextStyle": {
+        "fontSize": 21,
+        "typeface": "Aptos",
+        "alignment": "left"
+      },
+      "textLayout": {
+        "lineCount": 4,
+        "lines": [
+          {
+            "index": 1,
+            "text": "The task asks for real final"
+          },
+          {
+            "index": 2,
+            "text": "pose, but the robot does not"
+          },
+          {
+            "index": 3,
+            "text": "give a clean absolute endpoint"
+          },
+          {
+            "index": 4,
+            "text": "alone."
+          }
+        ]
+      },
+      "paragraphs": [
+        {
+          "index": 1,
+          "text": "The task asks for real final pose, but the robot does not give a clean absolute endpoint alone.",
+          "runs": [
+            {
+              "index": 1,
+              "text": "The task asks for real final pose, but the robot does not give a clean absolute endpoint alone.",
+              "fontSize": 21,
+              "typeface": "Aptos",
+              "color": "#17202A"
+            }
+          ]
+        }
+      ],
+      "fillColor": "rgba(0, 0, 0, 0)",
+      "lineColor": "rgba(0, 0, 0, 0)",
+      "lineWidth": 0
+    },
+    {
+      "order": 11,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/jqh0fepk",
+      "id": "11",
+      "bbox": [
+        474,
+        394,
+        6,
+        118
+      ],
+      "geometry": "rect",
+      "fillColor": "#0F766E",
+      "lineColor": "rgba(0, 0, 0, 0)",
+      "lineWidth": 0
+    },
+    {
+      "order": 12,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/8bat47y1",
+      "id": "12",
+      "bbox": [
+        494,
+        396,
+        300,
+        30
+      ],
+      "geometry": "rect",
+      "text": "Decision",
+      "textPreview": "Decision",
+      "resolvedFontSize": 18,
+      "resolvedTextStyle": {
+        "fontSize": 18,
+        "typeface": "Aptos",
+        "bold": true,
+        "alignment": "left"
+      },
+      "textLayout": {
+        "lineCount": 1,
+        "lines": [
+          {
+            "index": 1,
+            "text": "Decision"
+          }
+        ]
+      },
+      "paragraphs": [
+        {
+          "index": 1,
+          "text": "Decision",
+          "runs": [
+            {
+              "index": 1,
+              "text": "Decision",
+              "fontSize": 18,
+              "typeface": "Aptos",
+              "color": "#0F766E",
+              "bold": true
+            }
+          ]
+        }
+      ],
+      "fillColor": "rgba(0, 0, 0, 0)",
+      "lineColor": "rgba(0, 0, 0, 0)",
+      "lineWidth": 0
+    },
+    {
+      "order": 13,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/1w7mp0bi",
+      "id": "13",
+      "bbox": [
+        494,
+        432,
+        300,
+        76
+      ],
+      "geometry": "rect",
+      "text": "Build an external camera tracker and gate each run against a repeatable start.",
+      "textPreview": "Build an external camera tracker and gate each run against a repeatable start.",
+      "resolvedFontSize": 21,
+      "resolvedTextStyle": {
+        "fontSize": 21,
+        "typeface": "Aptos",
+        "alignment": "left"
+      },
+      "textLayout": {
+        "lineCount": 3,
+        "lines": [
+          {
+            "index": 1,
+            "text": "Build an external camera"
+          },
+          {
+            "index": 2,
+            "text": "tracker and gate each run"
+          },
+          {
+            "index": 3,
+            "text": "against a repeatable start."
+          }
+        ]
+      },
+      "paragraphs": [
+        {
+          "index": 1,
+          "text": "Build an external camera tracker and gate each run against a repeatable start.",
+          "runs": [
+            {
+              "index": 1,
+              "text": "Build an external camera tracker and gate each run against a repeatable start.",
+              "fontSize": 21,
+              "typeface": "Aptos",
+              "color": "#17202A"
+            }
+          ]
+        }
+      ],
+      "fillColor": "rgba(0, 0, 0, 0)",
+      "lineColor": "rgba(0, 0, 0, 0)",
+      "lineWidth": 0
+    },
+    {
+      "order": 14,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/qh0fepkz",
+      "id": "14",
+      "bbox": [
+        872,
+        394,
+        6,
+        118
+      ],
+      "geometry": "rect",
+      "fillColor": "#D97706",
+      "lineColor": "rgba(0, 0, 0, 0)",
+      "lineWidth": 0
+    },
+    {
+      "order": 15,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/j2t83itg",
+      "id": "15",
+      "bbox": [
+        892,
+        396,
+        300,
+        30
+      ],
+      "geometry": "rect",
+      "text": "Consequence",
+      "textPreview": "Consequence",
+      "resolvedFontSize": 18,
+      "resolvedTextStyle": {
+        "fontSize": 18,
+        "typeface": "Aptos",
+        "bold": true,
+        "alignment": "left"
+      },
+      "textLayout": {
+        "lineCount": 1,
+        "lines": [
+          {
+            "index": 1,
+            "text": "Consequence"
+          }
+        ]
+      },
+      "paragraphs": [
+        {
+          "index": 1,
+          "text": "Consequence",
+          "runs": [
+            {
+              "index": 1,
+              "text": "Consequence",
+              "fontSize": 18,
+              "typeface": "Aptos",
+              "color": "#D97706",
+              "bold": true
+            }
+          ]
+        }
+      ],
+      "fillColor": "rgba(0, 0, 0, 0)",
+      "lineColor": "rgba(0, 0, 0, 0)",
+      "lineWidth": 0
+    },
+    {
+      "order": 16,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/8nqxs72x",
+      "id": "16",
+      "bbox": [
+        892,
+        432,
+        300,
+        76
+      ],
+      "geometry": "rect",
+      "text": "A simple probabilistic model works for primitives; the composed route exposes the limits.",
+      "textPreview": "A simple probabilistic model works for primitives; the composed route exposes the limits.",
+      "resolvedFontSize": 21,
+      "resolvedTextStyle": {
+        "fontSize": 21,
+        "typeface": "Aptos",
+        "alignment": "left"
+      },
+      "textLayout": {
+        "lineCount": 4,
+        "lines": [
+          {
+            "index": 1,
+            "text": "A simple probabilistic model"
+          },
+          {
+            "index": 2,
+            "text": "works for primitives; the"
+          },
+          {
+            "index": 3,
+            "text": "composed route exposes the"
+          },
+          {
+            "index": 4,
+            "text": "limits."
+          }
+        ]
+      },
+      "paragraphs": [
+        {
+          "index": 1,
+          "text": "A simple probabilistic model works for primitives; the composed route exposes the limits.",
+          "runs": [
+            {
+              "index": 1,
+              "text": "A simple probabilistic model works for primitives; the composed route exposes the limits.",
+              "fontSize": 21,
+              "typeface": "Aptos",
+              "color": "#17202A"
+            }
+          ]
+        }
+      ],
+      "fillColor": "rgba(0, 0, 0, 0)",
+      "lineColor": "rgba(0, 0, 0, 0)",
+      "lineWidth": 0
+    },
+    {
+      "order": 17,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/18jqh0fe",
+      "id": "17",
+      "bbox": [
+        54,
+        654,
+        760,
+        26
+      ],
+      "geometry": "rect",
+      "text": "Sources: docs/tasks/Aufgabe_02.pdf; scripts/; vision_tracker/; results/",
+      "textPreview": "Sources: docs/tasks/Aufgabe_02.pdf; scripts/; vision_tracker/; results/",
+      "resolvedFontSize": 13,
+      "resolvedTextStyle": {
+        "fontSize": 13,
+        "typeface": "Aptos Mono",
+        "alignment": "left"
+      },
+      "textLayout": {
+        "lineCount": 1,
+        "lines": [
+          {
+            "index": 1,
+            "text": "Sources: docs/tasks/Aufgabe_02.pdf; scripts/; vision_tracker/; results/"
+          }
+        ]
+      },
+      "paragraphs": [
+        {
+          "index": 1,
+          "text": "Sources: docs/tasks/Aufgabe_02.pdf; scripts/; vision_tracker/; results/",
+          "runs": [
+            {
+              "index": 1,
+              "text": "Sources: docs/tasks/Aufgabe_02.pdf; scripts/; vision_tracker/; results/",
+              "fontSize": 13,
+              "typeface": "Aptos Mono",
+              "color": "#706B61"
+            }
+          ]
+        }
+      ],
+      "fillColor": "rgba(0, 0, 0, 0)",
+      "lineColor": "rgba(0, 0, 0, 0)",
+      "lineWidth": 0
+    }
+  ],
+  "composeRuns": []
+}

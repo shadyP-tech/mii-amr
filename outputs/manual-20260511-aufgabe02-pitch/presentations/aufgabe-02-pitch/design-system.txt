@@ -1,0 +1,21 @@
+Canvas: 1280x720, 16:9.
+Palette:
+- Ink: #17202A
+- Paper: #F7F3E8
+- Muted paper: #EEE7D6
+- Teal: #0F766E
+- Blue: #2563EB
+- Amber: #D97706
+- Red: #B91C1C
+- Soft gray: #D7D3C8
+
+Typography:
+- Title: Aptos Display, 42-56 px
+- Body: Aptos, 20-28 px
+- Metrics: Aptos Display, 42-64 px
+- Code/source labels: Aptos Mono, 14-16 px
+
+Composition:
+- Avoid repeated card grids.
+- Use one proof object per slide.
+- Put "problem / decision / why" on most slides.

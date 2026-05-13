@@ -75,45 +75,45 @@
     ]
   ],
   "fixed_points_frame": "physical",
-  "plot_frame": "model_mirror_y",
+  "plot_frame": "physical",
   "monte_carlo": {
     "samples": 10000,
     "seed": 7
   },
   "prediction": {
     "endpoint_mu": [
-      3.9085219977198467,
-      0.12933106377062786
+      3.90852199771984,
+      0.12933106377062792
     ],
     "endpoint_sigma": [
       [
-        0.00044054254725766116,
-        0.0016773686410077135
+        0.0004405425472576639,
+        0.0016773686410077096
       ],
       [
-        0.0016773686410077135,
-        0.010048565273297401
+        0.0016773686410077096,
+        0.010048565273297403
       ]
     ],
     "endpoint_std": [
-      0.02098910544205401,
+      0.020989105442054075,
       0.10024253225700856
     ],
     "endpoint_ellipse_95": {
       "center": [
-        3.9085219977198467,
-        0.12933106377062786
+        3.90852199771984,
+        0.12933106377062792
       ],
       "chi2_value": 5.991,
       "semi_major_m": 0.24880693209265886,
-      "semi_minor_m": 0.030583582124800533,
+      "semi_minor_m": 0.03058358212480079,
       "major_axis_length_m": 0.4976138641853177,
-      "minor_axis_length_m": 0.061167164249601065,
+      "minor_axis_length_m": 0.06116716424960158,
       "orientation_deg": 80.37642038928482,
-      "area_m2": 0.02390565788610745
+      "area_m2": 0.023905657886107653
     },
-    "final_yaw_mean_deg": -175.40126788182812,
-    "final_yaw_std_deg": 2.5386828783241056,
+    "final_yaw_mean_deg": -175.4012678818281,
+    "final_yaw_std_deg": 2.538682878320513,
     "mean_path_points": [
       [
         0.0,
@@ -208,11 +208,11 @@
     "notes": "supervisor_route_validation",
     "warning": null,
     "residual_xy_m": [
-      -0.14893499771984686,
-      0.003975936229372146
+      -0.1489349977198402,
+      0.00397593622937209
     ],
-    "residual_magnitude_m": 0.14898805863125683,
-    "mahalanobis_squared": 139.39959083142972,
+    "residual_magnitude_m": 0.14898805863125017,
+    "mahalanobis_squared": 139.39959083141494,
     "inside_95_endpoint_ellipse": false
   },
   "assumptions": [

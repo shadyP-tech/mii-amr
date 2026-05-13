@@ -1,0 +1,25 @@
+profile: engineering-platform
+profile gate: pass
+
+Rubric:
+- story: 5/5
+- specificity: 5/5
+- rhythm: 4/5
+- whitespace: 4/5
+- chart clarity: 4/5
+- typography: 4/5
+- restraint: 5/5
+- precision: 5/5
+- coherence: 4/5
+
+Total: 40/45
+
+Verification:
+- Final PPTX exported: output/aufgabe-02-pitch.pptx
+- Slide count: 7
+- Package contains ppt/slides/slide1.xml through slide7.xml
+- Rendered contact sheet inspected after final build.
+- Layout checker showed no errors on final checked slides; remaining tight-text warnings on text-heavy slides were visually inspected and accepted.
+
+Residual gap:
+- The deck is intentionally compact for a 5-10 minute oral pitch. It does not include a dense appendix because the supervisor asked for problems, decisions, and why.

@@ -1,0 +1,7 @@
+Slide 1: editorial cover with three-step problem chain.
+Slide 2: left decision column plus right camera-tracker flow diagram.
+Slide 3: metric rail plus start-gate threshold visual.
+Slide 4: split command/logging comparison for sim vs real.
+Slide 5: model decision slide with primitive metrics.
+Slide 6: evidence plot plus validation result rail.
+Slide 7: closing defense slide with three takeaways.

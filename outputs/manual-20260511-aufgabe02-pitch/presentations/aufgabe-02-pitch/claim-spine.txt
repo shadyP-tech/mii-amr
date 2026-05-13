@@ -1,0 +1,7 @@
+1. The assignment became a measurement problem before it became a modeling problem.
+2. Odometry and simulation were not enough; I needed an external final-pose measurement.
+3. Repeatable starts became a necessary control variable.
+4. The same command interface hid different stop conditions between simulation and real hardware.
+5. I chose a small empirical probabilistic model because the task asked for a rough endpoint prediction.
+6. The final route validation exposed the limit of that model.
+7. The takeaway is exactly the motivation for SLAM: without continuous localization, endpoint prediction is brittle.
