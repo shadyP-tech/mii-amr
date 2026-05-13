@@ -1,0 +1,7 @@
+image: arena_1p898x3p9_auto.pgm
+mode: trinary
+resolution: 0.05
+origin: [-2.82, -1.69, 0]
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.25
