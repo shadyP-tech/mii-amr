@@ -1,23 +1,3 @@
-"""
-main.py — Full vision tracking pipeline with CSV logging.
-
-Orchestrates:
-    camera frame → detect markers → classify → estimate pose → log CSV
-
-Usage:
-    python3 main.py
-
-Requires a saved homography (run ``python3 calibration.py`` first).
-
-CSV output schema:
-    timestamp, pose_x, pose_y, pose_yaw,
-    front_left_x, front_left_y, front_right_x, front_right_y, rear_x, rear_y,
-    num_detected, valid_pose
-
-If fewer than 3 markers are detected, a row is written with
-valid_pose=0 and pose/marker fields set to NaN.
-"""
-
 import cv2
 import csv
 import os
@@ -103,7 +83,7 @@ def main():
             ts = time.time()
 
             if num_detected >= 3:
-                # Convert pixel centers to world, keeping radius for
+                # convert pixel centers to world, keeping radius for
                 # size-based classification.
                 centers_world = []
                 for px, py, r in centers:
@@ -116,7 +96,7 @@ def main():
                     x, y, yaw = pose_estimator.estimate_pose(classified)
                     _draw_pose_center_overlay(frame, H, x, y, yaw)
 
-                    # Write latest external tracker pose for real experiment scripts
+                    # write latest external tracker pose for real experiment scripts
                     pose_estimator.write_latest_pose(
                         x,
                         y,
@@ -155,7 +135,7 @@ def main():
                     check = start_pose.check_start_pose(tracker_pose, now=ts)
                     _draw_start_overlay(frame, tracker_pose, check)
                 else:
-                    # Classification failed (shouldn't happen with 3 markers)
+                    # classification failed (shouldn't happen with 3 markers)
                     _write_invalid_row(writer, ts, num_detected)
                     _write_invalid_latest_pose(num_detected)
                     _draw_invalid_start_overlay(frame, num_detected)

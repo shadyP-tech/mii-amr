@@ -1,18 +1,3 @@
-"""
-calibration.py — Compute and store a pixel-to-world homography.
-
-Usage:
-    python3 calibration.py          # interactive: click 4 corners
-    python3 calibration.py --verify # click test points after loading H
-
-The homography maps image pixels to real-world meter coordinates for a
-planar workspace viewed from a roughly top-down camera.
-
-Limitations (document in report):
-    - Assumes a planar workspace.
-    - Neglects lens distortion (can add chessboard calibration later).
-"""
-
 import cv2
 import numpy as np
 import os
@@ -36,13 +21,6 @@ def _mouse_callback(event, x, y, flags, param):
 
 # pixel → world transform
 def load_homography(path=None):
-    """Load a previously saved homography matrix.
-
-    Returns
-    -------
-    np.ndarray or None
-        3×3 homography matrix, or None if file does not exist.
-    """
     path = path or config.HOMOGRAPHY_FILE
     if not os.path.exists(path):
         return None
@@ -51,40 +29,12 @@ def load_homography(path=None):
 
 
 def pixel_to_world(pixel, H):
-    """Convert a single pixel coordinate to world coordinates.
-
-    Parameters
-    ----------
-    pixel : tuple of (float, float)
-        (x, y) in image pixels.
-    H : np.ndarray
-        3×3 homography matrix (pixel → world).
-
-    Returns
-    -------
-    np.ndarray
-        [x, y] in world meters.
-    """
     px = np.array([[[pixel[0], pixel[1]]]], dtype=np.float32)
     world = cv2.perspectiveTransform(px, H)
     return world[0, 0]  # shape (2,)
 
 
 def world_to_pixel(point, H):
-    """Convert a single world coordinate to image pixel coordinates.
-
-    Parameters
-    ----------
-    point : tuple of (float, float)
-        (x, y) in world meters.
-    H : np.ndarray
-        3x3 homography matrix (pixel -> world).
-
-    Returns
-    -------
-    np.ndarray
-        [x, y] in image pixels.
-    """
     H_inv = np.linalg.inv(H)
     world = np.array([[[point[0], point[1]]]], dtype=np.float32)
     pixel = cv2.perspectiveTransform(world, H_inv)
@@ -92,32 +42,11 @@ def world_to_pixel(point, H):
 
 
 def pixels_to_world(pixels, H):
-    """Convert multiple pixel coordinates to world coordinates.
-
-    Parameters
-    ----------
-    pixels : list of (float, float)
-        Pixel coordinates.
-    H : np.ndarray
-        3×3 homography.
-
-    Returns
-    -------
-    list of np.ndarray
-        Each element is [x, y] in world meters.
-    """
     return [pixel_to_world(p, H) for p in pixels]
 
 
 # calibration procedure
 def calibrate_interactive():
-    """Run the interactive calibration: capture frame, click 4 corners, compute and save the homography.
-
-    Returns
-    -------
-    np.ndarray
-        3×3 homography matrix.
-    """
     global _clicked_points, _click_done
     _clicked_points = []
     _click_done = False
@@ -141,7 +70,7 @@ def calibrate_interactive():
 
     cap.release()
 
-    # Resize for display consistency
+    # resize for display consistency
     frame = cv2.resize(frame, None, fx=config.RESIZE_SCALE, fy=config.RESIZE_SCALE)
 
     print("\nClick the 4 corners of your reference rectangle in order:")
@@ -152,7 +81,7 @@ def calibrate_interactive():
     cv2.setMouseCallback("calibration", _mouse_callback)
 
     while not _click_done:
-        # Redraw with already-clicked points
+        # redraw with already-clicked points
         display = frame.copy()
         for i, (px, py) in enumerate(_clicked_points):
             cv2.circle(display, (px, py), 6, (0, 0, 255), -1)
@@ -190,8 +119,6 @@ def calibrate_interactive():
 
 # verification mode
 def verify_interactive(H=None):
-    """Click additional points and print their world coordinates to verify
-    calibration accuracy."""
     if H is None:
         H = load_homography()
     if H is None:
@@ -213,7 +140,7 @@ def verify_interactive(H=None):
             print(f"  Pixel ({x}, {y})  →  World ({world[0]:.4f}, {world[1]:.4f}) m")
             _clicked_points.append((x, y, world[0], world[1]))
 
-    # Live feed until SPACE is pressed (allows camera warmup)
+    # live feed until SPACE is pressed (allows camera warmup)
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -235,7 +162,7 @@ def verify_interactive(H=None):
     cv2.setMouseCallback("verify", _verify_click)
 
     while True:
-        # Redraw with clicked points
+        # redraw with clicked points
         display = frame.copy()
         for px, py, wx, wy in _clicked_points:
             cv2.circle(display, (px, py), 5, (0, 255, 0), -1)
@@ -255,7 +182,6 @@ def verify_interactive(H=None):
     cv2.destroyAllWindows()
 
 
-# CLI
 def main():
     import sys
 

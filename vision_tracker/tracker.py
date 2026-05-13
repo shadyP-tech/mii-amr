@@ -1,14 +1,3 @@
-"""
-tracker.py — Detect green circular markers in a camera frame.
-
-Pipeline per frame:
-    BGR → HSV → threshold green → morphological cleanup → find contours
-    → filter by area / radius / circularity → return marker centers.
-
-When run standalone (`python3 tracker.py`), opens a live camera feed with
-annotated detections and prints pixel coordinates to stdout.
-"""
-
 import cv2
 import numpy as np
 import config
@@ -16,10 +5,6 @@ import camera
 
 
 def score_exposure(frame, hsv_lower, hsv_upper):
-    """
-    Higher score = better frame for green-marker tracking.
-    Penalizes overexposure and rewards clean green blobs.
-    """
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
@@ -46,11 +31,6 @@ def score_exposure(frame, hsv_lower, hsv_upper):
 
 
 def auto_select_exposure(cap, hsv_lower, hsv_upper):
-    """
-    Try several exposure values and keep the best one.
-    Works only if the camera/backend allows manual exposure control.
-    """
-
     cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
     cap.set(cv2.CAP_PROP_GAIN, 0)
 
@@ -115,26 +95,10 @@ def auto_select_exposure(cap, hsv_lower, hsv_upper):
 
 
 def detect_markers(frame):
-    """Detect green circular blobs in *frame*.
-
-    Parameters
-    ----------
-    frame : np.ndarray
-        BGR image (already resized if desired).
-
-    Returns
-    -------
-    tuple
-        (centers, mask), where centers is a list of (x, y, radius)
-        and mask is the binary green-threshold image.
-    """
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
     mask = cv2.inRange(hsv, config.HSV_LOWER, config.HSV_UPPER)
 
-    # Fill gaps before removing noise.  The green markers often have glare or
-    # camera noise that makes their masks slightly broken; opening first can
-    # split a real marker into irregular fragments.
     kernel = cv2.getStructuringElement(
         cv2.MORPH_ELLIPSE,
         (config.MORPH_KERNEL_SIZE, config.MORPH_KERNEL_SIZE),
@@ -188,23 +152,19 @@ def detect_markers(frame):
 
         centers.append((int(x), int(y), float(radius)))
 
-    # Sort all detected centers by radius descending
+    # sort all detected centers by radius descending
     centers = sorted(centers, key=lambda c: c[2], reverse=True)
 
-    # Separate likely large and small markers.
-    # Tune these values for your resized frame.
+    # separate likely large and small markers.
     large_candidates = [c for c in centers if c[2] >= 35]
     small_candidates = [c for c in centers if 12 <= c[2] < 35]
 
     selected = []
 
     if len(large_candidates) >= 2:
-        # The two largest real markers
         m0, m1 = large_candidates[0], large_candidates[1]
         selected = [m0, m1]
 
-        # Reject small blobs that are too close to either large marker.
-        # These are usually reflections or fragmented parts of the large balls.
         valid_small = []
         for c in small_candidates:
             d0 = np.hypot(c[0] - m0[0], c[1] - m0[1])
@@ -214,7 +174,6 @@ def detect_markers(frame):
                 valid_small.append(c)
 
         if valid_small:
-            # Prefer the largest remaining small marker
             m2 = sorted(valid_small, key=lambda c: c[2], reverse=True)[0]
             selected.append(m2)
 
