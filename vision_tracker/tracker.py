@@ -4,96 +4,6 @@ import config
 import camera
 
 
-def score_exposure(frame, hsv_lower, hsv_upper):
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-    clipped_fraction = np.mean(gray > 250)
-
-    mask = cv2.inRange(hsv, hsv_lower, hsv_upper)
-
-    kernel = np.ones((7, 7), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-
-    green_pixels = np.count_nonzero(mask)
-
-    saturation = hsv[:, :, 1]
-    mean_green_saturation = np.mean(saturation[mask > 0]) if green_pixels > 0 else 0
-
-    score = green_pixels + 10.0 * mean_green_saturation
-
-    # Strongly reject frames with too much clipping
-    if clipped_fraction > config.MAX_CLIPPED_FRACTION:
-        score -= 1_000_000.0 * clipped_fraction
-
-    return score, clipped_fraction, green_pixels
-
-
-def auto_select_exposure(cap, hsv_lower, hsv_upper):
-    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
-    cap.set(cv2.CAP_PROP_GAIN, 0)
-
-    exposure_candidates = config.EXPOSURE_CANDIDATES
-
-    best_exposure = None
-    best_score = -float("inf")
-
-    for exposure in exposure_candidates:
-        cap.set(cv2.CAP_PROP_EXPOSURE, exposure)
-
-        # Let camera settle
-        for _ in range(10):
-            cap.read()
-
-        actual_exposure = cap.get(cv2.CAP_PROP_EXPOSURE)
-
-        ok, frame = cap.read()
-        if not ok:
-            continue
-
-        frame = cv2.resize(
-            frame,
-            None,
-            fx=config.RESIZE_SCALE,
-            fy=config.RESIZE_SCALE,
-        )
-
-        score, clipped_fraction, green_pixels = score_exposure(
-            frame,
-            hsv_lower,
-            hsv_upper,
-        )
-
-        print(
-            f"Requested exposure {exposure}, actual {actual_exposure}: "
-            f"score={score:.1f}, "
-            f"clipped={clipped_fraction:.4f}, "
-            f"green_pixels={green_pixels}"
-        )
-
-        if score > best_score:
-            best_score = score
-            best_exposure = exposure
-
-    if best_exposure is not None:
-        cap.set(cv2.CAP_PROP_EXPOSURE, best_exposure)
-
-        for _ in range(10):
-            cap.read()
-
-        actual_final_exposure = cap.get(cv2.CAP_PROP_EXPOSURE)
-
-        print(
-            f"Selected exposure: requested {best_exposure}, "
-            f"actual {actual_final_exposure}"
-        )
-    else:
-        print("Could not select exposure automatically.")
-
-    return best_exposure
-
-
 def detect_markers(frame):
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
@@ -208,16 +118,9 @@ def main():
     except RuntimeError as exc:
         print(f"ERROR: {exc}")
         return
-    
-    if config.AUTO_SELECT_EXPOSURE:
-        auto_select_exposure(
-            cap,
-            config.HSV_LOWER,
-            config.HSV_UPPER,
-        )
 
     print("tracker.py — press ESC to quit")
-    print(f"HSV range: {config.HSV_LOWER} – {config.HSV_UPPER}")
+    print(f"HSV range: {config.HSV_LOWER} - {config.HSV_UPPER}")
 
     frame_count = 0
     

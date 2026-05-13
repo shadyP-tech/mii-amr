@@ -1,13 +1,12 @@
 import cv2
 
-import camera
 import config
 
 
 def main():
     max_index = 5
 
-    print("Testing OpenCV/AVFoundation camera indices.")
+    print("Testing OpenCV camera indices.")
     print("Press any key in each image window to continue.\n")
 
     for index in range(max_index):
@@ -40,16 +39,11 @@ def main():
             cap.release()
             continue
 
-        mean_saturation, channel_diff = camera.color_stats(frame)
-        color_state = "color" if camera.looks_like_color(frame) else "grayscale-looking"
-        print(
-            f"{index}: {frame.shape[1]}x{frame.shape[0]} "
-            f"{color_state} sat={mean_saturation:.1f} diff={channel_diff:.1f}"
-        )
+        print(f"{index}: {frame.shape[1]}x{frame.shape[0]}")
 
-        cv2.imshow(f"camera {index}: {color_state}", frame)
+        cv2.imshow(f"camera {index}", frame)
         cv2.waitKey(0)
-        cv2.destroyWindow(f"camera {index}: {color_state}")
+        cv2.destroyWindow(f"camera {index}")
         cap.release()
 
     cv2.destroyAllWindows()

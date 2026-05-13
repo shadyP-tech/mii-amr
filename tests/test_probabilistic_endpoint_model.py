@@ -11,7 +11,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import analyze_probabilistic_endpoint_model as model  # noqa: E402
-import predict_waypoint_endpoint_region as waypoint  # noqa: E402
 
 
 REAL_HEADER = [
@@ -236,52 +235,6 @@ class ProbabilisticEndpointModelTest(unittest.TestCase):
             loaded["data_selection"]["selected_real_run_ids"],
             ["run_real_021"],
         )
-
-    def test_waypoint_prediction_accumulates_mean_bias_and_covariance(self):
-        waypoints = [[0.0, 0.0], [0.6, 0.0], [0.6, 0.3]]
-        mu_error = [0.01, 0.02]
-        sigma_error = [[0.0001, 0.0], [0.0, 0.0004]]
-
-        prediction = waypoint.predict_endpoint_region(
-            waypoints,
-            mu_error,
-            sigma_error,
-            step_distance_m=0.30,
-        )
-
-        self.assertAllClose(prediction["predicted_mu"], [0.6, 0.35])
-        self.assertAllClose(
-            prediction["sigma"],
-            [[0.0006, 0.0], [0.0, 0.0009]],
-            places=12,
-        )
-        self.assertEqual(prediction["primitive_count"], 3)
-
-    def test_waypoint_prediction_rejects_non_multiple_segments_by_default(self):
-        waypoints = [[0.0, 0.0], [0.5, 0.0]]
-
-        with self.assertRaises(ValueError):
-            waypoint.predict_endpoint_region(
-                waypoints,
-                [0.01, 0.0],
-                [[1.0, 0.0], [0.0, 1.0]],
-                step_distance_m=0.30,
-            )
-
-    def test_waypoint_prediction_allows_remainder_scaling_when_requested(self):
-        waypoints = [[0.0, 0.0], [0.5, 0.0]]
-
-        prediction = waypoint.predict_endpoint_region(
-            waypoints,
-            [0.03, 0.0],
-            [[1.0, 0.0], [0.0, 1.0]],
-            step_distance_m=0.30,
-            allow_remainder_scaling=True,
-        )
-
-        self.assertEqual(prediction["primitive_count"], 2)
-        self.assertAlmostEqual(prediction["remainder_segments"][0]["scale"], 2.0 / 3.0)
-        self.assertAlmostEqual(prediction["predicted_mu"][0], 0.55)
 
     @staticmethod
     def row(run_id, start_x, start_y, start_yaw, final_x, final_y, final_yaw):
