@@ -20,12 +20,14 @@ from pathlib import Path
 try:
     import rclpy
     from rclpy.node import Node
+    from rclpy.qos import qos_profile_sensor_data
     from geometry_msgs.msg import Twist
     from nav_msgs.msg import Odometry
     from sensor_msgs.msg import LaserScan
 except ImportError:
     rclpy = None
     Node = object
+    qos_profile_sensor_data = None
     Twist = None
     Odometry = object
     LaserScan = object
@@ -383,7 +385,7 @@ class ArenaCoverageDrive(Node):
             LaserScan,
             "/scan",
             self.scan_callback,
-            10,
+            qos_profile_sensor_data,
         )
         time.sleep(1.0)
 
