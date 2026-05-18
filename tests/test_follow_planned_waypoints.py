@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "scripts" / "aufgabe03"))
 
 import follow_planned_waypoints as follower  # noqa: E402
 
@@ -24,7 +24,7 @@ def write_waypoints(path, rows, header=None):
 def default_args(**overrides):
     values = {
         "run_id": "test_run",
-        "waypoints": Path("results/aufgabe03_waypoints.csv"),
+        "waypoints": Path("results/aufgabe03/aufgabe03_waypoints.csv"),
         "linear_speed": follower.DEFAULT_LINEAR_SPEED_MPS,
         "min_linear_speed": follower.DEFAULT_MIN_LINEAR_SPEED_MPS,
         "linear_gain": follower.DEFAULT_LINEAR_GAIN,

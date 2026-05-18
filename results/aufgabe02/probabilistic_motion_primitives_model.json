@@ -10,7 +10,7 @@
   },
   "coordinate_frame": "robot local frame at primitive start",
   "data_selection": {
-    "forward_csv": "results/real_scripted_drive_runs.csv",
+    "forward_csv": "results/aufgabe02/real_scripted_drive_runs.csv",
     "forward_run_range": "21:50",
     "selected_forward_run_ids": [
       "run_real_021",
@@ -45,7 +45,7 @@
       "run_real_050"
     ],
     "skipped_forward_rows": [],
-    "rotation_csv": "results/real_rotation_runs.csv",
+    "rotation_csv": "results/aufgabe02/real_rotation_runs.csv",
     "cw_prefix": "run_real_rot_cw90_",
     "cw_run_range": "18:32",
     "selected_cw_run_ids": [
@@ -88,7 +88,7 @@
     "skipped_ccw_rows": [],
     "primitive_sources": {
       "F30": {
-        "csv": "results/real_scripted_drive_runs.csv",
+        "csv": "results/aufgabe02/real_scripted_drive_runs.csv",
         "run_range": "21:50",
         "run_id_prefix": null,
         "selected_run_ids": [
@@ -126,7 +126,7 @@
         "skipped_rows": []
       },
       "CW90": {
-        "csv": "results/real_rotation_runs.csv",
+        "csv": "results/aufgabe02/real_rotation_runs.csv",
         "run_range": "18:32",
         "run_id_prefix": "run_real_rot_cw90_",
         "selected_run_ids": [
@@ -149,7 +149,7 @@
         "skipped_rows": []
       },
       "CCW90": {
-        "csv": "results/real_rotation_runs.csv",
+        "csv": "results/aufgabe02/real_rotation_runs.csv",
         "run_range": "1:15",
         "run_id_prefix": "run_real_rot_ccw90_",
         "selected_run_ids": [
@@ -172,7 +172,7 @@
         "skipped_rows": []
       },
       "F50": {
-        "csv": "results/real_scripted_drive_runs.csv",
+        "csv": "results/aufgabe02/real_scripted_drive_runs.csv",
         "run_range": "1:15",
         "run_id_prefix": "run_real_fwd50_",
         "selected_run_ids": [
@@ -195,7 +195,7 @@
         "skipped_rows": []
       },
       "CCW45": {
-        "csv": "results/real_rotation_runs.csv",
+        "csv": "results/aufgabe02/real_rotation_runs.csv",
         "run_range": "1:15",
         "run_id_prefix": "run_real_rot_ccw45_",
         "selected_run_ids": [
@@ -218,7 +218,7 @@
         "skipped_rows": []
       },
       "CW45": {
-        "csv": "results/real_rotation_runs.csv",
+        "csv": "results/aufgabe02/real_rotation_runs.csv",
         "run_range": "1:15",
         "run_id_prefix": "run_real_rot_cw45_",
         "selected_run_ids": [
@@ -241,7 +241,7 @@
         "skipped_rows": []
       },
       "CCW180": {
-        "csv": "results/real_rotation_runs.csv",
+        "csv": "results/aufgabe02/real_rotation_runs.csv",
         "run_range": "1:15",
         "run_id_prefix": "run_real_rot_ccw180_",
         "selected_run_ids": [

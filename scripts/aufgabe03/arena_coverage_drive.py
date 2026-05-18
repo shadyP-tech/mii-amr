@@ -54,7 +54,7 @@ TOPIC_TIMEOUT_SEC = 5.0
 STOP_PUBLISH_COUNT = 10
 STOP_PUBLISH_HZ = 10.0
 
-DEFAULT_RESULTS_CSV = Path("results/arena_coverage_runs.csv")
+DEFAULT_RESULTS_CSV = Path("results/aufgabe03/arena_coverage_runs.csv")
 
 CSV_HEADER = [
     "timestamp",
@@ -721,7 +721,7 @@ def parse_args(argv):
     parser.add_argument(
         "--no-log",
         action="store_true",
-        help="Do not append a row to results/arena_coverage_runs.csv.",
+        help="Do not append a row to results/aufgabe03/arena_coverage_runs.csv.",
     )
     args = parser.parse_args(argv)
 

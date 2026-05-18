@@ -5,7 +5,7 @@
     "covariance": "m^2"
   },
   "data_selection": {
-    "rotation_csv": "results/real_rotation_runs.csv",
+    "rotation_csv": "results/aufgabe02/real_rotation_runs.csv",
     "run_range": "1:15",
     "run_id_prefix": "run_real_rot_cw45_",
     "selected_run_ids": [

@@ -12,8 +12,10 @@ import re
 from pathlib import Path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_RESULTS_CSV = PROJECT_ROOT / "results" / "real_scripted_drive_runs.csv"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_RESULTS_CSV = (
+    PROJECT_ROOT / "results" / "aufgabe02" / "real_scripted_drive_runs.csv"
+)
 DEFAULT_BAGS_DIR = PROJECT_ROOT / "bags" / "real"
 DEFAULT_PREFIX = "run_real_"
 DEFAULT_WIDTH = 3

@@ -34,8 +34,8 @@ except ImportError:
     tf2_ros = None
 
 
-DEFAULT_WAYPOINTS_CSV = Path("results/aufgabe03_waypoints.csv")
-DEFAULT_RESULTS_CSV = Path("results/aufgabe03_waypoint_follow_runs.csv")
+DEFAULT_WAYPOINTS_CSV = Path("results/aufgabe03/aufgabe03_waypoints.csv")
+DEFAULT_RESULTS_CSV = Path("results/aufgabe03/aufgabe03_waypoint_follow_runs.csv")
 
 DEFAULT_LINEAR_SPEED_MPS = 0.05
 DEFAULT_MIN_LINEAR_SPEED_MPS = 0.015

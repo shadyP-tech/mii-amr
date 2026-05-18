@@ -2,7 +2,7 @@
 """
 Run the real TurtleBot supervisor-route validation experiment.
 
-The route action list is loaded from ``results/supervisor_route_prediction.json``.
+The route action list is loaded from ``results/aufgabe02/supervisor_route_prediction.json``.
 This runner is intended for the final-target camera setup: the camera tracker
 does not validate the start pose, but it must publish a fresh final pose after
 the robot reaches the target area.
@@ -31,9 +31,9 @@ except ImportError:
     Odometry = object
 
 
-DEFAULT_PREDICTION_FILE = Path("results/supervisor_route_prediction.json")
-DEFAULT_RESULTS_CSV = Path("results/supervisor_route_validation_runs.csv")
-DEFAULT_TRACKER_POSE_FILE = Path("results/latest_tracker_pose.csv")
+DEFAULT_PREDICTION_FILE = Path("results/aufgabe02/supervisor_route_prediction.json")
+DEFAULT_RESULTS_CSV = Path("results/aufgabe02/supervisor_route_validation_runs.csv")
+DEFAULT_TRACKER_POSE_FILE = Path("results/aufgabe02/latest_tracker_pose.csv")
 
 DEFAULT_LINEAR_SPEED_MPS = 0.10
 DEFAULT_ANGULAR_SPEED_RADPS = 0.30
@@ -921,7 +921,7 @@ def main(argv=None):
                 node.get_logger().error(
                     "No fresh valid final tracker pose was found. "
                     "Check that vision_tracker/main.py is running and that "
-                    "results/latest_tracker_pose.csv is visible on this host."
+                    "results/aufgabe02/latest_tracker_pose.csv is visible on this host."
                 )
             else:
                 node.get_logger().info(

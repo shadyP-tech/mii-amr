@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 
 
-DEFAULT_ROTATION_CSV = "results/real_rotation_runs.csv"
+DEFAULT_ROTATION_CSV = "results/aufgabe02/real_rotation_runs.csv"
 DEFAULT_RUN_RANGE = "18:32"
 DEFAULT_TRACKER_YAW_SIGN = -1.0
 
@@ -481,11 +481,11 @@ def parse_args():
     )
     parser.add_argument(
         "--output-json",
-        default="results/real_rotation_model.json",
+        default="results/aufgabe02/real_rotation_model.json",
     )
     parser.add_argument(
         "--summary-csv",
-        default="results/real_rotation_model_summary.csv",
+        default="results/aufgabe02/real_rotation_model_summary.csv",
     )
     return parser.parse_args()
 

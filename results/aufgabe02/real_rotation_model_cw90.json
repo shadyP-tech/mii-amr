@@ -5,8 +5,9 @@
     "covariance": "m^2"
   },
   "data_selection": {
-    "rotation_csv": "results/real_rotation_runs.csv",
+    "rotation_csv": "results/aufgabe02/real_rotation_runs.csv",
     "run_range": "18:32",
+    "run_id_prefix": "run_real_rot_cw90_",
     "selected_run_ids": [
       "run_real_rot_cw90_018",
       "run_real_rot_cw90_019",
@@ -64,6 +65,24 @@
     "drift_std": [
       0.0005667328420743935,
       0.0006093528729804522
+    ],
+    "local_drift_mu": [
+      -0.007366634803841582,
+      0.010083528308363605
+    ],
+    "local_drift_sigma": [
+      [
+        3.5241765079737244e-07,
+        5.642075010187376e-08
+      ],
+      [
+        5.642075010187376e-08,
+        3.2218840769504e-07
+      ]
+    ],
+    "local_drift_std": [
+      0.0005936477497619042,
+      0.0005676164265549756
     ],
     "drift_magnitude_m": {
       "mean": 0.012502549756747623,

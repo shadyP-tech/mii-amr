@@ -8,7 +8,7 @@
     "motion_primitive_error_model": "robot local start frame"
   },
   "data_selection": {
-    "real_csv": "results/real_scripted_drive_runs.csv",
+    "real_csv": "results/aufgabe02/real_scripted_drive_runs.csv",
     "real_run_range": "21:50",
     "selected_real_run_ids": [
       "run_real_021",
@@ -43,7 +43,7 @@
       "run_real_050"
     ],
     "skipped_real_rows": [],
-    "sim_csv": "results/scripted_drive_runs.csv",
+    "sim_csv": "results/aufgabe02/scripted_drive_runs.csv",
     "sim_last_n": 15,
     "selected_sim_run_ids": [
       "simulation_run_linear-forward_0.1_30cm_01",

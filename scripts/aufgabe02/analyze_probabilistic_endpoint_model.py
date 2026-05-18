@@ -954,32 +954,32 @@ def parse_args():
     )
     parser.add_argument(
         "--real-csv",
-        default="results/real_scripted_drive_runs.csv",
+        default="results/aufgabe02/real_scripted_drive_runs.csv",
     )
     parser.add_argument("--real-run-range", default="21:50")
-    parser.add_argument("--sim-csv", default="results/scripted_drive_runs.csv")
+    parser.add_argument("--sim-csv", default="results/aufgabe02/scripted_drive_runs.csv")
     parser.add_argument("--sim-last-n", type=int, default=15)
     parser.add_argument("--step-distance-m", type=float, default=DEFAULT_STEP_DISTANCE_M)
     parser.add_argument("--compare-sim-real", action="store_true")
     parser.add_argument(
         "--output-json",
-        default="results/probabilistic_endpoint_model.json",
+        default="results/aufgabe02/probabilistic_endpoint_model.json",
     )
     parser.add_argument(
         "--summary-csv",
-        default="results/probabilistic_endpoint_model_summary.csv",
+        default="results/aufgabe02/probabilistic_endpoint_model_summary.csv",
     )
     parser.add_argument(
         "--endpoint-plot",
-        default="results/real_endpoint_gaussian_ellipse.png",
+        default="results/aufgabe02/real_endpoint_gaussian_ellipse.png",
     )
     parser.add_argument(
         "--motion-error-plot",
-        default="results/real_motion_error_gaussian_ellipse.png",
+        default="results/aufgabe02/real_motion_error_gaussian_ellipse.png",
     )
     parser.add_argument(
         "--sim-real-plot",
-        default="results/sim_vs_real_displacement_error_scatter.png",
+        default="results/aufgabe02/sim_vs_real_displacement_error_scatter.png",
     )
     return parser.parse_args()
 

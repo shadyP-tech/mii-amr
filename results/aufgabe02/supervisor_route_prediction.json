@@ -4,7 +4,7 @@
     "angle": "deg",
     "covariance": "m^2"
   },
-  "model": "results/probabilistic_motion_primitives_model.json",
+  "model": "results/aufgabe02/probabilistic_motion_primitives_model.json",
   "actions": [
     "F30",
     "F50",

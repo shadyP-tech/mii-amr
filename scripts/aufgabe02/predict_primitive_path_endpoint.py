@@ -1254,7 +1254,7 @@ def parse_args():
     )
     parser.add_argument(
         "--model",
-        default="results/probabilistic_motion_primitives_model.json",
+        default="results/aufgabe02/probabilistic_motion_primitives_model.json",
     )
     parser.add_argument("--actions", required=True)
     parser.add_argument(
@@ -1271,15 +1271,15 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument(
         "--output-json",
-        default="results/primitive_path_prediction.json",
+        default="results/aufgabe02/primitive_path_prediction.json",
     )
     parser.add_argument(
         "--summary-csv",
-        default="results/primitive_path_prediction_summary.csv",
+        default="results/aufgabe02/primitive_path_prediction_summary.csv",
     )
     parser.add_argument(
         "--plot",
-        default="results/primitive_path_prediction.png",
+        default="results/aufgabe02/primitive_path_prediction.png",
     )
     parser.add_argument("--validation-csv", default=None)
     parser.add_argument("--validation-run-id", default=None)

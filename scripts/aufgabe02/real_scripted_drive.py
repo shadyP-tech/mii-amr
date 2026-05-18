@@ -24,8 +24,8 @@ DEFAULT_LINEAR_SPEED_MPS = 0.10
 DEFAULT_FORWARD_DURATION_SEC = 3.0
 DEFAULT_ROTATION_ANGLE_DEG = -90.0
 DEFAULT_ROTATION_ANGULAR_SPEED_RADPS = 0.30
-FORWARD_RESULTS_CSV = "results/real_scripted_drive_runs.csv"
-ROTATION_RESULTS_CSV = "results/real_rotation_runs.csv"
+FORWARD_RESULTS_CSV = "results/aufgabe02/real_scripted_drive_runs.csv"
+ROTATION_RESULTS_CSV = "results/aufgabe02/real_rotation_runs.csv"
 
 FORWARD_CSV_HEADER = [
     "timestamp",
@@ -197,7 +197,7 @@ def append_csv_row(file_path, header, row):
         writer.writerow(row)
 
 
-def read_tracker_pose(path="results/latest_tracker_pose.csv"):
+def read_tracker_pose(path="results/aufgabe02/latest_tracker_pose.csv"):
     if not os.path.exists(path):
         return None
 

@@ -20,10 +20,10 @@ CELL_FREE = 0
 CELL_OCCUPIED = 1
 CELL_UNKNOWN = 2
 
-DEFAULT_MAP = Path("maps/aufgabe3/arena_1p898x3p9_auto.yaml")
-DEFAULT_OUTPUT_CSV = Path("results/aufgabe03_planned_path.csv")
-DEFAULT_OUTPUT_WAYPOINTS_CSV = Path("results/aufgabe03_waypoints.csv")
-DEFAULT_OUTPUT_PPM = Path("results/aufgabe03_planned_path.ppm")
+DEFAULT_MAP = Path("maps/aufgabe03/arena_1p898x3p9_auto.yaml")
+DEFAULT_OUTPUT_CSV = Path("results/aufgabe03/aufgabe03_planned_path.csv")
+DEFAULT_OUTPUT_WAYPOINTS_CSV = Path("results/aufgabe03/aufgabe03_waypoints.csv")
+DEFAULT_OUTPUT_PPM = Path("results/aufgabe03/aufgabe03_planned_path.ppm")
 
 DEFAULT_INFLATE_RADIUS_M = 0.18
 DEFAULT_SNAP_RADIUS_M = 0.30

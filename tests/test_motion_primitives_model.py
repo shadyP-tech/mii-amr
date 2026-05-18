@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "scripts" / "aufgabe02"))
 
 import build_motion_primitives_model as builder  # noqa: E402
 import predict_primitive_path_endpoint as predictor  # noqa: E402
@@ -428,7 +428,7 @@ class MotionPrimitivesModelTest(unittest.TestCase):
                     {
                         "timestamp": "2026-05-07T14:32:50",
                         "run_id": "supervisor_validation_003",
-                        "prediction_file": "results/supervisor_route_prediction.json",
+                        "prediction_file": "results/aufgabe02/supervisor_route_prediction.json",
                         "actions": "F30,CW45",
                         "model_actions": "F30,CCW45",
                         "num_actions": "2",

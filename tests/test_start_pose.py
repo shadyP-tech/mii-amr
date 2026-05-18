@@ -124,6 +124,10 @@ class StartPoseTest(unittest.TestCase):
             'LATEST_TRACKER_POSE_FILE = os.path.join(RESULTS_DIR, "latest_tracker_pose.csv")',
             config_text,
         )
+        self.assertIn(
+            'RESULTS_DIR = os.path.join(PROJECT_ROOT, "results", "aufgabe02")',
+            config_text,
+        )
 
 
 if __name__ == "__main__":

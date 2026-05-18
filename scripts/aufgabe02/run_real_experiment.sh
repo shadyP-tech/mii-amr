@@ -3,7 +3,7 @@
 set -e
 
 if [ "$#" -gt 1 ]; then
-  echo "Usage: ./scripts/run_real_experiment.sh [run_id]"
+  echo "Usage: ./scripts/aufgabe02/run_real_experiment.sh [run_id]"
   exit 1
 fi
 
@@ -16,14 +16,14 @@ RUN_DURATION_SEC="${RUN_DURATION_SEC:-3.0}"
 
 cd /workspace/mii-amr
 
-mkdir -p bags/real results
+mkdir -p bags/real results/aufgabe02
 
 if [ -z "$RUN_ID" ]; then
   if [ "$RUN_MODE" = "rotate-in-place" ] || [ "$RUN_MODE" = "rotation" ] || [ "$RUN_MODE" = "rotate" ]; then
     RUN_PREFIX="$(python3 -c 'import sys; angle = float(sys.argv[1]); direction = "cw" if angle < 0 else "ccw"; amount = ("%g" % abs(angle)).replace(".", "p"); print(f"run_real_rot_{direction}{amount}_")' "$RUN_ANGLE_DEG")"
-    RUN_ID="$(python3 scripts/next_real_run_id.py --results-csv results/real_rotation_runs.csv --prefix "$RUN_PREFIX")"
+    RUN_ID="$(python3 scripts/common/next_real_run_id.py --results-csv results/aufgabe02/real_rotation_runs.csv --prefix "$RUN_PREFIX")"
   else
-    RUN_ID="$(python3 scripts/next_real_run_id.py)"
+    RUN_ID="$(python3 scripts/common/next_real_run_id.py)"
   fi
 fi
 
@@ -53,13 +53,13 @@ echo "Start vision_tracker/main.py in another terminal before continuing."
 python3 vision_tracker/start_pose_gate.py "$RUN_ID"
 
 echo "Starting bag recording for $RUN_ID..."
-ros2 bag record -o "bags/real/$RUN_ID" /cmd_vel /odom /imu /battery_state > "results/${RUN_ID}_bag.log" 2>&1 &
+ros2 bag record -o "bags/real/$RUN_ID" /cmd_vel /odom /imu /battery_state > "results/aufgabe02/${RUN_ID}_bag.log" 2>&1 &
 BAG_PID=$!
 
 sleep 2
 
 echo "Running real scripted drive..."
-python3 scripts/real_scripted_drive.py "$RUN_ID"
+python3 scripts/aufgabe02/real_scripted_drive.py "$RUN_ID"
 
 sleep 1
 

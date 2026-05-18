@@ -21,11 +21,9 @@ venv.bak/
 bags/
 scripts/bags/
 
-# experiment logs
-results/*_bag.log
-results/*.csvresults/latest_tracker_pose.csv
-results/latest_tracker_pose.csv
-
-results/latest_tracker_pose.sample.csv
+# experiment runtime outputs
+results/**/*_bag.log
+results/**/latest_tracker_pose.csv
+results/**/latest_tracker_pose.sample.csv
 .codex/
 .codex

@@ -6,7 +6,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(BASE_DIR)
 DATA_DIR = os.path.join(BASE_DIR, "data")
 HOMOGRAPHY_FILE = os.path.join(DATA_DIR, "homography.npz")
-RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
+RESULTS_DIR = os.path.join(PROJECT_ROOT, "results", "aufgabe02")
 LATEST_TRACKER_POSE_FILE = os.path.join(RESULTS_DIR, "latest_tracker_pose.csv")
 START_POSE_CHECKS_FILE = os.path.join(RESULTS_DIR, "real_start_pose_checks.csv")
 

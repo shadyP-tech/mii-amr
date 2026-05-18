@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "scripts" / "aufgabe02"))
 
 import real_scripted_drive  # noqa: E402
 
@@ -20,7 +20,7 @@ class RealScriptedDriveConfigTest(unittest.TestCase):
         self.assertAlmostEqual(motion["linear_x_mps"], 0.0)
         self.assertAlmostEqual(motion["angular_z_radps"], -0.3)
         self.assertAlmostEqual(motion["duration_sec"], math.pi / 2 / 0.3)
-        self.assertEqual(motion["results_csv"], "results/real_rotation_runs.csv")
+        self.assertEqual(motion["results_csv"], "results/aufgabe02/real_rotation_runs.csv")
 
     def test_counterclockwise_rotation_uses_positive_angular_z(self):
         motion = real_scripted_drive.configured_motion({
@@ -44,7 +44,10 @@ class RealScriptedDriveConfigTest(unittest.TestCase):
         self.assertAlmostEqual(motion["linear_x_mps"], 0.1)
         self.assertAlmostEqual(motion["angular_z_radps"], 0.0)
         self.assertAlmostEqual(motion["duration_sec"], 3.0)
-        self.assertEqual(motion["results_csv"], "results/real_scripted_drive_runs.csv")
+        self.assertEqual(
+            motion["results_csv"],
+            "results/aufgabe02/real_scripted_drive_runs.csv",
+        )
 
     def test_pose_delta_handles_clockwise_yaw_wrap_and_drift(self):
         start_pose = {"x": 0.2, "y": 0.1, "yaw_deg": 90.0}

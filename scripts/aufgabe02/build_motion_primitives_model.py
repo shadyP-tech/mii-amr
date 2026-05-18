@@ -450,12 +450,12 @@ def parse_args():
     )
     parser.add_argument(
         "--forward-csv",
-        default="results/real_scripted_drive_runs.csv",
+        default="results/aufgabe02/real_scripted_drive_runs.csv",
     )
     parser.add_argument("--forward-run-range", default="21:50")
     parser.add_argument(
         "--rotation-csv",
-        default="results/real_rotation_runs.csv",
+        default="results/aufgabe02/real_rotation_runs.csv",
     )
     parser.add_argument("--cw-prefix", default="run_real_rot_cw90_")
     parser.add_argument("--cw-run-range", default="18:32")
@@ -472,11 +472,11 @@ def parse_args():
     parser.add_argument("--tracker-yaw-sign", type=float, default=-1.0)
     parser.add_argument(
         "--output-json",
-        default="results/probabilistic_motion_primitives_model.json",
+        default="results/aufgabe02/probabilistic_motion_primitives_model.json",
     )
     parser.add_argument(
         "--summary-csv",
-        default="results/probabilistic_motion_primitives_model_summary.csv",
+        default="results/aufgabe02/probabilistic_motion_primitives_model_summary.csv",
     )
     return parser.parse_args()
 

@@ -3,31 +3,31 @@
 set -euo pipefail
 
 if [ "$#" -gt 1 ]; then
-  echo "Usage: ./scripts/run_supervisor_validation.sh [run_id]"
+  echo "Usage: ./scripts/aufgabe02/run_supervisor_validation.sh [run_id]"
   exit 1
 fi
 
 RUN_ID="${1:-}"
 PROJECT_DIR="${MII_AMR_PROJECT_DIR:-/workspace/mii-amr}"
-PREDICTION_FILE="${SUPERVISOR_PREDICTION_FILE:-results/supervisor_route_prediction.json}"
-RESULTS_CSV="${SUPERVISOR_VALIDATION_RESULTS_CSV:-results/supervisor_route_validation_runs.csv}"
-TRACKER_POSE_FILE="${TRACKER_POSE_FILE:-results/latest_tracker_pose.csv}"
+PREDICTION_FILE="${SUPERVISOR_PREDICTION_FILE:-results/aufgabe02/supervisor_route_prediction.json}"
+RESULTS_CSV="${SUPERVISOR_VALIDATION_RESULTS_CSV:-results/aufgabe02/supervisor_route_validation_runs.csv}"
+TRACKER_POSE_FILE="${TRACKER_POSE_FILE:-results/aufgabe02/latest_tracker_pose.csv}"
 LINEAR_SPEED="${SUPERVISOR_LINEAR_SPEED:-0.10}"
 ANGULAR_SPEED="${SUPERVISOR_ANGULAR_SPEED:-0.30}"
 FINAL_TRACKER_TIMEOUT_SEC="${FINAL_TRACKER_TIMEOUT_SEC:-90}"
 
 cd "$PROJECT_DIR"
 
-mkdir -p bags/real results
+mkdir -p bags/real results/aufgabe02
 
 if [ -z "$RUN_ID" ]; then
-  RUN_ID="$(python3 scripts/next_real_run_id.py \
+  RUN_ID="$(python3 scripts/common/next_real_run_id.py \
     --results-csv "$RESULTS_CSV" \
     --prefix supervisor_validation_)"
 fi
 
 BAG_DIR="bags/real/$RUN_ID"
-BAG_LOG="results/${RUN_ID}_bag.log"
+BAG_LOG="results/aufgabe02/${RUN_ID}_bag.log"
 
 if [ -e "$BAG_DIR" ]; then
   echo "ERROR: bag output already exists: $BAG_DIR"
@@ -113,7 +113,7 @@ BAG_PID=$!
 sleep 2
 
 echo "Running supervisor validation route..."
-python3 scripts/supervisor_route_validation.py \
+python3 scripts/aufgabe02/supervisor_route_validation.py \
   --run-id "$RUN_ID" \
   --prediction "$PREDICTION_FILE" \
   --results-csv "$RESULTS_CSV" \

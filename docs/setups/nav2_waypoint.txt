@@ -1,0 +1,160 @@
+Below is the full lab terminal setup.
+
+**Safety First**
+Before running the follower: clear the arena, keep an operator next to the TurtleBot, keep `Ctrl+C` ready, and keep a physical stop option available.
+
+**Terminal A: Robot Bringup**
+Skip this if robot bringup is already running.
+
+```bash
+cd /workspace/mii-amr
+
+source /opt/ros/humble/setup.bash
+source /opt/tb3_src_ws/install/setup.bash
+
+export ROS_DOMAIN_ID=30
+export ROS_LOCALHOST_ONLY=0
+export TURTLEBOT3_MODEL=burger
+export LDS_MODEL=LDS-01
+
+ros2 launch turtlebot3_bringup robot.launch.py
+```
+
+**Terminal B: Nav2 Localization With Saved Map**
+Use the map you generated:
+
+```bash
+cd /workspace/mii-amr
+
+source /opt/ros/humble/setup.bash
+source /opt/tb3_src_ws/install/setup.bash
+
+export ROS_DOMAIN_ID=30
+export ROS_LOCALHOST_ONLY=0
+export TURTLEBOT3_MODEL=burger
+export LDS_MODEL=LDS-01
+
+ros2 launch turtlebot3_navigation2 navigation2.launch.py \
+  use_sim_time:=False \
+  map:=$PWD/maps/aufgabe3/arena_1p898x3p9_auto.yaml
+```
+
+In RViz:
+1. Use **2D Pose Estimate**.
+2. Align the robot pose with the real robot.
+3. Confirm `/scan` overlaps the map walls.
+4. Do **not** send a Nav2 Goal while using your custom follower.
+
+**Terminal S: Safety Stop**
+Keep this ready. Run it immediately if needed.
+
+```bash
+source /opt/ros/humble/setup.bash
+source /opt/tb3_src_ws/install/setup.bash
+
+export ROS_DOMAIN_ID=30
+export ROS_LOCALHOST_ONLY=0
+
+ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist \
+  "{linear: {x: 0.0}, angular: {z: 0.0}}"
+```
+
+**Terminal C: Pre-Run Checks**
+Run these before motion:
+
+```bash
+cd /workspace/mii-amr
+
+source /opt/ros/humble/setup.bash
+source /opt/tb3_src_ws/install/setup.bash
+
+export ROS_DOMAIN_ID=30
+export ROS_LOCALHOST_ONLY=0
+export TURTLEBOT3_MODEL=burger
+export LDS_MODEL=LDS-01
+
+ros2 topic echo --once /amcl_pose
+ros2 topic echo --once /scan
+ros2 run tf2_ros tf2_echo map base_footprint
+```
+
+Let `tf2_echo` print a valid transform, then stop it with `Ctrl+C`.
+
+Check that no active Nav2 controller is competing on `/cmd_vel`:
+
+```bash
+ros2 topic info /cmd_vel --verbose
+```
+
+If you see Nav2 as a publisher, make sure there is no active Nav2 goal. Your script will publish `/cmd_vel` itself.
+
+**Terminal D: Preview Waypoint Follower**
+```bash
+cd /workspace/mii-amr
+
+source /opt/ros/humble/setup.bash
+source /opt/tb3_src_ws/install/setup.bash
+
+export ROS_DOMAIN_ID=30
+export ROS_LOCALHOST_ONLY=0
+export TURTLEBOT3_MODEL=burger
+export LDS_MODEL=LDS-01
+
+python3 scripts/follow_planned_waypoints.py \
+  --waypoints results/aufgabe03_waypoints.csv \
+  --dry-run
+```
+
+Expected route from the current CSV:
+
+```text
+1. x=0.555, y=-0.015
+2. x=0.855, y=0.285
+3. x=1.005, y=0.285
+```
+
+**Terminal D: Run Physical Waypoint Following**
+Only run after RViz alignment and checks pass.
+
+```bash
+python3 scripts/follow_planned_waypoints.py \
+  --waypoints results/aufgabe03_waypoints.csv \
+  --run-id waypoint_follow_001
+```
+
+When prompted, type:
+
+```text
+RUN
+```
+
+**Terminal D: If AMCL Covariance Is Noisy**
+The default only logs localization covariance warnings. If you want strict failure on bad localization:
+
+```bash
+python3 scripts/follow_planned_waypoints.py \
+  --waypoints results/aufgabe03_waypoints.csv \
+  --run-id waypoint_follow_001_strict \
+  --fail-on-bad-localization
+```
+
+**After The Run**
+Check the run log:
+
+```bash
+tail -n 3 results/aufgabe03_waypoint_follow_runs.csv
+```
+
+The important fields are:
+
+```text
+status
+reached_count
+blocked_waypoint_index
+timeout_waypoint_index
+base_frame_used
+final_x/final_y/final_yaw_deg
+min_scan_range_m
+p05_scan_range_m
+amcl_var_x/amcl_var_y/amcl_var_yaw
+```

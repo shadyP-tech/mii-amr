@@ -3,8 +3,8 @@
 set -euo pipefail
 
 if [ "$#" -ne 1 ] || [[ ! "$1" =~ ^[1-9][0-9]*$ ]]; then
-  echo "Usage: ./scripts/run_experiment.sh <number_of_runs>"
-  echo "Example: ./scripts/run_experiment.sh 15"
+  echo "Usage: ./scripts/aufgabe02/run_experiment.sh <number_of_runs>"
+  echo "Example: ./scripts/aufgabe02/run_experiment.sh 15"
   exit 1
 fi
 
@@ -21,7 +21,7 @@ SIM_START_YAW_DEG="${SIM_START_YAW_DEG:-180.0}"
 SIM_RESET_SETTLE_SEC="${SIM_RESET_SETTLE_SEC:-1}"
 RUN_NUMBER_WIDTH="${#RUN_COUNT}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 
 export RUN_MODE RUN_SPEED RUN_DISTANCE
 export SIM_START_X SIM_START_Y SIM_START_YAW_DEG
@@ -76,7 +76,7 @@ source_ros_setup() {
 cd "$PROJECT_ROOT"
 source_ros_setup
 
-mkdir -p bags results
+mkdir -p bags results/aufgabe02
 
 require_ros_graph() {
   local missing=0
@@ -177,19 +177,19 @@ run_experiment() {
     fi
   done
   echo "Recording topics: ${bag_topics[*]}"
-  ros2 bag record -o "bags/$run_id" "${bag_topics[@]}" > "results/${run_id}_bag.log" 2>&1 &
+  ros2 bag record -o "bags/$run_id" "${bag_topics[@]}" > "results/aufgabe02/${run_id}_bag.log" 2>&1 &
   bag_pid=$!
 
   sleep 2
 
   if ! kill -0 "$bag_pid" 2>/dev/null; then
-    echo "Bag recording failed for $run_id. See results/${run_id}_bag.log."
+    echo "Bag recording failed for $run_id. See results/aufgabe02/${run_id}_bag.log."
     wait "$bag_pid" || true
     return 1
   fi
 
   echo "Running scripted drive..."
-  python3 scripts/scripted_drive.py "$run_id" || drive_status=$?
+  python3 scripts/aufgabe02/scripted_drive.py "$run_id" || drive_status=$?
 
   sleep 1
 
