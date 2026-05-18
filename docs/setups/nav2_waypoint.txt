@@ -36,14 +36,18 @@ export LDS_MODEL=LDS-01
 
 ros2 launch turtlebot3_navigation2 navigation2.launch.py \
   use_sim_time:=False \
-  map:=$PWD/maps/aufgabe3/arena_1p898x3p9_auto.yaml
+  map:=$PWD/maps/aufgabe03/arena_1p898x3p9_auto.yaml
 ```
 
-In RViz:
+For the manual follower/debug workflow in RViz:
 1. Use **2D Pose Estimate**.
 2. Align the robot pose with the real robot.
 3. Confirm `/scan` overlaps the map walls.
 4. Do **not** send a Nav2 Goal while using your custom follower.
+
+For the two-stage coordinator below, RViz 2D Pose Estimate is not required in
+the normal global-localization mode. Keep RViz open if you want to inspect
+`/scan`, particles, and the map alignment.
 
 **Terminal S: Safety Stop**
 Keep this ready. Run it immediately if needed.
@@ -73,12 +77,10 @@ export ROS_LOCALHOST_ONLY=0
 export TURTLEBOT3_MODEL=burger
 export LDS_MODEL=LDS-01
 
-ros2 topic echo --once /amcl_pose
 ros2 topic echo --once /scan
-ros2 run tf2_ros tf2_echo map base_footprint
+ros2 service list | grep reinitialize_global_localization
+ros2 action list | grep navigate_to_pose
 ```
-
-Let `tf2_echo` print a valid transform, then stop it with `Ctrl+C`.
 
 Check that no active Nav2 controller is competing on `/cmd_vel`:
 
@@ -88,7 +90,7 @@ ros2 topic info /cmd_vel --verbose
 
 If you see Nav2 as a publisher, make sure there is no active Nav2 goal. Your script will publish `/cmd_vel` itself.
 
-**Terminal D: Preview Waypoint Follower**
+**Terminal D: Preview Two-Stage Coordinator**
 ```bash
 cd /workspace/mii-amr
 
@@ -100,26 +102,26 @@ export ROS_LOCALHOST_ONLY=0
 export TURTLEBOT3_MODEL=burger
 export LDS_MODEL=LDS-01
 
-python3 scripts/follow_planned_waypoints.py \
-  --waypoints results/aufgabe03_waypoints.csv \
+python3 scripts/aufgabe03/two_stage_waypoint_run.py \
+  --waypoints results/aufgabe03/aufgabe03_waypoints.csv \
+  --run-id waypoint_two_stage_dry_001 \
   --dry-run
 ```
 
-Expected route from the current CSV:
+Expected staging target from the current CSV:
 
 ```text
-1. x=0.555, y=-0.015
-2. x=0.855, y=0.285
-3. x=1.005, y=0.285
+waypoint 0: x=0.005, y=-0.015
+computed staging yaw: 0.0 deg
 ```
 
-**Terminal D: Run Physical Waypoint Following**
-Only run after RViz alignment and checks pass.
+**Terminal D: Run Two-Stage Waypoint Following**
+Only run after bringup, Nav2, and the pre-run checks pass.
 
 ```bash
-python3 scripts/follow_planned_waypoints.py \
-  --waypoints results/aufgabe03_waypoints.csv \
-  --run-id waypoint_follow_001
+python3 scripts/aufgabe03/two_stage_waypoint_run.py \
+  --waypoints results/aufgabe03/aufgabe03_waypoints.csv \
+  --run-id waypoint_two_stage_001
 ```
 
 When prompted, type:
@@ -128,21 +130,44 @@ When prompted, type:
 RUN
 ```
 
-**Terminal D: If AMCL Covariance Is Noisy**
-The default only logs localization covariance warnings. If you want strict failure on bad localization:
+The coordinator will:
+
+```text
+global AMCL localization -> bounded scan-safe spin -> Nav2 to waypoint 0 -> custom follower
+```
+
+If global localization is ambiguous in the arena, use known-start mode instead:
 
 ```bash
-python3 scripts/follow_planned_waypoints.py \
-  --waypoints results/aufgabe03_waypoints.csv \
-  --run-id waypoint_follow_001_strict \
-  --fail-on-bad-localization
+python3 scripts/aufgabe03/two_stage_waypoint_run.py \
+  --waypoints results/aufgabe03/aufgabe03_waypoints.csv \
+  --run-id waypoint_two_stage_known_001 \
+  --localization-mode known-start \
+  --initial-pose-x 0.0 \
+  --initial-pose-y 0.0 \
+  --initial-pose-yaw-deg 0.0
 ```
 
 **After The Run**
-Check the run log:
+Check the coordinator log:
 
 ```bash
-tail -n 3 results/aufgabe03_waypoint_follow_runs.csv
+tail -n 3 results/aufgabe03/aufgabe03_two_stage_runs.csv
+```
+
+Also check the follower log:
+
+```bash
+tail -n 3 results/aufgabe03/aufgabe03_waypoint_follow_runs.csv
+```
+
+**Manual Follower Fallback**
+Only run this after RViz alignment and checks pass:
+
+```bash
+python3 scripts/aufgabe03/follow_planned_waypoints.py \
+  --waypoints results/aufgabe03/aufgabe03_waypoints.csv \
+  --run-id waypoint_follow_001
 ```
 
 The important fields are:
