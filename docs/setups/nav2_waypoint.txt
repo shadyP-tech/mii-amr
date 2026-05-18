@@ -15,7 +15,7 @@ source /opt/tb3_src_ws/install/setup.bash
 export ROS_DOMAIN_ID=30
 export ROS_LOCALHOST_ONLY=0
 export TURTLEBOT3_MODEL=burger
-export LDS_MODEL=LDS-01
+export LDS_MODEL=LDS-02
 
 ros2 launch turtlebot3_bringup robot.launch.py
 ```
@@ -32,7 +32,7 @@ source /opt/tb3_src_ws/install/setup.bash
 export ROS_DOMAIN_ID=30
 export ROS_LOCALHOST_ONLY=0
 export TURTLEBOT3_MODEL=burger
-export LDS_MODEL=LDS-01
+export LDS_MODEL=LDS-02
 
 ros2 launch turtlebot3_navigation2 navigation2.launch.py \
   use_sim_time:=False \
