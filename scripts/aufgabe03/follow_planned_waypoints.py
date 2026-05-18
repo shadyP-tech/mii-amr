@@ -37,27 +37,34 @@ except ImportError:
 DEFAULT_WAYPOINTS_CSV = Path("results/aufgabe03/aufgabe03_waypoints.csv")
 DEFAULT_RESULTS_CSV = Path("results/aufgabe03/aufgabe03_waypoint_follow_runs.csv")
 
-DEFAULT_LINEAR_SPEED_MPS = 0.05
-DEFAULT_MIN_LINEAR_SPEED_MPS = 0.015
-DEFAULT_LINEAR_GAIN = 0.6
-DEFAULT_MAX_ANGULAR_SPEED_RADPS = 0.30
-DEFAULT_YAW_GAIN = 1.5
-DEFAULT_WAYPOINT_TOLERANCE_M = 0.08
-DEFAULT_GOAL_TOLERANCE_M = 0.10
-DEFAULT_ROTATE_START_HEADING_ERROR_DEG = 15.0
-DEFAULT_ROTATE_STOP_HEADING_ERROR_DEG = 6.0
+DEFAULT_LINEAR_SPEED_MPS = 0.03
+DEFAULT_MIN_LINEAR_SPEED_MPS = 0.01
+DEFAULT_LINEAR_GAIN = 0.25
+DEFAULT_MAX_ANGULAR_SPEED_RADPS = 0.12
+DEFAULT_YAW_GAIN = 0.5
+DEFAULT_WAYPOINT_TOLERANCE_M = 0.12
+DEFAULT_GOAL_TOLERANCE_M = 0.12
+DEFAULT_ROTATE_START_HEADING_ERROR_DEG = 20.0
+DEFAULT_ROTATE_STOP_HEADING_ERROR_DEG = 4.0
+DEFAULT_FORWARD_YAW_DEADBAND_DEG = 4.0
+DEFAULT_FORWARD_STOP_HEADING_ERROR_DEG = 18.0
 DEFAULT_MIN_WAYPOINT_SPACING_M = 0.12
+DEFAULT_START_SELECTION = "path-progress"
+DEFAULT_START_ON_PATH_TOLERANCE_M = 0.25
 DEFAULT_SCAN_HALF_ANGLE_DEG = 35.0
 DEFAULT_HARD_STOP_RANGE_M = 0.16
 DEFAULT_MIN_SCAN_RANGE_M = 0.24
 DEFAULT_ROTATION_STOP_RANGE_M = 0.18
-DEFAULT_MAX_POSE_AGE_SEC = 1.0
-DEFAULT_MAX_SCAN_AGE_SEC = 0.5
-DEFAULT_MAX_AMCL_AGE_SEC = 1.0
+DEFAULT_MAX_POSE_AGE_SEC = 10.0
+DEFAULT_MAX_SCAN_AGE_SEC = 8.0
+DEFAULT_MAX_AMCL_AGE_SEC = 15.0
 DEFAULT_MAX_AMCL_VAR_X = 0.05
 DEFAULT_MAX_AMCL_VAR_Y = 0.05
 DEFAULT_MAX_AMCL_VAR_YAW = 0.10
-DEFAULT_MAX_WAYPOINT_TIME_SEC = 120.0
+DEFAULT_MAX_WAYPOINT_TIME_SEC = 180.0
+DEFAULT_MAX_TF_UPDATE_GAP_SEC = 5.0
+DEFAULT_TF_RECOVERY_TIME_SEC = 5.0
+DEFAULT_LOCALIZATION_RECOVERY_TIME_SEC = 5.0
 DEFAULT_CONTROL_RATE_HZ = 10.0
 DEFAULT_SETTLE_SEC = 0.5
 
@@ -65,7 +72,7 @@ TOPIC_TIMEOUT_SEC = 5.0
 STOP_PUBLISH_COUNT = 10
 STOP_PUBLISH_HZ = 10.0
 
-CSV_HEADER = [
+BASE_CSV_HEADER = [
     "timestamp",
     "run_id",
     "waypoint_csv",
@@ -94,6 +101,22 @@ CSV_HEADER = [
     "max_angular_speed_radps",
     "yaw_gain",
     "notes",
+]
+
+CSV_HEADER = BASE_CSV_HEADER + [
+    "selected_start_segment_index",
+    "selected_start_waypoint_index",
+    "distance_to_path_m",
+    "tf_pose_age_sec",
+    "max_tf_update_gap_sec",
+    "tf_stale_warning_count",
+    "localization_warning_count",
+    "recovery_pause_count",
+    "max_abs_yaw_error_deg",
+    "mean_abs_yaw_error_deg",
+    "rotate_seconds",
+    "forward_seconds",
+    "final_status_reason",
 ]
 
 
@@ -137,6 +160,38 @@ class AmclHealth:
     cov_y: float | None
     cov_yaw: float | None
     age_sec: float | None
+
+
+@dataclass(frozen=True)
+class StartSelection:
+    waypoints: list[Waypoint]
+    selected_segment_index: int | None
+    selected_waypoint_index: int | None
+    distance_to_path_m: float | None
+
+
+@dataclass
+class RuntimeDiagnostics:
+    selected_start_segment_index: int | None = None
+    selected_start_waypoint_index: int | None = None
+    distance_to_path_m: float | None = None
+    tf_pose_age_sec: float | None = None
+    max_tf_update_gap_sec: float | None = None
+    tf_stale_warning_count: int = 0
+    localization_warning_count: int = 0
+    recovery_pause_count: int = 0
+    max_abs_yaw_error_deg: float = 0.0
+    yaw_error_sum_deg: float = 0.0
+    yaw_error_count: int = 0
+    rotate_seconds: float = 0.0
+    forward_seconds: float = 0.0
+    final_status_reason: str = ""
+
+    @property
+    def mean_abs_yaw_error_deg(self):
+        if self.yaw_error_count == 0:
+            return 0.0
+        return self.yaw_error_sum_deg / self.yaw_error_count
 
 
 def clamp(value, lower, upper):
@@ -197,13 +252,16 @@ def velocity_command(
     linear_gain,
     max_angular_speed_radps,
     yaw_gain,
+    forward_yaw_deadband_deg=0.0,
+    forward_stop_heading_error_deg=180.0,
 ):
     angular_z = clamp(
         math.radians(yaw_error_deg) * yaw_gain,
         -max_angular_speed_radps,
         max_angular_speed_radps,
     )
-    if rotate_mode:
+    abs_yaw_error = abs(yaw_error_deg)
+    if rotate_mode or abs_yaw_error >= forward_stop_heading_error_deg:
         return 0.0, angular_z
 
     linear_x = clamp(
@@ -211,6 +269,17 @@ def velocity_command(
         min_linear_speed_mps,
         linear_speed_mps,
     )
+    if abs_yaw_error <= forward_yaw_deadband_deg:
+        return linear_x, 0.0
+
+    scale_span = forward_stop_heading_error_deg - forward_yaw_deadband_deg
+    heading_scale = 1.0
+    if scale_span > 0.0:
+        heading_scale = 1.0 - (abs_yaw_error - forward_yaw_deadband_deg) / scale_span
+    heading_scale = clamp(heading_scale, 0.0, 1.0)
+    linear_x *= heading_scale
+    if linear_x > 0.0:
+        linear_x = max(min_linear_speed_mps, linear_x)
     return linear_x, angular_z
 
 
@@ -278,6 +347,118 @@ def prepare_executable_waypoints(waypoints, skip_first=True, min_spacing_m=0.0):
             "Waypoint CSV needs at least two executable waypoints after processing"
         )
     return executable
+
+
+def distance_point_to_segment_m(point, segment_start, segment_end):
+    dx = segment_end.x - segment_start.x
+    dy = segment_end.y - segment_start.y
+    length_sq = dx * dx + dy * dy
+    if length_sq == 0.0:
+        return math.hypot(point.x - segment_start.x, point.y - segment_start.y), 0.0
+    projection = (
+        (point.x - segment_start.x) * dx + (point.y - segment_start.y) * dy
+    ) / length_sq
+    projection = clamp(projection, 0.0, 1.0)
+    closest_x = segment_start.x + projection * dx
+    closest_y = segment_start.y + projection * dy
+    return math.hypot(point.x - closest_x, point.y - closest_y), projection
+
+
+def nearest_path_segment(point, waypoints):
+    if len(waypoints) < 2:
+        raise ValueError("Need at least two waypoints for path-progress selection")
+
+    best = None
+    for segment_index in range(len(waypoints) - 1):
+        distance_m, projection = distance_point_to_segment_m(
+            point,
+            waypoints[segment_index],
+            waypoints[segment_index + 1],
+        )
+        candidate = (distance_m, segment_index, projection)
+        if best is None or candidate < best:
+            best = candidate
+    return best
+
+
+def select_path_progress_waypoints(
+    waypoints,
+    current_pose,
+    start_on_path_tolerance_m,
+    waypoint_tolerance_m,
+    goal_tolerance_m,
+    min_spacing_m=0.0,
+):
+    distance_to_path_m, segment_index, _projection = nearest_path_segment(
+        current_pose,
+        waypoints,
+    )
+    if distance_to_path_m > start_on_path_tolerance_m:
+        raise ValueError(
+            "Current pose is too far from the planned path: "
+            f"distance={distance_to_path_m:.3f} m, "
+            f"tolerance={start_on_path_tolerance_m:.3f} m"
+        )
+
+    next_index = min(segment_index + 1, len(waypoints) - 1)
+    while next_index < len(waypoints) - 1:
+        waypoint = waypoints[next_index]
+        distance_m = math.hypot(waypoint.x - current_pose.x, waypoint.y - current_pose.y)
+        if not waypoint_reached(
+            distance_m,
+            is_final=False,
+            waypoint_tolerance_m=waypoint_tolerance_m,
+            goal_tolerance_m=goal_tolerance_m,
+        ):
+            break
+        next_index += 1
+
+    selected = list(waypoints[next_index:])
+    if min_spacing_m > 0.0 and len(selected) > 1:
+        selected = downsample_waypoints(selected, min_spacing_m)
+    if not selected:
+        selected = [waypoints[-1]]
+
+    return StartSelection(
+        waypoints=selected,
+        selected_segment_index=segment_index,
+        selected_waypoint_index=selected[0].index,
+        distance_to_path_m=distance_to_path_m,
+    )
+
+
+def select_executable_waypoints(
+    waypoints,
+    current_pose,
+    start_selection,
+    start_on_path_tolerance_m,
+    waypoint_tolerance_m,
+    goal_tolerance_m,
+    min_spacing_m,
+    skip_first=True,
+):
+    if start_selection == "fixed-skip":
+        selected = prepare_executable_waypoints(
+            waypoints,
+            skip_first=skip_first,
+            min_spacing_m=min_spacing_m,
+        )
+        return StartSelection(
+            waypoints=selected,
+            selected_segment_index=None,
+            selected_waypoint_index=selected[0].index,
+            distance_to_path_m=None,
+        )
+    if start_selection == "path-progress":
+        return select_path_progress_waypoints(
+            waypoints,
+            current_pose,
+            start_on_path_tolerance_m,
+            waypoint_tolerance_m,
+            goal_tolerance_m,
+            min_spacing_m=min_spacing_m,
+        )
+    raise ValueError(f"unsupported start selection mode: {start_selection!r}")
 
 
 def percentile(values, percent):
@@ -418,7 +599,9 @@ def build_log_row(
     base_frame_used="",
     scan_safety=None,
     amcl_health=None,
+    diagnostics=None,
 ):
+    diagnostics = diagnostics or RuntimeDiagnostics()
     blocked = blocked_waypoint or Waypoint("", "", "")
     timeout = timeout_waypoint or Waypoint("", "", "")
     return [
@@ -446,6 +629,19 @@ def build_log_row(
         args.max_angular_speed,
         args.yaw_gain,
         notes,
+        "" if diagnostics.selected_start_segment_index is None else diagnostics.selected_start_segment_index,
+        "" if diagnostics.selected_start_waypoint_index is None else diagnostics.selected_start_waypoint_index,
+        "" if diagnostics.distance_to_path_m is None else diagnostics.distance_to_path_m,
+        "" if diagnostics.tf_pose_age_sec is None else diagnostics.tf_pose_age_sec,
+        "" if diagnostics.max_tf_update_gap_sec is None else diagnostics.max_tf_update_gap_sec,
+        diagnostics.tf_stale_warning_count,
+        diagnostics.localization_warning_count,
+        diagnostics.recovery_pause_count,
+        diagnostics.max_abs_yaw_error_deg,
+        diagnostics.mean_abs_yaw_error_deg,
+        diagnostics.rotate_seconds,
+        diagnostics.forward_seconds,
+        diagnostics.final_status_reason,
     ]
 
 
@@ -462,7 +658,11 @@ def append_csv_row(path, header, row):
     if file_exists:
         with path.open(newline="") as file:
             existing_header = next(csv.reader(file), None)
-        if existing_header != header:
+        if existing_header == header:
+            pass
+        elif existing_header and header[: len(existing_header)] == existing_header:
+            migrate_csv_header(path, header)
+        else:
             raise RuntimeError(
                 f"{path} has an unrecognized schema. Move or migrate it first."
             )
@@ -471,6 +671,20 @@ def append_csv_row(path, header, row):
         if not file_exists:
             writer.writerow(header)
         writer.writerow(row)
+
+
+def migrate_csv_header(path, header):
+    path = Path(path)
+    with path.open(newline="") as file:
+        rows = list(csv.reader(file))
+
+    migrated = [header]
+    for row in rows[1:]:
+        migrated.append(row + [""] * (len(header) - len(row)))
+
+    with path.open("w", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerows(migrated)
 
 
 class WaypointFollower(Node):
@@ -492,6 +706,11 @@ class WaypointFollower(Node):
         self.final_pose = None
         self.last_scan_safety = None
         self.last_amcl_health = None
+        self.diagnostics = RuntimeDiagnostics(
+            max_tf_update_gap_sec=args.max_tf_update_gap_sec,
+        )
+        self.last_tf_stamp_sec = None
+        self.last_tf_stamp_change_local_sec = None
 
         self.pub = self.create_publisher(Twist, "/cmd_vel", 10)
         self.scan_sub = self.create_subscription(
@@ -579,6 +798,30 @@ class WaypointFollower(Node):
                 errors.append(f"{frame}: {exc}")
         raise RuntimeError("Could not lookup TF pose: " + "; ".join(errors))
 
+    def update_tf_tracking(self, pose):
+        if pose.stamp_sec is None:
+            return None
+        now = time.time()
+        if self.last_tf_stamp_sec is None or pose.stamp_sec != self.last_tf_stamp_sec:
+            self.last_tf_stamp_sec = pose.stamp_sec
+            self.last_tf_stamp_change_local_sec = now
+        if self.last_tf_stamp_change_local_sec is None:
+            self.last_tf_stamp_change_local_sec = now
+        return now - self.last_tf_stamp_change_local_sec
+
+    def record_motion_sample(self, yaw_error_deg, linear_x, angular_z, sample_seconds):
+        abs_error = abs(yaw_error_deg)
+        self.diagnostics.max_abs_yaw_error_deg = max(
+            self.diagnostics.max_abs_yaw_error_deg,
+            abs_error,
+        )
+        self.diagnostics.yaw_error_sum_deg += abs_error
+        self.diagnostics.yaw_error_count += 1
+        if abs(linear_x) <= 1e-9 and abs(angular_z) > 1e-9:
+            self.diagnostics.rotate_seconds += sample_seconds
+        else:
+            self.diagnostics.forward_seconds += sample_seconds
+
     def current_amcl_health(self):
         if self.last_amcl is None:
             return AmclHealth(False, ["missing_amcl"], None, None, None, None)
@@ -602,8 +845,26 @@ class WaypointFollower(Node):
         if pose.stamp_sec is None:
             raise RuntimeError("TF pose has no usable timestamp.")
         pose_age = time.time() - pose.stamp_sec
+        self.diagnostics.tf_pose_age_sec = pose_age
         if pose_age > self.args.max_pose_age_sec:
-            raise RuntimeError(f"TF pose is stale: age={pose_age:.3f} sec")
+            self.diagnostics.tf_stale_warning_count += 1
+            message = f"TF pose is stale: age={pose_age:.3f} sec"
+            if self.args.fail_on_stale_tf:
+                raise RuntimeError(message)
+            self.get_logger().warn(message)
+
+        tf_update_gap_sec = self.update_tf_tracking(pose)
+        if (
+            tf_update_gap_sec is not None
+            and tf_update_gap_sec > self.args.max_tf_update_gap_sec
+        ):
+            raise RecoverableHealthError(
+                "tf_update_gap",
+                self.args.tf_recovery_time_sec,
+                "TF transform stamp stopped updating: "
+                f"gap={tf_update_gap_sec:.3f} sec, "
+                f"limit={self.args.max_tf_update_gap_sec:.3f} sec",
+            )
 
         scan_age = (
             None if self.last_scan_received_sec is None
@@ -614,12 +875,43 @@ class WaypointFollower(Node):
 
         amcl_health = self.current_amcl_health()
         if amcl_health.warnings:
+            self.diagnostics.localization_warning_count += 1
             message = "AMCL localization warning(s): " + ",".join(amcl_health.warnings)
             if not amcl_health.ok:
                 raise RuntimeError(message)
+            if self.args.pause_on_bad_localization:
+                raise RecoverableHealthError(
+                    "bad_localization",
+                    self.args.localization_recovery_time_sec,
+                    message,
+                )
             self.get_logger().warn(message)
 
         return pose, frame, amcl_health
+
+    def check_health_or_recover(self):
+        while True:
+            try:
+                return self.check_health_or_raise()
+            except RecoverableHealthError as exc:
+                self.diagnostics.recovery_pause_count += 1
+                self.stop_repeatedly()
+                self.get_logger().warn(
+                    f"{exc}; pausing for up to {exc.timeout_sec:.1f} sec"
+                )
+                deadline = time.time() + exc.timeout_sec
+                last_message = str(exc)
+                while time.time() < deadline and rclpy.ok():
+                    rclpy.spin_once(self, timeout_sec=0.1)
+                    time.sleep(0.1)
+                    try:
+                        return self.check_health_or_raise()
+                    except RecoverableHealthError as retry_exc:
+                        last_message = str(retry_exc)
+                raise RuntimeError(
+                    f"{exc.reason} did not recover within "
+                    f"{exc.timeout_sec:.1f} sec: {last_message}"
+                )
 
     def check_scan_or_raise(self, mode):
         if self.last_scan is None:
@@ -642,7 +934,7 @@ class WaypointFollower(Node):
 
     def follow_waypoints(self, waypoints):
         reached_count = 0
-        start_pose, _frame, amcl_health = self.check_health_or_raise()
+        start_pose, _frame, amcl_health = self.check_health_or_recover()
         final_pose = start_pose
         last_scan_safety = None
         self.start_pose = start_pose
@@ -660,7 +952,7 @@ class WaypointFollower(Node):
             is_final = waypoint_index == len(waypoints) - 1
 
             while rclpy.ok():
-                pose, _frame, amcl_health = self.check_health_or_raise()
+                pose, _frame, amcl_health = self.check_health_or_recover()
                 final_pose = pose
                 self.final_pose = final_pose
                 self.last_amcl_health = amcl_health
@@ -702,6 +994,14 @@ class WaypointFollower(Node):
                     self.args.linear_gain,
                     self.args.max_angular_speed,
                     self.args.yaw_gain,
+                    self.args.forward_yaw_deadband_deg,
+                    self.args.forward_stop_heading_error_deg,
+                )
+                self.record_motion_sample(
+                    state.yaw_error_deg,
+                    linear_x,
+                    angular_z,
+                    1.0 / self.args.control_rate_hz,
                 )
                 self.publish_velocity(linear_x, angular_z)
                 rclpy.spin_once(self, timeout_sec=1.0 / self.args.control_rate_hz)
@@ -732,6 +1032,13 @@ class WaypointTimeoutError(RuntimeError):
     def __init__(self, waypoint):
         super().__init__(f"Timed out trying to reach waypoint {waypoint.index}")
         self.waypoint = waypoint
+
+
+class RecoverableHealthError(RuntimeError):
+    def __init__(self, reason, timeout_sec, message):
+        super().__init__(message)
+        self.reason = reason
+        self.timeout_sec = timeout_sec
 
 
 def transform_to_pose2d(transform, frame_id):
@@ -781,6 +1088,12 @@ def print_dry_run(args, raw_waypoints, executable_waypoints):
     print(f"Max angular speed: {args.max_angular_speed:.3f} rad/s")
     print(f"Waypoint tolerance: {args.waypoint_tolerance_m:.3f} m")
     print(f"Goal tolerance: {args.goal_tolerance_m:.3f} m")
+    print(f"Start selection: {args.start_selection}")
+    if args.start_selection == "path-progress":
+        print(
+            "Runtime route selection uses live TF after startup; "
+            "the route below is a fixed-skip preview."
+        )
     print("Executable route:")
     for index, waypoint in enumerate(executable_waypoints, start=1):
         print(f"  {index}. source index {waypoint.index}: x={waypoint.x:.3f}, y={waypoint.y:.3f}")
@@ -801,6 +1114,8 @@ def parse_args(argv):
     parser.add_argument("--linear-gain", default=DEFAULT_LINEAR_GAIN, type=float)
     parser.add_argument("--max-angular-speed", default=DEFAULT_MAX_ANGULAR_SPEED_RADPS, type=float)
     parser.add_argument("--yaw-gain", default=DEFAULT_YAW_GAIN, type=float)
+    parser.add_argument("--forward-yaw-deadband-deg", default=DEFAULT_FORWARD_YAW_DEADBAND_DEG, type=float)
+    parser.add_argument("--forward-stop-heading-error-deg", default=DEFAULT_FORWARD_STOP_HEADING_ERROR_DEG, type=float)
     parser.add_argument("--waypoint-tolerance-m", default=DEFAULT_WAYPOINT_TOLERANCE_M, type=float)
     parser.add_argument("--goal-tolerance-m", default=DEFAULT_GOAL_TOLERANCE_M, type=float)
     parser.add_argument(
@@ -814,6 +1129,12 @@ def parse_args(argv):
         type=float,
     )
     parser.add_argument("--min-waypoint-spacing-m", default=DEFAULT_MIN_WAYPOINT_SPACING_M, type=float)
+    parser.add_argument(
+        "--start-selection",
+        default=DEFAULT_START_SELECTION,
+        choices=["path-progress", "fixed-skip"],
+    )
+    parser.add_argument("--start-on-path-tolerance-m", default=DEFAULT_START_ON_PATH_TOLERANCE_M, type=float)
     parser.add_argument("--scan-half-angle-deg", default=DEFAULT_SCAN_HALF_ANGLE_DEG, type=float)
     parser.add_argument("--hard-stop-range-m", default=DEFAULT_HARD_STOP_RANGE_M, type=float)
     parser.add_argument("--min-scan-range-m", default=DEFAULT_MIN_SCAN_RANGE_M, type=float)
@@ -825,10 +1146,19 @@ def parse_args(argv):
     parser.add_argument("--max-amcl-var-y", default=DEFAULT_MAX_AMCL_VAR_Y, type=float)
     parser.add_argument("--max-amcl-var-yaw", default=DEFAULT_MAX_AMCL_VAR_YAW, type=float)
     parser.add_argument("--max-waypoint-time-sec", default=DEFAULT_MAX_WAYPOINT_TIME_SEC, type=float)
+    parser.add_argument("--max-tf-update-gap-sec", default=DEFAULT_MAX_TF_UPDATE_GAP_SEC, type=float)
+    parser.add_argument("--tf-recovery-time-sec", default=DEFAULT_TF_RECOVERY_TIME_SEC, type=float)
+    parser.add_argument(
+        "--localization-recovery-time-sec",
+        default=DEFAULT_LOCALIZATION_RECOVERY_TIME_SEC,
+        type=float,
+    )
     parser.add_argument("--control-rate-hz", default=DEFAULT_CONTROL_RATE_HZ, type=float)
     parser.add_argument("--settle-sec", default=DEFAULT_SETTLE_SEC, type=float)
     parser.add_argument("--notes", default="follow_planned_waypoints")
     parser.add_argument("--fail-on-bad-localization", action="store_true")
+    parser.add_argument("--pause-on-bad-localization", action="store_true")
+    parser.add_argument("--fail-on-stale-tf", action="store_true")
     parser.add_argument("--no-skip-first-waypoint", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--yes", action="store_true")
@@ -856,6 +1186,7 @@ def validate_args(parser, args):
         "hard_stop_range_m",
         "min_scan_range_m",
         "rotation_stop_range_m",
+        "start_on_path_tolerance_m",
         "max_pose_age_sec",
         "max_scan_age_sec",
         "max_amcl_age_sec",
@@ -863,6 +1194,9 @@ def validate_args(parser, args):
         "max_amcl_var_y",
         "max_amcl_var_yaw",
         "max_waypoint_time_sec",
+        "max_tf_update_gap_sec",
+        "tf_recovery_time_sec",
+        "localization_recovery_time_sec",
         "control_rate_hz",
     ]
     for field in positive_fields:
@@ -872,6 +1206,15 @@ def validate_args(parser, args):
         parser.error("--min-linear-speed must be <= --linear-speed")
     if args.rotate_stop_heading_error_deg >= args.rotate_start_heading_error_deg:
         parser.error("--rotate-stop-heading-error-deg must be < --rotate-start-heading-error-deg")
+    if args.forward_yaw_deadband_deg < 0.0:
+        parser.error("--forward-yaw-deadband-deg must be non-negative")
+    if args.forward_yaw_deadband_deg >= args.forward_stop_heading_error_deg:
+        parser.error("--forward-yaw-deadband-deg must be < --forward-stop-heading-error-deg")
+    if args.forward_stop_heading_error_deg >= args.rotate_start_heading_error_deg:
+        parser.error(
+            "--forward-stop-heading-error-deg must be < "
+            "--rotate-start-heading-error-deg"
+        )
     if args.hard_stop_range_m >= args.min_scan_range_m:
         parser.error("--hard-stop-range-m must be < --min-scan-range-m")
     if args.hard_stop_range_m >= args.rotation_stop_range_m:
@@ -887,7 +1230,7 @@ def main(argv=None):
 
     try:
         raw_waypoints = load_waypoints(args.waypoints)
-        executable_waypoints = prepare_executable_waypoints(
+        preview_waypoints = prepare_executable_waypoints(
             raw_waypoints,
             skip_first=not args.no_skip_first_waypoint,
             min_spacing_m=args.min_waypoint_spacing_m,
@@ -897,10 +1240,10 @@ def main(argv=None):
         return 2
 
     if args.dry_run:
-        print_dry_run(args, raw_waypoints, executable_waypoints)
+        print_dry_run(args, raw_waypoints, preview_waypoints)
         return 0
 
-    if not require_motion_confirmation(args, executable_waypoints):
+    if not require_motion_confirmation(args, preview_waypoints):
         print("Waypoint following cancelled.")
         return 130
 
@@ -916,6 +1259,7 @@ def main(argv=None):
     status = "failed"
     notes = args.notes
     reached_count = 0
+    executable_waypoints = preview_waypoints
     start_pose = None
     final_pose = None
     blocked_waypoint = None
@@ -926,7 +1270,31 @@ def main(argv=None):
 
     try:
         node.wait_for_startup_gate()
-        start_pose, _frame, amcl_health = node.check_health_or_raise()
+        start_pose, _frame, amcl_health = node.check_health_or_recover()
+        start_selection = select_executable_waypoints(
+            raw_waypoints,
+            start_pose,
+            args.start_selection,
+            args.start_on_path_tolerance_m,
+            args.waypoint_tolerance_m,
+            args.goal_tolerance_m,
+            args.min_waypoint_spacing_m,
+            skip_first=not args.no_skip_first_waypoint,
+        )
+        executable_waypoints = start_selection.waypoints
+        node.diagnostics.selected_start_segment_index = (
+            start_selection.selected_segment_index
+        )
+        node.diagnostics.selected_start_waypoint_index = (
+            start_selection.selected_waypoint_index
+        )
+        node.diagnostics.distance_to_path_m = start_selection.distance_to_path_m
+        node.get_logger().info(
+            "Selected executable route: "
+            f"segment={start_selection.selected_segment_index}, "
+            f"first_waypoint={start_selection.selected_waypoint_index}, "
+            f"distance_to_path={start_selection.distance_to_path_m}"
+        )
         result = node.follow_waypoints(executable_waypoints)
         reached_count = result["reached_count"]
         start_pose = result["start_pose"]
@@ -934,17 +1302,20 @@ def main(argv=None):
         scan_safety = result["scan_safety"]
         amcl_health = result["amcl_health"]
         status = "completed"
+        node.diagnostics.final_status_reason = "completed"
         return_code = 0
 
     except KeyboardInterrupt:
         status = "interrupted"
         notes = f"{args.notes};keyboard_interrupt"
+        node.diagnostics.final_status_reason = "keyboard_interrupt"
         print("Interrupted. Sending stop command...")
         return_code = 130
 
     except BlockedByScanError as exc:
         status = "blocked"
         notes = f"{args.notes};{exc}"
+        node.diagnostics.final_status_reason = str(exc)
         reached_count = node.reached_count
         start_pose = node.start_pose
         final_pose = node.final_pose
@@ -957,6 +1328,7 @@ def main(argv=None):
     except WaypointTimeoutError as exc:
         status = "timeout"
         notes = f"{args.notes};{exc}"
+        node.diagnostics.final_status_reason = str(exc)
         reached_count = node.reached_count
         start_pose = node.start_pose
         final_pose = node.final_pose
@@ -969,6 +1341,7 @@ def main(argv=None):
     except Exception as exc:
         status = "failed"
         notes = f"{args.notes};{exc}"
+        node.diagnostics.final_status_reason = str(exc)
         reached_count = node.reached_count
         start_pose = node.start_pose
         final_pose = node.final_pose
@@ -1001,6 +1374,7 @@ def main(argv=None):
                         base_frame_used=node.base_frame_used,
                         scan_safety=scan_safety,
                         amcl_health=amcl_health,
+                        diagnostics=node.diagnostics,
                     )
                     append_csv_row(args.results_csv, CSV_HEADER, row)
                     node.get_logger().info(f"Saved run log to {args.results_csv}")
