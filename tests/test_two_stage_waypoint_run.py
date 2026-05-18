@@ -46,6 +46,8 @@ class TwoStageWaypointRunTest(unittest.TestCase):
                 "12.0",
                 "--known-start-validation-timeout-sec",
                 "7.0",
+                "--tf-ready-timeout-sec",
+                "9.0",
                 "--follower-script",
                 "custom/follower.py",
                 "--python-executable",
@@ -61,6 +63,7 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         self.assertEqual(args.navigate_action, "/robot/navigate_to_pose")
         self.assertEqual(args.amcl_validation_timeout_sec, 12.0)
         self.assertEqual(args.known_start_validation_timeout_sec, 7.0)
+        self.assertEqual(args.tf_ready_timeout_sec, 9.0)
         self.assertEqual(args.follower_script, Path("custom/follower.py"))
         self.assertEqual(args.python_executable, "python-test")
 
@@ -111,6 +114,8 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         )
 
         self.assertEqual(msg.header.frame_id, "map")
+        self.assertEqual(msg.header.stamp.sec, 0)
+        self.assertEqual(msg.header.stamp.nanosec, 0)
         self.assertAlmostEqual(msg.pose.pose.position.x, 1.0)
         self.assertAlmostEqual(msg.pose.pose.position.y, -0.5)
         self.assertAlmostEqual(msg.pose.pose.orientation.z, math.sin(math.radians(45.0)))
@@ -249,6 +254,45 @@ class TwoStageWaypointRunTest(unittest.TestCase):
 
         self.assertEqual(node.cancel_count, 1)
         self.assertEqual(node.stop_count, 1)
+
+    def test_post_localization_tf_wait_retries_until_transform_is_available(self):
+        class FakeRclpy:
+            @staticmethod
+            def ok():
+                return True
+
+            @staticmethod
+            def spin_once(_node, timeout_sec=0.0):
+                return None
+
+        class FakeNode:
+            def __init__(self):
+                self.args = argparse.Namespace(
+                    tf_ready_timeout_sec=1.0,
+                    max_pose_age_sec=10.0,
+                    map_frame="map",
+                    base_frame="base_footprint",
+                    fallback_base_frame="base_link",
+                )
+                self.lookup_count = 0
+
+            def lookup_pose(self):
+                self.lookup_count += 1
+                if self.lookup_count == 1:
+                    raise RuntimeError("map frame not ready")
+                return two_stage.Pose2D(0.0, 0.0, 0.0, stamp_sec=None), "base_footprint"
+
+        original_rclpy = two_stage.rclpy
+        two_stage.rclpy = FakeRclpy
+        try:
+            node = FakeNode()
+            pose, frame = two_stage.TwoStageCoordinator.validate_post_localization_tf(node)
+        finally:
+            two_stage.rclpy = original_rclpy
+
+        self.assertEqual(frame, "base_footprint")
+        self.assertEqual(pose.x, 0.0)
+        self.assertEqual(node.lookup_count, 2)
 
     def test_log_row_contains_failure_status_and_follower_command(self):
         args = two_stage.parse_args(["--dry-run", "--run-id", "two_stage_test"])

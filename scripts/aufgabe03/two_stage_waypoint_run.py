@@ -96,6 +96,7 @@ DEFAULT_AMCL_VALIDATION_TIMEOUT_SEC = 60.0
 DEFAULT_KNOWN_START_VALIDATION_TIMEOUT_SEC = 30.0
 DEFAULT_PREFLIGHT_TIMEOUT_SEC = 10.0
 DEFAULT_NAV_TO_START_TIMEOUT_SEC = 180.0
+DEFAULT_TF_READY_TIMEOUT_SEC = 15.0
 
 DEFAULT_MAX_AMCL_AGE_SEC = 15.0
 DEFAULT_MAX_AMCL_VAR_X = 0.05
@@ -758,8 +759,18 @@ class TwoStageCoordinator(Node):
         self.stop_repeatedly()
         time.sleep(1.0)
 
+    def wait_for_initial_pose_subscriber(self):
+        deadline = time.time() + self.args.preflight_timeout_sec
+        while rclpy.ok() and time.time() <= deadline:
+            if self.initial_pose_pub.get_subscription_count() > 0:
+                return
+            rclpy.spin_once(self, timeout_sec=0.1)
+        raise RuntimeError(
+            f"No subscribers are listening on {self.args.initial_pose_topic}"
+        )
+
     def publish_known_start_initial_pose(self):
-        stamp = self.get_clock().now().to_msg()
+        self.wait_for_initial_pose_subscriber()
         msg = build_initial_pose_message(
             self.args.initial_pose_x,
             self.args.initial_pose_y,
@@ -768,7 +779,6 @@ class TwoStageCoordinator(Node):
             self.args.initial_pose_var_y,
             self.args.initial_pose_var_yaw_rad2,
             frame_id=self.args.map_frame,
-            stamp=stamp,
         )
         for _ in range(3):
             self.initial_pose_pub.publish(msg)
@@ -779,7 +789,7 @@ class TwoStageCoordinator(Node):
         stamp_sec = stamp_to_sec(msg.header.stamp)
         return pose2d_from_pose_msg(msg.pose.pose, stamp_sec=stamp_sec, frame_id=msg.header.frame_id)
 
-    def wait_for_amcl_validation(self, timeout_sec):
+    def wait_for_amcl_validation(self, timeout_sec, min_received_sec=None):
         start = time.time()
         state = StabilityState()
         processed_received_sec = None
@@ -792,6 +802,9 @@ class TwoStageCoordinator(Node):
                 )
             rclpy.spin_once(self, timeout_sec=0.1)
             if self.last_amcl is None or self.last_amcl_received_sec is None:
+                continue
+            if min_received_sec is not None and self.last_amcl_received_sec < min_received_sec:
+                last_reason = "waiting_for_fresh_amcl"
                 continue
             if processed_received_sec == self.last_amcl_received_sec:
                 continue
@@ -832,10 +845,26 @@ class TwoStageCoordinator(Node):
         raise RuntimeError("Could not lookup TF pose: " + "; ".join(errors))
 
     def validate_post_localization_tf(self):
-        pose, frame = self.lookup_pose()
-        if pose.stamp_sec is not None and time.time() - pose.stamp_sec > self.args.max_pose_age_sec:
-            raise RuntimeError(f"Post-localization TF is stale: frame={frame}")
-        return pose, frame
+        deadline = time.time() + self.args.tf_ready_timeout_sec
+        last_error = ""
+        while rclpy.ok() and time.time() <= deadline:
+            try:
+                pose, frame = self.lookup_pose()
+                if (
+                    pose.stamp_sec is not None
+                    and time.time() - pose.stamp_sec > self.args.max_pose_age_sec
+                ):
+                    last_error = f"Post-localization TF is stale: frame={frame}"
+                else:
+                    return pose, frame
+            except RuntimeError as exc:
+                last_error = str(exc)
+            rclpy.spin_once(self, timeout_sec=0.1)
+        raise RuntimeError(
+            "Timed out waiting for post-localization TF "
+            f"{self.args.map_frame}->{self.args.base_frame}/"
+            f"{self.args.fallback_base_frame}: {last_error}"
+        )
 
     def navigate_to_staging(self, staging_goal):
         goal_msg = NavigateToPose.Goal()
@@ -985,6 +1014,7 @@ def parse_args(argv):
         default=DEFAULT_NAV_TO_START_TIMEOUT_SEC,
         type=float,
     )
+    parser.add_argument("--tf-ready-timeout-sec", default=DEFAULT_TF_READY_TIMEOUT_SEC, type=float)
 
     parser.add_argument("--initial-pose-x", type=float)
     parser.add_argument("--initial-pose-y", type=float)
@@ -1069,6 +1099,7 @@ def validate_args(parser, args):
         "known_start_validation_timeout_sec",
         "preflight_timeout_sec",
         "nav_to_start_timeout_sec",
+        "tf_ready_timeout_sec",
         "initial_pose_var_x",
         "initial_pose_var_y",
         "initial_pose_var_yaw_rad2",
@@ -1156,7 +1187,7 @@ def main(argv=None):
         else:
             node.publish_known_start_initial_pose()
             timeout = args.known_start_validation_timeout_sec
-        stability = node.wait_for_amcl_validation(timeout)
+        stability = node.wait_for_amcl_validation(timeout, min_received_sec=phase_start)
         diagnostics.localization_duration_sec = time.time() - phase_start
         diagnostics.amcl_var_x = stability.cov_x
         diagnostics.amcl_var_y = stability.cov_y
