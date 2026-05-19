@@ -97,6 +97,8 @@ DEFAULT_KNOWN_START_VALIDATION_TIMEOUT_SEC = 30.0
 DEFAULT_PREFLIGHT_TIMEOUT_SEC = 10.0
 DEFAULT_NAV_TO_START_TIMEOUT_SEC = 180.0
 DEFAULT_TF_READY_TIMEOUT_SEC = 15.0
+DEFAULT_TF_LOOKUP_TIMEOUT_SEC = 10.0
+DEFAULT_TF_LOOKUP_RETRY_PERIOD_SEC = 0.1
 
 DEFAULT_MAX_AMCL_AGE_SEC = 15.0
 DEFAULT_MAX_AMCL_VAR_X = 0.05
@@ -552,6 +554,12 @@ def stamp_to_sec(stamp):
     return float(stamp.sec) + float(stamp.nanosec) / 1_000_000_000.0
 
 
+def latest_tf_time():
+    if Time is None:
+        return None
+    return Time()
+
+
 def transform_to_pose2d(transform, frame_id):
     translation = transform.transform.translation
     rotation = transform.transform.rotation
@@ -829,41 +837,69 @@ class TwoStageCoordinator(Node):
                 return state
         raise RuntimeError("ROS shutdown while waiting for AMCL validation")
 
-    def lookup_pose(self):
-        errors = []
-        for frame in [self.args.base_frame, self.args.fallback_base_frame]:
-            try:
-                transform = self.tf_buffer.lookup_transform(
-                    self.args.map_frame,
-                    frame,
-                    Time(),
-                )
-                self.selected_base_frame = frame
-                return transform_to_pose2d(transform, frame), frame
-            except Exception as exc:
-                errors.append(f"{frame}: {exc}")
-        raise RuntimeError("Could not lookup TF pose: " + "; ".join(errors))
+    def transform_age_sec(self, transform):
+        stamp_sec = stamp_to_sec(transform.header.stamp)
+        if stamp_sec is None:
+            return None
+        return time.time() - stamp_sec
 
-    def validate_post_localization_tf(self):
-        deadline = time.time() + self.args.tf_ready_timeout_sec
+    def lookup_robot_pose_tf(
+        self,
+        target_frame,
+        base_frames,
+        timeout_sec,
+        description="robot pose TF",
+    ):
+        deadline = time.time() + timeout_sec
         last_error = ""
         while rclpy.ok() and time.time() <= deadline:
-            try:
-                pose, frame = self.lookup_pose()
-                if (
-                    pose.stamp_sec is not None
-                    and time.time() - pose.stamp_sec > self.args.max_pose_age_sec
-                ):
-                    last_error = f"Post-localization TF is stale: frame={frame}"
-                else:
-                    return pose, frame
-            except RuntimeError as exc:
-                last_error = str(exc)
-            rclpy.spin_once(self, timeout_sec=0.1)
+            errors = []
+            for frame in base_frames:
+                try:
+                    transform = self.tf_buffer.lookup_transform(
+                        target_frame,
+                        frame,
+                        latest_tf_time(),
+                    )
+                except Exception as exc:
+                    errors.append(f"{frame}: {exc}")
+                    continue
+
+                age_sec = self.transform_age_sec(transform)
+                if age_sec is not None and age_sec > self.args.max_pose_age_sec:
+                    errors.append(
+                        f"{frame}: stale_tf age={age_sec:.3f}s "
+                        f"limit={self.args.max_pose_age_sec:.3f}s"
+                    )
+                    continue
+
+                self.selected_base_frame = frame
+                return transform, frame
+
+            last_error = "; ".join(errors)
+            rclpy.spin_once(self, timeout_sec=self.args.tf_lookup_retry_period_sec)
+        if not rclpy.ok():
+            raise RuntimeError(f"ROS shutdown while waiting for {description}")
         raise RuntimeError(
-            "Timed out waiting for post-localization TF "
-            f"{self.args.map_frame}->{self.args.base_frame}/"
-            f"{self.args.fallback_base_frame}: {last_error}"
+            f"Timed out waiting for {description} "
+            f"{target_frame}->{'/'.join(base_frames)}: {last_error}"
+        )
+
+    def lookup_pose(self, timeout_sec=None, description="robot pose TF"):
+        transform, frame = self.lookup_robot_pose_tf(
+            target_frame=self.args.map_frame,
+            base_frames=[self.args.base_frame, self.args.fallback_base_frame],
+            timeout_sec=(
+                timeout_sec if timeout_sec is not None else self.args.tf_lookup_timeout_sec
+            ),
+            description=description,
+        )
+        return transform_to_pose2d(transform, frame), frame
+
+    def validate_post_localization_tf(self):
+        return self.lookup_pose(
+            timeout_sec=self.args.tf_ready_timeout_sec,
+            description="post-localization TF",
         )
 
     def navigate_to_staging(self, staging_goal):
@@ -912,7 +948,7 @@ class TwoStageCoordinator(Node):
             self.active_goal_handle = None
 
     def verify_arrival(self, staging_goal):
-        pose, frame = self.lookup_pose()
+        pose, frame = self.lookup_pose(description="arrival TF")
         position_error = math.hypot(
             pose.x - staging_goal.waypoint.x,
             pose.y - staging_goal.waypoint.y,
@@ -1015,6 +1051,16 @@ def parse_args(argv):
         type=float,
     )
     parser.add_argument("--tf-ready-timeout-sec", default=DEFAULT_TF_READY_TIMEOUT_SEC, type=float)
+    parser.add_argument(
+        "--tf-lookup-timeout-sec",
+        default=DEFAULT_TF_LOOKUP_TIMEOUT_SEC,
+        type=float,
+    )
+    parser.add_argument(
+        "--tf-lookup-retry-period-sec",
+        default=DEFAULT_TF_LOOKUP_RETRY_PERIOD_SEC,
+        type=float,
+    )
 
     parser.add_argument("--initial-pose-x", type=float)
     parser.add_argument("--initial-pose-y", type=float)
@@ -1100,6 +1146,8 @@ def validate_args(parser, args):
         "preflight_timeout_sec",
         "nav_to_start_timeout_sec",
         "tf_ready_timeout_sec",
+        "tf_lookup_timeout_sec",
+        "tf_lookup_retry_period_sec",
         "initial_pose_var_x",
         "initial_pose_var_y",
         "initial_pose_var_yaw_rad2",
@@ -1219,7 +1267,7 @@ def main(argv=None):
         if follower_result.returncode != 0:
             raise RuntimeError(f"Follower exited with return code {follower_result.returncode}")
 
-        final_pose, _frame = node.lookup_pose()
+        final_pose, _frame = node.lookup_pose(description="final TF")
         diagnostics.final_tf_x = final_pose.x
         diagnostics.final_tf_y = final_pose.y
         diagnostics.final_tf_yaw_deg = final_pose.yaw_deg
@@ -1248,7 +1296,7 @@ def main(argv=None):
         diagnostics.duration_sec = time.time() - start_monotonic
         if node is not None:
             try:
-                final_pose, _frame = node.lookup_pose()
+                final_pose, _frame = node.lookup_pose(description="final TF logging")
                 diagnostics.final_tf_x = final_pose.x
                 diagnostics.final_tf_y = final_pose.y
                 diagnostics.final_tf_yaw_deg = final_pose.yaw_deg

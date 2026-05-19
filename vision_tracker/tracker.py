@@ -135,7 +135,7 @@ def main():
         centers, mask = detect_markers(frame)
         draw_markers(frame, centers)
 
-        # Print pixel coordinates
+        # print pixel coordinates
         frame_count += 1
         
         if centers and frame_count % 15 == 0:
@@ -147,7 +147,7 @@ def main():
         cv2.imshow("frame", frame)
         cv2.imshow("mask", mask)
 
-        if cv2.waitKey(1) & 0xFF == 27:  # ESC
+        if cv2.waitKey(1) & 0xFF == 27:
             break
 
     cap.release()

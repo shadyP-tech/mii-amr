@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""
-Block a real experiment run until the camera start pose is acceptable.
-
-This script never opens the camera.  It only reads the latest pose written by
-``vision_tracker/main.py``.
-"""
 
 import argparse
 import csv

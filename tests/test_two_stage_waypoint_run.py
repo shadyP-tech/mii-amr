@@ -5,6 +5,7 @@ import io
 import math
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -21,6 +22,61 @@ def write_waypoints(path, rows):
         writer = csv.writer(file)
         writer.writerow(["index", "world_x_m", "world_y_m"])
         writer.writerows(rows)
+
+
+def stamp_from_sec(stamp_sec):
+    seconds = int(stamp_sec)
+    nanoseconds = int((stamp_sec - seconds) * 1_000_000_000)
+    return argparse.Namespace(sec=seconds, nanosec=nanoseconds)
+
+
+def make_transform(stamp_sec=None, x=0.0, y=0.0, yaw_deg=0.0):
+    if stamp_sec is None:
+        stamp_sec = time.time()
+    half_yaw = math.radians(yaw_deg) / 2.0
+    return argparse.Namespace(
+        header=argparse.Namespace(stamp=stamp_from_sec(stamp_sec)),
+        transform=argparse.Namespace(
+            translation=argparse.Namespace(x=x, y=y, z=0.0),
+            rotation=argparse.Namespace(
+                x=0.0,
+                y=0.0,
+                z=math.sin(half_yaw),
+                w=math.cos(half_yaw),
+            ),
+        ),
+    )
+
+
+def fake_tf_node(tf_buffer, **overrides):
+    args = argparse.Namespace(
+        map_frame="map",
+        base_frame="base_footprint",
+        fallback_base_frame="base_link",
+        tf_lookup_timeout_sec=0.05,
+        tf_lookup_retry_period_sec=0.001,
+        tf_ready_timeout_sec=0.05,
+        max_pose_age_sec=10.0,
+    )
+    for key, value in overrides.items():
+        setattr(args, key, value)
+    node = argparse.Namespace(args=args, tf_buffer=tf_buffer, selected_base_frame="")
+    node.transform_age_sec = two_stage.TwoStageCoordinator.transform_age_sec.__get__(
+        node,
+        type(node),
+    )
+    node.lookup_robot_pose_tf = two_stage.TwoStageCoordinator.lookup_robot_pose_tf.__get__(
+        node,
+        type(node),
+    )
+    node.lookup_pose = two_stage.TwoStageCoordinator.lookup_pose.__get__(node, type(node))
+    node.validate_post_localization_tf = (
+        two_stage.TwoStageCoordinator.validate_post_localization_tf.__get__(
+            node,
+            type(node),
+        )
+    )
+    return node
 
 
 class TwoStageWaypointRunTest(unittest.TestCase):
@@ -48,6 +104,10 @@ class TwoStageWaypointRunTest(unittest.TestCase):
                 "7.0",
                 "--tf-ready-timeout-sec",
                 "9.0",
+                "--tf-lookup-timeout-sec",
+                "11.0",
+                "--tf-lookup-retry-period-sec",
+                "0.2",
                 "--follower-script",
                 "custom/follower.py",
                 "--python-executable",
@@ -64,6 +124,8 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         self.assertEqual(args.amcl_validation_timeout_sec, 12.0)
         self.assertEqual(args.known_start_validation_timeout_sec, 7.0)
         self.assertEqual(args.tf_ready_timeout_sec, 9.0)
+        self.assertEqual(args.tf_lookup_timeout_sec, 11.0)
+        self.assertEqual(args.tf_lookup_retry_period_sec, 0.2)
         self.assertEqual(args.follower_script, Path("custom/follower.py"))
         self.assertEqual(args.python_executable, "python-test")
 
@@ -255,7 +317,50 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         self.assertEqual(node.cancel_count, 1)
         self.assertEqual(node.stop_count, 1)
 
-    def test_post_localization_tf_wait_retries_until_transform_is_available(self):
+    def test_lookup_pose_retries_and_spins_until_transform_is_available(self):
+        class FakeRclpy:
+            spin_count = 0
+
+            @classmethod
+            def ok(cls):
+                return True
+
+            @classmethod
+            def spin_once(cls, _node, timeout_sec=0.0):
+                cls.spin_count += 1
+                time.sleep(min(timeout_sec, 0.001))
+                return None
+
+        class DelayedTfBuffer:
+            def __init__(self):
+                self.calls = 0
+
+            def lookup_transform(self, target_frame, source_frame, lookup_time):
+                self.calls += 1
+                self.last_target_frame = target_frame
+                self.last_lookup_time = lookup_time
+                if self.calls <= 2:
+                    raise RuntimeError("map frame not ready")
+                return make_transform(x=0.25, y=-0.1, yaw_deg=15.0)
+
+        original_rclpy = two_stage.rclpy
+        two_stage.rclpy = FakeRclpy
+        try:
+            tf_buffer = DelayedTfBuffer()
+            node = fake_tf_node(tf_buffer)
+            pose, frame = two_stage.TwoStageCoordinator.validate_post_localization_tf(node)
+        finally:
+            two_stage.rclpy = original_rclpy
+
+        self.assertEqual(frame, "base_footprint")
+        self.assertEqual(node.selected_base_frame, "base_footprint")
+        self.assertAlmostEqual(pose.x, 0.25)
+        self.assertAlmostEqual(pose.y, -0.1)
+        self.assertAlmostEqual(pose.yaw_deg, 15.0)
+        self.assertGreaterEqual(FakeRclpy.spin_count, 1)
+        self.assertEqual(tf_buffer.last_target_frame, "map")
+
+    def test_lookup_pose_falls_back_to_base_link_and_records_selected_frame(self):
         class FakeRclpy:
             @staticmethod
             def ok():
@@ -265,34 +370,85 @@ class TwoStageWaypointRunTest(unittest.TestCase):
             def spin_once(_node, timeout_sec=0.0):
                 return None
 
-        class FakeNode:
+        class FallbackTfBuffer:
             def __init__(self):
-                self.args = argparse.Namespace(
-                    tf_ready_timeout_sec=1.0,
-                    max_pose_age_sec=10.0,
-                    map_frame="map",
-                    base_frame="base_footprint",
-                    fallback_base_frame="base_link",
-                )
-                self.lookup_count = 0
+                self.sources = []
 
-            def lookup_pose(self):
-                self.lookup_count += 1
-                if self.lookup_count == 1:
-                    raise RuntimeError("map frame not ready")
-                return two_stage.Pose2D(0.0, 0.0, 0.0, stamp_sec=None), "base_footprint"
+            def lookup_transform(self, _target_frame, source_frame, _lookup_time):
+                self.sources.append(source_frame)
+                if source_frame == "base_footprint":
+                    raise RuntimeError("base_footprint unavailable")
+                return make_transform(x=1.0, y=2.0, yaw_deg=-30.0)
 
         original_rclpy = two_stage.rclpy
         two_stage.rclpy = FakeRclpy
         try:
-            node = FakeNode()
-            pose, frame = two_stage.TwoStageCoordinator.validate_post_localization_tf(node)
+            tf_buffer = FallbackTfBuffer()
+            node = fake_tf_node(tf_buffer)
+            pose, frame = two_stage.TwoStageCoordinator.lookup_pose(node)
         finally:
             two_stage.rclpy = original_rclpy
 
-        self.assertEqual(frame, "base_footprint")
-        self.assertEqual(pose.x, 0.0)
-        self.assertEqual(node.lookup_count, 2)
+        self.assertEqual(frame, "base_link")
+        self.assertEqual(node.selected_base_frame, "base_link")
+        self.assertEqual(tf_buffer.sources, ["base_footprint", "base_link"])
+        self.assertAlmostEqual(pose.x, 1.0)
+        self.assertAlmostEqual(pose.y, 2.0)
+
+    def test_lookup_pose_timeout_fails_cleanly(self):
+        class FakeRclpy:
+            @staticmethod
+            def ok():
+                return True
+
+            @staticmethod
+            def spin_once(_node, timeout_sec=0.0):
+                time.sleep(min(timeout_sec, 0.001))
+
+        class MissingTfBuffer:
+            def lookup_transform(self, _target_frame, source_frame, _lookup_time):
+                raise RuntimeError(f"{source_frame} missing")
+
+        original_rclpy = two_stage.rclpy
+        two_stage.rclpy = FakeRclpy
+        try:
+            node = fake_tf_node(
+                MissingTfBuffer(),
+                tf_lookup_timeout_sec=0.005,
+                tf_lookup_retry_period_sec=0.001,
+            )
+            with self.assertRaisesRegex(RuntimeError, "Timed out waiting for robot pose TF"):
+                two_stage.TwoStageCoordinator.lookup_pose(node)
+        finally:
+            two_stage.rclpy = original_rclpy
+
+    def test_lookup_pose_rejects_stale_tf(self):
+        class FakeRclpy:
+            @staticmethod
+            def ok():
+                return True
+
+            @staticmethod
+            def spin_once(_node, timeout_sec=0.0):
+                time.sleep(min(timeout_sec, 0.001))
+
+        class StaleTfBuffer:
+            def lookup_transform(self, _target_frame, _source_frame, _lookup_time):
+                return make_transform(stamp_sec=time.time() - 20.0)
+
+        original_rclpy = two_stage.rclpy
+        two_stage.rclpy = FakeRclpy
+        try:
+            node = fake_tf_node(
+                StaleTfBuffer(),
+                max_pose_age_sec=1.0,
+                tf_lookup_timeout_sec=0.005,
+                tf_lookup_retry_period_sec=0.001,
+            )
+            with self.assertRaisesRegex(RuntimeError, "stale_tf"):
+                two_stage.TwoStageCoordinator.lookup_pose(node)
+        finally:
+            two_stage.rclpy = original_rclpy
 
     def test_log_row_contains_failure_status_and_follower_command(self):
         args = two_stage.parse_args(["--dry-run", "--run-id", "two_stage_test"])

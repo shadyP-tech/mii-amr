@@ -1,11 +1,3 @@
-"""
-Shared start-pose checking helpers for real-world experiment runs.
-
-This module is deliberately pure: it does not open cameras, display windows,
-or depend on ROS.  Both the live tracker overlay and the start gate use the
-same acceptance calculation.
-"""
-
 import csv
 import math
 import os
