@@ -125,6 +125,24 @@ def parse_args(argv):
     parser.add_argument("--storage-id", default="sqlite3")
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--max-scan-samples", type=int)
+    parser.add_argument(
+        "--scan-stride",
+        default=1,
+        type=int,
+        help="Use every Nth scan sample after reading from the bag/JSON.",
+    )
+    parser.add_argument(
+        "--range-stride",
+        default=4,
+        type=int,
+        help="Use every Nth LaserScan range within each scan. Default keeps analysis fast.",
+    )
+    parser.add_argument(
+        "--max-points",
+        default=4000,
+        type=int,
+        help="Maximum accumulated scan points passed to geometry fitting.",
+    )
 
     parser.add_argument("--arena-length-m", default=3.90, type=float)
     parser.add_argument("--arena-width-m", default=1.898, type=float)
@@ -144,6 +162,12 @@ def parse_args(argv):
         parser.error("Provide exactly one of --bag or --input-json")
     if args.max_scan_samples is not None and args.max_scan_samples < 1:
         parser.error("--max-scan-samples must be >= 1")
+    if args.scan_stride < 1:
+        parser.error("--scan-stride must be >= 1")
+    if args.range_stride < 1:
+        parser.error("--range-stride must be >= 1")
+    if args.max_points is not None and args.max_points < 1:
+        parser.error("--max-points must be >= 1")
     return args
 
 
@@ -167,6 +191,7 @@ def config_from_args(args):
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
     try:
+        print("Loading scan samples...", flush=True)
         if args.input_json:
             samples = load_scan_samples_json(args.input_json)
             source = str(args.input_json)
@@ -181,7 +206,20 @@ def main(argv=None):
             )
             source = str(args.bag)
             source_type = "rosbag"
-        result = analyze_scan_samples(samples, config_from_args(args))
+        if args.scan_stride > 1:
+            samples = samples[::args.scan_stride]
+        print(
+            "Analyzing "
+            f"{len(samples)} scan sample(s), range_stride={args.range_stride}, "
+            f"max_points={args.max_points}...",
+            flush=True,
+        )
+        result = analyze_scan_samples(
+            samples,
+            config_from_args(args),
+            range_stride=args.range_stride,
+            max_points=args.max_points,
+        )
         output = result.to_dict()
         output["source"] = {
             "type": source_type,
@@ -189,6 +227,9 @@ def main(argv=None):
             "scan_topic": args.scan_topic,
             "odom_topic": args.odom_topic,
             "sample_count": len(samples),
+            "scan_stride": args.scan_stride,
+            "range_stride": args.range_stride,
+            "max_points": args.max_points,
         }
         write_json(args.output, output)
     except Exception as exc:

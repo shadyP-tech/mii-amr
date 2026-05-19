@@ -161,6 +161,7 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
 
         self.assertEqual(len(samples), 1)
         self.assertEqual(len(arena.finite_scan_points(samples[0])), 2)
+        self.assertEqual(len(arena.finite_scan_points(samples[0], range_stride=2)), 2)
 
     def test_analyzer_cli_writes_required_json_from_json_input(self):
         sample_data = {
@@ -195,15 +196,31 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
         self.assertIn("success", written)
         self.assertIn("long_wall_fit", written)
         self.assertEqual(written["source"]["type"], "json")
+        self.assertEqual(written["source"]["range_stride"], 4)
+        self.assertEqual(written["source"]["max_points"], 4000)
 
     def test_bag_cli_requires_exactly_one_input_source(self):
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
                 bag_analyzer.parse_args(["--output", "out.json"])
         args = bag_analyzer.parse_args(
-            ["--input-json", "samples.json", "--output", "out.json"]
+            [
+                "--input-json",
+                "samples.json",
+                "--output",
+                "out.json",
+                "--scan-stride",
+                "2",
+                "--range-stride",
+                "3",
+                "--max-points",
+                "100",
+            ]
         )
         self.assertEqual(args.input_json, Path("samples.json"))
+        self.assertEqual(args.scan_stride, 2)
+        self.assertEqual(args.range_stride, 3)
+        self.assertEqual(args.max_points, 100)
 
 
 if __name__ == "__main__":

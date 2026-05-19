@@ -206,10 +206,9 @@ def undirected_angle_delta_rad(a, b):
     return min(delta, abs(math.pi - delta))
 
 
-def percentile(values, percent):
-    if not values:
+def percentile_sorted(ordered, percent):
+    if not ordered:
         raise ValueError("percentile requires values")
-    ordered = sorted(values)
     if len(ordered) == 1:
         return ordered[0]
     rank = (percent / 100.0) * (len(ordered) - 1)
@@ -221,13 +220,19 @@ def percentile(values, percent):
     return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
 
 
+def percentile(values, percent):
+    return percentile_sorted(sorted(values), percent)
+
+
 def median(values):
     return percentile(values, 50.0)
 
 
-def finite_scan_points(sample: ScanSample):
+def finite_scan_points(sample: ScanSample, range_stride=1):
     points = []
     for index, raw_range in enumerate(sample.ranges):
+        if index % range_stride != 0:
+            continue
         if not math.isfinite(raw_range):
             continue
         if raw_range < sample.range_min or raw_range > sample.range_max:
@@ -260,7 +265,7 @@ def relative_pose(pose: Pose2D, origin: Pose2D):
     )
 
 
-def accumulate_scan_points(samples: Sequence[ScanSample]):
+def accumulate_scan_points(samples: Sequence[ScanSample], range_stride=1, max_points=None):
     if not samples:
         return []
     origin = next((sample.odom_pose for sample in samples if sample.odom_pose is not None), None)
@@ -269,8 +274,10 @@ def accumulate_scan_points(samples: Sequence[ScanSample]):
         pose = Pose2D()
         if sample.odom_pose is not None and origin is not None:
             pose = relative_pose(sample.odom_pose, origin)
-        for point in finite_scan_points(sample):
+        for point in finite_scan_points(sample, range_stride=range_stride):
             points.append(transform_point(point, pose))
+            if max_points is not None and len(points) >= max_points:
+                return points
     return points
 
 
@@ -337,8 +344,13 @@ def fit_long_walls(points: Sequence[tuple[float, float]], config: ArenaGeometryC
         normal_angle = axis_angle + math.pi / 2.0
         normal = vector_from_angle(normal_angle)
         projections = [dot(point, normal) for point in points]
-        lower_center = median([value for value in projections if value <= percentile(projections, 30.0)])
-        upper_center = median([value for value in projections if value >= percentile(projections, 70.0)])
+        ordered = sorted(projections)
+        p30 = percentile_sorted(ordered, 30.0)
+        p70 = percentile_sorted(ordered, 70.0)
+        lower_values = [value for value in projections if value <= p30]
+        upper_values = [value for value in projections if value >= p70]
+        lower_center = median(lower_values)
+        upper_center = median(upper_values)
         separation = upper_center - lower_center
         lower_points, upper_points = projection_clusters(
             points,
@@ -722,8 +734,13 @@ def analyze_points(points: Sequence[tuple[float, float]], config: ArenaGeometryC
     )
 
 
-def analyze_scan_samples(samples: Sequence[ScanSample], config: ArenaGeometryConfig | None = None):
-    points = accumulate_scan_points(samples)
+def analyze_scan_samples(
+    samples: Sequence[ScanSample],
+    config: ArenaGeometryConfig | None = None,
+    range_stride=1,
+    max_points=None,
+):
+    points = accumulate_scan_points(samples, range_stride=range_stride, max_points=max_points)
     result = analyze_points(points, config)
     diagnostics = dict(result.diagnostics)
     diagnostics["num_scan_samples_used"] = len(samples)
