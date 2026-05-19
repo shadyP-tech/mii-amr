@@ -368,6 +368,23 @@ class ArenaActiveSpinSession:
                 return
         raise RuntimeError("fresh_scan_or_odom_unavailable")
 
+    def refresh_fresh_inputs_after_prompt(self):
+        deadline = self.now() + min(2.0, self.config.max_spin_sec)
+        while self.rclpy.ok() and self.now() <= deadline:
+            self.rclpy.spin_once(self.node, timeout_sec=0.1)
+            scan_age = self.fresh_scan_age_sec()
+            odom_age = self.fresh_odom_age_sec()
+            if (
+                self.latest_scan is not None
+                and scan_age is not None
+                and scan_age <= self.config.max_odom_scan_age_sec
+                and self.latest_odom_pose is not None
+                and odom_age is not None
+                and odom_age <= self.config.max_odom_scan_age_sec
+            ):
+                return
+        raise RuntimeError("fresh_scan_or_odom_unavailable_after_prompt")
+
     def cmd_vel_publisher_check(self):
         count = None
         if hasattr(self.node, "count_publishers"):
@@ -417,6 +434,7 @@ class ArenaActiveSpinSession:
         self.wait_for_fresh_inputs()
         self.cmd_vel_publisher_check()
         self.print_operator_prompt()
+        self.refresh_fresh_inputs_after_prompt()
 
         previous_yaw = self.latest_odom_yaw_rad
         if previous_yaw is None:
@@ -430,11 +448,12 @@ class ArenaActiveSpinSession:
         last_progress_yaw = 0.0
 
         while self.rclpy.ok():
-            now = self.now()
-            if now - start > self.config.max_spin_sec:
+            if self.now() - start > self.config.max_spin_sec:
                 self.diagnostics["spin"]["timeout"] = True
                 raise RuntimeError("arena_active_spin_timeout")
-            self.rclpy.spin_once(self.node, timeout_sec=0.0)
+            self.publish_spin_command(publisher)
+            self.rclpy.spin_once(self.node, timeout_sec=period)
+            now = self.now()
             scan_age = self.fresh_scan_age_sec()
             odom_age = self.fresh_odom_age_sec()
             if scan_age is None or scan_age > self.config.max_odom_scan_age_sec:
@@ -462,9 +481,6 @@ class ArenaActiveSpinSession:
                     raise RuntimeError("insufficient_angular_progress")
                 last_progress_time = now
                 last_progress_yaw = accumulated
-
-            self.publish_spin_command(publisher)
-            self.sleep_fn(period)
 
         raise RuntimeError("ros_shutdown_during_arena_active_spin")
 

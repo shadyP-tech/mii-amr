@@ -88,6 +88,24 @@ class FakeRclpy:
             self.node.subscriptions["/scan"](fake_scan())
 
 
+class PromptDelayRclpy:
+    def __init__(self, node, time_box):
+        self.node = node
+        self.time_box = time_box
+        self.yaw = 0.0
+
+    def ok(self):
+        return True
+
+    def spin_once(self, _node, timeout_sec=0.0):
+        self.time_box["now"] += timeout_sec
+        if timeout_sec > 0.0:
+            if "/odom" in self.node.subscriptions:
+                self.node.subscriptions["/odom"](fake_odom(self.yaw))
+            if "/scan" in self.node.subscriptions:
+                self.node.subscriptions["/scan"](fake_scan())
+
+
 class ArenaActiveSpinTest(unittest.TestCase):
     def test_shortest_angle_delta_handles_wraparound(self):
         delta = active_spin.shortest_angle_delta_rad(
@@ -189,6 +207,42 @@ class ArenaActiveSpinTest(unittest.TestCase):
         self.assertEqual(diagnostics["exception"]["type"], "RuntimeError")
         self.assertGreaterEqual(len(publisher.messages), active_spin.DEFAULT_STOP_COUNT * 2)
         self.assertFalse(diagnostics["initialpose"]["published"])
+
+    def test_prompt_delay_refreshes_scan_before_first_command(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            node = FakeNode()
+            publisher = FakePublisher()
+            time_box = {"now": 0.0}
+            config = active_spin.ArenaActiveSpinConfig(
+                run_id="prompt_delay_test",
+                diagnostics_path=Path(tmpdir) / "diag.json",
+                require_operator_confirmation=True,
+                spin_complete_tolerance_deg=359.0,
+                min_scan_samples=1,
+                max_spin_sec=2.0,
+                stop_settle_sec=0.0,
+                arena_config=arena.ArenaGeometryConfig(),
+            )
+            session = active_spin.ArenaActiveSpinSession(
+                node,
+                config,
+                PromptDelayRclpy(node, time_box),
+                FakeTwist,
+                object,
+                object,
+                None,
+                input_fn=lambda _prompt: time_box.__setitem__("now", time_box["now"] + 1.0),
+                sleep_fn=lambda delay: time_box.__setitem__("now", time_box["now"] + delay),
+                analyze_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    RuntimeError("stop after spin")
+                ),
+            )
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = session.run(publisher)
+
+        self.assertNotEqual(result.failure_reason, "stale_scan_during_spin")
+        self.assertTrue(any(message.angular.z != 0.0 for message in publisher.messages))
 
 
 if __name__ == "__main__":
