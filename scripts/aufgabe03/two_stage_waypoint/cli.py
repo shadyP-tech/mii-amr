@@ -1,0 +1,545 @@
+import argparse
+import shlex
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+from .experiment_log import append_csv_row, build_log_row
+from .model import (
+    CSV_HEADER,
+    DEFAULT_AMCL_VALIDATION_TIMEOUT_SEC,
+    DEFAULT_ARENA_ACTIVE_VALIDATION_TIMEOUT_SEC,
+    DEFAULT_ARRIVAL_TOLERANCE_M,
+    DEFAULT_ARRIVAL_YAW_TOLERANCE_DEG,
+    DEFAULT_CONTROL_RATE_HZ,
+    DEFAULT_FOLLOWER_SCRIPT,
+    DEFAULT_GOAL_TOLERANCE_M,
+    DEFAULT_INITIAL_POSE_VAR_X,
+    DEFAULT_INITIAL_POSE_VAR_Y,
+    DEFAULT_INITIAL_POSE_VAR_YAW_RAD2,
+    DEFAULT_KNOWN_START_VALIDATION_TIMEOUT_SEC,
+    DEFAULT_LOCALIZATION_ANGULAR_SPEED_RADPS,
+    DEFAULT_LOCALIZATION_MODE,
+    DEFAULT_LOCALIZATION_SPIN_DEG,
+    DEFAULT_MAX_AMCL_AGE_SEC,
+    DEFAULT_MAX_AMCL_VAR_X,
+    DEFAULT_MAX_AMCL_VAR_Y,
+    DEFAULT_MAX_AMCL_VAR_YAW_RAD2,
+    DEFAULT_MAX_POSE_AGE_SEC,
+    DEFAULT_MAX_SCAN_AGE_SEC,
+    DEFAULT_MAX_STABLE_POSE_JUMP_M,
+    DEFAULT_MAX_STABLE_YAW_JUMP_DEG,
+    DEFAULT_MIN_WAYPOINT_SPACING_M,
+    DEFAULT_NAV_TO_START_TIMEOUT_SEC,
+    DEFAULT_PREFLIGHT_TIMEOUT_SEC,
+    DEFAULT_RESULTS_CSV,
+    DEFAULT_SPIN_MIN_SCAN_RANGE_M,
+    DEFAULT_SPIN_MIN_VALID_SCAN_COUNT,
+    DEFAULT_STABLE_AMCL_SAMPLES,
+    DEFAULT_TF_LOOKUP_RETRY_PERIOD_SEC,
+    DEFAULT_TF_LOOKUP_TIMEOUT_SEC,
+    DEFAULT_TF_READY_TIMEOUT_SEC,
+    DEFAULT_WAYPOINTS_CSV,
+    DEFAULT_WAYPOINT_TOLERANCE_M,
+    RunDiagnostics,
+)
+from .pure import (
+    build_follower_command,
+    load_waypoints,
+    staging_goal_from_waypoints,
+    timestamp_now,
+)
+
+
+def run_follower_command(command, runner=subprocess.run):
+    return runner(command, check=False, shell=False)
+
+
+def cleanup_motion(node):
+    try:
+        node.cancel_active_goal()
+    finally:
+        node.stop_repeatedly()
+
+
+def require_motion_confirmation(args, staging_goal, follower_command):
+    if args.yes:
+        return True
+    print("\nThis command may move the physical TurtleBot.")
+    print("Safety requirements:")
+    print("  - clear the arena and keep an operator near the robot")
+    print("  - keep Ctrl+C and physical stop available")
+    print("  - ensure no other controller is intentionally publishing /cmd_vel")
+    print(f"Run ID: {args.run_id}")
+    print(
+        "Staging goal: "
+        f"x={staging_goal.waypoint.x:.3f}, "
+        f"y={staging_goal.waypoint.y:.3f}, "
+        f"yaw={staging_goal.yaw_deg:.1f} deg"
+    )
+    print("Follower command:", shlex.join(follower_command))
+    response = input("Type RUN to start two-stage waypoint run: ").strip()
+    return response == "RUN"
+
+
+def print_dry_run(args, waypoints, staging_goal, follower_command):
+    print("Two-stage waypoint run dry run")
+    print(f"Waypoint CSV: {args.waypoints}")
+    print(f"Waypoints: {len(waypoints)}")
+    print(
+        "Selected waypoint 0: "
+        f"x={staging_goal.waypoint.x:.3f}, y={staging_goal.waypoint.y:.3f}"
+    )
+    print(f"Computed staging yaw: {staging_goal.yaw_deg:.1f} deg")
+    print(f"Localization mode: {args.localization_mode}")
+    print("ROS interfaces:")
+    print(f"  global localization service: {args.global_localization_service}")
+    print(f"  navigate action: {args.navigate_action}")
+    print(f"  initial pose topic: {args.initial_pose_topic}")
+    print(f"  amcl topic: {args.amcl_topic}")
+    print(f"  cmd_vel topic: {args.cmd_vel_topic}")
+    print(f"  scan topic: {args.scan_topic}")
+    print(f"Follower command: {shlex.join(follower_command)}")
+    print(f"Log path: {args.results_csv}")
+    from .ros_runtime import rclpy
+    print(f"ROS imports available: {'yes' if rclpy is not None else 'no'}")
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(
+        description="Coordinate AMCL localization, Nav2 staging, and waypoint following.",
+    )
+    parser.add_argument("--waypoints", default=DEFAULT_WAYPOINTS_CSV, type=Path)
+    parser.add_argument("--results-csv", default=DEFAULT_RESULTS_CSV, type=Path)
+    parser.add_argument("--run-id")
+    parser.add_argument("--notes", default="two_stage_waypoint_run")
+    parser.add_argument("--map-frame", default="map")
+    parser.add_argument("--base-frame", default="base_footprint")
+    parser.add_argument("--fallback-base-frame", default="base_link")
+
+    parser.add_argument(
+        "--localization-mode",
+        default=DEFAULT_LOCALIZATION_MODE,
+        choices=["global", "known-start", "arena-active"],
+    )
+    parser.add_argument("--localization-spin-deg", default=DEFAULT_LOCALIZATION_SPIN_DEG, type=float)
+    parser.add_argument(
+        "--localization-angular-speed",
+        default=DEFAULT_LOCALIZATION_ANGULAR_SPEED_RADPS,
+        type=float,
+    )
+    parser.add_argument(
+        "--amcl-validation-timeout-sec",
+        default=DEFAULT_AMCL_VALIDATION_TIMEOUT_SEC,
+        type=float,
+    )
+    parser.add_argument(
+        "--known-start-validation-timeout-sec",
+        default=DEFAULT_KNOWN_START_VALIDATION_TIMEOUT_SEC,
+        type=float,
+    )
+    parser.add_argument("--preflight-timeout-sec", default=DEFAULT_PREFLIGHT_TIMEOUT_SEC, type=float)
+    parser.add_argument(
+        "--nav-to-start-timeout-sec",
+        default=DEFAULT_NAV_TO_START_TIMEOUT_SEC,
+        type=float,
+    )
+    parser.add_argument("--tf-ready-timeout-sec", default=DEFAULT_TF_READY_TIMEOUT_SEC, type=float)
+    parser.add_argument(
+        "--tf-lookup-timeout-sec",
+        default=DEFAULT_TF_LOOKUP_TIMEOUT_SEC,
+        type=float,
+    )
+    parser.add_argument(
+        "--tf-lookup-retry-period-sec",
+        default=DEFAULT_TF_LOOKUP_RETRY_PERIOD_SEC,
+        type=float,
+    )
+
+    parser.add_argument("--initial-pose-x", type=float)
+    parser.add_argument("--initial-pose-y", type=float)
+    parser.add_argument("--initial-pose-yaw-deg", type=float)
+    parser.add_argument("--initial-pose-var-x", default=DEFAULT_INITIAL_POSE_VAR_X, type=float)
+    parser.add_argument("--initial-pose-var-y", default=DEFAULT_INITIAL_POSE_VAR_Y, type=float)
+    parser.add_argument(
+        "--initial-pose-var-yaw-rad2",
+        default=DEFAULT_INITIAL_POSE_VAR_YAW_RAD2,
+        type=float,
+    )
+
+    parser.add_argument("--global-localization-service", default="/reinitialize_global_localization")
+    parser.add_argument("--navigate-action", default="/navigate_to_pose")
+    parser.add_argument("--initial-pose-topic", default="/initialpose")
+    parser.add_argument("--amcl-topic", default="/amcl_pose")
+    parser.add_argument("--cmd-vel-topic", default="/cmd_vel")
+    parser.add_argument("--scan-topic", default="/scan")
+    parser.add_argument("--odom-topic", default="/odom")
+    parser.add_argument("--follower-script", default=DEFAULT_FOLLOWER_SCRIPT, type=Path)
+    parser.add_argument("--python-executable", default="python3")
+
+    parser.add_argument("--max-pose-age-sec", default=DEFAULT_MAX_POSE_AGE_SEC, type=float)
+    parser.add_argument("--max-scan-age-sec", default=DEFAULT_MAX_SCAN_AGE_SEC, type=float)
+    parser.add_argument("--max-amcl-age-sec", default=DEFAULT_MAX_AMCL_AGE_SEC, type=float)
+    parser.add_argument("--max-amcl-var-x", default=DEFAULT_MAX_AMCL_VAR_X, type=float)
+    parser.add_argument("--max-amcl-var-y", default=DEFAULT_MAX_AMCL_VAR_Y, type=float)
+    parser.add_argument(
+        "--max-amcl-var-yaw-rad2",
+        default=DEFAULT_MAX_AMCL_VAR_YAW_RAD2,
+        type=float,
+    )
+    parser.add_argument("--stable-amcl-samples", default=DEFAULT_STABLE_AMCL_SAMPLES, type=int)
+    parser.add_argument(
+        "--max-stable-pose-jump-m",
+        default=DEFAULT_MAX_STABLE_POSE_JUMP_M,
+        type=float,
+    )
+    parser.add_argument(
+        "--max-stable-yaw-jump-deg",
+        default=DEFAULT_MAX_STABLE_YAW_JUMP_DEG,
+        type=float,
+    )
+    parser.add_argument(
+        "--spin-min-scan-range-m",
+        default=DEFAULT_SPIN_MIN_SCAN_RANGE_M,
+        type=float,
+    )
+    parser.add_argument(
+        "--spin-min-valid-scan-count",
+        default=DEFAULT_SPIN_MIN_VALID_SCAN_COUNT,
+        type=int,
+    )
+    parser.add_argument("--arrival-tolerance-m", default=DEFAULT_ARRIVAL_TOLERANCE_M, type=float)
+    parser.add_argument(
+        "--arrival-yaw-tolerance-deg",
+        default=DEFAULT_ARRIVAL_YAW_TOLERANCE_DEG,
+        type=float,
+    )
+    parser.add_argument("--waypoint-tolerance-m", default=DEFAULT_WAYPOINT_TOLERANCE_M, type=float)
+    parser.add_argument("--goal-tolerance-m", default=DEFAULT_GOAL_TOLERANCE_M, type=float)
+    parser.add_argument(
+        "--min-waypoint-spacing-m",
+        default=DEFAULT_MIN_WAYPOINT_SPACING_M,
+        type=float,
+    )
+    parser.add_argument("--control-rate-hz", default=DEFAULT_CONTROL_RATE_HZ, type=float)
+    parser.add_argument("--arena-active-dry-run", action="store_true")
+    parser.add_argument(
+        "--arena-active-spin-direction",
+        default="ccw",
+        choices=["ccw", "cw"],
+    )
+    parser.add_argument("--arena-active-angular-speed-rad-s", default=0.25, type=float)
+    parser.add_argument("--arena-active-max-spin-sec", default=30.0, type=float)
+    parser.add_argument("--arena-active-spin-complete-tolerance-deg", default=5.0, type=float)
+    parser.add_argument("--arena-active-min-angular-progress-rad-s", default=0.05, type=float)
+    parser.add_argument("--arena-active-progress-check-sec", default=2.0, type=float)
+    parser.add_argument("--arena-active-min-scan-samples", default=20, type=int)
+    parser.add_argument("--arena-active-max-odom-scan-age-sec", default=0.20, type=float)
+    parser.add_argument("--arena-active-stop-settle-sec", default=0.5, type=float)
+    parser.add_argument("--arena-active-min-front-clearance-m", default=0.35, type=float)
+    parser.add_argument("--arena-active-min-side-clearance-m", default=0.20, type=float)
+    parser.add_argument("--arena-active-min-rear-clearance-m", default=0.20, type=float)
+    parser.add_argument(
+        "--arena-active-require-operator-confirmation",
+        dest="arena_active_require_operator_confirmation",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--no-arena-active-operator-confirmation",
+        dest="arena_active_require_operator_confirmation",
+        action="store_false",
+    )
+    parser.set_defaults(arena_active_require_operator_confirmation=True)
+    parser.add_argument("--arena-active-allow-extra-cmd-vel-publishers", action="store_true")
+    parser.add_argument(
+        "--arena-active-on-failure",
+        default="abort",
+        choices=["abort", "global"],
+    )
+    parser.add_argument("--arena-active-validation-timeout-sec", default=DEFAULT_ARENA_ACTIVE_VALIDATION_TIMEOUT_SEC, type=float)
+    parser.add_argument("--arena-active-diagnostics-json", type=Path)
+    parser.add_argument("--arena-active-range-stride", default=6, type=int)
+    parser.add_argument("--arena-active-max-points", default=3000, type=int)
+    parser.add_argument("--arena-length-m", default=3.90, type=float)
+    parser.add_argument("--arena-width-m", type=float)
+    parser.add_argument("--arena-heater-wall-width-m", default=2.016, type=float)
+    parser.add_argument("--arena-clean-wall-width-m", default=1.967, type=float)
+    parser.add_argument("--arena-width-match-min-margin-m", default=0.015, type=float)
+    parser.add_argument("--arena-max-short-wall-range-sum-error-m", default=0.15, type=float)
+    parser.add_argument("--arena-map-center-x", default=0.0, type=float)
+    parser.add_argument("--arena-map-center-y", default=0.0, type=float)
+    parser.add_argument("--arena-map-yaw-deg", default=0.0, type=float)
+    parser.add_argument("--heater-wall-side", default="+x", choices=["+x", "-x"])
+    parser.add_argument("--arena-min-wall-points", default=20, type=int)
+    parser.add_argument("--arena-max-wall-separation-error-m", default=0.20, type=float)
+    parser.add_argument("--arena-max-line-rmse-m", default=0.08, type=float)
+    parser.add_argument("--arena-min-parallel-score", default=0.90, type=float)
+    parser.add_argument("--arena-min-short-wall-confidence", default=0.75, type=float)
+    parser.add_argument("--arena-min-classification-margin", default=0.15, type=float)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--yes", action="store_true")
+    parser.add_argument("--no-log", action="store_true")
+    args = parser.parse_args(argv)
+
+    if not args.run_id:
+        args.run_id = datetime.now().strftime("waypoint_two_stage_%Y%m%d_%H%M%S")
+    validate_args(parser, args)
+    return args
+
+
+def validate_args(parser, args):
+    positive_float_fields = [
+        "localization_angular_speed",
+        "amcl_validation_timeout_sec",
+        "known_start_validation_timeout_sec",
+        "preflight_timeout_sec",
+        "nav_to_start_timeout_sec",
+        "tf_ready_timeout_sec",
+        "tf_lookup_timeout_sec",
+        "tf_lookup_retry_period_sec",
+        "arena_active_validation_timeout_sec",
+        "initial_pose_var_x",
+        "initial_pose_var_y",
+        "initial_pose_var_yaw_rad2",
+        "max_pose_age_sec",
+        "max_scan_age_sec",
+        "max_amcl_age_sec",
+        "max_amcl_var_x",
+        "max_amcl_var_y",
+        "max_amcl_var_yaw_rad2",
+        "max_stable_pose_jump_m",
+        "max_stable_yaw_jump_deg",
+        "spin_min_scan_range_m",
+        "arrival_tolerance_m",
+        "arrival_yaw_tolerance_deg",
+        "waypoint_tolerance_m",
+        "goal_tolerance_m",
+        "control_rate_hz",
+        "arena_active_angular_speed_rad_s",
+        "arena_active_max_spin_sec",
+        "arena_active_spin_complete_tolerance_deg",
+        "arena_active_min_angular_progress_rad_s",
+        "arena_active_progress_check_sec",
+        "arena_active_max_odom_scan_age_sec",
+        "arena_active_stop_settle_sec",
+        "arena_active_min_front_clearance_m",
+        "arena_active_min_side_clearance_m",
+        "arena_active_min_rear_clearance_m",
+        "arena_length_m",
+        "arena_heater_wall_width_m",
+        "arena_clean_wall_width_m",
+        "arena_max_wall_separation_error_m",
+        "arena_max_line_rmse_m",
+        "arena_min_parallel_score",
+        "arena_min_short_wall_confidence",
+        "arena_min_classification_margin",
+    ]
+    for field in positive_float_fields:
+        if getattr(args, field) <= 0.0:
+            parser.error(f"--{field.replace('_', '-')} must be greater than zero")
+    if args.localization_spin_deg == 0.0:
+        parser.error("--localization-spin-deg must be non-zero")
+    if args.stable_amcl_samples < 1:
+        parser.error("--stable-amcl-samples must be >= 1")
+    if args.spin_min_valid_scan_count < 1:
+        parser.error("--spin-min-valid-scan-count must be >= 1")
+    if args.arena_active_min_scan_samples < 1:
+        parser.error("--arena-active-min-scan-samples must be >= 1")
+    if args.arena_active_range_stride < 1:
+        parser.error("--arena-active-range-stride must be >= 1")
+    if args.arena_active_max_points < 1:
+        parser.error("--arena-active-max-points must be >= 1")
+    if args.arena_width_m is not None and args.arena_width_m <= 0.0:
+        parser.error("--arena-width-m must be greater than zero")
+    if args.arena_width_match_min_margin_m < 0.0:
+        parser.error("--arena-width-match-min-margin-m must be non-negative")
+    if args.arena_max_short_wall_range_sum_error_m < 0.0:
+        parser.error("--arena-max-short-wall-range-sum-error-m must be non-negative")
+    if args.arena_min_wall_points < 1:
+        parser.error("--arena-min-wall-points must be >= 1")
+    if args.min_waypoint_spacing_m < 0.0:
+        parser.error("--min-waypoint-spacing-m must be non-negative")
+    if args.localization_mode == "known-start":
+        missing = [
+            name
+            for name in ["initial_pose_x", "initial_pose_y", "initial_pose_yaw_deg"]
+            if getattr(args, name) is None
+        ]
+        if missing:
+            parser.error(
+                "known-start mode requires "
+                + ", ".join("--" + name.replace("_", "-") for name in missing)
+            )
+
+
+def main(argv=None):
+    args = parse_args(argv if argv is not None else sys.argv[1:])
+    try:
+        waypoints = load_waypoints(args.waypoints)
+        staging_goal = staging_goal_from_waypoints(waypoints)
+    except Exception as exc:
+        print(f"two_stage_waypoint_run.py: error: {exc}", file=sys.stderr)
+        return 2
+
+    follower_command = build_follower_command(args)
+    if args.dry_run:
+        print_dry_run(args, waypoints, staging_goal, follower_command)
+        return 0
+
+    if not require_motion_confirmation(args, staging_goal, follower_command):
+        print("Two-stage waypoint run cancelled.")
+        return 130
+
+    from . import ros_runtime
+
+    if ros_runtime.rclpy is None:
+        print("ROS 2 Python modules are unavailable. Source ROS 2 Humble first.", file=sys.stderr)
+        return 2
+
+    diagnostics = RunDiagnostics(
+        timestamp=timestamp_now(),
+        start_wall_time=timestamp_now(),
+        follower_command=shlex.join(follower_command),
+        notes=args.notes,
+    )
+    start_monotonic = time.time()
+    node = None
+    return_code = 1
+
+    try:
+        ros_runtime.rclpy.init()
+        node = ros_runtime.TwoStageCoordinator(args)
+        node.preflight_before_motion()
+
+        phase_start = time.time()
+        if args.localization_mode == "global":
+            node.call_global_localization()
+            node.perform_localization_spin()
+            timeout = args.amcl_validation_timeout_sec
+        elif args.localization_mode == "known-start":
+            node.publish_known_start_initial_pose()
+            timeout = args.known_start_validation_timeout_sec
+        else:
+            arena_result = node.perform_arena_active_spin()
+            diagnostics.localization_duration_sec = time.time() - phase_start
+            if args.arena_active_dry_run:
+                if arena_result.success:
+                    diagnostics.status = "completed"
+                    diagnostics.final_status_reason = "arena_active_dry_run_completed"
+                    return_code = 0
+                else:
+                    diagnostics.status = "failed"
+                    diagnostics.final_status_reason = (
+                        arena_result.failure_reason or "arena_active_dry_run_failed"
+                    )
+                    return_code = 1
+                return return_code
+            if not arena_result.success:
+                if args.arena_active_on_failure == "global":
+                    arena_result.diagnostics["fallback_used"] = True
+                    ros_runtime.write_diagnostics_json(
+                        arena_result.diagnostics_path,
+                        arena_result.diagnostics,
+                    )
+                    phase_start = time.time()
+                    node.call_global_localization()
+                    node.perform_localization_spin()
+                    timeout = args.amcl_validation_timeout_sec
+                else:
+                    raise RuntimeError(
+                        "arena-active localization failed: "
+                        f"{arena_result.failure_reason}"
+                    )
+            else:
+                phase_start = time.time()
+                node.publish_arena_active_initial_pose(
+                    arena_result.pose_prior,
+                    arena_result,
+                )
+                timeout = args.arena_active_validation_timeout_sec
+        stability = node.wait_for_amcl_validation(timeout, min_received_sec=phase_start)
+        if diagnostics.localization_duration_sec is None:
+            diagnostics.localization_duration_sec = time.time() - phase_start
+        diagnostics.amcl_var_x = stability.cov_x
+        diagnostics.amcl_var_y = stability.cov_y
+        diagnostics.amcl_var_yaw_rad2 = stability.cov_yaw_rad2
+        diagnostics.stable_samples = stability.stable_count
+        diagnostics.max_pose_jump_m = stability.max_pose_jump_m
+        diagnostics.max_yaw_jump_deg = stability.max_yaw_jump_deg
+
+        _pose, frame = node.validate_post_localization_tf()
+        diagnostics.selected_base_frame = frame
+
+        phase_start = time.time()
+        diagnostics.nav2_result_status = node.navigate_to_staging(staging_goal)
+        diagnostics.nav2_duration_sec = time.time() - phase_start
+
+        arrival = node.verify_arrival(staging_goal)
+        diagnostics.selected_base_frame = arrival.base_frame
+        diagnostics.tf_arrival_x = arrival.pose.x
+        diagnostics.tf_arrival_y = arrival.pose.y
+        diagnostics.tf_arrival_yaw_deg = arrival.pose.yaw_deg
+        diagnostics.arrival_position_error_m = arrival.position_error_m
+        diagnostics.arrival_yaw_error_deg = arrival.yaw_error_deg
+        node.stop_repeatedly()
+
+        phase_start = time.time()
+        follower_result = run_follower_command(follower_command)
+        diagnostics.follower_duration_sec = time.time() - phase_start
+        diagnostics.follower_return_code = follower_result.returncode
+        if follower_result.returncode != 0:
+            raise RuntimeError(f"Follower exited with return code {follower_result.returncode}")
+
+        final_pose, _frame = node.lookup_pose(description="final TF")
+        diagnostics.final_tf_x = final_pose.x
+        diagnostics.final_tf_y = final_pose.y
+        diagnostics.final_tf_yaw_deg = final_pose.yaw_deg
+        diagnostics.status = "completed"
+        diagnostics.final_status_reason = "completed"
+        return_code = 0
+
+    except KeyboardInterrupt:
+        diagnostics.status = "interrupted"
+        diagnostics.final_status_reason = "keyboard_interrupt"
+        print("Interrupted. Cancelling navigation and sending stop...")
+        if node is not None:
+            cleanup_motion(node)
+        return_code = 130
+
+    except Exception as exc:
+        diagnostics.status = "failed"
+        diagnostics.final_status_reason = str(exc)
+        print(f"two_stage_waypoint_run.py: error: {exc}", file=sys.stderr)
+        if node is not None:
+            cleanup_motion(node)
+        return_code = 1
+
+    finally:
+        diagnostics.end_wall_time = timestamp_now()
+        diagnostics.duration_sec = time.time() - start_monotonic
+        if node is not None:
+            try:
+                final_pose, _frame = node.lookup_pose(description="final TF logging")
+                diagnostics.final_tf_x = final_pose.x
+                diagnostics.final_tf_y = final_pose.y
+                diagnostics.final_tf_yaw_deg = final_pose.yaw_deg
+                diagnostics.selected_base_frame = node.selected_base_frame
+            except Exception:
+                pass
+            try:
+                node.destroy_node()
+            finally:
+                ros_runtime.rclpy.shutdown()
+        if not args.no_log:
+            try:
+                append_csv_row(
+                    args.results_csv,
+                    CSV_HEADER,
+                    build_log_row(args, staging_goal, diagnostics),
+                )
+            except Exception as log_exc:
+                print(f"Could not write two-stage run log: {log_exc}", file=sys.stderr)
+
+    return return_code

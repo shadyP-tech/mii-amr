@@ -3,6 +3,7 @@ import contextlib
 import csv
 import io
 import math
+import subprocess
 import sys
 import tempfile
 import time
@@ -15,7 +16,11 @@ sys.path.insert(0, str(ROOT / "scripts" / "aufgabe03"))
 
 import follow_planned_waypoints as follower  # noqa: E402
 import arena_active_spin  # noqa: E402
-import two_stage_waypoint_run as two_stage  # noqa: E402
+from two_stage_waypoint import cli as two_stage_cli  # noqa: E402
+from two_stage_waypoint import experiment_log as two_stage_log  # noqa: E402
+from two_stage_waypoint import model as two_stage_model  # noqa: E402
+from two_stage_waypoint import pure as two_stage_pure  # noqa: E402
+from two_stage_waypoint import ros_runtime as two_stage_ros  # noqa: E402
 
 
 def write_waypoints(path, rows):
@@ -62,17 +67,17 @@ def fake_tf_node(tf_buffer, **overrides):
     for key, value in overrides.items():
         setattr(args, key, value)
     node = argparse.Namespace(args=args, tf_buffer=tf_buffer, selected_base_frame="")
-    node.transform_age_sec = two_stage.TwoStageCoordinator.transform_age_sec.__get__(
+    node.transform_age_sec = two_stage_ros.TwoStageCoordinator.transform_age_sec.__get__(
         node,
         type(node),
     )
-    node.lookup_robot_pose_tf = two_stage.TwoStageCoordinator.lookup_robot_pose_tf.__get__(
+    node.lookup_robot_pose_tf = two_stage_ros.TwoStageCoordinator.lookup_robot_pose_tf.__get__(
         node,
         type(node),
     )
-    node.lookup_pose = two_stage.TwoStageCoordinator.lookup_pose.__get__(node, type(node))
+    node.lookup_pose = two_stage_ros.TwoStageCoordinator.lookup_pose.__get__(node, type(node))
     node.validate_post_localization_tf = (
-        two_stage.TwoStageCoordinator.validate_post_localization_tf.__get__(
+        two_stage_ros.TwoStageCoordinator.validate_post_localization_tf.__get__(
             node,
             type(node),
         )
@@ -82,7 +87,7 @@ def fake_tf_node(tf_buffer, **overrides):
 
 class TwoStageWaypointRunTest(unittest.TestCase):
     def test_cli_parses_modes_overrides_timeouts_and_subprocess_paths(self):
-        args = two_stage.parse_args(
+        args = two_stage_cli.parse_args(
             [
                 "--dry-run",
                 "--run-id",
@@ -133,11 +138,11 @@ class TwoStageWaypointRunTest(unittest.TestCase):
     def test_known_start_requires_complete_initial_pose(self):
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
-                two_stage.parse_args(["--localization-mode", "known-start"])
+                two_stage_cli.parse_args(["--localization-mode", "known-start"])
 
     def test_arena_active_parser_defaults_do_not_change_global_defaults(self):
-        global_args = two_stage.parse_args(["--dry-run"])
-        arena_args = two_stage.parse_args(
+        global_args = two_stage_cli.parse_args(["--dry-run"])
+        arena_args = two_stage_cli.parse_args(
             [
                 "--dry-run",
                 "--localization-mode",
@@ -156,7 +161,7 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         self.assertEqual(arena_args.odom_topic, "/odom")
 
     def test_arena_active_dry_run_preflight_does_not_require_nav_or_global_fallback(self):
-        args = two_stage.parse_args(
+        args = two_stage_cli.parse_args(
             [
                 "--dry-run",
                 "--localization-mode",
@@ -167,7 +172,7 @@ class TwoStageWaypointRunTest(unittest.TestCase):
             ]
         )
 
-        requirements = two_stage.required_preflight_interfaces(args)
+        requirements = two_stage_pure.required_preflight_interfaces(args)
 
         self.assertEqual(requirements.services, [])
         self.assertEqual(requirements.actions, [])
@@ -185,11 +190,11 @@ class TwoStageWaypointRunTest(unittest.TestCase):
             covariance=covariance,
         )
 
-        var_x, var_y, var_yaw = two_stage.validate_pose_prior_for_initialpose(pose_prior)
+        var_x, var_y, var_yaw = two_stage_pure.validate_pose_prior_for_initialpose(pose_prior)
 
-        self.assertEqual(var_x, two_stage.MIN_ARENA_ACTIVE_VAR_XY)
-        self.assertEqual(var_y, two_stage.MIN_ARENA_ACTIVE_VAR_XY)
-        self.assertEqual(var_yaw, two_stage.MIN_ARENA_ACTIVE_VAR_YAW_RAD2)
+        self.assertEqual(var_x, two_stage_model.MIN_ARENA_ACTIVE_VAR_XY)
+        self.assertEqual(var_y, two_stage_model.MIN_ARENA_ACTIVE_VAR_XY)
+        self.assertEqual(var_yaw, two_stage_model.MIN_ARENA_ACTIVE_VAR_YAW_RAD2)
 
     def test_arena_active_invalid_pose_prior_is_rejected(self):
         covariance = [0.0] * 36
@@ -204,16 +209,16 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(RuntimeError, "non-finite pose"):
-            two_stage.validate_pose_prior_for_initialpose(pose_prior)
+            two_stage_pure.validate_pose_prior_for_initialpose(pose_prior)
 
     def test_staging_goal_uses_waypoint_zero_and_yaw_toward_waypoint_one(self):
         waypoints = [
-            two_stage.Waypoint(0, 0.0, 0.0),
-            two_stage.Waypoint(1, 0.0, 1.0),
-            two_stage.Waypoint(2, 1.0, 1.0),
+            two_stage_model.Waypoint(0, 0.0, 0.0),
+            two_stage_model.Waypoint(1, 0.0, 1.0),
+            two_stage_model.Waypoint(2, 1.0, 1.0),
         ]
 
-        staging = two_stage.staging_goal_from_waypoints(waypoints)
+        staging = two_stage_pure.staging_goal_from_waypoints(waypoints)
 
         self.assertEqual(staging.waypoint.index, 0)
         self.assertAlmostEqual(staging.yaw_deg, 90.0)
@@ -224,12 +229,12 @@ class TwoStageWaypointRunTest(unittest.TestCase):
             write_waypoints(path, [[0, 0.0, 0.0]])
 
             with self.assertRaisesRegex(ValueError, "at least two"):
-                two_stage.load_waypoints(path)
+                two_stage_pure.load_waypoints(path)
 
     def test_global_preflight_does_not_require_map_to_base_tf(self):
-        args = two_stage.parse_args(["--dry-run"])
+        args = two_stage_cli.parse_args(["--dry-run"])
 
-        requirements = two_stage.required_preflight_interfaces(args)
+        requirements = two_stage_pure.required_preflight_interfaces(args)
 
         self.assertEqual(requirements.services, ["/reinitialize_global_localization"])
         self.assertEqual(requirements.actions, ["/navigate_to_pose"])
@@ -237,7 +242,7 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         self.assertFalse(requirements.requires_tf_before_localization)
 
     def test_known_start_initial_pose_message_sets_covariance_and_quaternion(self):
-        msg = two_stage.build_initial_pose_message(
+        msg = two_stage_ros.build_initial_pose_message(
             x=1.0,
             y=-0.5,
             yaw_deg=90.0,
@@ -264,13 +269,13 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         covariance[7] = 0.02
         covariance[35] = 0.03
 
-        cov = two_stage.amcl_covariances(covariance)
+        cov = two_stage_pure.amcl_covariances(covariance)
         self.assertEqual((cov.x, cov.y, cov.yaw_rad2), (0.01, 0.02, 0.03))
 
-        state = two_stage.StabilityState()
-        state = two_stage.update_amcl_stability(
+        state = two_stage_model.StabilityState()
+        state = two_stage_pure.update_amcl_stability(
             state,
-            two_stage.Pose2D(0.0, 0.0, 0.0),
+            two_stage_model.Pose2D(0.0, 0.0, 0.0),
             covariance,
             max_var_x=0.05,
             max_var_y=0.05,
@@ -278,9 +283,9 @@ class TwoStageWaypointRunTest(unittest.TestCase):
             max_pose_jump_m=0.05,
             max_yaw_jump_deg=10.0,
         )
-        state = two_stage.update_amcl_stability(
+        state = two_stage_pure.update_amcl_stability(
             state,
-            two_stage.Pose2D(0.01, 0.0, 1.0),
+            two_stage_model.Pose2D(0.01, 0.0, 1.0),
             covariance,
             max_var_x=0.05,
             max_var_y=0.05,
@@ -290,9 +295,9 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         )
         self.assertEqual(state.stable_count, 2)
 
-        state = two_stage.update_amcl_stability(
+        state = two_stage_pure.update_amcl_stability(
             state,
-            two_stage.Pose2D(0.50, 0.0, 1.0),
+            two_stage_model.Pose2D(0.50, 0.0, 1.0),
             covariance,
             max_var_x=0.05,
             max_var_y=0.05,
@@ -302,15 +307,15 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         )
         self.assertEqual(state.stable_count, 1)
         self.assertEqual(state.reason, "pose_jump_above_threshold")
-        self.assertTrue(two_stage.amcl_validation_timed_out(10.0, 71.0, 60.0))
+        self.assertTrue(two_stage_pure.amcl_validation_timed_out(10.0, 71.0, 60.0))
 
     def test_scan_safety_aborts_on_unsafe_or_insufficient_ranges(self):
-        unsafe = two_stage.evaluate_spin_scan_safety(
+        unsafe = two_stage_pure.evaluate_spin_scan_safety(
             [float("nan"), float("inf"), 0.22, 0.17],
             min_scan_range_m=0.18,
             min_valid_scan_count=2,
         )
-        insufficient = two_stage.evaluate_spin_scan_safety(
+        insufficient = two_stage_pure.evaluate_spin_scan_safety(
             [float("nan"), float("inf"), 0.25],
             min_scan_range_m=0.18,
             min_valid_scan_count=2,
@@ -322,8 +327,8 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         self.assertEqual(insufficient.reason, "insufficient_valid_scan")
 
     def test_follower_command_uses_path_progress_and_runner_without_shell(self):
-        args = two_stage.parse_args(["--dry-run", "--run-id", "two_stage_test"])
-        command = two_stage.build_follower_command(args)
+        args = two_stage_cli.parse_args(["--dry-run", "--run-id", "two_stage_test"])
+        command = two_stage_pure.build_follower_command(args)
 
         self.assertEqual(command[0], "python3")
         self.assertIn("--start-selection", command)
@@ -341,7 +346,7 @@ class TwoStageWaypointRunTest(unittest.TestCase):
             captured["shell"] = shell
             return Result()
 
-        result = two_stage.run_follower_command(command, runner=fake_runner)
+        result = two_stage_cli.run_follower_command(command, runner=fake_runner)
 
         self.assertEqual(result.returncode, 0)
         self.assertIs(captured["cmd"], command)
@@ -384,7 +389,7 @@ class TwoStageWaypointRunTest(unittest.TestCase):
 
         node = FakeNode()
 
-        two_stage.cleanup_motion(node)
+        two_stage_cli.cleanup_motion(node)
 
         self.assertEqual(node.cancel_count, 1)
         self.assertEqual(node.stop_count, 1)
@@ -415,14 +420,14 @@ class TwoStageWaypointRunTest(unittest.TestCase):
                     raise RuntimeError("map frame not ready")
                 return make_transform(x=0.25, y=-0.1, yaw_deg=15.0)
 
-        original_rclpy = two_stage.rclpy
-        two_stage.rclpy = FakeRclpy
+        original_rclpy = two_stage_ros.rclpy
+        two_stage_ros.rclpy = FakeRclpy
         try:
             tf_buffer = DelayedTfBuffer()
             node = fake_tf_node(tf_buffer)
-            pose, frame = two_stage.TwoStageCoordinator.validate_post_localization_tf(node)
+            pose, frame = two_stage_ros.TwoStageCoordinator.validate_post_localization_tf(node)
         finally:
-            two_stage.rclpy = original_rclpy
+            two_stage_ros.rclpy = original_rclpy
 
         self.assertEqual(frame, "base_footprint")
         self.assertEqual(node.selected_base_frame, "base_footprint")
@@ -452,14 +457,14 @@ class TwoStageWaypointRunTest(unittest.TestCase):
                     raise RuntimeError("base_footprint unavailable")
                 return make_transform(x=1.0, y=2.0, yaw_deg=-30.0)
 
-        original_rclpy = two_stage.rclpy
-        two_stage.rclpy = FakeRclpy
+        original_rclpy = two_stage_ros.rclpy
+        two_stage_ros.rclpy = FakeRclpy
         try:
             tf_buffer = FallbackTfBuffer()
             node = fake_tf_node(tf_buffer)
-            pose, frame = two_stage.TwoStageCoordinator.lookup_pose(node)
+            pose, frame = two_stage_ros.TwoStageCoordinator.lookup_pose(node)
         finally:
-            two_stage.rclpy = original_rclpy
+            two_stage_ros.rclpy = original_rclpy
 
         self.assertEqual(frame, "base_link")
         self.assertEqual(node.selected_base_frame, "base_link")
@@ -481,8 +486,8 @@ class TwoStageWaypointRunTest(unittest.TestCase):
             def lookup_transform(self, _target_frame, source_frame, _lookup_time):
                 raise RuntimeError(f"{source_frame} missing")
 
-        original_rclpy = two_stage.rclpy
-        two_stage.rclpy = FakeRclpy
+        original_rclpy = two_stage_ros.rclpy
+        two_stage_ros.rclpy = FakeRclpy
         try:
             node = fake_tf_node(
                 MissingTfBuffer(),
@@ -490,9 +495,9 @@ class TwoStageWaypointRunTest(unittest.TestCase):
                 tf_lookup_retry_period_sec=0.001,
             )
             with self.assertRaisesRegex(RuntimeError, "Timed out waiting for robot pose TF"):
-                two_stage.TwoStageCoordinator.lookup_pose(node)
+                two_stage_ros.TwoStageCoordinator.lookup_pose(node)
         finally:
-            two_stage.rclpy = original_rclpy
+            two_stage_ros.rclpy = original_rclpy
 
     def test_lookup_pose_rejects_stale_tf(self):
         class FakeRclpy:
@@ -508,8 +513,8 @@ class TwoStageWaypointRunTest(unittest.TestCase):
             def lookup_transform(self, _target_frame, _source_frame, _lookup_time):
                 return make_transform(stamp_sec=time.time() - 20.0)
 
-        original_rclpy = two_stage.rclpy
-        two_stage.rclpy = FakeRclpy
+        original_rclpy = two_stage_ros.rclpy
+        two_stage_ros.rclpy = FakeRclpy
         try:
             node = fake_tf_node(
                 StaleTfBuffer(),
@@ -518,14 +523,14 @@ class TwoStageWaypointRunTest(unittest.TestCase):
                 tf_lookup_retry_period_sec=0.001,
             )
             with self.assertRaisesRegex(RuntimeError, "stale_tf"):
-                two_stage.TwoStageCoordinator.lookup_pose(node)
+                two_stage_ros.TwoStageCoordinator.lookup_pose(node)
         finally:
-            two_stage.rclpy = original_rclpy
+            two_stage_ros.rclpy = original_rclpy
 
     def test_log_row_contains_failure_status_and_follower_command(self):
-        args = two_stage.parse_args(["--dry-run", "--run-id", "two_stage_test"])
-        staging = two_stage.StagingGoal(two_stage.Waypoint(0, 0.0, 0.0), 0.0)
-        diagnostics = two_stage.RunDiagnostics(
+        args = two_stage_cli.parse_args(["--dry-run", "--run-id", "two_stage_test"])
+        staging = two_stage_model.StagingGoal(two_stage_model.Waypoint(0, 0.0, 0.0), 0.0)
+        diagnostics = two_stage_model.RunDiagnostics(
             timestamp="2026-05-18T10:00:00",
             start_wall_time="2026-05-18T10:00:00",
             end_wall_time="2026-05-18T10:00:05",
@@ -536,8 +541,8 @@ class TwoStageWaypointRunTest(unittest.TestCase):
             follower_return_code=1,
         )
 
-        row = two_stage.build_log_row(args, staging, diagnostics)
-        values = dict(zip(two_stage.CSV_HEADER, row))
+        row = two_stage_log.build_log_row(args, staging, diagnostics)
+        values = dict(zip(two_stage_model.CSV_HEADER, row))
 
         self.assertEqual(values["status"], "failed")
         self.assertEqual(values["final_status_reason"], "test failure")
@@ -551,7 +556,7 @@ class TwoStageWaypointRunTest(unittest.TestCase):
 
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
-                result = two_stage.main(
+                result = two_stage_cli.main(
                     [
                         "--waypoints",
                         str(path),
@@ -567,6 +572,20 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         self.assertIn("Computed staging yaw", output)
         self.assertIn("Follower command:", output)
         self.assertIn("ROS imports available:", output)
+
+    def test_public_script_help_works_without_ros_graph(self):
+        script = ROOT / "scripts" / "aufgabe03" / "two_stage_waypoint_run.py"
+
+        result = subprocess.run(
+            [sys.executable, str(script), "--help"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Coordinate AMCL localization", result.stdout)
 
 
 if __name__ == "__main__":
