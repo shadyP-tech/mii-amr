@@ -234,10 +234,85 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
             SYNTHETIC_ARENA_CONFIG,
         )
 
-        self.assertFalse(result.success)
-        self.assertFalse(result.pose_unique)
-        self.assertEqual(result.short_wall_classification.wall_type, arena.WALL_AMBIGUOUS)
-        self.assertEqual(result.short_wall_classification.reason, "both_axis_candidates_valid")
+        self.assertTrue(result.success)
+        self.assertTrue(result.pose_unique)
+        self.assertEqual(result.short_wall_classification.wall_type, arena.WALL_HEATER)
+        self.assertEqual(
+            result.short_wall_classification.reason,
+            "complementary_short_walls_valid",
+        )
+        self.assertAlmostEqual(
+            result.short_wall_classification.short_wall_range_sum_m,
+            3.90,
+            delta=0.01,
+        )
+        self.assertAlmostEqual(result.estimated_pose_prior.x, 0.0, delta=0.02)
+
+    def test_complementary_short_wall_range_sum_must_be_consistent(self):
+        config = arena.ArenaGeometryConfig()
+        candidates = {
+            "axis_negative": arena.ShortWallClassification(
+                wall_type=arena.WALL_HEATER,
+                reason="heater_score_dominant",
+                observed_axis_side="axis_negative",
+                confidence=0.90,
+                heater_feature_score=0.90,
+                classification_margin=0.90,
+                short_wall_candidate_range_m=0.50,
+                short_wall_rmse_m=0.01,
+                point_count=20,
+            ),
+            "axis_positive": arena.ShortWallClassification(
+                wall_type=arena.WALL_CLEAN,
+                reason="clean_score_dominant",
+                observed_axis_side="axis_positive",
+                confidence=0.90,
+                clean_feature_score=0.90,
+                classification_margin=0.90,
+                short_wall_candidate_range_m=2.00,
+                short_wall_rmse_m=0.01,
+                point_count=20,
+            ),
+        }
+
+        classification = arena.select_short_wall_classification(candidates, config)
+
+        self.assertEqual(classification.wall_type, arena.WALL_AMBIGUOUS)
+        self.assertEqual(classification.reason, "short_wall_range_inconsistent")
+        self.assertAlmostEqual(classification.short_wall_range_sum_m, 2.50)
+        self.assertAlmostEqual(classification.short_wall_range_sum_error_m, 1.40)
+
+    def test_duplicate_valid_short_wall_types_are_rejected(self):
+        config = arena.ArenaGeometryConfig()
+        candidates = {
+            "axis_negative": arena.ShortWallClassification(
+                wall_type=arena.WALL_HEATER,
+                reason="heater_score_dominant",
+                observed_axis_side="axis_negative",
+                confidence=0.90,
+                heater_feature_score=0.90,
+                classification_margin=0.90,
+                short_wall_candidate_range_m=0.50,
+                short_wall_rmse_m=0.01,
+                point_count=20,
+            ),
+            "axis_positive": arena.ShortWallClassification(
+                wall_type=arena.WALL_HEATER,
+                reason="heater_score_dominant",
+                observed_axis_side="axis_positive",
+                confidence=0.85,
+                heater_feature_score=0.85,
+                classification_margin=0.85,
+                short_wall_candidate_range_m=3.40,
+                short_wall_rmse_m=0.01,
+                point_count=20,
+            ),
+        }
+
+        classification = arena.select_short_wall_classification(candidates, config)
+
+        self.assertEqual(classification.wall_type, arena.WALL_AMBIGUOUS)
+        self.assertEqual(classification.reason, "both_axis_candidates_valid")
 
     def test_width_profile_does_not_override_short_wall_classification(self):
         config = arena.ArenaGeometryConfig(max_wall_separation_error_m=0.05)
@@ -355,6 +430,7 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
         self.assertEqual(args.arena_heater_wall_width_m, 2.016)
         self.assertEqual(args.arena_clean_wall_width_m, 1.967)
         self.assertEqual(args.arena_width_match_min_margin_m, 0.015)
+        self.assertEqual(args.arena_max_short_wall_range_sum_error_m, 0.15)
 
         single_width_args = bag_analyzer.parse_args(
             [

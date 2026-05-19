@@ -46,6 +46,7 @@ class ArenaGeometryConfig:
     heater_side_width_m: float = 2.016
     clean_side_width_m: float = 1.967
     width_match_min_margin_m: float = 0.015
+    max_short_wall_range_sum_error_m: float = 0.15
     map_center_x: float = 0.0
     map_center_y: float = 0.0
     map_yaw_deg: float = 0.0
@@ -155,6 +156,8 @@ class ShortWallClassification:
     short_wall_candidate_range_m: float | None = None
     short_wall_visible_width_m: float | None = None
     short_wall_rmse_m: float | None = None
+    short_wall_range_sum_m: float | None = None
+    short_wall_range_sum_error_m: float | None = None
     point_count: int = 0
 
     def to_dict(self):
@@ -170,6 +173,8 @@ class ShortWallClassification:
             "short_wall_candidate_range_m": self.short_wall_candidate_range_m,
             "short_wall_visible_width_m": self.short_wall_visible_width_m,
             "short_wall_rmse_m": self.short_wall_rmse_m,
+            "short_wall_range_sum_m": self.short_wall_range_sum_m,
+            "short_wall_range_sum_error_m": self.short_wall_range_sum_error_m,
             "point_count": self.point_count,
         }
 
@@ -727,9 +732,15 @@ def is_valid_short_wall_candidate(candidate: ShortWallClassification, config: Ar
     return candidate.short_wall_rmse_m <= config.max_line_rmse_m
 
 
-def ambiguous_from_candidate(candidate: ShortWallClassification, reason):
+def copy_candidate_with_reason(
+    candidate: ShortWallClassification,
+    reason,
+    wall_type=None,
+    short_wall_range_sum_m=None,
+    short_wall_range_sum_error_m=None,
+):
     return ShortWallClassification(
-        wall_type=WALL_AMBIGUOUS,
+        wall_type=wall_type or candidate.wall_type,
         reason=reason,
         observed_axis_side=candidate.observed_axis_side,
         confidence=candidate.confidence,
@@ -739,8 +750,25 @@ def ambiguous_from_candidate(candidate: ShortWallClassification, reason):
         short_wall_candidate_range_m=candidate.short_wall_candidate_range_m,
         short_wall_visible_width_m=candidate.short_wall_visible_width_m,
         short_wall_rmse_m=candidate.short_wall_rmse_m,
+        short_wall_range_sum_m=short_wall_range_sum_m,
+        short_wall_range_sum_error_m=short_wall_range_sum_error_m,
         point_count=candidate.point_count,
     )
+
+
+def complementary_short_wall_pair(accepted: Sequence[ShortWallClassification]):
+    if len(accepted) != 2:
+        return None
+    heater = next((candidate for candidate in accepted if candidate.wall_type == WALL_HEATER), None)
+    clean = next((candidate for candidate in accepted if candidate.wall_type == WALL_CLEAN), None)
+    if heater is None or clean is None:
+        return None
+    if (
+        heater.short_wall_candidate_range_m is None
+        or clean.short_wall_candidate_range_m is None
+    ):
+        return None
+    return heater, clean
 
 
 def select_short_wall_classification(
@@ -755,8 +783,34 @@ def select_short_wall_classification(
     ]
     ambiguous = [candidate for candidate in ordered if candidate.wall_type == WALL_AMBIGUOUS]
     if len(accepted) > 1:
+        complementary_pair = complementary_short_wall_pair(accepted)
         best = max(accepted, key=lambda item: item.confidence)
-        return ambiguous_from_candidate(best, "both_axis_candidates_valid")
+        if complementary_pair is None:
+            return copy_candidate_with_reason(
+                best,
+                "both_axis_candidates_valid",
+                wall_type=WALL_AMBIGUOUS,
+            )
+        heater, clean = complementary_pair
+        range_sum = (
+            heater.short_wall_candidate_range_m
+            + clean.short_wall_candidate_range_m
+        )
+        range_sum_error = abs(range_sum - config.arena_length_m)
+        if range_sum_error > config.max_short_wall_range_sum_error_m:
+            return copy_candidate_with_reason(
+                best,
+                "short_wall_range_inconsistent",
+                wall_type=WALL_AMBIGUOUS,
+                short_wall_range_sum_m=range_sum,
+                short_wall_range_sum_error_m=range_sum_error,
+            )
+        return copy_candidate_with_reason(
+            heater,
+            "complementary_short_walls_valid",
+            short_wall_range_sum_m=range_sum,
+            short_wall_range_sum_error_m=range_sum_error,
+        )
     if len(accepted) == 1:
         return accepted[0]
     if ambiguous:
@@ -769,6 +823,7 @@ def build_pose_prior(
     long_wall_fit: LongWallFit,
     classification: ShortWallClassification,
     config: ArenaGeometryConfig,
+    candidates: dict[str, ShortWallClassification] | None = None,
 ):
     if (
         long_wall_fit.axis_angle_rad is None
@@ -784,13 +839,29 @@ def build_pose_prior(
     local_map_plus_angle = axis_angle if observed_positive == observed_is_map_positive else axis_angle + math.pi
     local_map_plus = vector_from_angle(local_map_plus_angle)
 
-    axis_values = [dot(point, local_map_plus) for point in points]
-    if observed_map_side == "+x":
-        wall_coord = percentile(axis_values, 95.0)
-        robot_x_arena = config.arena_length_m / 2.0 - wall_coord
+    complementary_pair = None
+    if (
+        candidates is not None
+        and classification.reason == "complementary_short_walls_valid"
+    ):
+        complementary_pair = complementary_short_wall_pair(list(candidates.values()))
+
+    if complementary_pair is not None:
+        heater, clean = complementary_pair
+        heater_range = heater.short_wall_candidate_range_m or 0.0
+        clean_range = clean.short_wall_candidate_range_m or 0.0
+        if config.heater_wall_side == "+x":
+            robot_x_arena = (clean_range - heater_range) / 2.0
+        else:
+            robot_x_arena = (heater_range - clean_range) / 2.0
     else:
-        wall_coord = percentile(axis_values, 5.0)
-        robot_x_arena = -config.arena_length_m / 2.0 - wall_coord
+        axis_values = [dot(point, local_map_plus) for point in points]
+        if observed_map_side == "+x":
+            wall_coord = percentile(axis_values, 95.0)
+            robot_x_arena = config.arena_length_m / 2.0 - wall_coord
+        else:
+            wall_coord = percentile(axis_values, 5.0)
+            robot_x_arena = -config.arena_length_m / 2.0 - wall_coord
 
     center_projection = (
         (long_wall_fit.lower_projection_m or 0.0)
@@ -864,7 +935,11 @@ def analyze_points(points: Sequence[tuple[float, float]], config: ArenaGeometryC
     candidates = classify_short_wall_candidates(points, long_fit, config)
     classification = select_short_wall_classification(candidates, config)
     pose_unique = classification.wall_type in {WALL_HEATER, WALL_CLEAN}
-    pose = build_pose_prior(points, long_fit, classification, config) if pose_unique else None
+    pose = (
+        build_pose_prior(points, long_fit, classification, config, candidates)
+        if pose_unique
+        else None
+    )
     covariance = estimate_covariance(long_fit, classification) if pose_unique else None
     if pose_unique and pose is not None and covariance is not None:
         success = True
