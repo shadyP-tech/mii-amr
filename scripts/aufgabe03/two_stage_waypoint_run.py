@@ -930,7 +930,7 @@ class TwoStageCoordinator(Node):
             "x_m": pose_prior.x_m,
             "y_m": pose_prior.y_m,
             "yaw_rad": pose_prior.yaw_rad,
-            "covariance": msg.pose.covariance,
+            "covariance": [float(value) for value in msg.pose.covariance],
         }
         write_diagnostics_json(arena_result.diagnostics_path, arena_result.diagnostics)
         return msg
