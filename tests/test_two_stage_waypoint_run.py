@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "aufgabe03"))
 
 import follow_planned_waypoints as follower  # noqa: E402
+import arena_active_spin  # noqa: E402
 import two_stage_waypoint_run as two_stage  # noqa: E402
 
 
@@ -133,6 +134,77 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
                 two_stage.parse_args(["--localization-mode", "known-start"])
+
+    def test_arena_active_parser_defaults_do_not_change_global_defaults(self):
+        global_args = two_stage.parse_args(["--dry-run"])
+        arena_args = two_stage.parse_args(
+            [
+                "--dry-run",
+                "--localization-mode",
+                "arena-active",
+                "--arena-active-dry-run",
+                "--no-arena-active-operator-confirmation",
+            ]
+        )
+
+        self.assertEqual(global_args.localization_mode, "global")
+        self.assertEqual(arena_args.localization_mode, "arena-active")
+        self.assertTrue(arena_args.arena_active_dry_run)
+        self.assertFalse(arena_args.arena_active_require_operator_confirmation)
+        self.assertEqual(arena_args.arena_active_on_failure, "abort")
+        self.assertEqual(arena_args.arena_active_spin_direction, "ccw")
+        self.assertEqual(arena_args.odom_topic, "/odom")
+
+    def test_arena_active_dry_run_preflight_does_not_require_nav_or_global_fallback(self):
+        args = two_stage.parse_args(
+            [
+                "--dry-run",
+                "--localization-mode",
+                "arena-active",
+                "--arena-active-dry-run",
+                "--arena-active-on-failure",
+                "global",
+            ]
+        )
+
+        requirements = two_stage.required_preflight_interfaces(args)
+
+        self.assertEqual(requirements.services, [])
+        self.assertEqual(requirements.actions, [])
+        self.assertEqual(requirements.topics, ["/scan"])
+
+    def test_arena_active_pose_prior_covariance_is_clamped_and_validated(self):
+        covariance = [0.0] * 36
+        covariance[0] = 1e-8
+        covariance[7] = 1e-8
+        covariance[35] = 1e-8
+        pose_prior = arena_active_spin.PosePrior(
+            x_m=0.1,
+            y_m=0.2,
+            yaw_rad=0.3,
+            covariance=covariance,
+        )
+
+        var_x, var_y, var_yaw = two_stage.validate_pose_prior_for_initialpose(pose_prior)
+
+        self.assertEqual(var_x, two_stage.MIN_ARENA_ACTIVE_VAR_XY)
+        self.assertEqual(var_y, two_stage.MIN_ARENA_ACTIVE_VAR_XY)
+        self.assertEqual(var_yaw, two_stage.MIN_ARENA_ACTIVE_VAR_YAW_RAD2)
+
+    def test_arena_active_invalid_pose_prior_is_rejected(self):
+        covariance = [0.0] * 36
+        covariance[0] = 0.01
+        covariance[7] = 0.01
+        covariance[35] = -0.1
+        pose_prior = arena_active_spin.PosePrior(
+            x_m=0.1,
+            y_m=float("nan"),
+            yaw_rad=0.3,
+            covariance=covariance,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "non-finite pose"):
+            two_stage.validate_pose_prior_for_initialpose(pose_prior)
 
     def test_staging_goal_uses_waypoint_zero_and_yaw_toward_waypoint_one(self):
         waypoints = [

@@ -22,6 +22,7 @@ try:
     import rclpy
     from action_msgs.msg import GoalStatus
     from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
+    from nav_msgs.msg import Odometry
     from nav2_msgs.action import NavigateToPose
     from rclpy.action import ActionClient
     from rclpy.node import Node
@@ -39,6 +40,7 @@ except ImportError:
     qos_profile_sensor_data = None
     Time = None
     LaserScan = object
+    Odometry = object
     Empty = None
     tf2_ros = None
 
@@ -84,6 +86,13 @@ except ImportError:
             self.linear = _FallbackPosition()
             self.angular = _FallbackPosition()
 
+from arena_active_spin import (
+    ArenaActiveSpinConfig,
+    run_arena_active_spin,
+    write_diagnostics_json,
+)
+from arena_geometry_localizer import ArenaGeometryConfig
+
 
 DEFAULT_WAYPOINTS_CSV = Path("results/aufgabe03/aufgabe03_waypoints.csv")
 DEFAULT_RESULTS_CSV = Path("results/aufgabe03/aufgabe03_two_stage_runs.csv")
@@ -99,6 +108,7 @@ DEFAULT_NAV_TO_START_TIMEOUT_SEC = 180.0
 DEFAULT_TF_READY_TIMEOUT_SEC = 15.0
 DEFAULT_TF_LOOKUP_TIMEOUT_SEC = 10.0
 DEFAULT_TF_LOOKUP_RETRY_PERIOD_SEC = 0.1
+DEFAULT_ARENA_ACTIVE_VALIDATION_TIMEOUT_SEC = 30.0
 
 DEFAULT_MAX_AMCL_AGE_SEC = 15.0
 DEFAULT_MAX_AMCL_VAR_X = 0.05
@@ -111,6 +121,8 @@ DEFAULT_MAX_STABLE_YAW_JUMP_DEG = 10.0
 DEFAULT_INITIAL_POSE_VAR_X = 0.05
 DEFAULT_INITIAL_POSE_VAR_Y = 0.05
 DEFAULT_INITIAL_POSE_VAR_YAW_RAD2 = 0.10
+MIN_ARENA_ACTIVE_VAR_XY = 0.0025
+MIN_ARENA_ACTIVE_VAR_YAW_RAD2 = 0.0076
 
 DEFAULT_SPIN_MIN_SCAN_RANGE_M = 0.18
 DEFAULT_SPIN_MIN_VALID_SCAN_COUNT = 20
@@ -468,11 +480,102 @@ def required_preflight_interfaces(args):
     services = []
     if args.localization_mode == "global":
         services.append(args.global_localization_service)
+    if (
+        args.localization_mode == "arena-active"
+        and args.arena_active_on_failure == "global"
+        and not args.arena_active_dry_run
+    ):
+        services.append(args.global_localization_service)
+    actions = []
+    if not (args.localization_mode == "arena-active" and args.arena_active_dry_run):
+        actions.append(args.navigate_action)
     return PreflightRequirements(
         services=services,
-        actions=[args.navigate_action],
+        actions=actions,
         topics=[args.scan_topic],
         requires_tf_before_localization=False,
+    )
+
+
+def arena_active_diagnostics_path(args):
+    if args.arena_active_diagnostics_json is not None:
+        return args.arena_active_diagnostics_json
+    return Path("results/aufgabe03") / f"{args.run_id}_arena_active_result.json"
+
+
+def arena_active_config_from_args(args):
+    arena_config = ArenaGeometryConfig(
+        arena_length_m=args.arena_length_m,
+        arena_width_m=args.arena_width_m,
+        heater_side_width_m=args.arena_heater_wall_width_m,
+        clean_side_width_m=args.arena_clean_wall_width_m,
+        width_match_min_margin_m=args.arena_width_match_min_margin_m,
+        max_short_wall_range_sum_error_m=args.arena_max_short_wall_range_sum_error_m,
+        map_center_x=args.arena_map_center_x,
+        map_center_y=args.arena_map_center_y,
+        map_yaw_deg=args.arena_map_yaw_deg,
+        heater_wall_side=args.heater_wall_side,
+        min_wall_points=args.arena_min_wall_points,
+        max_wall_separation_error_m=args.arena_max_wall_separation_error_m,
+        max_line_rmse_m=args.arena_max_line_rmse_m,
+        min_parallel_score=args.arena_min_parallel_score,
+        min_short_wall_confidence=args.arena_min_short_wall_confidence,
+        min_classification_margin=args.arena_min_classification_margin,
+    )
+    return ArenaActiveSpinConfig(
+        run_id=args.run_id,
+        diagnostics_path=arena_active_diagnostics_path(args),
+        cmd_vel_topic=args.cmd_vel_topic,
+        scan_topic=args.scan_topic,
+        odom_topic=args.odom_topic,
+        spin_direction=args.arena_active_spin_direction,
+        angular_speed_rad_s=args.arena_active_angular_speed_rad_s,
+        max_spin_sec=args.arena_active_max_spin_sec,
+        spin_complete_tolerance_deg=args.arena_active_spin_complete_tolerance_deg,
+        min_angular_progress_rad_s=args.arena_active_min_angular_progress_rad_s,
+        progress_check_sec=args.arena_active_progress_check_sec,
+        min_scan_samples=args.arena_active_min_scan_samples,
+        max_odom_scan_age_sec=args.arena_active_max_odom_scan_age_sec,
+        stop_settle_sec=args.arena_active_stop_settle_sec,
+        min_front_clearance_m=args.arena_active_min_front_clearance_m,
+        min_side_clearance_m=args.arena_active_min_side_clearance_m,
+        min_rear_clearance_m=args.arena_active_min_rear_clearance_m,
+        require_operator_confirmation=args.arena_active_require_operator_confirmation,
+        allow_extra_cmd_vel_publishers=args.arena_active_allow_extra_cmd_vel_publishers,
+        on_failure=args.arena_active_on_failure,
+        dry_run=args.arena_active_dry_run,
+        range_stride=args.arena_active_range_stride,
+        max_points=args.arena_active_max_points,
+        control_rate_hz=args.control_rate_hz,
+        arena_config=arena_config,
+    )
+
+
+def validate_pose_prior_for_initialpose(pose_prior):
+    if pose_prior is None:
+        raise RuntimeError("Arena-active localizer did not return a pose prior")
+    if not (
+        math.isfinite(pose_prior.x_m)
+        and math.isfinite(pose_prior.y_m)
+        and math.isfinite(pose_prior.yaw_rad)
+    ):
+        raise RuntimeError("Arena-active pose prior contains non-finite pose values")
+    if len(pose_prior.covariance) < 36:
+        raise RuntimeError("Arena-active pose prior covariance must have 36 entries")
+    var_x = float(pose_prior.covariance[0])
+    var_y = float(pose_prior.covariance[7])
+    var_yaw = float(pose_prior.covariance[35])
+    for name, value in [
+        ("x", var_x),
+        ("y", var_y),
+        ("yaw", var_yaw),
+    ]:
+        if not math.isfinite(value) or value <= 0.0:
+            raise RuntimeError(f"Arena-active pose prior has invalid {name} covariance")
+    return (
+        max(var_x, MIN_ARENA_ACTIVE_VAR_XY),
+        max(var_y, MIN_ARENA_ACTIVE_VAR_XY),
+        max(var_yaw, MIN_ARENA_ACTIVE_VAR_YAW_RAD2),
     )
 
 
@@ -732,8 +835,9 @@ class TwoStageCoordinator(Node):
                 timeout_sec=self.args.preflight_timeout_sec,
             ):
                 raise RuntimeError(f"Required service is unavailable: {service}")
-        if not self.navigate_client.wait_for_server(timeout_sec=self.args.preflight_timeout_sec):
-            raise RuntimeError(f"Required action is unavailable: {self.args.navigate_action}")
+        for action in requirements.actions:
+            if not self.navigate_client.wait_for_server(timeout_sec=self.args.preflight_timeout_sec):
+                raise RuntimeError(f"Required action is unavailable: {action}")
         self.wait_for_fresh_scan(self.args.preflight_timeout_sec)
         safety = self.current_scan_safety()
         if not safety.ok:
@@ -792,6 +896,44 @@ class TwoStageCoordinator(Node):
             self.initial_pose_pub.publish(msg)
             rclpy.spin_once(self, timeout_sec=0.1)
             time.sleep(0.1)
+
+    def perform_arena_active_spin(self):
+        return run_arena_active_spin(
+            self,
+            self.cmd_vel_pub,
+            arena_active_config_from_args(self.args),
+            rclpy,
+            Twist,
+            LaserScan,
+            Odometry,
+            qos_profile_sensor_data,
+        )
+
+    def publish_arena_active_initial_pose(self, pose_prior, arena_result):
+        var_x, var_y, var_yaw = validate_pose_prior_for_initialpose(pose_prior)
+        self.wait_for_initial_pose_subscriber()
+        msg = build_initial_pose_message(
+            pose_prior.x_m,
+            pose_prior.y_m,
+            math.degrees(pose_prior.yaw_rad),
+            var_x,
+            var_y,
+            var_yaw,
+            frame_id=self.args.map_frame,
+        )
+        for _ in range(3):
+            self.initial_pose_pub.publish(msg)
+            rclpy.spin_once(self, timeout_sec=0.1)
+            time.sleep(0.1)
+        arena_result.diagnostics["initialpose"] = {
+            "published": True,
+            "x_m": pose_prior.x_m,
+            "y_m": pose_prior.y_m,
+            "yaw_rad": pose_prior.yaw_rad,
+            "covariance": msg.pose.covariance,
+        }
+        write_diagnostics_json(arena_result.diagnostics_path, arena_result.diagnostics)
+        return msg
 
     def amcl_pose2d(self, msg):
         stamp_sec = stamp_to_sec(msg.header.stamp)
@@ -1026,7 +1168,7 @@ def parse_args(argv):
     parser.add_argument(
         "--localization-mode",
         default=DEFAULT_LOCALIZATION_MODE,
-        choices=["global", "known-start"],
+        choices=["global", "known-start", "arena-active"],
     )
     parser.add_argument("--localization-spin-deg", default=DEFAULT_LOCALIZATION_SPIN_DEG, type=float)
     parser.add_argument(
@@ -1079,6 +1221,7 @@ def parse_args(argv):
     parser.add_argument("--amcl-topic", default="/amcl_pose")
     parser.add_argument("--cmd-vel-topic", default="/cmd_vel")
     parser.add_argument("--scan-topic", default="/scan")
+    parser.add_argument("--odom-topic", default="/odom")
     parser.add_argument("--follower-script", default=DEFAULT_FOLLOWER_SCRIPT, type=Path)
     parser.add_argument("--python-executable", default="python3")
 
@@ -1127,6 +1270,60 @@ def parse_args(argv):
         type=float,
     )
     parser.add_argument("--control-rate-hz", default=DEFAULT_CONTROL_RATE_HZ, type=float)
+    parser.add_argument("--arena-active-dry-run", action="store_true")
+    parser.add_argument(
+        "--arena-active-spin-direction",
+        default="ccw",
+        choices=["ccw", "cw"],
+    )
+    parser.add_argument("--arena-active-angular-speed-rad-s", default=0.25, type=float)
+    parser.add_argument("--arena-active-max-spin-sec", default=30.0, type=float)
+    parser.add_argument("--arena-active-spin-complete-tolerance-deg", default=5.0, type=float)
+    parser.add_argument("--arena-active-min-angular-progress-rad-s", default=0.05, type=float)
+    parser.add_argument("--arena-active-progress-check-sec", default=2.0, type=float)
+    parser.add_argument("--arena-active-min-scan-samples", default=20, type=int)
+    parser.add_argument("--arena-active-max-odom-scan-age-sec", default=0.20, type=float)
+    parser.add_argument("--arena-active-stop-settle-sec", default=0.5, type=float)
+    parser.add_argument("--arena-active-min-front-clearance-m", default=0.35, type=float)
+    parser.add_argument("--arena-active-min-side-clearance-m", default=0.20, type=float)
+    parser.add_argument("--arena-active-min-rear-clearance-m", default=0.20, type=float)
+    parser.add_argument(
+        "--arena-active-require-operator-confirmation",
+        dest="arena_active_require_operator_confirmation",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--no-arena-active-operator-confirmation",
+        dest="arena_active_require_operator_confirmation",
+        action="store_false",
+    )
+    parser.set_defaults(arena_active_require_operator_confirmation=True)
+    parser.add_argument("--arena-active-allow-extra-cmd-vel-publishers", action="store_true")
+    parser.add_argument(
+        "--arena-active-on-failure",
+        default="abort",
+        choices=["abort", "global"],
+    )
+    parser.add_argument("--arena-active-validation-timeout-sec", default=DEFAULT_ARENA_ACTIVE_VALIDATION_TIMEOUT_SEC, type=float)
+    parser.add_argument("--arena-active-diagnostics-json", type=Path)
+    parser.add_argument("--arena-active-range-stride", default=6, type=int)
+    parser.add_argument("--arena-active-max-points", default=3000, type=int)
+    parser.add_argument("--arena-length-m", default=3.90, type=float)
+    parser.add_argument("--arena-width-m", type=float)
+    parser.add_argument("--arena-heater-wall-width-m", default=2.016, type=float)
+    parser.add_argument("--arena-clean-wall-width-m", default=1.967, type=float)
+    parser.add_argument("--arena-width-match-min-margin-m", default=0.015, type=float)
+    parser.add_argument("--arena-max-short-wall-range-sum-error-m", default=0.15, type=float)
+    parser.add_argument("--arena-map-center-x", default=0.0, type=float)
+    parser.add_argument("--arena-map-center-y", default=0.0, type=float)
+    parser.add_argument("--arena-map-yaw-deg", default=0.0, type=float)
+    parser.add_argument("--heater-wall-side", default="+x", choices=["+x", "-x"])
+    parser.add_argument("--arena-min-wall-points", default=20, type=int)
+    parser.add_argument("--arena-max-wall-separation-error-m", default=0.20, type=float)
+    parser.add_argument("--arena-max-line-rmse-m", default=0.08, type=float)
+    parser.add_argument("--arena-min-parallel-score", default=0.90, type=float)
+    parser.add_argument("--arena-min-short-wall-confidence", default=0.75, type=float)
+    parser.add_argument("--arena-min-classification-margin", default=0.15, type=float)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--yes", action="store_true")
     parser.add_argument("--no-log", action="store_true")
@@ -1148,6 +1345,7 @@ def validate_args(parser, args):
         "tf_ready_timeout_sec",
         "tf_lookup_timeout_sec",
         "tf_lookup_retry_period_sec",
+        "arena_active_validation_timeout_sec",
         "initial_pose_var_x",
         "initial_pose_var_y",
         "initial_pose_var_yaw_rad2",
@@ -1165,6 +1363,24 @@ def validate_args(parser, args):
         "waypoint_tolerance_m",
         "goal_tolerance_m",
         "control_rate_hz",
+        "arena_active_angular_speed_rad_s",
+        "arena_active_max_spin_sec",
+        "arena_active_spin_complete_tolerance_deg",
+        "arena_active_min_angular_progress_rad_s",
+        "arena_active_progress_check_sec",
+        "arena_active_max_odom_scan_age_sec",
+        "arena_active_stop_settle_sec",
+        "arena_active_min_front_clearance_m",
+        "arena_active_min_side_clearance_m",
+        "arena_active_min_rear_clearance_m",
+        "arena_length_m",
+        "arena_heater_wall_width_m",
+        "arena_clean_wall_width_m",
+        "arena_max_wall_separation_error_m",
+        "arena_max_line_rmse_m",
+        "arena_min_parallel_score",
+        "arena_min_short_wall_confidence",
+        "arena_min_classification_margin",
     ]
     for field in positive_float_fields:
         if getattr(args, field) <= 0.0:
@@ -1175,6 +1391,20 @@ def validate_args(parser, args):
         parser.error("--stable-amcl-samples must be >= 1")
     if args.spin_min_valid_scan_count < 1:
         parser.error("--spin-min-valid-scan-count must be >= 1")
+    if args.arena_active_min_scan_samples < 1:
+        parser.error("--arena-active-min-scan-samples must be >= 1")
+    if args.arena_active_range_stride < 1:
+        parser.error("--arena-active-range-stride must be >= 1")
+    if args.arena_active_max_points < 1:
+        parser.error("--arena-active-max-points must be >= 1")
+    if args.arena_width_m is not None and args.arena_width_m <= 0.0:
+        parser.error("--arena-width-m must be greater than zero")
+    if args.arena_width_match_min_margin_m < 0.0:
+        parser.error("--arena-width-match-min-margin-m must be non-negative")
+    if args.arena_max_short_wall_range_sum_error_m < 0.0:
+        parser.error("--arena-max-short-wall-range-sum-error-m must be non-negative")
+    if args.arena_min_wall_points < 1:
+        parser.error("--arena-min-wall-points must be >= 1")
     if args.min_waypoint_spacing_m < 0.0:
         parser.error("--min-waypoint-spacing-m must be non-negative")
     if args.localization_mode == "known-start":
@@ -1232,11 +1462,50 @@ def main(argv=None):
             node.call_global_localization()
             node.perform_localization_spin()
             timeout = args.amcl_validation_timeout_sec
-        else:
+        elif args.localization_mode == "known-start":
             node.publish_known_start_initial_pose()
             timeout = args.known_start_validation_timeout_sec
+        else:
+            arena_result = node.perform_arena_active_spin()
+            diagnostics.localization_duration_sec = time.time() - phase_start
+            if args.arena_active_dry_run:
+                if arena_result.success:
+                    diagnostics.status = "completed"
+                    diagnostics.final_status_reason = "arena_active_dry_run_completed"
+                    return_code = 0
+                else:
+                    diagnostics.status = "failed"
+                    diagnostics.final_status_reason = (
+                        arena_result.failure_reason or "arena_active_dry_run_failed"
+                    )
+                    return_code = 1
+                return return_code
+            if not arena_result.success:
+                if args.arena_active_on_failure == "global":
+                    arena_result.diagnostics["fallback_used"] = True
+                    write_diagnostics_json(
+                        arena_result.diagnostics_path,
+                        arena_result.diagnostics,
+                    )
+                    phase_start = time.time()
+                    node.call_global_localization()
+                    node.perform_localization_spin()
+                    timeout = args.amcl_validation_timeout_sec
+                else:
+                    raise RuntimeError(
+                        "arena-active localization failed: "
+                        f"{arena_result.failure_reason}"
+                    )
+            else:
+                phase_start = time.time()
+                node.publish_arena_active_initial_pose(
+                    arena_result.pose_prior,
+                    arena_result,
+                )
+                timeout = args.arena_active_validation_timeout_sec
         stability = node.wait_for_amcl_validation(timeout, min_received_sec=phase_start)
-        diagnostics.localization_duration_sec = time.time() - phase_start
+        if diagnostics.localization_duration_sec is None:
+            diagnostics.localization_duration_sec = time.time() - phase_start
         diagnostics.amcl_var_x = stability.cov_x
         diagnostics.amcl_var_y = stability.cov_y
         diagnostics.amcl_var_yaw_rad2 = stability.cov_yaw_rad2
