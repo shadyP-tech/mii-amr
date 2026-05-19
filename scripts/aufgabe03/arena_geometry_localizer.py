@@ -42,7 +42,10 @@ class ScanSample:
 @dataclass(frozen=True)
 class ArenaGeometryConfig:
     arena_length_m: float = 3.90
-    arena_width_m: float = 1.898
+    arena_width_m: float | None = None
+    heater_side_width_m: float = 2.016
+    clean_side_width_m: float = 1.967
+    width_match_min_margin_m: float = 0.015
     map_center_x: float = 0.0
     map_center_y: float = 0.0
     map_yaw_deg: float = 0.0
@@ -90,6 +93,14 @@ class LongWallFit:
     upper_wall_points: int = 0
     wall_separation_m: float | None = None
     wall_separation_error_m: float | None = None
+    observed_wall_separation_m: float | None = None
+    matched_width_profile_label: str | None = None
+    expected_wall_width_m: float | None = None
+    width_error_m: float | None = None
+    width_match_margin_m: float | None = None
+    width_match_mode: str | None = None
+    width_match_ambiguous: bool = False
+    width_profile_errors_m: dict[str, float] | None = None
     long_wall_rmse_m: float | None = None
     parallel_angle_error_deg: float | None = None
     parallel_score: float | None = None
@@ -113,6 +124,14 @@ class LongWallFit:
             "upper_wall_points": self.upper_wall_points,
             "wall_separation_m": self.wall_separation_m,
             "wall_separation_error_m": self.wall_separation_error_m,
+            "observed_wall_separation_m": self.observed_wall_separation_m,
+            "matched_width_profile_label": self.matched_width_profile_label,
+            "expected_wall_width_m": self.expected_wall_width_m,
+            "width_error_m": self.width_error_m,
+            "width_match_margin_m": self.width_match_margin_m,
+            "width_match_mode": self.width_match_mode,
+            "width_match_ambiguous": self.width_match_ambiguous,
+            "width_profile_errors_m": self.width_profile_errors_m,
             "long_wall_rmse_m": self.long_wall_rmse_m,
             "parallel_angle_error_deg": self.parallel_angle_error_deg,
             "parallel_score": self.parallel_score,
@@ -142,6 +161,7 @@ class ShortWallClassification:
         return {
             "wall_type": self.wall_type,
             "reason": self.reason,
+            "axis_side": self.observed_axis_side,
             "observed_axis_side": self.observed_axis_side,
             "confidence": self.confidence,
             "heater_feature_score": self.heater_feature_score,
@@ -164,6 +184,7 @@ class ArenaGeometryResult:
     estimated_covariance: dict[str, float] | None
     long_wall_fit: LongWallFit
     short_wall_classification: ShortWallClassification
+    short_wall_candidates: dict[str, ShortWallClassification]
     diagnostics: dict[str, float | int | str | None]
 
     def to_dict(self):
@@ -183,9 +204,29 @@ class ArenaGeometryResult:
             ),
             "estimated_covariance": self.estimated_covariance,
             "long_wall_fit": self.long_wall_fit.to_dict(),
+            "short_wall_candidates": {
+                side: candidate.to_dict()
+                for side, candidate in self.short_wall_candidates.items()
+            },
             "short_wall_classification": self.short_wall_classification.to_dict(),
             "diagnostics": self.diagnostics,
         }
+
+
+@dataclass(frozen=True)
+class WidthMatch:
+    observed_wall_separation_m: float
+    matched_width_profile_label: str
+    expected_wall_width_m: float
+    width_error_m: float
+    width_match_margin_m: float | None
+    width_match_mode: str
+    width_match_ambiguous: bool
+    width_profile_errors_m: dict[str, float]
+
+    @property
+    def abs_error_m(self):
+        return abs(self.width_error_m)
 
 
 def clamp(value, lower, upper):
@@ -330,6 +371,45 @@ def projection_clusters(points, normal, lower_center, upper_center, threshold):
     return lower, upper
 
 
+def width_profiles(config: ArenaGeometryConfig):
+    if config.arena_width_m is not None:
+        return "single", [("arena_single", config.arena_width_m)]
+    return "dual", [
+        ("heater_side_width", config.heater_side_width_m),
+        ("clean_side_width", config.clean_side_width_m),
+    ]
+
+
+def match_width_profile(observed_wall_separation_m, config: ArenaGeometryConfig):
+    mode, profiles = width_profiles(config)
+    errors = {
+        label: observed_wall_separation_m - expected_width
+        for label, expected_width in profiles
+    }
+    ranked = sorted(
+        profiles,
+        key=lambda item: abs(errors[item[0]]),
+    )
+    best_label, best_width = ranked[0]
+    best_abs_error = abs(errors[best_label])
+    margin = None
+    ambiguous = False
+    if len(ranked) > 1:
+        second_label, _second_width = ranked[1]
+        margin = abs(errors[second_label]) - best_abs_error
+        ambiguous = margin < config.width_match_min_margin_m
+    return WidthMatch(
+        observed_wall_separation_m=observed_wall_separation_m,
+        matched_width_profile_label=best_label,
+        expected_wall_width_m=best_width,
+        width_error_m=errors[best_label],
+        width_match_margin_m=margin,
+        width_match_mode=mode,
+        width_match_ambiguous=ambiguous,
+        width_profile_errors_m=errors,
+    )
+
+
 def fit_long_walls(points: Sequence[tuple[float, float]], config: ArenaGeometryConfig):
     if len(points) < 2 * config.min_wall_points:
         return LongWallFit(False, "insufficient_points")
@@ -380,7 +460,8 @@ def fit_long_walls(points: Sequence[tuple[float, float]], config: ArenaGeometryC
             )
             / 2.0
         )
-        separation_error = abs(separation - config.arena_width_m)
+        width_match = match_width_profile(separation, config)
+        separation_error = width_match.abs_error_m
         score = (
             len(lower_points)
             + len(upper_points)
@@ -396,6 +477,7 @@ def fit_long_walls(points: Sequence[tuple[float, float]], config: ArenaGeometryC
             upper_center,
             separation,
             separation_error,
+            width_match,
             rmse,
             parallel_error,
             parallel_score,
@@ -418,6 +500,7 @@ def fit_long_walls(points: Sequence[tuple[float, float]], config: ArenaGeometryC
         upper_center,
         separation,
         separation_error,
+        width_match,
         rmse,
         parallel_error,
         parallel_score,
@@ -450,6 +533,14 @@ def fit_long_walls(points: Sequence[tuple[float, float]], config: ArenaGeometryC
         upper_wall_points=len(upper_points),
         wall_separation_m=separation,
         wall_separation_error_m=separation_error,
+        observed_wall_separation_m=width_match.observed_wall_separation_m,
+        matched_width_profile_label=width_match.matched_width_profile_label,
+        expected_wall_width_m=width_match.expected_wall_width_m,
+        width_error_m=width_match.width_error_m,
+        width_match_margin_m=width_match.width_match_margin_m,
+        width_match_mode=width_match.width_match_mode,
+        width_match_ambiguous=width_match.width_match_ambiguous,
+        width_profile_errors_m=width_match.width_profile_errors_m,
         long_wall_rmse_m=rmse,
         parallel_angle_error_deg=parallel_error,
         parallel_score=parallel_score,
@@ -486,7 +577,13 @@ def classify_candidate(
         if abs(t - edge_projection) <= config.short_wall_band_m:
             band_points.append(point)
     if len(band_points) < config.min_short_wall_points:
-        return ShortWallClassification(WALL_UNKNOWN, "insufficient_short_wall_points")
+        return ShortWallClassification(
+            WALL_UNKNOWN,
+            "insufficient_short_wall_points",
+            observed_axis_side=side,
+            short_wall_candidate_range_m=abs(edge_projection),
+            point_count=len(band_points),
+        )
 
     normal_values = [dot(point, normal) for point in band_points]
     visible_width = max(normal_values) - min(normal_values)
@@ -500,7 +597,14 @@ def classify_candidate(
     try:
         line = fit_line(outer_points)
     except ValueError:
-        return ShortWallClassification(WALL_UNKNOWN, "short_wall_line_fit_failed")
+        return ShortWallClassification(
+            WALL_UNKNOWN,
+            "short_wall_line_fit_failed",
+            observed_axis_side=side,
+            short_wall_candidate_range_m=abs(edge_projection),
+            short_wall_visible_width_m=visible_width,
+            point_count=len(band_points),
+        )
 
     short_wall_expected_angle = math.atan2(normal[1], normal[0])
     perpendicular_error = math.degrees(
@@ -561,50 +665,103 @@ def classify_candidate(
     )
 
 
-def classify_short_wall(
+def empty_short_wall_candidates(reason):
+    return {
+        "axis_negative": ShortWallClassification(
+            WALL_UNKNOWN,
+            reason,
+            observed_axis_side="axis_negative",
+        ),
+        "axis_positive": ShortWallClassification(
+            WALL_UNKNOWN,
+            reason,
+            observed_axis_side="axis_positive",
+        ),
+    }
+
+
+def classify_short_wall_candidates(
     points: Sequence[tuple[float, float]],
     long_wall_fit: LongWallFit,
     config: ArenaGeometryConfig,
 ):
     if not long_wall_fit.ok or long_wall_fit.axis_angle_rad is None:
-        return ShortWallClassification(WALL_UNKNOWN, "long_wall_fit_unavailable")
+        return empty_short_wall_candidates("long_wall_fit_unavailable")
 
     axis = vector_from_angle(long_wall_fit.axis_angle_rad)
     normal = vector_from_angle(long_wall_fit.normal_angle_rad or long_wall_fit.axis_angle_rad + math.pi / 2.0)
     projections = [dot(point, axis) for point in points]
     lower_edge = percentile(projections, 5.0)
     upper_edge = percentile(projections, 95.0)
-    candidates = [
-        classify_candidate(points, axis, normal, "axis_negative", lower_edge, config),
-        classify_candidate(points, axis, normal, "axis_positive", upper_edge, config),
-    ]
+    return {
+        "axis_negative": classify_candidate(
+            points,
+            axis,
+            normal,
+            "axis_negative",
+            lower_edge,
+            config,
+        ),
+        "axis_positive": classify_candidate(
+            points,
+            axis,
+            normal,
+            "axis_positive",
+            upper_edge,
+            config,
+        ),
+    }
+
+
+def is_valid_short_wall_candidate(candidate: ShortWallClassification, config: ArenaGeometryConfig):
+    if candidate.wall_type not in {WALL_HEATER, WALL_CLEAN}:
+        return False
+    if candidate.confidence < config.min_short_wall_confidence:
+        return False
+    if candidate.classification_margin < config.min_classification_margin:
+        return False
+    if candidate.point_count < config.min_short_wall_points:
+        return False
+    if candidate.short_wall_rmse_m is None:
+        return False
+    return candidate.short_wall_rmse_m <= config.max_line_rmse_m
+
+
+def ambiguous_from_candidate(candidate: ShortWallClassification, reason):
+    return ShortWallClassification(
+        wall_type=WALL_AMBIGUOUS,
+        reason=reason,
+        observed_axis_side=candidate.observed_axis_side,
+        confidence=candidate.confidence,
+        heater_feature_score=candidate.heater_feature_score,
+        clean_feature_score=candidate.clean_feature_score,
+        classification_margin=candidate.classification_margin,
+        short_wall_candidate_range_m=candidate.short_wall_candidate_range_m,
+        short_wall_visible_width_m=candidate.short_wall_visible_width_m,
+        short_wall_rmse_m=candidate.short_wall_rmse_m,
+        point_count=candidate.point_count,
+    )
+
+
+def select_short_wall_classification(
+    candidates: dict[str, ShortWallClassification],
+    config: ArenaGeometryConfig,
+):
+    ordered = list(candidates.values())
     accepted = [
         candidate
-        for candidate in candidates
-        if candidate.wall_type in {WALL_HEATER, WALL_CLEAN}
+        for candidate in ordered
+        if is_valid_short_wall_candidate(candidate, config)
     ]
-    ambiguous = [candidate for candidate in candidates if candidate.wall_type == WALL_AMBIGUOUS]
-    if ambiguous and not accepted:
+    ambiguous = [candidate for candidate in ordered if candidate.wall_type == WALL_AMBIGUOUS]
+    if len(accepted) > 1:
+        best = max(accepted, key=lambda item: item.confidence)
+        return ambiguous_from_candidate(best, "both_axis_candidates_valid")
+    if len(accepted) == 1:
+        return accepted[0]
+    if ambiguous:
         return max(ambiguous, key=lambda item: item.confidence)
-    if not accepted:
-        return max(candidates, key=lambda item: item.confidence)
-    accepted.sort(key=lambda item: item.confidence, reverse=True)
-    if len(accepted) > 1 and accepted[0].confidence - accepted[1].confidence < config.min_classification_margin:
-        best = accepted[0]
-        return ShortWallClassification(
-            wall_type=WALL_AMBIGUOUS,
-            reason="multiple_short_wall_candidates_with_low_margin",
-            observed_axis_side=best.observed_axis_side,
-            confidence=best.confidence,
-            heater_feature_score=best.heater_feature_score,
-            clean_feature_score=best.clean_feature_score,
-            classification_margin=best.classification_margin,
-            short_wall_candidate_range_m=best.short_wall_candidate_range_m,
-            short_wall_visible_width_m=best.short_wall_visible_width_m,
-            short_wall_rmse_m=best.short_wall_rmse_m,
-            point_count=best.point_count,
-        )
-    return accepted[0]
+    return max(ordered, key=lambda item: item.confidence)
 
 
 def build_pose_prior(
@@ -687,6 +844,7 @@ def analyze_points(points: Sequence[tuple[float, float]], config: ArenaGeometryC
     long_fit = fit_long_walls(points, config)
     if not long_fit.ok:
         classification = ShortWallClassification(WALL_UNKNOWN, "long_wall_fit_failed")
+        candidates = empty_short_wall_candidates("long_wall_fit_failed")
         return ArenaGeometryResult(
             success=False,
             failure_reason=long_fit.reason,
@@ -696,13 +854,15 @@ def analyze_points(points: Sequence[tuple[float, float]], config: ArenaGeometryC
             estimated_covariance=None,
             long_wall_fit=long_fit,
             short_wall_classification=classification,
+            short_wall_candidates=candidates,
             diagnostics={
                 "num_scan_samples_used": 0,
                 "num_points_used": len(points),
             },
         )
 
-    classification = classify_short_wall(points, long_fit, config)
+    candidates = classify_short_wall_candidates(points, long_fit, config)
+    classification = select_short_wall_classification(candidates, config)
     pose_unique = classification.wall_type in {WALL_HEATER, WALL_CLEAN}
     pose = build_pose_prior(points, long_fit, classification, config) if pose_unique else None
     covariance = estimate_covariance(long_fit, classification) if pose_unique else None
@@ -722,6 +882,7 @@ def analyze_points(points: Sequence[tuple[float, float]], config: ArenaGeometryC
         estimated_covariance=covariance,
         long_wall_fit=long_fit,
         short_wall_classification=classification,
+        short_wall_candidates=candidates,
         diagnostics={
             "num_scan_samples_used": 0,
             "num_points_used": len(points),
@@ -753,6 +914,7 @@ def analyze_scan_samples(
         estimated_covariance=result.estimated_covariance,
         long_wall_fit=result.long_wall_fit,
         short_wall_classification=result.short_wall_classification,
+        short_wall_candidates=result.short_wall_candidates,
         diagnostics=diagnostics,
     )
 

@@ -145,7 +145,14 @@ def parse_args(argv):
     )
 
     parser.add_argument("--arena-length-m", default=3.90, type=float)
-    parser.add_argument("--arena-width-m", default=1.898, type=float)
+    parser.add_argument(
+        "--arena-width-m",
+        type=float,
+        help="Optional single empirical LiDAR width override. When omitted, dual width-profile matching is used.",
+    )
+    parser.add_argument("--arena-heater-wall-width-m", default=2.016, type=float)
+    parser.add_argument("--arena-clean-wall-width-m", default=1.967, type=float)
+    parser.add_argument("--arena-width-match-min-margin-m", default=0.015, type=float)
     parser.add_argument("--arena-map-center-x", default=0.0, type=float)
     parser.add_argument("--arena-map-center-y", default=0.0, type=float)
     parser.add_argument("--arena-map-yaw-deg", default=0.0, type=float)
@@ -168,6 +175,14 @@ def parse_args(argv):
         parser.error("--range-stride must be >= 1")
     if args.max_points is not None and args.max_points < 1:
         parser.error("--max-points must be >= 1")
+    if args.arena_width_m is not None and args.arena_width_m <= 0.0:
+        parser.error("--arena-width-m must be > 0")
+    if args.arena_heater_wall_width_m <= 0.0:
+        parser.error("--arena-heater-wall-width-m must be > 0")
+    if args.arena_clean_wall_width_m <= 0.0:
+        parser.error("--arena-clean-wall-width-m must be > 0")
+    if args.arena_width_match_min_margin_m < 0.0:
+        parser.error("--arena-width-match-min-margin-m must be >= 0")
     return args
 
 
@@ -175,6 +190,9 @@ def config_from_args(args):
     return ArenaGeometryConfig(
         arena_length_m=args.arena_length_m,
         arena_width_m=args.arena_width_m,
+        heater_side_width_m=args.arena_heater_wall_width_m,
+        clean_side_width_m=args.arena_clean_wall_width_m,
+        width_match_min_margin_m=args.arena_width_match_min_margin_m,
         map_center_x=args.arena_map_center_x,
         map_center_y=args.arena_map_center_y,
         map_yaw_deg=args.arena_map_yaw_deg,

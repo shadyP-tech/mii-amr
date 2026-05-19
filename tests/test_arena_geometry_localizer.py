@@ -15,6 +15,9 @@ import analyze_arena_geometry_from_bag as bag_analyzer  # noqa: E402
 import arena_geometry_localizer as arena  # noqa: E402
 
 
+SYNTHETIC_ARENA_CONFIG = arena.ArenaGeometryConfig(arena_width_m=1.898)
+
+
 def rotate_point(point, yaw_deg):
     yaw = math.radians(yaw_deg)
     x, y = point
@@ -36,9 +39,10 @@ def rectangular_points(
     include_heater=False,
     yaw_deg=0.0,
     lateral_offset_m=0.0,
+    width_m=1.898,
 ):
     half_length = 3.90 / 2.0
-    half_width = 1.898 / 2.0
+    half_width = width_m / 2.0
     points = []
     for index in range(61):
         x = -1.50 + index * 0.05
@@ -61,7 +65,7 @@ def rectangular_points(
 
 class ArenaGeometryLocalizerTest(unittest.TestCase):
     def test_long_walls_only_are_rejected_as_non_unique(self):
-        result = arena.analyze_points(rectangular_points())
+        result = arena.analyze_points(rectangular_points(), SYNTHETIC_ARENA_CONFIG)
 
         self.assertFalse(result.success)
         self.assertTrue(result.long_wall_fit.ok)
@@ -71,7 +75,10 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
         self.assertEqual(result.short_wall_classification.wall_type, arena.WALL_UNKNOWN)
 
     def test_clean_wall_resolves_pose_prior(self):
-        result = arena.analyze_points(rectangular_points(include_clean=True))
+        result = arena.analyze_points(
+            rectangular_points(include_clean=True),
+            SYNTHETIC_ARENA_CONFIG,
+        )
 
         self.assertTrue(result.success)
         self.assertTrue(result.pose_unique)
@@ -84,7 +91,10 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
         self.assertIsNotNone(result.estimated_covariance)
 
     def test_heater_wall_resolves_pose_prior(self):
-        result = arena.analyze_points(rectangular_points(include_heater=True))
+        result = arena.analyze_points(
+            rectangular_points(include_heater=True),
+            SYNTHETIC_ARENA_CONFIG,
+        )
 
         self.assertTrue(result.success)
         self.assertEqual(result.short_wall_classification.wall_type, arena.WALL_HEATER)
@@ -94,7 +104,8 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
 
     def test_rotated_and_laterally_offset_scan_estimates_y_and_yaw(self):
         result = arena.analyze_points(
-            rectangular_points(include_clean=True, yaw_deg=12.0, lateral_offset_m=0.18)
+            rectangular_points(include_clean=True, yaw_deg=12.0, lateral_offset_m=0.18),
+            SYNTHETIC_ARENA_CONFIG,
         )
 
         self.assertTrue(result.success)
@@ -103,6 +114,7 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
 
     def test_map_frame_calibration_is_applied_to_pose_prior(self):
         config = arena.ArenaGeometryConfig(
+            arena_width_m=1.898,
             map_center_x=1.0,
             map_center_y=2.0,
             map_yaw_deg=90.0,
@@ -115,7 +127,10 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
         self.assertAlmostEqual(result.estimated_pose_prior.yaw_deg, 90.0, delta=2.0)
 
     def test_json_output_contains_required_commit_a_keys(self):
-        result = arena.analyze_points(rectangular_points(include_clean=True))
+        result = arena.analyze_points(
+            rectangular_points(include_clean=True),
+            SYNTHETIC_ARENA_CONFIG,
+        )
         data = result.to_dict()
 
         for key in [
@@ -126,10 +141,124 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
             "estimated_pose_prior",
             "estimated_covariance",
             "long_wall_fit",
+            "short_wall_candidates",
             "short_wall_classification",
             "diagnostics",
         ]:
             self.assertIn(key, data)
+
+    def test_heater_side_width_profile_matches_lidar_width(self):
+        config = arena.ArenaGeometryConfig(max_wall_separation_error_m=0.05)
+        result = arena.analyze_points(
+            rectangular_points(width_m=2.016),
+            config,
+        )
+
+        self.assertTrue(result.long_wall_fit.ok)
+        self.assertEqual(
+            result.long_wall_fit.matched_width_profile_label,
+            "heater_side_width",
+        )
+        self.assertEqual(result.long_wall_fit.width_match_mode, "dual")
+        self.assertFalse(result.long_wall_fit.width_match_ambiguous)
+
+    def test_clean_side_width_profile_matches_lidar_width(self):
+        config = arena.ArenaGeometryConfig(max_wall_separation_error_m=0.05)
+        result = arena.analyze_points(
+            rectangular_points(width_m=1.967),
+            config,
+        )
+
+        self.assertTrue(result.long_wall_fit.ok)
+        self.assertEqual(
+            result.long_wall_fit.matched_width_profile_label,
+            "clean_side_width",
+        )
+        self.assertEqual(result.long_wall_fit.width_match_mode, "dual")
+        self.assertFalse(result.long_wall_fit.width_match_ambiguous)
+
+    def test_midpoint_width_profile_is_marked_ambiguous(self):
+        config = arena.ArenaGeometryConfig(max_wall_separation_error_m=0.05)
+        midpoint_width = (2.016 + 1.967) / 2.0
+        width_match = arena.match_width_profile(midpoint_width, config)
+
+        self.assertTrue(width_match.width_match_ambiguous)
+        self.assertAlmostEqual(width_match.width_match_margin_m, 0.0)
+
+    def test_out_of_tolerance_width_profile_fails_long_wall_fit(self):
+        config = arena.ArenaGeometryConfig(max_wall_separation_error_m=0.05)
+        result = arena.analyze_points(
+            rectangular_points(width_m=1.80),
+            config,
+        )
+
+        self.assertFalse(result.long_wall_fit.ok)
+        self.assertEqual(result.failure_reason, "wall_separation_out_of_tolerance")
+
+    def test_single_width_override_disables_dual_width_matching(self):
+        config = arena.ArenaGeometryConfig(
+            arena_width_m=1.90,
+            max_wall_separation_error_m=0.05,
+        )
+        result = arena.analyze_points(
+            rectangular_points(width_m=1.90),
+            config,
+        )
+
+        self.assertTrue(result.long_wall_fit.ok)
+        self.assertEqual(result.long_wall_fit.width_match_mode, "single")
+        self.assertEqual(result.long_wall_fit.matched_width_profile_label, "arena_single")
+
+    def test_short_wall_candidates_include_both_axis_sides(self):
+        data = arena.analyze_points(
+            rectangular_points(include_clean=True),
+            SYNTHETIC_ARENA_CONFIG,
+        ).to_dict()
+
+        self.assertEqual(
+            set(data["short_wall_candidates"].keys()),
+            {"axis_negative", "axis_positive"},
+        )
+        self.assertEqual(
+            data["short_wall_candidates"]["axis_negative"]["axis_side"],
+            "axis_negative",
+        )
+        self.assertEqual(
+            data["short_wall_candidates"]["axis_positive"]["axis_side"],
+            "axis_positive",
+        )
+
+    def test_two_valid_axis_candidates_are_rejected_as_ambiguous(self):
+        result = arena.analyze_points(
+            rectangular_points(include_clean=True, include_heater=True),
+            SYNTHETIC_ARENA_CONFIG,
+        )
+
+        self.assertFalse(result.success)
+        self.assertFalse(result.pose_unique)
+        self.assertEqual(result.short_wall_classification.wall_type, arena.WALL_AMBIGUOUS)
+        self.assertEqual(result.short_wall_classification.reason, "both_axis_candidates_valid")
+
+    def test_width_profile_does_not_override_short_wall_classification(self):
+        config = arena.ArenaGeometryConfig(max_wall_separation_error_m=0.05)
+        result = arena.analyze_points(
+            rectangular_points(include_clean=True, width_m=2.016),
+            config,
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(
+            result.long_wall_fit.matched_width_profile_label,
+            "heater_side_width",
+        )
+        self.assertEqual(result.short_wall_classification.wall_type, arena.WALL_CLEAN)
+
+    def test_unknown_selected_diagnostic_candidate_does_not_succeed(self):
+        result = arena.analyze_points(rectangular_points(), SYNTHETIC_ARENA_CONFIG)
+
+        self.assertFalse(result.success)
+        self.assertFalse(result.pose_unique)
+        self.assertEqual(result.short_wall_classification.wall_type, arena.WALL_UNKNOWN)
 
     def test_new_commit_a_files_do_not_contain_live_motion_or_initialpose_code(self):
         for relative in [
@@ -198,6 +327,7 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
         self.assertEqual(written["source"]["type"], "json")
         self.assertEqual(written["source"]["range_stride"], 4)
         self.assertEqual(written["source"]["max_points"], 4000)
+        self.assertIn("short_wall_candidates", written)
 
     def test_bag_cli_requires_exactly_one_input_source(self):
         with contextlib.redirect_stderr(io.StringIO()):
@@ -221,6 +351,23 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
         self.assertEqual(args.scan_stride, 2)
         self.assertEqual(args.range_stride, 3)
         self.assertEqual(args.max_points, 100)
+        self.assertIsNone(args.arena_width_m)
+        self.assertEqual(args.arena_heater_wall_width_m, 2.016)
+        self.assertEqual(args.arena_clean_wall_width_m, 1.967)
+        self.assertEqual(args.arena_width_match_min_margin_m, 0.015)
+
+        single_width_args = bag_analyzer.parse_args(
+            [
+                "--input-json",
+                "samples.json",
+                "--output",
+                "out.json",
+                "--arena-width-m",
+                "1.9",
+            ]
+        )
+        config = bag_analyzer.config_from_args(single_width_args)
+        self.assertEqual(config.arena_width_m, 1.9)
 
 
 if __name__ == "__main__":
