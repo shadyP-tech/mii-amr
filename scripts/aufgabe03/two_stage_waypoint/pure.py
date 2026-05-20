@@ -199,21 +199,9 @@ def amcl_validation_timed_out(start_sec, now_sec, timeout_sec):
 
 
 def required_preflight_interfaces(args):
-    services = []
-    if args.localization_mode == "global":
-        services.append(args.global_localization_service)
-    if (
-        args.localization_mode == "arena-active"
-        and args.arena_active_on_failure == "global"
-        and not args.arena_active_dry_run
-    ):
-        services.append(args.global_localization_service)
-    actions = []
-    if not (args.localization_mode == "arena-active" and args.arena_active_dry_run):
-        actions.append(args.navigate_action)
     return PreflightRequirements(
-        services=services,
-        actions=actions,
+        services=[],
+        actions=[] if args.arena_active_dry_run else [args.navigate_action],
         topics=[args.scan_topic],
         requires_tf_before_localization=False,
     )

@@ -4,19 +4,9 @@ from pathlib import Path
 
 DEFAULT_WAYPOINTS_CSV = Path("results/aufgabe03/aufgabe03_waypoints.csv")
 
-DEFAULT_RESULTS_CSV = Path("results/aufgabe03/aufgabe03_two_stage_runs.csv")
+DEFAULT_RESULTS_CSV = Path("results/aufgabe03/aufgabe03_arena_prior_two_stage_runs.csv")
 
 DEFAULT_FOLLOWER_SCRIPT = Path("scripts/aufgabe03/follow_planned_waypoints.py")
-
-DEFAULT_LOCALIZATION_MODE = "global"
-
-DEFAULT_LOCALIZATION_SPIN_DEG = 360.0
-
-DEFAULT_LOCALIZATION_ANGULAR_SPEED_RADPS = 0.18
-
-DEFAULT_AMCL_VALIDATION_TIMEOUT_SEC = 60.0
-
-DEFAULT_KNOWN_START_VALIDATION_TIMEOUT_SEC = 30.0
 
 DEFAULT_PREFLIGHT_TIMEOUT_SEC = 10.0
 
@@ -47,12 +37,6 @@ DEFAULT_AMCL_SETTLE_MIN_SEC = 3.0
 DEFAULT_MAX_STABLE_POSE_JUMP_M = 0.05
 
 DEFAULT_MAX_STABLE_YAW_JUMP_DEG = 10.0
-
-DEFAULT_INITIAL_POSE_VAR_X = 0.05
-
-DEFAULT_INITIAL_POSE_VAR_Y = 0.05
-
-DEFAULT_INITIAL_POSE_VAR_YAW_RAD2 = 0.10
 
 MIN_ARENA_ACTIVE_VAR_XY = 0.0025
 
@@ -89,21 +73,20 @@ CSV_HEADER = [
     "duration_sec",
     "run_id",
     "waypoint_csv",
-    "localization_mode",
     "status",
     "final_status_reason",
-    "global_localization_service",
     "navigate_action",
     "initial_pose_topic",
     "amcl_topic",
     "cmd_vel_topic",
     "scan_topic",
+    "odom_topic",
     "map_frame",
     "selected_base_frame",
     "staging_x",
     "staging_y",
     "staging_yaw_deg",
-    "localization_duration_sec",
+    "arena_localization_duration_sec",
     "nav2_duration_sec",
     "follower_duration_sec",
     "amcl_var_x",
@@ -214,7 +197,7 @@ class RunDiagnostics:
     status: str = "failed"
     final_status_reason: str = ""
     selected_base_frame: str = ""
-    localization_duration_sec: float | None = None
+    arena_localization_duration_sec: float | None = None
     nav2_duration_sec: float | None = None
     follower_duration_sec: float | None = None
     amcl_var_x: float | None = None

@@ -1,12 +1,8 @@
 import math
 import time
 
-from datetime import datetime
-from pathlib import Path
-
 try:
     import rclpy
-    from action_msgs.msg import GoalStatus
     from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
     from nav_msgs.msg import Odometry
     from nav2_msgs.action import NavigateToPose
@@ -15,11 +11,9 @@ try:
     from rclpy.qos import qos_profile_sensor_data
     from rclpy.time import Time
     from sensor_msgs.msg import LaserScan
-    from std_srvs.srv import Empty
     import tf2_ros
 except ImportError:
     rclpy = None
-    GoalStatus = None
     NavigateToPose = None
     ActionClient = None
     Node = object
@@ -27,7 +21,6 @@ except ImportError:
     Time = None
     LaserScan = object
     Odometry = object
-    Empty = None
     tf2_ros = None
 
     class _FallbackStamp:
@@ -143,7 +136,7 @@ def arena_active_config_from_args(args):
         min_rear_clearance_m=args.arena_active_min_rear_clearance_m,
         require_operator_confirmation=args.arena_active_require_operator_confirmation,
         allow_extra_cmd_vel_publishers=args.arena_active_allow_extra_cmd_vel_publishers,
-        on_failure=args.arena_active_on_failure,
+        on_failure="abort",
         dry_run=args.arena_active_dry_run,
         range_stride=args.arena_active_range_stride,
         max_points=args.arena_active_max_points,
@@ -255,10 +248,6 @@ class TwoStageCoordinator(Node):
             self.amcl_callback,
             10,
         )
-        self.global_localization_client = self.create_client(
-            Empty,
-            args.global_localization_service,
-        )
         self.navigate_client = ActionClient(self, NavigateToPose, args.navigate_action)
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -316,11 +305,6 @@ class TwoStageCoordinator(Node):
 
     def preflight_before_motion(self):
         requirements = required_preflight_interfaces(self.args)
-        for service in requirements.services:
-            if not self.global_localization_client.wait_for_service(
-                timeout_sec=self.args.preflight_timeout_sec,
-            ):
-                raise RuntimeError(f"Required service is unavailable: {service}")
         for action in requirements.actions:
             if not self.navigate_client.wait_for_server(timeout_sec=self.args.preflight_timeout_sec):
                 raise RuntimeError(f"Required action is unavailable: {action}")
@@ -328,34 +312,6 @@ class TwoStageCoordinator(Node):
         safety = self.current_scan_safety()
         if not safety.ok:
             raise RuntimeError(f"Preflight scan safety failed: {safety.reason}")
-
-    def call_global_localization(self):
-        request = Empty.Request()
-        future = self.global_localization_client.call_async(request)
-        self.wait_for_future(
-            future,
-            self.args.preflight_timeout_sec,
-            self.args.global_localization_service,
-        )
-
-    def perform_localization_spin(self):
-        self.stop_repeatedly()
-        angular_speed = abs(self.args.localization_angular_speed)
-        direction = 1.0 if self.args.localization_spin_deg >= 0.0 else -1.0
-        duration = math.radians(abs(self.args.localization_spin_deg)) / angular_speed
-        period = 1.0 / self.args.control_rate_hz
-        command = Twist()
-        command.angular.z = direction * angular_speed
-        start = time.time()
-        while rclpy.ok() and time.time() - start < duration:
-            rclpy.spin_once(self, timeout_sec=0.0)
-            safety = self.current_scan_safety()
-            if not safety.ok:
-                raise RuntimeError(f"Localization spin scan safety failed: {safety.reason}")
-            self.cmd_vel_pub.publish(command)
-            time.sleep(period)
-        self.stop_repeatedly()
-        time.sleep(1.0)
 
     def wait_for_initial_pose_subscriber(self):
         deadline = time.time() + self.args.preflight_timeout_sec
@@ -366,22 +322,6 @@ class TwoStageCoordinator(Node):
         raise RuntimeError(
             f"No subscribers are listening on {self.args.initial_pose_topic}"
         )
-
-    def publish_known_start_initial_pose(self):
-        self.wait_for_initial_pose_subscriber()
-        msg = build_initial_pose_message(
-            self.args.initial_pose_x,
-            self.args.initial_pose_y,
-            self.args.initial_pose_yaw_deg,
-            self.args.initial_pose_var_x,
-            self.args.initial_pose_var_y,
-            self.args.initial_pose_var_yaw_rad2,
-            frame_id=self.args.map_frame,
-        )
-        for _ in range(3):
-            self.initial_pose_pub.publish(msg)
-            rclpy.spin_once(self, timeout_sec=0.1)
-            time.sleep(0.1)
 
     def perform_arena_active_spin(self):
         return run_arena_active_spin(

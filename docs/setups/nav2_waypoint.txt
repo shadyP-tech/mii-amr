@@ -1,7 +1,8 @@
-Below is the full lab terminal setup.
+Below is the lab terminal setup for the arena-prior two-stage waypoint runner.
 
 **Safety First**
-Before running the follower: clear the arena, keep an operator next to the TurtleBot, keep `Ctrl+C` ready, and keep a physical stop option available.
+Before running the robot: clear the arena, keep an operator next to the
+TurtleBot, keep `Ctrl+C` ready, and keep a physical stop option available.
 
 **Terminal A: Robot Bringup**
 Skip this if robot bringup is already running.
@@ -20,8 +21,10 @@ export LDS_MODEL=LDS-02
 ros2 launch turtlebot3_bringup robot.launch.py
 ```
 
-**Terminal B: Nav2 Localization With Saved Map**
-Use the map you generated:
+**Terminal B: Nav2 With Saved Map**
+Start Nav2 with the saved arena map. The runner publishes the arena-derived
+pose prior to `/initialpose`; do not send a separate RViz 2D Pose Estimate for
+this automated run.
 
 ```bash
 cd /workspace/mii-amr
@@ -39,15 +42,8 @@ ros2 launch turtlebot3_navigation2 navigation2.launch.py \
   map:=$PWD/maps/aufgabe03/arena_1p898x3p9_auto.yaml
 ```
 
-For the manual follower/debug workflow in RViz:
-1. Use **2D Pose Estimate**.
-2. Align the robot pose with the real robot.
-3. Confirm `/scan` overlaps the map walls.
-4. Do **not** send a Nav2 Goal while using your custom follower.
-
-For the two-stage coordinator below, RViz 2D Pose Estimate is not required in
-the normal global-localization mode. Keep RViz open if you want to inspect
-`/scan`, particles, and the map alignment.
+Keep RViz open if you want to inspect `/scan`, particles, and map alignment.
+Do not send a Nav2 goal while using the custom follower.
 
 **Terminal S: Safety Stop**
 Keep this ready. Run it immediately if needed.
@@ -75,22 +71,26 @@ source /opt/tb3_src_ws/install/setup.bash
 export ROS_DOMAIN_ID=30
 export ROS_LOCALHOST_ONLY=0
 export TURTLEBOT3_MODEL=burger
-export LDS_MODEL=LDS-01
+export LDS_MODEL=LDS-02
 
 ros2 topic echo --once /scan
-ros2 service list | grep reinitialize_global_localization
+ros2 topic echo --once /odom
+ros2 topic echo --once /amcl_pose
+ros2 topic list | grep -E '^/(scan|odom|amcl_pose|initialpose)$'
 ros2 action list | grep navigate_to_pose
 ```
 
-Check that no active Nav2 controller is competing on `/cmd_vel`:
+Check that no active Nav2 controller is intentionally competing on `/cmd_vel`:
 
 ```bash
 ros2 topic info /cmd_vel --verbose
 ```
 
-If you see Nav2 as a publisher, make sure there is no active Nav2 goal. Your script will publish `/cmd_vel` itself.
+Nav2 nodes may appear as publishers while running. Make sure there is no active
+Nav2 goal before the custom follower handoff.
 
-**Terminal D: Preview Two-Stage Coordinator**
+**Terminal D: Preview Arena-Prior Two-Stage Run**
+
 ```bash
 cd /workspace/mii-amr
 
@@ -100,11 +100,11 @@ source /opt/tb3_src_ws/install/setup.bash
 export ROS_DOMAIN_ID=30
 export ROS_LOCALHOST_ONLY=0
 export TURTLEBOT3_MODEL=burger
-export LDS_MODEL=LDS-01
+export LDS_MODEL=LDS-02
 
 python3 scripts/aufgabe03/two_stage_waypoint_run.py \
   --waypoints results/aufgabe03/aufgabe03_waypoints.csv \
-  --run-id waypoint_two_stage_dry_001 \
+  --run-id arena_prior_two_stage_dry_001 \
   --dry-run
 ```
 
@@ -115,13 +115,20 @@ waypoint 0: x=0.005, y=-0.015
 computed staging yaw: 0.0 deg
 ```
 
-**Terminal D: Run Two-Stage Waypoint Following**
-Only run after bringup, Nav2, and the pre-run checks pass.
+**Terminal D: Run Arena-Prior Two-Stage Waypoint Following**
+Only run after bringup, Nav2, and pre-run checks pass.
 
 ```bash
 python3 scripts/aufgabe03/two_stage_waypoint_run.py \
   --waypoints results/aufgabe03/aufgabe03_waypoints.csv \
-  --run-id waypoint_two_stage_001
+  --run-id arena_prior_two_stage_001 \
+  --heater-wall-side=+x \
+  --arena-force-short-wall-side axis_positive \
+  --arena-force-short-wall-type clean \
+  --arena-active-allow-extra-cmd-vel-publishers \
+  --max-amcl-var-x 0.20 \
+  --max-stable-pose-jump-m 0.10 \
+  --stable-amcl-samples 3
 ```
 
 When prompted, type:
@@ -133,26 +140,14 @@ RUN
 The coordinator will:
 
 ```text
-global AMCL localization -> bounded scan-safe spin -> Nav2 to waypoint 0 -> custom follower
-```
-
-If global localization is ambiguous in the arena, use known-start mode instead:
-
-```bash
-python3 scripts/aufgabe03/two_stage_waypoint_run.py \
-  --waypoints results/aufgabe03/aufgabe03_waypoints.csv \
-  --run-id waypoint_two_stage_known_001 \
-  --localization-mode known-start \
-  --initial-pose-x 0.0 \
-  --initial-pose-y 0.0 \
-  --initial-pose-yaw-deg 0.0
+arena spin localization -> publish arena prior -> AMCL validation -> Nav2 to waypoint 0 -> custom follower
 ```
 
 **After The Run**
 Check the coordinator log:
 
 ```bash
-tail -n 3 results/aufgabe03/aufgabe03_two_stage_runs.csv
+tail -n 3 results/aufgabe03/aufgabe03_arena_prior_two_stage_runs.csv
 ```
 
 Also check the follower log:
@@ -161,25 +156,11 @@ Also check the follower log:
 tail -n 3 results/aufgabe03/aufgabe03_waypoint_follow_runs.csv
 ```
 
-**Manual Follower Fallback**
-Only run this after RViz alignment and checks pass:
-
-```bash
-python3 scripts/aufgabe03/follow_planned_waypoints.py \
-  --waypoints results/aufgabe03/aufgabe03_waypoints.csv \
-  --run-id waypoint_follow_001
-```
-
-The important fields are:
+The successful run should show:
 
 ```text
-status
-reached_count
-blocked_waypoint_index
-timeout_waypoint_index
-base_frame_used
-final_x/final_y/final_yaw_deg
-min_scan_range_m
-p05_scan_range_m
-amcl_var_x/amcl_var_y/amcl_var_yaw
+status=completed
+reached_count=3
+follower_return_code=0
+nav2_result_status=SUCCEEDED
 ```

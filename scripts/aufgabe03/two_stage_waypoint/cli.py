@@ -10,7 +10,6 @@ from .experiment_log import append_csv_row, build_log_row
 from .model import (
     CSV_HEADER,
     DEFAULT_AMCL_SETTLE_MIN_SEC,
-    DEFAULT_AMCL_VALIDATION_TIMEOUT_SEC,
     DEFAULT_ARENA_ACTIVE_VALIDATION_TIMEOUT_SEC,
     DEFAULT_ARRIVAL_TOLERANCE_M,
     DEFAULT_ARRIVAL_YAW_TOLERANCE_DEG,
@@ -18,13 +17,6 @@ from .model import (
     DEFAULT_FOLLOWER_SCRIPT,
     DEFAULT_FOLLOWER_STARTUP_TIMEOUT_SEC,
     DEFAULT_GOAL_TOLERANCE_M,
-    DEFAULT_INITIAL_POSE_VAR_X,
-    DEFAULT_INITIAL_POSE_VAR_Y,
-    DEFAULT_INITIAL_POSE_VAR_YAW_RAD2,
-    DEFAULT_KNOWN_START_VALIDATION_TIMEOUT_SEC,
-    DEFAULT_LOCALIZATION_ANGULAR_SPEED_RADPS,
-    DEFAULT_LOCALIZATION_MODE,
-    DEFAULT_LOCALIZATION_SPIN_DEG,
     DEFAULT_MAX_AMCL_AGE_SEC,
     DEFAULT_MAX_AMCL_VAR_X,
     DEFAULT_MAX_AMCL_VAR_Y,
@@ -82,12 +74,12 @@ def require_motion_confirmation(args, staging_goal, follower_command):
         f"yaw={staging_goal.yaw_deg:.1f} deg"
     )
     print("Follower command:", shlex.join(follower_command))
-    response = input("Type RUN to start two-stage waypoint run: ").strip()
+    response = input("Type RUN to start arena-prior two-stage run: ").strip()
     return response == "RUN"
 
 
 def print_dry_run(args, waypoints, staging_goal, follower_command):
-    print("Two-stage waypoint run dry run")
+    print("Arena-prior two-stage waypoint run dry run")
     print(f"Waypoint CSV: {args.waypoints}")
     print(f"Waypoints: {len(waypoints)}")
     print(
@@ -95,53 +87,34 @@ def print_dry_run(args, waypoints, staging_goal, follower_command):
         f"x={staging_goal.waypoint.x:.3f}, y={staging_goal.waypoint.y:.3f}"
     )
     print(f"Computed staging yaw: {staging_goal.yaw_deg:.1f} deg")
-    print(f"Localization mode: {args.localization_mode}")
     print("ROS interfaces:")
-    print(f"  global localization service: {args.global_localization_service}")
     print(f"  navigate action: {args.navigate_action}")
     print(f"  initial pose topic: {args.initial_pose_topic}")
     print(f"  amcl topic: {args.amcl_topic}")
     print(f"  cmd_vel topic: {args.cmd_vel_topic}")
     print(f"  scan topic: {args.scan_topic}")
+    print(f"  odom topic: {args.odom_topic}")
     print(f"Follower command: {shlex.join(follower_command)}")
     print(f"Log path: {args.results_csv}")
     from .ros_runtime import rclpy
+
     print(f"ROS imports available: {'yes' if rclpy is not None else 'no'}")
 
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(
-        description="Coordinate AMCL localization, Nav2 staging, and waypoint following.",
+        description=(
+            "Run arena-prior localization, Nav2 staging, and waypoint following."
+        ),
     )
     parser.add_argument("--waypoints", default=DEFAULT_WAYPOINTS_CSV, type=Path)
     parser.add_argument("--results-csv", default=DEFAULT_RESULTS_CSV, type=Path)
     parser.add_argument("--run-id")
-    parser.add_argument("--notes", default="two_stage_waypoint_run")
+    parser.add_argument("--notes", default="arena_prior_two_stage_run")
     parser.add_argument("--map-frame", default="map")
     parser.add_argument("--base-frame", default="base_footprint")
     parser.add_argument("--fallback-base-frame", default="base_link")
 
-    parser.add_argument(
-        "--localization-mode",
-        default=DEFAULT_LOCALIZATION_MODE,
-        choices=["global", "known-start", "arena-active"],
-    )
-    parser.add_argument("--localization-spin-deg", default=DEFAULT_LOCALIZATION_SPIN_DEG, type=float)
-    parser.add_argument(
-        "--localization-angular-speed",
-        default=DEFAULT_LOCALIZATION_ANGULAR_SPEED_RADPS,
-        type=float,
-    )
-    parser.add_argument(
-        "--amcl-validation-timeout-sec",
-        default=DEFAULT_AMCL_VALIDATION_TIMEOUT_SEC,
-        type=float,
-    )
-    parser.add_argument(
-        "--known-start-validation-timeout-sec",
-        default=DEFAULT_KNOWN_START_VALIDATION_TIMEOUT_SEC,
-        type=float,
-    )
     parser.add_argument("--preflight-timeout-sec", default=DEFAULT_PREFLIGHT_TIMEOUT_SEC, type=float)
     parser.add_argument(
         "--nav-to-start-timeout-sec",
@@ -160,18 +133,6 @@ def parse_args(argv):
         type=float,
     )
 
-    parser.add_argument("--initial-pose-x", type=float)
-    parser.add_argument("--initial-pose-y", type=float)
-    parser.add_argument("--initial-pose-yaw-deg", type=float)
-    parser.add_argument("--initial-pose-var-x", default=DEFAULT_INITIAL_POSE_VAR_X, type=float)
-    parser.add_argument("--initial-pose-var-y", default=DEFAULT_INITIAL_POSE_VAR_Y, type=float)
-    parser.add_argument(
-        "--initial-pose-var-yaw-rad2",
-        default=DEFAULT_INITIAL_POSE_VAR_YAW_RAD2,
-        type=float,
-    )
-
-    parser.add_argument("--global-localization-service", default="/reinitialize_global_localization")
     parser.add_argument("--navigate-action", default="/navigate_to_pose")
     parser.add_argument("--initial-pose-topic", default="/initialpose")
     parser.add_argument("--amcl-topic", default="/amcl_pose")
@@ -232,6 +193,7 @@ def parse_args(argv):
         type=float,
     )
     parser.add_argument("--control-rate-hz", default=DEFAULT_CONTROL_RATE_HZ, type=float)
+
     parser.add_argument("--arena-active-dry-run", action="store_true")
     parser.add_argument(
         "--arena-active-spin-direction",
@@ -262,11 +224,10 @@ def parse_args(argv):
     parser.set_defaults(arena_active_require_operator_confirmation=True)
     parser.add_argument("--arena-active-allow-extra-cmd-vel-publishers", action="store_true")
     parser.add_argument(
-        "--arena-active-on-failure",
-        default="abort",
-        choices=["abort", "global"],
+        "--arena-active-validation-timeout-sec",
+        default=DEFAULT_ARENA_ACTIVE_VALIDATION_TIMEOUT_SEC,
+        type=float,
     )
-    parser.add_argument("--arena-active-validation-timeout-sec", default=DEFAULT_ARENA_ACTIVE_VALIDATION_TIMEOUT_SEC, type=float)
     parser.add_argument("--arena-active-diagnostics-json", type=Path)
     parser.add_argument("--arena-active-range-stride", default=6, type=int)
     parser.add_argument("--arena-active-max-points", default=3000, type=int)
@@ -300,16 +261,13 @@ def parse_args(argv):
     args = parser.parse_args(argv)
 
     if not args.run_id:
-        args.run_id = datetime.now().strftime("waypoint_two_stage_%Y%m%d_%H%M%S")
+        args.run_id = datetime.now().strftime("arena_prior_two_stage_%Y%m%d_%H%M%S")
     validate_args(parser, args)
     return args
 
 
 def validate_args(parser, args):
     positive_float_fields = [
-        "localization_angular_speed",
-        "amcl_validation_timeout_sec",
-        "known_start_validation_timeout_sec",
         "preflight_timeout_sec",
         "nav_to_start_timeout_sec",
         "tf_ready_timeout_sec",
@@ -317,9 +275,6 @@ def validate_args(parser, args):
         "tf_lookup_retry_period_sec",
         "follower_startup_timeout_sec",
         "arena_active_validation_timeout_sec",
-        "initial_pose_var_x",
-        "initial_pose_var_y",
-        "initial_pose_var_yaw_rad2",
         "max_pose_age_sec",
         "max_scan_age_sec",
         "max_amcl_age_sec",
@@ -356,8 +311,6 @@ def validate_args(parser, args):
     for field in positive_float_fields:
         if getattr(args, field) <= 0.0:
             parser.error(f"--{field.replace('_', '-')} must be greater than zero")
-    if args.localization_spin_deg == 0.0:
-        parser.error("--localization-spin-deg must be non-zero")
     if args.stable_amcl_samples < 1:
         parser.error("--stable-amcl-samples must be >= 1")
     if args.amcl_settle_min_sec < 0.0:
@@ -387,17 +340,6 @@ def validate_args(parser, args):
         )
     if args.min_waypoint_spacing_m < 0.0:
         parser.error("--min-waypoint-spacing-m must be non-negative")
-    if args.localization_mode == "known-start":
-        missing = [
-            name
-            for name in ["initial_pose_x", "initial_pose_y", "initial_pose_yaw_deg"]
-            if getattr(args, name) is None
-        ]
-        if missing:
-            parser.error(
-                "known-start mode requires "
-                + ", ".join("--" + name.replace("_", "-") for name in missing)
-            )
 
 
 def main(argv=None):
@@ -415,7 +357,7 @@ def main(argv=None):
         return 0
 
     if not require_motion_confirmation(args, staging_goal, follower_command):
-        print("Two-stage waypoint run cancelled.")
+        print("Arena-prior two-stage waypoint run cancelled.")
         return 130
 
     from . import ros_runtime
@@ -440,60 +382,36 @@ def main(argv=None):
         node.preflight_before_motion()
 
         phase_start = time.time()
-        amcl_settle_min_sec = 0.0
-        if args.localization_mode == "global":
-            node.call_global_localization()
-            node.perform_localization_spin()
-            timeout = args.amcl_validation_timeout_sec
-        elif args.localization_mode == "known-start":
-            node.publish_known_start_initial_pose()
-            timeout = args.known_start_validation_timeout_sec
-        else:
-            arena_result = node.perform_arena_active_spin()
-            diagnostics.localization_duration_sec = time.time() - phase_start
-            if args.arena_active_dry_run:
-                if arena_result.success:
-                    diagnostics.status = "completed"
-                    diagnostics.final_status_reason = "arena_active_dry_run_completed"
-                    return_code = 0
-                else:
-                    diagnostics.status = "failed"
-                    diagnostics.final_status_reason = (
-                        arena_result.failure_reason or "arena_active_dry_run_failed"
-                    )
-                    return_code = 1
-                return return_code
-            if not arena_result.success:
-                if args.arena_active_on_failure == "global":
-                    arena_result.diagnostics["fallback_used"] = True
-                    ros_runtime.write_diagnostics_json(
-                        arena_result.diagnostics_path,
-                        arena_result.diagnostics,
-                    )
-                    phase_start = time.time()
-                    node.call_global_localization()
-                    node.perform_localization_spin()
-                    timeout = args.amcl_validation_timeout_sec
-                else:
-                    raise RuntimeError(
-                        "arena-active localization failed: "
-                        f"{arena_result.failure_reason}"
-                    )
+        arena_result = node.perform_arena_active_spin()
+        diagnostics.arena_localization_duration_sec = time.time() - phase_start
+        if args.arena_active_dry_run:
+            if arena_result.success:
+                diagnostics.status = "completed"
+                diagnostics.final_status_reason = "arena_active_dry_run_completed"
+                return_code = 0
             else:
-                phase_start = time.time()
-                node.publish_arena_active_initial_pose(
-                    arena_result.pose_prior,
-                    arena_result,
+                diagnostics.status = "failed"
+                diagnostics.final_status_reason = (
+                    arena_result.failure_reason or "arena_active_dry_run_failed"
                 )
-                amcl_settle_min_sec = args.amcl_settle_min_sec
-                timeout = args.arena_active_validation_timeout_sec
-        stability = node.wait_for_amcl_validation(
-            timeout,
-            min_received_sec=phase_start,
-            min_settle_sec=amcl_settle_min_sec,
+                return_code = 1
+            return return_code
+        if not arena_result.success:
+            raise RuntimeError(
+                "arena-prior localization failed: "
+                f"{arena_result.failure_reason}"
+            )
+
+        phase_start = time.time()
+        node.publish_arena_active_initial_pose(
+            arena_result.pose_prior,
+            arena_result,
         )
-        if diagnostics.localization_duration_sec is None:
-            diagnostics.localization_duration_sec = time.time() - phase_start
+        stability = node.wait_for_amcl_validation(
+            args.arena_active_validation_timeout_sec,
+            min_received_sec=phase_start,
+            min_settle_sec=args.amcl_settle_min_sec,
+        )
         diagnostics.amcl_var_x = stability.cov_x
         diagnostics.amcl_var_y = stability.cov_y
         diagnostics.amcl_var_yaw_rad2 = stability.cov_yaw_rad2

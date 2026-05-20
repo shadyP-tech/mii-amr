@@ -14,8 +14,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "aufgabe03"))
 
-import follow_planned_waypoints as follower  # noqa: E402
 import arena_active_spin  # noqa: E402
+import follow_planned_waypoints as follower  # noqa: E402
 from two_stage_waypoint import cli as two_stage_cli  # noqa: E402
 from two_stage_waypoint import experiment_log as two_stage_log  # noqa: E402
 from two_stage_waypoint import model as two_stage_model  # noqa: E402
@@ -86,28 +86,16 @@ def fake_tf_node(tf_buffer, **overrides):
 
 
 class TwoStageWaypointRunTest(unittest.TestCase):
-    def test_cli_parses_modes_overrides_timeouts_and_subprocess_paths(self):
+    def test_cli_parses_arena_prior_overrides_and_subprocess_paths(self):
         args = two_stage_cli.parse_args(
             [
                 "--dry-run",
                 "--run-id",
-                "two_stage_test",
-                "--localization-mode",
-                "known-start",
-                "--initial-pose-x",
-                "1.0",
-                "--initial-pose-y",
-                "2.0",
-                "--initial-pose-yaw-deg",
-                "30.0",
-                "--global-localization-service",
-                "/robot/reinitialize_global_localization",
+                "arena_prior_test",
                 "--navigate-action",
                 "/robot/navigate_to_pose",
-                "--amcl-validation-timeout-sec",
+                "--arena-active-validation-timeout-sec",
                 "12.0",
-                "--known-start-validation-timeout-sec",
-                "7.0",
                 "--amcl-settle-min-sec",
                 "4.5",
                 "--tf-ready-timeout-sec",
@@ -120,56 +108,7 @@ class TwoStageWaypointRunTest(unittest.TestCase):
                 "custom/follower.py",
                 "--python-executable",
                 "python-test",
-            ]
-        )
-
-        self.assertEqual(args.localization_mode, "known-start")
-        self.assertEqual(args.initial_pose_x, 1.0)
-        self.assertEqual(args.initial_pose_y, 2.0)
-        self.assertEqual(args.initial_pose_yaw_deg, 30.0)
-        self.assertEqual(args.global_localization_service, "/robot/reinitialize_global_localization")
-        self.assertEqual(args.navigate_action, "/robot/navigate_to_pose")
-        self.assertEqual(args.amcl_validation_timeout_sec, 12.0)
-        self.assertEqual(args.known_start_validation_timeout_sec, 7.0)
-        self.assertEqual(args.amcl_settle_min_sec, 4.5)
-        self.assertEqual(args.tf_ready_timeout_sec, 9.0)
-        self.assertEqual(args.tf_lookup_timeout_sec, 11.0)
-        self.assertEqual(args.tf_lookup_retry_period_sec, 0.2)
-        self.assertEqual(args.follower_script, Path("custom/follower.py"))
-        self.assertEqual(args.python_executable, "python-test")
-
-    def test_known_start_requires_complete_initial_pose(self):
-        with contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit):
-                two_stage_cli.parse_args(["--localization-mode", "known-start"])
-
-    def test_arena_active_parser_defaults_do_not_change_global_defaults(self):
-        global_args = two_stage_cli.parse_args(["--dry-run"])
-        arena_args = two_stage_cli.parse_args(
-            [
-                "--dry-run",
-                "--localization-mode",
-                "arena-active",
-                "--arena-active-dry-run",
-                "--no-arena-active-operator-confirmation",
-            ]
-        )
-
-        self.assertEqual(global_args.localization_mode, "global")
-        self.assertEqual(arena_args.localization_mode, "arena-active")
-        self.assertTrue(arena_args.arena_active_dry_run)
-        self.assertFalse(arena_args.arena_active_require_operator_confirmation)
-        self.assertEqual(arena_args.arena_active_on_failure, "abort")
-        self.assertEqual(arena_args.arena_active_spin_direction, "ccw")
-        self.assertEqual(arena_args.odom_topic, "/odom")
-        self.assertIsNone(arena_args.arena_force_short_wall_side)
-        self.assertIsNone(arena_args.arena_force_short_wall_type)
-
-        forced_args = two_stage_cli.parse_args(
-            [
-                "--dry-run",
-                "--localization-mode",
-                "arena-active",
+                "--arena-active-allow-extra-cmd-vel-publishers",
                 "--arena-force-short-wall-side",
                 "axis_positive",
                 "--arena-force-short-wall-type",
@@ -177,38 +116,63 @@ class TwoStageWaypointRunTest(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(forced_args.arena_force_short_wall_side, "axis_positive")
-        self.assertEqual(forced_args.arena_force_short_wall_type, "clean")
+        self.assertFalse(hasattr(args, "localization_mode"))
+        self.assertEqual(
+            args.results_csv,
+            Path("results/aufgabe03/aufgabe03_arena_prior_two_stage_runs.csv"),
+        )
+        self.assertEqual(args.navigate_action, "/robot/navigate_to_pose")
+        self.assertEqual(args.arena_active_validation_timeout_sec, 12.0)
+        self.assertEqual(args.amcl_settle_min_sec, 4.5)
+        self.assertEqual(args.tf_ready_timeout_sec, 9.0)
+        self.assertEqual(args.tf_lookup_timeout_sec, 11.0)
+        self.assertEqual(args.tf_lookup_retry_period_sec, 0.2)
+        self.assertEqual(args.follower_script, Path("custom/follower.py"))
+        self.assertEqual(args.python_executable, "python-test")
+        self.assertTrue(args.arena_active_allow_extra_cmd_vel_publishers)
+        self.assertEqual(args.arena_force_short_wall_side, "axis_positive")
+        self.assertEqual(args.arena_force_short_wall_type, "clean")
+
+    def test_removed_legacy_flags_are_rejected(self):
+        legacy_argvs = [
+            ["--localization-mode", "arena-active"],
+            ["--global-localization-service", "/reinitialize_global_localization"],
+            ["--initial-pose-x", "0.0"],
+            ["--known-start-validation-timeout-sec", "7.0"],
+            ["--localization-spin-deg", "360"],
+            ["--arena-active-on-failure", "global"],
+        ]
+
+        for argv in legacy_argvs:
+            with self.subTest(argv=argv):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        two_stage_cli.parse_args(argv)
 
     def test_arena_active_force_short_wall_requires_side_and_type(self):
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
                 two_stage_cli.parse_args(
                     [
-                        "--localization-mode",
-                        "arena-active",
                         "--arena-force-short-wall-side",
                         "axis_positive",
                     ]
                 )
 
-    def test_arena_active_dry_run_preflight_does_not_require_nav_or_global_fallback(self):
-        args = two_stage_cli.parse_args(
-            [
-                "--dry-run",
-                "--localization-mode",
-                "arena-active",
-                "--arena-active-dry-run",
-                "--arena-active-on-failure",
-                "global",
-            ]
-        )
+    def test_arena_prior_preflight_requires_scan_and_nav_for_real_runs(self):
+        args = two_stage_cli.parse_args(["--dry-run"])
+        dry_spin_args = two_stage_cli.parse_args(["--dry-run", "--arena-active-dry-run"])
 
         requirements = two_stage_pure.required_preflight_interfaces(args)
+        dry_spin_requirements = two_stage_pure.required_preflight_interfaces(dry_spin_args)
 
         self.assertEqual(requirements.services, [])
-        self.assertEqual(requirements.actions, [])
+        self.assertEqual(requirements.actions, ["/navigate_to_pose"])
         self.assertEqual(requirements.topics, ["/scan"])
+        self.assertFalse(requirements.requires_tf_before_localization)
+        self.assertEqual(dry_spin_requirements.services, [])
+        self.assertEqual(dry_spin_requirements.actions, [])
+        self.assertEqual(dry_spin_requirements.topics, ["/scan"])
 
     def test_arena_active_pose_prior_covariance_is_clamped_and_validated(self):
         covariance = [0.0] * 36
@@ -263,17 +227,7 @@ class TwoStageWaypointRunTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "at least two"):
                 two_stage_pure.load_waypoints(path)
 
-    def test_global_preflight_does_not_require_map_to_base_tf(self):
-        args = two_stage_cli.parse_args(["--dry-run"])
-
-        requirements = two_stage_pure.required_preflight_interfaces(args)
-
-        self.assertEqual(requirements.services, ["/reinitialize_global_localization"])
-        self.assertEqual(requirements.actions, ["/navigate_to_pose"])
-        self.assertEqual(requirements.topics, ["/scan"])
-        self.assertFalse(requirements.requires_tf_before_localization)
-
-    def test_known_start_initial_pose_message_sets_covariance_and_quaternion(self):
+    def test_initial_pose_message_sets_covariance_and_quaternion(self):
         msg = two_stage_ros.build_initial_pose_message(
             x=1.0,
             y=-0.5,
@@ -453,7 +407,7 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         self.assertEqual(insufficient.reason, "insufficient_valid_scan")
 
     def test_follower_command_uses_path_progress_and_runner_without_shell(self):
-        args = two_stage_cli.parse_args(["--dry-run", "--run-id", "two_stage_test"])
+        args = two_stage_cli.parse_args(["--dry-run", "--run-id", "arena_prior_test"])
         command = two_stage_pure.build_follower_command(args)
 
         self.assertEqual(command[0], "python3")
@@ -655,8 +609,8 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         finally:
             two_stage_ros.rclpy = original_rclpy
 
-    def test_log_row_contains_failure_status_and_follower_command(self):
-        args = two_stage_cli.parse_args(["--dry-run", "--run-id", "two_stage_test"])
+    def test_log_row_contains_clean_schema_and_follower_command(self):
+        args = two_stage_cli.parse_args(["--dry-run", "--run-id", "arena_prior_test"])
         staging = two_stage_model.StagingGoal(two_stage_model.Waypoint(0, 0.0, 0.0), 0.0)
         diagnostics = two_stage_model.RunDiagnostics(
             timestamp="2026-05-18T10:00:00",
@@ -667,13 +621,17 @@ class TwoStageWaypointRunTest(unittest.TestCase):
             final_status_reason="test failure",
             follower_command="python3 follower.py",
             follower_return_code=1,
+            arena_localization_duration_sec=2.0,
         )
 
         row = two_stage_log.build_log_row(args, staging, diagnostics)
         values = dict(zip(two_stage_model.CSV_HEADER, row))
 
+        self.assertNotIn("localization_mode", values)
+        self.assertNotIn("global_localization_service", values)
         self.assertEqual(values["status"], "failed")
         self.assertEqual(values["final_status_reason"], "test failure")
+        self.assertEqual(values["arena_localization_duration_sec"], 2.0)
         self.assertEqual(values["follower_command"], "python3 follower.py")
         self.assertEqual(values["follower_return_code"], 1)
 
@@ -689,17 +647,21 @@ class TwoStageWaypointRunTest(unittest.TestCase):
                         "--waypoints",
                         str(path),
                         "--run-id",
-                        "two_stage_dry",
+                        "arena_prior_dry",
                         "--dry-run",
                     ]
                 )
 
         self.assertEqual(result, 0)
         output = stdout.getvalue()
+        self.assertIn("Arena-prior two-stage waypoint run dry run", output)
         self.assertIn("Selected waypoint 0", output)
         self.assertIn("Computed staging yaw", output)
         self.assertIn("Follower command:", output)
         self.assertIn("ROS imports available:", output)
+        self.assertNotIn("Localization mode", output)
+        self.assertNotIn("global localization", output.lower())
+        self.assertNotIn("known-start", output)
 
     def test_public_script_help_works_without_ros_graph(self):
         script = ROOT / "scripts" / "aufgabe03" / "two_stage_waypoint_run.py"
@@ -713,7 +675,10 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Coordinate AMCL localization", result.stdout)
+        self.assertIn("arena-prior", result.stdout)
+        self.assertNotIn("--localization-mode", result.stdout)
+        self.assertNotIn("--global-localization-service", result.stdout)
+        self.assertNotIn("known-start", result.stdout)
 
 
 if __name__ == "__main__":
