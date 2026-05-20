@@ -86,7 +86,7 @@ CSV_HEADER = [
     "staging_x",
     "staging_y",
     "staging_yaw_deg",
-    "arena_localization_duration_sec",
+    "arena_spin_duration_sec",
     "nav2_duration_sec",
     "follower_duration_sec",
     "amcl_var_x",
@@ -152,10 +152,8 @@ class ScanSafety:
 
 @dataclass(frozen=True)
 class PreflightRequirements:
-    services: list[str]
     actions: list[str]
     topics: list[str]
-    requires_tf_before_localization: bool
 
 
 @dataclass(frozen=True)
@@ -197,7 +195,7 @@ class RunDiagnostics:
     status: str = "failed"
     final_status_reason: str = ""
     selected_base_frame: str = ""
-    arena_localization_duration_sec: float | None = None
+    arena_spin_duration_sec: float | None = None
     nav2_duration_sec: float | None = None
     follower_duration_sec: float | None = None
     amcl_var_x: float | None = None

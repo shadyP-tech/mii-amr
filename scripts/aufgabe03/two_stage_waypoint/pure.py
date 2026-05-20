@@ -200,17 +200,15 @@ def amcl_validation_timed_out(start_sec, now_sec, timeout_sec):
 
 def required_preflight_interfaces(args):
     return PreflightRequirements(
-        services=[],
-        actions=[] if args.arena_active_dry_run else [args.navigate_action],
+        actions=[args.navigate_action],
         topics=[args.scan_topic],
-        requires_tf_before_localization=False,
     )
 
 
 def arena_active_diagnostics_path(args):
     if args.arena_active_diagnostics_json is not None:
         return args.arena_active_diagnostics_json
-    return Path("results/aufgabe03") / f"{args.run_id}_arena_active_result.json"
+    return Path(args.results_csv).parent / f"{args.run_id}_arena_active_result.json"
 
 
 def validate_pose_prior_for_initialpose(pose_prior):

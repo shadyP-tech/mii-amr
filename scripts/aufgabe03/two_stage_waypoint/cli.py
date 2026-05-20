@@ -194,7 +194,6 @@ def parse_args(argv):
     )
     parser.add_argument("--control-rate-hz", default=DEFAULT_CONTROL_RATE_HZ, type=float)
 
-    parser.add_argument("--arena-active-dry-run", action="store_true")
     parser.add_argument(
         "--arena-active-spin-direction",
         default="ccw",
@@ -383,19 +382,7 @@ def main(argv=None):
 
         phase_start = time.time()
         arena_result = node.perform_arena_active_spin()
-        diagnostics.arena_localization_duration_sec = time.time() - phase_start
-        if args.arena_active_dry_run:
-            if arena_result.success:
-                diagnostics.status = "completed"
-                diagnostics.final_status_reason = "arena_active_dry_run_completed"
-                return_code = 0
-            else:
-                diagnostics.status = "failed"
-                diagnostics.final_status_reason = (
-                    arena_result.failure_reason or "arena_active_dry_run_failed"
-                )
-                return_code = 1
-            return return_code
+        diagnostics.arena_spin_duration_sec = time.time() - phase_start
         if not arena_result.success:
             raise RuntimeError(
                 "arena-prior localization failed: "

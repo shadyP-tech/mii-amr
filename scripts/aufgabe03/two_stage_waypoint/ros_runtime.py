@@ -137,7 +137,7 @@ def arena_active_config_from_args(args):
         require_operator_confirmation=args.arena_active_require_operator_confirmation,
         allow_extra_cmd_vel_publishers=args.arena_active_allow_extra_cmd_vel_publishers,
         on_failure="abort",
-        dry_run=args.arena_active_dry_run,
+        dry_run=False,
         range_stride=args.arena_active_range_stride,
         max_points=args.arena_active_max_points,
         control_rate_hz=args.control_rate_hz,
@@ -312,15 +312,19 @@ class TwoStageCoordinator(Node):
         safety = self.current_scan_safety()
         if not safety.ok:
             raise RuntimeError(f"Preflight scan safety failed: {safety.reason}")
+        self.wait_for_initial_pose_subscriber(self.args.preflight_timeout_sec)
 
-    def wait_for_initial_pose_subscriber(self):
-        deadline = time.time() + self.args.preflight_timeout_sec
+    def wait_for_initial_pose_subscriber(self, timeout_sec=None):
+        if timeout_sec is None:
+            timeout_sec = self.args.preflight_timeout_sec
+        deadline = time.time() + timeout_sec
         while rclpy.ok() and time.time() <= deadline:
             if self.initial_pose_pub.get_subscription_count() > 0:
                 return
             rclpy.spin_once(self, timeout_sec=0.1)
         raise RuntimeError(
-            f"No subscribers are listening on {self.args.initial_pose_topic}"
+            "AMCL/localization is not listening on "
+            f"{self.args.initial_pose_topic}"
         )
 
     def perform_arena_active_spin(self):
@@ -337,7 +341,9 @@ class TwoStageCoordinator(Node):
 
     def publish_arena_active_initial_pose(self, pose_prior, arena_result):
         var_x, var_y, var_yaw = validate_pose_prior_for_initialpose(pose_prior)
-        self.wait_for_initial_pose_subscriber()
+        self.wait_for_initial_pose_subscriber(
+            min(2.0, self.args.preflight_timeout_sec)
+        )
         msg = build_initial_pose_message(
             pose_prior.x_m,
             pose_prior.y_m,

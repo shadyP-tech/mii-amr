@@ -77,8 +77,12 @@ ros2 topic echo --once /scan
 ros2 topic echo --once /odom
 ros2 topic echo --once /amcl_pose
 ros2 topic list | grep -E '^/(scan|odom|amcl_pose|initialpose)$'
+ros2 topic info /initialpose --verbose
 ros2 action list | grep navigate_to_pose
 ```
+
+The runner checks `/initialpose` before the arena spin. If no AMCL/localization
+subscriber is listening there, it aborts before moving the robot.
 
 Check that no active Nav2 controller is intentionally competing on `/cmd_vel`:
 

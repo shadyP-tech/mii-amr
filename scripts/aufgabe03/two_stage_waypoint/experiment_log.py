@@ -41,7 +41,7 @@ def build_log_row(args, staging_goal, diagnostics):
         staging_goal.waypoint.x,
         staging_goal.waypoint.y,
         staging_goal.yaw_deg,
-        empty_if_none(diagnostics.arena_localization_duration_sec),
+        empty_if_none(diagnostics.arena_spin_duration_sec),
         empty_if_none(diagnostics.nav2_duration_sec),
         empty_if_none(diagnostics.follower_duration_sec),
         empty_if_none(diagnostics.amcl_var_x),
