@@ -754,6 +754,11 @@ class WaypointFollower(Node):
     def wait_for_startup_gate(self, timeout_sec=None):
         if timeout_sec is None:
             timeout_sec = self.args.startup_timeout_sec
+        require_amcl = (
+            self.args.require_amcl_startup
+            or self.args.fail_on_bad_localization
+            or self.args.pause_on_bad_localization
+        )
         start = time.time()
         while rclpy.ok():
             have_scan = self.last_scan is not None
@@ -766,13 +771,13 @@ class WaypointFollower(Node):
             except RuntimeError:
                 have_tf = False
 
-            if have_scan and have_amcl and have_tf:
+            if have_scan and have_tf and (have_amcl or not require_amcl):
                 return
             if time.time() - start > timeout_sec:
                 missing = []
                 if not have_scan:
                     missing.append("/scan")
-                if not have_amcl:
+                if require_amcl and not have_amcl:
                     missing.append("/amcl_pose")
                 if not have_tf:
                     missing.append(
@@ -1161,6 +1166,7 @@ def parse_args(argv):
     parser.add_argument("--notes", default="follow_planned_waypoints")
     parser.add_argument("--fail-on-bad-localization", action="store_true")
     parser.add_argument("--pause-on-bad-localization", action="store_true")
+    parser.add_argument("--require-amcl-startup", action="store_true")
     parser.add_argument("--fail-on-stale-tf", action="store_true")
     parser.add_argument("--no-skip-first-waypoint", action="store_true")
     parser.add_argument("--dry-run", action="store_true")

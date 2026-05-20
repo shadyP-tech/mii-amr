@@ -115,6 +115,7 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
         self.assertEqual(args.max_scan_age_sec, 8.0)
         self.assertEqual(args.max_amcl_age_sec, 15.0)
         self.assertEqual(args.startup_timeout_sec, 20.0)
+        self.assertFalse(args.require_amcl_startup)
         self.assertEqual(args.max_waypoint_time_sec, 180.0)
 
     def test_waypoint_csv_parsing_and_duplicate_handling(self):
@@ -545,6 +546,77 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
         self.assertLess(first_gap, 0.1)
         self.assertGreater(stalled_gap, 5.0)
         self.assertLess(updated_gap, 0.1)
+
+    def test_startup_gate_allows_missing_amcl_when_tf_and_scan_are_ready(self):
+        class FakeRclpy:
+            @staticmethod
+            def ok():
+                return True
+
+        node = argparse.Namespace(
+            args=default_args(
+                startup_timeout_sec=0.01,
+                map_frame="map",
+                base_frame="base_footprint",
+                fallback_base_frame="base_link",
+                require_amcl_startup=False,
+                fail_on_bad_localization=False,
+                pause_on_bad_localization=False,
+            ),
+            last_scan=object(),
+            last_amcl=None,
+            base_frame_used="",
+        )
+
+        def lookup_pose():
+            return follower.Pose2D(0.0, 0.0, 0.0), "base_footprint"
+
+        node.lookup_pose = lookup_pose
+        original_rclpy = follower.rclpy
+        follower.rclpy = FakeRclpy
+        try:
+            follower.WaypointFollower.wait_for_startup_gate(node)
+        finally:
+            follower.rclpy = original_rclpy
+
+        self.assertEqual(node.base_frame_used, "base_footprint")
+
+    def test_startup_gate_can_require_amcl_for_strict_startup(self):
+        class FakeRclpy:
+            @staticmethod
+            def ok():
+                return True
+
+            @staticmethod
+            def spin_once(_node, timeout_sec=0.0):
+                return None
+
+        node = argparse.Namespace(
+            args=default_args(
+                startup_timeout_sec=0.001,
+                map_frame="map",
+                base_frame="base_footprint",
+                fallback_base_frame="base_link",
+                require_amcl_startup=True,
+                fail_on_bad_localization=False,
+                pause_on_bad_localization=False,
+            ),
+            last_scan=object(),
+            last_amcl=None,
+            base_frame_used="",
+        )
+
+        def lookup_pose():
+            return follower.Pose2D(0.0, 0.0, 0.0), "base_footprint"
+
+        node.lookup_pose = lookup_pose
+        original_rclpy = follower.rclpy
+        follower.rclpy = FakeRclpy
+        try:
+            with self.assertRaisesRegex(RuntimeError, "/amcl_pose"):
+                follower.WaypointFollower.wait_for_startup_gate(node)
+        finally:
+            follower.rclpy = original_rclpy
 
     def test_stale_absolute_tf_age_warns_by_default(self):
         node = FakeHealthNode(pose_age_sec=2.0)
