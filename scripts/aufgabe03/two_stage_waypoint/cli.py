@@ -9,6 +9,7 @@ from pathlib import Path
 from .experiment_log import append_csv_row, build_log_row
 from .model import (
     CSV_HEADER,
+    DEFAULT_AMCL_SETTLE_MIN_SEC,
     DEFAULT_AMCL_VALIDATION_TIMEOUT_SEC,
     DEFAULT_ARENA_ACTIVE_VALIDATION_TIMEOUT_SEC,
     DEFAULT_ARRIVAL_TOLERANCE_M,
@@ -190,6 +191,7 @@ def parse_args(argv):
         type=float,
     )
     parser.add_argument("--stable-amcl-samples", default=DEFAULT_STABLE_AMCL_SAMPLES, type=int)
+    parser.add_argument("--amcl-settle-min-sec", default=DEFAULT_AMCL_SETTLE_MIN_SEC, type=float)
     parser.add_argument(
         "--max-stable-pose-jump-m",
         default=DEFAULT_MAX_STABLE_POSE_JUMP_M,
@@ -351,6 +353,8 @@ def validate_args(parser, args):
         parser.error("--localization-spin-deg must be non-zero")
     if args.stable_amcl_samples < 1:
         parser.error("--stable-amcl-samples must be >= 1")
+    if args.amcl_settle_min_sec < 0.0:
+        parser.error("--amcl-settle-min-sec must be non-negative")
     if args.spin_min_valid_scan_count < 1:
         parser.error("--spin-min-valid-scan-count must be >= 1")
     if args.arena_active_min_scan_samples < 1:
@@ -429,6 +433,7 @@ def main(argv=None):
         node.preflight_before_motion()
 
         phase_start = time.time()
+        amcl_settle_min_sec = 0.0
         if args.localization_mode == "global":
             node.call_global_localization()
             node.perform_localization_spin()
@@ -473,8 +478,13 @@ def main(argv=None):
                     arena_result.pose_prior,
                     arena_result,
                 )
+                amcl_settle_min_sec = args.amcl_settle_min_sec
                 timeout = args.arena_active_validation_timeout_sec
-        stability = node.wait_for_amcl_validation(timeout, min_received_sec=phase_start)
+        stability = node.wait_for_amcl_validation(
+            timeout,
+            min_received_sec=phase_start,
+            min_settle_sec=amcl_settle_min_sec,
+        )
         if diagnostics.localization_duration_sec is None:
             diagnostics.localization_duration_sec = time.time() - phase_start
         diagnostics.amcl_var_x = stability.cov_x

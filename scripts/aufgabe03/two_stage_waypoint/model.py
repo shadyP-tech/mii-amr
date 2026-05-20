@@ -40,6 +40,8 @@ DEFAULT_MAX_AMCL_VAR_YAW_RAD2 = 0.10
 
 DEFAULT_STABLE_AMCL_SAMPLES = 5
 
+DEFAULT_AMCL_SETTLE_MIN_SEC = 3.0
+
 DEFAULT_MAX_STABLE_POSE_JUMP_M = 0.05
 
 DEFAULT_MAX_STABLE_YAW_JUMP_DEG = 10.0
@@ -182,6 +184,8 @@ class AmclCovariance:
 class StabilityState:
     stable_count: int = 0
     previous_pose: Pose2D | None = None
+    stable_since_sec: float | None = None
+    quiet_duration_sec: float = 0.0
     max_pose_jump_m: float = 0.0
     max_yaw_jump_deg: float = 0.0
     cov_x: float | None = None

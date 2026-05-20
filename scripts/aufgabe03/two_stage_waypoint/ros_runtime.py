@@ -88,6 +88,7 @@ from .model import (
     StabilityState,
 )
 from .pure import (
+    amcl_stability_satisfied,
     amcl_validation_timed_out,
     arena_active_diagnostics_path,
     evaluate_spin_scan_safety,
@@ -424,16 +425,20 @@ class TwoStageCoordinator(Node):
         stamp_sec = stamp_to_sec(msg.header.stamp)
         return pose2d_from_pose_msg(msg.pose.pose, stamp_sec=stamp_sec, frame_id=msg.header.frame_id)
 
-    def wait_for_amcl_validation(self, timeout_sec, min_received_sec=None):
+    def wait_for_amcl_validation(self, timeout_sec, min_received_sec=None, min_settle_sec=0.0):
         start = time.time()
         state = StabilityState()
         processed_received_sec = None
         last_reason = state.reason
         while rclpy.ok():
-            if amcl_validation_timed_out(start, time.time(), timeout_sec):
+            now = time.time()
+            if amcl_validation_timed_out(start, now, timeout_sec):
                 raise RuntimeError(
                     "Timed out waiting for AMCL validation: "
-                    f"reason={last_reason}, stable_samples={state.stable_count}"
+                    f"reason={last_reason}, stable_samples={state.stable_count}, "
+                    f"quiet_duration_sec={state.quiet_duration_sec:.2f}, "
+                    f"max_pose_jump_m={state.max_pose_jump_m:.4f}, "
+                    f"max_yaw_jump_deg={state.max_yaw_jump_deg:.2f}"
                 )
             rclpy.spin_once(self, timeout_sec=0.1)
             if self.last_amcl is None or self.last_amcl_received_sec is None:
@@ -441,26 +446,31 @@ class TwoStageCoordinator(Node):
             if min_received_sec is not None and self.last_amcl_received_sec < min_received_sec:
                 last_reason = "waiting_for_fresh_amcl"
                 continue
-            if processed_received_sec == self.last_amcl_received_sec:
-                continue
-            processed_received_sec = self.last_amcl_received_sec
-            age_sec = time.time() - self.last_amcl_received_sec
+            age_sec = now - self.last_amcl_received_sec
             if age_sec > self.args.max_amcl_age_sec:
                 last_reason = "stale_amcl"
                 continue
-            pose = self.amcl_pose2d(self.last_amcl)
-            state = update_amcl_stability(
+            if processed_received_sec != self.last_amcl_received_sec:
+                processed_received_sec = self.last_amcl_received_sec
+                pose = self.amcl_pose2d(self.last_amcl)
+                state = update_amcl_stability(
+                    state,
+                    pose,
+                    self.last_amcl.pose.covariance,
+                    self.args.max_amcl_var_x,
+                    self.args.max_amcl_var_y,
+                    self.args.max_amcl_var_yaw_rad2,
+                    self.args.max_stable_pose_jump_m,
+                    self.args.max_stable_yaw_jump_deg,
+                    sample_sec=self.last_amcl_received_sec,
+                )
+                last_reason = state.reason
+            if amcl_stability_satisfied(
                 state,
-                pose,
-                self.last_amcl.pose.covariance,
-                self.args.max_amcl_var_x,
-                self.args.max_amcl_var_y,
-                self.args.max_amcl_var_yaw_rad2,
-                self.args.max_stable_pose_jump_m,
-                self.args.max_stable_yaw_jump_deg,
-            )
-            last_reason = state.reason
-            if state.stable_count >= self.args.stable_amcl_samples:
+                self.args.stable_amcl_samples,
+                min_settle_sec,
+                now_sec=now,
+            ):
                 return state
         raise RuntimeError("ROS shutdown while waiting for AMCL validation")
 

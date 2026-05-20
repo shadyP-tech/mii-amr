@@ -108,6 +108,8 @@ class TwoStageWaypointRunTest(unittest.TestCase):
                 "12.0",
                 "--known-start-validation-timeout-sec",
                 "7.0",
+                "--amcl-settle-min-sec",
+                "4.5",
                 "--tf-ready-timeout-sec",
                 "9.0",
                 "--tf-lookup-timeout-sec",
@@ -129,6 +131,7 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         self.assertEqual(args.navigate_action, "/robot/navigate_to_pose")
         self.assertEqual(args.amcl_validation_timeout_sec, 12.0)
         self.assertEqual(args.known_start_validation_timeout_sec, 7.0)
+        self.assertEqual(args.amcl_settle_min_sec, 4.5)
         self.assertEqual(args.tf_ready_timeout_sec, 9.0)
         self.assertEqual(args.tf_lookup_timeout_sec, 11.0)
         self.assertEqual(args.tf_lookup_retry_period_sec, 0.2)
@@ -311,6 +314,7 @@ class TwoStageWaypointRunTest(unittest.TestCase):
             max_var_yaw_rad2=0.1,
             max_pose_jump_m=0.05,
             max_yaw_jump_deg=10.0,
+            sample_sec=10.0,
         )
         state = two_stage_pure.update_amcl_stability(
             state,
@@ -321,8 +325,12 @@ class TwoStageWaypointRunTest(unittest.TestCase):
             max_var_yaw_rad2=0.1,
             max_pose_jump_m=0.05,
             max_yaw_jump_deg=10.0,
+            sample_sec=11.0,
         )
         self.assertEqual(state.stable_count, 2)
+        self.assertAlmostEqual(state.quiet_duration_sec, 1.0)
+        self.assertTrue(two_stage_pure.amcl_stability_satisfied(state, 2, 1.0))
+        self.assertFalse(two_stage_pure.amcl_stability_satisfied(state, 2, 1.5))
 
         state = two_stage_pure.update_amcl_stability(
             state,
@@ -333,10 +341,99 @@ class TwoStageWaypointRunTest(unittest.TestCase):
             max_var_yaw_rad2=0.1,
             max_pose_jump_m=0.05,
             max_yaw_jump_deg=10.0,
+            sample_sec=12.0,
         )
         self.assertEqual(state.stable_count, 1)
         self.assertEqual(state.reason, "pose_jump_above_threshold")
+        self.assertAlmostEqual(state.quiet_duration_sec, 0.0)
+        self.assertFalse(two_stage_pure.amcl_stability_satisfied(state, 1, 0.0))
+
+        state = two_stage_pure.update_amcl_stability(
+            state,
+            two_stage_model.Pose2D(0.51, 0.0, 1.5),
+            covariance,
+            max_var_x=0.05,
+            max_var_y=0.05,
+            max_var_yaw_rad2=0.1,
+            max_pose_jump_m=0.05,
+            max_yaw_jump_deg=10.0,
+            sample_sec=14.0,
+        )
+        self.assertEqual(state.stable_count, 2)
+        self.assertEqual(state.reason, "stable")
+        self.assertAlmostEqual(state.quiet_duration_sec, 2.0)
+        self.assertTrue(two_stage_pure.amcl_stability_satisfied(state, 2, 2.0))
+        self.assertTrue(two_stage_pure.amcl_stability_satisfied(state, 2, 3.0, now_sec=15.0))
         self.assertTrue(two_stage_pure.amcl_validation_timed_out(10.0, 71.0, 60.0))
+
+    def test_amcl_stability_repeated_jumps_never_satisfy_settle_gate(self):
+        covariance = [0.0] * 36
+        covariance[0] = 0.01
+        covariance[7] = 0.02
+        covariance[35] = 0.03
+
+        state = two_stage_model.StabilityState()
+        poses = [
+            two_stage_model.Pose2D(0.0, 0.0, 0.0),
+            two_stage_model.Pose2D(0.20, 0.0, 0.0),
+            two_stage_model.Pose2D(0.40, 0.0, 0.0),
+            two_stage_model.Pose2D(0.60, 0.0, 0.0),
+        ]
+        for index, pose in enumerate(poses):
+            state = two_stage_pure.update_amcl_stability(
+                state,
+                pose,
+                covariance,
+                max_var_x=0.05,
+                max_var_y=0.05,
+                max_var_yaw_rad2=0.1,
+                max_pose_jump_m=0.05,
+                max_yaw_jump_deg=10.0,
+                sample_sec=20.0 + index,
+            )
+
+        self.assertEqual(state.reason, "pose_jump_above_threshold")
+        self.assertEqual(state.stable_count, 1)
+        self.assertGreater(state.max_pose_jump_m, 0.05)
+        self.assertFalse(two_stage_pure.amcl_stability_satisfied(state, 1, 0.0))
+
+    def test_amcl_stability_bad_covariance_resets_quiet_window(self):
+        good_covariance = [0.0] * 36
+        good_covariance[0] = 0.01
+        good_covariance[7] = 0.02
+        good_covariance[35] = 0.03
+        bad_covariance = list(good_covariance)
+        bad_covariance[7] = 0.20
+
+        state = two_stage_model.StabilityState()
+        state = two_stage_pure.update_amcl_stability(
+            state,
+            two_stage_model.Pose2D(0.0, 0.0, 0.0),
+            good_covariance,
+            max_var_x=0.05,
+            max_var_y=0.05,
+            max_var_yaw_rad2=0.1,
+            max_pose_jump_m=0.05,
+            max_yaw_jump_deg=10.0,
+            sample_sec=30.0,
+        )
+        state = two_stage_pure.update_amcl_stability(
+            state,
+            two_stage_model.Pose2D(0.01, 0.0, 0.0),
+            bad_covariance,
+            max_var_x=0.05,
+            max_var_y=0.05,
+            max_var_yaw_rad2=0.1,
+            max_pose_jump_m=0.05,
+            max_yaw_jump_deg=10.0,
+            sample_sec=31.0,
+        )
+
+        self.assertEqual(state.reason, "covariance_above_threshold")
+        self.assertEqual(state.stable_count, 0)
+        self.assertIsNone(state.stable_since_sec)
+        self.assertEqual(state.quiet_duration_sec, 0.0)
+        self.assertFalse(two_stage_pure.amcl_stability_satisfied(state, 1, 0.0))
 
     def test_scan_safety_aborts_on_unsafe_or_insufficient_ranges(self):
         unsafe = two_stage_pure.evaluate_spin_scan_safety(

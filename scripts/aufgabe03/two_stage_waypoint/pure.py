@@ -128,13 +128,18 @@ def update_amcl_stability(
     max_var_yaw_rad2,
     max_pose_jump_m,
     max_yaw_jump_deg,
+    sample_sec=None,
 ):
     cov = amcl_covariances(covariance)
     samples_seen = state.samples_seen + 1
+    if sample_sec is None:
+        sample_sec = float(samples_seen)
     if cov.x > max_var_x or cov.y > max_var_y or cov.yaw_rad2 > max_var_yaw_rad2:
         return StabilityState(
             stable_count=0,
             previous_pose=pose,
+            stable_since_sec=None,
+            quiet_duration_sec=0.0,
             max_pose_jump_m=state.max_pose_jump_m,
             max_yaw_jump_deg=state.max_yaw_jump_deg,
             cov_x=cov.x,
@@ -147,17 +152,24 @@ def update_amcl_stability(
     pose_jump = 0.0
     yaw_jump = 0.0
     stable_count = state.stable_count + 1
+    stable_since_sec = state.stable_since_sec
     reason = "stable"
     if state.previous_pose is not None:
         pose_jump = pose_distance_m(state.previous_pose, pose)
         yaw_jump = abs(shortest_angle_delta_deg(state.previous_pose.yaw_deg, pose.yaw_deg))
         if pose_jump > max_pose_jump_m or yaw_jump > max_yaw_jump_deg:
             stable_count = 1
+            stable_since_sec = sample_sec
             reason = "pose_jump_above_threshold"
+    if stable_since_sec is None:
+        stable_since_sec = sample_sec
+    quiet_duration_sec = max(0.0, float(sample_sec) - float(stable_since_sec))
 
     return StabilityState(
         stable_count=stable_count,
         previous_pose=pose,
+        stable_since_sec=stable_since_sec,
+        quiet_duration_sec=quiet_duration_sec,
         max_pose_jump_m=max(state.max_pose_jump_m, pose_jump),
         max_yaw_jump_deg=max(state.max_yaw_jump_deg, yaw_jump),
         cov_x=cov.x,
@@ -165,6 +177,20 @@ def update_amcl_stability(
         cov_yaw_rad2=cov.yaw_rad2,
         samples_seen=samples_seen,
         reason=reason,
+    )
+
+
+def amcl_stability_satisfied(state, required_samples, min_settle_sec, now_sec=None):
+    quiet_duration_sec = state.quiet_duration_sec
+    if now_sec is not None and state.stable_since_sec is not None:
+        quiet_duration_sec = max(
+            quiet_duration_sec,
+            float(now_sec) - float(state.stable_since_sec),
+        )
+    return (
+        state.reason == "stable"
+        and state.stable_count >= required_samples
+        and quiet_duration_sec >= min_settle_sec
     )
 
 
