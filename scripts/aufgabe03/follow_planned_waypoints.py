@@ -831,7 +831,14 @@ class WaypointFollower(Node):
 
     def current_amcl_health(self):
         if self.last_amcl is None:
-            return AmclHealth(False, ["missing_amcl"], None, None, None, None)
+            return AmclHealth(
+                ok=not self.args.fail_on_bad_localization,
+                warnings=["missing_amcl"],
+                cov_x=None,
+                cov_y=None,
+                cov_yaw=None,
+                age_sec=None,
+            )
         age_sec = (
             None if self.last_amcl_received_sec is None
             else time.time() - self.last_amcl_received_sec

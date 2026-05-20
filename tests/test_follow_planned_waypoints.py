@@ -618,6 +618,26 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
         finally:
             follower.rclpy = original_rclpy
 
+    def test_missing_amcl_is_warning_unless_strict_localization_is_enabled(self):
+        relaxed_node = argparse.Namespace(
+            args=default_args(fail_on_bad_localization=False),
+            last_amcl=None,
+            last_amcl_received_sec=None,
+        )
+        strict_node = argparse.Namespace(
+            args=default_args(fail_on_bad_localization=True),
+            last_amcl=None,
+            last_amcl_received_sec=None,
+        )
+
+        relaxed = follower.WaypointFollower.current_amcl_health(relaxed_node)
+        strict = follower.WaypointFollower.current_amcl_health(strict_node)
+
+        self.assertTrue(relaxed.ok)
+        self.assertEqual(relaxed.warnings, ["missing_amcl"])
+        self.assertFalse(strict.ok)
+        self.assertEqual(strict.warnings, ["missing_amcl"])
+
     def test_stale_absolute_tf_age_warns_by_default(self):
         node = FakeHealthNode(pose_age_sec=2.0)
 
