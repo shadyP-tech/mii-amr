@@ -114,6 +114,7 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
         self.assertEqual(args.max_pose_age_sec, 10.0)
         self.assertEqual(args.max_scan_age_sec, 8.0)
         self.assertEqual(args.max_amcl_age_sec, 15.0)
+        self.assertEqual(args.startup_timeout_sec, 20.0)
         self.assertEqual(args.max_waypoint_time_sec, 180.0)
 
     def test_waypoint_csv_parsing_and_duplicate_handling(self):

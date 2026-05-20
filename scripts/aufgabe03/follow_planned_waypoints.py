@@ -68,7 +68,7 @@ DEFAULT_LOCALIZATION_RECOVERY_TIME_SEC = 5.0
 DEFAULT_CONTROL_RATE_HZ = 10.0
 DEFAULT_SETTLE_SEC = 0.5
 
-TOPIC_TIMEOUT_SEC = 5.0
+DEFAULT_STARTUP_TIMEOUT_SEC = 20.0
 STOP_PUBLISH_COUNT = 10
 STOP_PUBLISH_HZ = 10.0
 
@@ -751,7 +751,9 @@ class WaypointFollower(Node):
                 self.pub.publish(msg)
             time.sleep(sleep_sec)
 
-    def wait_for_startup_gate(self, timeout_sec=TOPIC_TIMEOUT_SEC):
+    def wait_for_startup_gate(self, timeout_sec=None):
+        if timeout_sec is None:
+            timeout_sec = self.args.startup_timeout_sec
         start = time.time()
         while rclpy.ok():
             have_scan = self.last_scan is not None
@@ -1155,6 +1157,7 @@ def parse_args(argv):
     )
     parser.add_argument("--control-rate-hz", default=DEFAULT_CONTROL_RATE_HZ, type=float)
     parser.add_argument("--settle-sec", default=DEFAULT_SETTLE_SEC, type=float)
+    parser.add_argument("--startup-timeout-sec", default=DEFAULT_STARTUP_TIMEOUT_SEC, type=float)
     parser.add_argument("--notes", default="follow_planned_waypoints")
     parser.add_argument("--fail-on-bad-localization", action="store_true")
     parser.add_argument("--pause-on-bad-localization", action="store_true")
@@ -1198,6 +1201,7 @@ def validate_args(parser, args):
         "tf_recovery_time_sec",
         "localization_recovery_time_sec",
         "control_rate_hz",
+        "startup_timeout_sec",
     ]
     for field in positive_fields:
         if getattr(args, field) <= 0.0:

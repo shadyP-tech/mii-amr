@@ -459,6 +459,8 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         self.assertEqual(command[0], "python3")
         self.assertIn("--start-selection", command)
         self.assertEqual(command[command.index("--start-selection") + 1], "path-progress")
+        self.assertIn("--startup-timeout-sec", command)
+        self.assertEqual(command[command.index("--startup-timeout-sec") + 1], "20.0")
         self.assertIn("--max-amcl-var-yaw", command)
 
         captured = {}

@@ -16,6 +16,7 @@ from .model import (
     DEFAULT_ARRIVAL_YAW_TOLERANCE_DEG,
     DEFAULT_CONTROL_RATE_HZ,
     DEFAULT_FOLLOWER_SCRIPT,
+    DEFAULT_FOLLOWER_STARTUP_TIMEOUT_SEC,
     DEFAULT_GOAL_TOLERANCE_M,
     DEFAULT_INITIAL_POSE_VAR_X,
     DEFAULT_INITIAL_POSE_VAR_Y,
@@ -179,6 +180,11 @@ def parse_args(argv):
     parser.add_argument("--odom-topic", default="/odom")
     parser.add_argument("--follower-script", default=DEFAULT_FOLLOWER_SCRIPT, type=Path)
     parser.add_argument("--python-executable", default="python3")
+    parser.add_argument(
+        "--follower-startup-timeout-sec",
+        default=DEFAULT_FOLLOWER_STARTUP_TIMEOUT_SEC,
+        type=float,
+    )
 
     parser.add_argument("--max-pose-age-sec", default=DEFAULT_MAX_POSE_AGE_SEC, type=float)
     parser.add_argument("--max-scan-age-sec", default=DEFAULT_MAX_SCAN_AGE_SEC, type=float)
@@ -309,6 +315,7 @@ def validate_args(parser, args):
         "tf_ready_timeout_sec",
         "tf_lookup_timeout_sec",
         "tf_lookup_retry_period_sec",
+        "follower_startup_timeout_sec",
         "arena_active_validation_timeout_sec",
         "initial_pose_var_x",
         "initial_pose_var_y",

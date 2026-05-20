@@ -276,6 +276,8 @@ def build_follower_command(args):
         str(args.max_scan_age_sec),
         "--max-amcl-age-sec",
         str(args.max_amcl_age_sec),
+        "--startup-timeout-sec",
+        str(args.follower_startup_timeout_sec),
         "--max-amcl-var-x",
         str(args.max_amcl_var_x),
         "--max-amcl-var-y",
