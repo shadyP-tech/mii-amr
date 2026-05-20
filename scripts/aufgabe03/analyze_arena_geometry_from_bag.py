@@ -164,6 +164,14 @@ def parse_args(argv):
     parser.add_argument("--arena-min-parallel-score", default=0.90, type=float)
     parser.add_argument("--arena-min-short-wall-confidence", default=0.75, type=float)
     parser.add_argument("--arena-min-classification-margin", default=0.15, type=float)
+    parser.add_argument(
+        "--arena-force-short-wall-side",
+        choices=["axis_negative", "axis_positive"],
+    )
+    parser.add_argument(
+        "--arena-force-short-wall-type",
+        choices=["heater", "clean"],
+    )
     args = parser.parse_args(argv)
 
     if bool(args.bag) == bool(args.input_json):
@@ -186,6 +194,13 @@ def parse_args(argv):
         parser.error("--arena-width-match-min-margin-m must be >= 0")
     if args.arena_max_short_wall_range_sum_error_m < 0.0:
         parser.error("--arena-max-short-wall-range-sum-error-m must be >= 0")
+    if (args.arena_force_short_wall_side is None) != (
+        args.arena_force_short_wall_type is None
+    ):
+        parser.error(
+            "--arena-force-short-wall-side and --arena-force-short-wall-type "
+            "must be provided together"
+        )
     return args
 
 
@@ -207,6 +222,8 @@ def config_from_args(args):
         min_parallel_score=args.arena_min_parallel_score,
         min_short_wall_confidence=args.arena_min_short_wall_confidence,
         min_classification_margin=args.arena_min_classification_margin,
+        forced_short_wall_side=args.arena_force_short_wall_side,
+        forced_short_wall_type=args.arena_force_short_wall_type,
     )
 
 

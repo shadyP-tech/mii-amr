@@ -119,6 +119,8 @@ def arena_active_config_from_args(args):
         min_parallel_score=args.arena_min_parallel_score,
         min_short_wall_confidence=args.arena_min_short_wall_confidence,
         min_classification_margin=args.arena_min_classification_margin,
+        forced_short_wall_side=args.arena_force_short_wall_side,
+        forced_short_wall_type=args.arena_force_short_wall_type,
     )
     return ArenaActiveSpinConfig(
         run_id=args.run_id,

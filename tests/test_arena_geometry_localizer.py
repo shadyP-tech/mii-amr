@@ -314,6 +314,43 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
         self.assertEqual(classification.wall_type, arena.WALL_AMBIGUOUS)
         self.assertEqual(classification.reason, "both_axis_candidates_valid")
 
+    def test_forced_short_wall_classification_overrides_candidate_scores(self):
+        config = arena.ArenaGeometryConfig(
+            forced_short_wall_side="axis_positive",
+            forced_short_wall_type=arena.WALL_CLEAN,
+        )
+        candidates = {
+            "axis_negative": arena.ShortWallClassification(
+                wall_type=arena.WALL_CLEAN,
+                reason="clean_score_dominant",
+                observed_axis_side="axis_negative",
+                confidence=0.90,
+                clean_feature_score=0.90,
+                classification_margin=0.90,
+                short_wall_candidate_range_m=3.00,
+                short_wall_rmse_m=0.01,
+                point_count=20,
+            ),
+            "axis_positive": arena.ShortWallClassification(
+                wall_type=arena.WALL_UNKNOWN,
+                reason="classification_confidence_too_low",
+                observed_axis_side="axis_positive",
+                confidence=0.45,
+                clean_feature_score=0.45,
+                heater_feature_score=0.30,
+                classification_margin=0.15,
+                short_wall_candidate_range_m=0.90,
+                short_wall_rmse_m=0.02,
+                point_count=20,
+            ),
+        }
+
+        classification = arena.select_short_wall_classification(candidates, config)
+
+        self.assertEqual(classification.wall_type, arena.WALL_CLEAN)
+        self.assertEqual(classification.observed_axis_side, "axis_positive")
+        self.assertEqual(classification.reason, "forced_short_wall_classification")
+
     def test_width_profile_does_not_override_short_wall_classification(self):
         config = arena.ArenaGeometryConfig(max_wall_separation_error_m=0.05)
         result = arena.analyze_points(
@@ -431,6 +468,8 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
         self.assertEqual(args.arena_clean_wall_width_m, 1.967)
         self.assertEqual(args.arena_width_match_min_margin_m, 0.015)
         self.assertEqual(args.arena_max_short_wall_range_sum_error_m, 0.15)
+        self.assertIsNone(args.arena_force_short_wall_side)
+        self.assertIsNone(args.arena_force_short_wall_type)
 
         single_width_args = bag_analyzer.parse_args(
             [
@@ -444,6 +483,22 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
         )
         config = bag_analyzer.config_from_args(single_width_args)
         self.assertEqual(config.arena_width_m, 1.9)
+
+        forced_args = bag_analyzer.parse_args(
+            [
+                "--input-json",
+                "samples.json",
+                "--output",
+                "out.json",
+                "--arena-force-short-wall-side",
+                "axis_positive",
+                "--arena-force-short-wall-type",
+                "clean",
+            ]
+        )
+        forced_config = bag_analyzer.config_from_args(forced_args)
+        self.assertEqual(forced_config.forced_short_wall_side, "axis_positive")
+        self.assertEqual(forced_config.forced_short_wall_type, arena.WALL_CLEAN)
 
 
 if __name__ == "__main__":

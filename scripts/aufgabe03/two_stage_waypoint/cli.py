@@ -278,6 +278,14 @@ def parse_args(argv):
     parser.add_argument("--arena-min-parallel-score", default=0.90, type=float)
     parser.add_argument("--arena-min-short-wall-confidence", default=0.75, type=float)
     parser.add_argument("--arena-min-classification-margin", default=0.15, type=float)
+    parser.add_argument(
+        "--arena-force-short-wall-side",
+        choices=["axis_negative", "axis_positive"],
+    )
+    parser.add_argument(
+        "--arena-force-short-wall-type",
+        choices=["heater", "clean"],
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--yes", action="store_true")
     parser.add_argument("--no-log", action="store_true")
@@ -359,6 +367,13 @@ def validate_args(parser, args):
         parser.error("--arena-max-short-wall-range-sum-error-m must be non-negative")
     if args.arena_min_wall_points < 1:
         parser.error("--arena-min-wall-points must be >= 1")
+    if (args.arena_force_short_wall_side is None) != (
+        args.arena_force_short_wall_type is None
+    ):
+        parser.error(
+            "--arena-force-short-wall-side and --arena-force-short-wall-type "
+            "must be provided together"
+        )
     if args.min_waypoint_spacing_m < 0.0:
         parser.error("--min-waypoint-spacing-m must be non-negative")
     if args.localization_mode == "known-start":

@@ -58,6 +58,8 @@ class ArenaGeometryConfig:
     min_short_wall_points: int = 8
     min_short_wall_confidence: float = 0.75
     min_classification_margin: float = 0.15
+    forced_short_wall_side: str | None = None
+    forced_short_wall_type: str | None = None
     short_wall_band_m: float = 0.25
     short_wall_outer_band_m: float = 0.06
     min_short_wall_visible_width_m: float = 0.35
@@ -771,10 +773,54 @@ def complementary_short_wall_pair(accepted: Sequence[ShortWallClassification]):
     return heater, clean
 
 
+def forced_short_wall_classification(
+    candidates: dict[str, ShortWallClassification],
+    config: ArenaGeometryConfig,
+):
+    if config.forced_short_wall_side is None and config.forced_short_wall_type is None:
+        return None
+    if config.forced_short_wall_side not in candidates:
+        return ShortWallClassification(
+            WALL_UNKNOWN,
+            "forced_short_wall_side_missing",
+            observed_axis_side=config.forced_short_wall_side,
+        )
+    if config.forced_short_wall_type not in {WALL_HEATER, WALL_CLEAN}:
+        candidate = candidates[config.forced_short_wall_side]
+        return copy_candidate_with_reason(
+            candidate,
+            "forced_short_wall_type_invalid",
+            wall_type=WALL_UNKNOWN,
+        )
+
+    candidate = candidates[config.forced_short_wall_side]
+    if candidate.point_count < config.min_short_wall_points:
+        return copy_candidate_with_reason(
+            candidate,
+            "forced_short_wall_candidate_insufficient_points",
+            wall_type=WALL_UNKNOWN,
+        )
+    if candidate.short_wall_rmse_m is None or candidate.short_wall_rmse_m > config.max_line_rmse_m:
+        return copy_candidate_with_reason(
+            candidate,
+            "forced_short_wall_candidate_bad_fit",
+            wall_type=WALL_UNKNOWN,
+        )
+    return copy_candidate_with_reason(
+        candidate,
+        "forced_short_wall_classification",
+        wall_type=config.forced_short_wall_type,
+    )
+
+
 def select_short_wall_classification(
     candidates: dict[str, ShortWallClassification],
     config: ArenaGeometryConfig,
 ):
+    forced = forced_short_wall_classification(candidates, config)
+    if forced is not None:
+        return forced
+
     ordered = list(candidates.values())
     accepted = [
         candidate

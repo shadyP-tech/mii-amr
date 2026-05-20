@@ -159,6 +159,35 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         self.assertEqual(arena_args.arena_active_on_failure, "abort")
         self.assertEqual(arena_args.arena_active_spin_direction, "ccw")
         self.assertEqual(arena_args.odom_topic, "/odom")
+        self.assertIsNone(arena_args.arena_force_short_wall_side)
+        self.assertIsNone(arena_args.arena_force_short_wall_type)
+
+        forced_args = two_stage_cli.parse_args(
+            [
+                "--dry-run",
+                "--localization-mode",
+                "arena-active",
+                "--arena-force-short-wall-side",
+                "axis_positive",
+                "--arena-force-short-wall-type",
+                "clean",
+            ]
+        )
+
+        self.assertEqual(forced_args.arena_force_short_wall_side, "axis_positive")
+        self.assertEqual(forced_args.arena_force_short_wall_type, "clean")
+
+    def test_arena_active_force_short_wall_requires_side_and_type(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                two_stage_cli.parse_args(
+                    [
+                        "--localization-mode",
+                        "arena-active",
+                        "--arena-force-short-wall-side",
+                        "axis_positive",
+                    ]
+                )
 
     def test_arena_active_dry_run_preflight_does_not_require_nav_or_global_fallback(self):
         args = two_stage_cli.parse_args(
