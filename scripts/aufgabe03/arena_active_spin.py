@@ -191,13 +191,27 @@ def pose_prior_from_localizer_result(result):
     )
 
 
+def json_safe(value):
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if hasattr(value, "tolist"):
+        return json_safe(value.tolist())
+    if hasattr(value, "item"):
+        return json_safe(value.item())
+    return value
+
+
 def write_diagnostics_json(path: Path | str | None, diagnostics):
     if path is None:
         return None
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as file:
-        json.dump(diagnostics, file, indent=2, sort_keys=True)
+        json.dump(json_safe(diagnostics), file, indent=2, sort_keys=True)
         file.write("\n")
     return str(path)
 

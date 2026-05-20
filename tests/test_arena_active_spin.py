@@ -107,6 +107,32 @@ class PromptDelayRclpy:
 
 
 class ArenaActiveSpinTest(unittest.TestCase):
+    def test_diagnostics_json_accepts_array_like_values(self):
+        class FakeArray:
+            def tolist(self):
+                return [[1.0, 2.0], [3.0, 4.0]]
+
+        class FakeScalar:
+            def item(self):
+                return 0.25
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "diag.json"
+
+            active_spin.write_diagnostics_json(
+                path,
+                {
+                    "matrix": FakeArray(),
+                    "scalar": FakeScalar(),
+                    "nested": {"tuple": (FakeScalar(),)},
+                },
+            )
+            diagnostics = json.loads(path.read_text())
+
+        self.assertEqual(diagnostics["matrix"], [[1.0, 2.0], [3.0, 4.0]])
+        self.assertEqual(diagnostics["scalar"], 0.25)
+        self.assertEqual(diagnostics["nested"]["tuple"], [0.25])
+
     def test_shortest_angle_delta_handles_wraparound(self):
         delta = active_spin.shortest_angle_delta_rad(
             math.radians(170.0),
