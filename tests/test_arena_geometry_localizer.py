@@ -5,6 +5,7 @@ import math
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -63,6 +64,45 @@ def rectangular_points(
     return transform_points(points, yaw_deg=yaw_deg, lateral_offset_m=lateral_offset_m)
 
 
+def profile_candidate(
+    side,
+    heater_score,
+    clean_score,
+    range_m,
+    validity_failed_reason=None,
+):
+    return arena.ShortWallClassification(
+        wall_type=arena.WALL_UNKNOWN,
+        reason="profile_candidate",
+        observed_axis_side=side,
+        confidence=max(heater_score, clean_score),
+        heater_feature_score=heater_score,
+        clean_feature_score=clean_score,
+        classification_margin=abs(heater_score - clean_score),
+        short_wall_candidate_range_m=range_m,
+        short_wall_visible_width_m=1.0,
+        short_wall_rmse_m=0.0,
+        point_count=30,
+        profile_features={
+            "point_count": 30,
+            "visible_width_m": 1.0,
+            "line_rmse_m": 0.0,
+            "depth_p75_m": 0.0,
+            "depth_p90_m": 0.0,
+            "depth_p95_m": 0.0,
+            "protrusion_fraction": 0.0,
+            "protrusion_cluster_count": 0,
+            "largest_protrusion_cluster_width_m": 0.0,
+            "profile_roughness_m": 0.0,
+            "outer_line_support_fraction": 1.0,
+            "validity_failed_reason": validity_failed_reason,
+        },
+        heater_profile_score=heater_score,
+        clean_profile_score=clean_score,
+        validity_failed_reason=validity_failed_reason,
+    )
+
+
 class ArenaGeometryLocalizerTest(unittest.TestCase):
     def test_long_walls_only_are_rejected_as_non_unique(self):
         result = arena.analyze_points(rectangular_points(), SYNTHETIC_ARENA_CONFIG)
@@ -74,37 +114,54 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
         self.assertEqual(result.failure_reason, "pose_not_unique")
         self.assertEqual(result.short_wall_classification.wall_type, arena.WALL_UNKNOWN)
 
-    def test_clean_wall_resolves_pose_prior(self):
+    def test_pairwise_clean_heater_walls_resolve_pose_prior(self):
         result = arena.analyze_points(
-            rectangular_points(include_clean=True),
+            rectangular_points(include_clean=True, include_heater=True),
             SYNTHETIC_ARENA_CONFIG,
         )
 
         self.assertTrue(result.success)
         self.assertTrue(result.pose_unique)
-        self.assertEqual(result.short_wall_classification.wall_type, arena.WALL_CLEAN)
-        self.assertEqual(result.short_wall_classification.observed_axis_side, "axis_negative")
+        self.assertEqual(result.short_wall_classification.wall_type, arena.WALL_HEATER)
+        self.assertEqual(result.short_wall_classification.observed_axis_side, "axis_positive")
+        self.assertEqual(
+            result.short_wall_classification.reason,
+            "pairwise_profile_heater_clean_valid",
+        )
+        self.assertEqual(
+            result.short_wall_classification.selected_assignment,
+            "positive_heater",
+        )
+        self.assertEqual(
+            result.short_wall_candidates["axis_negative"].wall_type,
+            arena.WALL_CLEAN,
+        )
         self.assertIsNotNone(result.estimated_pose_prior)
         self.assertAlmostEqual(result.estimated_pose_prior.x, 0.0, delta=0.08)
         self.assertAlmostEqual(result.estimated_pose_prior.y, 0.0, delta=0.08)
         self.assertAlmostEqual(result.estimated_pose_prior.yaw_deg, 0.0, delta=2.0)
         self.assertIsNotNone(result.estimated_covariance)
 
-    def test_heater_wall_resolves_pose_prior(self):
+    def test_single_short_wall_is_rejected_as_pairwise_incomplete(self):
         result = arena.analyze_points(
             rectangular_points(include_heater=True),
             SYNTHETIC_ARENA_CONFIG,
         )
 
-        self.assertTrue(result.success)
-        self.assertEqual(result.short_wall_classification.wall_type, arena.WALL_HEATER)
-        self.assertEqual(result.short_wall_classification.observed_axis_side, "axis_positive")
-        self.assertGreater(result.short_wall_classification.heater_feature_score, 0.75)
-        self.assertAlmostEqual(result.estimated_pose_prior.x, 0.0, delta=0.12)
+        self.assertFalse(result.success)
+        self.assertFalse(result.pose_unique)
+        self.assertEqual(result.short_wall_classification.wall_type, arena.WALL_UNKNOWN)
+        self.assertEqual(result.short_wall_classification.reason, "pairwise_profile_candidate_invalid")
+        self.assertGreater(result.short_wall_candidates["axis_positive"].heater_profile_score, 0.75)
 
     def test_rotated_and_laterally_offset_scan_estimates_y_and_yaw(self):
         result = arena.analyze_points(
-            rectangular_points(include_clean=True, yaw_deg=12.0, lateral_offset_m=0.18),
+            rectangular_points(
+                include_clean=True,
+                include_heater=True,
+                yaw_deg=12.0,
+                lateral_offset_m=0.18,
+            ),
             SYNTHETIC_ARENA_CONFIG,
         )
 
@@ -119,7 +176,10 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
             map_center_y=2.0,
             map_yaw_deg=90.0,
         )
-        result = arena.analyze_points(rectangular_points(include_clean=True), config)
+        result = arena.analyze_points(
+            rectangular_points(include_clean=True, include_heater=True),
+            config,
+        )
 
         self.assertTrue(result.success)
         self.assertAlmostEqual(result.estimated_pose_prior.x, 1.0, delta=0.08)
@@ -228,7 +288,7 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
             "axis_positive",
         )
 
-    def test_two_valid_axis_candidates_are_rejected_as_ambiguous(self):
+    def test_pairwise_profile_accepts_complementary_short_walls(self):
         result = arena.analyze_points(
             rectangular_points(include_clean=True, include_heater=True),
             SYNTHETIC_ARENA_CONFIG,
@@ -239,7 +299,7 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
         self.assertEqual(result.short_wall_classification.wall_type, arena.WALL_HEATER)
         self.assertEqual(
             result.short_wall_classification.reason,
-            "complementary_short_walls_valid",
+            "pairwise_profile_heater_clean_valid",
         )
         self.assertAlmostEqual(
             result.short_wall_classification.short_wall_range_sum_m,
@@ -247,6 +307,177 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
             delta=0.01,
         )
         self.assertAlmostEqual(result.estimated_pose_prior.x, 0.0, delta=0.02)
+
+    def test_pairwise_profile_rejects_both_heater_like_candidates(self):
+        config = arena.ArenaGeometryConfig()
+        candidates = {
+            "axis_negative": profile_candidate("axis_negative", 0.90, 0.10, 1.95),
+            "axis_positive": profile_candidate("axis_positive", 0.85, 0.20, 1.95),
+        }
+
+        pairwise = arena.classify_short_wall_pairwise(candidates, config)
+        classification = arena.select_short_wall_classification(candidates, config)
+
+        self.assertFalse(pairwise.accepted)
+        self.assertEqual(pairwise.reason, "pairwise_profile_both_heater_like")
+        self.assertEqual(classification.wall_type, arena.WALL_UNKNOWN)
+
+    def test_pairwise_profile_rejects_both_clean_like_candidates(self):
+        config = arena.ArenaGeometryConfig()
+        candidates = {
+            "axis_negative": profile_candidate("axis_negative", 0.10, 0.90, 1.95),
+            "axis_positive": profile_candidate("axis_positive", 0.20, 0.85, 1.95),
+        }
+
+        pairwise = arena.classify_short_wall_pairwise(candidates, config)
+
+        self.assertFalse(pairwise.accepted)
+        self.assertEqual(pairwise.reason, "pairwise_profile_both_clean_like")
+
+    def test_pairwise_profile_rejects_ambiguous_mid_confidence_scores(self):
+        config = arena.ArenaGeometryConfig()
+        candidates = {
+            "axis_negative": profile_candidate("axis_negative", 0.68, 0.66, 1.95),
+            "axis_positive": profile_candidate("axis_positive", 0.64, 0.67, 1.95),
+        }
+
+        pairwise = arena.classify_short_wall_pairwise(candidates, config)
+
+        self.assertFalse(pairwise.accepted)
+        self.assertEqual(pairwise.reason, "pairwise_profile_ambiguous_scores")
+
+    def test_pairwise_profile_rejects_winner_label_mismatch(self):
+        config = arena.ArenaGeometryConfig()
+        candidates = {
+            "axis_negative": profile_candidate("axis_negative", 0.10, 0.90, 1.95),
+            "axis_positive": profile_candidate("axis_positive", 0.90, 0.10, 1.95),
+        }
+
+        def fake_heater_like(candidate, _config):
+            return candidate.observed_axis_side == "axis_negative"
+
+        def fake_clean_like(candidate, _config):
+            return candidate.observed_axis_side == "axis_positive"
+
+        with mock.patch.object(arena, "is_profile_heater_like", fake_heater_like), mock.patch.object(
+            arena,
+            "is_profile_clean_like",
+            fake_clean_like,
+        ):
+            pairwise = arena.classify_short_wall_pairwise(candidates, config)
+
+        self.assertFalse(pairwise.accepted)
+        self.assertEqual(pairwise.reason, "pairwise_profile_assignment_label_mismatch")
+
+    def test_pairwise_profile_rejects_broken_wall_before_scoring(self):
+        config = arena.ArenaGeometryConfig()
+        candidates = {
+            "axis_negative": profile_candidate(
+                "axis_negative",
+                0.90,
+                0.10,
+                1.95,
+                validity_failed_reason="profile_line_rmse_too_high",
+            ),
+            "axis_positive": profile_candidate("axis_positive", 0.10, 0.90, 1.95),
+        }
+
+        pairwise = arena.classify_short_wall_pairwise(candidates, config)
+
+        self.assertFalse(pairwise.accepted)
+        self.assertEqual(pairwise.reason, "pairwise_profile_candidate_invalid")
+
+    def test_pairwise_profile_rejects_range_sum_errors_directionally(self):
+        config = arena.ArenaGeometryConfig(max_short_wall_range_sum_error_m=0.15)
+        short_candidates = {
+            "axis_negative": profile_candidate("axis_negative", 0.90, 0.10, 0.50),
+            "axis_positive": profile_candidate("axis_positive", 0.10, 0.90, 2.00),
+        }
+        long_candidates = {
+            "axis_negative": profile_candidate("axis_negative", 0.90, 0.10, 2.50),
+            "axis_positive": profile_candidate("axis_positive", 0.10, 0.90, 2.00),
+        }
+
+        self.assertEqual(
+            arena.classify_short_wall_pairwise(short_candidates, config).reason,
+            "pairwise_profile_range_sum_too_short",
+        )
+        self.assertEqual(
+            arena.classify_short_wall_pairwise(long_candidates, config).reason,
+            "pairwise_profile_range_sum_too_long",
+        )
+
+    def test_pairwise_profile_candidate_order_is_key_based(self):
+        config = arena.ArenaGeometryConfig()
+        candidates = {
+            "axis_positive": profile_candidate("axis_positive", 0.90, 0.10, 1.95),
+            "axis_negative": profile_candidate("axis_negative", 0.10, 0.90, 1.95),
+        }
+
+        pairwise = arena.classify_short_wall_pairwise(candidates, config)
+
+        self.assertTrue(pairwise.accepted)
+        self.assertEqual(pairwise.assignment, "positive_heater")
+
+    def test_profile_features_are_invariant_to_axis_sign_flip(self):
+        config = arena.ArenaGeometryConfig()
+        axis = (1.0, 0.0)
+        flipped_axis = (-1.0, 0.0)
+        normal = (0.0, 1.0)
+        points = [(1.95, -0.5), (1.95, 0.0), (1.95, 0.5)]
+        points += [(1.80, -0.2), (1.80, 0.2)]
+        line = arena.fit_line(points[:3])
+
+        original = arena.compute_short_wall_profile_features(
+            points,
+            axis,
+            normal,
+            "axis_positive",
+            1.95,
+            line,
+            config,
+        )
+        flipped = arena.compute_short_wall_profile_features(
+            points,
+            flipped_axis,
+            normal,
+            "axis_negative",
+            -1.95,
+            line,
+            config,
+        )
+
+        self.assertAlmostEqual(original["depth_p95_m"], flipped["depth_p95_m"])
+        self.assertAlmostEqual(
+            original["protrusion_fraction"],
+            flipped["protrusion_fraction"],
+        )
+
+    def test_mirrored_arena_preserves_physical_heater_identification(self):
+        mirrored = [(-x, y) for x, y in rectangular_points(include_clean=True, include_heater=True)]
+        result = arena.analyze_points(mirrored, SYNTHETIC_ARENA_CONFIG)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.short_wall_classification.wall_type, arena.WALL_HEATER)
+        self.assertEqual(result.short_wall_classification.observed_axis_side, "axis_negative")
+
+    def test_noisy_clean_wall_does_not_become_heater_like(self):
+        config = arena.ArenaGeometryConfig()
+        points = [(-1.95 + (0.005 if index % 2 else -0.005), -0.9 + index * 0.06) for index in range(31)]
+        line = arena.fit_line(points)
+        features = arena.compute_short_wall_profile_features(
+            points,
+            (1.0, 0.0),
+            (0.0, 1.0),
+            "axis_negative",
+            -1.95,
+            line,
+            config,
+        )
+        heater_score, clean_score = arena.score_short_wall_profile(features, config)
+
+        self.assertLess(heater_score, config.profile_min_heater_like_score)
+        self.assertGreater(clean_score, config.profile_min_clean_like_score)
 
     def test_complementary_short_wall_range_sum_must_be_consistent(self):
         config = arena.ArenaGeometryConfig()
@@ -354,7 +585,7 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
     def test_width_profile_does_not_override_short_wall_classification(self):
         config = arena.ArenaGeometryConfig(max_wall_separation_error_m=0.05)
         result = arena.analyze_points(
-            rectangular_points(include_clean=True, width_m=2.016),
+            rectangular_points(include_clean=True, include_heater=True, width_m=2.016),
             config,
         )
 
@@ -363,7 +594,11 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
             result.long_wall_fit.matched_width_profile_label,
             "heater_side_width",
         )
-        self.assertEqual(result.short_wall_classification.wall_type, arena.WALL_CLEAN)
+        self.assertEqual(result.short_wall_classification.wall_type, arena.WALL_HEATER)
+        self.assertEqual(
+            result.short_wall_classification.reason,
+            "pairwise_profile_heater_clean_valid",
+        )
 
     def test_unknown_selected_diagnostic_candidate_does_not_succeed(self):
         result = arena.analyze_points(rectangular_points(), SYNTHETIC_ARENA_CONFIG)

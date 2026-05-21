@@ -64,6 +64,41 @@ class ArenaGeometryConfig:
     short_wall_outer_band_m: float = 0.06
     min_short_wall_visible_width_m: float = 0.35
     heater_protrusion_min_m: float = 0.06
+    profile_min_points: int = 20
+    profile_min_visible_width_m: float = 0.45
+    profile_max_line_rmse_m: float = 0.035
+    profile_min_any_line_support_fraction: float = 0.20
+    profile_cluster_bin_width_m: float = 0.075
+    profile_cluster_gap_tolerance_bins: int = 1
+    profile_min_confidence: float = 0.75
+    profile_min_assignment_margin: float = 0.20
+    profile_min_heater_clean_contrast: float = 0.20
+    profile_min_heater_like_score: float = 0.70
+    profile_min_clean_like_score: float = 0.70
+    profile_max_opposite_score: float = 0.55
+    profile_protrusion_min_m: float = 0.04
+    profile_heater_depth_p95_low_m: float = 0.03
+    profile_heater_depth_p95_high_m: float = 0.08
+    profile_heater_protrusion_fraction_low: float = 0.05
+    profile_heater_protrusion_fraction_high: float = 0.25
+    profile_heater_cluster_count_low: float = 1.0
+    profile_heater_cluster_count_high: float = 3.0
+    profile_heater_largest_cluster_width_low_m: float = 0.05
+    profile_heater_largest_cluster_width_high_m: float = 0.20
+    profile_heater_roughness_low_m: float = 0.01
+    profile_heater_roughness_high_m: float = 0.04
+    profile_heater_line_support_low: float = 0.35
+    profile_heater_line_support_high: float = 0.75
+    profile_clean_depth_p95_low_m: float = 0.02
+    profile_clean_depth_p95_high_m: float = 0.06
+    profile_clean_protrusion_fraction_low: float = 0.03
+    profile_clean_protrusion_fraction_high: float = 0.15
+    profile_clean_cluster_count_low: float = 0.0
+    profile_clean_cluster_count_high: float = 2.0
+    profile_clean_roughness_low_m: float = 0.005
+    profile_clean_roughness_high_m: float = 0.03
+    profile_clean_line_support_low: float = 0.45
+    profile_clean_line_support_high: float = 0.80
     angle_search_step_deg: float = 2.0
 
 
@@ -161,6 +196,16 @@ class ShortWallClassification:
     short_wall_range_sum_m: float | None = None
     short_wall_range_sum_error_m: float | None = None
     point_count: int = 0
+    profile_features: dict | None = None
+    heater_profile_score: float = 0.0
+    clean_profile_score: float = 0.0
+    pairwise_assignment_score: float | None = None
+    pairwise_assignment_margin: float | None = None
+    heater_clean_contrast: float | None = None
+    short_wall_range_sum_expected_m: float | None = None
+    short_wall_range_sum_tolerance_m: float | None = None
+    selected_assignment: str | None = None
+    validity_failed_reason: str | None = None
 
     def to_dict(self):
         return {
@@ -178,7 +223,38 @@ class ShortWallClassification:
             "short_wall_range_sum_m": self.short_wall_range_sum_m,
             "short_wall_range_sum_error_m": self.short_wall_range_sum_error_m,
             "point_count": self.point_count,
+            "profile_features": self.profile_features,
+            "heater_profile_score": self.heater_profile_score,
+            "clean_profile_score": self.clean_profile_score,
+            "pairwise_assignment_score": self.pairwise_assignment_score,
+            "pairwise_assignment_margin": self.pairwise_assignment_margin,
+            "heater_clean_contrast": self.heater_clean_contrast,
+            "range_sum_m": self.short_wall_range_sum_m,
+            "range_sum_expected_m": self.short_wall_range_sum_expected_m,
+            "range_sum_error_m": self.short_wall_range_sum_error_m,
+            "range_sum_tolerance_m": self.short_wall_range_sum_tolerance_m,
+            "selected_assignment": self.selected_assignment,
+            "validity_failed_reason": self.validity_failed_reason,
         }
+
+
+@dataclass(frozen=True)
+class PairwiseShortWallClassification:
+    applicable: bool
+    accepted: bool
+    reason: str
+    assignment: str | None = None
+    confidence: float = 0.0
+    margin: float = 0.0
+    heater_clean_contrast: float = 0.0
+    winner_score: float = 0.0
+    loser_score: float = 0.0
+    range_sum_m: float | None = None
+    range_sum_expected_m: float | None = None
+    range_sum_error_m: float | None = None
+    range_sum_tolerance_m: float | None = None
+    negative_wall_type: str = WALL_UNKNOWN
+    positive_wall_type: str = WALL_UNKNOWN
 
 
 @dataclass(frozen=True)
@@ -569,6 +645,421 @@ def wall_side_for_type(wall_type, config: ArenaGeometryConfig):
     return None
 
 
+def clipped_score(value, low, high):
+    if high <= low:
+        return 1.0 if value >= high else 0.0
+    return clamp((value - low) / (high - low), 0.0, 1.0)
+
+
+def cluster_bins(bin_indices: Sequence[int], gap_tolerance_bins: int):
+    if not bin_indices:
+        return []
+    ordered = sorted(set(bin_indices))
+    clusters = [[ordered[0], ordered[0]]]
+    for bin_index in ordered[1:]:
+        if bin_index - clusters[-1][1] <= gap_tolerance_bins + 1:
+            clusters[-1][1] = bin_index
+        else:
+            clusters.append([bin_index, bin_index])
+    return clusters
+
+
+def compute_short_wall_profile_features(
+    band_points,
+    axis,
+    normal,
+    side,
+    edge_projection,
+    line: LineFit | None,
+    config: ArenaGeometryConfig,
+):
+    if not band_points:
+        return {
+            "point_count": 0,
+            "visible_width_m": None,
+            "line_rmse_m": None,
+            "edge_projection_m": edge_projection,
+            "candidate_axis_sign": 1.0 if side == "axis_positive" else -1.0,
+            "depth_positive_meaning": "residual_from_clean_edge_toward_arena_center",
+            "validity_failed_reason": "profile_point_count_too_low",
+        }
+
+    axis_sign = 1.0 if side == "axis_positive" else -1.0
+    width_values = [dot(point, normal) for point in band_points]
+    depth_values = [
+        axis_sign * (edge_projection - dot(point, axis))
+        for point in band_points
+    ]
+    sorted_depth = sorted(depth_values)
+    visible_width = max(width_values) - min(width_values)
+    depth_p75 = percentile_sorted(sorted_depth, 75.0)
+    depth_p90 = percentile_sorted(sorted_depth, 90.0)
+    depth_p95 = percentile_sorted(sorted_depth, 95.0)
+    depth_p10 = percentile_sorted(sorted_depth, 10.0)
+    profile_roughness = max(0.0, depth_p90 - depth_p10)
+    outer_support_count = sum(
+        1
+        for depth in depth_values
+        if abs(depth) <= config.short_wall_outer_band_m
+    )
+    outer_line_support_fraction = outer_support_count / len(depth_values)
+
+    min_width = min(width_values)
+    protrusion_bins = []
+    for width, depth in zip(width_values, depth_values):
+        if depth > config.profile_protrusion_min_m:
+            protrusion_bins.append(
+                int(math.floor((width - min_width) / config.profile_cluster_bin_width_m))
+            )
+    clusters = cluster_bins(protrusion_bins, config.profile_cluster_gap_tolerance_bins)
+    largest_cluster_width = 0.0
+    if clusters:
+        largest_cluster_width = max(
+            (end - start + 1) * config.profile_cluster_bin_width_m
+            for start, end in clusters
+        )
+    protrusion_fraction = len(protrusion_bins) / len(depth_values)
+
+    validity_failed_reason = None
+    line_rmse = None if line is None else line.rmse_m
+    if len(band_points) < config.profile_min_points:
+        validity_failed_reason = "profile_point_count_too_low"
+    elif visible_width < config.profile_min_visible_width_m:
+        validity_failed_reason = "profile_visible_width_too_low"
+    elif line_rmse is None:
+        validity_failed_reason = "profile_line_fit_unavailable"
+    elif line_rmse > config.profile_max_line_rmse_m:
+        validity_failed_reason = "profile_line_rmse_too_high"
+    elif outer_line_support_fraction < config.profile_min_any_line_support_fraction:
+        validity_failed_reason = "profile_line_support_too_low"
+
+    return {
+        "point_count": len(band_points),
+        "visible_width_m": visible_width,
+        "line_rmse_m": line_rmse,
+        "edge_projection_m": edge_projection,
+        "candidate_axis_sign": axis_sign,
+        "depth_positive_meaning": "residual_from_clean_edge_toward_arena_center",
+        "depth_p75_m": depth_p75,
+        "depth_p90_m": depth_p90,
+        "depth_p95_m": depth_p95,
+        "protrusion_fraction": protrusion_fraction,
+        "protrusion_cluster_count": len(clusters),
+        "largest_protrusion_cluster_width_m": largest_cluster_width,
+        "profile_roughness_m": profile_roughness,
+        "outer_line_support_fraction": outer_line_support_fraction,
+        "validity_failed_reason": validity_failed_reason,
+    }
+
+
+def score_short_wall_profile(features, config: ArenaGeometryConfig):
+    if not features:
+        return 0.0, 0.0
+    depth_p95 = features.get("depth_p95_m") or 0.0
+    protrusion_fraction = features.get("protrusion_fraction") or 0.0
+    cluster_count = features.get("protrusion_cluster_count") or 0.0
+    largest_cluster_width = features.get("largest_protrusion_cluster_width_m") or 0.0
+    roughness = features.get("profile_roughness_m") or 0.0
+    line_support = features.get("outer_line_support_fraction") or 0.0
+
+    heater_score = sum(
+        [
+            clipped_score(
+                depth_p95,
+                config.profile_heater_depth_p95_low_m,
+                config.profile_heater_depth_p95_high_m,
+            ),
+            clipped_score(
+                protrusion_fraction,
+                config.profile_heater_protrusion_fraction_low,
+                config.profile_heater_protrusion_fraction_high,
+            ),
+            clipped_score(
+                cluster_count,
+                config.profile_heater_cluster_count_low,
+                config.profile_heater_cluster_count_high,
+            ),
+            clipped_score(
+                largest_cluster_width,
+                config.profile_heater_largest_cluster_width_low_m,
+                config.profile_heater_largest_cluster_width_high_m,
+            ),
+            clipped_score(
+                roughness,
+                config.profile_heater_roughness_low_m,
+                config.profile_heater_roughness_high_m,
+            ),
+            1.0
+            - clipped_score(
+                line_support,
+                config.profile_heater_line_support_low,
+                config.profile_heater_line_support_high,
+            ),
+        ]
+    ) / 6.0
+
+    clean_score = sum(
+        [
+            1.0
+            - clipped_score(
+                depth_p95,
+                config.profile_clean_depth_p95_low_m,
+                config.profile_clean_depth_p95_high_m,
+            ),
+            1.0
+            - clipped_score(
+                protrusion_fraction,
+                config.profile_clean_protrusion_fraction_low,
+                config.profile_clean_protrusion_fraction_high,
+            ),
+            1.0
+            - clipped_score(
+                cluster_count,
+                config.profile_clean_cluster_count_low,
+                config.profile_clean_cluster_count_high,
+            ),
+            1.0
+            - clipped_score(
+                roughness,
+                config.profile_clean_roughness_low_m,
+                config.profile_clean_roughness_high_m,
+            ),
+            clipped_score(
+                line_support,
+                config.profile_clean_line_support_low,
+                config.profile_clean_line_support_high,
+            ),
+        ]
+    ) / 5.0
+    return heater_score, clean_score
+
+
+def is_profile_heater_like(candidate: ShortWallClassification, config: ArenaGeometryConfig):
+    return (
+        candidate.heater_profile_score >= config.profile_min_heater_like_score
+        and candidate.clean_profile_score <= config.profile_max_opposite_score
+    )
+
+
+def is_profile_clean_like(candidate: ShortWallClassification, config: ArenaGeometryConfig):
+    return (
+        candidate.clean_profile_score >= config.profile_min_clean_like_score
+        and candidate.heater_profile_score <= config.profile_max_opposite_score
+    )
+
+
+def is_profile_weak(candidate: ShortWallClassification, config: ArenaGeometryConfig):
+    return (
+        candidate.heater_profile_score < config.profile_min_heater_like_score
+        and candidate.clean_profile_score < config.profile_min_clean_like_score
+    )
+
+
+def classify_short_wall_pairwise(
+    candidates: dict[str, ShortWallClassification],
+    config: ArenaGeometryConfig,
+):
+    negative = candidates.get("axis_negative")
+    positive = candidates.get("axis_positive")
+    if negative is None or positive is None:
+        return PairwiseShortWallClassification(False, False, "pairwise_profile_missing_candidate")
+    if negative.profile_features is None or positive.profile_features is None:
+        return PairwiseShortWallClassification(False, False, "pairwise_profile_unavailable")
+
+    if (
+        negative.short_wall_candidate_range_m is None
+        or positive.short_wall_candidate_range_m is None
+    ):
+        return PairwiseShortWallClassification(
+            True,
+            False,
+            "pairwise_profile_range_missing",
+            range_sum_expected_m=config.arena_length_m,
+            range_sum_tolerance_m=config.max_short_wall_range_sum_error_m,
+        )
+
+    range_sum = negative.short_wall_candidate_range_m + positive.short_wall_candidate_range_m
+    range_sum_error = range_sum - config.arena_length_m
+    abs_range_sum_error = abs(range_sum_error)
+
+    for candidate in (negative, positive):
+        failed = candidate.validity_failed_reason
+        if failed is None and candidate.profile_features is not None:
+            failed = candidate.profile_features.get("validity_failed_reason")
+        if failed is not None:
+            return PairwiseShortWallClassification(
+                True,
+                False,
+                "pairwise_profile_candidate_invalid",
+                confidence=0.0,
+                range_sum_m=range_sum,
+                range_sum_expected_m=config.arena_length_m,
+                range_sum_error_m=abs_range_sum_error,
+                range_sum_tolerance_m=config.max_short_wall_range_sum_error_m,
+            )
+
+    if abs_range_sum_error > config.max_short_wall_range_sum_error_m:
+        reason = (
+            "pairwise_profile_range_sum_too_short"
+            if range_sum < config.arena_length_m
+            else "pairwise_profile_range_sum_too_long"
+        )
+        return PairwiseShortWallClassification(
+            True,
+            False,
+            reason,
+            range_sum_m=range_sum,
+            range_sum_expected_m=config.arena_length_m,
+            range_sum_error_m=abs_range_sum_error,
+            range_sum_tolerance_m=config.max_short_wall_range_sum_error_m,
+        )
+
+    negative_heater_like = is_profile_heater_like(negative, config)
+    positive_heater_like = is_profile_heater_like(positive, config)
+    negative_clean_like = is_profile_clean_like(negative, config)
+    positive_clean_like = is_profile_clean_like(positive, config)
+
+    score_neg_heater = negative.heater_profile_score + positive.clean_profile_score
+    score_pos_heater = negative.clean_profile_score + positive.heater_profile_score
+    if score_neg_heater >= score_pos_heater:
+        assignment = "negative_heater"
+        winner_score = score_neg_heater
+        loser_score = score_pos_heater
+    else:
+        assignment = "positive_heater"
+        winner_score = score_pos_heater
+        loser_score = score_neg_heater
+    confidence = winner_score / 2.0
+    margin = (winner_score - loser_score) / 2.0
+    contrast = min(
+        abs(negative.heater_profile_score - positive.heater_profile_score),
+        abs(negative.clean_profile_score - positive.clean_profile_score),
+    )
+
+    common = {
+        "applicable": True,
+        "accepted": False,
+        "assignment": assignment,
+        "confidence": confidence,
+        "margin": margin,
+        "heater_clean_contrast": contrast,
+        "winner_score": winner_score,
+        "loser_score": loser_score,
+        "range_sum_m": range_sum,
+        "range_sum_expected_m": config.arena_length_m,
+        "range_sum_error_m": abs_range_sum_error,
+        "range_sum_tolerance_m": config.max_short_wall_range_sum_error_m,
+    }
+
+    if negative_heater_like and positive_heater_like:
+        return PairwiseShortWallClassification(reason="pairwise_profile_both_heater_like", **common)
+    if negative_clean_like and positive_clean_like:
+        return PairwiseShortWallClassification(reason="pairwise_profile_both_clean_like", **common)
+    if is_profile_weak(negative, config) and is_profile_weak(positive, config):
+        return PairwiseShortWallClassification(reason="pairwise_profile_ambiguous_scores", **common)
+
+    expected_assignment = None
+    if negative_heater_like and positive_clean_like:
+        expected_assignment = "negative_heater"
+    elif positive_heater_like and negative_clean_like:
+        expected_assignment = "positive_heater"
+    else:
+        return PairwiseShortWallClassification(reason="pairwise_profile_ambiguous_scores", **common)
+
+    if assignment != expected_assignment:
+        return PairwiseShortWallClassification(
+            reason="pairwise_profile_assignment_label_mismatch",
+            **common,
+        )
+    if confidence < config.profile_min_confidence:
+        return PairwiseShortWallClassification(reason="pairwise_profile_confidence_too_low", **common)
+    if margin < config.profile_min_assignment_margin:
+        return PairwiseShortWallClassification(reason="pairwise_profile_margin_too_low", **common)
+    if contrast < config.profile_min_heater_clean_contrast:
+        return PairwiseShortWallClassification(reason="pairwise_profile_contrast_too_low", **common)
+
+    negative_type = WALL_HEATER if assignment == "negative_heater" else WALL_CLEAN
+    positive_type = WALL_CLEAN if assignment == "negative_heater" else WALL_HEATER
+    return PairwiseShortWallClassification(
+        **{**common, "accepted": True},
+        reason="pairwise_profile_heater_clean_valid",
+        negative_wall_type=negative_type,
+        positive_wall_type=positive_type,
+    )
+
+
+def copy_candidate_with_pairwise_result(
+    candidate: ShortWallClassification,
+    pairwise: PairwiseShortWallClassification,
+    wall_type=None,
+):
+    return ShortWallClassification(
+        wall_type=wall_type or candidate.wall_type,
+        reason=pairwise.reason,
+        observed_axis_side=candidate.observed_axis_side,
+        confidence=pairwise.confidence,
+        heater_feature_score=candidate.heater_profile_score,
+        clean_feature_score=candidate.clean_profile_score,
+        classification_margin=pairwise.margin,
+        short_wall_candidate_range_m=candidate.short_wall_candidate_range_m,
+        short_wall_visible_width_m=candidate.short_wall_visible_width_m,
+        short_wall_rmse_m=candidate.short_wall_rmse_m,
+        short_wall_range_sum_m=pairwise.range_sum_m,
+        short_wall_range_sum_error_m=pairwise.range_sum_error_m,
+        point_count=candidate.point_count,
+        profile_features=candidate.profile_features,
+        heater_profile_score=candidate.heater_profile_score,
+        clean_profile_score=candidate.clean_profile_score,
+        pairwise_assignment_score=pairwise.winner_score,
+        pairwise_assignment_margin=pairwise.margin,
+        heater_clean_contrast=pairwise.heater_clean_contrast,
+        short_wall_range_sum_expected_m=pairwise.range_sum_expected_m,
+        short_wall_range_sum_tolerance_m=pairwise.range_sum_tolerance_m,
+        selected_assignment=pairwise.assignment,
+        validity_failed_reason=candidate.validity_failed_reason,
+    )
+
+
+def pairwise_result_to_classification(
+    candidates: dict[str, ShortWallClassification],
+    pairwise: PairwiseShortWallClassification,
+):
+    if pairwise.accepted:
+        heater_side = (
+            "axis_negative"
+            if pairwise.assignment == "negative_heater"
+            else "axis_positive"
+        )
+        return copy_candidate_with_pairwise_result(
+            candidates[heater_side],
+            pairwise,
+            wall_type=WALL_HEATER,
+        )
+    best = max(
+        candidates.values(),
+        key=lambda item: max(item.heater_profile_score, item.clean_profile_score),
+    )
+    return copy_candidate_with_pairwise_result(best, pairwise, wall_type=WALL_UNKNOWN)
+
+
+def annotate_pairwise_candidates(
+    candidates: dict[str, ShortWallClassification],
+    pairwise: PairwiseShortWallClassification,
+):
+    if not pairwise.applicable:
+        return candidates
+    annotated = {}
+    for side, candidate in candidates.items():
+        wall_type = WALL_UNKNOWN
+        if pairwise.accepted:
+            if side == "axis_negative":
+                wall_type = pairwise.negative_wall_type
+            elif side == "axis_positive":
+                wall_type = pairwise.positive_wall_type
+        annotated[side] = copy_candidate_with_pairwise_result(candidate, pairwise, wall_type)
+    return annotated
+
+
 def classify_candidate(
     points,
     axis,
@@ -577,19 +1068,29 @@ def classify_candidate(
     edge_projection,
     config: ArenaGeometryConfig,
 ):
-    sign = 1.0 if side == "axis_positive" else -1.0
     band_points = []
     for point in points:
         t = dot(point, axis)
         if abs(t - edge_projection) <= config.short_wall_band_m:
             band_points.append(point)
     if len(band_points) < config.min_short_wall_points:
+        profile_features = compute_short_wall_profile_features(
+            band_points,
+            axis,
+            normal,
+            side,
+            edge_projection,
+            None,
+            config,
+        )
         return ShortWallClassification(
             WALL_UNKNOWN,
             "insufficient_short_wall_points",
             observed_axis_side=side,
             short_wall_candidate_range_m=abs(edge_projection),
             point_count=len(band_points),
+            profile_features=profile_features,
+            validity_failed_reason=profile_features.get("validity_failed_reason"),
         )
 
     normal_values = [dot(point, normal) for point in band_points]
@@ -604,6 +1105,15 @@ def classify_candidate(
     try:
         line = fit_line(outer_points)
     except ValueError:
+        profile_features = compute_short_wall_profile_features(
+            band_points,
+            axis,
+            normal,
+            side,
+            edge_projection,
+            None,
+            config,
+        )
         return ShortWallClassification(
             WALL_UNKNOWN,
             "short_wall_line_fit_failed",
@@ -611,64 +1121,68 @@ def classify_candidate(
             short_wall_candidate_range_m=abs(edge_projection),
             short_wall_visible_width_m=visible_width,
             point_count=len(band_points),
+            profile_features=profile_features,
+            validity_failed_reason=profile_features.get("validity_failed_reason"),
         )
 
-    short_wall_expected_angle = math.atan2(normal[1], normal[0])
-    perpendicular_error = math.degrees(
-        undirected_angle_delta_rad(line.direction_angle_rad, short_wall_expected_angle)
+    profile_features = compute_short_wall_profile_features(
+        band_points,
+        axis,
+        normal,
+        side,
+        edge_projection,
+        line,
+        config,
     )
-    geometric_quality = clamp(1.0 - line.rmse_m / config.max_line_rmse_m, 0.0, 1.0)
-    perpendicular_quality = clamp(1.0 - perpendicular_error / 30.0, 0.0, 1.0)
-    coverage_quality = clamp(
-        visible_width / config.min_short_wall_visible_width_m,
-        0.0,
-        1.0,
-    )
-
-    protrusion_count = 0
-    for point in band_points:
-        inward = sign * (edge_projection - dot(point, axis))
-        if inward > config.heater_protrusion_min_m:
-            protrusion_count += 1
-    protrusion_fraction = protrusion_count / len(band_points)
-    protrusion_score = clamp((protrusion_fraction - 0.05) / 0.25, 0.0, 1.0)
-
-    base_quality = geometric_quality * perpendicular_quality * coverage_quality
-    heater_score = base_quality * protrusion_score
-    clean_score = base_quality * (1.0 - protrusion_score)
-    margin = abs(heater_score - clean_score)
-
-    if (
-        heater_score >= config.min_short_wall_confidence
-        and clean_score >= config.min_short_wall_confidence
+    heater_score, clean_score = score_short_wall_profile(profile_features, config)
+    profile_margin = abs(heater_score - clean_score)
+    if is_profile_heater_like(
+        ShortWallClassification(
+            WALL_UNKNOWN,
+            "profile_candidate_scoring",
+            heater_profile_score=heater_score,
+            clean_profile_score=clean_score,
+        ),
+        config,
     ):
-        wall_type = WALL_AMBIGUOUS
-        reason = "heater_and_clean_scores_both_high"
-    elif max(heater_score, clean_score) < config.min_short_wall_confidence:
-        wall_type = WALL_UNKNOWN
-        reason = "classification_confidence_too_low"
-    elif margin < config.min_classification_margin:
-        wall_type = WALL_UNKNOWN
-        reason = "classification_margin_too_low"
-    elif heater_score > clean_score:
-        wall_type = WALL_HEATER
-        reason = "heater_score_dominant"
+        profile_wall_type = WALL_HEATER
+        profile_reason = "profile_candidate_heater_like"
+    elif is_profile_clean_like(
+        ShortWallClassification(
+            WALL_UNKNOWN,
+            "profile_candidate_scoring",
+            heater_profile_score=heater_score,
+            clean_profile_score=clean_score,
+        ),
+        config,
+    ):
+        profile_wall_type = WALL_CLEAN
+        profile_reason = "profile_candidate_clean_like"
     else:
-        wall_type = WALL_CLEAN
-        reason = "clean_score_dominant"
+        profile_wall_type = WALL_UNKNOWN
+        profile_reason = "profile_candidate_ambiguous_scores"
+
+    validity_failed_reason = profile_features.get("validity_failed_reason")
+    if validity_failed_reason is not None:
+        profile_wall_type = WALL_UNKNOWN
+        profile_reason = validity_failed_reason
 
     return ShortWallClassification(
-        wall_type=wall_type,
-        reason=reason,
+        wall_type=profile_wall_type,
+        reason=profile_reason,
         observed_axis_side=side,
         confidence=max(heater_score, clean_score),
         heater_feature_score=heater_score,
         clean_feature_score=clean_score,
-        classification_margin=margin,
+        classification_margin=profile_margin,
         short_wall_candidate_range_m=abs(edge_projection),
         short_wall_visible_width_m=visible_width,
         short_wall_rmse_m=line.rmse_m,
         point_count=len(band_points),
+        profile_features=profile_features,
+        heater_profile_score=heater_score,
+        clean_profile_score=clean_score,
+        validity_failed_reason=validity_failed_reason,
     )
 
 
@@ -755,6 +1269,16 @@ def copy_candidate_with_reason(
         short_wall_range_sum_m=short_wall_range_sum_m,
         short_wall_range_sum_error_m=short_wall_range_sum_error_m,
         point_count=candidate.point_count,
+        profile_features=candidate.profile_features,
+        heater_profile_score=candidate.heater_profile_score,
+        clean_profile_score=candidate.clean_profile_score,
+        pairwise_assignment_score=candidate.pairwise_assignment_score,
+        pairwise_assignment_margin=candidate.pairwise_assignment_margin,
+        heater_clean_contrast=candidate.heater_clean_contrast,
+        short_wall_range_sum_expected_m=candidate.short_wall_range_sum_expected_m,
+        short_wall_range_sum_tolerance_m=candidate.short_wall_range_sum_tolerance_m,
+        selected_assignment=candidate.selected_assignment,
+        validity_failed_reason=candidate.validity_failed_reason,
     )
 
 
@@ -820,6 +1344,10 @@ def select_short_wall_classification(
     forced = forced_short_wall_classification(candidates, config)
     if forced is not None:
         return forced
+
+    pairwise = classify_short_wall_pairwise(candidates, config)
+    if pairwise.applicable:
+        return pairwise_result_to_classification(candidates, pairwise)
 
     ordered = list(candidates.values())
     accepted = [
@@ -888,7 +1416,8 @@ def build_pose_prior(
     complementary_pair = None
     if (
         candidates is not None
-        and classification.reason == "complementary_short_walls_valid"
+        and classification.reason
+        in {"complementary_short_walls_valid", "pairwise_profile_heater_clean_valid"}
     ):
         complementary_pair = complementary_short_wall_pair(list(candidates.values()))
 
@@ -980,6 +1509,10 @@ def analyze_points(points: Sequence[tuple[float, float]], config: ArenaGeometryC
 
     candidates = classify_short_wall_candidates(points, long_fit, config)
     classification = select_short_wall_classification(candidates, config)
+    if classification.reason.startswith("pairwise_profile_"):
+        pairwise = classify_short_wall_pairwise(candidates, config)
+        candidates = annotate_pairwise_candidates(candidates, pairwise)
+        classification = pairwise_result_to_classification(candidates, pairwise)
     pose_unique = classification.wall_type in {WALL_HEATER, WALL_CLEAN}
     pose = (
         build_pose_prior(points, long_fit, classification, config, candidates)
