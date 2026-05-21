@@ -309,7 +309,18 @@ def append_marker(markers, marker):
         markers.append(marker)
 
 
-def marker_stamp_from_scan(node, scan):
+def latest_transform_stamp(node):
+    stamp = node.get_clock().now().to_msg()
+    stamp.sec = 0
+    stamp.nanosec = 0
+    return stamp
+
+
+def marker_stamp(node, scan, mode):
+    if mode == "latest":
+        return latest_transform_stamp(node)
+    if mode == "now":
+        return node.get_clock().now().to_msg()
     stamp = getattr(getattr(scan, "header", None), "stamp", None)
     if stamp is not None and (getattr(stamp, "sec", 0) or getattr(stamp, "nanosec", 0)):
         return stamp
@@ -388,7 +399,7 @@ class LidarObstacleDebugViz(Node):
             self.last_warn_sec = now
 
     def scan_callback(self, scan):
-        stamp = marker_stamp_from_scan(self, scan)
+        stamp = marker_stamp(self, scan, self.args.marker_stamp_mode)
         scan_frame = getattr(scan.header, "frame_id", "") or self.args.scan_frame_fallback
         scan_layers = scan_point_layers_from_scan(scan, self.obstacle_config)
         markers = [delete_all_marker()]
@@ -597,6 +608,15 @@ def build_arg_parser():
         help="High default keeps the diagnostic live; set to 3 to mirror follower limits.",
     )
     parser.add_argument("--marker-lifetime-sec", default=DEFAULT_MARKER_LIFETIME_SEC, type=float)
+    parser.add_argument(
+        "--marker-stamp-mode",
+        choices=["latest", "scan", "now"],
+        default="latest",
+        help=(
+            "Timestamp marker headers. latest uses time zero so RViz uses the "
+            "latest TF, scan uses the /scan stamp, and now uses wall-clock ROS time."
+        ),
+    )
     parser.add_argument("--scan-point-scale-m", default=0.018, type=float)
     parser.add_argument("--roi-point-scale-m", default=0.035, type=float)
     parser.add_argument("--no-raw-scan", dest="publish_raw_scan", action="store_false")

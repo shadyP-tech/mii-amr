@@ -37,6 +37,35 @@ def free_map(width=10, height=10, resolution=0.1):
 
 
 class LidarObstacleDebugVizTest(unittest.TestCase):
+    def test_marker_stamp_mode_defaults_to_latest_tf(self):
+        parser = debug_viz.build_arg_parser()
+
+        args = parser.parse_args([])
+
+        self.assertEqual(args.marker_stamp_mode, "latest")
+
+    def test_marker_stamp_latest_uses_zero_time_for_rviz_latest_tf(self):
+        class Stamp:
+            sec = 123
+            nanosec = 456
+
+        class Now:
+            def to_msg(self):
+                return Stamp()
+
+        class Clock:
+            def now(self):
+                return Now()
+
+        class Node:
+            def get_clock(self):
+                return Clock()
+
+        stamp = debug_viz.marker_stamp(Node(), object(), "latest")
+
+        self.assertEqual(stamp.sec, 0)
+        self.assertEqual(stamp.nanosec, 0)
+
     def test_latest_tf_flag_matches_replan_runtime_arg_name(self):
         parser = debug_viz.build_arg_parser()
 
