@@ -99,6 +99,13 @@ class ArenaGeometryConfig:
     profile_clean_roughness_high_m: float = 0.03
     profile_clean_line_support_low: float = 0.45
     profile_clean_line_support_high: float = 0.80
+    profile_relative_heater_min_score: float = 0.85
+    profile_relative_heater_min_delta: float = 0.15
+    profile_relative_opposite_max_heater_score: float = 0.80
+    profile_relative_selected_max_clean_score: float = 0.55
+    profile_relative_min_protrusion_clusters: int = 2
+    profile_relative_min_protrusion_fraction: float = 0.10
+    profile_relative_confidence_cap: float = 0.85
     angle_search_step_deg: float = 2.0
 
 
@@ -206,6 +213,13 @@ class ShortWallClassification:
     short_wall_range_sum_tolerance_m: float | None = None
     selected_assignment: str | None = None
     validity_failed_reason: str | None = None
+    heater_profile_delta: float | None = None
+    relative_heater_score: float | None = None
+    relative_opposite_heater_score: float | None = None
+    relative_opposite_max_heater_score: float | None = None
+    relative_min_protrusion_clusters: int | None = None
+    relative_min_protrusion_fraction: float | None = None
+    relative_confidence_raw: float | None = None
 
     def to_dict(self):
         return {
@@ -235,6 +249,13 @@ class ShortWallClassification:
             "range_sum_tolerance_m": self.short_wall_range_sum_tolerance_m,
             "selected_assignment": self.selected_assignment,
             "validity_failed_reason": self.validity_failed_reason,
+            "heater_profile_delta": self.heater_profile_delta,
+            "relative_heater_score": self.relative_heater_score,
+            "relative_opposite_heater_score": self.relative_opposite_heater_score,
+            "relative_opposite_max_heater_score": self.relative_opposite_max_heater_score,
+            "relative_min_protrusion_clusters": self.relative_min_protrusion_clusters,
+            "relative_min_protrusion_fraction": self.relative_min_protrusion_fraction,
+            "relative_confidence_raw": self.relative_confidence_raw,
         }
 
 
@@ -255,6 +276,13 @@ class PairwiseShortWallClassification:
     range_sum_tolerance_m: float | None = None
     negative_wall_type: str = WALL_UNKNOWN
     positive_wall_type: str = WALL_UNKNOWN
+    heater_profile_delta: float | None = None
+    relative_heater_score: float | None = None
+    relative_opposite_heater_score: float | None = None
+    relative_opposite_max_heater_score: float | None = None
+    relative_min_protrusion_clusters: int | None = None
+    relative_min_protrusion_fraction: float | None = None
+    relative_confidence_raw: float | None = None
 
 
 @dataclass(frozen=True)
@@ -855,6 +883,83 @@ def is_profile_weak(candidate: ShortWallClassification, config: ArenaGeometryCon
     )
 
 
+def classify_short_wall_relative_heater(
+    negative: ShortWallClassification,
+    positive: ShortWallClassification,
+    common: dict,
+    config: ArenaGeometryConfig,
+):
+    if negative.heater_profile_score >= positive.heater_profile_score:
+        selected = negative
+        opposite = positive
+        assignment = "negative_heater"
+    else:
+        selected = positive
+        opposite = negative
+        assignment = "positive_heater"
+
+    selected_features = selected.profile_features or {}
+    selected_heater_score = selected.heater_profile_score
+    opposite_heater_score = opposite.heater_profile_score
+    heater_delta = selected_heater_score - opposite_heater_score
+    protrusion_clusters = int(selected_features.get("protrusion_cluster_count") or 0)
+    protrusion_fraction = selected_features.get("protrusion_fraction") or 0.0
+
+    relative_common = {
+        **common,
+        "assignment": assignment,
+        "confidence": min(selected_heater_score, config.profile_relative_confidence_cap),
+        "margin": heater_delta,
+        "winner_score": selected_heater_score,
+        "loser_score": opposite_heater_score,
+        "heater_profile_delta": heater_delta,
+        "relative_heater_score": selected_heater_score,
+        "relative_opposite_heater_score": opposite_heater_score,
+        "relative_opposite_max_heater_score": config.profile_relative_opposite_max_heater_score,
+        "relative_min_protrusion_clusters": config.profile_relative_min_protrusion_clusters,
+        "relative_min_protrusion_fraction": config.profile_relative_min_protrusion_fraction,
+        "relative_confidence_raw": selected_heater_score,
+    }
+
+    if selected_heater_score < config.profile_relative_heater_min_score:
+        return PairwiseShortWallClassification(
+            reason="pairwise_profile_relative_heater_score_too_low",
+            **relative_common,
+        )
+    if opposite_heater_score > config.profile_relative_opposite_max_heater_score:
+        return PairwiseShortWallClassification(
+            reason="pairwise_profile_relative_opposite_too_heater_like",
+            **relative_common,
+        )
+    if heater_delta < config.profile_relative_heater_min_delta:
+        return PairwiseShortWallClassification(
+            reason="pairwise_profile_relative_heater_delta_too_low",
+            **relative_common,
+        )
+    if selected.clean_profile_score > config.profile_relative_selected_max_clean_score:
+        return PairwiseShortWallClassification(
+            reason="pairwise_profile_relative_selected_contradictory",
+            **relative_common,
+        )
+    if (
+        protrusion_clusters < config.profile_relative_min_protrusion_clusters
+        or protrusion_fraction < config.profile_relative_min_protrusion_fraction
+    ):
+        return PairwiseShortWallClassification(
+            reason="pairwise_profile_relative_evidence_not_distributed",
+            **relative_common,
+        )
+
+    negative_type = WALL_HEATER if assignment == "negative_heater" else WALL_CLEAN
+    positive_type = WALL_CLEAN if assignment == "negative_heater" else WALL_HEATER
+    return PairwiseShortWallClassification(
+        **{**relative_common, "accepted": True},
+        reason="pairwise_profile_relative_heater_valid",
+        negative_wall_type=negative_type,
+        positive_wall_type=positive_type,
+    )
+
+
 def classify_short_wall_pairwise(
     candidates: dict[str, ShortWallClassification],
     config: ArenaGeometryConfig,
@@ -935,6 +1040,7 @@ def classify_short_wall_pairwise(
         abs(negative.heater_profile_score - positive.heater_profile_score),
         abs(negative.clean_profile_score - positive.clean_profile_score),
     )
+    heater_delta = abs(negative.heater_profile_score - positive.heater_profile_score)
 
     common = {
         "applicable": True,
@@ -949,14 +1055,15 @@ def classify_short_wall_pairwise(
         "range_sum_expected_m": config.arena_length_m,
         "range_sum_error_m": abs_range_sum_error,
         "range_sum_tolerance_m": config.max_short_wall_range_sum_error_m,
+        "heater_profile_delta": heater_delta,
     }
 
     if negative_heater_like and positive_heater_like:
-        return PairwiseShortWallClassification(reason="pairwise_profile_both_heater_like", **common)
+        return classify_short_wall_relative_heater(negative, positive, common, config)
     if negative_clean_like and positive_clean_like:
         return PairwiseShortWallClassification(reason="pairwise_profile_both_clean_like", **common)
     if is_profile_weak(negative, config) and is_profile_weak(positive, config):
-        return PairwiseShortWallClassification(reason="pairwise_profile_ambiguous_scores", **common)
+        return classify_short_wall_relative_heater(negative, positive, common, config)
 
     expected_assignment = None
     if negative_heater_like and positive_clean_like:
@@ -964,7 +1071,7 @@ def classify_short_wall_pairwise(
     elif positive_heater_like and negative_clean_like:
         expected_assignment = "positive_heater"
     else:
-        return PairwiseShortWallClassification(reason="pairwise_profile_ambiguous_scores", **common)
+        return classify_short_wall_relative_heater(negative, positive, common, config)
 
     if assignment != expected_assignment:
         return PairwiseShortWallClassification(
@@ -1017,6 +1124,13 @@ def copy_candidate_with_pairwise_result(
         short_wall_range_sum_tolerance_m=pairwise.range_sum_tolerance_m,
         selected_assignment=pairwise.assignment,
         validity_failed_reason=candidate.validity_failed_reason,
+        heater_profile_delta=pairwise.heater_profile_delta,
+        relative_heater_score=pairwise.relative_heater_score,
+        relative_opposite_heater_score=pairwise.relative_opposite_heater_score,
+        relative_opposite_max_heater_score=pairwise.relative_opposite_max_heater_score,
+        relative_min_protrusion_clusters=pairwise.relative_min_protrusion_clusters,
+        relative_min_protrusion_fraction=pairwise.relative_min_protrusion_fraction,
+        relative_confidence_raw=pairwise.relative_confidence_raw,
     )
 
 
@@ -1417,7 +1531,11 @@ def build_pose_prior(
     if (
         candidates is not None
         and classification.reason
-        in {"complementary_short_walls_valid", "pairwise_profile_heater_clean_valid"}
+        in {
+            "complementary_short_walls_valid",
+            "pairwise_profile_heater_clean_valid",
+            "pairwise_profile_relative_heater_valid",
+        }
     ):
         complementary_pair = complementary_short_wall_pair(list(candidates.values()))
 
