@@ -95,6 +95,11 @@ def profile_candidate(
             "protrusion_fraction": protrusion_fraction,
             "protrusion_cluster_count": protrusion_cluster_count,
             "largest_protrusion_cluster_width_m": 0.0,
+            "protrusion_depth_p90_m": 0.0,
+            "protrusion_width_coverage_fraction": 0.0,
+            "dominant_cluster_width_fraction": 0.0,
+            "flat_outer_support_fraction": 1.0,
+            "clean_rail_artifact_score": 0.0,
             "profile_roughness_m": 0.0,
             "outer_line_support_fraction": 1.0,
             "validity_failed_reason": validity_failed_reason,
@@ -103,6 +108,37 @@ def profile_candidate(
         clean_profile_score=clean_score,
         validity_failed_reason=validity_failed_reason,
     )
+
+
+def profile_features(
+    protrusion_fraction=0.0,
+    protrusion_width_coverage_fraction=0.0,
+    protrusion_depth_p90_m=0.0,
+    flat_outer_support_fraction=1.0,
+    clean_rail_artifact_score=0.0,
+    profile_roughness_m=0.0,
+    protrusion_cluster_count=0,
+    dominant_cluster_width_fraction=0.0,
+):
+    return {
+        "point_count": 40,
+        "visible_width_m": 1.0,
+        "line_rmse_m": 0.0,
+        "depth_p75_m": 0.0,
+        "depth_p90_m": protrusion_depth_p90_m,
+        "depth_p95_m": protrusion_depth_p90_m,
+        "protrusion_fraction": protrusion_fraction,
+        "protrusion_cluster_count": protrusion_cluster_count,
+        "largest_protrusion_cluster_width_m": dominant_cluster_width_fraction,
+        "protrusion_depth_p90_m": protrusion_depth_p90_m,
+        "protrusion_width_coverage_fraction": protrusion_width_coverage_fraction,
+        "dominant_cluster_width_fraction": dominant_cluster_width_fraction,
+        "flat_outer_support_fraction": flat_outer_support_fraction,
+        "clean_rail_artifact_score": clean_rail_artifact_score,
+        "profile_roughness_m": profile_roughness_m,
+        "outer_line_support_fraction": flat_outer_support_fraction,
+        "validity_failed_reason": None,
+    }
 
 
 class ArenaGeometryLocalizerTest(unittest.TestCase):
@@ -560,6 +596,118 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
         self.assertIsNotNone(pose)
         self.assertAlmostEqual(pose.x, 0.95)
 
+    def test_refined_score_rates_distributed_radiator_profile_high(self):
+        config = arena.ArenaGeometryConfig()
+        heater_score, clean_score = arena.score_short_wall_profile(
+            profile_features(
+                protrusion_fraction=0.45,
+                protrusion_width_coverage_fraction=0.45,
+                protrusion_depth_p90_m=0.16,
+                flat_outer_support_fraction=0.30,
+                profile_roughness_m=0.08,
+                protrusion_cluster_count=4,
+            ),
+            config,
+        )
+
+        self.assertGreater(heater_score, 0.85)
+        self.assertLess(clean_score, 0.20)
+
+    def test_refined_score_suppresses_shallow_clean_rail_artifacts(self):
+        config = arena.ArenaGeometryConfig()
+        heater_score, clean_score = arena.score_short_wall_profile(
+            profile_features(
+                protrusion_fraction=0.05,
+                protrusion_width_coverage_fraction=0.06,
+                protrusion_depth_p90_m=0.055,
+                flat_outer_support_fraction=0.80,
+                clean_rail_artifact_score=0.60,
+                profile_roughness_m=0.16,
+                protrusion_cluster_count=1,
+                dominant_cluster_width_fraction=0.60,
+            ),
+            config,
+        )
+
+        self.assertLess(heater_score, 0.25)
+        self.assertGreater(clean_score, 0.75)
+
+    def test_refined_score_does_not_treat_roughness_alone_as_heater(self):
+        config = arena.ArenaGeometryConfig()
+        heater_score, clean_score = arena.score_short_wall_profile(
+            profile_features(
+                protrusion_fraction=0.0,
+                protrusion_width_coverage_fraction=0.0,
+                protrusion_depth_p90_m=0.0,
+                flat_outer_support_fraction=0.90,
+                profile_roughness_m=0.20,
+            ),
+            config,
+        )
+
+        self.assertLess(heater_score, 0.25)
+        self.assertGreater(clean_score, 0.90)
+
+    def test_refined_score_penalizes_broad_cluster_only_when_rail_like(self):
+        config = arena.ArenaGeometryConfig()
+        deep_cluster_heater, _clean = arena.score_short_wall_profile(
+            profile_features(
+                protrusion_fraction=0.18,
+                protrusion_width_coverage_fraction=0.30,
+                protrusion_depth_p90_m=0.15,
+                flat_outer_support_fraction=0.35,
+                clean_rail_artifact_score=0.0,
+                profile_roughness_m=0.08,
+                dominant_cluster_width_fraction=0.70,
+            ),
+            config,
+        )
+        shallow_rail_heater, _clean = arena.score_short_wall_profile(
+            profile_features(
+                protrusion_fraction=0.07,
+                protrusion_width_coverage_fraction=0.08,
+                protrusion_depth_p90_m=0.055,
+                flat_outer_support_fraction=0.75,
+                clean_rail_artifact_score=0.70,
+                profile_roughness_m=0.08,
+                dominant_cluster_width_fraction=0.70,
+            ),
+            config,
+        )
+
+        self.assertGreater(deep_cluster_heater, 0.70)
+        self.assertLess(shallow_rail_heater, 0.25)
+
+    def test_refined_score_improves_clean_wall_contrast_shape(self):
+        config = arena.ArenaGeometryConfig()
+        radiator_score, _clean = arena.score_short_wall_profile(
+            profile_features(
+                protrusion_fraction=0.66,
+                protrusion_width_coverage_fraction=0.55,
+                protrusion_depth_p90_m=0.16,
+                flat_outer_support_fraction=0.35,
+                profile_roughness_m=0.18,
+                protrusion_cluster_count=2,
+            ),
+            config,
+        )
+        clean_side_score, _clean = arena.score_short_wall_profile(
+            profile_features(
+                protrusion_fraction=0.045,
+                protrusion_width_coverage_fraction=0.06,
+                protrusion_depth_p90_m=0.055,
+                flat_outer_support_fraction=0.61,
+                clean_rail_artifact_score=0.35,
+                profile_roughness_m=0.16,
+                protrusion_cluster_count=2,
+            ),
+            config,
+        )
+
+        self.assertGreater(radiator_score, 0.85)
+        self.assertLess(clean_side_score, 0.35)
+        self.assertGreater(radiator_score - clean_side_score, 0.50)
+
     def test_profile_features_are_invariant_to_axis_sign_flip(self):
         config = arena.ArenaGeometryConfig()
         axis = (1.0, 0.0)
@@ -593,6 +741,15 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
             original["protrusion_fraction"],
             flipped["protrusion_fraction"],
         )
+        for key in [
+            "protrusion_depth_p90_m",
+            "protrusion_width_coverage_fraction",
+            "dominant_cluster_width_fraction",
+            "flat_outer_support_fraction",
+            "clean_rail_artifact_score",
+        ]:
+            self.assertIn(key, original)
+            self.assertIn(key, flipped)
 
     def test_mirrored_arena_preserves_physical_heater_identification(self):
         mirrored = [(-x, y) for x, y in rectangular_points(include_clean=True, include_heater=True)]

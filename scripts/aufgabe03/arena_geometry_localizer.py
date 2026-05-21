@@ -106,6 +106,20 @@ class ArenaGeometryConfig:
     profile_relative_min_protrusion_clusters: int = 2
     profile_relative_min_protrusion_fraction: float = 0.10
     profile_relative_confidence_cap: float = 0.85
+    profile_heater_weight_protrusion_fraction: float = 0.30
+    profile_heater_weight_width_coverage: float = 0.25
+    profile_heater_weight_depth: float = 0.20
+    profile_heater_weight_low_flat_support: float = 0.15
+    profile_heater_weight_roughness_refined: float = 0.10
+    profile_heater_clean_rail_penalty: float = 0.20
+    profile_heater_width_coverage_low: float = 0.08
+    profile_heater_width_coverage_high: float = 0.35
+    profile_heater_protrusion_depth_p90_low_m: float = 0.05
+    profile_heater_protrusion_depth_p90_high_m: float = 0.14
+    profile_clean_rail_flat_support_min: float = 0.55
+    profile_clean_rail_protrusion_fraction_max: float = 0.10
+    profile_clean_rail_depth_p90_max_m: float = 0.07
+    profile_clean_rail_dominant_cluster_fraction_min: float = 0.45
     angle_search_step_deg: float = 2.0
 
 
@@ -709,6 +723,11 @@ def compute_short_wall_profile_features(
             "edge_projection_m": edge_projection,
             "candidate_axis_sign": 1.0 if side == "axis_positive" else -1.0,
             "depth_positive_meaning": "residual_from_clean_edge_toward_arena_center",
+            "protrusion_depth_p90_m": 0.0,
+            "protrusion_width_coverage_fraction": 0.0,
+            "dominant_cluster_width_fraction": 0.0,
+            "flat_outer_support_fraction": 0.0,
+            "clean_rail_artifact_score": 0.0,
             "validity_failed_reason": "profile_point_count_too_low",
         }
 
@@ -734,8 +753,10 @@ def compute_short_wall_profile_features(
 
     min_width = min(width_values)
     protrusion_bins = []
+    protrusion_depths = []
     for width, depth in zip(width_values, depth_values):
         if depth > config.profile_protrusion_min_m:
+            protrusion_depths.append(depth)
             protrusion_bins.append(
                 int(math.floor((width - min_width) / config.profile_cluster_bin_width_m))
             )
@@ -747,6 +768,49 @@ def compute_short_wall_profile_features(
             for start, end in clusters
         )
     protrusion_fraction = len(protrusion_bins) / len(depth_values)
+    total_width_bins = max(
+        1,
+        int(math.floor(visible_width / config.profile_cluster_bin_width_m)) + 1,
+    )
+    protrusion_width_coverage = len(set(protrusion_bins)) / total_width_bins
+    dominant_cluster_width_fraction = (
+        0.0 if visible_width <= 0.0 else clamp(largest_cluster_width / visible_width, 0.0, 1.0)
+    )
+    protrusion_depth_p90 = (
+        percentile_sorted(sorted(protrusion_depths), 90.0)
+        if protrusion_depths
+        else 0.0
+    )
+    flat_outer_support_fraction = outer_line_support_fraction
+    if protrusion_bins:
+        flat_support_score = clipped_score(
+            flat_outer_support_fraction,
+            config.profile_clean_rail_flat_support_min,
+            1.0,
+        )
+        low_protrusion_score = 1.0 - clipped_score(
+            protrusion_fraction,
+            0.0,
+            config.profile_clean_rail_protrusion_fraction_max,
+        )
+        shallow_depth_score = 1.0 - clipped_score(
+            protrusion_depth_p90,
+            config.profile_protrusion_min_m,
+            config.profile_clean_rail_depth_p90_max_m,
+        )
+        dominant_cluster_score = clipped_score(
+            dominant_cluster_width_fraction,
+            config.profile_clean_rail_dominant_cluster_fraction_min,
+            1.0,
+        )
+        clean_rail_artifact_score = min(
+            flat_support_score,
+            low_protrusion_score,
+            shallow_depth_score,
+            dominant_cluster_score,
+        )
+    else:
+        clean_rail_artifact_score = 0.0
 
     validity_failed_reason = None
     line_rmse = None if line is None else line.rmse_m
@@ -774,6 +838,11 @@ def compute_short_wall_profile_features(
         "protrusion_fraction": protrusion_fraction,
         "protrusion_cluster_count": len(clusters),
         "largest_protrusion_cluster_width_m": largest_cluster_width,
+        "protrusion_depth_p90_m": protrusion_depth_p90,
+        "protrusion_width_coverage_fraction": protrusion_width_coverage,
+        "dominant_cluster_width_fraction": dominant_cluster_width_fraction,
+        "flat_outer_support_fraction": flat_outer_support_fraction,
+        "clean_rail_artifact_score": clean_rail_artifact_score,
         "profile_roughness_m": profile_roughness,
         "outer_line_support_fraction": outer_line_support_fraction,
         "validity_failed_reason": validity_failed_reason,
@@ -783,56 +852,58 @@ def compute_short_wall_profile_features(
 def score_short_wall_profile(features, config: ArenaGeometryConfig):
     if not features:
         return 0.0, 0.0
-    depth_p95 = features.get("depth_p95_m") or 0.0
     protrusion_fraction = features.get("protrusion_fraction") or 0.0
-    cluster_count = features.get("protrusion_cluster_count") or 0.0
-    largest_cluster_width = features.get("largest_protrusion_cluster_width_m") or 0.0
+    width_coverage = features.get("protrusion_width_coverage_fraction") or 0.0
+    protrusion_depth_p90 = features.get("protrusion_depth_p90_m") or 0.0
     roughness = features.get("profile_roughness_m") or 0.0
     line_support = features.get("outer_line_support_fraction") or 0.0
+    flat_support = features.get("flat_outer_support_fraction")
+    if flat_support is None:
+        flat_support = line_support
+    clean_rail_artifact_score = features.get("clean_rail_artifact_score") or 0.0
 
-    heater_score = sum(
-        [
-            clipped_score(
-                depth_p95,
-                config.profile_heater_depth_p95_low_m,
-                config.profile_heater_depth_p95_high_m,
-            ),
-            clipped_score(
-                protrusion_fraction,
-                config.profile_heater_protrusion_fraction_low,
-                config.profile_heater_protrusion_fraction_high,
-            ),
-            clipped_score(
-                cluster_count,
-                config.profile_heater_cluster_count_low,
-                config.profile_heater_cluster_count_high,
-            ),
-            clipped_score(
-                largest_cluster_width,
-                config.profile_heater_largest_cluster_width_low_m,
-                config.profile_heater_largest_cluster_width_high_m,
-            ),
-            clipped_score(
-                roughness,
-                config.profile_heater_roughness_low_m,
-                config.profile_heater_roughness_high_m,
-            ),
-            1.0
-            - clipped_score(
-                line_support,
-                config.profile_heater_line_support_low,
-                config.profile_heater_line_support_high,
-            ),
-        ]
-    ) / 6.0
+    protrusion_fraction_score = clipped_score(
+        protrusion_fraction,
+        config.profile_heater_protrusion_fraction_low,
+        config.profile_heater_protrusion_fraction_high,
+    )
+    width_coverage_score = clipped_score(
+        width_coverage,
+        config.profile_heater_width_coverage_low,
+        config.profile_heater_width_coverage_high,
+    )
+    protrusion_depth_score = clipped_score(
+        protrusion_depth_p90,
+        config.profile_heater_protrusion_depth_p90_low_m,
+        config.profile_heater_protrusion_depth_p90_high_m,
+    )
+    low_flat_support_score = 1.0 - clipped_score(
+        flat_support,
+        config.profile_heater_line_support_low,
+        config.profile_heater_line_support_high,
+    )
+    roughness_score = clipped_score(
+        roughness,
+        config.profile_heater_roughness_low_m,
+        config.profile_heater_roughness_high_m,
+    )
+    heater_score = clamp(
+        config.profile_heater_weight_protrusion_fraction * protrusion_fraction_score
+        + config.profile_heater_weight_width_coverage * width_coverage_score
+        + config.profile_heater_weight_depth * protrusion_depth_score
+        + config.profile_heater_weight_low_flat_support * low_flat_support_score
+        + config.profile_heater_weight_roughness_refined * roughness_score
+        - config.profile_heater_clean_rail_penalty * clean_rail_artifact_score,
+        0.0,
+        1.0,
+    )
 
     clean_score = sum(
         [
-            1.0
-            - clipped_score(
-                depth_p95,
-                config.profile_clean_depth_p95_low_m,
-                config.profile_clean_depth_p95_high_m,
+            clipped_score(
+                flat_support,
+                config.profile_clean_line_support_low,
+                config.profile_clean_line_support_high,
             ),
             1.0
             - clipped_score(
@@ -842,23 +913,18 @@ def score_short_wall_profile(features, config: ArenaGeometryConfig):
             ),
             1.0
             - clipped_score(
-                cluster_count,
-                config.profile_clean_cluster_count_low,
-                config.profile_clean_cluster_count_high,
+                width_coverage,
+                config.profile_heater_width_coverage_low,
+                config.profile_heater_width_coverage_high,
             ),
             1.0
             - clipped_score(
-                roughness,
-                config.profile_clean_roughness_low_m,
-                config.profile_clean_roughness_high_m,
-            ),
-            clipped_score(
-                line_support,
-                config.profile_clean_line_support_low,
-                config.profile_clean_line_support_high,
+                protrusion_depth_p90,
+                config.profile_heater_protrusion_depth_p90_low_m,
+                config.profile_heater_protrusion_depth_p90_high_m,
             ),
         ]
-    ) / 5.0
+    ) / 4.0
     return heater_score, clean_score
 
 
