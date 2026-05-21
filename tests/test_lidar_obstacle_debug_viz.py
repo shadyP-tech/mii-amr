@@ -37,6 +37,14 @@ def free_map(width=10, height=10, resolution=0.1):
 
 
 class LidarObstacleDebugVizTest(unittest.TestCase):
+    def test_latest_tf_flag_matches_replan_runtime_arg_name(self):
+        parser = debug_viz.build_arg_parser()
+
+        args = parser.parse_args(["--allow-latest-tf-fallback"])
+
+        self.assertTrue(args.allow_latest_tf_replan_fallback)
+        self.assertFalse(hasattr(args, "allow_latest_tf_fallback"))
+
     def test_scan_point_layers_separate_roi_candidates(self):
         config = overlay.ObstacleOverlayConfig(
             forward_distance_m=0.55,

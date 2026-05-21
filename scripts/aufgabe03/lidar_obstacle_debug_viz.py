@@ -568,6 +568,7 @@ def build_arg_parser():
     )
     parser.add_argument(
         "--allow-latest-tf-fallback",
+        dest="allow_latest_tf_replan_fallback",
         action="store_true",
         help="Use latest TF if timestamped map<-scan lookup is unavailable.",
     )
