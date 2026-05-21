@@ -193,7 +193,10 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
         self.assertFalse(result.pose_unique)
         self.assertEqual(result.short_wall_classification.wall_type, arena.WALL_UNKNOWN)
         self.assertEqual(result.short_wall_classification.reason, "pairwise_profile_candidate_invalid")
-        self.assertGreater(result.short_wall_candidates["axis_positive"].heater_profile_score, 0.75)
+        self.assertGreater(
+            result.short_wall_candidates["axis_positive"].heater_profile_score,
+            SYNTHETIC_ARENA_CONFIG.profile_min_heater_like_score,
+        )
 
     def test_rotated_and_laterally_offset_scan_estimates_y_and_yaw(self):
         result = arena.analyze_points(
@@ -655,8 +658,8 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
         config = arena.ArenaGeometryConfig()
         deep_cluster_heater, _clean = arena.score_short_wall_profile(
             profile_features(
-                protrusion_fraction=0.18,
-                protrusion_width_coverage_fraction=0.30,
+                protrusion_fraction=0.35,
+                protrusion_width_coverage_fraction=0.45,
                 protrusion_depth_p90_m=0.15,
                 flat_outer_support_fraction=0.35,
                 clean_rail_artifact_score=0.0,
@@ -680,6 +683,25 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
 
         self.assertGreater(deep_cluster_heater, 0.70)
         self.assertLess(shallow_rail_heater, 0.25)
+
+    def test_refined_score_penalizes_high_flat_support_clean_side(self):
+        config = arena.ArenaGeometryConfig()
+        heater_score, clean_score = arena.score_short_wall_profile(
+            profile_features(
+                protrusion_fraction=0.183,
+                protrusion_width_coverage_fraction=0.481,
+                protrusion_depth_p90_m=0.188,
+                flat_outer_support_fraction=0.907,
+                profile_roughness_m=0.16,
+                protrusion_cluster_count=2,
+                dominant_cluster_width_fraction=0.411,
+            ),
+            config,
+        )
+
+        self.assertLess(heater_score, 0.55)
+        self.assertLess(heater_score, config.profile_relative_heater_min_score)
+        self.assertGreater(clean_score, 0.20)
 
     def test_refined_score_caps_broad_flat_wall_false_positive(self):
         config = arena.ArenaGeometryConfig()

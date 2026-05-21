@@ -79,8 +79,8 @@ class ArenaGeometryConfig:
     profile_protrusion_min_m: float = 0.04
     profile_heater_depth_p95_low_m: float = 0.03
     profile_heater_depth_p95_high_m: float = 0.08
-    profile_heater_protrusion_fraction_low: float = 0.05
-    profile_heater_protrusion_fraction_high: float = 0.25
+    profile_heater_protrusion_fraction_low: float = 0.12
+    profile_heater_protrusion_fraction_high: float = 0.45
     profile_heater_cluster_count_low: float = 1.0
     profile_heater_cluster_count_high: float = 3.0
     profile_heater_largest_cluster_width_low_m: float = 0.05
@@ -106,12 +106,15 @@ class ArenaGeometryConfig:
     profile_relative_min_protrusion_clusters: int = 2
     profile_relative_min_protrusion_fraction: float = 0.10
     profile_relative_confidence_cap: float = 0.85
-    profile_heater_weight_protrusion_fraction: float = 0.30
-    profile_heater_weight_width_coverage: float = 0.25
-    profile_heater_weight_depth: float = 0.20
+    profile_heater_weight_protrusion_fraction: float = 0.40
+    profile_heater_weight_width_coverage: float = 0.20
+    profile_heater_weight_depth: float = 0.15
     profile_heater_weight_low_flat_support: float = 0.15
     profile_heater_weight_roughness_refined: float = 0.10
     profile_heater_clean_rail_penalty: float = 0.20
+    profile_heater_high_flat_support_penalty: float = 0.25
+    profile_heater_high_flat_support_penalty_low: float = 0.75
+    profile_heater_high_flat_support_penalty_high: float = 0.90
     profile_heater_width_coverage_low: float = 0.08
     profile_heater_width_coverage_high: float = 0.35
     profile_heater_protrusion_depth_p90_low_m: float = 0.05
@@ -927,6 +930,11 @@ def score_short_wall_profile(features, config: ArenaGeometryConfig):
         config.profile_heater_roughness_low_m,
         config.profile_heater_roughness_high_m,
     )
+    high_flat_support_penalty_score = clipped_score(
+        flat_support,
+        config.profile_heater_high_flat_support_penalty_low,
+        config.profile_heater_high_flat_support_penalty_high,
+    )
     heater_score = clamp(
         config.profile_heater_weight_protrusion_fraction * protrusion_fraction_score
         + config.profile_heater_weight_width_coverage * width_coverage_score
@@ -934,6 +942,13 @@ def score_short_wall_profile(features, config: ArenaGeometryConfig):
         + config.profile_heater_weight_low_flat_support * low_flat_support_score
         + config.profile_heater_weight_roughness_refined * roughness_score
         - config.profile_heater_clean_rail_penalty * clean_rail_artifact_score,
+        0.0,
+        1.0,
+    )
+    heater_score = clamp(
+        heater_score
+        - config.profile_heater_high_flat_support_penalty
+        * high_flat_support_penalty_score,
         0.0,
         1.0,
     )
