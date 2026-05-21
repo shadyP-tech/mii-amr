@@ -100,6 +100,7 @@ def profile_candidate(
             "dominant_cluster_width_fraction": 0.0,
             "flat_outer_support_fraction": 1.0,
             "clean_rail_artifact_score": 0.0,
+            "broad_flat_wall_artifact_score": 0.0,
             "profile_roughness_m": 0.0,
             "outer_line_support_fraction": 1.0,
             "validity_failed_reason": validity_failed_reason,
@@ -116,6 +117,7 @@ def profile_features(
     protrusion_depth_p90_m=0.0,
     flat_outer_support_fraction=1.0,
     clean_rail_artifact_score=0.0,
+    broad_flat_wall_artifact_score=0.0,
     profile_roughness_m=0.0,
     protrusion_cluster_count=0,
     dominant_cluster_width_fraction=0.0,
@@ -135,6 +137,7 @@ def profile_features(
         "dominant_cluster_width_fraction": dominant_cluster_width_fraction,
         "flat_outer_support_fraction": flat_outer_support_fraction,
         "clean_rail_artifact_score": clean_rail_artifact_score,
+        "broad_flat_wall_artifact_score": broad_flat_wall_artifact_score,
         "profile_roughness_m": profile_roughness_m,
         "outer_line_support_fraction": flat_outer_support_fraction,
         "validity_failed_reason": None,
@@ -678,6 +681,59 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
         self.assertGreater(deep_cluster_heater, 0.70)
         self.assertLess(shallow_rail_heater, 0.25)
 
+    def test_refined_score_caps_broad_flat_wall_false_positive(self):
+        config = arena.ArenaGeometryConfig()
+        heater_score, clean_score = arena.score_short_wall_profile(
+            profile_features(
+                protrusion_fraction=0.2755,
+                protrusion_width_coverage_fraction=0.697,
+                protrusion_depth_p90_m=0.213,
+                flat_outer_support_fraction=0.845,
+                profile_roughness_m=0.125,
+                protrusion_cluster_count=2,
+                dominant_cluster_width_fraction=0.618,
+                broad_flat_wall_artifact_score=1.0,
+            ),
+            config,
+        )
+
+        self.assertLessEqual(heater_score, config.profile_broad_flat_wall_heater_cap)
+        self.assertLess(heater_score, config.profile_min_heater_like_score)
+        self.assertLess(clean_score, config.profile_min_clean_like_score)
+
+    def test_profile_features_detect_broad_flat_wall_artifact(self):
+        config = arena.ArenaGeometryConfig()
+        edge_points = [
+            (1.0, -1.2 + index * (2.4 / 99.0))
+            for index in range(100)
+        ]
+        protrusion_points = [
+            (0.78, -0.75 + index * (1.5 / 29.0))
+            for index in range(30)
+        ]
+        points = edge_points + protrusion_points
+        line = arena.fit_line(edge_points)
+
+        features = arena.compute_short_wall_profile_features(
+            points,
+            (1.0, 0.0),
+            (0.0, 1.0),
+            "axis_positive",
+            1.0,
+            line,
+            config,
+        )
+
+        self.assertGreater(features["broad_flat_wall_artifact_score"], 0.0)
+        self.assertGreaterEqual(
+            features["flat_outer_support_fraction"],
+            config.profile_broad_flat_wall_flat_support_min,
+        )
+        self.assertGreaterEqual(
+            features["largest_protrusion_cluster_width_m"],
+            config.profile_broad_flat_wall_cluster_width_min_m,
+        )
+
     def test_refined_score_improves_clean_wall_contrast_shape(self):
         config = arena.ArenaGeometryConfig()
         radiator_score, _clean = arena.score_short_wall_profile(
@@ -747,6 +803,7 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
             "dominant_cluster_width_fraction",
             "flat_outer_support_fraction",
             "clean_rail_artifact_score",
+            "broad_flat_wall_artifact_score",
         ]:
             self.assertIn(key, original)
             self.assertIn(key, flipped)

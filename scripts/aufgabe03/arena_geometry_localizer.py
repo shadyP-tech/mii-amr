@@ -120,6 +120,12 @@ class ArenaGeometryConfig:
     profile_clean_rail_protrusion_fraction_max: float = 0.10
     profile_clean_rail_depth_p90_max_m: float = 0.07
     profile_clean_rail_dominant_cluster_fraction_min: float = 0.45
+    profile_broad_flat_wall_flat_support_min: float = 0.75
+    profile_broad_flat_wall_dominant_cluster_fraction_min: float = 0.45
+    profile_broad_flat_wall_cluster_width_min_m: float = 0.75
+    profile_broad_flat_wall_cluster_count_max: int = 2
+    profile_broad_flat_wall_penalty: float = 0.25
+    profile_broad_flat_wall_heater_cap: float = 0.69
     angle_search_step_deg: float = 2.0
 
 
@@ -728,6 +734,7 @@ def compute_short_wall_profile_features(
             "dominant_cluster_width_fraction": 0.0,
             "flat_outer_support_fraction": 0.0,
             "clean_rail_artifact_score": 0.0,
+            "broad_flat_wall_artifact_score": 0.0,
             "validity_failed_reason": "profile_point_count_too_low",
         }
 
@@ -811,6 +818,35 @@ def compute_short_wall_profile_features(
         )
     else:
         clean_rail_artifact_score = 0.0
+    if clusters:
+        broad_flat_support_score = clipped_score(
+            flat_outer_support_fraction,
+            config.profile_broad_flat_wall_flat_support_min,
+            1.0,
+        )
+        broad_dominant_cluster_score = clipped_score(
+            dominant_cluster_width_fraction,
+            config.profile_broad_flat_wall_dominant_cluster_fraction_min,
+            1.0,
+        )
+        broad_cluster_width_score = clipped_score(
+            largest_cluster_width,
+            config.profile_broad_flat_wall_cluster_width_min_m,
+            max(config.profile_broad_flat_wall_cluster_width_min_m, visible_width),
+        )
+        low_cluster_count_score = 1.0 - clipped_score(
+            float(len(clusters)),
+            float(config.profile_broad_flat_wall_cluster_count_max),
+            float(config.profile_broad_flat_wall_cluster_count_max + 2),
+        )
+        broad_flat_wall_artifact_score = min(
+            broad_flat_support_score,
+            broad_dominant_cluster_score,
+            broad_cluster_width_score,
+            low_cluster_count_score,
+        )
+    else:
+        broad_flat_wall_artifact_score = 0.0
 
     validity_failed_reason = None
     line_rmse = None if line is None else line.rmse_m
@@ -843,6 +879,7 @@ def compute_short_wall_profile_features(
         "dominant_cluster_width_fraction": dominant_cluster_width_fraction,
         "flat_outer_support_fraction": flat_outer_support_fraction,
         "clean_rail_artifact_score": clean_rail_artifact_score,
+        "broad_flat_wall_artifact_score": broad_flat_wall_artifact_score,
         "profile_roughness_m": profile_roughness,
         "outer_line_support_fraction": outer_line_support_fraction,
         "validity_failed_reason": validity_failed_reason,
@@ -861,6 +898,9 @@ def score_short_wall_profile(features, config: ArenaGeometryConfig):
     if flat_support is None:
         flat_support = line_support
     clean_rail_artifact_score = features.get("clean_rail_artifact_score") or 0.0
+    broad_flat_wall_artifact_score = (
+        features.get("broad_flat_wall_artifact_score") or 0.0
+    )
 
     protrusion_fraction_score = clipped_score(
         protrusion_fraction,
@@ -897,6 +937,13 @@ def score_short_wall_profile(features, config: ArenaGeometryConfig):
         0.0,
         1.0,
     )
+    if broad_flat_wall_artifact_score > 0.0:
+        heater_score = clamp(
+            heater_score
+            - config.profile_broad_flat_wall_penalty * broad_flat_wall_artifact_score,
+            0.0,
+            config.profile_broad_flat_wall_heater_cap,
+        )
 
     clean_score = sum(
         [
