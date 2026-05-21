@@ -141,6 +141,25 @@ def arena_active_config_from_args(args):
         range_stride=args.arena_active_range_stride,
         max_points=args.arena_active_max_points,
         control_rate_hz=args.control_rate_hz,
+        enable_center_reposition=args.arena_active_enable_center_reposition,
+        center_reposition_max_attempts=args.arena_active_center_reposition_max_attempts,
+        center_reposition_target_nearest_short_wall_range_m=(
+            args.arena_active_center_reposition_target_nearest_short_wall_range_m
+        ),
+        center_reposition_min_step_m=args.arena_active_center_reposition_min_step_m,
+        center_reposition_max_step_m=args.arena_active_center_reposition_max_step_m,
+        center_reposition_linear_speed_mps=(
+            args.arena_active_center_reposition_linear_speed_mps
+        ),
+        center_reposition_angular_speed_rad_s=(
+            args.arena_active_center_reposition_angular_speed_rad_s
+        ),
+        center_reposition_heading_tolerance_deg=(
+            args.arena_active_center_reposition_heading_tolerance_deg
+        ),
+        center_reposition_min_front_clearance_m=(
+            args.arena_active_center_reposition_min_front_clearance_m
+        ),
         arena_config=arena_config,
     )
 

@@ -94,6 +94,8 @@ def require_motion_confirmation(args, staging_goal, follower_command):
     print("  - clear the arena and keep an operator near the robot")
     print("  - keep Ctrl+C and physical stop available")
     print("  - ensure no other controller is intentionally publishing /cmd_vel")
+    if args.arena_active_enable_center_reposition:
+        print("  - center-reposition recovery may drive before /initialpose is published")
     print(f"Run ID: {args.run_id}")
     print(
         "Staging goal: "
@@ -357,6 +359,40 @@ def parse_args(argv):
     parser.add_argument("--arena-active-diagnostics-json", type=Path)
     parser.add_argument("--arena-active-range-stride", default=6, type=int)
     parser.add_argument("--arena-active-max-points", default=3000, type=int)
+    parser.add_argument(
+        "--arena-active-enable-center-reposition",
+        "--arena-active-enable-reposition",
+        dest="arena_active_enable_center_reposition",
+        action="store_true",
+    )
+    parser.add_argument("--arena-active-center-reposition-max-attempts", default=1, type=int)
+    parser.add_argument(
+        "--arena-active-center-reposition-target-nearest-short-wall-range-m",
+        default=1.40,
+        type=float,
+    )
+    parser.add_argument("--arena-active-center-reposition-min-step-m", default=0.25, type=float)
+    parser.add_argument("--arena-active-center-reposition-max-step-m", default=0.80, type=float)
+    parser.add_argument(
+        "--arena-active-center-reposition-linear-speed-mps",
+        default=0.08,
+        type=float,
+    )
+    parser.add_argument(
+        "--arena-active-center-reposition-angular-speed-rad-s",
+        default=0.25,
+        type=float,
+    )
+    parser.add_argument(
+        "--arena-active-center-reposition-heading-tolerance-deg",
+        default=8.0,
+        type=float,
+    )
+    parser.add_argument(
+        "--arena-active-center-reposition-min-front-clearance-m",
+        default=0.45,
+        type=float,
+    )
     parser.add_argument("--arena-length-m", default=3.90, type=float)
     parser.add_argument("--arena-width-m", type=float)
     parser.add_argument("--arena-heater-wall-width-m", default=2.016, type=float)
@@ -443,6 +479,13 @@ def validate_args(parser, args):
         "arena_active_min_front_clearance_m",
         "arena_active_min_side_clearance_m",
         "arena_active_min_rear_clearance_m",
+        "arena_active_center_reposition_target_nearest_short_wall_range_m",
+        "arena_active_center_reposition_min_step_m",
+        "arena_active_center_reposition_max_step_m",
+        "arena_active_center_reposition_linear_speed_mps",
+        "arena_active_center_reposition_angular_speed_rad_s",
+        "arena_active_center_reposition_heading_tolerance_deg",
+        "arena_active_center_reposition_min_front_clearance_m",
         "arena_length_m",
         "arena_heater_wall_width_m",
         "arena_clean_wall_width_m",
@@ -486,6 +529,16 @@ def validate_args(parser, args):
         parser.error("--arena-active-range-stride must be >= 1")
     if args.arena_active_max_points < 1:
         parser.error("--arena-active-max-points must be >= 1")
+    if args.arena_active_center_reposition_max_attempts < 1:
+        parser.error("--arena-active-center-reposition-max-attempts must be >= 1")
+    if (
+        args.arena_active_center_reposition_min_step_m
+        > args.arena_active_center_reposition_max_step_m
+    ):
+        parser.error(
+            "--arena-active-center-reposition-min-step-m must be <= "
+            "--arena-active-center-reposition-max-step-m"
+        )
     if args.arena_width_m is not None and args.arena_width_m <= 0.0:
         parser.error("--arena-width-m must be greater than zero")
     if args.arena_width_match_min_margin_m < 0.0:

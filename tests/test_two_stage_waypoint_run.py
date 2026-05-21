@@ -109,6 +109,11 @@ class TwoStageWaypointRunTest(unittest.TestCase):
                 "--python-executable",
                 "python-test",
                 "--arena-active-allow-extra-cmd-vel-publishers",
+                "--arena-active-enable-center-reposition",
+                "--arena-active-center-reposition-target-nearest-short-wall-range-m",
+                "1.45",
+                "--arena-active-center-reposition-max-step-m",
+                "0.7",
                 "--arena-force-short-wall-side",
                 "axis_positive",
                 "--arena-force-short-wall-type",
@@ -130,6 +135,12 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         self.assertEqual(args.follower_script, Path("custom/follower.py"))
         self.assertEqual(args.python_executable, "python-test")
         self.assertTrue(args.arena_active_allow_extra_cmd_vel_publishers)
+        self.assertTrue(args.arena_active_enable_center_reposition)
+        self.assertEqual(
+            args.arena_active_center_reposition_target_nearest_short_wall_range_m,
+            1.45,
+        )
+        self.assertEqual(args.arena_active_center_reposition_max_step_m, 0.7)
         self.assertEqual(args.arena_force_short_wall_side, "axis_positive")
         self.assertEqual(args.arena_force_short_wall_type, "clean")
 

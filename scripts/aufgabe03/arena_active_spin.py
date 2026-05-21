@@ -56,6 +56,25 @@ class SectorClearance:
 
 
 @dataclass(frozen=True)
+class CenterRepositionAction:
+    ok: bool
+    reason: str
+    nearest_axis_side: str | None = None
+    away_axis_side: str | None = None
+    nearest_short_wall_range_m: float | None = None
+    far_short_wall_range_m: float | None = None
+    target_nearest_short_wall_range_m: float | None = None
+    planned_distance_m: float | None = None
+    local_heading_rad: float | None = None
+    odom_heading_rad: float | None = None
+    range_sum_error_m: float | None = None
+    heater_scores: dict[str, float] | None = None
+
+    def to_dict(self):
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class ArenaActiveSpinConfig:
     run_id: str
     diagnostics_path: Path
@@ -81,6 +100,15 @@ class ArenaActiveSpinConfig:
     range_stride: int = 6
     max_points: int = 3000
     control_rate_hz: float = 10.0
+    enable_center_reposition: bool = False
+    center_reposition_max_attempts: int = 1
+    center_reposition_target_nearest_short_wall_range_m: float = 1.40
+    center_reposition_min_step_m: float = 0.25
+    center_reposition_max_step_m: float = 0.80
+    center_reposition_linear_speed_mps: float = 0.08
+    center_reposition_angular_speed_rad_s: float = 0.25
+    center_reposition_heading_tolerance_deg: float = 8.0
+    center_reposition_min_front_clearance_m: float = 0.45
     arena_config: ArenaGeometryConfig = field(default_factory=ArenaGeometryConfig)
 
 
@@ -90,6 +118,121 @@ def normalize_angle_rad(angle_rad):
 
 def shortest_angle_delta_rad(start_rad, end_rad):
     return normalize_angle_rad(end_rad - start_rad)
+
+
+def clamp(value, low, high):
+    return max(low, min(high, value))
+
+
+def opposite_axis_side(axis_side):
+    if axis_side == "axis_negative":
+        return "axis_positive"
+    if axis_side == "axis_positive":
+        return "axis_negative"
+    return None
+
+
+def spin_diagnostics_template():
+    return {
+        "target_rad": 2.0 * math.pi,
+        "accumulated_rad": 0.0,
+        "duration_sec": 0.0,
+        "timeout": False,
+    }
+
+
+def candidate_range(candidate):
+    if candidate is None:
+        return None
+    value = getattr(candidate, "short_wall_candidate_range_m", None)
+    if value is None or not math.isfinite(value) or value <= 0.0:
+        return None
+    return float(value)
+
+
+def choose_center_reposition_action(result, config: ArenaActiveSpinConfig, origin_yaw_rad=0.0):
+    if not config.enable_center_reposition:
+        return CenterRepositionAction(False, "center_reposition_disabled")
+    if result.success or result.failure_reason != "pose_not_unique":
+        return CenterRepositionAction(False, "center_reposition_not_pose_not_unique")
+    long_fit = result.long_wall_fit
+    if not getattr(long_fit, "ok", False) or long_fit.axis_angle_rad is None:
+        return CenterRepositionAction(False, "center_reposition_invalid_long_wall_fit")
+
+    candidates = result.short_wall_candidates or {}
+    negative = candidates.get("axis_negative")
+    positive = candidates.get("axis_positive")
+    negative_range = candidate_range(negative)
+    positive_range = candidate_range(positive)
+    if negative_range is None or positive_range is None:
+        return CenterRepositionAction(False, "center_reposition_missing_short_wall_ranges")
+
+    range_sum = negative_range + positive_range
+    range_sum_error = range_sum - config.arena_config.arena_length_m
+    if abs(range_sum_error) > config.arena_config.max_short_wall_range_sum_error_m:
+        return CenterRepositionAction(
+            False,
+            "center_reposition_range_sum_invalid",
+            range_sum_error_m=range_sum_error,
+        )
+
+    if negative_range <= positive_range:
+        nearest_side = "axis_negative"
+        nearest_range = negative_range
+        far_range = positive_range
+    else:
+        nearest_side = "axis_positive"
+        nearest_range = positive_range
+        far_range = negative_range
+    away_side = opposite_axis_side(nearest_side)
+    raw_step = config.center_reposition_target_nearest_short_wall_range_m - nearest_range
+    if raw_step < config.center_reposition_min_step_m:
+        return CenterRepositionAction(
+            False,
+            "center_reposition_not_useful_already_near_target",
+            nearest_axis_side=nearest_side,
+            away_axis_side=away_side,
+            nearest_short_wall_range_m=nearest_range,
+            far_short_wall_range_m=far_range,
+            target_nearest_short_wall_range_m=(
+                config.center_reposition_target_nearest_short_wall_range_m
+            ),
+            planned_distance_m=max(0.0, raw_step),
+            range_sum_error_m=range_sum_error,
+            heater_scores={
+                "axis_negative": getattr(negative, "heater_profile_score", None),
+                "axis_positive": getattr(positive, "heater_profile_score", None),
+            },
+        )
+
+    planned_distance = clamp(
+        raw_step,
+        config.center_reposition_min_step_m,
+        config.center_reposition_max_step_m,
+    )
+    local_heading = long_fit.axis_angle_rad
+    if away_side == "axis_negative":
+        local_heading += math.pi
+    odom_heading = normalize_angle_rad(origin_yaw_rad + local_heading)
+    return CenterRepositionAction(
+        True,
+        "center_reposition_toward_arena_center",
+        nearest_axis_side=nearest_side,
+        away_axis_side=away_side,
+        nearest_short_wall_range_m=nearest_range,
+        far_short_wall_range_m=far_range,
+        target_nearest_short_wall_range_m=(
+            config.center_reposition_target_nearest_short_wall_range_m
+        ),
+        planned_distance_m=planned_distance,
+        local_heading_rad=normalize_angle_rad(local_heading),
+        odom_heading_rad=odom_heading,
+        range_sum_error_m=range_sum_error,
+        heater_scores={
+            "axis_negative": getattr(negative, "heater_profile_score", None),
+            "axis_positive": getattr(positive, "heater_profile_score", None),
+        },
+    )
 
 
 def yaw_from_quaternion(qx, qy, qz, qw):
@@ -170,6 +313,30 @@ def evaluate_clearance(scan, config: ArenaActiveSpinConfig):
     return SectorClearance(True, "ok", front, left, right, rear)
 
 
+def evaluate_reposition_clearance(scan, config: ArenaActiveSpinConfig):
+    front = min_sector_range(scan, [(-30.0, 30.0)])
+    left = min_sector_range(scan, [(60.0, 120.0)])
+    right = min_sector_range(scan, [(-120.0, -60.0)])
+    rear = min_sector_range(scan, [(150.0, 180.0), (-180.0, -150.0)])
+    checks = [
+        (
+            "front_clearance_missing",
+            "front_clearance_below_limit",
+            front,
+            config.center_reposition_min_front_clearance_m,
+        ),
+        ("left_clearance_missing", "left_clearance_below_limit", left, config.min_side_clearance_m),
+        ("right_clearance_missing", "right_clearance_below_limit", right, config.min_side_clearance_m),
+        ("rear_clearance_missing", "rear_clearance_below_limit", rear, config.min_rear_clearance_m),
+    ]
+    for missing_reason, low_reason, value, limit in checks:
+        if value is None:
+            return SectorClearance(False, missing_reason, front, left, right, rear)
+        if value < limit:
+            return SectorClearance(False, low_reason, front, left, right, rear)
+    return SectorClearance(True, "ok", front, left, right, rear)
+
+
 def covariance_list_from_localizer(covariance):
     values = [0.0] * 36
     values[0] = float(covariance["x_m2"])
@@ -230,11 +397,11 @@ def initial_diagnostics(config: ArenaActiveSpinConfig):
         "failure_reason": "",
         "fallback_used": False,
         "config": config_diagnostics(config),
-        "spin": {
-            "target_rad": 2.0 * math.pi,
-            "accumulated_rad": 0.0,
-            "duration_sec": 0.0,
-            "timeout": False,
+        "spin": spin_diagnostics_template(),
+        "spin_attempts": [],
+        "reposition": {
+            "enabled": config.enable_center_reposition,
+            "attempts": [],
         },
         "samples": {
             "scan_samples_collected": 0,
@@ -498,7 +665,31 @@ class ArenaActiveSpinSession:
 
         raise RuntimeError("ros_shutdown_during_arena_active_spin")
 
-    def analyze(self):
+    def reset_spin_collection(self, attempt_index):
+        self.collecting = False
+        self.samples = []
+        self.rejected_samples = 0
+        self.diagnostics["spin"] = {
+            **spin_diagnostics_template(),
+            "attempt_index": attempt_index,
+        }
+
+    def run_spin_attempt(self, publisher, attempt_index):
+        self.reset_spin_collection(attempt_index)
+        self.run_spin(publisher)
+        self.collecting = False
+        stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
+        self.sleep_fn(self.config.stop_settle_sec)
+        self.diagnostics["spin_attempts"].append(
+            {
+                **self.diagnostics["spin"],
+                "scan_samples_collected": len(self.samples),
+                "scan_samples_used": len(self.samples),
+                "rejected_scan_samples": self.rejected_samples,
+            }
+        )
+
+    def analyze_result(self):
         if len(self.samples) < self.config.min_scan_samples:
             raise RuntimeError(
                 "insufficient_scan_samples:"
@@ -511,12 +702,126 @@ class ArenaActiveSpinSession:
             max_points=self.config.max_points,
         )
         self.diagnostics["localizer_result"] = result.to_dict()
+        return result
+
+    def pose_prior_from_result_or_raise(self, result):
         if not result.success:
             raise RuntimeError(f"arena_localizer_failed:{result.failure_reason}")
         pose_prior = pose_prior_from_localizer_result(result)
         if pose_prior is None:
             raise RuntimeError("arena_localizer_missing_pose_prior")
         return pose_prior
+
+    def first_sample_origin_yaw_rad(self):
+        for sample in self.samples:
+            if sample.odom_pose is not None:
+                return math.radians(sample.odom_pose.yaw_deg)
+        return 0.0
+
+    def publish_turn_command(self, publisher, target_yaw_rad):
+        if self.latest_odom_yaw_rad is None:
+            raise RuntimeError("fresh_odom_unavailable_during_reposition_turn")
+        command = self.twist_factory()
+        delta = shortest_angle_delta_rad(self.latest_odom_yaw_rad, target_yaw_rad)
+        command.angular.z = (
+            1.0 if delta >= 0.0 else -1.0
+        ) * abs(self.config.center_reposition_angular_speed_rad_s)
+        publisher.publish(command)
+
+    def turn_to_heading(self, publisher, target_yaw_rad):
+        tolerance = math.radians(self.config.center_reposition_heading_tolerance_deg)
+        deadline = self.now() + max(
+            8.0,
+            math.pi / max(0.01, abs(self.config.center_reposition_angular_speed_rad_s))
+            + 3.0,
+        )
+        period = 1.0 / self.config.control_rate_hz
+        while self.rclpy.ok() and self.now() <= deadline:
+            self.rclpy.spin_once(self.node, timeout_sec=period)
+            scan_age = self.fresh_scan_age_sec()
+            odom_age = self.fresh_odom_age_sec()
+            if scan_age is None or scan_age > self.config.max_odom_scan_age_sec:
+                raise RuntimeError("stale_scan_during_reposition_turn")
+            if odom_age is None or odom_age > self.config.max_odom_scan_age_sec:
+                raise RuntimeError("stale_odom_during_reposition_turn")
+            clearance = evaluate_clearance(self.latest_scan, self.config)
+            update_safety_minima(self.diagnostics, clearance)
+            if not clearance.ok:
+                raise RuntimeError(f"reposition_turn_clearance_failed:{clearance.reason}")
+            delta = shortest_angle_delta_rad(self.latest_odom_yaw_rad, target_yaw_rad)
+            if abs(delta) <= tolerance:
+                return
+            self.publish_turn_command(publisher, target_yaw_rad)
+        raise RuntimeError("center_reposition_turn_timeout")
+
+    def publish_drive_command(self, publisher):
+        command = self.twist_factory()
+        command.linear.x = abs(self.config.center_reposition_linear_speed_mps)
+        publisher.publish(command)
+
+    def drive_forward(self, publisher, distance_m):
+        if self.latest_odom_pose is None:
+            raise RuntimeError("fresh_odom_unavailable_before_reposition_drive")
+        start_x = self.latest_odom_pose.x
+        start_y = self.latest_odom_pose.y
+        deadline = self.now() + max(
+            8.0,
+            distance_m / max(0.01, abs(self.config.center_reposition_linear_speed_mps))
+            + 3.0,
+        )
+        period = 1.0 / self.config.control_rate_hz
+        while self.rclpy.ok() and self.now() <= deadline:
+            self.rclpy.spin_once(self.node, timeout_sec=period)
+            scan_age = self.fresh_scan_age_sec()
+            odom_age = self.fresh_odom_age_sec()
+            if scan_age is None or scan_age > self.config.max_odom_scan_age_sec:
+                raise RuntimeError("stale_scan_during_reposition_drive")
+            if odom_age is None or odom_age > self.config.max_odom_scan_age_sec:
+                raise RuntimeError("stale_odom_during_reposition_drive")
+            clearance = evaluate_reposition_clearance(self.latest_scan, self.config)
+            update_safety_minima(self.diagnostics, clearance)
+            if not clearance.ok:
+                raise RuntimeError(f"reposition_drive_clearance_failed:{clearance.reason}")
+            dx = self.latest_odom_pose.x - start_x
+            dy = self.latest_odom_pose.y - start_y
+            if math.hypot(dx, dy) >= distance_m:
+                return math.hypot(dx, dy)
+            self.publish_drive_command(publisher)
+        raise RuntimeError("center_reposition_drive_timeout")
+
+    def print_reposition_prompt(self, action: CenterRepositionAction):
+        print("\nArena-active center reposition recovery")
+        print(f"  nearest short wall: {action.nearest_axis_side}")
+        print(f"  away direction: {action.away_axis_side}")
+        print(f"  nearest range: {action.nearest_short_wall_range_m}")
+        print(f"  target nearest range: {action.target_nearest_short_wall_range_m}")
+        print(f"  planned drive distance: {action.planned_distance_m}")
+        print(f"  target odom heading deg: {math.degrees(action.odom_heading_rad or 0.0):.1f}")
+        print("  expected action: turn toward arena center, drive forward, then spin again")
+        if self.config.require_operator_confirmation:
+            self.input_fn("Press Enter to start center reposition, or Ctrl+C to abort: ")
+
+    def execute_center_reposition(self, publisher, action: CenterRepositionAction):
+        if not action.ok or action.odom_heading_rad is None or action.planned_distance_m is None:
+            raise RuntimeError(action.reason)
+        self.wait_for_fresh_inputs()
+        self.print_reposition_prompt(action)
+        self.refresh_fresh_inputs_after_prompt()
+        clearance = evaluate_reposition_clearance(self.latest_scan, self.config)
+        update_safety_minima(self.diagnostics, clearance)
+        if not clearance.ok:
+            raise RuntimeError(f"reposition_precheck_clearance_failed:{clearance.reason}")
+
+        start = self.now()
+        self.turn_to_heading(publisher, action.odom_heading_rad)
+        stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
+        driven = self.drive_forward(publisher, action.planned_distance_m)
+        stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
+        return {
+            **action.to_dict(),
+            "driven_distance_m": driven,
+            "duration_sec": self.now() - start,
+        }
 
     def finish_failure(self, reason, exception=None):
         self.diagnostics["success"] = False
@@ -548,11 +853,37 @@ class ArenaActiveSpinSession:
     def run(self, publisher):
         try:
             stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
-            self.run_spin(publisher)
-            self.collecting = False
-            stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
-            self.sleep_fn(self.config.stop_settle_sec)
-            pose_prior = self.analyze()
+            self.run_spin_attempt(publisher, attempt_index=0)
+            result = self.analyze_result()
+            if not result.success and self.config.enable_center_reposition:
+                reposition_attempts = 0
+                while (
+                    not result.success
+                    and reposition_attempts < self.config.center_reposition_max_attempts
+                ):
+                    origin_yaw = self.first_sample_origin_yaw_rad()
+                    action = choose_center_reposition_action(result, self.config, origin_yaw)
+                    attempt_record = {
+                        "attempt_index": reposition_attempts,
+                        "previous_failure_reason": result.failure_reason,
+                        "previous_classifier_reason": result.short_wall_classification.reason,
+                        "action": action.to_dict(),
+                    }
+                    self.diagnostics["reposition"]["attempts"].append(attempt_record)
+                    if not action.ok:
+                        break
+                    self.diagnostics["fallback_used"] = True
+                    motion_record = self.execute_center_reposition(publisher, action)
+                    attempt_record["motion"] = motion_record
+                    reposition_attempts += 1
+                    self.run_spin_attempt(publisher, attempt_index=reposition_attempts)
+                    result = self.analyze_result()
+                    attempt_record["post_reposition_success"] = result.success
+                    attempt_record["post_reposition_failure_reason"] = result.failure_reason
+                    attempt_record["post_reposition_classifier_reason"] = (
+                        result.short_wall_classification.reason
+                    )
+            pose_prior = self.pose_prior_from_result_or_raise(result)
             return self.finish_success(pose_prior)
         except KeyboardInterrupt:
             self.collecting = False
