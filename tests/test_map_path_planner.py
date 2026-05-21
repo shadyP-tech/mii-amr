@@ -281,6 +281,26 @@ class MapPathPlannerTest(unittest.TestCase):
 
         self.assertTrue(data.startswith(b"P6\n2 1\n255\n"))
 
+    def test_write_occupancy_map_copy_round_trips_with_updated_cells(self):
+        occ = occupancy_map(
+            [
+                [planner.CELL_FREE, planner.CELL_FREE],
+                [planner.CELL_FREE, planner.CELL_FREE],
+            ],
+            resolution=0.1,
+        )
+        updated = planner.map_with_occupied_cells(occ, {(1, 1)})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            yaml_path = root / "updated.yaml"
+            pgm_path = root / "updated.pgm"
+            planner.write_occupancy_map_copy(updated, yaml_path, pgm_path)
+            reloaded = planner.load_occupancy_map(yaml_path)
+
+        self.assertEqual(occ.cells[1][1], planner.CELL_FREE)
+        self.assertEqual(reloaded.cells[1][1], planner.CELL_OCCUPIED)
+
 
 if __name__ == "__main__":
     unittest.main()

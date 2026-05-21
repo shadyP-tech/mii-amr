@@ -240,7 +240,7 @@ def validate_pose_prior_for_initialpose(pose_prior):
 
 
 def build_follower_command(args):
-    return [
+    command = [
         str(args.python_executable),
         str(args.follower_script),
         "--waypoints",
@@ -279,6 +279,83 @@ def build_follower_command(args):
         "--notes",
         f"{args.notes};two_stage_handoff",
     ]
+    if args.enable_lidar_map_replan:
+        command.extend([
+            "--enable-lidar-map-replan",
+            "--static-map",
+            str(args.static_map),
+            "--replan-output-dir",
+            str(args.replan_output_dir),
+            "--max-replans",
+            str(args.max_replans),
+            "--replan-timeout-sec",
+            str(args.replan_timeout_sec),
+            "--max-replan-scan-age-sec",
+            str(args.max_replan_scan_age_sec),
+            "--max-replan-tf-age-sec",
+            str(args.max_replan_tf_age_sec),
+            "--obstacle-forward-distance-m",
+            str(args.obstacle_forward_distance_m),
+            "--obstacle-forward-half-width-m",
+            str(args.obstacle_forward_half_width_m),
+            "--obstacle-angle-window-deg",
+            str(args.obstacle_angle_window_deg),
+            "--obstacle-min-range-m",
+            str(args.obstacle_min_range_m),
+            "--robot-footprint-radius-m",
+            str(args.robot_footprint_radius_m),
+            "--obstacle-min-cluster-size",
+            str(args.obstacle_min_cluster_size),
+            "--obstacle-min-cluster-width-m",
+            str(args.obstacle_min_cluster_width_m),
+            "--obstacle-inflate-radius-m",
+            str(args.obstacle_inflate_radius_m),
+            "--max-start-snap-m",
+            str(args.max_start_snap_m),
+            "--max-goal-snap-m",
+            str(args.max_goal_snap_m),
+            "--max-replan-path-length-ratio",
+            str(args.max_replan_path_length_ratio),
+            "--run-local-map-initial-scan-mode",
+            args.run_local_map_initial_scan_mode,
+            "--run-local-map-initial-scan-count",
+            str(args.run_local_map_initial_scan_count),
+            "--run-local-map-update-mode",
+            args.run_local_map_update_mode,
+            "--run-local-map-min-hit-count",
+            str(args.run_local_map_min_hit_count),
+            "--run-local-map-inflation-radius-m",
+            str(args.run_local_map_inflation_radius_m),
+            "--run-local-map-max-tf-age-sec",
+            str(args.run_local_map_max_tf_age_sec),
+            "--run-local-map-max-scan-age-sec",
+            str(args.run_local_map_max_scan_age_sec),
+            "--run-local-map-min-used-points",
+            str(args.run_local_map_min_used_points),
+            "--run-local-map-max-rejected-ratio",
+            str(args.run_local_map_max_rejected_ratio),
+            "--run-local-map-corridor-check-distance-m",
+            str(args.run_local_map_corridor_check_distance_m),
+            "--run-local-map-clearance-margin-m",
+            str(args.run_local_map_clearance_margin_m),
+            "--run-local-map-max-updates",
+            str(args.run_local_map_max_updates),
+        ])
+        if args.run_local_map_corridor_radius_m is not None:
+            command.extend([
+                "--run-local-map-corridor-radius-m",
+                str(args.run_local_map_corridor_radius_m),
+            ])
+        if args.run_local_map_artifact_prefix:
+            command.extend([
+                "--run-local-map-artifact-prefix",
+                args.run_local_map_artifact_prefix,
+            ])
+        if args.lidar_replan_artifact_only:
+            command.append("--lidar-replan-artifact-only")
+        if args.allow_latest_tf_replan_fallback:
+            command.append("--allow-latest-tf-replan-fallback")
+    return command
 
 
 def goal_status_name(status):

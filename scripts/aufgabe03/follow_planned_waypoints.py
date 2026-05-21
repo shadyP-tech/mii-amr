@@ -33,9 +33,14 @@ except ImportError:
     LaserScan = object
     tf2_ros = None
 
+import lidar_obstacle_map
+import replan_runtime
+
 
 DEFAULT_WAYPOINTS_CSV = Path("results/aufgabe03/aufgabe03_waypoints.csv")
 DEFAULT_RESULTS_CSV = Path("results/aufgabe03/aufgabe03_waypoint_follow_runs.csv")
+DEFAULT_STATIC_MAP = Path("maps/aufgabe03/arena_1p898x3p9_auto.yaml")
+DEFAULT_REPLAN_OUTPUT_DIR = Path("results/aufgabe03")
 
 DEFAULT_LINEAR_SPEED_MPS = 0.03
 DEFAULT_MIN_LINEAR_SPEED_MPS = 0.01
@@ -67,6 +72,32 @@ DEFAULT_TF_RECOVERY_TIME_SEC = 5.0
 DEFAULT_LOCALIZATION_RECOVERY_TIME_SEC = 5.0
 DEFAULT_CONTROL_RATE_HZ = 10.0
 DEFAULT_SETTLE_SEC = 0.5
+DEFAULT_REPLAN_TIMEOUT_SEC = 5.0
+DEFAULT_MAX_REPLAN_SCAN_AGE_SEC = 1.0
+DEFAULT_MAX_REPLAN_TF_AGE_SEC = 1.0
+DEFAULT_OBSTACLE_FORWARD_DISTANCE_M = 0.55
+DEFAULT_OBSTACLE_FORWARD_HALF_WIDTH_M = 0.18
+DEFAULT_OBSTACLE_ANGLE_WINDOW_DEG = 45.0
+DEFAULT_OBSTACLE_MIN_RANGE_M = 0.12
+DEFAULT_ROBOT_FOOTPRINT_RADIUS_M = 0.18
+DEFAULT_OBSTACLE_MIN_CLUSTER_SIZE = 3
+DEFAULT_OBSTACLE_MIN_CLUSTER_WIDTH_M = 0.05
+DEFAULT_OBSTACLE_INFLATE_RADIUS_M = 0.22
+DEFAULT_MAX_START_SNAP_M = 0.20
+DEFAULT_MAX_GOAL_SNAP_M = 0.30
+DEFAULT_MAX_REPLAN_PATH_LENGTH_RATIO = 3.0
+DEFAULT_RUN_LOCAL_MAP_INITIAL_SCAN_MODE = "full"
+DEFAULT_RUN_LOCAL_MAP_INITIAL_SCAN_COUNT = 5
+DEFAULT_RUN_LOCAL_MAP_UPDATE_MODE = "forward"
+DEFAULT_RUN_LOCAL_MAP_MIN_HIT_COUNT = 2
+DEFAULT_RUN_LOCAL_MAP_INFLATION_RADIUS_M = DEFAULT_OBSTACLE_INFLATE_RADIUS_M
+DEFAULT_RUN_LOCAL_MAP_MAX_TF_AGE_SEC = 1.0
+DEFAULT_RUN_LOCAL_MAP_MAX_SCAN_AGE_SEC = 1.0
+DEFAULT_RUN_LOCAL_MAP_MIN_USED_POINTS = 3
+DEFAULT_RUN_LOCAL_MAP_MAX_REJECTED_RATIO = 0.90
+DEFAULT_RUN_LOCAL_MAP_CORRIDOR_CHECK_DISTANCE_M = 0.75
+DEFAULT_RUN_LOCAL_MAP_CLEARANCE_MARGIN_M = 0.04
+DEFAULT_RUN_LOCAL_MAP_MAX_UPDATES = 3
 
 DEFAULT_STARTUP_TIMEOUT_SEC = 20.0
 STOP_PUBLISH_COUNT = 10
@@ -117,6 +148,50 @@ CSV_HEADER = BASE_CSV_HEADER + [
     "rotate_seconds",
     "forward_seconds",
     "final_status_reason",
+    "replan_count",
+    "last_replan_reason",
+    "updated_map_yaml",
+    "updated_waypoints_csv",
+    "detected_obstacle_count",
+    "candidate_scan_points",
+    "filtered_obstacle_points",
+    "raw_obstacle_cells",
+    "free_obstacle_cells",
+    "inflated_cells_total",
+    "inflated_cells_newly_occupied",
+    "inflated_cells_over_static_occupied",
+    "scan_frame",
+    "scan_age_sec",
+    "tf_age_sec",
+    "tf_lookup_mode",
+    "start_snap_distance_m",
+    "goal_snap_distance_m",
+    "old_remaining_waypoint_count",
+    "new_waypoint_count",
+    "old_path_length_m",
+    "new_path_length_m",
+    "replan_duration_sec",
+    "run_local_map_updates",
+    "run_local_replan_count",
+    "run_local_last_replan_reason",
+    "run_local_no_path_reason",
+    "run_local_start_cell_blocked",
+    "run_local_goal_cell_blocked",
+    "run_local_path_blocked_cell_count",
+    "run_local_scan_points_valid",
+    "run_local_scan_points_used",
+    "run_local_scan_points_rejected_invalid_range",
+    "run_local_scan_points_rejected_static",
+    "run_local_scan_points_rejected_bounds",
+    "run_local_scan_points_rejected_wall_band",
+    "run_local_scan_points_rejected_low_confidence",
+    "run_local_update_rejected_reason",
+    "run_local_initial_scan_count",
+    "run_local_corridor_check_distance_m",
+    "run_local_inflation_radius_m",
+    "run_local_map_yaml",
+    "run_local_waypoints_csv",
+    "run_local_cell_source_counts",
 ]
 
 
@@ -186,6 +261,50 @@ class RuntimeDiagnostics:
     rotate_seconds: float = 0.0
     forward_seconds: float = 0.0
     final_status_reason: str = ""
+    replan_count: int = 0
+    last_replan_reason: str = ""
+    updated_map_yaml: str = ""
+    updated_waypoints_csv: str = ""
+    detected_obstacle_count: int = 0
+    candidate_scan_points: int = 0
+    filtered_obstacle_points: int = 0
+    raw_obstacle_cells: int = 0
+    free_obstacle_cells: int = 0
+    inflated_cells_total: int = 0
+    inflated_cells_newly_occupied: int = 0
+    inflated_cells_over_static_occupied: int = 0
+    scan_frame: str = ""
+    scan_age_sec: float | None = None
+    tf_age_sec: float | None = None
+    tf_lookup_mode: str = ""
+    start_snap_distance_m: float | None = None
+    goal_snap_distance_m: float | None = None
+    old_remaining_waypoint_count: int = 0
+    new_waypoint_count: int = 0
+    old_path_length_m: float | None = None
+    new_path_length_m: float | None = None
+    replan_duration_sec: float | None = None
+    run_local_map_updates: int = 0
+    run_local_replan_count: int = 0
+    run_local_last_replan_reason: str = ""
+    run_local_no_path_reason: str = ""
+    run_local_start_cell_blocked: bool = False
+    run_local_goal_cell_blocked: bool = False
+    run_local_path_blocked_cell_count: int = 0
+    run_local_scan_points_valid: int = 0
+    run_local_scan_points_used: int = 0
+    run_local_scan_points_rejected_invalid_range: int = 0
+    run_local_scan_points_rejected_static: int = 0
+    run_local_scan_points_rejected_bounds: int = 0
+    run_local_scan_points_rejected_wall_band: int = 0
+    run_local_scan_points_rejected_low_confidence: int = 0
+    run_local_update_rejected_reason: str = ""
+    run_local_initial_scan_count: int = 0
+    run_local_corridor_check_distance_m: float | None = None
+    run_local_inflation_radius_m: float | None = None
+    run_local_map_yaml: str = ""
+    run_local_waypoints_csv: str = ""
+    run_local_cell_source_counts: dict[str, int] | str = ""
 
     @property
     def mean_abs_yaw_error_deg(self):
@@ -642,6 +761,50 @@ def build_log_row(
         diagnostics.rotate_seconds,
         diagnostics.forward_seconds,
         diagnostics.final_status_reason,
+        diagnostics.replan_count,
+        diagnostics.last_replan_reason,
+        diagnostics.updated_map_yaml,
+        diagnostics.updated_waypoints_csv,
+        diagnostics.detected_obstacle_count,
+        diagnostics.candidate_scan_points,
+        diagnostics.filtered_obstacle_points,
+        diagnostics.raw_obstacle_cells,
+        diagnostics.free_obstacle_cells,
+        diagnostics.inflated_cells_total,
+        diagnostics.inflated_cells_newly_occupied,
+        diagnostics.inflated_cells_over_static_occupied,
+        diagnostics.scan_frame,
+        "" if diagnostics.scan_age_sec is None else diagnostics.scan_age_sec,
+        "" if diagnostics.tf_age_sec is None else diagnostics.tf_age_sec,
+        diagnostics.tf_lookup_mode,
+        "" if diagnostics.start_snap_distance_m is None else diagnostics.start_snap_distance_m,
+        "" if diagnostics.goal_snap_distance_m is None else diagnostics.goal_snap_distance_m,
+        diagnostics.old_remaining_waypoint_count,
+        diagnostics.new_waypoint_count,
+        "" if diagnostics.old_path_length_m is None else diagnostics.old_path_length_m,
+        "" if diagnostics.new_path_length_m is None else diagnostics.new_path_length_m,
+        "" if diagnostics.replan_duration_sec is None else diagnostics.replan_duration_sec,
+        diagnostics.run_local_map_updates,
+        diagnostics.run_local_replan_count,
+        diagnostics.run_local_last_replan_reason,
+        diagnostics.run_local_no_path_reason,
+        diagnostics.run_local_start_cell_blocked,
+        diagnostics.run_local_goal_cell_blocked,
+        diagnostics.run_local_path_blocked_cell_count,
+        diagnostics.run_local_scan_points_valid,
+        diagnostics.run_local_scan_points_used,
+        diagnostics.run_local_scan_points_rejected_invalid_range,
+        diagnostics.run_local_scan_points_rejected_static,
+        diagnostics.run_local_scan_points_rejected_bounds,
+        diagnostics.run_local_scan_points_rejected_wall_band,
+        diagnostics.run_local_scan_points_rejected_low_confidence,
+        diagnostics.run_local_update_rejected_reason,
+        diagnostics.run_local_initial_scan_count,
+        "" if diagnostics.run_local_corridor_check_distance_m is None else diagnostics.run_local_corridor_check_distance_m,
+        "" if diagnostics.run_local_inflation_radius_m is None else diagnostics.run_local_inflation_radius_m,
+        diagnostics.run_local_map_yaml,
+        diagnostics.run_local_waypoints_csv,
+        diagnostics.run_local_cell_source_counts,
     ]
 
 
@@ -711,6 +874,8 @@ class WaypointFollower(Node):
         )
         self.last_tf_stamp_sec = None
         self.last_tf_stamp_change_local_sec = None
+        self.run_local_map = None
+        self.live_replan_attempt_count = 0
 
         self.pub = self.create_publisher(Twist, "/cmd_vel", 10)
         self.scan_sub = self.create_subscription(
@@ -750,6 +915,9 @@ class WaypointFollower(Node):
             if rclpy.ok():
                 self.pub.publish(msg)
             time.sleep(sleep_sec)
+
+    def spin_once(self, timeout_sec):
+        rclpy.spin_once(self, timeout_sec=timeout_sec)
 
     def wait_for_startup_gate(self, timeout_sec=None):
         if timeout_sec is None:
@@ -946,6 +1114,264 @@ class WaypointFollower(Node):
             raise BlockedByScanError(safety)
         return safety
 
+    def update_replan_diagnostics(self, result, count_replan=True):
+        diag = result.diagnostics
+        if count_replan:
+            self.diagnostics.replan_count += 1
+        self.diagnostics.last_replan_reason = result.reason
+        self.diagnostics.updated_map_yaml = result.updated_map_yaml or ""
+        self.diagnostics.updated_waypoints_csv = result.updated_waypoints_csv or ""
+        self.diagnostics.detected_obstacle_count = diag.detected_obstacle_count
+        self.diagnostics.candidate_scan_points = diag.candidate_scan_points
+        self.diagnostics.filtered_obstacle_points = diag.filtered_obstacle_points
+        self.diagnostics.raw_obstacle_cells = diag.raw_obstacle_cells
+        self.diagnostics.free_obstacle_cells = diag.free_obstacle_cells
+        self.diagnostics.inflated_cells_total = diag.inflated_cells_total
+        self.diagnostics.inflated_cells_newly_occupied = diag.inflated_cells_newly_occupied
+        self.diagnostics.inflated_cells_over_static_occupied = diag.inflated_cells_over_static_occupied
+        self.diagnostics.scan_frame = diag.scan_frame
+        self.diagnostics.scan_age_sec = diag.scan_age_sec
+        self.diagnostics.tf_age_sec = diag.tf_age_sec
+        self.diagnostics.tf_lookup_mode = diag.tf_lookup_mode
+        self.diagnostics.start_snap_distance_m = diag.start_snap_distance_m
+        self.diagnostics.goal_snap_distance_m = diag.goal_snap_distance_m
+        self.diagnostics.old_remaining_waypoint_count = diag.old_remaining_waypoint_count
+        self.diagnostics.new_waypoint_count = diag.new_waypoint_count
+        self.diagnostics.old_path_length_m = diag.old_path_length_m
+        self.diagnostics.new_path_length_m = diag.new_path_length_m
+        self.diagnostics.replan_duration_sec = diag.replan_duration_sec
+        self.diagnostics.run_local_map_updates = diag.run_local_map_updates
+        self.diagnostics.run_local_replan_count += diag.run_local_replan_count
+        self.diagnostics.run_local_last_replan_reason = diag.run_local_last_replan_reason
+        self.diagnostics.run_local_no_path_reason = diag.run_local_no_path_reason
+        self.diagnostics.run_local_start_cell_blocked = diag.run_local_start_cell_blocked
+        self.diagnostics.run_local_goal_cell_blocked = diag.run_local_goal_cell_blocked
+        self.diagnostics.run_local_path_blocked_cell_count = diag.run_local_path_blocked_cell_count
+        self.diagnostics.run_local_scan_points_valid = diag.run_local_scan_points_valid
+        self.diagnostics.run_local_scan_points_used = diag.run_local_scan_points_used
+        self.diagnostics.run_local_scan_points_rejected_invalid_range = (
+            diag.run_local_scan_points_rejected_invalid_range
+        )
+        self.diagnostics.run_local_scan_points_rejected_static = diag.run_local_scan_points_rejected_static
+        self.diagnostics.run_local_scan_points_rejected_bounds = diag.run_local_scan_points_rejected_bounds
+        self.diagnostics.run_local_scan_points_rejected_wall_band = (
+            diag.run_local_scan_points_rejected_wall_band
+        )
+        self.diagnostics.run_local_scan_points_rejected_low_confidence = (
+            diag.run_local_scan_points_rejected_low_confidence
+        )
+        self.diagnostics.run_local_update_rejected_reason = diag.run_local_update_rejected_reason
+        self.diagnostics.run_local_initial_scan_count = max(
+            self.diagnostics.run_local_initial_scan_count,
+            diag.run_local_initial_scan_count,
+        )
+        self.diagnostics.run_local_corridor_check_distance_m = (
+            diag.run_local_corridor_check_distance_m
+        )
+        self.diagnostics.run_local_inflation_radius_m = diag.run_local_inflation_radius_m
+        self.diagnostics.run_local_map_yaml = diag.run_local_map_yaml
+        self.diagnostics.run_local_waypoints_csv = diag.run_local_waypoints_csv
+        self.diagnostics.run_local_cell_source_counts = diag.run_local_cell_source_counts
+        if result.run_local_map is not None:
+            self.run_local_map = result.run_local_map
+
+    def replanned_waypoints_from_result(self, result):
+        return [
+            Waypoint(index, x, y)
+            for index, x, y in result.waypoints
+        ]
+
+    def first_motion_waypoint(self, replanned, current_pose):
+        for waypoint in replanned:
+            distance_m = math.hypot(
+                waypoint.x - current_pose.x,
+                waypoint.y - current_pose.y,
+            )
+            if distance_m > self.args.waypoint_tolerance_m:
+                return waypoint
+        return replanned[-1]
+
+    def validate_replan_result(
+        self,
+        result,
+        current_pose,
+        old_remaining_waypoints,
+        goal_waypoint,
+        require_changed=True,
+    ):
+        if not result.success:
+            raise RuntimeError(f"lidar_replan_failed:{result.reason}")
+        replanned = self.replanned_waypoints_from_result(result)
+        if not replanned:
+            raise RuntimeError("lidar_replan_failed:empty_waypoint_list")
+        final_error = waypoint_distance(replanned[-1], goal_waypoint)
+        if final_error > self.args.goal_tolerance_m:
+            raise RuntimeError(
+                "lidar_replan_failed:final_goal_mismatch "
+                f"error={final_error:.3f}"
+            )
+        old_pairs = [(round(wp.x, 3), round(wp.y, 3)) for wp in old_remaining_waypoints]
+        new_pairs = [(round(wp.x, 3), round(wp.y, 3)) for wp in replanned]
+        if require_changed and old_pairs == new_pairs:
+            raise RuntimeError("lidar_replan_failed:updated_path_matches_old_path")
+        motion_waypoint = self.first_motion_waypoint(replanned, current_pose)
+        first_base = lidar_obstacle_map.map_point_to_base(
+            motion_waypoint.x,
+            motion_waypoint.y,
+            lidar_obstacle_map.Pose2D(current_pose.x, current_pose.y, current_pose.yaw_deg),
+        )
+        if first_base.x < -self.args.robot_footprint_radius_m:
+            raise RuntimeError("lidar_replan_failed:first_waypoint_behind_robot")
+        first_heading = math.degrees(math.atan2(first_base.y, first_base.x))
+        first_heading_error = abs(shortest_angle_delta_deg(0.0, first_heading))
+        if not math.isfinite(first_heading_error) or first_heading_error > 180.0:
+            raise RuntimeError("lidar_replan_failed:first_segment_heading_unreachable")
+        if (
+            first_base.x > 0.0
+            and first_base.x < self.args.min_scan_range_m
+            and abs(first_base.y) <= self.args.obstacle_forward_half_width_m
+        ):
+            raise RuntimeError("lidar_replan_failed:first_waypoint_in_scan_stop_zone")
+        if result.inflated_obstacle_cells and result.path_cells:
+            obstacle_path_overlap = set(result.path_cells).intersection(result.inflated_obstacle_cells)
+            if obstacle_path_overlap:
+                raise RuntimeError("lidar_replan_failed:path_crosses_obstacle_cells")
+        return replanned
+
+    def initialize_run_local_route(self, current_pose, waypoints):
+        if self.args.run_local_map_initial_scan_mode == "none":
+            return list(waypoints)
+        self.stop_repeatedly()
+        goal_waypoint = waypoints[-1]
+        result = replan_runtime.perform_initial_run_local_replan(
+            self,
+            self.args,
+            current_pose,
+            goal_waypoint,
+            waypoints,
+        )
+        self.update_replan_diagnostics(result, count_replan=True)
+        replanned = self.validate_replan_result(
+            result,
+            current_pose,
+            waypoints,
+            goal_waypoint,
+            require_changed=False,
+        )
+        self.stop_repeatedly()
+        self.get_logger().info(
+            "Initial run-local obstacle map completed: "
+            f"waypoints={len(replanned)}, map={result.updated_map_yaml}"
+        )
+        return replanned
+
+    def corridor_blocked_cells(self, current_pose, remaining_waypoints):
+        if self.run_local_map is None or not remaining_waypoints:
+            return set()
+        check_distance_m = self.args.run_local_map_corridor_check_distance_m
+        corridor_radius_m = (
+            self.args.run_local_map_corridor_radius_m
+            if self.args.run_local_map_corridor_radius_m is not None
+            else self.args.run_local_map_inflation_radius_m
+        )
+        blocked = lidar_obstacle_map.path_corridor_blocked_cells(
+            self.run_local_map.static_map,
+            lidar_obstacle_map.Pose2D(
+                current_pose.x,
+                current_pose.y,
+                current_pose.yaw_deg,
+            ),
+            remaining_waypoints,
+            self.run_local_map.inflated_obstacle_cells,
+            check_distance_m,
+            corridor_radius_m,
+        )
+        self.diagnostics.run_local_corridor_check_distance_m = check_distance_m
+        self.diagnostics.run_local_path_blocked_cell_count = len(blocked)
+        return blocked
+
+    def plan_with_existing_run_local_map(self, current_pose, old_remaining_waypoints):
+        if self.run_local_map is None:
+            raise RuntimeError("lidar_replan_failed:no_run_local_map")
+        goal_waypoint = old_remaining_waypoints[-1]
+        result = replan_runtime.plan_existing_run_local_map(
+            self.args,
+            self.run_local_map,
+            current_pose,
+            goal_waypoint,
+            old_remaining_waypoints,
+            sequence=self.live_replan_attempt_count + 1,
+        )
+        self.update_replan_diagnostics(result, count_replan=True)
+        return self.validate_replan_result(
+            result,
+            current_pose,
+            old_remaining_waypoints,
+            goal_waypoint,
+            require_changed=True,
+        )
+
+    def replan_after_blockage(self, current_pose, old_remaining_waypoints):
+        if self.live_replan_attempt_count >= self.args.max_replans:
+            raise RuntimeError("lidar_replan_failed:max_replans_exceeded")
+        self.live_replan_attempt_count += 1
+        goal_waypoint = old_remaining_waypoints[-1]
+        if self.args.run_local_map_update_mode == "none":
+            replanned = self.plan_with_existing_run_local_map(
+                current_pose,
+                old_remaining_waypoints,
+            )
+            self.get_logger().info("Replanned with existing run-local map.")
+            return replanned
+        try:
+            result = replan_runtime.perform_lidar_replan(
+                self,
+                self.args,
+                current_pose,
+                goal_waypoint,
+                old_remaining_waypoints,
+                sequence=self.live_replan_attempt_count + 1,
+            )
+        except RuntimeError:
+            if self.run_local_map is None:
+                raise
+            replanned = self.plan_with_existing_run_local_map(
+                current_pose,
+                old_remaining_waypoints,
+            )
+            self.get_logger().warn(
+                "LiDAR map update failed; replanned with existing run-local map."
+            )
+            return replanned
+        self.update_replan_diagnostics(result)
+        if not result.success and self.run_local_map is not None:
+            rejected_reasons = {
+                lidar_obstacle_map.RUN_LOCAL_FAILURE_STALE_TF,
+                lidar_obstacle_map.RUN_LOCAL_FAILURE_STALE_SCAN,
+                lidar_obstacle_map.RUN_LOCAL_FAILURE_TOO_FEW_SCAN_POINTS,
+                lidar_obstacle_map.RUN_LOCAL_FAILURE_TOO_MANY_REJECTED_POINTS,
+                lidar_obstacle_map.RUN_LOCAL_FAILURE_MAX_UPDATES_EXCEEDED,
+            }
+            if result.reason in rejected_reasons:
+                self.get_logger().warn(
+                    "LiDAR map update rejected; replanning with existing run-local map."
+                )
+                return self.plan_with_existing_run_local_map(
+                    current_pose,
+                    old_remaining_waypoints,
+                )
+        replanned = self.validate_replan_result(
+            result,
+            current_pose,
+            old_remaining_waypoints,
+            goal_waypoint,
+        )
+        self.get_logger().info(
+            "LiDAR obstacle replan completed: "
+            f"waypoints={len(replanned)}, map={result.updated_map_yaml}"
+        )
+        return replanned
+
     def follow_waypoints(self, waypoints):
         reached_count = 0
         start_pose, _frame, amcl_health = self.check_health_or_recover()
@@ -955,7 +1381,24 @@ class WaypointFollower(Node):
         self.final_pose = final_pose
         self.last_amcl_health = amcl_health
 
-        for waypoint_index, waypoint in enumerate(waypoints):
+        waypoints = list(waypoints)
+        if self.args.enable_lidar_map_replan:
+            waypoints = self.initialize_run_local_route(start_pose, waypoints)
+            if self.args.lidar_replan_artifact_only:
+                self.stop_repeatedly()
+                return {
+                    "reached_count": reached_count,
+                    "start_pose": start_pose,
+                    "final_pose": final_pose,
+                    "scan_safety": last_scan_safety,
+                    "amcl_health": amcl_health,
+                    "base_frame_used": self.base_frame_used,
+                    "status": "replan_artifact_only_complete",
+                }
+
+        waypoint_index = 0
+        while waypoint_index < len(waypoints):
+            waypoint = waypoints[waypoint_index]
             self.get_logger().info(
                 f"[{waypoint_index + 1}/{len(waypoints)}] "
                 f"target waypoint {waypoint.index}: "
@@ -963,7 +1406,8 @@ class WaypointFollower(Node):
             )
             waypoint_start = time.time()
             mode = "forward"
-            is_final = waypoint_index == len(waypoints) - 1
+            reached_current = False
+            replanned_current = False
 
             while rclpy.ok():
                 pose, _frame, amcl_health = self.check_health_or_recover()
@@ -971,6 +1415,7 @@ class WaypointFollower(Node):
                 self.final_pose = final_pose
                 self.last_amcl_health = amcl_health
                 state = target_state(pose, waypoint)
+                is_final = waypoint_index == len(waypoints) - 1
 
                 if waypoint_reached(
                     state.distance_m,
@@ -982,6 +1427,7 @@ class WaypointFollower(Node):
                     self.reached_count = reached_count
                     self.stop_repeatedly()
                     time.sleep(self.args.settle_sec)
+                    reached_current = True
                     break
 
                 if time.time() - waypoint_start > self.args.max_waypoint_time_sec:
@@ -998,7 +1444,46 @@ class WaypointFollower(Node):
                     last_scan_safety = self.check_scan_or_raise(mode)
                     self.last_scan_safety = last_scan_safety
                 except BlockedByScanError as exc:
+                    if self.args.enable_lidar_map_replan:
+                        remaining = waypoints[waypoint_index:]
+                        replanned = self.replan_after_blockage(pose, remaining)
+                        if self.args.lidar_replan_artifact_only:
+                            self.stop_repeatedly()
+                            return {
+                                "reached_count": reached_count,
+                                "start_pose": start_pose,
+                                "final_pose": final_pose,
+                                "scan_safety": exc.scan_safety,
+                                "amcl_health": amcl_health,
+                                "base_frame_used": self.base_frame_used,
+                                "status": "replan_artifact_only_complete",
+                            }
+                        waypoints = replanned
+                        waypoint_index = 0
+                        replanned_current = True
+                        break
                     raise BlockedByScanError(exc.scan_safety, waypoint) from exc
+                if self.args.enable_lidar_map_replan and self.run_local_map is not None:
+                    remaining = waypoints[waypoint_index:]
+                    blocked_cells = self.corridor_blocked_cells(pose, remaining)
+                    if blocked_cells:
+                        self.stop_repeatedly()
+                        replanned = self.replan_after_blockage(pose, remaining)
+                        if self.args.lidar_replan_artifact_only:
+                            self.stop_repeatedly()
+                            return {
+                                "reached_count": reached_count,
+                                "start_pose": start_pose,
+                                "final_pose": final_pose,
+                                "scan_safety": last_scan_safety,
+                                "amcl_health": amcl_health,
+                                "base_frame_used": self.base_frame_used,
+                                "status": "replan_artifact_only_complete",
+                            }
+                        waypoints = replanned
+                        waypoint_index = 0
+                        replanned_current = True
+                        break
                 linear_x, angular_z = velocity_command(
                     state.distance_m,
                     state.yaw_error_deg,
@@ -1020,6 +1505,13 @@ class WaypointFollower(Node):
                 self.publish_velocity(linear_x, angular_z)
                 rclpy.spin_once(self, timeout_sec=1.0 / self.args.control_rate_hz)
                 time.sleep(1.0 / self.args.control_rate_hz)
+
+            if replanned_current:
+                continue
+            if reached_current:
+                waypoint_index += 1
+                continue
+            raise RuntimeError("ROS shutdown while following waypoints")
 
         return {
             "reached_count": reached_count,
@@ -1103,6 +1595,19 @@ def print_dry_run(args, raw_waypoints, executable_waypoints):
     print(f"Waypoint tolerance: {args.waypoint_tolerance_m:.3f} m")
     print(f"Goal tolerance: {args.goal_tolerance_m:.3f} m")
     print(f"Start selection: {args.start_selection}")
+    print(f"LiDAR map replan: {'enabled' if args.enable_lidar_map_replan else 'disabled'}")
+    if args.enable_lidar_map_replan:
+        print(f"  artifact only: {'yes' if args.lidar_replan_artifact_only else 'no'}")
+        print(f"  static map: {args.static_map}")
+        print(f"  output dir: {args.replan_output_dir}")
+        print(
+            "  initial scans: "
+            f"{args.run_local_map_initial_scan_mode} x "
+            f"{args.run_local_map_initial_scan_count}"
+        )
+        print(f"  update mode: {args.run_local_map_update_mode}")
+        print(f"  min hit count: {args.run_local_map_min_hit_count}")
+        print(f"  inflation radius: {args.run_local_map_inflation_radius_m:.3f} m")
     if args.start_selection == "path-progress":
         print(
             "Runtime route selection uses live TF after startup; "
@@ -1176,6 +1681,92 @@ def parse_args(argv):
     parser.add_argument("--require-amcl-startup", action="store_true")
     parser.add_argument("--fail-on-stale-tf", action="store_true")
     parser.add_argument("--no-skip-first-waypoint", action="store_true")
+    parser.add_argument("--enable-lidar-map-replan", action="store_true")
+    parser.add_argument("--lidar-replan-artifact-only", action="store_true")
+    parser.add_argument("--static-map", default=DEFAULT_STATIC_MAP, type=Path)
+    parser.add_argument("--replan-output-dir", default=DEFAULT_REPLAN_OUTPUT_DIR, type=Path)
+    parser.add_argument("--max-replans", default=1, type=int)
+    parser.add_argument("--replan-timeout-sec", default=DEFAULT_REPLAN_TIMEOUT_SEC, type=float)
+    parser.add_argument("--max-replan-scan-age-sec", default=DEFAULT_MAX_REPLAN_SCAN_AGE_SEC, type=float)
+    parser.add_argument("--max-replan-tf-age-sec", default=DEFAULT_MAX_REPLAN_TF_AGE_SEC, type=float)
+    parser.add_argument("--allow-latest-tf-replan-fallback", action="store_true")
+    parser.add_argument("--obstacle-forward-distance-m", default=DEFAULT_OBSTACLE_FORWARD_DISTANCE_M, type=float)
+    parser.add_argument("--obstacle-forward-half-width-m", default=DEFAULT_OBSTACLE_FORWARD_HALF_WIDTH_M, type=float)
+    parser.add_argument("--obstacle-angle-window-deg", default=DEFAULT_OBSTACLE_ANGLE_WINDOW_DEG, type=float)
+    parser.add_argument("--obstacle-min-range-m", default=DEFAULT_OBSTACLE_MIN_RANGE_M, type=float)
+    parser.add_argument("--robot-footprint-radius-m", default=DEFAULT_ROBOT_FOOTPRINT_RADIUS_M, type=float)
+    parser.add_argument("--obstacle-min-cluster-size", default=DEFAULT_OBSTACLE_MIN_CLUSTER_SIZE, type=int)
+    parser.add_argument("--obstacle-min-cluster-width-m", default=DEFAULT_OBSTACLE_MIN_CLUSTER_WIDTH_M, type=float)
+    parser.add_argument("--obstacle-inflate-radius-m", default=DEFAULT_OBSTACLE_INFLATE_RADIUS_M, type=float)
+    parser.add_argument("--max-start-snap-m", default=DEFAULT_MAX_START_SNAP_M, type=float)
+    parser.add_argument("--max-goal-snap-m", default=DEFAULT_MAX_GOAL_SNAP_M, type=float)
+    parser.add_argument(
+        "--max-replan-path-length-ratio",
+        default=DEFAULT_MAX_REPLAN_PATH_LENGTH_RATIO,
+        type=float,
+    )
+    parser.add_argument(
+        "--run-local-map-initial-scan-mode",
+        default=DEFAULT_RUN_LOCAL_MAP_INITIAL_SCAN_MODE,
+        choices=["none", "full"],
+    )
+    parser.add_argument(
+        "--run-local-map-initial-scan-count",
+        default=DEFAULT_RUN_LOCAL_MAP_INITIAL_SCAN_COUNT,
+        type=int,
+    )
+    parser.add_argument(
+        "--run-local-map-update-mode",
+        default=DEFAULT_RUN_LOCAL_MAP_UPDATE_MODE,
+        choices=["none", "forward", "full"],
+    )
+    parser.add_argument(
+        "--run-local-map-min-hit-count",
+        default=DEFAULT_RUN_LOCAL_MAP_MIN_HIT_COUNT,
+        type=int,
+    )
+    parser.add_argument(
+        "--run-local-map-inflation-radius-m",
+        default=DEFAULT_RUN_LOCAL_MAP_INFLATION_RADIUS_M,
+        type=float,
+    )
+    parser.add_argument(
+        "--run-local-map-max-tf-age-sec",
+        default=DEFAULT_RUN_LOCAL_MAP_MAX_TF_AGE_SEC,
+        type=float,
+    )
+    parser.add_argument(
+        "--run-local-map-max-scan-age-sec",
+        default=DEFAULT_RUN_LOCAL_MAP_MAX_SCAN_AGE_SEC,
+        type=float,
+    )
+    parser.add_argument(
+        "--run-local-map-min-used-points",
+        default=DEFAULT_RUN_LOCAL_MAP_MIN_USED_POINTS,
+        type=int,
+    )
+    parser.add_argument(
+        "--run-local-map-max-rejected-ratio",
+        default=DEFAULT_RUN_LOCAL_MAP_MAX_REJECTED_RATIO,
+        type=float,
+    )
+    parser.add_argument(
+        "--run-local-map-corridor-check-distance-m",
+        default=DEFAULT_RUN_LOCAL_MAP_CORRIDOR_CHECK_DISTANCE_M,
+        type=float,
+    )
+    parser.add_argument("--run-local-map-corridor-radius-m", type=float)
+    parser.add_argument(
+        "--run-local-map-clearance-margin-m",
+        default=DEFAULT_RUN_LOCAL_MAP_CLEARANCE_MARGIN_M,
+        type=float,
+    )
+    parser.add_argument(
+        "--run-local-map-max-updates",
+        default=DEFAULT_RUN_LOCAL_MAP_MAX_UPDATES,
+        type=int,
+    )
+    parser.add_argument("--run-local-map-artifact-prefix")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--yes", action="store_true")
     parser.add_argument("--no-log", action="store_true")
@@ -1215,6 +1806,24 @@ def validate_args(parser, args):
         "localization_recovery_time_sec",
         "control_rate_hz",
         "startup_timeout_sec",
+        "replan_timeout_sec",
+        "max_replan_scan_age_sec",
+        "max_replan_tf_age_sec",
+        "obstacle_forward_distance_m",
+        "obstacle_forward_half_width_m",
+        "obstacle_angle_window_deg",
+        "obstacle_min_range_m",
+        "robot_footprint_radius_m",
+        "obstacle_min_cluster_width_m",
+        "obstacle_inflate_radius_m",
+        "max_start_snap_m",
+        "max_goal_snap_m",
+        "max_replan_path_length_ratio",
+        "run_local_map_inflation_radius_m",
+        "run_local_map_max_tf_age_sec",
+        "run_local_map_max_scan_age_sec",
+        "run_local_map_corridor_check_distance_m",
+        "run_local_map_clearance_margin_m",
     ]
     for field in positive_fields:
         if getattr(args, field) <= 0.0:
@@ -1240,6 +1849,25 @@ def validate_args(parser, args):
         parser.error("--scan-half-angle-deg must be > 0 and <= 90")
     if args.settle_sec < 0.0:
         parser.error("--settle-sec must be non-negative")
+    if args.max_replans < 1:
+        parser.error("--max-replans must be >= 1")
+    if args.run_local_map_initial_scan_count < 1:
+        parser.error("--run-local-map-initial-scan-count must be >= 1")
+    if args.run_local_map_min_hit_count < 1:
+        parser.error("--run-local-map-min-hit-count must be >= 1")
+    if args.run_local_map_min_used_points < 1:
+        parser.error("--run-local-map-min-used-points must be >= 1")
+    if not (0.0 <= args.run_local_map_max_rejected_ratio <= 1.0):
+        parser.error("--run-local-map-max-rejected-ratio must be between 0 and 1")
+    if (
+        args.run_local_map_corridor_radius_m is not None
+        and args.run_local_map_corridor_radius_m <= 0.0
+    ):
+        parser.error("--run-local-map-corridor-radius-m must be greater than zero")
+    if args.run_local_map_max_updates < 1:
+        parser.error("--run-local-map-max-updates must be >= 1")
+    if args.obstacle_min_cluster_size < 1:
+        parser.error("--obstacle-min-cluster-size must be >= 1")
 
 
 def main(argv=None):
@@ -1318,8 +1946,8 @@ def main(argv=None):
         final_pose = result["final_pose"]
         scan_safety = result["scan_safety"]
         amcl_health = result["amcl_health"]
-        status = "completed"
-        node.diagnostics.final_status_reason = "completed"
+        status = result.get("status", "completed")
+        node.diagnostics.final_status_reason = status
         return_code = 0
 
     except KeyboardInterrupt:

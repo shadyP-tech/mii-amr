@@ -93,6 +93,44 @@ ros2 topic info /cmd_vel --verbose
 Nav2 nodes may appear as publishers while running. Make sure there is no active
 Nav2 goal before the custom follower handoff.
 
+**Optional: Live LiDAR Obstacle Debug Markers**
+Run this in a separate terminal while RViz is open. It does not publish
+`/cmd_vel`; it only subscribes to `/scan`, reads TF/map state, and publishes
+diagnostic markers.
+
+```bash
+cd /workspace/mii-amr
+
+source /opt/ros/humble/setup.bash
+source /opt/tb3_src_ws/install/setup.bash
+
+export ROS_DOMAIN_ID=30
+export ROS_LOCALHOST_ONLY=0
+export TURTLEBOT3_MODEL=burger
+export LDS_MODEL=LDS-02
+
+python3 scripts/aufgabe03/lidar_obstacle_debug_viz.py \
+  --static-map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
+  --allow-latest-tf-fallback
+```
+
+In RViz, add a `MarkerArray` display for:
+
+```text
+/mii_amr/lidar_obstacle_debug/markers
+```
+
+Marker layers:
+
+```text
+gray points: raw valid /scan returns
+yellow points/box: points inside the obstacle ROI
+blue cells: current scan cells accepted by the map filter
+green cells: confirmed temporary obstacle cells after hit-count filtering
+purple cells: inflated obstacle cells used for clearance
+red/orange cells: scan hits rejected by static map or wall-band filtering
+```
+
 **Terminal D: Preview Arena-Prior Two-Stage Run**
 
 ```bash
@@ -146,6 +184,38 @@ The coordinator will:
 ```text
 arena spin localization -> publish arena prior -> AMCL validation -> Nav2 to waypoint 0 -> custom follower
 ```
+
+**Optional: One-Shot LiDAR Obstacle Overlay Preview**
+This is an experimental Aufgabe 3 extension. It is not dynamic obstacle
+avoidance. It stops on a scan blockage, writes a one-shot map overlay and
+updated A* path, and in artifact-only mode does not resume motion.
+
+Offline synthetic artifact generation:
+
+```bash
+python3 scripts/aufgabe03/lidar_obstacle_map.py \
+  --static-map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
+  --synthetic-obstacle-base-x 0.45 \
+  --synthetic-obstacle-base-y 0.0 \
+  --robot-pose 1.0,1.0,0.0 \
+  --goal-pose 1.005,0.285,0.0 \
+  --run-id synthetic_lidar_overlay_test
+```
+
+Two-stage dry-run with obstacle-replan flags:
+
+```bash
+python3 scripts/aufgabe03/two_stage_waypoint_run.py \
+  --waypoints results/aufgabe03/aufgabe03_waypoints.csv \
+  --run-id lidar_replan_dry \
+  --dry-run \
+  --enable-lidar-map-replan \
+  --lidar-replan-artifact-only
+```
+
+Only test artifact-only mode on the robot after the normal arena-prior run is
+stable. Enable resume behavior later by removing `--lidar-replan-artifact-only`
+after the overlay artifacts prove the obstacle lands in the correct map cells.
 
 **After The Run**
 Check the coordinator log:

@@ -320,6 +320,27 @@ def build_occupancy_map(metadata, image):
     )
 
 
+def copy_occupancy_map(occupancy_map, cells=None, metadata=None):
+    copied_cells = [
+        list(row)
+        for row in (cells if cells is not None else occupancy_map.cells)
+    ]
+    return OccupancyMap(
+        metadata=metadata if metadata is not None else occupancy_map.metadata,
+        width=occupancy_map.width,
+        height=occupancy_map.height,
+        cells=copied_cells,
+    )
+
+
+def map_with_occupied_cells(occupancy_map, occupied_cells):
+    updated = copy_occupancy_map(occupancy_map)
+    for grid_x, grid_y in occupied_cells:
+        if in_bounds(updated, (grid_x, grid_y)):
+            updated.cells[grid_y][grid_x] = CELL_OCCUPIED
+    return updated
+
+
 def load_occupancy_map(path):
     metadata = read_map_metadata(path)
     image = read_pgm(metadata.image_path)
@@ -591,6 +612,85 @@ def write_ppm(path, pixel_rows):
         for row in pixel_rows:
             for red, green, blue in row:
                 file.write(bytes((red, green, blue)))
+
+
+def cell_to_pgm_pixel(cell, metadata):
+    if metadata.negate:
+        if cell == CELL_OCCUPIED:
+            return 255
+        if cell == CELL_FREE:
+            return 1
+        probability = (metadata.occupied_thresh + metadata.free_thresh) / 2.0
+        return int(round(255.0 * probability))
+    if cell == CELL_OCCUPIED:
+        return 0
+    if cell == CELL_FREE:
+        return 254
+    probability = (metadata.occupied_thresh + metadata.free_thresh) / 2.0
+    return int(round(255.0 * (1.0 - probability)))
+
+
+def occupancy_map_to_pgm_image(occupancy_map):
+    pixels = []
+    for image_row in range(occupancy_map.height):
+        row = []
+        for image_col in range(occupancy_map.width):
+            grid_x, grid_y = image_to_grid(
+                image_col,
+                image_row,
+                occupancy_map.height,
+            )
+            row.append(cell_to_pgm_pixel(
+                occupancy_map.cells[grid_y][grid_x],
+                occupancy_map.metadata,
+            ))
+        pixels.append(row)
+    return PgmImage(
+        width=occupancy_map.width,
+        height=occupancy_map.height,
+        maxval=255,
+        pixels=pixels,
+    )
+
+
+def write_pgm(path, image):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as file:
+        file.write(f"P5\n{image.width} {image.height}\n{image.maxval}\n".encode("ascii"))
+        for row in image.pixels:
+            file.write(bytes(row))
+
+
+def write_map_yaml(path, occupancy_map, image_path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image_path = Path(image_path)
+    image_value = image_path.name if image_path.parent == path.parent else str(image_path)
+    origin = occupancy_map.metadata.origin
+    lines = [
+        f"image: {image_value}",
+        f"mode: {occupancy_map.metadata.mode}",
+        f"resolution: {occupancy_map.metadata.resolution}",
+        f"origin: [{origin[0]}, {origin[1]}, {origin[2]}]",
+        f"negate: {occupancy_map.metadata.negate}",
+        f"occupied_thresh: {occupancy_map.metadata.occupied_thresh}",
+        f"free_thresh: {occupancy_map.metadata.free_thresh}",
+        "",
+    ]
+    path.write_text("\n".join(lines))
+
+
+def write_occupancy_map_copy(occupancy_map, yaml_path, pgm_path):
+    write_pgm(pgm_path, occupancy_map_to_pgm_image(occupancy_map))
+    write_map_yaml(yaml_path, occupancy_map, pgm_path)
+
+
+def snapped_distance_m(requested_world, snapped_world):
+    return math.hypot(
+        snapped_world[0] - requested_world[0],
+        snapped_world[1] - requested_world[1],
+    )
 
 
 def plan_path(

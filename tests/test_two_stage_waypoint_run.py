@@ -528,6 +528,7 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         self.assertIn("--startup-timeout-sec", command)
         self.assertEqual(command[command.index("--startup-timeout-sec") + 1], "20.0")
         self.assertIn("--max-amcl-var-yaw", command)
+        self.assertNotIn("--enable-lidar-map-replan", command)
 
         captured = {}
 
@@ -546,6 +547,42 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         self.assertIs(captured["cmd"], command)
         self.assertFalse(captured["check"])
         self.assertFalse(captured["shell"])
+
+    def test_follower_command_passes_lidar_replan_flags_only_when_enabled(self):
+        args = two_stage_cli.parse_args(
+            [
+                "--dry-run",
+                "--run-id",
+                "arena_prior_test",
+                "--enable-lidar-map-replan",
+                "--lidar-replan-artifact-only",
+                "--static-map",
+                "maps/test.yaml",
+                "--replan-output-dir",
+                "results/replan",
+                "--max-replans",
+                "2",
+                "--run-local-map-initial-scan-count",
+                "4",
+                "--run-local-map-update-mode",
+                "full",
+                "--run-local-map-min-hit-count",
+                "1",
+                "--allow-latest-tf-replan-fallback",
+            ]
+        )
+
+        command = two_stage_pure.build_follower_command(args)
+
+        self.assertIn("--enable-lidar-map-replan", command)
+        self.assertIn("--lidar-replan-artifact-only", command)
+        self.assertIn("--allow-latest-tf-replan-fallback", command)
+        self.assertEqual(command[command.index("--static-map") + 1], "maps/test.yaml")
+        self.assertEqual(command[command.index("--replan-output-dir") + 1], "results/replan")
+        self.assertEqual(command[command.index("--max-replans") + 1], "2")
+        self.assertEqual(command[command.index("--run-local-map-initial-scan-count") + 1], "4")
+        self.assertEqual(command[command.index("--run-local-map-update-mode") + 1], "full")
+        self.assertEqual(command[command.index("--run-local-map-min-hit-count") + 1], "1")
 
     def test_pose_near_waypoint_zero_selects_waypoint_one_for_path_progress(self):
         waypoints = [

@@ -27,9 +27,37 @@ from .model import (
     DEFAULT_MAX_STABLE_YAW_JUMP_DEG,
     DEFAULT_MIN_WAYPOINT_SPACING_M,
     DEFAULT_NAV_TO_START_TIMEOUT_SEC,
+    DEFAULT_MAX_GOAL_SNAP_M,
+    DEFAULT_MAX_REPLAN_PATH_LENGTH_RATIO,
+    DEFAULT_MAX_REPLAN_SCAN_AGE_SEC,
+    DEFAULT_MAX_REPLAN_TF_AGE_SEC,
+    DEFAULT_MAX_START_SNAP_M,
+    DEFAULT_OBSTACLE_ANGLE_WINDOW_DEG,
+    DEFAULT_OBSTACLE_FORWARD_DISTANCE_M,
+    DEFAULT_OBSTACLE_FORWARD_HALF_WIDTH_M,
+    DEFAULT_OBSTACLE_INFLATE_RADIUS_M,
+    DEFAULT_OBSTACLE_MIN_CLUSTER_SIZE,
+    DEFAULT_OBSTACLE_MIN_CLUSTER_WIDTH_M,
+    DEFAULT_OBSTACLE_MIN_RANGE_M,
     DEFAULT_PREFLIGHT_TIMEOUT_SEC,
+    DEFAULT_REPLAN_OUTPUT_DIR,
+    DEFAULT_REPLAN_TIMEOUT_SEC,
     DEFAULT_RESULTS_CSV,
+    DEFAULT_ROBOT_FOOTPRINT_RADIUS_M,
+    DEFAULT_RUN_LOCAL_MAP_CLEARANCE_MARGIN_M,
+    DEFAULT_RUN_LOCAL_MAP_CORRIDOR_CHECK_DISTANCE_M,
+    DEFAULT_RUN_LOCAL_MAP_INITIAL_SCAN_COUNT,
+    DEFAULT_RUN_LOCAL_MAP_INITIAL_SCAN_MODE,
+    DEFAULT_RUN_LOCAL_MAP_INFLATION_RADIUS_M,
+    DEFAULT_RUN_LOCAL_MAP_MAX_REJECTED_RATIO,
+    DEFAULT_RUN_LOCAL_MAP_MAX_SCAN_AGE_SEC,
+    DEFAULT_RUN_LOCAL_MAP_MAX_TF_AGE_SEC,
+    DEFAULT_RUN_LOCAL_MAP_MAX_UPDATES,
+    DEFAULT_RUN_LOCAL_MAP_MIN_HIT_COUNT,
+    DEFAULT_RUN_LOCAL_MAP_MIN_USED_POINTS,
+    DEFAULT_RUN_LOCAL_MAP_UPDATE_MODE,
     DEFAULT_SPIN_MIN_SCAN_RANGE_M,
+    DEFAULT_STATIC_MAP,
     DEFAULT_SPIN_MIN_VALID_SCAN_COUNT,
     DEFAULT_STABLE_AMCL_SAMPLES,
     DEFAULT_TF_LOOKUP_RETRY_PERIOD_SEC,
@@ -94,6 +122,19 @@ def print_dry_run(args, waypoints, staging_goal, follower_command):
     print(f"  cmd_vel topic: {args.cmd_vel_topic}")
     print(f"  scan topic: {args.scan_topic}")
     print(f"  odom topic: {args.odom_topic}")
+    print(f"LiDAR map replan: {'enabled' if args.enable_lidar_map_replan else 'disabled'}")
+    if args.enable_lidar_map_replan:
+        print(f"  artifact only: {'yes' if args.lidar_replan_artifact_only else 'no'}")
+        print(f"  static map: {args.static_map}")
+        print(f"  output dir: {args.replan_output_dir}")
+        print(
+            "  initial scans: "
+            f"{args.run_local_map_initial_scan_mode} x "
+            f"{args.run_local_map_initial_scan_count}"
+        )
+        print(f"  update mode: {args.run_local_map_update_mode}")
+        print(f"  min hit count: {args.run_local_map_min_hit_count}")
+        print(f"  inflation radius: {args.run_local_map_inflation_radius_m:.3f} m")
     print(f"Follower command: {shlex.join(follower_command)}")
     print(f"Log path: {args.results_csv}")
     from .ros_runtime import rclpy
@@ -193,6 +234,92 @@ def parse_args(argv):
         type=float,
     )
     parser.add_argument("--control-rate-hz", default=DEFAULT_CONTROL_RATE_HZ, type=float)
+    parser.add_argument("--enable-lidar-map-replan", action="store_true")
+    parser.add_argument("--lidar-replan-artifact-only", action="store_true")
+    parser.add_argument("--static-map", default=DEFAULT_STATIC_MAP, type=Path)
+    parser.add_argument("--replan-output-dir", default=DEFAULT_REPLAN_OUTPUT_DIR, type=Path)
+    parser.add_argument("--max-replans", default=1, type=int)
+    parser.add_argument("--replan-timeout-sec", default=DEFAULT_REPLAN_TIMEOUT_SEC, type=float)
+    parser.add_argument("--max-replan-scan-age-sec", default=DEFAULT_MAX_REPLAN_SCAN_AGE_SEC, type=float)
+    parser.add_argument("--max-replan-tf-age-sec", default=DEFAULT_MAX_REPLAN_TF_AGE_SEC, type=float)
+    parser.add_argument("--allow-latest-tf-replan-fallback", action="store_true")
+    parser.add_argument("--obstacle-forward-distance-m", default=DEFAULT_OBSTACLE_FORWARD_DISTANCE_M, type=float)
+    parser.add_argument("--obstacle-forward-half-width-m", default=DEFAULT_OBSTACLE_FORWARD_HALF_WIDTH_M, type=float)
+    parser.add_argument("--obstacle-angle-window-deg", default=DEFAULT_OBSTACLE_ANGLE_WINDOW_DEG, type=float)
+    parser.add_argument("--obstacle-min-range-m", default=DEFAULT_OBSTACLE_MIN_RANGE_M, type=float)
+    parser.add_argument("--robot-footprint-radius-m", default=DEFAULT_ROBOT_FOOTPRINT_RADIUS_M, type=float)
+    parser.add_argument("--obstacle-min-cluster-size", default=DEFAULT_OBSTACLE_MIN_CLUSTER_SIZE, type=int)
+    parser.add_argument("--obstacle-min-cluster-width-m", default=DEFAULT_OBSTACLE_MIN_CLUSTER_WIDTH_M, type=float)
+    parser.add_argument("--obstacle-inflate-radius-m", default=DEFAULT_OBSTACLE_INFLATE_RADIUS_M, type=float)
+    parser.add_argument("--max-start-snap-m", default=DEFAULT_MAX_START_SNAP_M, type=float)
+    parser.add_argument("--max-goal-snap-m", default=DEFAULT_MAX_GOAL_SNAP_M, type=float)
+    parser.add_argument(
+        "--max-replan-path-length-ratio",
+        default=DEFAULT_MAX_REPLAN_PATH_LENGTH_RATIO,
+        type=float,
+    )
+    parser.add_argument(
+        "--run-local-map-initial-scan-mode",
+        default=DEFAULT_RUN_LOCAL_MAP_INITIAL_SCAN_MODE,
+        choices=["none", "full"],
+    )
+    parser.add_argument(
+        "--run-local-map-initial-scan-count",
+        default=DEFAULT_RUN_LOCAL_MAP_INITIAL_SCAN_COUNT,
+        type=int,
+    )
+    parser.add_argument(
+        "--run-local-map-update-mode",
+        default=DEFAULT_RUN_LOCAL_MAP_UPDATE_MODE,
+        choices=["none", "forward", "full"],
+    )
+    parser.add_argument(
+        "--run-local-map-min-hit-count",
+        default=DEFAULT_RUN_LOCAL_MAP_MIN_HIT_COUNT,
+        type=int,
+    )
+    parser.add_argument(
+        "--run-local-map-inflation-radius-m",
+        default=DEFAULT_RUN_LOCAL_MAP_INFLATION_RADIUS_M,
+        type=float,
+    )
+    parser.add_argument(
+        "--run-local-map-max-tf-age-sec",
+        default=DEFAULT_RUN_LOCAL_MAP_MAX_TF_AGE_SEC,
+        type=float,
+    )
+    parser.add_argument(
+        "--run-local-map-max-scan-age-sec",
+        default=DEFAULT_RUN_LOCAL_MAP_MAX_SCAN_AGE_SEC,
+        type=float,
+    )
+    parser.add_argument(
+        "--run-local-map-min-used-points",
+        default=DEFAULT_RUN_LOCAL_MAP_MIN_USED_POINTS,
+        type=int,
+    )
+    parser.add_argument(
+        "--run-local-map-max-rejected-ratio",
+        default=DEFAULT_RUN_LOCAL_MAP_MAX_REJECTED_RATIO,
+        type=float,
+    )
+    parser.add_argument(
+        "--run-local-map-corridor-check-distance-m",
+        default=DEFAULT_RUN_LOCAL_MAP_CORRIDOR_CHECK_DISTANCE_M,
+        type=float,
+    )
+    parser.add_argument("--run-local-map-corridor-radius-m", type=float)
+    parser.add_argument(
+        "--run-local-map-clearance-margin-m",
+        default=DEFAULT_RUN_LOCAL_MAP_CLEARANCE_MARGIN_M,
+        type=float,
+    )
+    parser.add_argument(
+        "--run-local-map-max-updates",
+        default=DEFAULT_RUN_LOCAL_MAP_MAX_UPDATES,
+        type=int,
+    )
+    parser.add_argument("--run-local-map-artifact-prefix")
 
     parser.add_argument(
         "--arena-active-spin-direction",
@@ -288,6 +415,24 @@ def validate_args(parser, args):
         "waypoint_tolerance_m",
         "goal_tolerance_m",
         "control_rate_hz",
+        "replan_timeout_sec",
+        "max_replan_scan_age_sec",
+        "max_replan_tf_age_sec",
+        "obstacle_forward_distance_m",
+        "obstacle_forward_half_width_m",
+        "obstacle_angle_window_deg",
+        "obstacle_min_range_m",
+        "robot_footprint_radius_m",
+        "obstacle_min_cluster_width_m",
+        "obstacle_inflate_radius_m",
+        "max_start_snap_m",
+        "max_goal_snap_m",
+        "max_replan_path_length_ratio",
+        "run_local_map_inflation_radius_m",
+        "run_local_map_max_tf_age_sec",
+        "run_local_map_max_scan_age_sec",
+        "run_local_map_corridor_check_distance_m",
+        "run_local_map_clearance_margin_m",
         "arena_active_angular_speed_rad_s",
         "arena_active_max_spin_sec",
         "arena_active_spin_complete_tolerance_deg",
@@ -316,6 +461,25 @@ def validate_args(parser, args):
         parser.error("--amcl-settle-min-sec must be non-negative")
     if args.spin_min_valid_scan_count < 1:
         parser.error("--spin-min-valid-scan-count must be >= 1")
+    if args.max_replans < 1:
+        parser.error("--max-replans must be >= 1")
+    if args.run_local_map_initial_scan_count < 1:
+        parser.error("--run-local-map-initial-scan-count must be >= 1")
+    if args.run_local_map_min_hit_count < 1:
+        parser.error("--run-local-map-min-hit-count must be >= 1")
+    if args.run_local_map_min_used_points < 1:
+        parser.error("--run-local-map-min-used-points must be >= 1")
+    if not (0.0 <= args.run_local_map_max_rejected_ratio <= 1.0):
+        parser.error("--run-local-map-max-rejected-ratio must be between 0 and 1")
+    if (
+        args.run_local_map_corridor_radius_m is not None
+        and args.run_local_map_corridor_radius_m <= 0.0
+    ):
+        parser.error("--run-local-map-corridor-radius-m must be greater than zero")
+    if args.run_local_map_max_updates < 1:
+        parser.error("--run-local-map-max-updates must be >= 1")
+    if args.obstacle_min_cluster_size < 1:
+        parser.error("--obstacle-min-cluster-size must be >= 1")
     if args.arena_active_min_scan_samples < 1:
         parser.error("--arena-active-min-scan-samples must be >= 1")
     if args.arena_active_range_stride < 1:

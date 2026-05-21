@@ -41,9 +41,17 @@ def default_args(**overrides):
 class FakeLogger:
     def __init__(self):
         self.warnings = []
+        self.infos = []
+        self.errors = []
 
     def warn(self, message):
         self.warnings.append(message)
+
+    def info(self, message):
+        self.infos.append(message)
+
+    def error(self, message):
+        self.errors.append(message)
 
 
 class FakeHealthNode:
@@ -117,6 +125,58 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
         self.assertEqual(args.startup_timeout_sec, 20.0)
         self.assertFalse(args.require_amcl_startup)
         self.assertEqual(args.max_waypoint_time_sec, 180.0)
+        self.assertFalse(args.enable_lidar_map_replan)
+        self.assertFalse(args.lidar_replan_artifact_only)
+        self.assertEqual(args.run_local_map_initial_scan_mode, "full")
+        self.assertEqual(args.run_local_map_initial_scan_count, 5)
+        self.assertEqual(args.run_local_map_update_mode, "forward")
+        self.assertEqual(args.run_local_map_min_hit_count, 2)
+        self.assertEqual(args.run_local_map_inflation_radius_m, 0.22)
+
+    def test_lidar_replan_flags_parse_as_opt_in(self):
+        args = follower.parse_args(
+            [
+                "--dry-run",
+                "--enable-lidar-map-replan",
+                "--lidar-replan-artifact-only",
+                "--static-map",
+                "maps/test.yaml",
+                "--replan-output-dir",
+                "results/replan",
+                "--max-replans",
+                "2",
+                "--max-replan-scan-age-sec",
+                "0.5",
+                "--max-replan-tf-age-sec",
+                "0.6",
+                "--run-local-map-initial-scan-mode",
+                "none",
+                "--run-local-map-initial-scan-count",
+                "3",
+                "--run-local-map-update-mode",
+                "full",
+                "--run-local-map-min-hit-count",
+                "1",
+                "--run-local-map-inflation-radius-m",
+                "0.15",
+                "--run-local-map-corridor-check-distance-m",
+                "0.5",
+            ]
+        )
+
+        self.assertTrue(args.enable_lidar_map_replan)
+        self.assertTrue(args.lidar_replan_artifact_only)
+        self.assertEqual(args.static_map, Path("maps/test.yaml"))
+        self.assertEqual(args.replan_output_dir, Path("results/replan"))
+        self.assertEqual(args.max_replans, 2)
+        self.assertEqual(args.max_replan_scan_age_sec, 0.5)
+        self.assertEqual(args.max_replan_tf_age_sec, 0.6)
+        self.assertEqual(args.run_local_map_initial_scan_mode, "none")
+        self.assertEqual(args.run_local_map_initial_scan_count, 3)
+        self.assertEqual(args.run_local_map_update_mode, "full")
+        self.assertEqual(args.run_local_map_min_hit_count, 1)
+        self.assertEqual(args.run_local_map_inflation_radius_m, 0.15)
+        self.assertEqual(args.run_local_map_corridor_check_distance_m, 0.5)
 
     def test_waypoint_csv_parsing_and_duplicate_handling(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -754,10 +814,106 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
                 self.assertEqual(values["selected_start_segment_index"], 1)
                 self.assertEqual(values["selected_start_waypoint_index"], 2)
                 self.assertEqual(values["final_status_reason"], "test_reason")
+                self.assertIn("replan_count", values)
+                self.assertIn("updated_map_yaml", values)
                 if status == "blocked":
                     self.assertEqual(values["blocked_waypoint_index"], 2)
                 if status == "timeout":
                     self.assertEqual(values["timeout_waypoint_index"], 2)
+
+    def test_artifact_only_replan_returns_distinct_status_without_resuming(self):
+        class FakeRclpy:
+            @staticmethod
+            def ok():
+                return True
+
+        args = follower.parse_args(
+            [
+                "--dry-run",
+                "--enable-lidar-map-replan",
+                "--lidar-replan-artifact-only",
+            ]
+        )
+        node = argparse.Namespace(
+            args=args,
+            diagnostics=follower.RuntimeDiagnostics(),
+            reached_count=0,
+            start_pose=None,
+            final_pose=None,
+            last_amcl_health=None,
+            last_scan_safety=None,
+            base_frame_used="base_footprint",
+            logger=FakeLogger(),
+        )
+        pose = follower.Pose2D(0.0, 0.0, 0.0, stamp_sec=time.time())
+        amcl = follower.AmclHealth(True, [], 0.01, 0.01, 0.01, 0.1)
+        safety = follower.ScanSafety(False, "soft_stop", 4, 0.2, 0.21)
+
+        node.check_health_or_recover = lambda: (pose, "base_footprint", amcl)
+        node.check_scan_or_raise = lambda _mode: (_ for _ in ()).throw(
+            follower.BlockedByScanError(safety)
+        )
+        node.initialize_run_local_route = lambda _pose, waypoints: list(waypoints)
+        node.replan_after_blockage = lambda _pose, _remaining: [
+            follower.Waypoint(10, 0.3, 0.0),
+            follower.Waypoint(11, 0.5, 0.0),
+        ]
+        node.stop_repeatedly = lambda: None
+        node.get_logger = lambda: node.logger
+
+        original_rclpy = follower.rclpy
+        follower.rclpy = FakeRclpy
+        try:
+            result = follower.WaypointFollower.follow_waypoints(
+                node,
+                [follower.Waypoint(1, 0.4, 0.0)],
+            )
+        finally:
+            follower.rclpy = original_rclpy
+
+        self.assertEqual(result["status"], "replan_artifact_only_complete")
+
+    def test_replan_validation_rejects_first_motion_waypoint_behind_robot(self):
+        class ValidationNode:
+            replanned_waypoints_from_result = (
+                follower.WaypointFollower.replanned_waypoints_from_result
+            )
+            first_motion_waypoint = follower.WaypointFollower.first_motion_waypoint
+
+            def __init__(self):
+                self.args = default_args(
+                    goal_tolerance_m=0.12,
+                    waypoint_tolerance_m=0.12,
+                    min_scan_range_m=0.24,
+                    obstacle_forward_half_width_m=0.18,
+                    robot_footprint_radius_m=0.18,
+                )
+
+        node = ValidationNode()
+        result = follower.lidar_obstacle_map.ReplanResult(
+            success=True,
+            reason="replan_completed",
+            waypoints=[
+                (0, 0.0, 0.0),
+                (1, -0.4, 0.0),
+                (2, 0.0, 0.5),
+            ],
+        )
+        current_pose = follower.Pose2D(0.0, 0.0, 0.0)
+        old_remaining = [
+            follower.Waypoint(1, 0.4, 0.0),
+            follower.Waypoint(2, 0.0, 0.5),
+        ]
+        goal_waypoint = follower.Waypoint(2, 0.0, 0.5)
+
+        with self.assertRaisesRegex(RuntimeError, "first_waypoint_behind_robot"):
+            follower.WaypointFollower.validate_replan_result(
+                node,
+                result,
+                current_pose,
+                old_remaining,
+                goal_waypoint,
+            )
 
     def test_append_csv_row_migrates_old_header_by_appending_columns(self):
         args = default_args()
