@@ -17,6 +17,7 @@ from .model import (
     DEFAULT_ARRIVAL_YAW_TOLERANCE_DEG,
     DEFAULT_CONTROL_RATE_HZ,
     DEFAULT_FOLLOWER_SCRIPT,
+    DEFAULT_FOLLOWER_START_ON_PATH_TOLERANCE_M,
     DEFAULT_FOLLOWER_STARTUP_TIMEOUT_SEC,
     DEFAULT_GOAL_TOLERANCE_M,
     DEFAULT_MAX_AMCL_AGE_SEC,
@@ -190,6 +191,15 @@ def parse_args(argv):
         "--follower-startup-timeout-sec",
         default=DEFAULT_FOLLOWER_STARTUP_TIMEOUT_SEC,
         type=float,
+    )
+    parser.add_argument(
+        "--follower-start-on-path-tolerance-m",
+        default=DEFAULT_FOLLOWER_START_ON_PATH_TOLERANCE_M,
+        type=float,
+        help=(
+            "Maximum distance from the planned waypoint path that is accepted "
+            "for handing off from Nav2 staging to the custom follower."
+        ),
     )
 
     parser.add_argument("--max-pose-age-sec", default=DEFAULT_MAX_POSE_AGE_SEC, type=float)
@@ -509,6 +519,7 @@ def validate_args(parser, args):
         "tf_lookup_timeout_sec",
         "tf_lookup_retry_period_sec",
         "follower_startup_timeout_sec",
+        "follower_start_on_path_tolerance_m",
         "arena_active_validation_timeout_sec",
         "arena_active_max_post_amcl_prior_position_error_m",
         "arena_active_max_post_amcl_prior_yaw_error_deg",
@@ -749,7 +760,7 @@ def main(argv=None):
         diagnostics.nav2_result_status = node.navigate_to_staging(staging_goal)
         diagnostics.nav2_duration_sec = time.time() - phase_start
 
-        arrival = node.verify_arrival(staging_goal)
+        arrival = node.verify_arrival(staging_goal, waypoints)
         diagnostics.selected_base_frame = arrival.base_frame
         diagnostics.tf_arrival_x = arrival.pose.x
         diagnostics.tf_arrival_y = arrival.pose.y

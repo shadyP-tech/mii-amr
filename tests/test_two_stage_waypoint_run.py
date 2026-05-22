@@ -271,6 +271,18 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         self.assertEqual(staging.waypoint.index, 0)
         self.assertAlmostEqual(staging.yaw_deg, 90.0)
 
+    def test_distance_pose_to_waypoint_path_uses_nearest_segment(self):
+        waypoints = [
+            two_stage_model.Waypoint(0, 0.0, 0.0),
+            two_stage_model.Waypoint(1, 1.0, 0.0),
+            two_stage_model.Waypoint(2, 1.0, 1.0),
+        ]
+        pose = two_stage_model.Pose2D(0.5, 0.2, 0.0)
+
+        distance = two_stage_pure.distance_pose_to_waypoint_path_m(pose, waypoints)
+
+        self.assertAlmostEqual(distance, 0.2)
+
     def test_waypoint_csv_requires_at_least_two_points(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "waypoints.csv"
@@ -547,6 +559,11 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         self.assertEqual(command[command.index("--start-selection") + 1], "path-progress")
         self.assertIn("--startup-timeout-sec", command)
         self.assertEqual(command[command.index("--startup-timeout-sec") + 1], "20.0")
+        self.assertIn("--start-on-path-tolerance-m", command)
+        self.assertEqual(
+            command[command.index("--start-on-path-tolerance-m") + 1],
+            "0.25",
+        )
         self.assertIn("--max-amcl-var-yaw", command)
         self.assertNotIn("--enable-lidar-map-replan", command)
 
@@ -567,6 +584,73 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         self.assertIs(captured["cmd"], command)
         self.assertFalse(captured["check"])
         self.assertFalse(captured["shell"])
+
+    def test_verify_arrival_allows_path_ready_handoff_after_staging_miss(self):
+        warnings = []
+
+        class Logger:
+            def warn(self, message):
+                warnings.append(message)
+
+        class DummyCoordinator:
+            args = argparse.Namespace(
+                arrival_tolerance_m=0.15,
+                arrival_yaw_tolerance_deg=45.0,
+                follower_start_on_path_tolerance_m=0.25,
+            )
+
+            def lookup_pose(self, description=""):
+                return two_stage_model.Pose2D(0.24, 0.0, 90.0), "base_footprint"
+
+            def get_logger(self):
+                return Logger()
+
+        staging = two_stage_model.StagingGoal(two_stage_model.Waypoint(0, 0.0, 0.0), 0.0)
+        waypoints = [
+            two_stage_model.Waypoint(0, 0.0, 0.0),
+            two_stage_model.Waypoint(1, 1.0, 0.0),
+        ]
+
+        arrival = two_stage_ros.TwoStageCoordinator.verify_arrival(
+            DummyCoordinator(),
+            staging,
+            waypoints,
+        )
+
+        self.assertGreater(arrival.position_error_m, 0.15)
+        self.assertGreater(arrival.yaw_error_deg, 45.0)
+        self.assertTrue(arrival.handoff_path_ok)
+        self.assertFalse(arrival.strict_position_ok)
+        self.assertFalse(arrival.strict_yaw_ok)
+        self.assertAlmostEqual(arrival.distance_to_path_m, 0.0)
+        self.assertEqual(len(warnings), 1)
+
+    def test_verify_arrival_rejects_when_staging_miss_is_off_path(self):
+        class DummyCoordinator:
+            args = argparse.Namespace(
+                arrival_tolerance_m=0.15,
+                arrival_yaw_tolerance_deg=45.0,
+                follower_start_on_path_tolerance_m=0.25,
+            )
+
+            def lookup_pose(self, description=""):
+                return two_stage_model.Pose2D(0.24, 0.30, 0.0), "base_footprint"
+
+            def get_logger(self):
+                return argparse.Namespace(warn=lambda _message: None)
+
+        staging = two_stage_model.StagingGoal(two_stage_model.Waypoint(0, 0.0, 0.0), 0.0)
+        waypoints = [
+            two_stage_model.Waypoint(0, 0.0, 0.0),
+            two_stage_model.Waypoint(1, 1.0, 0.0),
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "Arrival position check failed"):
+            two_stage_ros.TwoStageCoordinator.verify_arrival(
+                DummyCoordinator(),
+                staging,
+                waypoints,
+            )
 
     def test_follower_command_passes_lidar_replan_flags_only_when_enabled(self):
         args = two_stage_cli.parse_args(

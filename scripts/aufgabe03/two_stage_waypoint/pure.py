@@ -119,6 +119,28 @@ def pose_distance_m(a, b):
     return math.hypot(b.x - a.x, b.y - a.y)
 
 
+def distance_point_to_segment_m(point, segment_start, segment_end):
+    dx = segment_end.x - segment_start.x
+    dy = segment_end.y - segment_start.y
+    length_sq = dx * dx + dy * dy
+    if length_sq == 0.0:
+        return math.hypot(point.x - segment_start.x, point.y - segment_start.y)
+    projection = ((point.x - segment_start.x) * dx + (point.y - segment_start.y) * dy) / length_sq
+    projection = max(0.0, min(1.0, projection))
+    closest_x = segment_start.x + projection * dx
+    closest_y = segment_start.y + projection * dy
+    return math.hypot(point.x - closest_x, point.y - closest_y)
+
+
+def distance_pose_to_waypoint_path_m(pose, waypoints):
+    if len(waypoints) < 2:
+        raise ValueError("Need at least two waypoints for path distance")
+    return min(
+        distance_point_to_segment_m(pose, waypoints[index], waypoints[index + 1])
+        for index in range(len(waypoints) - 1)
+    )
+
+
 def update_amcl_stability(
     state,
     pose,
@@ -264,6 +286,8 @@ def build_follower_command(args):
         str(args.max_amcl_age_sec),
         "--startup-timeout-sec",
         str(args.follower_startup_timeout_sec),
+        "--start-on-path-tolerance-m",
+        str(args.follower_start_on_path_tolerance_m),
         "--max-amcl-var-x",
         str(args.max_amcl_var_x),
         "--max-amcl-var-y",

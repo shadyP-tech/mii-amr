@@ -24,6 +24,8 @@ DEFAULT_TF_LOOKUP_RETRY_PERIOD_SEC = 0.1
 
 DEFAULT_FOLLOWER_STARTUP_TIMEOUT_SEC = 20.0
 
+DEFAULT_FOLLOWER_START_ON_PATH_TOLERANCE_M = 0.25
+
 DEFAULT_ARENA_ACTIVE_VALIDATION_TIMEOUT_SEC = 30.0
 
 DEFAULT_ARENA_ACTIVE_MAX_POST_AMCL_PRIOR_POSITION_ERROR_M = 0.25
@@ -244,6 +246,10 @@ class ArrivalCheck:
     base_frame: str
     position_error_m: float
     yaw_error_deg: float
+    distance_to_path_m: float | None = None
+    handoff_path_ok: bool = False
+    strict_position_ok: bool = True
+    strict_yaw_ok: bool = True
 
 
 @dataclass
