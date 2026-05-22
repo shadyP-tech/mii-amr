@@ -2,6 +2,7 @@ import argparse
 import contextlib
 import csv
 import io
+import json
 import math
 import subprocess
 import sys
@@ -63,6 +64,8 @@ def fake_tf_node(tf_buffer, **overrides):
         tf_lookup_retry_period_sec=0.001,
         tf_ready_timeout_sec=0.05,
         max_pose_age_sec=10.0,
+        arena_active_max_post_amcl_prior_position_error_m=0.25,
+        arena_active_max_post_amcl_prior_yaw_error_deg=20.0,
     )
     for key, value in overrides.items():
         setattr(args, key, value)
@@ -78,6 +81,12 @@ def fake_tf_node(tf_buffer, **overrides):
     node.lookup_pose = two_stage_ros.TwoStageCoordinator.lookup_pose.__get__(node, type(node))
     node.validate_post_localization_tf = (
         two_stage_ros.TwoStageCoordinator.validate_post_localization_tf.__get__(
+            node,
+            type(node),
+        )
+    )
+    node.validate_post_amcl_pose_prior = (
+        two_stage_ros.TwoStageCoordinator.validate_post_amcl_pose_prior.__get__(
             node,
             type(node),
         )
@@ -768,6 +777,77 @@ class TwoStageWaypointRunTest(unittest.TestCase):
                 two_stage_ros.TwoStageCoordinator.lookup_pose(node)
         finally:
             two_stage_ros.rclpy = original_rclpy
+
+    def test_post_amcl_pose_prior_validation_logs_and_accepts_small_delta(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            diagnostics_path = Path(tmpdir) / "arena_active_result.json"
+            arena_result = argparse.Namespace(
+                diagnostics={},
+                diagnostics_path=diagnostics_path,
+            )
+            node = fake_tf_node(None)
+            pose_prior = arena_active_spin.PosePrior(
+                x_m=1.0,
+                y_m=-0.5,
+                yaw_rad=math.radians(30.0),
+                covariance=[0.0] * 36,
+            )
+            observed = two_stage_model.Pose2D(1.05, -0.53, 37.0)
+
+            validation = two_stage_ros.TwoStageCoordinator.validate_post_amcl_pose_prior(
+                node,
+                pose_prior,
+                observed,
+                arena_result,
+                "base_footprint",
+            )
+            diagnostics = json.loads(diagnostics_path.read_text())
+
+        self.assertTrue(validation["ok"])
+        self.assertEqual(
+            diagnostics["post_amcl_pose_prior_validation"]["frame"],
+            "base_footprint",
+        )
+        self.assertAlmostEqual(
+            diagnostics["post_amcl_pose_prior_validation"]["position_error_m"],
+            math.hypot(0.05, -0.03),
+        )
+
+    def test_post_amcl_pose_prior_validation_rejects_large_delta_before_nav2(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            diagnostics_path = Path(tmpdir) / "arena_active_result.json"
+            arena_result = argparse.Namespace(
+                diagnostics={},
+                diagnostics_path=diagnostics_path,
+            )
+            node = fake_tf_node(
+                None,
+                arena_active_max_post_amcl_prior_position_error_m=0.25,
+                arena_active_max_post_amcl_prior_yaw_error_deg=20.0,
+            )
+            pose_prior = arena_active_spin.PosePrior(
+                x_m=0.0,
+                y_m=0.0,
+                yaw_rad=0.0,
+                covariance=[0.0] * 36,
+            )
+            observed = two_stage_model.Pose2D(0.40, 0.0, 25.0)
+
+            with self.assertRaisesRegex(RuntimeError, "Post-AMCL pose differs"):
+                two_stage_ros.TwoStageCoordinator.validate_post_amcl_pose_prior(
+                    node,
+                    pose_prior,
+                    observed,
+                    arena_result,
+                    "base_footprint",
+                )
+            diagnostics = json.loads(diagnostics_path.read_text())
+
+        self.assertFalse(diagnostics["post_amcl_pose_prior_validation"]["ok"])
+        self.assertAlmostEqual(
+            diagnostics["post_amcl_pose_prior_validation"]["position_error_m"],
+            0.40,
+        )
 
     def test_log_row_contains_clean_schema_and_follower_command(self):
         args = two_stage_cli.parse_args(["--dry-run", "--run-id", "arena_prior_test"])

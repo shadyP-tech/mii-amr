@@ -504,6 +504,47 @@ class TwoStageCoordinator(Node):
             description="post-localization TF",
         )
 
+    def validate_post_amcl_pose_prior(self, pose_prior, observed_pose, arena_result, frame):
+        prior_yaw_deg = math.degrees(pose_prior.yaw_rad)
+        dx = observed_pose.x - pose_prior.x_m
+        dy = observed_pose.y - pose_prior.y_m
+        position_error_m = math.hypot(dx, dy)
+        yaw_error_deg = abs(shortest_angle_delta_deg(prior_yaw_deg, observed_pose.yaw_deg))
+        validation = {
+            "ok": (
+                position_error_m
+                <= self.args.arena_active_max_post_amcl_prior_position_error_m
+                and yaw_error_deg
+                <= self.args.arena_active_max_post_amcl_prior_yaw_error_deg
+            ),
+            "frame": frame,
+            "prior_x_m": pose_prior.x_m,
+            "prior_y_m": pose_prior.y_m,
+            "prior_yaw_deg": prior_yaw_deg,
+            "observed_x_m": observed_pose.x,
+            "observed_y_m": observed_pose.y,
+            "observed_yaw_deg": observed_pose.yaw_deg,
+            "dx_m": dx,
+            "dy_m": dy,
+            "position_error_m": position_error_m,
+            "yaw_error_deg": yaw_error_deg,
+            "max_position_error_m": (
+                self.args.arena_active_max_post_amcl_prior_position_error_m
+            ),
+            "max_yaw_error_deg": self.args.arena_active_max_post_amcl_prior_yaw_error_deg,
+        }
+        arena_result.diagnostics["post_amcl_pose_prior_validation"] = validation
+        write_diagnostics_json(arena_result.diagnostics_path, arena_result.diagnostics)
+        if not validation["ok"]:
+            raise RuntimeError(
+                "Post-AMCL pose differs from arena prior: "
+                f"position_error_m={position_error_m:.3f} "
+                f"limit={validation['max_position_error_m']:.3f}, "
+                f"yaw_error_deg={yaw_error_deg:.1f} "
+                f"limit={validation['max_yaw_error_deg']:.1f}"
+            )
+        return validation
+
     def navigate_to_staging(self, staging_goal):
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose.header.frame_id = self.args.map_frame

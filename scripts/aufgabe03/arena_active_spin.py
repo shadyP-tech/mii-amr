@@ -102,9 +102,9 @@ class ArenaActiveSpinConfig:
     control_rate_hz: float = 10.0
     enable_center_reposition: bool = False
     center_reposition_max_attempts: int = 1
-    center_reposition_target_nearest_short_wall_range_m: float = 1.40
+    center_reposition_target_nearest_short_wall_range_m: float = 1.65
     center_reposition_min_step_m: float = 0.25
-    center_reposition_max_step_m: float = 0.80
+    center_reposition_max_step_m: float = 1.10
     center_reposition_linear_speed_mps: float = 0.08
     center_reposition_angular_speed_rad_s: float = 0.25
     center_reposition_heading_tolerance_deg: float = 8.0
@@ -815,6 +815,7 @@ class ArenaActiveSpinSession:
         start = self.now()
         self.turn_to_heading(publisher, action.odom_heading_rad)
         stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
+        self.wait_for_fresh_inputs()
         driven = self.drive_forward(publisher, action.planned_distance_m)
         stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
         return {

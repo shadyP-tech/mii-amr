@@ -10,6 +10,8 @@ from .experiment_log import append_csv_row, build_log_row
 from .model import (
     CSV_HEADER,
     DEFAULT_AMCL_SETTLE_MIN_SEC,
+    DEFAULT_ARENA_ACTIVE_MAX_POST_AMCL_PRIOR_POSITION_ERROR_M,
+    DEFAULT_ARENA_ACTIVE_MAX_POST_AMCL_PRIOR_YAW_ERROR_DEG,
     DEFAULT_ARENA_ACTIVE_VALIDATION_TIMEOUT_SEC,
     DEFAULT_ARRIVAL_TOLERANCE_M,
     DEFAULT_ARRIVAL_YAW_TOLERANCE_DEG,
@@ -356,6 +358,16 @@ def parse_args(argv):
         default=DEFAULT_ARENA_ACTIVE_VALIDATION_TIMEOUT_SEC,
         type=float,
     )
+    parser.add_argument(
+        "--arena-active-max-post-amcl-prior-position-error-m",
+        default=DEFAULT_ARENA_ACTIVE_MAX_POST_AMCL_PRIOR_POSITION_ERROR_M,
+        type=float,
+    )
+    parser.add_argument(
+        "--arena-active-max-post-amcl-prior-yaw-error-deg",
+        default=DEFAULT_ARENA_ACTIVE_MAX_POST_AMCL_PRIOR_YAW_ERROR_DEG,
+        type=float,
+    )
     parser.add_argument("--arena-active-diagnostics-json", type=Path)
     parser.add_argument("--arena-active-range-stride", default=6, type=int)
     parser.add_argument("--arena-active-max-points", default=3000, type=int)
@@ -368,11 +380,11 @@ def parse_args(argv):
     parser.add_argument("--arena-active-center-reposition-max-attempts", default=1, type=int)
     parser.add_argument(
         "--arena-active-center-reposition-target-nearest-short-wall-range-m",
-        default=1.40,
+        default=1.65,
         type=float,
     )
     parser.add_argument("--arena-active-center-reposition-min-step-m", default=0.25, type=float)
-    parser.add_argument("--arena-active-center-reposition-max-step-m", default=0.80, type=float)
+    parser.add_argument("--arena-active-center-reposition-max-step-m", default=1.10, type=float)
     parser.add_argument(
         "--arena-active-center-reposition-linear-speed-mps",
         default=0.08,
@@ -437,6 +449,8 @@ def validate_args(parser, args):
         "tf_lookup_retry_period_sec",
         "follower_startup_timeout_sec",
         "arena_active_validation_timeout_sec",
+        "arena_active_max_post_amcl_prior_position_error_m",
+        "arena_active_max_post_amcl_prior_yaw_error_deg",
         "max_pose_age_sec",
         "max_scan_age_sec",
         "max_amcl_age_sec",
@@ -623,8 +637,14 @@ def main(argv=None):
         diagnostics.max_pose_jump_m = stability.max_pose_jump_m
         diagnostics.max_yaw_jump_deg = stability.max_yaw_jump_deg
 
-        _pose, frame = node.validate_post_localization_tf()
+        post_amcl_pose, frame = node.validate_post_localization_tf()
         diagnostics.selected_base_frame = frame
+        node.validate_post_amcl_pose_prior(
+            arena_result.pose_prior,
+            post_amcl_pose,
+            arena_result,
+            frame,
+        )
 
         phase_start = time.time()
         diagnostics.nav2_result_status = node.navigate_to_staging(staging_goal)

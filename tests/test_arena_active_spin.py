@@ -251,7 +251,7 @@ class ArenaActiveSpinTest(unittest.TestCase):
         self.assertTrue(action.ok)
         self.assertEqual(action.nearest_axis_side, "axis_negative")
         self.assertEqual(action.away_axis_side, "axis_positive")
-        self.assertAlmostEqual(action.planned_distance_m, 0.68)
+        self.assertAlmostEqual(action.planned_distance_m, 0.93)
         self.assertAlmostEqual(action.local_heading_rad, 0.25)
         self.assertAlmostEqual(action.odom_heading_rad, 0.35)
 
@@ -268,7 +268,7 @@ class ArenaActiveSpinTest(unittest.TestCase):
             config,
         )
         near_action = active_spin.choose_center_reposition_action(
-            fake_pose_not_unique_result(negative_range=1.25, positive_range=2.65),
+            fake_pose_not_unique_result(negative_range=1.50, positive_range=2.40),
             config,
         )
 
@@ -295,6 +295,52 @@ class ArenaActiveSpinTest(unittest.TestCase):
 
         self.assertFalse(action.ok)
         self.assertEqual(action.reason, "center_reposition_range_sum_invalid")
+
+    def test_center_reposition_refreshes_inputs_between_turn_and_drive(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            node = FakeNode()
+            publisher = FakePublisher()
+            time_box = {"now": 0.0}
+            config = active_spin.ArenaActiveSpinConfig(
+                run_id="reposition_handoff_test",
+                diagnostics_path=Path(tmpdir) / "diag.json",
+                require_operator_confirmation=False,
+            )
+            session = active_spin.ArenaActiveSpinSession(
+                node,
+                config,
+                FakeRclpy(node, time_box),
+                FakeTwist,
+                object,
+                object,
+                None,
+                sleep_fn=lambda delay: time_box.__setitem__("now", time_box["now"] + delay),
+            )
+            events = []
+
+            def freshen():
+                events.append("wait")
+                session.latest_scan = fake_scan()
+                session.latest_scan_received_sec = session.now()
+                session.latest_odom_pose = arena.Pose2D()
+                session.latest_odom_yaw_rad = 0.0
+                session.latest_odom_received_sec = session.now()
+
+            session.wait_for_fresh_inputs = freshen
+            session.refresh_fresh_inputs_after_prompt = lambda: None
+            session.turn_to_heading = lambda _publisher, _heading: events.append("turn")
+            session.drive_forward = lambda _publisher, _distance: events.append("drive") or 0.5
+            action = active_spin.CenterRepositionAction(
+                ok=True,
+                reason="center_reposition_toward_arena_center",
+                planned_distance_m=0.5,
+                odom_heading_rad=0.0,
+            )
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                session.execute_center_reposition(publisher, action)
+
+        self.assertEqual(events, ["wait", "turn", "wait", "drive"])
 
     def test_localizer_exception_writes_diagnostics_and_stops(self):
         with tempfile.TemporaryDirectory() as tmpdir:
