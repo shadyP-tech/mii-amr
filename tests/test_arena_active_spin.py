@@ -374,10 +374,13 @@ class ArenaActiveSpinTest(unittest.TestCase):
         self.assertEqual([step.kind for step in action.steps], ["longitudinal", "lateral"])
         lateral = action.steps[1]
         self.assertAlmostEqual(lateral.planned_distance_m, 0.40)
-        self.assertAlmostEqual(lateral.local_heading_rad, math.pi / 2.0)
+        self.assertAlmostEqual(
+            lateral.local_heading_rad,
+            active_spin.normalize_angle_rad(math.pi / 2.0 + math.pi),
+        )
         self.assertAlmostEqual(
             lateral.odom_heading_rad,
-            0.10 + math.pi / 2.0,
+            active_spin.normalize_angle_rad(0.10 + math.pi / 2.0 + math.pi),
         )
         self.assertFalse(action.lateral_step_skipped)
 
@@ -403,14 +406,8 @@ class ArenaActiveSpinTest(unittest.TestCase):
 
         self.assertTrue(action.ok)
         lateral = action.steps[1]
-        self.assertAlmostEqual(
-            lateral.local_heading_rad,
-            active_spin.normalize_angle_rad(math.pi / 2.0 + math.pi),
-        )
-        self.assertAlmostEqual(
-            lateral.odom_heading_rad,
-            active_spin.normalize_angle_rad(0.10 + math.pi / 2.0 + math.pi),
-        )
+        self.assertAlmostEqual(lateral.local_heading_rad, math.pi / 2.0)
+        self.assertAlmostEqual(lateral.odom_heading_rad, 0.10 + math.pi / 2.0)
 
     def test_center_reposition_lateral_regression_for_real_negative_offset(self):
         config = active_spin.ArenaActiveSpinConfig(
@@ -437,13 +434,10 @@ class ArenaActiveSpinTest(unittest.TestCase):
         self.assertEqual([step.kind for step in action.steps], ["longitudinal", "lateral"])
         lateral = action.steps[1]
         self.assertAlmostEqual(lateral.planned_distance_m, 0.2872003294910733)
-        self.assertAlmostEqual(
-            lateral.local_heading_rad,
-            active_spin.normalize_angle_rad(0.7679448708775052 + math.pi),
-        )
+        self.assertAlmostEqual(lateral.local_heading_rad, 0.7679448708775052)
         self.assertAlmostEqual(
             lateral.odom_heading_rad,
-            active_spin.normalize_angle_rad(1.7085612863302231 + 0.7679448708775052 + math.pi),
+            active_spin.normalize_angle_rad(1.7085612863302231 + 0.7679448708775052),
         )
 
     def test_center_reposition_action_clamps_lateral_step(self):

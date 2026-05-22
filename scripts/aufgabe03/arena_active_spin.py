@@ -322,7 +322,7 @@ def choose_center_reposition_action(result, config: ArenaActiveSpinConfig, origi
                 config.center_reposition_lateral_min_step_m,
                 config.center_reposition_lateral_max_step_m,
             )
-            lateral_heading = normal_angle if lateral_offset > 0.0 else normal_angle + math.pi
+            lateral_heading = normal_angle if lateral_offset < 0.0 else normal_angle + math.pi
             lateral_odom_heading = normalize_angle_rad(origin_yaw_rad + lateral_heading)
             steps.append(
                 CenterRepositionStep(
