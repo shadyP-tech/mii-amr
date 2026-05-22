@@ -172,6 +172,30 @@ def arena_active_config_from_args(args):
         center_reposition_lateral_max_step_m=(
             args.arena_active_center_reposition_lateral_max_step_m
         ),
+        center_reposition_enable_heater_approach=(
+            args.arena_active_center_reposition_enable_heater_approach
+        ),
+        center_reposition_heater_approach_max_attempts=(
+            args.arena_active_center_reposition_heater_approach_max_attempts
+        ),
+        center_reposition_heater_approach_target_range_m=(
+            args.arena_active_center_reposition_heater_approach_target_range_m
+        ),
+        center_reposition_heater_approach_min_selected_score=(
+            args.arena_active_center_reposition_heater_approach_min_selected_score
+        ),
+        center_reposition_heater_approach_max_opposite_score=(
+            args.arena_active_center_reposition_heater_approach_max_opposite_score
+        ),
+        center_reposition_heater_approach_min_delta=(
+            args.arena_active_center_reposition_heater_approach_min_delta
+        ),
+        center_reposition_heater_approach_min_step_m=(
+            args.arena_active_center_reposition_heater_approach_min_step_m
+        ),
+        center_reposition_heater_approach_max_step_m=(
+            args.arena_active_center_reposition_heater_approach_max_step_m
+        ),
         arena_config=arena_config,
     )
 

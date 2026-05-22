@@ -97,7 +97,7 @@ def require_motion_confirmation(args, staging_goal, follower_command):
     print("  - keep Ctrl+C and physical stop available")
     print("  - ensure no other controller is intentionally publishing /cmd_vel")
     if args.arena_active_enable_center_reposition:
-        print("  - center-reposition recovery may drive before /initialpose is published")
+        print("  - reposition recovery may drive before /initialpose is published")
     print(f"Run ID: {args.run_id}")
     print(
         "Staging goal: "
@@ -425,6 +425,47 @@ def parse_args(argv):
         default=0.55,
         type=float,
     )
+    parser.add_argument(
+        "--arena-active-disable-heater-approach-reposition",
+        dest="arena_active_center_reposition_enable_heater_approach",
+        action="store_false",
+        default=True,
+    )
+    parser.add_argument(
+        "--arena-active-center-reposition-heater-approach-max-attempts",
+        default=1,
+        type=int,
+    )
+    parser.add_argument(
+        "--arena-active-center-reposition-heater-approach-target-range-m",
+        default=1.05,
+        type=float,
+    )
+    parser.add_argument(
+        "--arena-active-center-reposition-heater-approach-min-selected-score",
+        default=0.50,
+        type=float,
+    )
+    parser.add_argument(
+        "--arena-active-center-reposition-heater-approach-max-opposite-score",
+        default=0.30,
+        type=float,
+    )
+    parser.add_argument(
+        "--arena-active-center-reposition-heater-approach-min-delta",
+        default=0.35,
+        type=float,
+    )
+    parser.add_argument(
+        "--arena-active-center-reposition-heater-approach-min-step-m",
+        default=0.25,
+        type=float,
+    )
+    parser.add_argument(
+        "--arena-active-center-reposition-heater-approach-max-step-m",
+        default=1.10,
+        type=float,
+    )
     parser.add_argument("--arena-length-m", default=3.90, type=float)
     parser.add_argument("--arena-width-m", type=float)
     parser.add_argument("--arena-heater-wall-width-m", default=2.016, type=float)
@@ -524,6 +565,12 @@ def validate_args(parser, args):
         "arena_active_center_reposition_lateral_target_offset_m",
         "arena_active_center_reposition_lateral_min_step_m",
         "arena_active_center_reposition_lateral_max_step_m",
+        "arena_active_center_reposition_heater_approach_target_range_m",
+        "arena_active_center_reposition_heater_approach_min_selected_score",
+        "arena_active_center_reposition_heater_approach_max_opposite_score",
+        "arena_active_center_reposition_heater_approach_min_delta",
+        "arena_active_center_reposition_heater_approach_min_step_m",
+        "arena_active_center_reposition_heater_approach_max_step_m",
         "arena_length_m",
         "arena_heater_wall_width_m",
         "arena_clean_wall_width_m",
@@ -569,6 +616,10 @@ def validate_args(parser, args):
         parser.error("--arena-active-max-points must be >= 1")
     if args.arena_active_center_reposition_max_attempts < 1:
         parser.error("--arena-active-center-reposition-max-attempts must be >= 1")
+    if args.arena_active_center_reposition_heater_approach_max_attempts < 1:
+        parser.error(
+            "--arena-active-center-reposition-heater-approach-max-attempts must be >= 1"
+        )
     if (
         args.arena_active_center_reposition_min_step_m
         > args.arena_active_center_reposition_max_step_m
@@ -585,6 +636,22 @@ def validate_args(parser, args):
             "--arena-active-center-reposition-lateral-min-step-m must be <= "
             "--arena-active-center-reposition-lateral-max-step-m"
         )
+    if (
+        args.arena_active_center_reposition_heater_approach_min_step_m
+        > args.arena_active_center_reposition_heater_approach_max_step_m
+    ):
+        parser.error(
+            "--arena-active-center-reposition-heater-approach-min-step-m must be <= "
+            "--arena-active-center-reposition-heater-approach-max-step-m"
+        )
+    for field in [
+        "arena_active_center_reposition_heater_approach_min_selected_score",
+        "arena_active_center_reposition_heater_approach_max_opposite_score",
+        "arena_active_center_reposition_heater_approach_min_delta",
+    ]:
+        value = getattr(args, field)
+        if value > 1.0:
+            parser.error(f"--{field.replace('_', '-')} must be <= 1")
     if args.arena_width_m is not None and args.arena_width_m <= 0.0:
         parser.error("--arena-width-m must be greater than zero")
     if args.arena_width_match_min_margin_m < 0.0:

@@ -73,14 +73,20 @@ class CenterRepositionAction:
     reason: str
     nearest_axis_side: str | None = None
     away_axis_side: str | None = None
+    suspected_heater_axis_side: str | None = None
     nearest_short_wall_range_m: float | None = None
     far_short_wall_range_m: float | None = None
+    suspected_heater_range_m: float | None = None
     target_nearest_short_wall_range_m: float | None = None
+    heater_approach_target_range_m: float | None = None
     planned_distance_m: float | None = None
     local_heading_rad: float | None = None
     odom_heading_rad: float | None = None
     range_sum_error_m: float | None = None
     heater_scores: dict[str, float] | None = None
+    selected_heater_score: float | None = None
+    opposite_heater_score: float | None = None
+    heater_profile_delta: float | None = None
     lateral_offset_m: float | None = None
     lateral_target_offset_m: float | None = None
     lateral_planned_distance_m: float | None = None
@@ -131,6 +137,14 @@ class ArenaActiveSpinConfig:
     center_reposition_lateral_target_offset_m: float = 0.10
     center_reposition_lateral_min_step_m: float = 0.15
     center_reposition_lateral_max_step_m: float = 0.55
+    center_reposition_enable_heater_approach: bool = True
+    center_reposition_heater_approach_max_attempts: int = 1
+    center_reposition_heater_approach_target_range_m: float = 1.05
+    center_reposition_heater_approach_min_selected_score: float = 0.50
+    center_reposition_heater_approach_max_opposite_score: float = 0.30
+    center_reposition_heater_approach_min_delta: float = 0.35
+    center_reposition_heater_approach_min_step_m: float = 0.25
+    center_reposition_heater_approach_max_step_m: float = 1.10
     arena_config: ArenaGeometryConfig = field(default_factory=ArenaGeometryConfig)
 
 
@@ -172,6 +186,37 @@ def candidate_range(candidate):
     return float(value)
 
 
+def candidate_heater_score(candidate):
+    if candidate is None:
+        return None
+    value = getattr(candidate, "heater_profile_score", None)
+    if value is None or not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def candidate_profile_valid(candidate):
+    if candidate is None:
+        return False
+    reason = getattr(candidate, "validity_failed_reason", None)
+    if reason is not None:
+        return False
+    features = getattr(candidate, "profile_features", None) or {}
+    return features.get("validity_failed_reason") is None
+
+
+def short_wall_ranges_and_error(result, config: ArenaActiveSpinConfig):
+    candidates = result.short_wall_candidates or {}
+    negative = candidates.get("axis_negative")
+    positive = candidates.get("axis_positive")
+    negative_range = candidate_range(negative)
+    positive_range = candidate_range(positive)
+    if negative_range is None or positive_range is None:
+        return None, None, None, None, None, None
+    range_sum_error = negative_range + positive_range - config.arena_config.arena_length_m
+    return candidates, negative, positive, negative_range, positive_range, range_sum_error
+
+
 def choose_center_reposition_action(result, config: ArenaActiveSpinConfig, origin_yaw_rad=0.0):
     if not config.enable_center_reposition:
         return CenterRepositionAction(False, "center_reposition_disabled")
@@ -181,16 +226,17 @@ def choose_center_reposition_action(result, config: ArenaActiveSpinConfig, origi
     if not getattr(long_fit, "ok", False) or long_fit.axis_angle_rad is None:
         return CenterRepositionAction(False, "center_reposition_invalid_long_wall_fit")
 
-    candidates = result.short_wall_candidates or {}
-    negative = candidates.get("axis_negative")
-    positive = candidates.get("axis_positive")
-    negative_range = candidate_range(negative)
-    positive_range = candidate_range(positive)
+    (
+        _candidates,
+        negative,
+        positive,
+        negative_range,
+        positive_range,
+        range_sum_error,
+    ) = short_wall_ranges_and_error(result, config)
     if negative_range is None or positive_range is None:
         return CenterRepositionAction(False, "center_reposition_missing_short_wall_ranges")
 
-    range_sum = negative_range + positive_range
-    range_sum_error = range_sum - config.arena_config.arena_length_m
     if abs(range_sum_error) > config.arena_config.max_short_wall_range_sum_error_m:
         return CenterRepositionAction(
             False,
@@ -276,7 +322,7 @@ def choose_center_reposition_action(result, config: ArenaActiveSpinConfig, origi
                 config.center_reposition_lateral_min_step_m,
                 config.center_reposition_lateral_max_step_m,
             )
-            lateral_heading = normal_angle if lateral_offset < 0.0 else normal_angle + math.pi
+            lateral_heading = normal_angle if lateral_offset > 0.0 else normal_angle + math.pi
             lateral_odom_heading = normalize_angle_rad(origin_yaw_rad + lateral_heading)
             steps.append(
                 CenterRepositionStep(
@@ -338,6 +384,135 @@ def choose_center_reposition_action(result, config: ArenaActiveSpinConfig, origi
         lateral_step_skipped=lateral_step_skipped,
         lateral_skip_reason=lateral_skip_reason,
         steps=tuple(steps),
+    )
+
+
+def choose_heater_approach_reposition_action(
+    result,
+    config: ArenaActiveSpinConfig,
+    origin_yaw_rad=0.0,
+):
+    if not config.enable_center_reposition:
+        return CenterRepositionAction(False, "heater_approach_reposition_disabled")
+    if not config.center_reposition_enable_heater_approach:
+        return CenterRepositionAction(False, "heater_approach_reposition_disabled")
+    if result.success or result.failure_reason != "pose_not_unique":
+        return CenterRepositionAction(False, "heater_approach_not_pose_not_unique")
+    long_fit = result.long_wall_fit
+    if not getattr(long_fit, "ok", False) or long_fit.axis_angle_rad is None:
+        return CenterRepositionAction(False, "heater_approach_invalid_long_wall_fit")
+
+    (
+        _candidates,
+        negative,
+        positive,
+        negative_range,
+        positive_range,
+        range_sum_error,
+    ) = short_wall_ranges_and_error(result, config)
+    if negative_range is None or positive_range is None:
+        return CenterRepositionAction(False, "heater_approach_missing_short_wall_ranges")
+    if abs(range_sum_error) > config.arena_config.max_short_wall_range_sum_error_m:
+        return CenterRepositionAction(
+            False,
+            "heater_approach_range_sum_invalid",
+            range_sum_error_m=range_sum_error,
+        )
+    if not candidate_profile_valid(negative) or not candidate_profile_valid(positive):
+        return CenterRepositionAction(
+            False,
+            "heater_approach_profile_invalid",
+            range_sum_error_m=range_sum_error,
+        )
+
+    negative_score = candidate_heater_score(negative)
+    positive_score = candidate_heater_score(positive)
+    if negative_score is None or positive_score is None:
+        return CenterRepositionAction(
+            False,
+            "heater_approach_missing_heater_scores",
+            range_sum_error_m=range_sum_error,
+        )
+
+    if negative_score >= positive_score:
+        selected_side = "axis_negative"
+        selected_range = negative_range
+        selected_score = negative_score
+        opposite_score = positive_score
+    else:
+        selected_side = "axis_positive"
+        selected_range = positive_range
+        selected_score = positive_score
+        opposite_score = negative_score
+    delta = selected_score - opposite_score
+    heater_scores = {
+        "axis_negative": negative_score,
+        "axis_positive": positive_score,
+    }
+    common = {
+        "suspected_heater_axis_side": selected_side,
+        "suspected_heater_range_m": selected_range,
+        "heater_approach_target_range_m": (
+            config.center_reposition_heater_approach_target_range_m
+        ),
+        "range_sum_error_m": range_sum_error,
+        "heater_scores": heater_scores,
+        "selected_heater_score": selected_score,
+        "opposite_heater_score": opposite_score,
+        "heater_profile_delta": delta,
+    }
+    if selected_score < config.center_reposition_heater_approach_min_selected_score:
+        return CenterRepositionAction(
+            False,
+            "heater_approach_selected_score_too_low",
+            **common,
+        )
+    if opposite_score > config.center_reposition_heater_approach_max_opposite_score:
+        return CenterRepositionAction(
+            False,
+            "heater_approach_opposite_score_too_high",
+            **common,
+        )
+    if delta < config.center_reposition_heater_approach_min_delta:
+        return CenterRepositionAction(
+            False,
+            "heater_approach_delta_too_low",
+            **common,
+        )
+
+    raw_step = selected_range - config.center_reposition_heater_approach_target_range_m
+    if raw_step < config.center_reposition_heater_approach_min_step_m:
+        return CenterRepositionAction(
+            False,
+            "heater_approach_not_useful_already_near_target",
+            planned_distance_m=max(0.0, raw_step),
+            **common,
+        )
+
+    planned_distance = clamp(
+        raw_step,
+        config.center_reposition_heater_approach_min_step_m,
+        config.center_reposition_heater_approach_max_step_m,
+    )
+    local_heading = long_fit.axis_angle_rad
+    if selected_side == "axis_negative":
+        local_heading += math.pi
+    odom_heading = normalize_angle_rad(origin_yaw_rad + local_heading)
+    step = CenterRepositionStep(
+        kind="heater_approach",
+        reason="heater_approach_toward_suspected_heater",
+        planned_distance_m=planned_distance,
+        local_heading_rad=normalize_angle_rad(local_heading),
+        odom_heading_rad=odom_heading,
+    )
+    return CenterRepositionAction(
+        True,
+        "heater_approach_toward_suspected_heater",
+        planned_distance_m=planned_distance,
+        local_heading_rad=step.local_heading_rad,
+        odom_heading_rad=odom_heading,
+        steps=(step,),
+        **common,
     )
 
 
@@ -896,11 +1071,16 @@ class ArenaActiveSpinSession:
         raise RuntimeError("center_reposition_drive_timeout")
 
     def print_reposition_prompt(self, action: CenterRepositionAction):
-        print("\nArena-active center reposition recovery")
+        print("\nArena-active reposition recovery")
         print(f"  nearest short wall: {action.nearest_axis_side}")
         print(f"  away direction: {action.away_axis_side}")
         print(f"  nearest range: {action.nearest_short_wall_range_m}")
         print(f"  target nearest range: {action.target_nearest_short_wall_range_m}")
+        print(f"  suspected heater wall: {action.suspected_heater_axis_side}")
+        print(f"  suspected heater range: {action.suspected_heater_range_m}")
+        print(f"  target heater range: {action.heater_approach_target_range_m}")
+        print(f"  heater scores: {action.heater_scores}")
+        print(f"  heater delta: {action.heater_profile_delta}")
         print(f"  lateral offset: {action.lateral_offset_m}")
         print(f"  target lateral offset: {action.lateral_target_offset_m}")
         steps = list(action.steps)
@@ -1015,7 +1195,8 @@ class ArenaActiveSpinSession:
                     origin_yaw = self.first_sample_origin_yaw_rad()
                     action = choose_center_reposition_action(result, self.config, origin_yaw)
                     attempt_record = {
-                        "attempt_index": reposition_attempts,
+                        "attempt_index": len(self.diagnostics["reposition"]["attempts"]),
+                        "stage": "center",
                         "previous_failure_reason": result.failure_reason,
                         "previous_classifier_reason": result.short_wall_classification.reason,
                         "action": action.to_dict(),
@@ -1028,6 +1209,43 @@ class ArenaActiveSpinSession:
                     attempt_record["motion"] = motion_record
                     reposition_attempts += 1
                     self.run_spin_attempt(publisher, attempt_index=reposition_attempts)
+                    result = self.analyze_result()
+                    attempt_record["post_reposition_success"] = result.success
+                    attempt_record["post_reposition_failure_reason"] = result.failure_reason
+                    attempt_record["post_reposition_classifier_reason"] = (
+                        result.short_wall_classification.reason
+                    )
+                heater_approach_attempts = 0
+                while (
+                    not result.success
+                    and self.config.center_reposition_enable_heater_approach
+                    and heater_approach_attempts
+                    < self.config.center_reposition_heater_approach_max_attempts
+                ):
+                    origin_yaw = self.first_sample_origin_yaw_rad()
+                    action = choose_heater_approach_reposition_action(
+                        result,
+                        self.config,
+                        origin_yaw,
+                    )
+                    attempt_record = {
+                        "attempt_index": len(self.diagnostics["reposition"]["attempts"]),
+                        "stage": "heater_approach",
+                        "previous_failure_reason": result.failure_reason,
+                        "previous_classifier_reason": result.short_wall_classification.reason,
+                        "action": action.to_dict(),
+                    }
+                    self.diagnostics["reposition"]["attempts"].append(attempt_record)
+                    if not action.ok:
+                        break
+                    self.diagnostics["fallback_used"] = True
+                    motion_record = self.execute_center_reposition(publisher, action)
+                    attempt_record["motion"] = motion_record
+                    heater_approach_attempts += 1
+                    self.run_spin_attempt(
+                        publisher,
+                        attempt_index=len(self.diagnostics["spin_attempts"]),
+                    )
                     result = self.analyze_result()
                     attempt_record["post_reposition_success"] = result.success
                     attempt_record["post_reposition_failure_reason"] = result.failure_reason
