@@ -56,6 +56,18 @@ class SectorClearance:
 
 
 @dataclass(frozen=True)
+class CenterRepositionStep:
+    kind: str
+    reason: str
+    planned_distance_m: float
+    local_heading_rad: float | None
+    odom_heading_rad: float
+
+    def to_dict(self):
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class CenterRepositionAction:
     ok: bool
     reason: str
@@ -69,6 +81,12 @@ class CenterRepositionAction:
     odom_heading_rad: float | None = None
     range_sum_error_m: float | None = None
     heater_scores: dict[str, float] | None = None
+    lateral_offset_m: float | None = None
+    lateral_target_offset_m: float | None = None
+    lateral_planned_distance_m: float | None = None
+    lateral_step_skipped: bool = True
+    lateral_skip_reason: str | None = None
+    steps: tuple[CenterRepositionStep, ...] = ()
 
     def to_dict(self):
         return asdict(self)
@@ -109,6 +127,10 @@ class ArenaActiveSpinConfig:
     center_reposition_angular_speed_rad_s: float = 0.25
     center_reposition_heading_tolerance_deg: float = 8.0
     center_reposition_min_front_clearance_m: float = 0.45
+    center_reposition_lateral_offset_threshold_m: float = 0.25
+    center_reposition_lateral_target_offset_m: float = 0.10
+    center_reposition_lateral_min_step_m: float = 0.15
+    center_reposition_lateral_max_step_m: float = 0.55
     arena_config: ArenaGeometryConfig = field(default_factory=ArenaGeometryConfig)
 
 
@@ -185,8 +207,90 @@ def choose_center_reposition_action(result, config: ArenaActiveSpinConfig, origi
         nearest_range = positive_range
         far_range = negative_range
     away_side = opposite_axis_side(nearest_side)
+
+    heater_scores = {
+        "axis_negative": getattr(negative, "heater_profile_score", None),
+        "axis_positive": getattr(positive, "heater_profile_score", None),
+    }
+    steps = []
+
     raw_step = config.center_reposition_target_nearest_short_wall_range_m - nearest_range
-    if raw_step < config.center_reposition_min_step_m:
+    planned_distance = None
+    local_heading = None
+    odom_heading = None
+    if raw_step >= config.center_reposition_min_step_m:
+        planned_distance = clamp(
+            raw_step,
+            config.center_reposition_min_step_m,
+            config.center_reposition_max_step_m,
+        )
+        local_heading = long_fit.axis_angle_rad
+        if away_side == "axis_negative":
+            local_heading += math.pi
+        odom_heading = normalize_angle_rad(origin_yaw_rad + local_heading)
+        steps.append(
+            CenterRepositionStep(
+                kind="longitudinal",
+                reason="center_reposition_away_from_nearest_short_wall",
+                planned_distance_m=planned_distance,
+                local_heading_rad=normalize_angle_rad(local_heading),
+                odom_heading_rad=odom_heading,
+            )
+        )
+
+    lateral_offset = getattr(long_fit, "lateral_offset_m", None)
+    lateral_target = config.center_reposition_lateral_target_offset_m
+    lateral_planned_distance = None
+    lateral_step_skipped = True
+    lateral_skip_reason = "center_reposition_lateral_offset_unavailable"
+    if lateral_offset is not None and math.isfinite(lateral_offset):
+        lateral_error = abs(float(lateral_offset))
+        if lateral_error <= config.center_reposition_lateral_offset_threshold_m:
+            lateral_skip_reason = "center_reposition_lateral_offset_within_threshold"
+        else:
+            normal_angle = getattr(long_fit, "normal_angle_rad", None)
+            if normal_angle is None or not math.isfinite(normal_angle):
+                return CenterRepositionAction(
+                    False,
+                    "center_reposition_missing_lateral_normal",
+                    nearest_axis_side=nearest_side,
+                    away_axis_side=away_side,
+                    nearest_short_wall_range_m=nearest_range,
+                    far_short_wall_range_m=far_range,
+                    target_nearest_short_wall_range_m=(
+                        config.center_reposition_target_nearest_short_wall_range_m
+                    ),
+                    planned_distance_m=planned_distance if planned_distance is not None else max(0.0, raw_step),
+                    range_sum_error_m=range_sum_error,
+                    heater_scores=heater_scores,
+                    lateral_offset_m=float(lateral_offset),
+                    lateral_target_offset_m=lateral_target,
+                    lateral_planned_distance_m=None,
+                    lateral_step_skipped=True,
+                    lateral_skip_reason="center_reposition_missing_lateral_normal",
+                    steps=tuple(steps),
+                )
+            lateral_raw_step = max(0.0, lateral_error - lateral_target)
+            lateral_planned_distance = clamp(
+                lateral_raw_step,
+                config.center_reposition_lateral_min_step_m,
+                config.center_reposition_lateral_max_step_m,
+            )
+            lateral_heading = normal_angle if lateral_offset < 0.0 else normal_angle + math.pi
+            lateral_odom_heading = normalize_angle_rad(origin_yaw_rad + lateral_heading)
+            steps.append(
+                CenterRepositionStep(
+                    kind="lateral",
+                    reason="center_reposition_reduce_lateral_offset",
+                    planned_distance_m=lateral_planned_distance,
+                    local_heading_rad=normalize_angle_rad(lateral_heading),
+                    odom_heading_rad=lateral_odom_heading,
+                )
+            )
+            lateral_step_skipped = False
+            lateral_skip_reason = None
+
+    if not steps:
         return CenterRepositionAction(
             False,
             "center_reposition_not_useful_already_near_target",
@@ -199,21 +303,20 @@ def choose_center_reposition_action(result, config: ArenaActiveSpinConfig, origi
             ),
             planned_distance_m=max(0.0, raw_step),
             range_sum_error_m=range_sum_error,
-            heater_scores={
-                "axis_negative": getattr(negative, "heater_profile_score", None),
-                "axis_positive": getattr(positive, "heater_profile_score", None),
-            },
+            heater_scores=heater_scores,
+            lateral_offset_m=lateral_offset,
+            lateral_target_offset_m=lateral_target,
+            lateral_planned_distance_m=lateral_planned_distance,
+            lateral_step_skipped=lateral_step_skipped,
+            lateral_skip_reason=lateral_skip_reason,
         )
 
-    planned_distance = clamp(
-        raw_step,
-        config.center_reposition_min_step_m,
-        config.center_reposition_max_step_m,
-    )
-    local_heading = long_fit.axis_angle_rad
-    if away_side == "axis_negative":
-        local_heading += math.pi
-    odom_heading = normalize_angle_rad(origin_yaw_rad + local_heading)
+    if planned_distance is None:
+        first_step = steps[0]
+        planned_distance = first_step.planned_distance_m
+        local_heading = first_step.local_heading_rad
+        odom_heading = first_step.odom_heading_rad
+
     return CenterRepositionAction(
         True,
         "center_reposition_toward_arena_center",
@@ -225,13 +328,16 @@ def choose_center_reposition_action(result, config: ArenaActiveSpinConfig, origi
             config.center_reposition_target_nearest_short_wall_range_m
         ),
         planned_distance_m=planned_distance,
-        local_heading_rad=normalize_angle_rad(local_heading),
+        local_heading_rad=None if local_heading is None else normalize_angle_rad(local_heading),
         odom_heading_rad=odom_heading,
         range_sum_error_m=range_sum_error,
-        heater_scores={
-            "axis_negative": getattr(negative, "heater_profile_score", None),
-            "axis_positive": getattr(positive, "heater_profile_score", None),
-        },
+        heater_scores=heater_scores,
+        lateral_offset_m=lateral_offset,
+        lateral_target_offset_m=lateral_target,
+        lateral_planned_distance_m=lateral_planned_distance,
+        lateral_step_skipped=lateral_step_skipped,
+        lateral_skip_reason=lateral_skip_reason,
+        steps=tuple(steps),
     )
 
 
@@ -795,14 +901,44 @@ class ArenaActiveSpinSession:
         print(f"  away direction: {action.away_axis_side}")
         print(f"  nearest range: {action.nearest_short_wall_range_m}")
         print(f"  target nearest range: {action.target_nearest_short_wall_range_m}")
-        print(f"  planned drive distance: {action.planned_distance_m}")
-        print(f"  target odom heading deg: {math.degrees(action.odom_heading_rad or 0.0):.1f}")
-        print("  expected action: turn toward arena center, drive forward, then spin again")
+        print(f"  lateral offset: {action.lateral_offset_m}")
+        print(f"  target lateral offset: {action.lateral_target_offset_m}")
+        steps = list(action.steps)
+        if not steps and action.odom_heading_rad is not None and action.planned_distance_m is not None:
+            steps = [
+                CenterRepositionStep(
+                    kind="legacy",
+                    reason=action.reason,
+                    planned_distance_m=action.planned_distance_m,
+                    local_heading_rad=action.local_heading_rad,
+                    odom_heading_rad=action.odom_heading_rad,
+                )
+            ]
+        for index, step in enumerate(steps, start=1):
+            print(
+                f"  step {index} {step.kind}: "
+                f"distance={step.planned_distance_m:.3f} m, "
+                f"target odom heading={math.degrees(step.odom_heading_rad):.1f} deg"
+            )
+        if action.lateral_step_skipped:
+            print(f"  lateral step: skipped ({action.lateral_skip_reason})")
+        print("  expected action: turn, drive, optionally turn sideways, drive, then spin again")
         if self.config.require_operator_confirmation:
             self.input_fn("Press Enter to start center reposition, or Ctrl+C to abort: ")
 
     def execute_center_reposition(self, publisher, action: CenterRepositionAction):
-        if not action.ok or action.odom_heading_rad is None or action.planned_distance_m is None:
+        steps = list(action.steps)
+        if not steps and action.odom_heading_rad is not None and action.planned_distance_m is not None:
+            steps = [
+                CenterRepositionStep(
+                    kind="legacy",
+                    reason=action.reason,
+                    planned_distance_m=action.planned_distance_m,
+                    local_heading_rad=action.local_heading_rad,
+                    odom_heading_rad=action.odom_heading_rad,
+                )
+            ]
+        if not action.ok or not steps:
             raise RuntimeError(action.reason)
         self.wait_for_fresh_inputs()
         self.print_reposition_prompt(action)
@@ -813,16 +949,30 @@ class ArenaActiveSpinSession:
             raise RuntimeError(f"reposition_precheck_clearance_failed:{clearance.reason}")
 
         start = self.now()
-        self.turn_to_heading(publisher, action.odom_heading_rad)
-        stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
-        self.wait_for_fresh_inputs()
-        driven = self.drive_forward(publisher, action.planned_distance_m)
-        stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
-        return {
-            **action.to_dict(),
-            "driven_distance_m": driven,
-            "duration_sec": self.now() - start,
-        }
+        total_driven = 0.0
+        step_records = []
+        for index, step in enumerate(steps):
+            if index > 0:
+                self.wait_for_fresh_inputs()
+            step_start = self.now()
+            self.turn_to_heading(publisher, step.odom_heading_rad)
+            stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
+            self.wait_for_fresh_inputs()
+            driven = self.drive_forward(publisher, step.planned_distance_m)
+            stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
+            total_driven += driven
+            step_records.append(
+                {
+                    **step.to_dict(),
+                    "driven_distance_m": driven,
+                    "duration_sec": self.now() - step_start,
+                }
+            )
+        record = action.to_dict()
+        record["steps"] = step_records
+        record["driven_distance_m"] = total_driven
+        record["duration_sec"] = self.now() - start
+        return record
 
     def finish_failure(self, reason, exception=None):
         self.diagnostics["success"] = False

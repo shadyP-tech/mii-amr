@@ -160,6 +160,18 @@ def arena_active_config_from_args(args):
         center_reposition_min_front_clearance_m=(
             args.arena_active_center_reposition_min_front_clearance_m
         ),
+        center_reposition_lateral_offset_threshold_m=(
+            args.arena_active_center_reposition_lateral_offset_threshold_m
+        ),
+        center_reposition_lateral_target_offset_m=(
+            args.arena_active_center_reposition_lateral_target_offset_m
+        ),
+        center_reposition_lateral_min_step_m=(
+            args.arena_active_center_reposition_lateral_min_step_m
+        ),
+        center_reposition_lateral_max_step_m=(
+            args.arena_active_center_reposition_lateral_max_step_m
+        ),
         arena_config=arena_config,
     )
 

@@ -405,6 +405,26 @@ def parse_args(argv):
         default=0.45,
         type=float,
     )
+    parser.add_argument(
+        "--arena-active-center-reposition-lateral-offset-threshold-m",
+        default=0.25,
+        type=float,
+    )
+    parser.add_argument(
+        "--arena-active-center-reposition-lateral-target-offset-m",
+        default=0.10,
+        type=float,
+    )
+    parser.add_argument(
+        "--arena-active-center-reposition-lateral-min-step-m",
+        default=0.15,
+        type=float,
+    )
+    parser.add_argument(
+        "--arena-active-center-reposition-lateral-max-step-m",
+        default=0.55,
+        type=float,
+    )
     parser.add_argument("--arena-length-m", default=3.90, type=float)
     parser.add_argument("--arena-width-m", type=float)
     parser.add_argument("--arena-heater-wall-width-m", default=2.016, type=float)
@@ -500,6 +520,10 @@ def validate_args(parser, args):
         "arena_active_center_reposition_angular_speed_rad_s",
         "arena_active_center_reposition_heading_tolerance_deg",
         "arena_active_center_reposition_min_front_clearance_m",
+        "arena_active_center_reposition_lateral_offset_threshold_m",
+        "arena_active_center_reposition_lateral_target_offset_m",
+        "arena_active_center_reposition_lateral_min_step_m",
+        "arena_active_center_reposition_lateral_max_step_m",
         "arena_length_m",
         "arena_heater_wall_width_m",
         "arena_clean_wall_width_m",
@@ -552,6 +576,14 @@ def validate_args(parser, args):
         parser.error(
             "--arena-active-center-reposition-min-step-m must be <= "
             "--arena-active-center-reposition-max-step-m"
+        )
+    if (
+        args.arena_active_center_reposition_lateral_min_step_m
+        > args.arena_active_center_reposition_lateral_max_step_m
+    ):
+        parser.error(
+            "--arena-active-center-reposition-lateral-min-step-m must be <= "
+            "--arena-active-center-reposition-lateral-max-step-m"
         )
     if args.arena_width_m is not None and args.arena_width_m <= 0.0:
         parser.error("--arena-width-m must be greater than zero")

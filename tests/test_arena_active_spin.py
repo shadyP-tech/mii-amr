@@ -54,7 +54,13 @@ def fake_candidate(axis_side, range_m, heater_score=0.0):
     )
 
 
-def fake_pose_not_unique_result(negative_range=0.7, positive_range=3.2, axis_angle_rad=0.0):
+def fake_pose_not_unique_result(
+    negative_range=0.7,
+    positive_range=3.2,
+    axis_angle_rad=0.0,
+    normal_angle_rad=None,
+    lateral_offset_m=None,
+):
     return arena.ArenaGeometryResult(
         success=False,
         failure_reason="pose_not_unique",
@@ -66,6 +72,8 @@ def fake_pose_not_unique_result(negative_range=0.7, positive_range=3.2, axis_ang
             ok=True,
             reason="ok",
             axis_angle_rad=axis_angle_rad,
+            normal_angle_rad=normal_angle_rad,
+            lateral_offset_m=lateral_offset_m,
         ),
         short_wall_classification=arena.ShortWallClassification(
             arena.WALL_UNKNOWN,
@@ -254,6 +262,7 @@ class ArenaActiveSpinTest(unittest.TestCase):
         self.assertAlmostEqual(action.planned_distance_m, 0.93)
         self.assertAlmostEqual(action.local_heading_rad, 0.25)
         self.assertAlmostEqual(action.odom_heading_rad, 0.35)
+        self.assertEqual([step.kind for step in action.steps], ["longitudinal"])
 
     def test_center_reposition_action_clamps_step_and_rejects_near_target(self):
         config = active_spin.ArenaActiveSpinConfig(
@@ -279,6 +288,137 @@ class ArenaActiveSpinTest(unittest.TestCase):
             near_action.reason,
             "center_reposition_not_useful_already_near_target",
         )
+
+    def test_center_reposition_action_skips_lateral_when_offset_small(self):
+        config = active_spin.ArenaActiveSpinConfig(
+            run_id="reposition_lateral_skip_test",
+            diagnostics_path=Path("unused.json"),
+            enable_center_reposition=True,
+            require_operator_confirmation=False,
+        )
+
+        action = active_spin.choose_center_reposition_action(
+            fake_pose_not_unique_result(
+                negative_range=0.72,
+                positive_range=3.13,
+                axis_angle_rad=0.25,
+                normal_angle_rad=1.25,
+                lateral_offset_m=0.10,
+            ),
+            config,
+        )
+
+        self.assertTrue(action.ok)
+        self.assertEqual([step.kind for step in action.steps], ["longitudinal"])
+        self.assertTrue(action.lateral_step_skipped)
+        self.assertEqual(
+            action.lateral_skip_reason,
+            "center_reposition_lateral_offset_within_threshold",
+        )
+
+    def test_center_reposition_action_adds_lateral_step_for_positive_offset(self):
+        config = active_spin.ArenaActiveSpinConfig(
+            run_id="reposition_lateral_positive_test",
+            diagnostics_path=Path("unused.json"),
+            enable_center_reposition=True,
+            require_operator_confirmation=False,
+        )
+
+        action = active_spin.choose_center_reposition_action(
+            fake_pose_not_unique_result(
+                negative_range=0.72,
+                positive_range=3.13,
+                axis_angle_rad=0.25,
+                normal_angle_rad=math.pi / 2.0,
+                lateral_offset_m=0.50,
+            ),
+            config,
+            origin_yaw_rad=0.10,
+        )
+
+        self.assertTrue(action.ok)
+        self.assertEqual([step.kind for step in action.steps], ["longitudinal", "lateral"])
+        lateral = action.steps[1]
+        self.assertAlmostEqual(lateral.planned_distance_m, 0.40)
+        self.assertAlmostEqual(
+            lateral.local_heading_rad,
+            active_spin.normalize_angle_rad(math.pi / 2.0 + math.pi),
+        )
+        self.assertAlmostEqual(
+            lateral.odom_heading_rad,
+            active_spin.normalize_angle_rad(0.10 + math.pi / 2.0 + math.pi),
+        )
+        self.assertFalse(action.lateral_step_skipped)
+
+    def test_center_reposition_action_adds_lateral_step_for_negative_offset(self):
+        config = active_spin.ArenaActiveSpinConfig(
+            run_id="reposition_lateral_negative_test",
+            diagnostics_path=Path("unused.json"),
+            enable_center_reposition=True,
+            require_operator_confirmation=False,
+        )
+
+        action = active_spin.choose_center_reposition_action(
+            fake_pose_not_unique_result(
+                negative_range=0.72,
+                positive_range=3.13,
+                axis_angle_rad=0.25,
+                normal_angle_rad=math.pi / 2.0,
+                lateral_offset_m=-0.50,
+            ),
+            config,
+            origin_yaw_rad=0.10,
+        )
+
+        self.assertTrue(action.ok)
+        lateral = action.steps[1]
+        self.assertAlmostEqual(lateral.local_heading_rad, math.pi / 2.0)
+        self.assertAlmostEqual(lateral.odom_heading_rad, 0.10 + math.pi / 2.0)
+
+    def test_center_reposition_action_clamps_lateral_step(self):
+        config = active_spin.ArenaActiveSpinConfig(
+            run_id="reposition_lateral_clamp_test",
+            diagnostics_path=Path("unused.json"),
+            enable_center_reposition=True,
+            require_operator_confirmation=False,
+            center_reposition_lateral_max_step_m=0.35,
+        )
+
+        action = active_spin.choose_center_reposition_action(
+            fake_pose_not_unique_result(
+                negative_range=1.50,
+                positive_range=2.40,
+                normal_angle_rad=math.pi / 2.0,
+                lateral_offset_m=1.00,
+            ),
+            config,
+        )
+
+        self.assertTrue(action.ok)
+        self.assertEqual([step.kind for step in action.steps], ["lateral"])
+        self.assertAlmostEqual(action.steps[0].planned_distance_m, 0.35)
+        self.assertAlmostEqual(action.lateral_planned_distance_m, 0.35)
+
+    def test_center_reposition_action_rejects_missing_lateral_normal(self):
+        config = active_spin.ArenaActiveSpinConfig(
+            run_id="reposition_lateral_missing_normal_test",
+            diagnostics_path=Path("unused.json"),
+            enable_center_reposition=True,
+            require_operator_confirmation=False,
+        )
+
+        action = active_spin.choose_center_reposition_action(
+            fake_pose_not_unique_result(
+                negative_range=0.72,
+                positive_range=3.13,
+                normal_angle_rad=None,
+                lateral_offset_m=0.50,
+            ),
+            config,
+        )
+
+        self.assertFalse(action.ok)
+        self.assertEqual(action.reason, "center_reposition_missing_lateral_normal")
 
     def test_center_reposition_action_rejects_invalid_range_sum(self):
         config = active_spin.ArenaActiveSpinConfig(
@@ -341,6 +481,122 @@ class ArenaActiveSpinTest(unittest.TestCase):
                 session.execute_center_reposition(publisher, action)
 
         self.assertEqual(events, ["wait", "turn", "wait", "drive"])
+
+    def test_center_reposition_executes_two_steps_with_fresh_handoffs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            node = FakeNode()
+            publisher = FakePublisher()
+            time_box = {"now": 0.0}
+            config = active_spin.ArenaActiveSpinConfig(
+                run_id="reposition_two_step_test",
+                diagnostics_path=Path(tmpdir) / "diag.json",
+                require_operator_confirmation=False,
+            )
+            session = active_spin.ArenaActiveSpinSession(
+                node,
+                config,
+                FakeRclpy(node, time_box),
+                FakeTwist,
+                object,
+                object,
+                None,
+                sleep_fn=lambda delay: time_box.__setitem__("now", time_box["now"] + delay),
+            )
+            events = []
+
+            def freshen():
+                events.append("wait")
+                session.latest_scan = fake_scan()
+                session.latest_scan_received_sec = session.now()
+                session.latest_odom_pose = arena.Pose2D()
+                session.latest_odom_yaw_rad = 0.0
+                session.latest_odom_received_sec = session.now()
+
+            session.wait_for_fresh_inputs = freshen
+            session.refresh_fresh_inputs_after_prompt = lambda: None
+            session.turn_to_heading = lambda _publisher, _heading: events.append("turn")
+            session.drive_forward = lambda _publisher, distance: events.append("drive") or distance
+            action = active_spin.CenterRepositionAction(
+                ok=True,
+                reason="center_reposition_toward_arena_center",
+                steps=(
+                    active_spin.CenterRepositionStep(
+                        "longitudinal",
+                        "center_reposition_away_from_nearest_short_wall",
+                        0.50,
+                        0.0,
+                        0.0,
+                    ),
+                    active_spin.CenterRepositionStep(
+                        "lateral",
+                        "center_reposition_reduce_lateral_offset",
+                        0.30,
+                        math.pi / 2.0,
+                        math.pi / 2.0,
+                    ),
+                ),
+            )
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                record = session.execute_center_reposition(publisher, action)
+
+        self.assertEqual(events, ["wait", "turn", "wait", "drive", "wait", "turn", "wait", "drive"])
+        self.assertAlmostEqual(record["driven_distance_m"], 0.80)
+        self.assertEqual(len(record["steps"]), 2)
+        self.assertGreaterEqual(len(publisher.messages), 40)
+
+    def test_center_reposition_second_step_failure_propagates(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            node = FakeNode()
+            publisher = FakePublisher()
+            time_box = {"now": 0.0}
+            config = active_spin.ArenaActiveSpinConfig(
+                run_id="reposition_two_step_stale_test",
+                diagnostics_path=Path(tmpdir) / "diag.json",
+                require_operator_confirmation=False,
+            )
+            session = active_spin.ArenaActiveSpinSession(
+                node,
+                config,
+                FakeRclpy(node, time_box),
+                FakeTwist,
+                object,
+                object,
+                None,
+                sleep_fn=lambda delay: time_box.__setitem__("now", time_box["now"] + delay),
+            )
+
+            def freshen():
+                session.latest_scan = fake_scan()
+                session.latest_scan_received_sec = session.now()
+                session.latest_odom_pose = arena.Pose2D()
+                session.latest_odom_yaw_rad = 0.0
+                session.latest_odom_received_sec = session.now()
+
+            drive_calls = {"count": 0}
+
+            def drive(_publisher, distance):
+                drive_calls["count"] += 1
+                if drive_calls["count"] == 2:
+                    raise RuntimeError("stale_scan_during_reposition_drive")
+                return distance
+
+            session.wait_for_fresh_inputs = freshen
+            session.refresh_fresh_inputs_after_prompt = lambda: None
+            session.turn_to_heading = lambda _publisher, _heading: None
+            session.drive_forward = drive
+            action = active_spin.CenterRepositionAction(
+                ok=True,
+                reason="center_reposition_toward_arena_center",
+                steps=(
+                    active_spin.CenterRepositionStep("longitudinal", "long", 0.50, 0.0, 0.0),
+                    active_spin.CenterRepositionStep("lateral", "lat", 0.30, 1.0, 1.0),
+                ),
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "stale_scan_during_reposition_drive"):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    session.execute_center_reposition(publisher, action)
 
     def test_localizer_exception_writes_diagnostics_and_stops(self):
         with tempfile.TemporaryDirectory() as tmpdir:
