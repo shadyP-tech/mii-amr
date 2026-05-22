@@ -62,6 +62,8 @@ class CenterRepositionStep:
     planned_distance_m: float
     local_heading_rad: float | None
     odom_heading_rad: float
+    dynamic_heading: bool = False
+    dynamic_heading_source: str | None = None
 
     def to_dict(self):
         return asdict(self)
@@ -327,10 +329,12 @@ def choose_center_reposition_action(result, config: ArenaActiveSpinConfig, origi
             steps.append(
                 CenterRepositionStep(
                     kind="lateral",
-                    reason="center_reposition_reduce_lateral_offset",
+                    reason="center_reposition_reduce_lateral_offset_dynamic",
                     planned_distance_m=lateral_planned_distance,
                     local_heading_rad=normalize_angle_rad(lateral_heading),
                     odom_heading_rad=lateral_odom_heading,
+                    dynamic_heading=True,
+                    dynamic_heading_source="live_side_clearance",
                 )
             )
             lateral_step_skipped = False
@@ -616,6 +620,26 @@ def evaluate_reposition_clearance(scan, config: ArenaActiveSpinConfig):
         if value < limit:
             return SectorClearance(False, low_reason, front, left, right, rear)
     return SectorClearance(True, "ok", front, left, right, rear)
+
+
+def dynamic_lateral_heading_from_scan(scan, current_yaw_rad):
+    left = min_sector_range(scan, [(60.0, 120.0)])
+    right = min_sector_range(scan, [(-120.0, -60.0)])
+    if left is None or right is None:
+        raise RuntimeError("center_reposition_dynamic_lateral_clearance_missing")
+    if left >= right:
+        return {
+            "odom_heading_rad": normalize_angle_rad(current_yaw_rad + math.pi / 2.0),
+            "direction": "left",
+            "left_clearance_m": left,
+            "right_clearance_m": right,
+        }
+    return {
+        "odom_heading_rad": normalize_angle_rad(current_yaw_rad - math.pi / 2.0),
+        "direction": "right",
+        "left_clearance_m": left,
+        "right_clearance_m": right,
+    }
 
 
 def covariance_list_from_localizer(covariance):
@@ -1095,10 +1119,13 @@ class ArenaActiveSpinSession:
                 )
             ]
         for index, step in enumerate(steps, start=1):
+            heading_text = f"{math.degrees(step.odom_heading_rad):.1f} deg"
+            if step.dynamic_heading:
+                heading_text = f"dynamic ({step.dynamic_heading_source}), initial estimate {heading_text}"
             print(
                 f"  step {index} {step.kind}: "
                 f"distance={step.planned_distance_m:.3f} m, "
-                f"target odom heading={math.degrees(step.odom_heading_rad):.1f} deg"
+                f"target odom heading={heading_text}"
             )
         if action.lateral_step_skipped:
             print(f"  lateral step: skipped ({action.lateral_skip_reason})")
@@ -1135,7 +1162,19 @@ class ArenaActiveSpinSession:
             if index > 0:
                 self.wait_for_fresh_inputs()
             step_start = self.now()
-            self.turn_to_heading(publisher, step.odom_heading_rad)
+            step_record = step.to_dict()
+            target_heading = step.odom_heading_rad
+            if step.dynamic_heading:
+                if self.latest_odom_yaw_rad is None:
+                    raise RuntimeError("fresh_odom_unavailable_before_dynamic_lateral_turn")
+                dynamic_heading = dynamic_lateral_heading_from_scan(
+                    self.latest_scan,
+                    self.latest_odom_yaw_rad,
+                )
+                target_heading = dynamic_heading["odom_heading_rad"]
+                step_record["dynamic_heading_result"] = dynamic_heading
+                step_record["odom_heading_rad"] = target_heading
+            self.turn_to_heading(publisher, target_heading)
             stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
             self.wait_for_fresh_inputs()
             driven = self.drive_forward(publisher, step.planned_distance_m)
@@ -1143,7 +1182,7 @@ class ArenaActiveSpinSession:
             total_driven += driven
             step_records.append(
                 {
-                    **step.to_dict(),
+                    **step_record,
                     "driven_distance_m": driven,
                     "duration_sec": self.now() - step_start,
                 }

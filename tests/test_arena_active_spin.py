@@ -27,6 +27,22 @@ def fake_scan(clearance=1.0):
     )
 
 
+def fake_scan_with_side_clearance(left=1.0, right=1.0, front=1.0, rear=1.0):
+    scan = fake_scan(clearance=2.0)
+    for index in range(len(scan.ranges)):
+        angle_rad = scan.angle_min + index * scan.angle_increment
+        angle_deg = math.degrees(active_spin.normalize_angle_rad(angle_rad))
+        if -30.0 <= angle_deg <= 30.0:
+            scan.ranges[index] = front
+        elif 60.0 <= angle_deg <= 120.0:
+            scan.ranges[index] = left
+        elif -120.0 <= angle_deg <= -60.0:
+            scan.ranges[index] = right
+        elif 150.0 <= angle_deg <= 180.0 or -180.0 <= angle_deg <= -150.0:
+            scan.ranges[index] = rear
+    return scan
+
+
 def fake_odom(yaw_rad=0.0):
     return argparse.Namespace(
         pose=argparse.Namespace(
@@ -439,6 +455,23 @@ class ArenaActiveSpinTest(unittest.TestCase):
             lateral.odom_heading_rad,
             active_spin.normalize_angle_rad(1.7085612863302231 + 0.7679448708775052),
         )
+        self.assertTrue(lateral.dynamic_heading)
+        self.assertEqual(lateral.dynamic_heading_source, "live_side_clearance")
+
+    def test_dynamic_lateral_heading_turns_toward_more_open_side(self):
+        left_open = active_spin.dynamic_lateral_heading_from_scan(
+            fake_scan_with_side_clearance(left=1.4, right=0.5),
+            current_yaw_rad=0.2,
+        )
+        right_open = active_spin.dynamic_lateral_heading_from_scan(
+            fake_scan_with_side_clearance(left=0.5, right=1.4),
+            current_yaw_rad=0.2,
+        )
+
+        self.assertEqual(left_open["direction"], "left")
+        self.assertAlmostEqual(left_open["odom_heading_rad"], 0.2 + math.pi / 2.0)
+        self.assertEqual(right_open["direction"], "right")
+        self.assertAlmostEqual(right_open["odom_heading_rad"], 0.2 - math.pi / 2.0)
 
     def test_center_reposition_action_clamps_lateral_step(self):
         config = active_spin.ArenaActiveSpinConfig(
@@ -724,6 +757,83 @@ class ArenaActiveSpinTest(unittest.TestCase):
         self.assertAlmostEqual(record["driven_distance_m"], 0.80)
         self.assertEqual(len(record["steps"]), 2)
         self.assertGreaterEqual(len(publisher.messages), 40)
+
+    def test_center_reposition_lateral_step_uses_fresh_side_clearance_heading(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            node = FakeNode()
+            publisher = FakePublisher()
+            time_box = {"now": 0.0}
+            config = active_spin.ArenaActiveSpinConfig(
+                run_id="reposition_dynamic_lateral_test",
+                diagnostics_path=Path(tmpdir) / "diag.json",
+                require_operator_confirmation=False,
+            )
+            session = active_spin.ArenaActiveSpinSession(
+                node,
+                config,
+                FakeRclpy(node, time_box),
+                FakeTwist,
+                object,
+                object,
+                None,
+                sleep_fn=lambda delay: time_box.__setitem__("now", time_box["now"] + delay),
+            )
+            events = []
+            wait_calls = {"count": 0}
+            headings = []
+
+            def freshen():
+                wait_calls["count"] += 1
+                events.append("wait")
+                if wait_calls["count"] >= 3:
+                    session.latest_scan = fake_scan_with_side_clearance(left=0.5, right=1.4)
+                    session.latest_odom_yaw_rad = 0.2
+                else:
+                    session.latest_scan = fake_scan_with_side_clearance(left=1.0, right=1.0)
+                    session.latest_odom_yaw_rad = 0.0
+                session.latest_scan_received_sec = session.now()
+                session.latest_odom_pose = arena.Pose2D()
+                session.latest_odom_received_sec = session.now()
+
+            session.wait_for_fresh_inputs = freshen
+            session.refresh_fresh_inputs_after_prompt = lambda: None
+            session.turn_to_heading = lambda _publisher, heading: headings.append(heading)
+            session.drive_forward = lambda _publisher, distance: events.append("drive") or distance
+            action = active_spin.CenterRepositionAction(
+                ok=True,
+                reason="center_reposition_toward_arena_center",
+                steps=(
+                    active_spin.CenterRepositionStep(
+                        "longitudinal",
+                        "center_reposition_away_from_nearest_short_wall",
+                        0.50,
+                        0.0,
+                        0.0,
+                    ),
+                    active_spin.CenterRepositionStep(
+                        "lateral",
+                        "center_reposition_reduce_lateral_offset_dynamic",
+                        0.30,
+                        math.pi / 2.0,
+                        math.pi / 2.0,
+                        dynamic_heading=True,
+                        dynamic_heading_source="live_side_clearance",
+                    ),
+                ),
+            )
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                record = session.execute_center_reposition(publisher, action)
+
+        self.assertAlmostEqual(headings[0], 0.0)
+        self.assertAlmostEqual(
+            headings[1],
+            active_spin.normalize_angle_rad(0.2 - math.pi / 2.0),
+        )
+        self.assertEqual(
+            record["steps"][1]["dynamic_heading_result"]["direction"],
+            "right",
+        )
 
     def test_center_reposition_second_step_failure_propagates(self):
         with tempfile.TemporaryDirectory() as tmpdir:
