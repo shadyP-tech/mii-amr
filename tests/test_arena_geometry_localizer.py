@@ -72,6 +72,7 @@ def profile_candidate(
     validity_failed_reason=None,
     protrusion_cluster_count=0,
     protrusion_fraction=0.0,
+    line_rmse_m=0.0,
 ):
     return arena.ShortWallClassification(
         wall_type=arena.WALL_UNKNOWN,
@@ -83,12 +84,12 @@ def profile_candidate(
         classification_margin=abs(heater_score - clean_score),
         short_wall_candidate_range_m=range_m,
         short_wall_visible_width_m=1.0,
-        short_wall_rmse_m=0.0,
+        short_wall_rmse_m=line_rmse_m,
         point_count=30,
         profile_features={
             "point_count": 30,
             "visible_width_m": 1.0,
-            "line_rmse_m": 0.0,
+            "line_rmse_m": line_rmse_m,
             "depth_p75_m": 0.0,
             "depth_p90_m": 0.0,
             "depth_p95_m": 0.0,
@@ -424,6 +425,56 @@ class ArenaGeometryLocalizerTest(unittest.TestCase):
                 validity_failed_reason="profile_line_rmse_too_high",
             ),
             "axis_positive": profile_candidate("axis_positive", 0.10, 0.90, 1.95),
+        }
+
+        pairwise = arena.classify_short_wall_pairwise(candidates, config)
+
+        self.assertFalse(pairwise.accepted)
+        self.assertEqual(pairwise.reason, "pairwise_profile_candidate_invalid")
+
+    def test_pairwise_profile_allows_relaxed_rmse_for_strong_heater_candidate(self):
+        config = arena.ArenaGeometryConfig()
+        candidates = {
+            "axis_negative": profile_candidate(
+                "axis_negative",
+                0.95,
+                0.08,
+                2.12,
+                validity_failed_reason="profile_line_rmse_too_high",
+                protrusion_cluster_count=2,
+                protrusion_fraction=0.20,
+                line_rmse_m=0.041,
+            ),
+            "axis_positive": profile_candidate(
+                "axis_positive",
+                0.13,
+                0.41,
+                1.78,
+                protrusion_cluster_count=0,
+                protrusion_fraction=0.02,
+            ),
+        }
+
+        pairwise = arena.classify_short_wall_pairwise(candidates, config)
+
+        self.assertTrue(pairwise.accepted)
+        self.assertEqual(pairwise.reason, "pairwise_profile_relative_heater_valid")
+        self.assertEqual(pairwise.assignment, "negative_heater")
+
+    def test_pairwise_profile_rejects_relaxed_rmse_above_heater_limit(self):
+        config = arena.ArenaGeometryConfig()
+        candidates = {
+            "axis_negative": profile_candidate(
+                "axis_negative",
+                0.95,
+                0.08,
+                2.12,
+                validity_failed_reason="profile_line_rmse_too_high",
+                protrusion_cluster_count=2,
+                protrusion_fraction=0.20,
+                line_rmse_m=0.065,
+            ),
+            "axis_positive": profile_candidate("axis_positive", 0.13, 0.41, 1.78),
         }
 
         pairwise = arena.classify_short_wall_pairwise(candidates, config)

@@ -67,6 +67,7 @@ class ArenaGeometryConfig:
     profile_min_points: int = 20
     profile_min_visible_width_m: float = 0.45
     profile_max_line_rmse_m: float = 0.035
+    profile_heater_relaxed_max_line_rmse_m: float = 0.055
     profile_min_any_line_support_fraction: float = 0.20
     profile_cluster_bin_width_m: float = 0.075
     profile_cluster_gap_tolerance_bins: int = 1
@@ -1088,6 +1089,35 @@ def classify_short_wall_relative_heater(
     )
 
 
+def short_wall_profile_validity_failure(candidate: ShortWallClassification):
+    failed = candidate.validity_failed_reason
+    if failed is None and candidate.profile_features is not None:
+        failed = candidate.profile_features.get("validity_failed_reason")
+    return failed
+
+
+def allows_relaxed_heater_profile_rmse(
+    candidate: ShortWallClassification,
+    config: ArenaGeometryConfig,
+):
+    if short_wall_profile_validity_failure(candidate) != "profile_line_rmse_too_high":
+        return False
+
+    features = candidate.profile_features or {}
+    line_rmse = features.get("line_rmse_m")
+    if line_rmse is None or line_rmse > config.profile_heater_relaxed_max_line_rmse_m:
+        return False
+
+    protrusion_clusters = int(features.get("protrusion_cluster_count") or 0)
+    protrusion_fraction = features.get("protrusion_fraction") or 0.0
+    return (
+        candidate.heater_profile_score >= config.profile_relative_heater_min_score
+        and candidate.clean_profile_score <= config.profile_relative_selected_max_clean_score
+        and protrusion_clusters >= config.profile_relative_min_protrusion_clusters
+        and protrusion_fraction >= config.profile_relative_min_protrusion_fraction
+    )
+
+
 def classify_short_wall_pairwise(
     candidates: dict[str, ShortWallClassification],
     config: ArenaGeometryConfig,
@@ -1116,10 +1146,8 @@ def classify_short_wall_pairwise(
     abs_range_sum_error = abs(range_sum_error)
 
     for candidate in (negative, positive):
-        failed = candidate.validity_failed_reason
-        if failed is None and candidate.profile_features is not None:
-            failed = candidate.profile_features.get("validity_failed_reason")
-        if failed is not None:
+        failed = short_wall_profile_validity_failure(candidate)
+        if failed is not None and not allows_relaxed_heater_profile_rmse(candidate, config):
             return PairwiseShortWallClassification(
                 True,
                 False,
@@ -1228,6 +1256,15 @@ def copy_candidate_with_pairwise_result(
     pairwise: PairwiseShortWallClassification,
     wall_type=None,
 ):
+    raw_validity_failed_reason = short_wall_profile_validity_failure(candidate)
+    validity_failed_reason = None if pairwise.accepted else raw_validity_failed_reason
+    profile_features = candidate.profile_features
+    if pairwise.accepted and raw_validity_failed_reason is not None:
+        profile_features = dict(candidate.profile_features or {})
+        profile_features["raw_validity_failed_reason"] = raw_validity_failed_reason
+        profile_features["validity_failed_reason"] = None
+        profile_features["relaxed_validity_reason"] = "accepted_by_pairwise_classifier"
+
     return ShortWallClassification(
         wall_type=wall_type or candidate.wall_type,
         reason=pairwise.reason,
@@ -1242,7 +1279,7 @@ def copy_candidate_with_pairwise_result(
         short_wall_range_sum_m=pairwise.range_sum_m,
         short_wall_range_sum_error_m=pairwise.range_sum_error_m,
         point_count=candidate.point_count,
-        profile_features=candidate.profile_features,
+        profile_features=profile_features,
         heater_profile_score=candidate.heater_profile_score,
         clean_profile_score=candidate.clean_profile_score,
         pairwise_assignment_score=pairwise.winner_score,
@@ -1251,7 +1288,7 @@ def copy_candidate_with_pairwise_result(
         short_wall_range_sum_expected_m=pairwise.range_sum_expected_m,
         short_wall_range_sum_tolerance_m=pairwise.range_sum_tolerance_m,
         selected_assignment=pairwise.assignment,
-        validity_failed_reason=candidate.validity_failed_reason,
+        validity_failed_reason=validity_failed_reason,
         heater_profile_delta=pairwise.heater_profile_delta,
         relative_heater_score=pairwise.relative_heater_score,
         relative_opposite_heater_score=pairwise.relative_opposite_heater_score,
