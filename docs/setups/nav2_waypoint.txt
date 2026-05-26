@@ -93,6 +93,21 @@ ros2 topic info /cmd_vel --verbose
 Nav2 nodes may appear as publishers while running. Make sure there is no active
 Nav2 goal before the custom follower handoff.
 
+**RViz Planned Route Displays**
+Keep RViz fixed frame set to `map`. The custom follower publishes its active
+route and run-local obstacle state while it is running. In RViz, add:
+
+```text
+Path: /mii_amr/planned_path
+MarkerArray: /mii_amr/planned_waypoints
+MarkerArray: /mii_amr/run_local_obstacles
+```
+
+The planned path starts at the current robot pose and then follows the remaining
+waypoints. Waypoint markers highlight the current target and final goal. The
+run-local obstacle markers show the confirmed temporary obstacle cells, inflated
+clearance cells, and any corridor cells that triggered a replan.
+
 **Optional: Live LiDAR Obstacle Debug Markers**
 Run this in a separate terminal while RViz is open. It does not publish
 `/cmd_vel`; it only subscribes to `/scan`, reads TF/map state, and publishes

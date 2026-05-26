@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "aufgabe03"))
 
 import follow_planned_waypoints as follower  # noqa: E402
+import map_path_planner as planner  # noqa: E402
 
 
 def write_waypoints(path, rows, header=None):
@@ -52,6 +53,135 @@ class FakeLogger:
 
     def error(self, message):
         self.errors.append(message)
+
+
+class FakeStamp:
+    def __init__(self, sec=0, nanosec=0):
+        self.sec = sec
+        self.nanosec = nanosec
+
+
+class FakeHeader:
+    def __init__(self):
+        self.frame_id = ""
+        self.stamp = None
+
+
+class FakeVector3:
+    def __init__(self):
+        self.x = 0.0
+        self.y = 0.0
+        self.z = 0.0
+
+
+class FakeQuaternion:
+    def __init__(self):
+        self.x = 0.0
+        self.y = 0.0
+        self.z = 0.0
+        self.w = 0.0
+
+
+class FakePose:
+    def __init__(self):
+        self.position = FakeVector3()
+        self.orientation = FakeQuaternion()
+
+
+class FakeColor:
+    def __init__(self):
+        self.r = 0.0
+        self.g = 0.0
+        self.b = 0.0
+        self.a = 0.0
+
+
+class FakePoint(FakeVector3):
+    pass
+
+
+class FakePoseStamped:
+    def __init__(self):
+        self.header = FakeHeader()
+        self.pose = FakePose()
+
+
+class FakeNavPath:
+    def __init__(self):
+        self.header = FakeHeader()
+        self.poses = []
+
+
+class FakeMarker:
+    ADD = 0
+    SPHERE = 2
+    DELETEALL = 3
+    CUBE_LIST = 6
+    SPHERE_LIST = 7
+    TEXT_VIEW_FACING = 9
+
+    def __init__(self):
+        self.header = FakeHeader()
+        self.ns = ""
+        self.id = 0
+        self.type = 0
+        self.action = self.ADD
+        self.pose = FakePose()
+        self.scale = FakeVector3()
+        self.color = FakeColor()
+        self.points = []
+        self.text = ""
+
+
+class FakeMarkerArray:
+    def __init__(self, markers=None):
+        self.markers = list(markers or [])
+
+
+def install_fake_rviz_messages(testcase):
+    originals = {
+        "Point": follower.Point,
+        "PoseStamped": follower.PoseStamped,
+        "NavPath": follower.NavPath,
+        "Marker": follower.Marker,
+        "MarkerArray": follower.MarkerArray,
+    }
+    follower.Point = FakePoint
+    follower.PoseStamped = FakePoseStamped
+    follower.NavPath = FakeNavPath
+    follower.Marker = FakeMarker
+    follower.MarkerArray = FakeMarkerArray
+
+    def restore():
+        for name, value in originals.items():
+            setattr(follower, name, value)
+
+    testcase.addCleanup(restore)
+
+
+def test_metadata(resolution=0.1, origin=(0.0, 0.0, 0.0)):
+    return planner.MapMetadata(
+        yaml_path=Path("test.yaml"),
+        image_path=Path("test.pgm"),
+        resolution=resolution,
+        origin=origin,
+        negate=0,
+        occupied_thresh=0.65,
+        free_thresh=0.25,
+        mode="trinary",
+    )
+
+
+def free_map(width=10, height=10, resolution=0.1):
+    return planner.OccupancyMap(
+        metadata=test_metadata(resolution=resolution),
+        width=width,
+        height=height,
+        cells=[
+            [planner.CELL_FREE for _ in range(width)]
+            for _ in range(height)
+        ],
+    )
 
 
 class FakeHealthNode:
@@ -178,6 +308,120 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
         self.assertEqual(args.run_local_map_min_hit_count, 1)
         self.assertEqual(args.run_local_map_inflation_radius_m, 0.15)
         self.assertEqual(args.run_local_map_corridor_check_distance_m, 0.5)
+
+    def test_rviz_visualization_flags_parse(self):
+        args = follower.parse_args(["--dry-run"])
+
+        self.assertFalse(args.no_rviz_visualization)
+        self.assertEqual(args.rviz_path_topic, "/mii_amr/planned_path")
+        self.assertEqual(args.rviz_waypoint_marker_topic, "/mii_amr/planned_waypoints")
+        self.assertEqual(args.rviz_obstacle_marker_topic, "/mii_amr/run_local_obstacles")
+
+        disabled = follower.parse_args(
+            [
+                "--dry-run",
+                "--no-rviz-visualization",
+                "--rviz-path-topic",
+                "/custom/path",
+                "--rviz-waypoint-marker-topic",
+                "/custom/waypoints",
+                "--rviz-obstacle-marker-topic",
+                "/custom/obstacles",
+            ]
+        )
+
+        self.assertTrue(disabled.no_rviz_visualization)
+        self.assertEqual(disabled.rviz_path_topic, "/custom/path")
+        self.assertEqual(disabled.rviz_waypoint_marker_topic, "/custom/waypoints")
+        self.assertEqual(disabled.rviz_obstacle_marker_topic, "/custom/obstacles")
+
+    def test_rviz_path_message_contains_current_pose_and_waypoints(self):
+        install_fake_rviz_messages(self)
+        stamp = FakeStamp(12, 34)
+        pose = follower.Pose2D(0.1, 0.2, 90.0)
+        waypoints = [
+            follower.Waypoint(1, 0.5, 0.2),
+            follower.Waypoint(2, 0.7, 0.4),
+        ]
+
+        path = follower.build_rviz_path_message(
+            waypoints,
+            "map",
+            stamp,
+            current_pose=pose,
+        )
+
+        self.assertEqual(path.header.frame_id, "map")
+        self.assertIs(path.header.stamp, stamp)
+        self.assertEqual(len(path.poses), 3)
+        self.assertEqual(path.poses[0].pose.position.x, 0.1)
+        self.assertEqual(path.poses[0].pose.position.y, 0.2)
+        self.assertEqual(path.poses[1].pose.position.x, 0.5)
+        self.assertEqual(path.poses[2].pose.position.y, 0.4)
+        for pose_stamped in path.poses:
+            self.assertEqual(pose_stamped.pose.orientation.x, 0.0)
+            self.assertEqual(pose_stamped.pose.orientation.y, 0.0)
+            self.assertEqual(pose_stamped.pose.orientation.z, 0.0)
+            self.assertEqual(pose_stamped.pose.orientation.w, 1.0)
+
+    def test_rviz_waypoint_markers_include_current_goal_and_labels(self):
+        install_fake_rviz_messages(self)
+        stamp = FakeStamp()
+        waypoints = [
+            follower.Waypoint(4, 0.2, 0.3),
+            follower.Waypoint(5, 0.6, 0.7),
+        ]
+
+        marker_array = follower.build_rviz_waypoint_markers(
+            waypoints,
+            "map",
+            stamp,
+            current_waypoint_index=0,
+        )
+
+        markers = marker_array.markers
+        self.assertEqual(markers[0].action, FakeMarker.DELETEALL)
+        self.assertIn("planned_waypoints", [marker.ns for marker in markers])
+        self.assertIn("current_waypoint", [marker.ns for marker in markers])
+        self.assertIn("goal_waypoint", [marker.ns for marker in markers])
+        labels = [
+            marker.text
+            for marker in markers
+            if marker.ns == "planned_waypoint_labels"
+        ]
+        self.assertEqual(labels, ["4", "5"])
+
+    def test_rviz_obstacle_markers_convert_cells_to_map_points(self):
+        install_fake_rviz_messages(self)
+        occ = free_map(width=6, height=6, resolution=0.1)
+        run_local_map = follower.lidar_obstacle_map.RunLocalObstacleMap(
+            occ,
+            follower.lidar_obstacle_map.RunLocalMapConfig(
+                min_hit_count=1,
+                min_used_points=1,
+                inflation_radius_m=0.1,
+            ),
+        )
+        run_local_map.confirmed_raw_cells = {(1, 2)}
+        run_local_map.inflated_obstacle_cells = {(1, 2), (2, 2)}
+
+        marker_array = follower.build_rviz_obstacle_markers(
+            run_local_map,
+            "map",
+            FakeStamp(),
+            blocked_cells={(3, 4)},
+        )
+
+        markers = {marker.ns: marker for marker in marker_array.markers}
+        self.assertIn("run_local_confirmed_obstacle_cells", markers)
+        self.assertIn("run_local_inflated_obstacle_cells", markers)
+        self.assertIn("run_local_blocked_corridor_cells", markers)
+        confirmed_point = markers["run_local_confirmed_obstacle_cells"].points[0]
+        self.assertAlmostEqual(confirmed_point.x, 0.15)
+        self.assertAlmostEqual(confirmed_point.y, 0.25)
+        blocked_point = markers["run_local_blocked_corridor_cells"].points[0]
+        self.assertAlmostEqual(blocked_point.x, 0.35)
+        self.assertAlmostEqual(blocked_point.y, 0.45)
 
     def test_wait_before_follow_prompt_requires_run(self):
         args = follower.parse_args(["--dry-run", "--wait-before-follow"])
@@ -958,6 +1202,64 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
             follower.rclpy = original_rclpy
 
         self.assertEqual(result["status"], "replan_artifact_only_complete")
+
+    def test_live_replan_publishes_replacement_route(self):
+        class ReplanRoutePublished(Exception):
+            pass
+
+        class FakeRclpy:
+            @staticmethod
+            def ok():
+                return True
+
+        args = follower.parse_args(["--dry-run", "--enable-lidar-map-replan"])
+        node = argparse.Namespace(
+            args=args,
+            diagnostics=follower.RuntimeDiagnostics(),
+            reached_count=0,
+            start_pose=None,
+            final_pose=None,
+            last_amcl_health=None,
+            last_scan_safety=None,
+            base_frame_used="base_footprint",
+            logger=FakeLogger(),
+        )
+        pose = follower.Pose2D(0.0, 0.0, 0.0, stamp_sec=time.time())
+        amcl = follower.AmclHealth(True, [], 0.01, 0.01, 0.01, 0.1)
+        safety = follower.ScanSafety(False, "soft_stop", 4, 0.2, 0.21)
+        published_routes = []
+
+        def publish_route(waypoints, current_pose=None, current_waypoint_index=0):
+            route = [waypoint.index for waypoint in waypoints]
+            published_routes.append(route)
+            if route == [10, 11]:
+                raise ReplanRoutePublished()
+
+        node.check_health_or_recover = lambda: (pose, "base_footprint", amcl)
+        node.initialize_run_local_route = lambda _pose, waypoints: list(waypoints)
+        node.check_scan_or_raise = lambda _mode: (_ for _ in ()).throw(
+            follower.BlockedByScanError(safety)
+        )
+        node.replan_after_blockage = lambda _pose, _remaining: [
+            follower.Waypoint(10, 0.3, 0.0),
+            follower.Waypoint(11, 0.5, 0.0),
+        ]
+        node.stop_repeatedly = lambda: None
+        node.get_logger = lambda: node.logger
+        node.publish_rviz_route = publish_route
+
+        original_rclpy = follower.rclpy
+        follower.rclpy = FakeRclpy
+        try:
+            with self.assertRaises(ReplanRoutePublished):
+                follower.WaypointFollower.follow_waypoints(
+                    node,
+                    [follower.Waypoint(1, 0.4, 0.0)],
+                )
+        finally:
+            follower.rclpy = original_rclpy
+
+        self.assertIn([10, 11], published_routes)
 
     def test_initial_run_local_empty_map_continues_with_static_route(self):
         class InitialMapNode:

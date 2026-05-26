@@ -20,17 +20,24 @@ try:
     from rclpy.node import Node
     from rclpy.qos import qos_profile_sensor_data
     from rclpy.time import Time
-    from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
+    from geometry_msgs.msg import Point, PoseStamped, PoseWithCovarianceStamped, Twist
+    from nav_msgs.msg import Path as NavPath
     from sensor_msgs.msg import LaserScan
+    from visualization_msgs.msg import Marker, MarkerArray
     import tf2_ros
 except ImportError:
     rclpy = None
     Node = object
     qos_profile_sensor_data = None
     Time = None
+    Point = None
+    PoseStamped = None
     PoseWithCovarianceStamped = object
+    NavPath = None
     Twist = None
     LaserScan = object
+    Marker = None
+    MarkerArray = None
     tf2_ros = None
 
 import lidar_obstacle_map
@@ -41,6 +48,9 @@ DEFAULT_WAYPOINTS_CSV = Path("results/aufgabe03/aufgabe03_waypoints.csv")
 DEFAULT_RESULTS_CSV = Path("results/aufgabe03/aufgabe03_waypoint_follow_runs.csv")
 DEFAULT_STATIC_MAP = Path("maps/aufgabe03/arena_1p898x3p9_auto.yaml")
 DEFAULT_REPLAN_OUTPUT_DIR = Path("results/aufgabe03")
+DEFAULT_RVIZ_PATH_TOPIC = "/mii_amr/planned_path"
+DEFAULT_RVIZ_WAYPOINT_MARKER_TOPIC = "/mii_amr/planned_waypoints"
+DEFAULT_RVIZ_OBSTACLE_MARKER_TOPIC = "/mii_amr/run_local_obstacles"
 
 DEFAULT_LINEAR_SPEED_MPS = 0.03
 DEFAULT_MIN_LINEAR_SPEED_MPS = 0.01
@@ -107,6 +117,15 @@ INITIAL_RUN_LOCAL_MAP_NONFATAL_REASONS = {
 DEFAULT_STARTUP_TIMEOUT_SEC = 20.0
 STOP_PUBLISH_COUNT = 10
 STOP_PUBLISH_HZ = 10.0
+
+RVIZ_COLOR_PATH = (0.0, 0.55, 1.0, 0.95)
+RVIZ_COLOR_WAYPOINT = (0.0, 0.75, 1.0, 0.85)
+RVIZ_COLOR_CURRENT = (1.0, 0.82, 0.16, 0.95)
+RVIZ_COLOR_GOAL = (0.95, 0.18, 0.14, 0.95)
+RVIZ_COLOR_LABEL = (0.95, 0.95, 0.95, 1.0)
+RVIZ_COLOR_CONFIRMED_OBSTACLE = (0.05, 0.95, 0.22, 0.85)
+RVIZ_COLOR_INFLATED_OBSTACLE = (0.9, 0.25, 1.0, 0.30)
+RVIZ_COLOR_BLOCKED_CORRIDOR = (1.0, 0.45, 0.0, 0.80)
 
 BASE_CSV_HEADER = [
     "timestamp",
@@ -316,6 +335,294 @@ class RuntimeDiagnostics:
         if self.yaw_error_count == 0:
             return 0.0
         return self.yaw_error_sum_deg / self.yaw_error_count
+
+
+def rviz_messages_available():
+    return all(
+        message_type is not None
+        for message_type in (NavPath, PoseStamped, Point, Marker, MarkerArray)
+    )
+
+
+def set_header(message, frame_id, stamp):
+    message.header.frame_id = frame_id
+    message.header.stamp = stamp
+
+
+def set_pose_xy(pose, x, y, z=0.0):
+    pose.position.x = float(x)
+    pose.position.y = float(y)
+    pose.position.z = float(z)
+    pose.orientation.x = 0.0
+    pose.orientation.y = 0.0
+    pose.orientation.z = 0.0
+    pose.orientation.w = 1.0
+
+
+def point_msg(x, y, z=0.0):
+    point = Point()
+    point.x = float(x)
+    point.y = float(y)
+    point.z = float(z)
+    return point
+
+
+def set_marker_color(marker, color):
+    marker.color.r = color[0]
+    marker.color.g = color[1]
+    marker.color.b = color[2]
+    marker.color.a = color[3]
+
+
+def marker_delete_all(frame_id, stamp):
+    marker = Marker()
+    set_header(marker, frame_id, stamp)
+    marker.action = Marker.DELETEALL
+    return marker
+
+
+def apply_marker_common(marker, frame_id, stamp, namespace, marker_id, marker_type, color):
+    set_header(marker, frame_id, stamp)
+    marker.ns = namespace
+    marker.id = int(marker_id)
+    marker.type = marker_type
+    marker.action = Marker.ADD
+    marker.pose.orientation.w = 1.0
+    set_marker_color(marker, color)
+
+
+def build_pose_stamped(frame_id, stamp, x, y):
+    pose = PoseStamped()
+    set_header(pose, frame_id, stamp)
+    set_pose_xy(pose.pose, x, y)
+    return pose
+
+
+def build_rviz_path_message(waypoints, frame_id, stamp, current_pose=None):
+    if NavPath is None or PoseStamped is None:
+        raise RuntimeError("ROS nav_msgs/geometry_msgs are unavailable.")
+    path = NavPath()
+    set_header(path, frame_id, stamp)
+    if current_pose is not None:
+        path.poses.append(build_pose_stamped(frame_id, stamp, current_pose.x, current_pose.y))
+    for waypoint in waypoints:
+        path.poses.append(build_pose_stamped(frame_id, stamp, waypoint.x, waypoint.y))
+    return path
+
+
+def waypoint_point(waypoint, z=0.04):
+    return point_msg(waypoint.x, waypoint.y, z)
+
+
+def build_point_layer_marker(
+    frame_id,
+    stamp,
+    namespace,
+    marker_id,
+    marker_type,
+    points,
+    color,
+    scale_m,
+):
+    if not points:
+        return None
+    marker = Marker()
+    apply_marker_common(marker, frame_id, stamp, namespace, marker_id, marker_type, color)
+    marker.scale.x = scale_m
+    marker.scale.y = scale_m
+    marker.scale.z = scale_m
+    marker.points = list(points)
+    return marker
+
+
+def build_single_waypoint_marker(frame_id, stamp, namespace, marker_id, waypoint, color, scale_m, z):
+    marker = Marker()
+    apply_marker_common(marker, frame_id, stamp, namespace, marker_id, Marker.SPHERE, color)
+    marker.scale.x = scale_m
+    marker.scale.y = scale_m
+    marker.scale.z = scale_m
+    set_pose_xy(marker.pose, waypoint.x, waypoint.y, z)
+    return marker
+
+
+def build_waypoint_label_marker(frame_id, stamp, marker_id, waypoint):
+    marker = Marker()
+    apply_marker_common(
+        marker,
+        frame_id,
+        stamp,
+        "planned_waypoint_labels",
+        marker_id,
+        Marker.TEXT_VIEW_FACING,
+        RVIZ_COLOR_LABEL,
+    )
+    set_pose_xy(marker.pose, waypoint.x, waypoint.y, 0.20)
+    marker.scale.z = 0.08
+    marker.text = str(waypoint.index)
+    return marker
+
+
+def build_rviz_waypoint_markers(waypoints, frame_id, stamp, current_waypoint_index=0):
+    if Marker is None or MarkerArray is None or Point is None:
+        raise RuntimeError("ROS visualization messages are unavailable.")
+    waypoints = list(waypoints)
+    markers = [marker_delete_all(frame_id, stamp)]
+    points = [waypoint_point(waypoint) for waypoint in waypoints]
+    waypoint_layer = build_point_layer_marker(
+        frame_id,
+        stamp,
+        "planned_waypoints",
+        1,
+        Marker.SPHERE_LIST,
+        points,
+        RVIZ_COLOR_WAYPOINT,
+        0.07,
+    )
+    if waypoint_layer is not None:
+        markers.append(waypoint_layer)
+    if waypoints:
+        current_index = max(0, min(int(current_waypoint_index), len(waypoints) - 1))
+        markers.append(
+            build_single_waypoint_marker(
+                frame_id,
+                stamp,
+                "current_waypoint",
+                2,
+                waypoints[current_index],
+                RVIZ_COLOR_CURRENT,
+                0.14,
+                0.08,
+            )
+        )
+        markers.append(
+            build_single_waypoint_marker(
+                frame_id,
+                stamp,
+                "goal_waypoint",
+                3,
+                waypoints[-1],
+                RVIZ_COLOR_GOAL,
+                0.12,
+                0.10,
+            )
+        )
+        for label_index, waypoint in enumerate(waypoints):
+            markers.append(
+                build_waypoint_label_marker(
+                    frame_id,
+                    stamp,
+                    1000 + label_index,
+                    waypoint,
+                )
+            )
+    return MarkerArray(markers=markers)
+
+
+def build_cell_layer_marker(
+    run_local_map,
+    frame_id,
+    stamp,
+    namespace,
+    marker_id,
+    cells,
+    color,
+    z,
+    height_m,
+):
+    cells = sorted(cells or ())
+    if not cells:
+        return None
+    metadata = run_local_map.static_map.metadata
+    marker = Marker()
+    apply_marker_common(marker, frame_id, stamp, namespace, marker_id, Marker.CUBE_LIST, color)
+    marker.scale.x = metadata.resolution
+    marker.scale.y = metadata.resolution
+    marker.scale.z = height_m
+    marker.points = [
+        point_msg(
+            *lidar_obstacle_map.planner.grid_to_world(cell[0], cell[1], metadata),
+            z,
+        )
+        for cell in cells
+    ]
+    return marker
+
+
+def append_marker(markers, marker):
+    if marker is not None:
+        markers.append(marker)
+
+
+def build_rviz_obstacle_markers(run_local_map, frame_id, stamp, blocked_cells=None):
+    if Marker is None or MarkerArray is None or Point is None:
+        raise RuntimeError("ROS visualization messages are unavailable.")
+    markers = [marker_delete_all(frame_id, stamp)]
+    if run_local_map is None:
+        return MarkerArray(markers=markers)
+    append_marker(
+        markers,
+        build_cell_layer_marker(
+            run_local_map,
+            frame_id,
+            stamp,
+            "run_local_inflated_obstacle_cells",
+            1,
+            run_local_map.inflated_obstacle_cells,
+            RVIZ_COLOR_INFLATED_OBSTACLE,
+            0.005,
+            0.02,
+        ),
+    )
+    append_marker(
+        markers,
+        build_cell_layer_marker(
+            run_local_map,
+            frame_id,
+            stamp,
+            "run_local_confirmed_obstacle_cells",
+            2,
+            run_local_map.confirmed_raw_cells,
+            RVIZ_COLOR_CONFIRMED_OBSTACLE,
+            0.045,
+            0.05,
+        ),
+    )
+    append_marker(
+        markers,
+        build_cell_layer_marker(
+            run_local_map,
+            frame_id,
+            stamp,
+            "run_local_blocked_corridor_cells",
+            3,
+            blocked_cells or set(),
+            RVIZ_COLOR_BLOCKED_CORRIDOR,
+            0.075,
+            0.06,
+        ),
+    )
+    return MarkerArray(markers=markers)
+
+
+def publish_rviz_route_if_available(
+    node,
+    waypoints,
+    current_pose=None,
+    current_waypoint_index=0,
+):
+    publish = getattr(node, "publish_rviz_route", None)
+    if callable(publish):
+        publish(
+            waypoints,
+            current_pose=current_pose,
+            current_waypoint_index=current_waypoint_index,
+        )
+
+
+def publish_rviz_obstacles_if_available(node, blocked_cells=None):
+    publish = getattr(node, "publish_rviz_obstacles", None)
+    if callable(publish):
+        publish(blocked_cells=blocked_cells)
 
 
 def clamp(value, lower, upper):
@@ -881,8 +1188,35 @@ class WaypointFollower(Node):
         self.last_tf_stamp_change_local_sec = None
         self.run_local_map = None
         self.live_replan_attempt_count = 0
+        self.rviz_last_blocked_cells = set()
 
         self.pub = self.create_publisher(Twist, "/cmd_vel", 10)
+        self.rviz_path_pub = None
+        self.rviz_waypoint_marker_pub = None
+        self.rviz_obstacle_marker_pub = None
+        if not args.no_rviz_visualization:
+            if not rviz_messages_available():
+                raise RuntimeError(
+                    "ROS RViz message types are unavailable. Source ROS 2 Humble "
+                    "before enabling RViz visualization."
+                )
+            self.rviz_path_pub = self.create_publisher(NavPath, args.rviz_path_topic, 10)
+            self.rviz_waypoint_marker_pub = self.create_publisher(
+                MarkerArray,
+                args.rviz_waypoint_marker_topic,
+                10,
+            )
+            self.rviz_obstacle_marker_pub = self.create_publisher(
+                MarkerArray,
+                args.rviz_obstacle_marker_topic,
+                10,
+            )
+            self.get_logger().info(
+                "Publishing RViz visualization: "
+                f"path={args.rviz_path_topic}, "
+                f"waypoints={args.rviz_waypoint_marker_topic}, "
+                f"obstacles={args.rviz_obstacle_marker_topic}"
+            )
         self.scan_sub = self.create_subscription(
             LaserScan,
             "/scan",
@@ -898,6 +1232,53 @@ class WaypointFollower(Node):
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         time.sleep(1.0)
+
+    def rviz_visualization_enabled(self):
+        return (
+            not getattr(self.args, "no_rviz_visualization", False)
+            and self.rviz_path_pub is not None
+            and self.rviz_waypoint_marker_pub is not None
+            and self.rviz_obstacle_marker_pub is not None
+        )
+
+    def rviz_stamp(self):
+        return self.get_clock().now().to_msg()
+
+    def publish_rviz_route(self, waypoints, current_pose=None, current_waypoint_index=0):
+        if not self.rviz_visualization_enabled():
+            return
+        waypoints = list(waypoints)
+        stamp = self.rviz_stamp()
+        self.rviz_path_pub.publish(
+            build_rviz_path_message(
+                waypoints,
+                self.args.map_frame,
+                stamp,
+                current_pose=current_pose,
+            )
+        )
+        self.rviz_waypoint_marker_pub.publish(
+            build_rviz_waypoint_markers(
+                waypoints,
+                self.args.map_frame,
+                stamp,
+                current_waypoint_index=current_waypoint_index,
+            )
+        )
+
+    def publish_rviz_obstacles(self, blocked_cells=None):
+        if not self.rviz_visualization_enabled():
+            return
+        if blocked_cells is not None:
+            self.rviz_last_blocked_cells = set(blocked_cells)
+        self.rviz_obstacle_marker_pub.publish(
+            build_rviz_obstacle_markers(
+                self.run_local_map,
+                self.args.map_frame,
+                self.rviz_stamp(),
+                blocked_cells=self.rviz_last_blocked_cells,
+            )
+        )
 
     def scan_callback(self, msg):
         self.last_scan = msg
@@ -1209,6 +1590,7 @@ class WaypointFollower(Node):
         self.diagnostics.run_local_cell_source_counts = diag.run_local_cell_source_counts
         if result.run_local_map is not None:
             self.run_local_map = result.run_local_map
+            publish_rviz_obstacles_if_available(self)
 
     def replanned_waypoints_from_result(self, result):
         return [
@@ -1424,8 +1806,11 @@ class WaypointFollower(Node):
         self.last_amcl_health = amcl_health
 
         waypoints = list(waypoints)
+        publish_rviz_route_if_available(self, waypoints, current_pose=start_pose)
+        publish_rviz_obstacles_if_available(self)
         if self.args.enable_lidar_map_replan:
             waypoints = self.initialize_run_local_route(start_pose, waypoints)
+            publish_rviz_route_if_available(self, waypoints, current_pose=start_pose)
             if self.args.lidar_replan_artifact_only:
                 self.stop_repeatedly()
                 return {
@@ -1441,6 +1826,12 @@ class WaypointFollower(Node):
         waypoint_index = 0
         while waypoint_index < len(waypoints):
             waypoint = waypoints[waypoint_index]
+            publish_rviz_route_if_available(
+                self,
+                waypoints[waypoint_index:],
+                current_pose=final_pose,
+                current_waypoint_index=0,
+            )
             self.get_logger().info(
                 f"[{waypoint_index + 1}/{len(waypoints)}] "
                 f"target waypoint {waypoint.index}: "
@@ -1489,6 +1880,12 @@ class WaypointFollower(Node):
                     if self.args.enable_lidar_map_replan:
                         remaining = waypoints[waypoint_index:]
                         replanned = self.replan_after_blockage(pose, remaining)
+                        publish_rviz_route_if_available(
+                            self,
+                            replanned,
+                            current_pose=pose,
+                            current_waypoint_index=0,
+                        )
                         if self.args.lidar_replan_artifact_only:
                             self.stop_repeatedly()
                             return {
@@ -1509,8 +1906,15 @@ class WaypointFollower(Node):
                     remaining = waypoints[waypoint_index:]
                     blocked_cells = self.corridor_blocked_cells(pose, remaining)
                     if blocked_cells:
+                        publish_rviz_obstacles_if_available(self, blocked_cells)
                         self.stop_repeatedly()
                         replanned = self.replan_after_blockage(pose, remaining)
+                        publish_rviz_route_if_available(
+                            self,
+                            replanned,
+                            current_pose=pose,
+                            current_waypoint_index=0,
+                        )
                         if self.args.lidar_replan_artifact_only:
                             self.stop_repeatedly()
                             return {
@@ -1662,6 +2066,11 @@ def print_dry_run(args, raw_waypoints, executable_waypoints):
     print(f"Goal tolerance: {args.goal_tolerance_m:.3f} m")
     print(f"Start selection: {args.start_selection}")
     print(f"Wait before follow: {'yes' if args.wait_before_follow else 'no'}")
+    print(f"RViz visualization: {'disabled' if args.no_rviz_visualization else 'enabled'}")
+    if not args.no_rviz_visualization:
+        print(f"  path topic: {args.rviz_path_topic}")
+        print(f"  waypoint markers: {args.rviz_waypoint_marker_topic}")
+        print(f"  obstacle markers: {args.rviz_obstacle_marker_topic}")
     print(f"LiDAR map replan: {'enabled' if args.enable_lidar_map_replan else 'disabled'}")
     if args.enable_lidar_map_replan:
         print(f"  artifact only: {'yes' if args.lidar_replan_artifact_only else 'no'}")
@@ -1748,6 +2157,16 @@ def parse_args(argv):
     parser.add_argument("--require-amcl-startup", action="store_true")
     parser.add_argument("--fail-on-stale-tf", action="store_true")
     parser.add_argument("--no-skip-first-waypoint", action="store_true")
+    parser.add_argument("--rviz-path-topic", default=DEFAULT_RVIZ_PATH_TOPIC)
+    parser.add_argument(
+        "--rviz-waypoint-marker-topic",
+        default=DEFAULT_RVIZ_WAYPOINT_MARKER_TOPIC,
+    )
+    parser.add_argument(
+        "--rviz-obstacle-marker-topic",
+        default=DEFAULT_RVIZ_OBSTACLE_MARKER_TOPIC,
+    )
+    parser.add_argument("--no-rviz-visualization", action="store_true")
     parser.add_argument("--enable-lidar-map-replan", action="store_true")
     parser.add_argument("--lidar-replan-artifact-only", action="store_true")
     parser.add_argument("--static-map", default=DEFAULT_STATIC_MAP, type=Path)
