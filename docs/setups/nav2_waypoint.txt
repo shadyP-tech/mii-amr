@@ -107,6 +107,10 @@ The planned path starts at the current robot pose and then follows the remaining
 waypoints. Waypoint markers highlight the current target and final goal. The
 run-local obstacle markers show the confirmed temporary obstacle cells, inflated
 clearance cells, and any corridor cells that triggered a replan.
+By default, the live corridor recheck only tests the planned path cells against
+the already-inflated run-local obstacle cells. Set
+`--run-local-map-corridor-radius-m` only if you intentionally want an extra
+proactive clearance band around the replanned path.
 
 **Optional: Live LiDAR Obstacle Debug Markers**
 Run this in a separate terminal while RViz is open. It does not publish

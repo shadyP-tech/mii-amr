@@ -114,11 +114,21 @@ INITIAL_RUN_LOCAL_MAP_NONFATAL_REASONS = {
     lidar_obstacle_map.RUN_LOCAL_FAILURE_TOO_MANY_REJECTED_POINTS,
 }
 
+REPLAN_TRIGGER_SCAN_BLOCKAGE = "scan_blockage"
+REPLAN_TRIGGER_KNOWN_CORRIDOR = "known_corridor"
+
 
 def run_local_map_has_confirmed_obstacles(run_local_map):
     if run_local_map is None:
         return False
     return bool(getattr(run_local_map, "confirmed_raw_cells", None))
+
+
+def lidar_replan_failure(reason):
+    message = str(reason)
+    if message.startswith("lidar_replan_failed:"):
+        return RuntimeError(message)
+    return RuntimeError(f"lidar_replan_failed:{message}")
 
 DEFAULT_STARTUP_TIMEOUT_SEC = 20.0
 STOP_PUBLISH_COUNT = 10
@@ -1704,7 +1714,7 @@ class WaypointFollower(Node):
         corridor_radius_m = (
             self.args.run_local_map_corridor_radius_m
             if self.args.run_local_map_corridor_radius_m is not None
-            else self.args.run_local_map_inflation_radius_m
+            else 0.0
         )
         blocked = lidar_obstacle_map.path_corridor_blocked_cells(
             self.run_local_map.static_map,
@@ -1722,11 +1732,18 @@ class WaypointFollower(Node):
         self.diagnostics.run_local_path_blocked_cell_count = len(blocked)
         return blocked
 
-    def plan_with_existing_run_local_map(self, current_pose, old_remaining_waypoints):
+    def plan_with_existing_run_local_map(
+        self,
+        current_pose,
+        old_remaining_waypoints,
+        sequence=None,
+        count_replan=True,
+    ):
         if self.run_local_map is None:
             raise RuntimeError("lidar_replan_failed:no_run_local_map")
         if not run_local_map_has_confirmed_obstacles(self.run_local_map):
             raise RuntimeError("lidar_replan_failed:no_confirmed_run_local_obstacles")
+        sequence = sequence or self.live_replan_attempt_count + 1
         goal_waypoint = old_remaining_waypoints[-1]
         result = replan_runtime.plan_existing_run_local_map(
             self.args,
@@ -1734,9 +1751,9 @@ class WaypointFollower(Node):
             current_pose,
             goal_waypoint,
             old_remaining_waypoints,
-            sequence=self.live_replan_attempt_count + 1,
+            sequence=sequence,
         )
-        self.update_replan_diagnostics(result, count_replan=True)
+        self.update_replan_diagnostics(result, count_replan=count_replan)
         return self.validate_replan_result(
             result,
             current_pose,
@@ -1745,16 +1762,23 @@ class WaypointFollower(Node):
             require_changed=True,
         )
 
-    def replan_after_blockage(self, current_pose, old_remaining_waypoints):
+    def replan_after_blockage(
+        self,
+        current_pose,
+        old_remaining_waypoints,
+        trigger=REPLAN_TRIGGER_SCAN_BLOCKAGE,
+    ):
         if self.live_replan_attempt_count >= self.args.max_replans:
             raise RuntimeError("lidar_replan_failed:max_replans_exceeded")
-        self.live_replan_attempt_count += 1
+        sequence = self.live_replan_attempt_count + 1
         goal_waypoint = old_remaining_waypoints[-1]
         if self.args.run_local_map_update_mode == "none":
             replanned = self.plan_with_existing_run_local_map(
                 current_pose,
                 old_remaining_waypoints,
+                sequence=sequence,
             )
+            self.live_replan_attempt_count += 1
             self.get_logger().info("Replanned with existing run-local map.")
             return replanned
         try:
@@ -1764,15 +1788,19 @@ class WaypointFollower(Node):
                 current_pose,
                 goal_waypoint,
                 old_remaining_waypoints,
-                sequence=self.live_replan_attempt_count + 1,
+                sequence=sequence,
             )
-        except RuntimeError:
+        except RuntimeError as exc:
+            if trigger == REPLAN_TRIGGER_SCAN_BLOCKAGE:
+                raise lidar_replan_failure(exc) from exc
             if self.run_local_map is None:
                 raise
             replanned = self.plan_with_existing_run_local_map(
                 current_pose,
                 old_remaining_waypoints,
+                sequence=sequence,
             )
+            self.live_replan_attempt_count += 1
             self.get_logger().warn(
                 "LiDAR map update failed; replanned with existing run-local map."
             )
@@ -1787,19 +1815,25 @@ class WaypointFollower(Node):
                 lidar_obstacle_map.RUN_LOCAL_FAILURE_MAX_UPDATES_EXCEEDED,
             }
             if result.reason in rejected_reasons:
+                if trigger == REPLAN_TRIGGER_SCAN_BLOCKAGE:
+                    raise lidar_replan_failure(result.reason)
                 self.get_logger().warn(
                     "LiDAR map update rejected; replanning with existing run-local map."
                 )
-                return self.plan_with_existing_run_local_map(
+                replanned = self.plan_with_existing_run_local_map(
                     current_pose,
                     old_remaining_waypoints,
+                    sequence=sequence,
                 )
+                self.live_replan_attempt_count += 1
+                return replanned
         replanned = self.validate_replan_result(
             result,
             current_pose,
             old_remaining_waypoints,
             goal_waypoint,
         )
+        self.live_replan_attempt_count += 1
         self.get_logger().info(
             "LiDAR obstacle replan completed: "
             f"waypoints={len(replanned)}, map={result.updated_map_yaml}"
@@ -1889,7 +1923,11 @@ class WaypointFollower(Node):
                 except BlockedByScanError as exc:
                     if self.args.enable_lidar_map_replan:
                         remaining = waypoints[waypoint_index:]
-                        replanned = self.replan_after_blockage(pose, remaining)
+                        replanned = self.replan_after_blockage(
+                            pose,
+                            remaining,
+                            trigger=REPLAN_TRIGGER_SCAN_BLOCKAGE,
+                        )
                         publish_rviz_route_if_available(
                             self,
                             replanned,
@@ -1918,7 +1956,11 @@ class WaypointFollower(Node):
                     if blocked_cells:
                         publish_rviz_obstacles_if_available(self, blocked_cells)
                         self.stop_repeatedly()
-                        replanned = self.replan_after_blockage(pose, remaining)
+                        replanned = self.replan_after_blockage(
+                            pose,
+                            remaining,
+                            trigger=REPLAN_TRIGGER_KNOWN_CORRIDOR,
+                        )
                         publish_rviz_route_if_available(
                             self,
                             replanned,
