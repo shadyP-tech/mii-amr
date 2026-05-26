@@ -1219,6 +1219,7 @@ class WaypointFollower(Node):
         self.last_tf_stamp_change_local_sec = None
         self.run_local_map = None
         self.live_replan_attempt_count = 0
+        self.known_corridor_repair_count = 0
         self.rviz_last_blocked_cells = set()
 
         self.pub = self.create_publisher(Twist, "/cmd_vel", 10)
@@ -1782,10 +1783,22 @@ class WaypointFollower(Node):
         old_remaining_waypoints,
         trigger=REPLAN_TRIGGER_SCAN_BLOCKAGE,
     ):
+        known_corridor_repair_count = getattr(self, "known_corridor_repair_count", 0)
+        sequence = self.live_replan_attempt_count + known_corridor_repair_count + 1
+        goal_waypoint = old_remaining_waypoints[-1]
+        if trigger == REPLAN_TRIGGER_KNOWN_CORRIDOR and self.run_local_map is not None:
+            replanned = self.plan_with_existing_run_local_map(
+                current_pose,
+                old_remaining_waypoints,
+                sequence=sequence,
+            )
+            self.known_corridor_repair_count = known_corridor_repair_count + 1
+            self.get_logger().info(
+                "Replanned with existing run-local map for known corridor blockage."
+            )
+            return replanned
         if self.live_replan_attempt_count >= self.args.max_replans:
             raise RuntimeError("lidar_replan_failed:max_replans_exceeded")
-        sequence = self.live_replan_attempt_count + 1
-        goal_waypoint = old_remaining_waypoints[-1]
         if self.args.run_local_map_update_mode == "none":
             replanned = self.plan_with_existing_run_local_map(
                 current_pose,

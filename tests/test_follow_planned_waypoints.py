@@ -1484,7 +1484,7 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
         self.assertFalse(plan_called)
         self.assertEqual(node.live_replan_attempt_count, 0)
 
-    def test_known_corridor_blockage_can_replan_with_existing_map_after_update_failure(self):
+    def test_known_corridor_blockage_repairs_existing_map_without_spending_lidar_budget(self):
         class ReplanNode:
             replan_after_blockage = follower.WaypointFollower.replan_after_blockage
             plan_with_existing_run_local_map = (
@@ -1520,14 +1520,14 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
             follower.Waypoint(1, 0.5, 0.0),
             follower.Waypoint(2, 1.0, 0.0),
         ]
-        plan_called = False
+        plan_call_count = 0
 
         def fail_update(*_args, **_kwargs):
-            raise RuntimeError("stale_tf: age=6.0s")
+            raise AssertionError("known corridor repairs should not require a fresh scan update")
 
         def plan_existing(*_args, **_kwargs):
-            nonlocal plan_called
-            plan_called = True
+            nonlocal plan_call_count
+            plan_call_count += 1
             return follower.lidar_obstacle_map.ReplanResult(
                 success=True,
                 reason="run_local_replan_completed",
@@ -1547,14 +1547,27 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
                 old_remaining,
                 trigger=follower.REPLAN_TRIGGER_KNOWN_CORRIDOR,
             )
+            node.live_replan_attempt_count = node.args.max_replans
+            second_replanned = follower.WaypointFollower.replan_after_blockage(
+                node,
+                follower.Pose2D(0.0, 0.0, 0.0),
+                old_remaining,
+                trigger=follower.REPLAN_TRIGGER_KNOWN_CORRIDOR,
+            )
         finally:
             follower.replan_runtime.perform_lidar_replan = original_update
             follower.replan_runtime.plan_existing_run_local_map = original_existing
 
-        self.assertTrue(plan_called)
+        self.assertEqual(plan_call_count, 2)
         self.assertEqual([(wp.x, wp.y) for wp in replanned], [(0.0, 0.0), (1.0, 0.0)])
-        self.assertEqual(node.live_replan_attempt_count, 1)
-        self.assertEqual(len(node.logger.warnings), 1)
+        self.assertEqual(
+            [(wp.x, wp.y) for wp in second_replanned],
+            [(0.0, 0.0), (1.0, 0.0)],
+        )
+        self.assertEqual(node.live_replan_attempt_count, node.args.max_replans)
+        self.assertEqual(node.known_corridor_repair_count, 2)
+        self.assertEqual(len(node.logger.warnings), 0)
+        self.assertEqual(len(node.logger.infos), 2)
 
     def test_initial_run_local_path_failure_still_aborts(self):
         class InitialMapNode:
