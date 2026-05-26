@@ -289,10 +289,16 @@ def collect_initial_observations(node, args):
     latest_tf_age = None
     latest_lookup_mode = ""
     seen_stamps = set()
-    deadline = time.time() + max(2.0, scan_count * 0.5)
     node.stop_repeatedly()
+    if hasattr(node, "spin_once"):
+        # stop_repeatedly intentionally publishes zero commands without spinning.
+        # Drain one queued sensor callback before setting the post-stop freshness
+        # boundary, so the collection loop waits for data produced after the stop.
+        node.spin_once(0.1)
     min_scan_received_sec = time.time()
     min_scan_stamp_sec = min_scan_received_sec
+    deadline = time.time() + max(5.0, scan_count * 1.0)
+    last_error = None
     while len(seen_stamps) < scan_count and time.time() <= deadline:
         try:
             batch, scan, scan_age, tf_age, lookup_mode = observations_from_latest_scan(
@@ -302,7 +308,8 @@ def collect_initial_observations(node, args):
                 min_scan_received_sec=min_scan_received_sec,
                 min_scan_stamp_sec=min_scan_stamp_sec,
             )
-        except RuntimeError:
+        except RuntimeError as exc:
+            last_error = exc
             if hasattr(node, "spin_once"):
                 node.spin_once(0.1)
             elif "rclpy" in globals() and globals()["rclpy"] is not None:
@@ -324,9 +331,10 @@ def collect_initial_observations(node, args):
             node.spin_once(0.1)
         time.sleep(0.05)
     if len(seen_stamps) < scan_count:
+        detail = "" if last_error is None else f", last_error={last_error}"
         raise RuntimeError(
             f"{lidar_obstacle_map.RUN_LOCAL_FAILURE_STALE_SCAN}: "
-            f"collected={len(seen_stamps)}, required={scan_count}"
+            f"collected={len(seen_stamps)}, required={scan_count}{detail}"
         )
     return observations, latest_scan, latest_scan_age, latest_tf_age, latest_lookup_mode, len(seen_stamps)
 
