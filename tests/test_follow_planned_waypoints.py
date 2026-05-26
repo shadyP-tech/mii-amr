@@ -1616,6 +1616,51 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
                 goal_waypoint,
             )
 
+    def test_replan_validation_allows_near_forward_waypoint_on_clear_path(self):
+        class ValidationNode:
+            replanned_waypoints_from_result = (
+                follower.WaypointFollower.replanned_waypoints_from_result
+            )
+            first_motion_waypoint = follower.WaypointFollower.first_motion_waypoint
+
+            def __init__(self):
+                self.args = default_args(
+                    goal_tolerance_m=0.12,
+                    waypoint_tolerance_m=0.12,
+                    min_scan_range_m=0.24,
+                    obstacle_forward_half_width_m=0.18,
+                    robot_footprint_radius_m=0.18,
+                )
+
+        node = ValidationNode()
+        result = follower.lidar_obstacle_map.ReplanResult(
+            success=True,
+            reason="run_local_replan_completed",
+            waypoints=[
+                (0, 0.0, 0.0),
+                (1, 0.18, 0.0),
+                (2, 0.6, 0.2),
+            ],
+            path_cells=[(0, 0), (1, 0), (2, 1)],
+            inflated_obstacle_cells={(2, 0)},
+        )
+        current_pose = follower.Pose2D(0.0, 0.0, 0.0)
+        old_remaining = [
+            follower.Waypoint(1, 0.4, 0.0),
+            follower.Waypoint(2, 0.6, 0.2),
+        ]
+        goal_waypoint = follower.Waypoint(2, 0.6, 0.2)
+
+        replanned = follower.WaypointFollower.validate_replan_result(
+            node,
+            result,
+            current_pose,
+            old_remaining,
+            goal_waypoint,
+        )
+
+        self.assertEqual([wp.index for wp in replanned], [0, 1, 2])
+
     def test_append_csv_row_migrates_old_header_by_appending_columns(self):
         args = default_args()
         row = follower.build_log_row(

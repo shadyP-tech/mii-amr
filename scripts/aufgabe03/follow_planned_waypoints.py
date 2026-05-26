@@ -18,7 +18,7 @@ from pathlib import Path
 try:
     import rclpy
     from rclpy.node import Node
-    from rclpy.qos import qos_profile_sensor_data
+    from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
     from rclpy.time import Time
     from geometry_msgs.msg import Point, PoseStamped, PoseWithCovarianceStamped, Twist
     from nav_msgs.msg import Path as NavPath
@@ -28,6 +28,8 @@ try:
 except ImportError:
     rclpy = None
     Node = object
+    DurabilityPolicy = None
+    QoSProfile = None
     qos_profile_sensor_data = None
     Time = None
     Point = None
@@ -1659,12 +1661,6 @@ class WaypointFollower(Node):
         first_heading_error = abs(shortest_angle_delta_deg(0.0, first_heading))
         if not math.isfinite(first_heading_error) or first_heading_error > 180.0:
             raise RuntimeError("lidar_replan_failed:first_segment_heading_unreachable")
-        if (
-            first_base.x > 0.0
-            and first_base.x < self.args.min_scan_range_m
-            and abs(first_base.y) <= self.args.obstacle_forward_half_width_m
-        ):
-            raise RuntimeError("lidar_replan_failed:first_waypoint_in_scan_stop_zone")
         if result.inflated_obstacle_cells and result.path_cells:
             obstacle_path_overlap = set(result.path_cells).intersection(result.inflated_obstacle_cells)
             if obstacle_path_overlap:
@@ -1818,7 +1814,8 @@ class WaypointFollower(Node):
                 if trigger == REPLAN_TRIGGER_SCAN_BLOCKAGE:
                     raise lidar_replan_failure(result.reason)
                 self.get_logger().warn(
-                    "LiDAR map update rejected; replanning with existing run-local map."
+                    "LiDAR map update rejected; "
+                    f"replanning with existing run-local map. reason={result.reason}"
                 )
                 replanned = self.plan_with_existing_run_local_map(
                     current_pose,
