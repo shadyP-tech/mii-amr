@@ -715,6 +715,7 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         self.assertEqual(command[command.index("--static-map") + 1], "maps/test.yaml")
         self.assertEqual(command[command.index("--replan-output-dir") + 1], "results/replan")
         self.assertEqual(command[command.index("--max-replans") + 1], "2")
+        self.assertEqual(command[command.index("--run-local-map-initial-scan-mode") + 1], "forward")
         self.assertEqual(command[command.index("--run-local-map-initial-scan-count") + 1], "4")
         self.assertEqual(command[command.index("--run-local-map-update-mode") + 1], "full")
         self.assertEqual(command[command.index("--run-local-map-min-hit-count") + 1], "1")

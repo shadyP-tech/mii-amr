@@ -418,6 +418,98 @@ class LidarObstacleMapTest(unittest.TestCase):
         self.assertEqual(node.stop_count, 1)
         self.assertGreaterEqual(node.spin_count, 1)
 
+    def test_runtime_initial_collection_honors_forward_scan_mode(self):
+        def stamp_from_time(stamp_sec):
+            return argparse.Namespace(
+                sec=int(stamp_sec),
+                nanosec=int((stamp_sec - int(stamp_sec)) * 1_000_000_000),
+            )
+
+        class Header:
+            def __init__(self, stamp_sec):
+                self.frame_id = "scan"
+                self.stamp = stamp_from_time(stamp_sec)
+
+        class Scan:
+            def __init__(self, stamp_sec):
+                self.header = Header(stamp_sec)
+                self.ranges = [0.45, 0.45]
+                self.angle_min = 0.0
+                self.angle_increment = 1.5707963267948966
+                self.range_min = 0.05
+                self.range_max = 4.0
+
+        class Rotation:
+            x = 0.0
+            y = 0.0
+            z = 0.0
+            w = 1.0
+
+        class Translation:
+            x = 0.0
+            y = 0.0
+            z = 0.0
+
+        class TransformBody:
+            translation = Translation()
+            rotation = Rotation()
+
+        class Transform:
+            def __init__(self):
+                self.header = Header(time.time())
+                self.transform = TransformBody()
+
+        class Buffer:
+            def lookup_transform(self, *_args):
+                return Transform()
+
+        class Node:
+            def __init__(self):
+                now = time.time()
+                self.scans = [Scan(now), Scan(now + 1.0)]
+                self.scan_index = 0
+                self.last_scan = self.scans[0]
+                self.last_scan_received_sec = now
+                self.tf_buffer = Buffer()
+
+            def stop_repeatedly(self):
+                return None
+
+            def spin_once(self, _timeout_sec):
+                if self.scan_index + 1 < len(self.scans):
+                    self.scan_index += 1
+                    self.last_scan = self.scans[self.scan_index]
+                    self.last_scan_received_sec = time.time()
+
+        args = argparse.Namespace(
+            map_frame="map",
+            allow_latest_tf_replan_fallback=False,
+            run_local_map_initial_scan_mode="forward",
+            run_local_map_initial_scan_count=1,
+            run_local_map_max_scan_age_sec=1.0,
+            run_local_map_max_tf_age_sec=10.0,
+            obstacle_forward_distance_m=0.55,
+            obstacle_forward_half_width_m=0.18,
+            obstacle_angle_window_deg=45.0,
+            obstacle_min_range_m=0.12,
+            robot_footprint_radius_m=0.18,
+            obstacle_min_cluster_size=1,
+            obstacle_min_cluster_width_m=0.0,
+            obstacle_inflate_radius_m=0.22,
+            max_start_snap_m=0.2,
+            max_goal_snap_m=0.3,
+            max_replan_path_length_ratio=3.0,
+        )
+
+        observations, _scan, _scan_age, _tf_age, _lookup_mode, collected = (
+            replan_runtime.collect_initial_observations(Node(), args)
+        )
+
+        self.assertEqual(collected, 1)
+        self.assertEqual(len(observations), 1)
+        self.assertAlmostEqual(observations[0].x_m, 0.45)
+        self.assertAlmostEqual(observations[0].y_m, 0.0)
+
     def test_runtime_initial_collection_retries_tf_offset_before_success(self):
         now = int(time.time())
 

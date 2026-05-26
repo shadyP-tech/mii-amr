@@ -258,7 +258,7 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
         self.assertFalse(args.wait_before_follow)
         self.assertFalse(args.enable_lidar_map_replan)
         self.assertFalse(args.lidar_replan_artifact_only)
-        self.assertEqual(args.run_local_map_initial_scan_mode, "full")
+        self.assertEqual(args.run_local_map_initial_scan_mode, "forward")
         self.assertEqual(args.run_local_map_initial_scan_count, 5)
         self.assertEqual(args.run_local_map_update_mode, "forward")
         self.assertEqual(args.run_local_map_min_hit_count, 2)

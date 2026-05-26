@@ -316,6 +316,7 @@ def wait_for_observations_from_fresh_scan(
 
 def collect_initial_observations(node, args):
     scan_count = getattr(args, "run_local_map_initial_scan_count", 5)
+    scan_mode = getattr(args, "run_local_map_initial_scan_mode", "full")
     observations = []
     latest_scan = None
     latest_scan_age = None
@@ -337,7 +338,7 @@ def collect_initial_observations(node, args):
             batch, scan, scan_age, tf_age, lookup_mode = observations_from_latest_scan(
                 node,
                 args,
-                scan_mode="full",
+                scan_mode=scan_mode,
                 min_scan_received_sec=min_scan_received_sec,
                 min_scan_stamp_sec=min_scan_stamp_sec,
             )

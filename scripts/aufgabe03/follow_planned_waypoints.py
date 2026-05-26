@@ -98,7 +98,7 @@ DEFAULT_OBSTACLE_INFLATE_RADIUS_M = 0.22
 DEFAULT_MAX_START_SNAP_M = 0.20
 DEFAULT_MAX_GOAL_SNAP_M = 0.30
 DEFAULT_MAX_REPLAN_PATH_LENGTH_RATIO = 3.0
-DEFAULT_RUN_LOCAL_MAP_INITIAL_SCAN_MODE = "full"
+DEFAULT_RUN_LOCAL_MAP_INITIAL_SCAN_MODE = "forward"
 DEFAULT_RUN_LOCAL_MAP_INITIAL_SCAN_COUNT = 5
 DEFAULT_RUN_LOCAL_MAP_UPDATE_MODE = "forward"
 DEFAULT_RUN_LOCAL_MAP_MIN_HIT_COUNT = 2
@@ -2256,7 +2256,7 @@ def parse_args(argv):
     parser.add_argument(
         "--run-local-map-initial-scan-mode",
         default=DEFAULT_RUN_LOCAL_MAP_INITIAL_SCAN_MODE,
-        choices=["none", "full"],
+        choices=["none", "forward", "full"],
     )
     parser.add_argument(
         "--run-local-map-initial-scan-count",

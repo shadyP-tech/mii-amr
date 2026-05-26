@@ -281,7 +281,7 @@ def parse_args(argv):
     parser.add_argument(
         "--run-local-map-initial-scan-mode",
         default=DEFAULT_RUN_LOCAL_MAP_INITIAL_SCAN_MODE,
-        choices=["none", "full"],
+        choices=["none", "forward", "full"],
     )
     parser.add_argument(
         "--run-local-map-initial-scan-count",
