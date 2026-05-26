@@ -362,6 +362,14 @@ def rviz_messages_available():
     )
 
 
+def rviz_qos_profile():
+    if QoSProfile is None or DurabilityPolicy is None:
+        return 1
+    qos = QoSProfile(depth=1)
+    qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+    return qos
+
+
 def set_header(message, frame_id, stamp):
     message.header.frame_id = frame_id
     message.header.stamp = stamp
@@ -1218,16 +1226,21 @@ class WaypointFollower(Node):
                     "ROS RViz message types are unavailable. Source ROS 2 Humble "
                     "before enabling RViz visualization."
                 )
-            self.rviz_path_pub = self.create_publisher(NavPath, args.rviz_path_topic, 10)
+            rviz_qos = rviz_qos_profile()
+            self.rviz_path_pub = self.create_publisher(
+                NavPath,
+                args.rviz_path_topic,
+                rviz_qos,
+            )
             self.rviz_waypoint_marker_pub = self.create_publisher(
                 MarkerArray,
                 args.rviz_waypoint_marker_topic,
-                10,
+                rviz_qos,
             )
             self.rviz_obstacle_marker_pub = self.create_publisher(
                 MarkerArray,
                 args.rviz_obstacle_marker_topic,
-                10,
+                rviz_qos,
             )
             self.get_logger().info(
                 "Publishing RViz visualization: "
@@ -2476,6 +2489,8 @@ def main(argv=None):
             f"first_waypoint={start_selection.selected_waypoint_index}, "
             f"distance_to_path={start_selection.distance_to_path_m}"
         )
+        node.publish_rviz_route(executable_waypoints, current_pose=start_pose)
+        node.publish_rviz_obstacles()
         if not wait_before_follow_confirmation(args, start_pose, executable_waypoints):
             status = "interrupted"
             notes = f"{args.notes};wait_before_follow_cancelled"
