@@ -203,8 +203,21 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
         self.assertIn("Waypoint follower handoff is ready", stdout.getvalue())
 
     def test_refresh_after_operator_wait_requires_new_scan_after_prompt(self):
+        class Stamp:
+            def __init__(self, stamp_sec):
+                self.sec = int(stamp_sec)
+                self.nanosec = int((stamp_sec - int(stamp_sec)) * 1_000_000_000)
+
+        class Header:
+            def __init__(self, stamp_sec):
+                self.stamp = Stamp(stamp_sec)
+
+        class Scan:
+            def __init__(self, stamp_sec):
+                self.header = Header(stamp_sec)
+
         class FakeRclpy:
-            updated = False
+            spin_count = 0
 
             @staticmethod
             def ok():
@@ -212,9 +225,12 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
 
             @classmethod
             def spin_once(cls, node, timeout_sec=0.0):
-                cls.updated = True
-                node.last_scan = object()
+                cls.spin_count += 1
                 node.last_scan_received_sec = time.time()
+                if cls.spin_count == 1:
+                    node.last_scan = Scan(node.min_scan_received_sec - 10.0)
+                else:
+                    node.last_scan = Scan(time.time())
 
         class RefreshNode:
             reset_tf_tracking = follower.WaypointFollower.reset_tf_tracking
@@ -222,7 +238,8 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
 
             def __init__(self):
                 self.args = default_args(startup_timeout_sec=0.5)
-                self.last_scan = object()
+                self.min_scan_received_sec = time.time()
+                self.last_scan = Scan(self.min_scan_received_sec - 10.0)
                 self.last_scan_received_sec = time.time() - 10.0
                 self.last_tf_stamp_sec = 123.0
                 self.last_tf_stamp_change_local_sec = time.time() - 10.0
@@ -231,17 +248,19 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
         follower.rclpy = FakeRclpy
         try:
             node = RefreshNode()
-            min_scan_received_sec = time.time()
 
             follower.WaypointFollower.refresh_after_operator_wait(
                 node,
-                min_scan_received_sec,
+                node.min_scan_received_sec,
             )
         finally:
             follower.rclpy = original_rclpy
 
-        self.assertTrue(FakeRclpy.updated)
-        self.assertGreaterEqual(node.last_scan_received_sec, min_scan_received_sec)
+        self.assertEqual(FakeRclpy.spin_count, 2)
+        self.assertGreaterEqual(
+            follower.replan_runtime.scan_stamp_sec(node.last_scan),
+            node.min_scan_received_sec - follower.replan_runtime.FRESH_SCAN_STAMP_SLACK_SEC,
+        )
         self.assertIsNone(node.last_tf_stamp_sec)
         self.assertIsNone(node.last_tf_stamp_change_local_sec)
 

@@ -993,19 +993,31 @@ class WaypointFollower(Node):
         self.last_tf_stamp_sec = None
         self.last_tf_stamp_change_local_sec = None
 
-    def refresh_after_operator_wait(self, min_scan_received_sec, timeout_sec=None):
+    def refresh_after_operator_wait(self, min_scan_stamp_sec, timeout_sec=None):
         self.reset_tf_tracking()
         timeout_sec = timeout_sec or self.args.startup_timeout_sec
         deadline = time.time() + timeout_sec
         while rclpy.ok() and time.time() <= deadline:
             rclpy.spin_once(self, timeout_sec=0.1)
+            scan_stamp_sec = (
+                None
+                if self.last_scan is None
+                else replan_runtime.scan_stamp_sec(self.last_scan)
+            )
             if (
                 self.last_scan is not None
                 and self.last_scan_received_sec is not None
-                and self.last_scan_received_sec >= min_scan_received_sec
+                and self.last_scan_received_sec >= min_scan_stamp_sec
+                and (
+                    scan_stamp_sec is None
+                    or scan_stamp_sec
+                    >= min_scan_stamp_sec - replan_runtime.FRESH_SCAN_STAMP_SLACK_SEC
+                )
             ):
                 return
-        raise RuntimeError("Timed out waiting for fresh /scan after handoff pause.")
+        raise RuntimeError(
+            "Timed out waiting for fresh stamped /scan after handoff pause."
+        )
 
     def record_motion_sample(self, yaw_error_deg, linear_x, angular_z, sample_seconds):
         abs_error = abs(yaw_error_deg)
