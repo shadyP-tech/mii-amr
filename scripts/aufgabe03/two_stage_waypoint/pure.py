@@ -303,6 +303,8 @@ def build_follower_command(args):
         "--notes",
         f"{args.notes};two_stage_handoff",
     ]
+    if args.wait_before_follow:
+        command.append("--wait-before-follow")
     if args.enable_lidar_map_replan:
         command.extend([
             "--enable-lidar-map-replan",

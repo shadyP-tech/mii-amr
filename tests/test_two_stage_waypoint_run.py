@@ -152,6 +152,23 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         self.assertEqual(args.arena_active_center_reposition_max_step_m, 0.7)
         self.assertEqual(args.arena_force_short_wall_side, "axis_positive")
         self.assertEqual(args.arena_force_short_wall_type, "clean")
+        self.assertFalse(args.arena_active_require_operator_confirmation)
+
+    def test_arena_active_internal_confirmations_are_opt_in_for_two_stage(self):
+        default_args = two_stage_cli.parse_args(["--dry-run"])
+        required_args = two_stage_cli.parse_args([
+            "--dry-run",
+            "--arena-active-require-operator-confirmation",
+        ])
+        disabled_args = two_stage_cli.parse_args([
+            "--dry-run",
+            "--arena-active-require-operator-confirmation",
+            "--no-arena-active-operator-confirmation",
+        ])
+
+        self.assertFalse(default_args.arena_active_require_operator_confirmation)
+        self.assertTrue(required_args.arena_active_require_operator_confirmation)
+        self.assertFalse(disabled_args.arena_active_require_operator_confirmation)
 
     def test_removed_legacy_flags_are_rejected(self):
         legacy_argvs = [
@@ -565,6 +582,7 @@ class TwoStageWaypointRunTest(unittest.TestCase):
             "0.25",
         )
         self.assertIn("--max-amcl-var-yaw", command)
+        self.assertNotIn("--wait-before-follow", command)
         self.assertNotIn("--enable-lidar-map-replan", command)
 
         captured = {}
@@ -584,6 +602,19 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         self.assertIs(captured["cmd"], command)
         self.assertFalse(captured["check"])
         self.assertFalse(captured["shell"])
+
+    def test_follower_command_passes_wait_before_follow_flag(self):
+        args = two_stage_cli.parse_args([
+            "--dry-run",
+            "--run-id",
+            "arena_prior_test",
+            "--wait-before-follow",
+        ])
+
+        command = two_stage_pure.build_follower_command(args)
+
+        self.assertTrue(args.wait_before_follow)
+        self.assertIn("--wait-before-follow", command)
 
     def test_verify_arrival_allows_path_ready_handoff_after_staging_miss(self):
         warnings = []

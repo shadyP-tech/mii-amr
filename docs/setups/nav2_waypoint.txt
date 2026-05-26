@@ -185,10 +185,17 @@ The coordinator will:
 arena spin localization -> publish arena prior -> AMCL validation -> Nav2 to waypoint 0 -> custom follower
 ```
 
-**Optional: One-Shot LiDAR Obstacle Overlay Preview**
-This is an experimental Aufgabe 3 extension. It is not dynamic obstacle
-avoidance. It stops on a scan blockage, writes a one-shot map overlay and
-updated A* path, and in artifact-only mode does not resume motion.
+By default, the two-stage runner uses only the initial `RUN` confirmation for
+arena-active spin and recovery repositioning. Add
+`--arena-active-require-operator-confirmation` only when you want the older
+extra prompts before spin/reposition motion.
+
+**Optional: LiDAR Obstacle Overlay And Active Replan**
+This is the Aufgabe 3 run-local map extension. It keeps the saved static map
+unchanged, adds confirmed LiDAR obstacle cells to a temporary overlay, writes
+map/path artifacts, and can replan the remaining route after a scan blockage.
+Use artifact-only mode first; it stops, writes the overlay/path artifacts, and
+does not resume motion.
 
 Offline synthetic artifact generation:
 
@@ -209,13 +216,63 @@ python3 scripts/aufgabe03/two_stage_waypoint_run.py \
   --waypoints results/aufgabe03/aufgabe03_waypoints.csv \
   --run-id lidar_replan_dry \
   --dry-run \
+  --wait-before-follow \
   --enable-lidar-map-replan \
   --lidar-replan-artifact-only
 ```
 
-Only test artifact-only mode on the robot after the normal arena-prior run is
-stable. Enable resume behavior later by removing `--lidar-replan-artifact-only`
-after the overlay artifacts prove the obstacle lands in the correct map cells.
+Robot artifact-only validation after the normal arena-prior run is stable:
+
+```bash
+python3 scripts/aufgabe03/two_stage_waypoint_run.py \
+  --waypoints results/aufgabe03/aufgabe03_waypoints.csv \
+  --run-id lidar_replan_artifact_001 \
+  --heater-wall-side=+x \
+  --arena-force-short-wall-side axis_positive \
+  --arena-force-short-wall-type clean \
+  --arena-active-allow-extra-cmd-vel-publishers \
+  --max-amcl-var-x 0.20 \
+  --max-stable-pose-jump-m 0.10 \
+  --stable-amcl-samples 3 \
+  --wait-before-follow \
+  --enable-lidar-map-replan \
+  --lidar-replan-artifact-only \
+  --allow-latest-tf-replan-fallback
+```
+
+Check the generated files before enabling resume behavior:
+
+```bash
+ls -1 results/aufgabe03/lidar_replan_artifact_001_run_local*
+tail -n 1 results/aufgabe03/aufgabe03_waypoint_follow_runs.csv
+```
+
+Active temporary-obstacle validation removes `--lidar-replan-artifact-only`.
+Place a temporary obstacle on the planned route, keep the safety stop terminal
+ready, and use a small replan limit. With `--wait-before-follow`, the robot
+stops after Nav2 reaches waypoint 0 and waits for `RUN` before the custom
+follower starts:
+
+```bash
+python3 scripts/aufgabe03/two_stage_waypoint_run.py \
+  --waypoints results/aufgabe03/aufgabe03_waypoints.csv \
+  --run-id lidar_replan_active_001 \
+  --heater-wall-side=+x \
+  --arena-force-short-wall-side axis_positive \
+  --arena-force-short-wall-type clean \
+  --arena-active-allow-extra-cmd-vel-publishers \
+  --max-amcl-var-x 0.20 \
+  --max-stable-pose-jump-m 0.10 \
+  --stable-amcl-samples 3 \
+  --wait-before-follow \
+  --enable-lidar-map-replan \
+  --max-replans 2 \
+  --allow-latest-tf-replan-fallback
+```
+
+If the initial full-scan pass does not find a confirmed free-space obstacle, the
+follower logs the rejected update and continues on the static route. A later
+forward scan blockage still triggers a run-local map update and A* replan.
 
 **After The Run**
 Check the coordinator log:

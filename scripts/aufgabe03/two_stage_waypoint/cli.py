@@ -127,6 +127,11 @@ def print_dry_run(args, waypoints, staging_goal, follower_command):
     print(f"  cmd_vel topic: {args.cmd_vel_topic}")
     print(f"  scan topic: {args.scan_topic}")
     print(f"  odom topic: {args.odom_topic}")
+    print(f"Wait before custom follower: {'yes' if args.wait_before_follow else 'no'}")
+    print(
+        "Arena-active internal confirmations: "
+        f"{'yes' if args.arena_active_require_operator_confirmation else 'no'}"
+    )
     print(f"LiDAR map replan: {'enabled' if args.enable_lidar_map_replan else 'disabled'}")
     if args.enable_lidar_map_replan:
         print(f"  artifact only: {'yes' if args.lidar_replan_artifact_only else 'no'}")
@@ -248,6 +253,7 @@ def parse_args(argv):
         type=float,
     )
     parser.add_argument("--control-rate-hz", default=DEFAULT_CONTROL_RATE_HZ, type=float)
+    parser.add_argument("--wait-before-follow", action="store_true")
     parser.add_argument("--enable-lidar-map-replan", action="store_true")
     parser.add_argument("--lidar-replan-artifact-only", action="store_true")
     parser.add_argument("--static-map", default=DEFAULT_STATIC_MAP, type=Path)
@@ -355,13 +361,18 @@ def parse_args(argv):
         "--arena-active-require-operator-confirmation",
         dest="arena_active_require_operator_confirmation",
         action="store_true",
+        help=(
+            "Ask again before arena-active spin and center reposition. "
+            "By default the two-stage runner relies on the initial RUN prompt."
+        ),
     )
     parser.add_argument(
         "--no-arena-active-operator-confirmation",
         dest="arena_active_require_operator_confirmation",
         action="store_false",
+        help="Use only the two-stage runner's initial RUN prompt for arena-active motion.",
     )
-    parser.set_defaults(arena_active_require_operator_confirmation=True)
+    parser.set_defaults(arena_active_require_operator_confirmation=False)
     parser.add_argument("--arena-active-allow-extra-cmd-vel-publishers", action="store_true")
     parser.add_argument(
         "--arena-active-validation-timeout-sec",

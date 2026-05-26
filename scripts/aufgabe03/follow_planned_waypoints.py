@@ -99,6 +99,11 @@ DEFAULT_RUN_LOCAL_MAP_CORRIDOR_CHECK_DISTANCE_M = 0.75
 DEFAULT_RUN_LOCAL_MAP_CLEARANCE_MARGIN_M = 0.04
 DEFAULT_RUN_LOCAL_MAP_MAX_UPDATES = 3
 
+INITIAL_RUN_LOCAL_MAP_NONFATAL_REASONS = {
+    lidar_obstacle_map.RUN_LOCAL_FAILURE_TOO_FEW_SCAN_POINTS,
+    lidar_obstacle_map.RUN_LOCAL_FAILURE_TOO_MANY_REJECTED_POINTS,
+}
+
 DEFAULT_STARTUP_TIMEOUT_SEC = 20.0
 STOP_PUBLISH_COUNT = 10
 STOP_PUBLISH_HZ = 10.0
@@ -1250,7 +1255,14 @@ class WaypointFollower(Node):
             goal_waypoint,
             waypoints,
         )
-        self.update_replan_diagnostics(result, count_replan=True)
+        self.update_replan_diagnostics(result, count_replan=result.success)
+        if not result.success and result.reason in INITIAL_RUN_LOCAL_MAP_NONFATAL_REASONS:
+            self.stop_repeatedly()
+            self.get_logger().warn(
+                "Initial run-local obstacle map did not find a confirmed "
+                f"free-space obstacle; continuing with the static route. reason={result.reason}"
+            )
+            return list(waypoints)
         replanned = self.validate_replan_result(
             result,
             current_pose,
@@ -1583,6 +1595,30 @@ def require_motion_confirmation(args, waypoints):
     return response == "RUN"
 
 
+def wait_before_follow_confirmation(args, current_pose, executable_waypoints, input_fn=input):
+    if not args.wait_before_follow:
+        return True
+
+    print("\nWaypoint follower handoff is ready.")
+    print("The robot is stopped after Nav2 staging and before custom waypoint following.")
+    print("Place the temporary obstacle on the planned path now.")
+    print("Safety requirements:")
+    print("  - keep the path area clear except for the test obstacle")
+    print("  - keep Ctrl+C and physical stop available")
+    print(
+        "Current pose: "
+        f"x={current_pose.x:.3f}, y={current_pose.y:.3f}, yaw={current_pose.yaw_deg:.1f} deg"
+    )
+    if executable_waypoints:
+        first = executable_waypoints[0]
+        print(
+            "First follower waypoint: "
+            f"index={first.index}, x={first.x:.3f}, y={first.y:.3f}"
+        )
+    response = input_fn("Type RUN to start custom waypoint following: ").strip()
+    return response == "RUN"
+
+
 def print_dry_run(args, raw_waypoints, executable_waypoints):
     print("Waypoint follower dry run")
     print(f"Waypoint CSV: {args.waypoints}")
@@ -1595,6 +1631,7 @@ def print_dry_run(args, raw_waypoints, executable_waypoints):
     print(f"Waypoint tolerance: {args.waypoint_tolerance_m:.3f} m")
     print(f"Goal tolerance: {args.goal_tolerance_m:.3f} m")
     print(f"Start selection: {args.start_selection}")
+    print(f"Wait before follow: {'yes' if args.wait_before_follow else 'no'}")
     print(f"LiDAR map replan: {'enabled' if args.enable_lidar_map_replan else 'disabled'}")
     if args.enable_lidar_map_replan:
         print(f"  artifact only: {'yes' if args.lidar_replan_artifact_only else 'no'}")
@@ -1767,6 +1804,7 @@ def parse_args(argv):
         type=int,
     )
     parser.add_argument("--run-local-map-artifact-prefix")
+    parser.add_argument("--wait-before-follow", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--yes", action="store_true")
     parser.add_argument("--no-log", action="store_true")
@@ -1940,15 +1978,22 @@ def main(argv=None):
             f"first_waypoint={start_selection.selected_waypoint_index}, "
             f"distance_to_path={start_selection.distance_to_path_m}"
         )
-        result = node.follow_waypoints(executable_waypoints)
-        reached_count = result["reached_count"]
-        start_pose = result["start_pose"]
-        final_pose = result["final_pose"]
-        scan_safety = result["scan_safety"]
-        amcl_health = result["amcl_health"]
-        status = result.get("status", "completed")
-        node.diagnostics.final_status_reason = status
-        return_code = 0
+        if not wait_before_follow_confirmation(args, start_pose, executable_waypoints):
+            status = "interrupted"
+            notes = f"{args.notes};wait_before_follow_cancelled"
+            node.diagnostics.final_status_reason = "wait_before_follow_cancelled"
+            print("Waypoint following cancelled before custom follower start.")
+            return_code = 130
+        else:
+            result = node.follow_waypoints(executable_waypoints)
+            reached_count = result["reached_count"]
+            start_pose = result["start_pose"]
+            final_pose = result["final_pose"]
+            scan_safety = result["scan_safety"]
+            amcl_health = result["amcl_health"]
+            status = result.get("status", "completed")
+            node.diagnostics.final_status_reason = status
+            return_code = 0
 
     except KeyboardInterrupt:
         status = "interrupted"

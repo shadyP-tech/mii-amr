@@ -125,6 +125,7 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
         self.assertEqual(args.startup_timeout_sec, 20.0)
         self.assertFalse(args.require_amcl_startup)
         self.assertEqual(args.max_waypoint_time_sec, 180.0)
+        self.assertFalse(args.wait_before_follow)
         self.assertFalse(args.enable_lidar_map_replan)
         self.assertFalse(args.lidar_replan_artifact_only)
         self.assertEqual(args.run_local_map_initial_scan_mode, "full")
@@ -177,6 +178,29 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
         self.assertEqual(args.run_local_map_min_hit_count, 1)
         self.assertEqual(args.run_local_map_inflation_radius_m, 0.15)
         self.assertEqual(args.run_local_map_corridor_check_distance_m, 0.5)
+
+    def test_wait_before_follow_prompt_requires_run(self):
+        args = follower.parse_args(["--dry-run", "--wait-before-follow"])
+        pose = follower.Pose2D(0.1, 0.2, 15.0)
+        waypoints = [follower.Waypoint(1, 0.5, 0.2)]
+
+        with contextlib.redirect_stdout(io.StringIO()) as stdout:
+            accepted = follower.wait_before_follow_confirmation(
+                args,
+                pose,
+                waypoints,
+                input_fn=lambda _prompt: "RUN",
+            )
+            rejected = follower.wait_before_follow_confirmation(
+                args,
+                pose,
+                waypoints,
+                input_fn=lambda _prompt: "stop",
+            )
+
+        self.assertTrue(accepted)
+        self.assertFalse(rejected)
+        self.assertIn("Waypoint follower handoff is ready", stdout.getvalue())
 
     def test_waypoint_csv_parsing_and_duplicate_handling(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -872,6 +896,96 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
             follower.rclpy = original_rclpy
 
         self.assertEqual(result["status"], "replan_artifact_only_complete")
+
+    def test_initial_run_local_empty_map_continues_with_static_route(self):
+        class InitialMapNode:
+            update_replan_diagnostics = follower.WaypointFollower.update_replan_diagnostics
+
+            def __init__(self):
+                self.args = default_args(run_local_map_initial_scan_mode="full")
+                self.diagnostics = follower.RuntimeDiagnostics()
+                self.logger = FakeLogger()
+                self.stop_count = 0
+                self.run_local_map = None
+
+            def stop_repeatedly(self):
+                self.stop_count += 1
+
+            def get_logger(self):
+                return self.logger
+
+        waypoints = [
+            follower.Waypoint(1, 0.4, 0.0),
+            follower.Waypoint(2, 0.8, 0.0),
+        ]
+        run_local_map = object()
+        initial_result = follower.lidar_obstacle_map.ReplanResult(
+            success=False,
+            reason=follower.lidar_obstacle_map.RUN_LOCAL_FAILURE_TOO_FEW_SCAN_POINTS,
+            diagnostics=follower.lidar_obstacle_map.ObstacleOverlayDiagnostics(),
+            run_local_map=run_local_map,
+        )
+        original_initial_replan = follower.replan_runtime.perform_initial_run_local_replan
+        follower.replan_runtime.perform_initial_run_local_replan = (
+            lambda *_args, **_kwargs: initial_result
+        )
+        try:
+            node = InitialMapNode()
+            result = follower.WaypointFollower.initialize_run_local_route(
+                node,
+                follower.Pose2D(0.0, 0.0, 0.0),
+                waypoints,
+            )
+        finally:
+            follower.replan_runtime.perform_initial_run_local_replan = original_initial_replan
+
+        self.assertEqual(result, waypoints)
+        self.assertIs(node.run_local_map, run_local_map)
+        self.assertEqual(node.diagnostics.replan_count, 0)
+        self.assertEqual(
+            node.diagnostics.last_replan_reason,
+            follower.lidar_obstacle_map.RUN_LOCAL_FAILURE_TOO_FEW_SCAN_POINTS,
+        )
+        self.assertEqual(len(node.logger.warnings), 1)
+        self.assertGreaterEqual(node.stop_count, 1)
+
+    def test_initial_run_local_path_failure_still_aborts(self):
+        class InitialMapNode:
+            update_replan_diagnostics = follower.WaypointFollower.update_replan_diagnostics
+            validate_replan_result = follower.WaypointFollower.validate_replan_result
+
+            def __init__(self):
+                self.args = default_args(run_local_map_initial_scan_mode="full")
+                self.diagnostics = follower.RuntimeDiagnostics()
+                self.logger = FakeLogger()
+
+            def stop_repeatedly(self):
+                return None
+
+            def get_logger(self):
+                return self.logger
+
+        initial_result = follower.lidar_obstacle_map.ReplanResult(
+            success=False,
+            reason=follower.lidar_obstacle_map.RUN_LOCAL_FAILURE_GOAL_BLOCKED,
+            diagnostics=follower.lidar_obstacle_map.ObstacleOverlayDiagnostics(),
+        )
+        original_initial_replan = follower.replan_runtime.perform_initial_run_local_replan
+        follower.replan_runtime.perform_initial_run_local_replan = (
+            lambda *_args, **_kwargs: initial_result
+        )
+        try:
+            with self.assertRaisesRegex(RuntimeError, "goal_blocked"):
+                follower.WaypointFollower.initialize_run_local_route(
+                    InitialMapNode(),
+                    follower.Pose2D(0.0, 0.0, 0.0),
+                    [
+                        follower.Waypoint(1, 0.4, 0.0),
+                        follower.Waypoint(2, 0.8, 0.0),
+                    ],
+                )
+        finally:
+            follower.replan_runtime.perform_initial_run_local_replan = original_initial_replan
 
     def test_replan_validation_rejects_first_motion_waypoint_behind_robot(self):
         class ValidationNode:
