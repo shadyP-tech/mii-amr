@@ -114,6 +114,12 @@ INITIAL_RUN_LOCAL_MAP_NONFATAL_REASONS = {
     lidar_obstacle_map.RUN_LOCAL_FAILURE_TOO_MANY_REJECTED_POINTS,
 }
 
+
+def run_local_map_has_confirmed_obstacles(run_local_map):
+    if run_local_map is None:
+        return False
+    return bool(getattr(run_local_map, "confirmed_raw_cells", None))
+
 DEFAULT_STARTUP_TIMEOUT_SEC = 20.0
 STOP_PUBLISH_COUNT = 10
 STOP_PUBLISH_HZ = 10.0
@@ -1670,6 +1676,8 @@ class WaypointFollower(Node):
         self.update_replan_diagnostics(result, count_replan=result.success)
         if not result.success and result.reason in INITIAL_RUN_LOCAL_MAP_NONFATAL_REASONS:
             self.stop_repeatedly()
+            if not run_local_map_has_confirmed_obstacles(self.run_local_map):
+                self.run_local_map = None
             self.get_logger().warn(
                 "Initial run-local obstacle map did not find a confirmed "
                 f"free-space obstacle; continuing with the static route. reason={result.reason}"
@@ -1717,6 +1725,8 @@ class WaypointFollower(Node):
     def plan_with_existing_run_local_map(self, current_pose, old_remaining_waypoints):
         if self.run_local_map is None:
             raise RuntimeError("lidar_replan_failed:no_run_local_map")
+        if not run_local_map_has_confirmed_obstacles(self.run_local_map):
+            raise RuntimeError("lidar_replan_failed:no_confirmed_run_local_obstacles")
         goal_waypoint = old_remaining_waypoints[-1]
         result = replan_runtime.plan_existing_run_local_map(
             self.args,

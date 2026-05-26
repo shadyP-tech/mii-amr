@@ -1304,7 +1304,7 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
             follower.replan_runtime.perform_initial_run_local_replan = original_initial_replan
 
         self.assertEqual(result, waypoints)
-        self.assertIs(node.run_local_map, run_local_map)
+        self.assertIsNone(node.run_local_map)
         self.assertEqual(node.diagnostics.replan_count, 0)
         self.assertEqual(
             node.diagnostics.last_replan_reason,
@@ -1312,6 +1312,26 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
         )
         self.assertEqual(len(node.logger.warnings), 1)
         self.assertGreaterEqual(node.stop_count, 1)
+
+    def test_existing_run_local_map_without_confirmed_obstacles_rejects_replan(self):
+        class EmptyRunLocalMap:
+            confirmed_raw_cells = set()
+
+        class ReplanNode:
+            run_local_map = EmptyRunLocalMap()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "lidar_replan_failed:no_confirmed_run_local_obstacles",
+        ):
+            follower.WaypointFollower.plan_with_existing_run_local_map(
+                ReplanNode(),
+                follower.Pose2D(0.0, 0.0, 0.0),
+                [
+                    follower.Waypoint(1, 0.4, 0.0),
+                    follower.Waypoint(2, 0.8, 0.0),
+                ],
+            )
 
     def test_initial_run_local_path_failure_still_aborts(self):
         class InitialMapNode:

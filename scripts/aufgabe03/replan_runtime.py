@@ -290,13 +290,13 @@ def collect_initial_observations(node, args):
     latest_lookup_mode = ""
     seen_stamps = set()
     node.stop_repeatedly()
-    if hasattr(node, "spin_once"):
-        # stop_repeatedly intentionally publishes zero commands without spinning.
-        # Drain one queued sensor callback before setting the post-stop freshness
-        # boundary, so the collection loop waits for data produced after the stop.
-        node.spin_once(0.1)
     min_scan_received_sec = time.time()
     min_scan_stamp_sec = min_scan_received_sec
+    if hasattr(node, "spin_once"):
+        # stop_repeatedly intentionally publishes zero commands without spinning.
+        # Drain one queued sensor callback after setting the post-stop freshness
+        # boundary, so a scan received during this handoff can be used.
+        node.spin_once(0.1)
     deadline = time.time() + max(5.0, scan_count * 1.0)
     last_error = None
     while len(seen_stamps) < scan_count and time.time() <= deadline:
