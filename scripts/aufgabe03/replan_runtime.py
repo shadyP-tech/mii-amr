@@ -127,11 +127,17 @@ def lookup_map_from_scan_transform(node, args, scan):
                 "timestamped TF lookup failed for LiDAR replan: "
                 f"{timestamped_exc}"
             ) from timestamped_exc
-        transform = node.tf_buffer.lookup_transform(
-            args.map_frame,
-            scan_frame,
-            latest_time(),
-        )
+        try:
+            transform = node.tf_buffer.lookup_transform(
+                args.map_frame,
+                scan_frame,
+                latest_time(),
+            )
+        except Exception as latest_exc:
+            raise RuntimeError(
+                "latest TF fallback failed for LiDAR replan: "
+                f"timestamped={timestamped_exc}; latest={latest_exc}"
+            ) from latest_exc
         return transform, "latest_fallback"
 
 
