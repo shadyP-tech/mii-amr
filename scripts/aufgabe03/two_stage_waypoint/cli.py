@@ -17,6 +17,9 @@ from .model import (
     DEFAULT_ARRIVAL_YAW_TOLERANCE_DEG,
     DEFAULT_CONTROL_RATE_HZ,
     DEFAULT_FOLLOWER_SCRIPT,
+    DEFAULT_FOLLOWER_HARD_STOP_RANGE_M,
+    DEFAULT_FOLLOWER_MIN_SCAN_RANGE_M,
+    DEFAULT_FOLLOWER_SCAN_HALF_ANGLE_DEG,
     DEFAULT_FOLLOWER_START_ON_PATH_TOLERANCE_M,
     DEFAULT_FOLLOWER_STARTUP_TIMEOUT_SEC,
     DEFAULT_GOAL_TOLERANCE_M,
@@ -238,6 +241,21 @@ def parse_args(argv):
         "--spin-min-valid-scan-count",
         default=DEFAULT_SPIN_MIN_VALID_SCAN_COUNT,
         type=int,
+    )
+    parser.add_argument(
+        "--follower-scan-half-angle-deg",
+        default=DEFAULT_FOLLOWER_SCAN_HALF_ANGLE_DEG,
+        type=float,
+    )
+    parser.add_argument(
+        "--follower-hard-stop-range-m",
+        default=DEFAULT_FOLLOWER_HARD_STOP_RANGE_M,
+        type=float,
+    )
+    parser.add_argument(
+        "--follower-min-scan-range-m",
+        default=DEFAULT_FOLLOWER_MIN_SCAN_RANGE_M,
+        type=float,
     )
     parser.add_argument("--arrival-tolerance-m", default=DEFAULT_ARRIVAL_TOLERANCE_M, type=float)
     parser.add_argument(
@@ -543,6 +561,9 @@ def validate_args(parser, args):
         "max_stable_pose_jump_m",
         "max_stable_yaw_jump_deg",
         "spin_min_scan_range_m",
+        "follower_scan_half_angle_deg",
+        "follower_hard_stop_range_m",
+        "follower_min_scan_range_m",
         "arrival_tolerance_m",
         "arrival_yaw_tolerance_deg",
         "waypoint_tolerance_m",
@@ -611,6 +632,8 @@ def validate_args(parser, args):
         parser.error("--amcl-settle-min-sec must be non-negative")
     if args.spin_min_valid_scan_count < 1:
         parser.error("--spin-min-valid-scan-count must be >= 1")
+    if args.follower_hard_stop_range_m >= args.follower_min_scan_range_m:
+        parser.error("--follower-hard-stop-range-m must be < --follower-min-scan-range-m")
     if args.max_replans < 1:
         parser.error("--max-replans must be >= 1")
     if args.run_local_map_initial_scan_count < 1:

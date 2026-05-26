@@ -582,6 +582,9 @@ class TwoStageWaypointRunTest(unittest.TestCase):
             "0.25",
         )
         self.assertIn("--max-amcl-var-yaw", command)
+        self.assertEqual(command[command.index("--scan-half-angle-deg") + 1], "35.0")
+        self.assertEqual(command[command.index("--hard-stop-range-m") + 1], "0.16")
+        self.assertEqual(command[command.index("--min-scan-range-m") + 1], "0.4")
         self.assertNotIn("--wait-before-follow", command)
         self.assertNotIn("--enable-lidar-map-replan", command)
 
@@ -715,6 +718,8 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         self.assertEqual(command[command.index("--static-map") + 1], "maps/test.yaml")
         self.assertEqual(command[command.index("--replan-output-dir") + 1], "results/replan")
         self.assertEqual(command[command.index("--max-replans") + 1], "2")
+        self.assertEqual(command[command.index("--obstacle-forward-distance-m") + 1], "0.75")
+        self.assertEqual(command[command.index("--obstacle-forward-half-width-m") + 1], "0.25")
         self.assertEqual(command[command.index("--run-local-map-initial-scan-mode") + 1], "forward")
         self.assertEqual(command[command.index("--run-local-map-initial-scan-count") + 1], "4")
         self.assertEqual(command[command.index("--run-local-map-update-mode") + 1], "full")

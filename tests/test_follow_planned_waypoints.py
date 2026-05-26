@@ -253,6 +253,7 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
         self.assertEqual(args.max_scan_age_sec, 8.0)
         self.assertEqual(args.max_amcl_age_sec, 15.0)
         self.assertEqual(args.startup_timeout_sec, 20.0)
+        self.assertEqual(args.min_scan_range_m, 0.40)
         self.assertFalse(args.require_amcl_startup)
         self.assertEqual(args.max_waypoint_time_sec, 180.0)
         self.assertFalse(args.wait_before_follow)
@@ -263,6 +264,8 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
         self.assertEqual(args.run_local_map_update_mode, "forward")
         self.assertEqual(args.run_local_map_min_hit_count, 2)
         self.assertEqual(args.run_local_map_inflation_radius_m, 0.22)
+        self.assertEqual(args.obstacle_forward_distance_m, 0.75)
+        self.assertEqual(args.obstacle_forward_half_width_m, 0.25)
 
     def test_lidar_replan_flags_parse_as_opt_in(self):
         args = follower.parse_args(
@@ -898,6 +901,23 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
         self.assertEqual(hard.reason, "hard_stop")
         self.assertFalse(soft.safe)
         self.assertEqual(soft.reason, "soft_stop")
+
+    def test_forward_scan_soft_stops_on_narrow_obstacle(self):
+        result = follower.evaluate_scan_safety(
+            [0.35, 0.36] + [1.0] * 50,
+            angle_min=math.radians(-25),
+            angle_increment=math.radians(1),
+            range_min=0.1,
+            range_max=4.0,
+            mode="forward",
+            scan_half_angle_deg=35.0,
+            hard_stop_range_m=0.16,
+            min_scan_range_m=0.40,
+            rotation_stop_range_m=0.18,
+        )
+
+        self.assertFalse(result.safe)
+        self.assertEqual(result.reason, "soft_stop")
 
     def test_rotation_scan_uses_full_scan(self):
         result = follower.evaluate_scan_safety(

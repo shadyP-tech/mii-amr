@@ -70,8 +70,9 @@ DEFAULT_START_SELECTION = "path-progress"
 DEFAULT_START_ON_PATH_TOLERANCE_M = 0.25
 DEFAULT_SCAN_HALF_ANGLE_DEG = 35.0
 DEFAULT_HARD_STOP_RANGE_M = 0.16
-DEFAULT_MIN_SCAN_RANGE_M = 0.24
+DEFAULT_MIN_SCAN_RANGE_M = 0.40
 DEFAULT_ROTATION_STOP_RANGE_M = 0.18
+FORWARD_SOFT_STOP_MIN_CLOSE_RANGES = 2
 DEFAULT_MAX_POSE_AGE_SEC = 10.0
 DEFAULT_MAX_SCAN_AGE_SEC = 8.0
 DEFAULT_MAX_AMCL_AGE_SEC = 15.0
@@ -87,8 +88,8 @@ DEFAULT_SETTLE_SEC = 0.5
 DEFAULT_REPLAN_TIMEOUT_SEC = 5.0
 DEFAULT_MAX_REPLAN_SCAN_AGE_SEC = 1.0
 DEFAULT_MAX_REPLAN_TF_AGE_SEC = 1.0
-DEFAULT_OBSTACLE_FORWARD_DISTANCE_M = 0.55
-DEFAULT_OBSTACLE_FORWARD_HALF_WIDTH_M = 0.18
+DEFAULT_OBSTACLE_FORWARD_DISTANCE_M = 0.75
+DEFAULT_OBSTACLE_FORWARD_HALF_WIDTH_M = 0.25
 DEFAULT_OBSTACLE_ANGLE_WINDOW_DEG = 45.0
 DEFAULT_OBSTACLE_MIN_RANGE_M = 0.12
 DEFAULT_ROBOT_FOOTPRINT_RADIUS_M = 0.18
@@ -993,6 +994,10 @@ def evaluate_scan_safety(
 
     if min_range < hard_stop_range_m:
         return ScanSafety(False, "hard_stop", len(selected), min_range, percentile_5)
+    if mode == "forward":
+        close_count = sum(1 for value in selected if value < min_scan_range_m)
+        if close_count >= FORWARD_SOFT_STOP_MIN_CLOSE_RANGES:
+            return ScanSafety(False, "soft_stop", len(selected), min_range, percentile_5)
     if percentile_5 < soft_threshold:
         return ScanSafety(False, "soft_stop", len(selected), min_range, percentile_5)
     return ScanSafety(True, "clear", len(selected), min_range, percentile_5)

@@ -112,6 +112,27 @@ the already-inflated run-local obstacle cells. Set
 `--run-local-map-corridor-radius-m` only if you intentionally want an extra
 proactive clearance band around the replanned path.
 
+If the follower is not running yet and you want these route topics to appear in
+RViz before motion, start the standalone waypoint path debug publisher:
+
+```bash
+cd /workspace/mii-amr
+
+source /opt/ros/humble/setup.bash
+source /opt/tb3_src_ws/install/setup.bash
+
+export ROS_DOMAIN_ID=30
+export ROS_LOCALHOST_ONLY=0
+export TURTLEBOT3_MODEL=burger
+export LDS_MODEL=LDS-02
+
+python3 scripts/aufgabe03/waypoint_path_debug_viz.py \
+  --waypoints results/aufgabe03/aufgabe03_waypoints.csv
+```
+
+For a two-stage run after Nav2 has already moved to waypoint 0, add
+`--skip-first-waypoint` to preview only the custom follower route.
+
 **Optional: Live LiDAR Obstacle Debug Markers**
 Run this in a separate terminal while RViz is open. It does not publish
 `/cmd_vel`; it only subscribes to `/scan`, reads TF/map state, and publishes
