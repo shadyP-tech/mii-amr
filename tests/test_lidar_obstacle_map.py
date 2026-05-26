@@ -681,6 +681,34 @@ class LidarObstacleMapTest(unittest.TestCase):
         self.assertEqual(goal_result.reason, overlay.RUN_LOCAL_FAILURE_GOAL_BLOCKED)
         self.assertTrue(goal_result.diagnostics.run_local_goal_cell_blocked)
 
+    def test_run_local_start_clearance_margin_does_not_abort_replan(self):
+        occ = free_map(width=60, height=40, resolution=0.05)
+        config = overlay.RunLocalMapConfig(
+            min_hit_count=1,
+            min_used_points=1,
+            inflation_radius_m=0.22,
+            robot_footprint_radius_m=0.18,
+            clearance_margin_m=0.04,
+            static_wall_exclusion_radius_m=0.0,
+        )
+        run_map = overlay.RunLocalObstacleMap(occ, config)
+        run_map.add_observations(overlay.ObservationBatch([
+            overlay.GridCellObservation(24, 20),
+        ]))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = overlay.plan_with_run_local_map(
+                run_map,
+                overlay.Pose2D(1.025, 1.025, 0.0),
+                overlay.Pose2D(2.0, 1.025, 0.0),
+                "start_margin",
+                output_dir=Path(tmpdir),
+            )
+
+        self.assertTrue(result.success, result.reason)
+        self.assertFalse(result.diagnostics.run_local_start_cell_blocked)
+        self.assertFalse(set(result.path_cells).intersection(result.inflated_obstacle_cells))
+
     def test_run_local_cell_sources_and_corridor_block_detection(self):
         occ = free_map(width=20, height=20)
         occ.cells[0][0] = planner.CELL_UNKNOWN

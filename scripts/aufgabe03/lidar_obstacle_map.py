@@ -472,18 +472,32 @@ class RunLocalObstacleMap:
         disk = cells_within_radius(self.static_map, center_cell, radius_m)
         return self.confirmed_raw_cells.intersection(disk)
 
+    def raw_cells_within_world_radius(self, center_world, radius_m):
+        center_x, center_y = center_world
+        cells = set()
+        for cell in self.confirmed_raw_cells:
+            world_x, world_y = planner.grid_to_world(
+                cell[0],
+                cell[1],
+                self.static_map.metadata,
+            )
+            if math.hypot(world_x - center_x, world_y - center_y) <= radius_m:
+                cells.add(cell)
+        return cells
+
     def overlay_cells_for_planning(self, start_world=None):
         overlay = set(self.inflated_obstacle_cells)
         if start_world is None:
             return overlay
         start_cell = planner.world_to_grid(start_world[0], start_world[1], self.static_map.metadata)
-        clearance_radius = (
+        start_collision_radius = self.config.robot_footprint_radius_m
+        if self.raw_cells_within_world_radius(start_world, start_collision_radius):
+            raise ObstacleOverlayError(RUN_LOCAL_FAILURE_START_IN_COLLISION)
+        start_clearance_radius = (
             self.config.robot_footprint_radius_m
             + self.config.clearance_margin_m
         )
-        if self.raw_cells_in_radius(start_cell, clearance_radius):
-            raise ObstacleOverlayError(RUN_LOCAL_FAILURE_START_IN_COLLISION)
-        return overlay.difference(cells_within_radius(self.static_map, start_cell, clearance_radius))
+        return overlay.difference(cells_within_radius(self.static_map, start_cell, start_clearance_radius))
 
     def composed_map(self, overlay_cells=None):
         cells = overlay_cells if overlay_cells is not None else self.inflated_obstacle_cells
