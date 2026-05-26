@@ -204,9 +204,18 @@ def current_scan_age(node):
     return time.time() - node.last_scan_received_sec
 
 
-def fresh_scan_or_error(node, args):
+def fresh_scan_or_error(node, args, min_scan_received_sec=None):
     if node.last_scan is None or node.last_scan_received_sec is None:
         raise RuntimeError("No /scan sample is available for LiDAR replan.")
+    if (
+        min_scan_received_sec is not None
+        and node.last_scan_received_sec < min_scan_received_sec
+    ):
+        raise RuntimeError(
+            f"{lidar_obstacle_map.RUN_LOCAL_FAILURE_STALE_SCAN}: "
+            f"received={node.last_scan_received_sec:.3f}, "
+            f"required_after={min_scan_received_sec:.3f}"
+        )
     scan_age_sec = current_scan_age(node)
     if scan_age_sec is None or scan_age_sec > max_scan_age_from_args(args):
         raise RuntimeError(
@@ -216,8 +225,12 @@ def fresh_scan_or_error(node, args):
     return node.last_scan, scan_age_sec
 
 
-def observations_from_latest_scan(node, args, scan_mode=None):
-    scan, scan_age_sec = fresh_scan_or_error(node, args)
+def observations_from_latest_scan(node, args, scan_mode=None, min_scan_received_sec=None):
+    scan, scan_age_sec = fresh_scan_or_error(
+        node,
+        args,
+        min_scan_received_sec=min_scan_received_sec,
+    )
     transform, lookup_mode = lookup_map_from_scan_transform(node, args, scan)
     tf_stamp_sec = stamp_to_sec(transform.header.stamp)
     tf_age_sec = None if tf_stamp_sec is None else time.time() - tf_stamp_sec
@@ -242,12 +255,14 @@ def collect_initial_observations(node, args):
     seen_stamps = set()
     deadline = time.time() + max(2.0, scan_count * 0.5)
     node.stop_repeatedly()
+    min_scan_received_sec = time.time()
     while len(seen_stamps) < scan_count and time.time() <= deadline:
         try:
             batch, scan, scan_age, tf_age, lookup_mode = observations_from_latest_scan(
                 node,
                 args,
                 scan_mode="full",
+                min_scan_received_sec=min_scan_received_sec,
             )
         except RuntimeError:
             if hasattr(node, "spin_once"):

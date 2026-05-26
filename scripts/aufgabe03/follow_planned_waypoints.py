@@ -989,6 +989,24 @@ class WaypointFollower(Node):
             self.last_tf_stamp_change_local_sec = now
         return now - self.last_tf_stamp_change_local_sec
 
+    def reset_tf_tracking(self):
+        self.last_tf_stamp_sec = None
+        self.last_tf_stamp_change_local_sec = None
+
+    def refresh_after_operator_wait(self, min_scan_received_sec, timeout_sec=None):
+        self.reset_tf_tracking()
+        timeout_sec = timeout_sec or self.args.startup_timeout_sec
+        deadline = time.time() + timeout_sec
+        while rclpy.ok() and time.time() <= deadline:
+            rclpy.spin_once(self, timeout_sec=0.1)
+            if (
+                self.last_scan is not None
+                and self.last_scan_received_sec is not None
+                and self.last_scan_received_sec >= min_scan_received_sec
+            ):
+                return
+        raise RuntimeError("Timed out waiting for fresh /scan after handoff pause.")
+
     def record_motion_sample(self, yaw_error_deg, linear_x, angular_z, sample_seconds):
         abs_error = abs(yaw_error_deg)
         self.diagnostics.max_abs_yaw_error_deg = max(
@@ -1985,6 +2003,8 @@ def main(argv=None):
             print("Waypoint following cancelled before custom follower start.")
             return_code = 130
         else:
+            if args.wait_before_follow:
+                node.refresh_after_operator_wait(time.time())
             result = node.follow_waypoints(executable_waypoints)
             reached_count = result["reached_count"]
             start_pose = result["start_pose"]

@@ -277,7 +277,7 @@ class LidarObstacleMapTest(unittest.TestCase):
 
         class Node:
             def __init__(self):
-                self.scans = [Scan(now), Scan(now + 1)]
+                self.scans = [Scan(now), Scan(now + 1), Scan(now + 2)]
                 self.scan_index = 0
                 self.last_scan = self.scans[0]
                 self.last_scan_received_sec = time.time()
