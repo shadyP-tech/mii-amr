@@ -229,6 +229,111 @@ class LidarObstacleMapTest(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertIn("replan_timeout_exceeded", result.reason)
 
+    def test_runtime_live_replan_waits_for_scan_after_stop(self):
+        def stamp_from_time(stamp_sec):
+            return argparse.Namespace(
+                sec=int(stamp_sec),
+                nanosec=int((stamp_sec - int(stamp_sec)) * 1_000_000_000),
+            )
+
+        class Header:
+            def __init__(self, stamp_sec):
+                self.frame_id = "scan"
+                self.stamp = stamp_from_time(stamp_sec)
+
+        class Scan:
+            def __init__(self, stamp_sec):
+                self.header = Header(stamp_sec)
+                self.ranges = [0.45, 0.45, 0.45]
+                self.angle_min = -0.08
+                self.angle_increment = 0.08
+                self.range_min = 0.05
+                self.range_max = 4.0
+
+        class Rotation:
+            x = 0.0
+            y = 0.0
+            z = 0.0
+            w = 1.0
+
+        class Translation:
+            x = 0.0
+            y = 0.0
+            z = 0.0
+
+        class TransformBody:
+            translation = Translation()
+            rotation = Rotation()
+
+        class Transform:
+            def __init__(self):
+                self.header = Header(time.time())
+                self.transform = TransformBody()
+
+        class Buffer:
+            def lookup_transform(self, *_args):
+                return Transform()
+
+        class Node:
+            def __init__(self):
+                self.last_scan = Scan(time.time() - 10.0)
+                self.last_scan_received_sec = time.time() - 10.0
+                self.tf_buffer = Buffer()
+                self.stop_count = 0
+                self.spin_count = 0
+
+            def stop_repeatedly(self):
+                self.stop_count += 1
+
+            def spin_once(self, _timeout_sec):
+                self.spin_count += 1
+                self.last_scan = Scan(time.time())
+                self.last_scan_received_sec = time.time()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = argparse.Namespace(
+                map_frame="map",
+                allow_latest_tf_replan_fallback=False,
+                run_local_map_update_mode="forward",
+                run_local_map_max_scan_age_sec=1.0,
+                run_local_map_max_tf_age_sec=10.0,
+                replan_timeout_sec=5.0,
+                static_map=free_map(width=40, height=30),
+                replan_output_dir=Path(tmpdir),
+                run_id="fresh_scan_test",
+                obstacle_forward_distance_m=0.55,
+                obstacle_forward_half_width_m=0.18,
+                obstacle_angle_window_deg=45.0,
+                obstacle_min_range_m=0.12,
+                robot_footprint_radius_m=0.18,
+                obstacle_min_cluster_size=3,
+                obstacle_min_cluster_width_m=0.05,
+                obstacle_inflate_radius_m=0.10,
+                run_local_map_min_hit_count=1,
+                run_local_map_min_used_points=1,
+                max_start_snap_m=0.30,
+                max_goal_snap_m=0.30,
+                max_replan_path_length_ratio=3.0,
+            )
+            node = Node()
+
+            result = replan_runtime.perform_lidar_replan(
+                node,
+                args,
+                overlay.Pose2D(1.0, 1.0, 0.0),
+                overlay.Pose2D(2.0, 1.0, 0.0),
+                [
+                    argparse.Namespace(x=1.0, y=1.0),
+                    argparse.Namespace(x=2.0, y=1.0),
+                ],
+                sequence=1,
+            )
+
+        self.assertEqual(node.stop_count, 1)
+        self.assertGreaterEqual(node.spin_count, 1)
+        self.assertTrue(result.success, result.reason)
+        self.assertLessEqual(result.diagnostics.scan_age_sec, 1.0)
+
     def test_runtime_initial_collection_uses_multiple_stopped_scans(self):
         now = int(time.time())
 

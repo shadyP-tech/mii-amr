@@ -281,6 +281,39 @@ def observations_from_latest_scan(
     return observations, scan, scan_age_sec, tf_age_sec, lookup_mode
 
 
+def wait_for_observations_from_fresh_scan(
+    node,
+    args,
+    scan_mode=None,
+    min_scan_received_sec=None,
+    min_scan_stamp_sec=None,
+    timeout_sec=None,
+):
+    timeout_sec = timeout_sec or max(1.0, max_scan_age_from_args(args))
+    deadline = time.time() + timeout_sec
+    last_error = None
+    while time.time() <= deadline:
+        try:
+            return observations_from_latest_scan(
+                node,
+                args,
+                scan_mode=scan_mode,
+                min_scan_received_sec=min_scan_received_sec,
+                min_scan_stamp_sec=min_scan_stamp_sec,
+            )
+        except RuntimeError as exc:
+            last_error = exc
+            if hasattr(node, "spin_once"):
+                node.spin_once(0.1)
+            time.sleep(0.05)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(
+        f"{lidar_obstacle_map.RUN_LOCAL_FAILURE_STALE_SCAN}: "
+        f"no fresh /scan for LiDAR replan within {timeout_sec:.3f}s"
+    )
+
+
 def collect_initial_observations(node, args):
     scan_count = getattr(args, "run_local_map_initial_scan_count", 5)
     observations = []
@@ -457,12 +490,31 @@ def perform_initial_run_local_replan(
     return apply_runtime_diagnostics(result, scan, scan_age, tf_age, lookup_mode)
 
 
-def update_run_local_map_from_latest_scan(node, args, current_pose, goal_waypoint, old_remaining_waypoints, sequence):
-    observations, scan, scan_age, tf_age, lookup_mode = observations_from_latest_scan(
-        node,
-        args,
-        scan_mode=getattr(args, "run_local_map_update_mode", "forward"),
-    )
+def update_run_local_map_from_latest_scan(
+    node,
+    args,
+    current_pose,
+    goal_waypoint,
+    old_remaining_waypoints,
+    sequence,
+    min_scan_received_sec=None,
+    min_scan_stamp_sec=None,
+):
+    scan_mode = getattr(args, "run_local_map_update_mode", "forward")
+    if min_scan_received_sec is None and min_scan_stamp_sec is None:
+        observations, scan, scan_age, tf_age, lookup_mode = observations_from_latest_scan(
+            node,
+            args,
+            scan_mode=scan_mode,
+        )
+    else:
+        observations, scan, scan_age, tf_age, lookup_mode = wait_for_observations_from_fresh_scan(
+            node,
+            args,
+            scan_mode=scan_mode,
+            min_scan_received_sec=min_scan_received_sec,
+            min_scan_stamp_sec=min_scan_stamp_sec,
+        )
     result = build_run_local_replan(
         args,
         observations,
@@ -484,6 +536,7 @@ def perform_lidar_replan(
     sequence,
 ):
     node.stop_repeatedly()
+    min_scan_received_sec = time.time() if hasattr(node, "spin_once") else None
     return update_run_local_map_from_latest_scan(
         node,
         args,
@@ -491,4 +544,6 @@ def perform_lidar_replan(
         goal_waypoint,
         old_remaining_waypoints,
         sequence=sequence,
+        min_scan_received_sec=min_scan_received_sec,
+        min_scan_stamp_sec=min_scan_received_sec,
     )
