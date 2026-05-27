@@ -110,15 +110,31 @@ def scan_points_to_base_frame(scan, map_from_scan_transform, robot_pose):
     return base_points
 
 
-def lookup_map_from_scan_transform(node, args, scan):
-    scan_frame = getattr(scan.header, "frame_id", "")
-    if not scan_frame:
-        raise RuntimeError("scan frame is empty")
+def unique_non_empty_frames(frames):
+    unique = []
+    for frame in frames:
+        if not frame:
+            continue
+        if frame not in unique:
+            unique.append(frame)
+    return unique
+
+
+def scan_tf_candidate_frames(node, args, scan_frame):
+    return unique_non_empty_frames([
+        scan_frame,
+        getattr(node, "base_frame_used", ""),
+        getattr(args, "base_frame", ""),
+        getattr(args, "fallback_base_frame", ""),
+    ])
+
+
+def lookup_transform_timestamped_or_latest(node, args, source_frame, stamp):
     try:
         transform = node.tf_buffer.lookup_transform(
             args.map_frame,
-            scan_frame,
-            time_from_stamp(scan.header.stamp),
+            source_frame,
+            time_from_stamp(stamp),
         )
         return transform, "timestamped"
     except Exception as timestamped_exc:
@@ -130,7 +146,7 @@ def lookup_map_from_scan_transform(node, args, scan):
         try:
             transform = node.tf_buffer.lookup_transform(
                 args.map_frame,
-                scan_frame,
+                source_frame,
                 latest_time(),
             )
         except Exception as latest_exc:
@@ -139,6 +155,27 @@ def lookup_map_from_scan_transform(node, args, scan):
                 f"timestamped={timestamped_exc}; latest={latest_exc}"
             ) from latest_exc
         return transform, "latest_fallback"
+
+
+def lookup_map_from_scan_transform(node, args, scan):
+    scan_frame = getattr(scan.header, "frame_id", "")
+    if not scan_frame:
+        raise RuntimeError("scan frame is empty")
+    errors = []
+    for frame in scan_tf_candidate_frames(node, args, scan_frame):
+        try:
+            transform, lookup_mode = lookup_transform_timestamped_or_latest(
+                node,
+                args,
+                frame,
+                scan.header.stamp,
+            )
+            if frame == scan_frame:
+                return transform, lookup_mode
+            return transform, f"{lookup_mode}_frame_fallback:{frame}"
+        except RuntimeError as exc:
+            errors.append(f"{frame}: {exc}")
+    raise RuntimeError("; ".join(errors))
 
 
 def replan_config_from_args(args):

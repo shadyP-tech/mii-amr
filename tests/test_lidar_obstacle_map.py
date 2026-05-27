@@ -354,6 +354,102 @@ class LidarObstacleMapTest(unittest.TestCase):
         self.assertTrue(result.success, result.reason)
         self.assertLessEqual(result.diagnostics.scan_age_sec, 1.0)
 
+    def test_runtime_scan_tf_falls_back_to_base_frame_when_scan_frame_missing(self):
+        def stamp_from_time(stamp_sec):
+            return argparse.Namespace(
+                sec=int(stamp_sec),
+                nanosec=int((stamp_sec - int(stamp_sec)) * 1_000_000_000),
+            )
+
+        class Header:
+            def __init__(self, frame_id, stamp_sec):
+                self.frame_id = frame_id
+                self.stamp = stamp_from_time(stamp_sec)
+
+        class Scan:
+            def __init__(self):
+                self.header = Header("base_scan", time.time())
+                self.ranges = [0.45, 0.45, 0.45]
+                self.angle_min = -0.08
+                self.angle_increment = 0.08
+                self.range_min = 0.05
+                self.range_max = 4.0
+
+        class Rotation:
+            x = 0.0
+            y = 0.0
+            z = 0.0
+            w = 1.0
+
+        class Translation:
+            x = 0.0
+            y = 0.0
+            z = 0.0
+
+        class TransformBody:
+            translation = Translation()
+            rotation = Rotation()
+
+        class Transform:
+            def __init__(self):
+                self.header = Header("map", time.time())
+                self.transform = TransformBody()
+
+        class Buffer:
+            def __init__(self):
+                self.sources = []
+
+            def lookup_transform(self, _target, source, _time):
+                self.sources.append(source)
+                if source == "base_scan":
+                    raise RuntimeError(
+                        '"base_scan" passed to lookupTransform argument '
+                        "source_frame does not exist"
+                    )
+                if source == "base_footprint":
+                    return Transform()
+                raise RuntimeError(f"unexpected source frame {source}")
+
+        class Node:
+            def __init__(self):
+                self.last_scan = Scan()
+                self.last_scan_received_sec = time.time()
+                self.base_frame_used = "base_footprint"
+                self.tf_buffer = Buffer()
+
+        args = argparse.Namespace(
+            map_frame="map",
+            base_frame="base_footprint",
+            fallback_base_frame="base_link",
+            allow_latest_tf_replan_fallback=True,
+            run_local_map_update_mode="forward",
+            run_local_map_max_scan_age_sec=1.0,
+            run_local_map_max_tf_age_sec=10.0,
+            obstacle_forward_distance_m=0.55,
+            obstacle_forward_half_width_m=0.18,
+            obstacle_angle_window_deg=45.0,
+            obstacle_min_range_m=0.12,
+            robot_footprint_radius_m=0.18,
+            obstacle_min_cluster_size=3,
+            obstacle_min_cluster_width_m=0.05,
+            obstacle_inflate_radius_m=0.10,
+            max_start_snap_m=0.30,
+            max_goal_snap_m=0.30,
+            max_replan_path_length_ratio=3.0,
+        )
+        node = Node()
+
+        observations, _scan, _scan_age, _tf_age, lookup_mode = (
+            replan_runtime.observations_from_latest_scan(node, args)
+        )
+
+        self.assertEqual(len(observations), 3)
+        self.assertEqual(lookup_mode, "timestamped_frame_fallback:base_footprint")
+        self.assertEqual(
+            node.tf_buffer.sources,
+            ["base_scan", "base_scan", "base_footprint"],
+        )
+
     def test_runtime_initial_collection_uses_multiple_stopped_scans(self):
         now = int(time.time())
 
