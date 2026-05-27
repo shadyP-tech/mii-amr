@@ -1229,6 +1229,7 @@ class WaypointFollower(Node):
         self.known_corridor_repair_count = 0
         self.last_known_corridor_repair_signature = None
         self.suppressed_known_corridor_signature = None
+        self.last_scan_block_budget_repair_signature = None
         self.rviz_last_blocked_cells = set()
 
         self.pub = self.create_publisher(Twist, "/cmd_vel", 10)
@@ -1335,6 +1336,8 @@ class WaypointFollower(Node):
         self.last_amcl_received_sec = time.time()
 
     def publish_velocity(self, linear_x, angular_z):
+        if linear_x != 0.0 or angular_z != 0.0:
+            self.last_scan_block_budget_repair_signature = None
         msg = Twist()
         msg.linear.x = linear_x
         msg.angular.z = angular_z
@@ -1741,6 +1744,30 @@ class WaypointFollower(Node):
         self.suppressed_known_corridor_signature = signature
         return True
 
+    def scan_block_budget_repair_signature(self, current_pose, waypoints):
+        return (
+            round(current_pose.x, 2),
+            round(current_pose.y, 2),
+            WaypointFollower.route_signature(self, waypoints),
+        )
+
+    def remember_scan_block_budget_repair(self, current_pose, waypoints):
+        signature = WaypointFollower.scan_block_budget_repair_signature(
+            self,
+            current_pose,
+            waypoints,
+        )
+        if (
+            signature
+            and signature
+            == getattr(self, "last_scan_block_budget_repair_signature", None)
+        ):
+            raise RuntimeError(
+                "lidar_replan_failed:"
+                "persistent_scan_blockage_after_existing_map_repair"
+            )
+        self.last_scan_block_budget_repair_signature = signature
+
     def validate_replan_result(
         self,
         result,
@@ -1903,6 +1930,11 @@ class WaypointFollower(Node):
                     old_remaining_waypoints,
                     sequence=sequence,
                 )
+                WaypointFollower.remember_scan_block_budget_repair(
+                    self,
+                    current_pose,
+                    replanned,
+                )
                 self.known_corridor_repair_count = known_corridor_repair_count + 1
                 self.get_logger().warn(
                     "LiDAR replan budget exhausted; repaired route with existing "
@@ -2043,6 +2075,7 @@ class WaypointFollower(Node):
                     self.reached_count = reached_count
                     self.last_known_corridor_repair_signature = None
                     self.suppressed_known_corridor_signature = None
+                    self.last_scan_block_budget_repair_signature = None
                     self.stop_repeatedly()
                     self.spin_for(self.args.settle_sec)
                     reached_current = True
@@ -2061,6 +2094,7 @@ class WaypointFollower(Node):
                 try:
                     last_scan_safety = self.check_scan_or_raise(mode)
                     self.last_scan_safety = last_scan_safety
+                    self.last_scan_block_budget_repair_signature = None
                 except BlockedByScanError as exc:
                     if self.args.enable_lidar_map_replan:
                         remaining = waypoints[waypoint_index:]
