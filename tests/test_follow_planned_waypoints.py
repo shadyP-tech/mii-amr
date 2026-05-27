@@ -1594,6 +1594,24 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
                 type(node),
             )
         )
+        node.suppress_repeated_known_corridor_repair = (
+            follower.WaypointFollower.suppress_repeated_known_corridor_repair.__get__(
+                node,
+                type(node),
+            )
+        )
+        node.remember_known_corridor_repair = (
+            follower.WaypointFollower.remember_known_corridor_repair.__get__(
+                node,
+                type(node),
+            )
+        )
+        node.scan_block_repair_signature = (
+            follower.WaypointFollower.scan_block_repair_signature.__get__(
+                node,
+                type(node),
+            )
+        )
 
         original_rclpy = follower.rclpy
         follower.rclpy = FakeRclpy
@@ -1607,6 +1625,111 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
             follower.rclpy = original_rclpy
 
         self.assertIn([1, 2], published_routes)
+
+    def test_repeated_known_corridor_repair_continues_under_scan_safety(self):
+        class MotionPublished(Exception):
+            pass
+
+        class FakeRclpy:
+            @staticmethod
+            def ok():
+                return True
+
+            @staticmethod
+            def spin_once(_node, timeout_sec=0.0):
+                return None
+
+        args = follower.parse_args(["--dry-run", "--enable-lidar-map-replan"])
+        node = argparse.Namespace(
+            args=args,
+            diagnostics=follower.RuntimeDiagnostics(),
+            reached_count=0,
+            start_pose=None,
+            final_pose=None,
+            last_amcl_health=None,
+            last_scan_safety=None,
+            base_frame_used="base_footprint",
+            logger=FakeLogger(),
+            run_local_map=object(),
+            last_scan_block_repair_signature=None,
+            last_known_corridor_repair_signature=None,
+            suppressed_known_corridor_signature=None,
+        )
+        pose = follower.Pose2D(0.0, 0.0, 0.0, stamp_sec=time.time())
+        amcl = follower.AmclHealth(True, [], 0.01, 0.01, 0.01, 0.1)
+        replanned = [
+            follower.Waypoint(1, 0.605, 0.385),
+            follower.Waypoint(2, 0.705, 0.385),
+            follower.Waypoint(3, 0.805, 0.385),
+            follower.Waypoint(4, 1.005, 0.185),
+            follower.Waypoint(5, 1.105, -0.015),
+        ]
+        replan_count = 0
+
+        def replan(_pose, _remaining, **_kwargs):
+            nonlocal replan_count
+            replan_count += 1
+            return list(replanned)
+
+        def publish_velocity(linear_x, angular_z):
+            if linear_x != 0.0 or angular_z != 0.0:
+                raise MotionPublished()
+
+        node.check_health_or_recover = lambda: (pose, "base_footprint", amcl)
+        node.initialize_run_local_route = lambda _pose, waypoints: list(waypoints)
+        node.check_scan_or_raise = lambda _mode: follower.ScanSafety(True, "clear", 4, 0.6, 0.7)
+        node.corridor_blocked_cells = lambda _pose, _remaining: {(1, 1)}
+        node.replan_after_blockage = replan
+        node.stop_repeatedly = lambda: None
+        node.spin_for = lambda _duration_sec: None
+        node.get_logger = lambda: node.logger
+        node.publish_rviz_route = lambda *args, **_kwargs: None
+        node.record_motion_sample = lambda *args, **_kwargs: None
+        node.publish_velocity = publish_velocity
+        node.prune_replanned_waypoints_for_progress = (
+            follower.WaypointFollower.prune_replanned_waypoints_for_progress.__get__(
+                node,
+                type(node),
+            )
+        )
+        node.first_motion_waypoint_index = (
+            follower.WaypointFollower.first_motion_waypoint_index.__get__(
+                node,
+                type(node),
+            )
+        )
+        node.scan_block_repair_signature = (
+            follower.WaypointFollower.scan_block_repair_signature.__get__(
+                node,
+                type(node),
+            )
+        )
+        node.remember_known_corridor_repair = (
+            follower.WaypointFollower.remember_known_corridor_repair.__get__(
+                node,
+                type(node),
+            )
+        )
+        node.suppress_repeated_known_corridor_repair = (
+            follower.WaypointFollower.suppress_repeated_known_corridor_repair.__get__(
+                node,
+                type(node),
+            )
+        )
+
+        original_rclpy = follower.rclpy
+        follower.rclpy = FakeRclpy
+        try:
+            with self.assertRaises(MotionPublished):
+                follower.WaypointFollower.follow_waypoints(
+                    node,
+                    [follower.Waypoint(1, 0.705, 0.435)],
+                )
+        finally:
+            follower.rclpy = original_rclpy
+
+        self.assertEqual(replan_count, 1)
+        self.assertEqual(len(node.logger.warnings), 1)
 
     def test_initial_run_local_empty_map_continues_with_static_route(self):
         class InitialMapNode:

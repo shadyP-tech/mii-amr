@@ -1229,6 +1229,8 @@ class WaypointFollower(Node):
         self.live_replan_attempt_count = 0
         self.known_corridor_repair_count = 0
         self.last_scan_block_repair_signature = None
+        self.last_known_corridor_repair_signature = None
+        self.suppressed_known_corridor_signature = None
         self.rviz_last_blocked_cells = set()
 
         self.pub = self.create_publisher(Twist, "/cmd_vel", 10)
@@ -1733,6 +1735,25 @@ class WaypointFollower(Node):
             raise RuntimeError(f"lidar_replan_failed:{REPEATED_SCAN_REPAIR_REASON}")
         self.last_scan_block_repair_signature = signature
 
+    def remember_known_corridor_repair(self, waypoints):
+        self.last_known_corridor_repair_signature = self.scan_block_repair_signature(waypoints)
+        self.suppressed_known_corridor_signature = None
+
+    def suppress_repeated_known_corridor_repair(self, waypoints):
+        signature = self.scan_block_repair_signature(waypoints)
+        if (
+            not signature
+            or signature != getattr(self, "last_known_corridor_repair_signature", None)
+        ):
+            return False
+        if signature != getattr(self, "suppressed_known_corridor_signature", None):
+            self.get_logger().warn(
+                "Known corridor blockage still overlaps the same repaired route; "
+                "continuing under live scan safety instead of replanning again."
+            )
+        self.suppressed_known_corridor_signature = signature
+        return True
+
     def validate_replan_result(
         self,
         result,
@@ -2034,6 +2055,8 @@ class WaypointFollower(Node):
                     reached_count += 1
                     self.reached_count = reached_count
                     self.last_scan_block_repair_signature = None
+                    self.last_known_corridor_repair_signature = None
+                    self.suppressed_known_corridor_signature = None
                     self.stop_repeatedly()
                     self.spin_for(self.args.settle_sec)
                     reached_current = True
@@ -2086,7 +2109,7 @@ class WaypointFollower(Node):
                 if self.args.enable_lidar_map_replan and self.run_local_map is not None:
                     remaining = waypoints[waypoint_index:]
                     blocked_cells = self.corridor_blocked_cells(pose, remaining)
-                    if blocked_cells:
+                    if blocked_cells and not self.suppress_repeated_known_corridor_repair(remaining):
                         publish_rviz_obstacles_if_available(self, blocked_cells)
                         self.stop_repeatedly()
                         replanned = self.replan_after_blockage(
@@ -2112,6 +2135,7 @@ class WaypointFollower(Node):
                                 "status": "replan_artifact_only_complete",
                             }
                         waypoints = self.prune_replanned_waypoints_for_progress(replanned, pose)
+                        self.remember_known_corridor_repair(waypoints)
                         waypoint_index = 0
                         replanned_current = True
                         break
