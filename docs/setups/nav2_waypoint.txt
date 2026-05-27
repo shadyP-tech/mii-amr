@@ -274,9 +274,9 @@ python3 scripts/aufgabe03/two_stage_waypoint_run.py \
 ```
 
 This separate route keeps the same staging target and first 1.12 m as the
-default route, then continues to a raised return leg. It is 3.33 m long. For a
+default route, then continues to a middle return leg. It is 2.94 m long. For a
 delayed obstacle test, place the temporary obstacle on the return leg near
-`y=0.785` after the robot has left the initial straight segment.
+`x=0.6, y=0.435` after the robot has left the initial straight segment.
 
 Robot artifact-only validation after the normal arena-prior run is stable:
 
