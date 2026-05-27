@@ -237,18 +237,20 @@ class FakeHealthNode:
 
 
 class FollowPlannedWaypointsTest(unittest.TestCase):
-    def test_real_robot_defaults_match_slow_successful_profile(self):
+    def test_real_robot_defaults_match_smooth_waypoint_profile(self):
         args = follower.parse_args(["--dry-run"])
 
-        self.assertEqual(args.linear_speed, 0.03)
-        self.assertEqual(args.min_linear_speed, 0.01)
+        self.assertEqual(args.linear_speed, 0.04)
+        self.assertEqual(args.min_linear_speed, 0.012)
         self.assertEqual(args.linear_gain, 0.25)
-        self.assertEqual(args.max_angular_speed, 0.12)
-        self.assertEqual(args.yaw_gain, 0.5)
+        self.assertEqual(args.max_angular_speed, 0.09)
+        self.assertEqual(args.yaw_gain, 0.35)
         self.assertEqual(args.waypoint_tolerance_m, 0.12)
         self.assertEqual(args.goal_tolerance_m, 0.12)
         self.assertEqual(args.rotate_start_heading_error_deg, 20.0)
-        self.assertEqual(args.rotate_stop_heading_error_deg, 4.0)
+        self.assertEqual(args.rotate_stop_heading_error_deg, 7.0)
+        self.assertEqual(args.forward_yaw_deadband_deg, 3.0)
+        self.assertEqual(args.control_rate_hz, 20.0)
         self.assertEqual(args.max_pose_age_sec, 10.0)
         self.assertEqual(args.max_scan_age_sec, 8.0)
         self.assertEqual(args.max_amcl_age_sec, 15.0)
