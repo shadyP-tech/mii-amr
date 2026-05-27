@@ -145,6 +145,8 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         self.assertEqual(args.python_executable, "python-test")
         self.assertTrue(args.arena_active_allow_extra_cmd_vel_publishers)
         self.assertTrue(args.arena_active_enable_center_reposition)
+        self.assertEqual(args.arena_active_recovery_mode, "legacy")
+        self.assertEqual(args.arena_active_recovery_executor, "dry_run")
         self.assertEqual(
             args.arena_active_center_reposition_target_nearest_short_wall_range_m,
             1.45,
@@ -169,6 +171,81 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         self.assertFalse(default_args.arena_active_require_operator_confirmation)
         self.assertTrue(required_args.arena_active_require_operator_confirmation)
         self.assertFalse(disabled_args.arena_active_require_operator_confirmation)
+
+    def test_active_recovery_mode_defaults_and_explicit_none_overrides_legacy_flag(self):
+        default_args = two_stage_cli.parse_args(["--dry-run"])
+        legacy_args = two_stage_cli.parse_args([
+            "--dry-run",
+            "--arena-active-enable-center-reposition",
+        ])
+        explicit_none = two_stage_cli.parse_args([
+            "--dry-run",
+            "--arena-active-enable-center-reposition",
+            "--arena-active-recovery-mode",
+            "none",
+        ])
+
+        self.assertEqual(default_args.arena_active_recovery_mode, "none")
+        self.assertFalse(default_args.arena_active_enable_center_reposition)
+        self.assertEqual(legacy_args.arena_active_recovery_mode, "legacy")
+        self.assertTrue(legacy_args.arena_active_enable_center_reposition)
+        self.assertEqual(explicit_none.arena_active_recovery_mode, "none")
+        self.assertFalse(explicit_none.arena_active_enable_center_reposition)
+
+    def test_active_explore_cli_overrides_reach_runtime_config(self):
+        args = two_stage_cli.parse_args(
+            [
+                "--dry-run",
+                "--run-id",
+                "active_explore_cfg",
+                "--arena-active-recovery-mode",
+                "active_explore",
+                "--arena-active-recovery-executor",
+                "cmd_vel",
+                "--arena-active-explore-max-attempts",
+                "3",
+                "--arena-active-explore-max-single-move-m",
+                "0.35",
+                "--arena-active-explore-max-total-distance-m",
+                "0.70",
+                "--arena-active-explore-grid-resolution-m",
+                "0.04",
+                "--arena-active-explore-grid-size-m",
+                "3.5",
+                "--arena-active-explore-inflation-radius-m",
+                "0.30",
+                "--arena-active-explore-allow-unknown",
+                "--arena-active-explore-max-path-segments",
+                "2",
+            ]
+        )
+
+        config = two_stage_ros.arena_active_config_from_args(args)
+
+        self.assertEqual(config.recovery_mode, "active_explore")
+        self.assertEqual(config.recovery_executor, "cmd_vel")
+        self.assertFalse(config.enable_center_reposition)
+        self.assertEqual(config.active_explore_max_attempts, 3)
+        self.assertAlmostEqual(config.active_explore_max_single_move_m, 0.35)
+        self.assertAlmostEqual(config.active_explore_max_total_distance_m, 0.70)
+        self.assertAlmostEqual(config.active_explore_grid_resolution_m, 0.04)
+        self.assertAlmostEqual(config.active_explore_grid_size_m, 3.5)
+        self.assertAlmostEqual(config.active_explore_inflation_radius_m, 0.30)
+        self.assertFalse(config.active_explore_unknown_blocked)
+        self.assertEqual(config.active_explore_max_path_segments, 2)
+
+    def test_active_recovery_executor_requires_active_explore_mode(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                two_stage_cli.parse_args(
+                    [
+                        "--dry-run",
+                        "--arena-active-recovery-mode",
+                        "legacy",
+                        "--arena-active-recovery-executor",
+                        "cmd_vel",
+                    ]
+                )
 
     def test_removed_legacy_flags_are_rejected(self):
         legacy_argvs = [
@@ -206,6 +283,54 @@ class TwoStageWaypointRunTest(unittest.TestCase):
         self.assertEqual(requirements.topics, ["/scan"])
         self.assertFalse(hasattr(requirements, "services"))
         self.assertFalse(hasattr(requirements, "requires_tf_before_localization"))
+
+    def test_nav2_follow_path_preflight_is_only_required_for_that_executor(self):
+        dry_run_args = two_stage_cli.parse_args(
+            [
+                "--dry-run",
+                "--arena-active-recovery-mode",
+                "active_explore",
+                "--arena-active-recovery-executor",
+                "dry_run",
+                "--follow-path-action",
+                "/robot/follow_path",
+            ]
+        )
+        cmd_vel_args = two_stage_cli.parse_args(
+            [
+                "--dry-run",
+                "--arena-active-recovery-mode",
+                "active_explore",
+                "--arena-active-recovery-executor",
+                "cmd_vel",
+                "--follow-path-action",
+                "/robot/follow_path",
+            ]
+        )
+        nav2_args = two_stage_cli.parse_args(
+            [
+                "--dry-run",
+                "--arena-active-recovery-mode",
+                "active_explore",
+                "--arena-active-recovery-executor",
+                "nav2_follow_path",
+                "--follow-path-action",
+                "/robot/follow_path",
+            ]
+        )
+
+        self.assertEqual(
+            two_stage_pure.required_preflight_interfaces(dry_run_args).actions,
+            ["/navigate_to_pose"],
+        )
+        self.assertEqual(
+            two_stage_pure.required_preflight_interfaces(cmd_vel_args).actions,
+            ["/navigate_to_pose"],
+        )
+        self.assertEqual(
+            two_stage_pure.required_preflight_interfaces(nav2_args).actions,
+            ["/navigate_to_pose", "/robot/follow_path"],
+        )
 
     def test_arena_active_diagnostics_path_defaults_next_to_results_csv(self):
         args = two_stage_cli.parse_args(

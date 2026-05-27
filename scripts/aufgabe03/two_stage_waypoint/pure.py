@@ -221,8 +221,14 @@ def amcl_validation_timed_out(start_sec, now_sec, timeout_sec):
 
 
 def required_preflight_interfaces(args):
+    actions = [args.navigate_action]
+    if (
+        getattr(args, "arena_active_recovery_mode", "none") == "active_explore"
+        and getattr(args, "arena_active_recovery_executor", "dry_run") == "nav2_follow_path"
+    ):
+        actions.append(args.follow_path_action)
     return PreflightRequirements(
-        actions=[args.navigate_action],
+        actions=actions,
         topics=[args.scan_topic],
     )
 

@@ -14,13 +14,19 @@ import math
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable
 
 from arena_geometry_localizer import (
     ArenaGeometryConfig,
     Pose2D,
     ScanSample,
     analyze_scan_samples,
+)
+from arena_active_explore import (
+    ActiveExploreConfig,
+    ActiveExplorePlan,
+    geometry_is_recoverable,
+    plan_active_explore_recovery,
 )
 
 
@@ -126,6 +132,8 @@ class ArenaActiveSpinConfig:
     range_stride: int = 6
     max_points: int = 3000
     control_rate_hz: float = 10.0
+    recovery_mode: str = "none"
+    recovery_executor: str = "dry_run"
     enable_center_reposition: bool = False
     center_reposition_max_attempts: int = 1
     center_reposition_target_nearest_short_wall_range_m: float = 1.65
@@ -147,6 +155,14 @@ class ArenaActiveSpinConfig:
     center_reposition_heater_approach_min_delta: float = 0.35
     center_reposition_heater_approach_min_step_m: float = 0.25
     center_reposition_heater_approach_max_step_m: float = 1.10
+    active_explore_max_attempts: int = 2
+    active_explore_max_single_move_m: float = 0.45
+    active_explore_max_total_distance_m: float = 0.90
+    active_explore_grid_resolution_m: float = 0.05
+    active_explore_grid_size_m: float = 4.0
+    active_explore_inflation_radius_m: float = 0.28
+    active_explore_unknown_blocked: bool = True
+    active_explore_max_path_segments: int = 3
     arena_config: ArenaGeometryConfig = field(default_factory=ArenaGeometryConfig)
 
 
@@ -220,7 +236,7 @@ def short_wall_ranges_and_error(result, config: ArenaActiveSpinConfig):
 
 
 def choose_center_reposition_action(result, config: ArenaActiveSpinConfig, origin_yaw_rad=0.0):
-    if not config.enable_center_reposition:
+    if effective_recovery_mode(config) != "legacy":
         return CenterRepositionAction(False, "center_reposition_disabled")
     if result.success or result.failure_reason != "pose_not_unique":
         return CenterRepositionAction(False, "center_reposition_not_pose_not_unique")
@@ -396,7 +412,7 @@ def choose_heater_approach_reposition_action(
     config: ArenaActiveSpinConfig,
     origin_yaw_rad=0.0,
 ):
-    if not config.enable_center_reposition:
+    if effective_recovery_mode(config) != "legacy":
         return CenterRepositionAction(False, "heater_approach_reposition_disabled")
     if not config.center_reposition_enable_heater_approach:
         return CenterRepositionAction(False, "heater_approach_reposition_disabled")
@@ -692,10 +708,53 @@ def config_diagnostics(config: ArenaActiveSpinConfig):
     data = asdict(config)
     data["diagnostics_path"] = str(config.diagnostics_path)
     data["arena_config"] = asdict(config.arena_config)
+    data["effective_recovery_mode"] = effective_recovery_mode(config)
     return data
 
 
+def effective_recovery_mode(config: ArenaActiveSpinConfig):
+    if config.recovery_mode != "none":
+        return config.recovery_mode
+    if config.enable_center_reposition:
+        return "legacy"
+    return "none"
+
+
+def active_explore_config_from_arena_config(config: ArenaActiveSpinConfig):
+    return ActiveExploreConfig(
+        max_attempts=config.active_explore_max_attempts,
+        max_single_move_m=config.active_explore_max_single_move_m,
+        max_total_distance_m=config.active_explore_max_total_distance_m,
+        grid_resolution_m=config.active_explore_grid_resolution_m,
+        grid_size_m=config.active_explore_grid_size_m,
+        inflation_radius_m=config.active_explore_inflation_radius_m,
+        unknown_blocked=config.active_explore_unknown_blocked,
+        max_path_segments=config.active_explore_max_path_segments,
+        target_nearest_short_wall_range_m=(
+            config.center_reposition_target_nearest_short_wall_range_m
+        ),
+        center_min_step_m=config.center_reposition_min_step_m,
+        lateral_offset_threshold_m=config.center_reposition_lateral_offset_threshold_m,
+        lateral_target_offset_m=config.center_reposition_lateral_target_offset_m,
+        heater_approach_target_range_m=(
+            config.center_reposition_heater_approach_target_range_m
+        ),
+        heater_approach_min_selected_score=(
+            config.center_reposition_heater_approach_min_selected_score
+        ),
+        heater_approach_max_opposite_score=(
+            config.center_reposition_heater_approach_max_opposite_score
+        ),
+        heater_approach_min_delta=config.center_reposition_heater_approach_min_delta,
+        arena_length_m=config.arena_config.arena_length_m,
+        max_short_wall_range_sum_error_m=(
+            config.arena_config.max_short_wall_range_sum_error_m
+        ),
+    )
+
+
 def initial_diagnostics(config: ArenaActiveSpinConfig):
+    recovery_mode = effective_recovery_mode(config)
     return {
         "mode": "arena-active",
         "success": False,
@@ -705,8 +764,15 @@ def initial_diagnostics(config: ArenaActiveSpinConfig):
         "spin": spin_diagnostics_template(),
         "spin_attempts": [],
         "reposition": {
-            "enabled": config.enable_center_reposition,
+            "enabled": recovery_mode == "legacy",
             "attempts": [],
+        },
+        "active_explore": {
+            "enabled": recovery_mode == "active_explore",
+            "mode": recovery_mode,
+            "executor": config.recovery_executor,
+            "attempts": [],
+            "total_distance_m": 0.0,
         },
         "samples": {
             "scan_samples_collected": 0,
@@ -1193,6 +1259,297 @@ class ArenaActiveSpinSession:
         record["duration_sec"] = self.now() - start
         return record
 
+    def plan_active_explore_recovery(self, result):
+        active_config = active_explore_config_from_arena_config(self.config)
+        geometry_ok, reason = geometry_is_recoverable(result, active_config)
+        if not geometry_ok:
+            return ActiveExplorePlan(False, reason, None, (), None)
+        self.wait_for_fresh_inputs()
+        origin_yaw = self.first_sample_origin_yaw_rad()
+        return plan_active_explore_recovery(
+            result,
+            self.latest_scan,
+            self.latest_odom_pose,
+            active_config,
+            origin_yaw_rad=origin_yaw,
+        )
+
+    def active_explore_steps_from_candidate(self, candidate, distance_limit_m=None):
+        points = list(candidate.simplified_path_world or candidate.path_world)
+        if len(points) < 2:
+            raise RuntimeError("active_explore_no_motion_steps")
+        if self.latest_odom_pose is None:
+            raise RuntimeError("fresh_odom_unavailable_before_active_explore")
+
+        limit = self.config.active_explore_max_single_move_m
+        if distance_limit_m is not None:
+            limit = min(limit, max(0.0, distance_limit_m))
+        if limit <= 0.0:
+            raise RuntimeError("active_explore_distance_limit_exhausted")
+
+        previous = (float(self.latest_odom_pose.x), float(self.latest_odom_pose.y))
+        remaining = limit
+        steps = []
+        for point in points[1:]:
+            if len(steps) >= self.config.active_explore_max_path_segments:
+                break
+            dx = point[0] - previous[0]
+            dy = point[1] - previous[1]
+            distance = math.hypot(dx, dy)
+            if distance <= 1e-6:
+                previous = point
+                continue
+            planned_distance = min(distance, remaining)
+            if planned_distance <= 1e-6:
+                break
+            heading = math.atan2(dy, dx)
+            steps.append(
+                CenterRepositionStep(
+                    kind="active_explore",
+                    reason=f"active_explore_{candidate.kind}",
+                    planned_distance_m=planned_distance,
+                    local_heading_rad=None,
+                    odom_heading_rad=normalize_angle_rad(heading),
+                )
+            )
+            remaining -= planned_distance
+            if planned_distance < distance or remaining <= 1e-6:
+                break
+            previous = point
+
+        if not steps:
+            raise RuntimeError("active_explore_no_motion_steps")
+        return steps
+
+    def print_active_explore_prompt(self, candidate, steps):
+        print("\nArena-active active-explore recovery")
+        print(f"  executor: {self.config.recovery_executor}")
+        print(f"  selected candidate: {candidate.kind}")
+        print(f"  score: {candidate.score}")
+        print(f"  score components: {candidate.score_components}")
+        print(f"  path length: {candidate.path_length_m}")
+        for index, step in enumerate(steps, start=1):
+            print(
+                f"  step {index}: "
+                f"distance={step.planned_distance_m:.3f} m, "
+                f"target odom heading={math.degrees(step.odom_heading_rad):.1f} deg"
+            )
+        print("  expected action: follow short odom-frame path, stop, then spin again")
+        if self.config.require_operator_confirmation:
+            self.input_fn("Press Enter to start active-explore recovery, or Ctrl+C to abort: ")
+
+    def execute_active_explore_cmd_vel(self, publisher, candidate, distance_limit_m=None):
+        self.wait_for_fresh_inputs()
+        steps = self.active_explore_steps_from_candidate(
+            candidate,
+            distance_limit_m=distance_limit_m,
+        )
+        self.print_active_explore_prompt(candidate, steps)
+        self.refresh_fresh_inputs_after_prompt()
+        clearance = evaluate_reposition_clearance(self.latest_scan, self.config)
+        update_safety_minima(self.diagnostics, clearance)
+        if not clearance.ok:
+            raise RuntimeError(f"active_explore_precheck_clearance_failed:{clearance.reason}")
+
+        start = self.now()
+        total_driven = 0.0
+        step_records = []
+        try:
+            for index, step in enumerate(steps):
+                if index > 0:
+                    self.wait_for_fresh_inputs()
+                step_start = self.now()
+                self.turn_to_heading(publisher, step.odom_heading_rad)
+                stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
+                self.wait_for_fresh_inputs()
+                driven = self.drive_forward(publisher, step.planned_distance_m)
+                stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
+                total_driven += driven
+                if total_driven > self.config.active_explore_max_single_move_m + 1e-6:
+                    raise RuntimeError("active_explore_single_move_distance_exceeded")
+                step_records.append(
+                    {
+                        **step.to_dict(),
+                        "driven_distance_m": driven,
+                        "duration_sec": self.now() - step_start,
+                    }
+                )
+        except Exception:
+            stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
+            raise
+
+        return {
+            "executor": "cmd_vel",
+            "executed": True,
+            "candidate_kind": candidate.kind,
+            "candidate_score": candidate.score,
+            "path_length_m": candidate.path_length_m,
+            "steps": step_records,
+            "driven_distance_m": total_driven,
+            "duration_sec": self.now() - start,
+            "stop_reason": "completed",
+        }
+
+    def run_legacy_recovery(self, publisher, result):
+        reposition_attempts = 0
+        while (
+            not result.success
+            and reposition_attempts < self.config.center_reposition_max_attempts
+        ):
+            origin_yaw = self.first_sample_origin_yaw_rad()
+            action = choose_center_reposition_action(result, self.config, origin_yaw)
+            attempt_record = {
+                "attempt_index": len(self.diagnostics["reposition"]["attempts"]),
+                "stage": "center",
+                "previous_failure_reason": result.failure_reason,
+                "previous_classifier_reason": result.short_wall_classification.reason,
+                "action": action.to_dict(),
+            }
+            self.diagnostics["reposition"]["attempts"].append(attempt_record)
+            if not action.ok:
+                break
+            self.diagnostics["fallback_used"] = True
+            motion_record = self.execute_center_reposition(publisher, action)
+            attempt_record["motion"] = motion_record
+            reposition_attempts += 1
+            self.run_spin_attempt(publisher, attempt_index=reposition_attempts)
+            result = self.analyze_result()
+            attempt_record["post_reposition_success"] = result.success
+            attempt_record["post_reposition_failure_reason"] = result.failure_reason
+            attempt_record["post_reposition_classifier_reason"] = (
+                result.short_wall_classification.reason
+            )
+
+        heater_approach_attempts = 0
+        while (
+            not result.success
+            and self.config.center_reposition_enable_heater_approach
+            and heater_approach_attempts
+            < self.config.center_reposition_heater_approach_max_attempts
+        ):
+            origin_yaw = self.first_sample_origin_yaw_rad()
+            action = choose_heater_approach_reposition_action(
+                result,
+                self.config,
+                origin_yaw,
+            )
+            attempt_record = {
+                "attempt_index": len(self.diagnostics["reposition"]["attempts"]),
+                "stage": "heater_approach",
+                "previous_failure_reason": result.failure_reason,
+                "previous_classifier_reason": result.short_wall_classification.reason,
+                "action": action.to_dict(),
+            }
+            self.diagnostics["reposition"]["attempts"].append(attempt_record)
+            if not action.ok:
+                break
+            self.diagnostics["fallback_used"] = True
+            motion_record = self.execute_center_reposition(publisher, action)
+            attempt_record["motion"] = motion_record
+            heater_approach_attempts += 1
+            self.run_spin_attempt(
+                publisher,
+                attempt_index=len(self.diagnostics["spin_attempts"]),
+            )
+            result = self.analyze_result()
+            attempt_record["post_reposition_success"] = result.success
+            attempt_record["post_reposition_failure_reason"] = result.failure_reason
+            attempt_record["post_reposition_classifier_reason"] = (
+                result.short_wall_classification.reason
+            )
+        return result
+
+    def run_active_explore_recovery(self, publisher, result):
+        if self.config.recovery_executor not in {"dry_run", "cmd_vel", "nav2_follow_path"}:
+            raise RuntimeError(f"active_explore_executor_unknown:{self.config.recovery_executor}")
+
+        attempts = 0
+        total_distance = float(self.diagnostics["active_explore"].get("total_distance_m", 0.0))
+        while (
+            not result.success
+            and attempts < self.config.active_explore_max_attempts
+            and total_distance < self.config.active_explore_max_total_distance_m
+        ):
+            plan = self.plan_active_explore_recovery(result)
+            plan_dict = plan.to_dict()
+            rejected_unknown = [
+                candidate
+                for candidate in plan.candidates
+                if candidate.rejection_reason == "goal_unknown"
+            ]
+            attempt_record = {
+                "attempt_index": len(self.diagnostics["active_explore"]["attempts"]),
+                "stage": "active_explore",
+                "executor": self.config.recovery_executor,
+                "previous_failure_reason": result.failure_reason,
+                "previous_classifier_reason": result.short_wall_classification.reason,
+                "plan": plan_dict,
+                "local_grid_stats": (
+                    None if plan.grid is None else plan.grid.to_dict()["cell_counts"]
+                ),
+                "rejected_unknown_space_candidates": len(rejected_unknown),
+                "execution": {
+                    "executed": False,
+                    "stop_reason": "not_started",
+                    "driven_distance_m": 0.0,
+                },
+            }
+            self.diagnostics["active_explore"]["attempts"].append(attempt_record)
+
+            if not plan.ok or plan.selected is None:
+                attempt_record["execution"]["stop_reason"] = plan.reason
+                break
+
+            if self.config.recovery_executor == "dry_run":
+                attempt_record["execution"] = {
+                    "executor": "dry_run",
+                    "executed": False,
+                    "stop_reason": "dry_run",
+                    "driven_distance_m": 0.0,
+                }
+                break
+
+            if self.config.recovery_executor == "nav2_follow_path":
+                attempt_record["execution"] = {
+                    "executor": "nav2_follow_path",
+                    "executed": False,
+                    "stop_reason": "nav2_follow_path_unverified_pre_amcl",
+                    "driven_distance_m": 0.0,
+                }
+                raise RuntimeError("nav2_follow_path_unverified_pre_amcl")
+
+            remaining_distance = (
+                self.config.active_explore_max_total_distance_m - total_distance
+            )
+            self.diagnostics["fallback_used"] = True
+            motion_record = self.execute_active_explore_cmd_vel(
+                publisher,
+                plan.selected,
+                distance_limit_m=remaining_distance,
+            )
+            total_distance += float(motion_record.get("driven_distance_m", 0.0))
+            if total_distance > self.config.active_explore_max_total_distance_m + 1e-6:
+                motion_record["stop_reason"] = "active_explore_total_distance_exceeded"
+                attempt_record["execution"] = motion_record
+                self.diagnostics["active_explore"]["total_distance_m"] = total_distance
+                raise RuntimeError("active_explore_total_distance_exceeded")
+
+            attempt_record["execution"] = motion_record
+            self.diagnostics["active_explore"]["total_distance_m"] = total_distance
+            attempts += 1
+            self.run_spin_attempt(
+                publisher,
+                attempt_index=len(self.diagnostics["spin_attempts"]),
+            )
+            result = self.analyze_result()
+            attempt_record["post_recovery_spin_result"] = result.to_dict()
+            attempt_record["post_recovery_success"] = result.success
+            attempt_record["post_recovery_failure_reason"] = result.failure_reason
+            attempt_record["post_recovery_classifier_reason"] = (
+                result.short_wall_classification.reason
+            )
+        return result
+
     def finish_failure(self, reason, exception=None):
         self.diagnostics["success"] = False
         self.diagnostics["failure_reason"] = reason
@@ -1225,72 +1582,11 @@ class ArenaActiveSpinSession:
             stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
             self.run_spin_attempt(publisher, attempt_index=0)
             result = self.analyze_result()
-            if not result.success and self.config.enable_center_reposition:
-                reposition_attempts = 0
-                while (
-                    not result.success
-                    and reposition_attempts < self.config.center_reposition_max_attempts
-                ):
-                    origin_yaw = self.first_sample_origin_yaw_rad()
-                    action = choose_center_reposition_action(result, self.config, origin_yaw)
-                    attempt_record = {
-                        "attempt_index": len(self.diagnostics["reposition"]["attempts"]),
-                        "stage": "center",
-                        "previous_failure_reason": result.failure_reason,
-                        "previous_classifier_reason": result.short_wall_classification.reason,
-                        "action": action.to_dict(),
-                    }
-                    self.diagnostics["reposition"]["attempts"].append(attempt_record)
-                    if not action.ok:
-                        break
-                    self.diagnostics["fallback_used"] = True
-                    motion_record = self.execute_center_reposition(publisher, action)
-                    attempt_record["motion"] = motion_record
-                    reposition_attempts += 1
-                    self.run_spin_attempt(publisher, attempt_index=reposition_attempts)
-                    result = self.analyze_result()
-                    attempt_record["post_reposition_success"] = result.success
-                    attempt_record["post_reposition_failure_reason"] = result.failure_reason
-                    attempt_record["post_reposition_classifier_reason"] = (
-                        result.short_wall_classification.reason
-                    )
-                heater_approach_attempts = 0
-                while (
-                    not result.success
-                    and self.config.center_reposition_enable_heater_approach
-                    and heater_approach_attempts
-                    < self.config.center_reposition_heater_approach_max_attempts
-                ):
-                    origin_yaw = self.first_sample_origin_yaw_rad()
-                    action = choose_heater_approach_reposition_action(
-                        result,
-                        self.config,
-                        origin_yaw,
-                    )
-                    attempt_record = {
-                        "attempt_index": len(self.diagnostics["reposition"]["attempts"]),
-                        "stage": "heater_approach",
-                        "previous_failure_reason": result.failure_reason,
-                        "previous_classifier_reason": result.short_wall_classification.reason,
-                        "action": action.to_dict(),
-                    }
-                    self.diagnostics["reposition"]["attempts"].append(attempt_record)
-                    if not action.ok:
-                        break
-                    self.diagnostics["fallback_used"] = True
-                    motion_record = self.execute_center_reposition(publisher, action)
-                    attempt_record["motion"] = motion_record
-                    heater_approach_attempts += 1
-                    self.run_spin_attempt(
-                        publisher,
-                        attempt_index=len(self.diagnostics["spin_attempts"]),
-                    )
-                    result = self.analyze_result()
-                    attempt_record["post_reposition_success"] = result.success
-                    attempt_record["post_reposition_failure_reason"] = result.failure_reason
-                    attempt_record["post_reposition_classifier_reason"] = (
-                        result.short_wall_classification.reason
-                    )
+            recovery_mode = effective_recovery_mode(self.config)
+            if not result.success and recovery_mode == "legacy":
+                result = self.run_legacy_recovery(publisher, result)
+            elif not result.success and recovery_mode == "active_explore":
+                result = self.run_active_explore_recovery(publisher, result)
             pose_prior = self.pose_prior_from_result_or_raise(result)
             return self.finish_success(pose_prior)
         except KeyboardInterrupt:

@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "aufgabe03"))
 
 import arena_active_spin as active_spin  # noqa: E402
+import arena_active_explore as active_explore  # noqa: E402
 import arena_geometry_localizer as arena  # noqa: E402
 
 
@@ -286,6 +287,155 @@ class ArenaActiveSpinTest(unittest.TestCase):
 
         self.assertEqual(len(publisher.messages), 5)
         self.assertTrue(all(msg.angular.z == 0.0 for msg in publisher.messages))
+
+    def test_active_explore_requires_pose_not_unique_trustworthy_geometry(self):
+        config = active_explore.ActiveExploreConfig()
+        plan = active_explore.plan_active_explore_recovery(
+            fake_pose_not_unique_result(negative_range=0.70, positive_range=2.00),
+            fake_scan(),
+            arena.Pose2D(),
+            config,
+        )
+
+        self.assertFalse(plan.ok)
+        self.assertEqual(plan.reason, "range_sum_invalid")
+        self.assertIsNone(plan.grid)
+
+    def test_active_explore_rejects_unknown_goal_even_when_attractive(self):
+        grid = active_explore.LocalGrid(
+            origin_x=-0.2,
+            origin_y=-0.2,
+            resolution_m=0.1,
+            width=5,
+            height=5,
+            cells=(
+                (active_explore.CELL_UNKNOWN,) * 5,
+                (active_explore.CELL_UNKNOWN,) * 5,
+                (
+                    active_explore.CELL_UNKNOWN,
+                    active_explore.CELL_UNKNOWN,
+                    active_explore.CELL_FREE,
+                    active_explore.CELL_UNKNOWN,
+                    active_explore.CELL_UNKNOWN,
+                ),
+                (active_explore.CELL_UNKNOWN,) * 5,
+                (active_explore.CELL_UNKNOWN,) * 5,
+            ),
+            robot_cell=(2, 2),
+        )
+        target_x, target_y = active_explore.cell_to_world(grid, (4, 2))
+        raw = active_explore.RawCandidate(
+            "provisional_center",
+            target_x,
+            target_y,
+            0.0,
+            geometry_progress=1.0,
+            heater_potential=1.0,
+        )
+
+        candidate = active_explore.plan_candidate(
+            raw,
+            grid,
+            active_explore.ActiveExploreConfig(unknown_blocked=True),
+        )
+
+        self.assertFalse(candidate.accepted)
+        self.assertEqual(candidate.rejection_reason, "goal_unknown")
+
+    def test_active_explore_astar_prefers_reachable_corridor_over_blocked_center(self):
+        rows = [[active_explore.CELL_FREE for _x in range(9)] for _y in range(9)]
+        for cell in [
+            (3, 5),
+            (4, 5),
+            (5, 5),
+            (3, 6),
+            (5, 6),
+            (3, 7),
+            (4, 7),
+            (5, 7),
+        ]:
+            rows[cell[1]][cell[0]] = active_explore.CELL_OCCUPIED
+        grid = active_explore.LocalGrid(
+            origin_x=-0.4,
+            origin_y=-0.4,
+            resolution_m=0.1,
+            width=9,
+            height=9,
+            cells=tuple(tuple(row) for row in rows),
+            robot_cell=(4, 4),
+        )
+        config = active_explore.ActiveExploreConfig(max_single_move_m=0.5)
+        center_x, center_y = active_explore.cell_to_world(grid, (4, 6))
+        corridor_x, corridor_y = active_explore.cell_to_world(grid, (8, 4))
+
+        center = active_explore.plan_candidate(
+            active_explore.RawCandidate(
+                "provisional_center",
+                center_x,
+                center_y,
+                math.pi / 2.0,
+                geometry_progress=1.0,
+            ),
+            grid,
+            config,
+        )
+        corridor = active_explore.plan_candidate(
+            active_explore.RawCandidate(
+                "open_corridor",
+                corridor_x,
+                corridor_y,
+                0.0,
+                geometry_progress=0.2,
+            ),
+            grid,
+            config,
+        )
+
+        self.assertFalse(center.accepted)
+        self.assertEqual(center.rejection_reason, "no_connected_path")
+        self.assertTrue(corridor.accepted)
+        self.assertEqual(corridor.kind, "open_corridor")
+
+    def test_active_explore_scoring_logs_all_components(self):
+        rows = [[active_explore.CELL_FREE for _x in range(7)] for _y in range(7)]
+        rows[1][1] = active_explore.CELL_OCCUPIED
+        grid = active_explore.LocalGrid(
+            origin_x=-0.3,
+            origin_y=-0.3,
+            resolution_m=0.1,
+            width=7,
+            height=7,
+            cells=tuple(tuple(row) for row in rows),
+            robot_cell=(3, 3),
+        )
+        target_x, target_y = active_explore.cell_to_world(grid, (5, 3))
+
+        candidate = active_explore.plan_candidate(
+            active_explore.RawCandidate(
+                "open_corridor",
+                target_x,
+                target_y,
+                0.0,
+                geometry_progress=0.5,
+                heater_potential=0.2,
+            ),
+            grid,
+            active_explore.ActiveExploreConfig(),
+        )
+
+        self.assertTrue(candidate.accepted)
+        self.assertEqual(
+            set(candidate.score_components),
+            {
+                "geometry_progress",
+                "heater_potential",
+                "clearance_margin",
+                "path_length",
+                "turn_count",
+                "unknown_ratio",
+            },
+        )
+        self.assertIsNotNone(candidate.score)
 
     def test_center_reposition_action_moves_away_from_nearest_short_wall(self):
         config = active_spin.ArenaActiveSpinConfig(
@@ -887,6 +1037,206 @@ class ArenaActiveSpinTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "stale_scan_during_reposition_drive"):
                 with contextlib.redirect_stdout(io.StringIO()):
                     session.execute_center_reposition(publisher, action)
+
+    def test_active_explore_dry_run_plans_without_cmd_vel_or_initialpose(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            node = FakeNode()
+            publisher = FakePublisher()
+            time_box = {"now": 0.0}
+            config = active_spin.ArenaActiveSpinConfig(
+                run_id="active_explore_dry_run_test",
+                diagnostics_path=Path(tmpdir) / "diag.json",
+                recovery_mode="active_explore",
+                recovery_executor="dry_run",
+                require_operator_confirmation=False,
+            )
+            session = active_spin.ArenaActiveSpinSession(
+                node,
+                config,
+                FakeRclpy(node, time_box),
+                FakeTwist,
+                object,
+                object,
+                None,
+                sleep_fn=lambda _delay: None,
+            )
+            session.latest_scan = fake_scan(clearance=2.0)
+            session.latest_odom_pose = arena.Pose2D()
+            session.latest_odom_yaw_rad = 0.0
+            session.wait_for_fresh_inputs = lambda: None
+
+            result = session.run_active_explore_recovery(
+                publisher,
+                fake_pose_not_unique_result(),
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(len(publisher.messages), 0)
+        self.assertEqual(len(session.diagnostics["active_explore"]["attempts"]), 1)
+        attempt = session.diagnostics["active_explore"]["attempts"][0]
+        self.assertEqual(attempt["execution"]["stop_reason"], "dry_run")
+        self.assertFalse(session.diagnostics["initialpose"]["published"])
+
+    def test_active_explore_weak_geometry_aborts_without_waiting_for_recovery_inputs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            node = FakeNode()
+            publisher = FakePublisher()
+            time_box = {"now": 0.0}
+            config = active_spin.ArenaActiveSpinConfig(
+                run_id="active_explore_weak_geometry_test",
+                diagnostics_path=Path(tmpdir) / "diag.json",
+                recovery_mode="active_explore",
+                recovery_executor="dry_run",
+                require_operator_confirmation=False,
+            )
+            session = active_spin.ArenaActiveSpinSession(
+                node,
+                config,
+                FakeRclpy(node, time_box),
+                FakeTwist,
+                object,
+                object,
+                None,
+                sleep_fn=lambda _delay: None,
+            )
+            session.wait_for_fresh_inputs = lambda: (_ for _ in ()).throw(
+                AssertionError("should not wait for recovery inputs")
+            )
+
+            result = session.run_active_explore_recovery(
+                publisher,
+                fake_pose_not_unique_result(negative_range=0.70, positive_range=2.00),
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(len(publisher.messages), 0)
+        attempt = session.diagnostics["active_explore"]["attempts"][0]
+        self.assertEqual(attempt["plan"]["reason"], "range_sum_invalid")
+        self.assertEqual(attempt["execution"]["stop_reason"], "range_sum_invalid")
+
+    def test_active_explore_cmd_vel_recovery_second_spin_success_returns_pose_prior(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            node = FakeNode()
+            publisher = FakePublisher()
+            time_box = {"now": 0.0}
+            diagnostics_path = Path(tmpdir) / "arena_active_result.json"
+            config = active_spin.ArenaActiveSpinConfig(
+                run_id="active_explore_cmd_vel_flow_test",
+                diagnostics_path=diagnostics_path,
+                recovery_mode="active_explore",
+                recovery_executor="cmd_vel",
+                require_operator_confirmation=False,
+                spin_complete_tolerance_deg=359.0,
+                min_scan_samples=1,
+                stop_settle_sec=0.0,
+            )
+            analyze_results = iter(
+                [
+                    fake_pose_not_unique_result(),
+                    fake_success_result(),
+                ]
+            )
+            session = active_spin.ArenaActiveSpinSession(
+                node,
+                config,
+                FakeRclpy(node, time_box),
+                FakeTwist,
+                object,
+                object,
+                None,
+                sleep_fn=lambda delay: time_box.__setitem__("now", time_box["now"] + delay),
+                analyze_fn=lambda *_args, **_kwargs: next(analyze_results),
+            )
+            executed = []
+
+            def execute_active(_publisher, candidate, distance_limit_m=None):
+                executed.append((candidate.kind, distance_limit_m))
+                return {
+                    "executor": "cmd_vel",
+                    "executed": True,
+                    "candidate_kind": candidate.kind,
+                    "steps": [],
+                    "driven_distance_m": 0.30,
+                    "duration_sec": 0.0,
+                    "stop_reason": "completed",
+                }
+
+            session.execute_active_explore_cmd_vel = execute_active
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = session.run(publisher)
+            diagnostics = json.loads(diagnostics_path.read_text())
+
+        self.assertTrue(result.success)
+        self.assertEqual(len(executed), 1)
+        self.assertEqual(len(diagnostics["active_explore"]["attempts"]), 1)
+        self.assertTrue(diagnostics["fallback_used"])
+        self.assertEqual(len(diagnostics["spin_attempts"]), 2)
+        self.assertFalse(diagnostics["initialpose"]["published"])
+        self.assertEqual(
+            diagnostics["initialpose"]["reason"],
+            "pending_runner_publication",
+        )
+
+    def test_active_explore_cmd_vel_failure_publishes_stop(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            node = FakeNode()
+            publisher = FakePublisher()
+            time_box = {"now": 0.0}
+            config = active_spin.ArenaActiveSpinConfig(
+                run_id="active_explore_stale_stop_test",
+                diagnostics_path=Path(tmpdir) / "diag.json",
+                recovery_mode="active_explore",
+                recovery_executor="cmd_vel",
+                require_operator_confirmation=False,
+            )
+            session = active_spin.ArenaActiveSpinSession(
+                node,
+                config,
+                FakeRclpy(node, time_box),
+                FakeTwist,
+                object,
+                object,
+                None,
+                sleep_fn=lambda _delay: None,
+            )
+            candidate = active_explore.ActiveExploreCandidate(
+                kind="open_corridor",
+                target_x=0.30,
+                target_y=0.0,
+                heading_rad=0.0,
+                accepted=True,
+                score=1.0,
+                path_world=((0.0, 0.0), (0.30, 0.0)),
+                simplified_path_world=((0.0, 0.0), (0.30, 0.0)),
+                path_length_m=0.30,
+            )
+
+            def freshen():
+                session.latest_scan = fake_scan(clearance=2.0)
+                session.latest_scan_received_sec = session.now()
+                session.latest_odom_pose = arena.Pose2D()
+                session.latest_odom_yaw_rad = 0.0
+                session.latest_odom_received_sec = session.now()
+
+            session.wait_for_fresh_inputs = freshen
+            session.refresh_fresh_inputs_after_prompt = lambda: None
+            session.turn_to_heading = lambda _publisher, _heading: None
+            session.drive_forward = lambda _publisher, _distance: (_ for _ in ()).throw(
+                RuntimeError("stale_odom_during_reposition_drive")
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "stale_odom_during_reposition_drive"):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    session.execute_active_explore_cmd_vel(publisher, candidate)
+
+        self.assertGreaterEqual(len(publisher.messages), active_spin.DEFAULT_STOP_COUNT)
+        self.assertTrue(
+            all(
+                message.linear.x == 0.0 and message.angular.z == 0.0
+                for message in publisher.messages[-active_spin.DEFAULT_STOP_COUNT:]
+            )
+        )
 
     def test_run_uses_heater_approach_after_center_reposition_still_ambiguous(self):
         with tempfile.TemporaryDirectory() as tmpdir:

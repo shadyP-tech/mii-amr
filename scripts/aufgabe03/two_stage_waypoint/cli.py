@@ -102,6 +102,11 @@ def require_motion_confirmation(args, staging_goal, follower_command):
     print("  - ensure no other controller is intentionally publishing /cmd_vel")
     if args.arena_active_enable_center_reposition:
         print("  - reposition recovery may drive before /initialpose is published")
+    if (
+        args.arena_active_recovery_mode == "active_explore"
+        and args.arena_active_recovery_executor != "dry_run"
+    ):
+        print("  - active-explore recovery may drive before /initialpose is published")
     print(f"Run ID: {args.run_id}")
     print(
         "Staging goal: "
@@ -130,6 +135,32 @@ def print_dry_run(args, waypoints, staging_goal, follower_command):
     print(f"  cmd_vel topic: {args.cmd_vel_topic}")
     print(f"  scan topic: {args.scan_topic}")
     print(f"  odom topic: {args.odom_topic}")
+    print(f"  follow path action: {args.follow_path_action}")
+    print("Arena-active recovery:")
+    print(f"  mode: {args.arena_active_recovery_mode}")
+    print(f"  executor: {args.arena_active_recovery_executor}")
+    print(f"  active-explore max attempts: {args.arena_active_explore_max_attempts}")
+    print(
+        "  active-explore max single move: "
+        f"{args.arena_active_explore_max_single_move_m:.3f} m"
+    )
+    print(
+        "  active-explore max total distance: "
+        f"{args.arena_active_explore_max_total_distance_m:.3f} m"
+    )
+    print(
+        "  active-explore grid: "
+        f"{args.arena_active_explore_grid_size_m:.2f} m @ "
+        f"{args.arena_active_explore_grid_resolution_m:.3f} m"
+    )
+    print(
+        "  active-explore inflation: "
+        f"{args.arena_active_explore_inflation_radius_m:.3f} m"
+    )
+    print(
+        "  active-explore unknown blocked: "
+        f"{'yes' if args.arena_active_explore_unknown_blocked else 'no'}"
+    )
     print(f"Wait before custom follower: {'yes' if args.wait_before_follow else 'no'}")
     print(
         "Arena-active internal confirmations: "
@@ -188,6 +219,7 @@ def parse_args(argv):
     )
 
     parser.add_argument("--navigate-action", default="/navigate_to_pose")
+    parser.add_argument("--follow-path-action", default="/follow_path")
     parser.add_argument("--initial-pose-topic", default="/initialpose")
     parser.add_argument("--amcl-topic", default="/amcl_pose")
     parser.add_argument("--cmd-vel-topic", default="/cmd_vel")
@@ -416,6 +448,20 @@ def parse_args(argv):
         dest="arena_active_enable_center_reposition",
         action="store_true",
     )
+    parser.add_argument(
+        "--arena-active-recovery-mode",
+        choices=["none", "legacy", "active_explore"],
+        default=None,
+        help=(
+            "Arena-active recovery after pose_not_unique. The legacy center "
+            "reposition flag maps to legacy when this is omitted."
+        ),
+    )
+    parser.add_argument(
+        "--arena-active-recovery-executor",
+        choices=["dry_run", "cmd_vel", "nav2_follow_path"],
+        default="dry_run",
+    )
     parser.add_argument("--arena-active-center-reposition-max-attempts", default=1, type=int)
     parser.add_argument(
         "--arena-active-center-reposition-target-nearest-short-wall-range-m",
@@ -505,6 +551,48 @@ def parse_args(argv):
         default=1.10,
         type=float,
     )
+    parser.add_argument("--arena-active-explore-max-attempts", default=2, type=int)
+    parser.add_argument(
+        "--arena-active-explore-max-single-move-m",
+        default=0.45,
+        type=float,
+    )
+    parser.add_argument(
+        "--arena-active-explore-max-total-distance-m",
+        default=0.90,
+        type=float,
+    )
+    parser.add_argument(
+        "--arena-active-explore-grid-resolution-m",
+        default=0.05,
+        type=float,
+    )
+    parser.add_argument(
+        "--arena-active-explore-grid-size-m",
+        default=4.0,
+        type=float,
+    )
+    parser.add_argument(
+        "--arena-active-explore-inflation-radius-m",
+        default=0.28,
+        type=float,
+    )
+    parser.add_argument(
+        "--arena-active-explore-unknown-blocked",
+        dest="arena_active_explore_unknown_blocked",
+        action="store_true",
+        default=True,
+    )
+    parser.add_argument(
+        "--arena-active-explore-allow-unknown",
+        dest="arena_active_explore_unknown_blocked",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--arena-active-explore-max-path-segments",
+        default=3,
+        type=int,
+    )
     parser.add_argument("--arena-length-m", default=3.90, type=float)
     parser.add_argument("--arena-width-m", type=float)
     parser.add_argument("--arena-heater-wall-width-m", default=2.016, type=float)
@@ -536,6 +624,14 @@ def parse_args(argv):
 
     if not args.run_id:
         args.run_id = datetime.now().strftime("arena_prior_two_stage_%Y%m%d_%H%M%S")
+    if args.arena_active_recovery_mode is None:
+        args.arena_active_recovery_mode = (
+            "legacy" if args.arena_active_enable_center_reposition else "none"
+        )
+    elif args.arena_active_recovery_mode == "legacy":
+        args.arena_active_enable_center_reposition = True
+    else:
+        args.arena_active_enable_center_reposition = False
     validate_args(parser, args)
     return args
 
@@ -614,6 +710,11 @@ def validate_args(parser, args):
         "arena_active_center_reposition_heater_approach_min_delta",
         "arena_active_center_reposition_heater_approach_min_step_m",
         "arena_active_center_reposition_heater_approach_max_step_m",
+        "arena_active_explore_max_single_move_m",
+        "arena_active_explore_max_total_distance_m",
+        "arena_active_explore_grid_resolution_m",
+        "arena_active_explore_grid_size_m",
+        "arena_active_explore_inflation_radius_m",
         "arena_length_m",
         "arena_heater_wall_width_m",
         "arena_clean_wall_width_m",
@@ -664,6 +765,18 @@ def validate_args(parser, args):
     if args.arena_active_center_reposition_heater_approach_max_attempts < 1:
         parser.error(
             "--arena-active-center-reposition-heater-approach-max-attempts must be >= 1"
+        )
+    if args.arena_active_explore_max_attempts < 1:
+        parser.error("--arena-active-explore-max-attempts must be >= 1")
+    if args.arena_active_explore_max_path_segments < 1:
+        parser.error("--arena-active-explore-max-path-segments must be >= 1")
+    if (
+        args.arena_active_recovery_mode != "active_explore"
+        and args.arena_active_recovery_executor != "dry_run"
+    ):
+        parser.error(
+            "--arena-active-recovery-executor other than dry_run requires "
+            "--arena-active-recovery-mode active_explore"
         )
     if (
         args.arena_active_center_reposition_min_step_m

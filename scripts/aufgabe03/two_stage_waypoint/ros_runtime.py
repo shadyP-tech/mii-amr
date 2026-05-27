@@ -5,7 +5,7 @@ try:
     import rclpy
     from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
     from nav_msgs.msg import Odometry
-    from nav2_msgs.action import NavigateToPose
+    from nav2_msgs.action import FollowPath, NavigateToPose
     from rclpy.action import ActionClient
     from rclpy.node import Node
     from rclpy.qos import qos_profile_sensor_data
@@ -14,6 +14,7 @@ try:
     import tf2_ros
 except ImportError:
     rclpy = None
+    FollowPath = None
     NavigateToPose = None
     ActionClient = None
     Node = object
@@ -142,6 +143,8 @@ def arena_active_config_from_args(args):
         range_stride=args.arena_active_range_stride,
         max_points=args.arena_active_max_points,
         control_rate_hz=args.control_rate_hz,
+        recovery_mode=args.arena_active_recovery_mode,
+        recovery_executor=args.arena_active_recovery_executor,
         enable_center_reposition=args.arena_active_enable_center_reposition,
         center_reposition_max_attempts=args.arena_active_center_reposition_max_attempts,
         center_reposition_target_nearest_short_wall_range_m=(
@@ -197,6 +200,20 @@ def arena_active_config_from_args(args):
         center_reposition_heater_approach_max_step_m=(
             args.arena_active_center_reposition_heater_approach_max_step_m
         ),
+        active_explore_max_attempts=args.arena_active_explore_max_attempts,
+        active_explore_max_single_move_m=args.arena_active_explore_max_single_move_m,
+        active_explore_max_total_distance_m=(
+            args.arena_active_explore_max_total_distance_m
+        ),
+        active_explore_grid_resolution_m=(
+            args.arena_active_explore_grid_resolution_m
+        ),
+        active_explore_grid_size_m=args.arena_active_explore_grid_size_m,
+        active_explore_inflation_radius_m=(
+            args.arena_active_explore_inflation_radius_m
+        ),
+        active_explore_unknown_blocked=args.arena_active_explore_unknown_blocked,
+        active_explore_max_path_segments=args.arena_active_explore_max_path_segments,
         arena_config=arena_config,
     )
 
@@ -305,6 +322,17 @@ class TwoStageCoordinator(Node):
             10,
         )
         self.navigate_client = ActionClient(self, NavigateToPose, args.navigate_action)
+        self.follow_path_client = None
+        if (
+            args.arena_active_recovery_mode == "active_explore"
+            and args.arena_active_recovery_executor == "nav2_follow_path"
+        ):
+            if FollowPath is None:
+                raise RuntimeError(
+                    "nav2_msgs.action.FollowPath is unavailable; "
+                    "source a Nav2 Humble environment first"
+                )
+            self.follow_path_client = ActionClient(self, FollowPath, args.follow_path_action)
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
@@ -362,7 +390,12 @@ class TwoStageCoordinator(Node):
     def preflight_before_motion(self):
         requirements = required_preflight_interfaces(self.args)
         for action in requirements.actions:
-            if not self.navigate_client.wait_for_server(timeout_sec=self.args.preflight_timeout_sec):
+            client = self.navigate_client
+            if action == self.args.follow_path_action:
+                client = self.follow_path_client
+            if client is None or not client.wait_for_server(
+                timeout_sec=self.args.preflight_timeout_sec,
+            ):
                 raise RuntimeError(f"Required action is unavailable: {action}")
         self.wait_for_fresh_scan(self.args.preflight_timeout_sec)
         safety = self.current_scan_safety()
