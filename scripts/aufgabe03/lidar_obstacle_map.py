@@ -39,6 +39,7 @@ RUN_LOCAL_FAILURE_START_IN_COLLISION = "start_in_collision"
 RUN_LOCAL_FAILURE_GOAL_BLOCKED = "goal_blocked"
 RUN_LOCAL_FAILURE_NO_CONNECTED_PATH = "no_connected_path"
 RUN_LOCAL_FAILURE_MAX_UPDATES_EXCEEDED = "max_updates_exceeded"
+DEFAULT_MIN_REPLAN_PATH_LENGTH_BASELINE_M = 0.75
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,7 @@ class RunLocalMapConfig:
     max_rejected_ratio: float = 0.90
     max_updates: int = 3
     max_replan_path_length_ratio: float = 3.0
+    min_replan_path_length_baseline_m: float = DEFAULT_MIN_REPLAN_PATH_LENGTH_BASELINE_M
     planner_inflate_radius_m: float = 0.0
     planner_snap_radius_m: float = planner.DEFAULT_SNAP_RADIUS_M
     max_start_snap_m: float = 0.20
@@ -157,6 +159,7 @@ class ObstacleOverlayConfig:
     max_start_snap_m: float = 0.20
     max_goal_snap_m: float = 0.30
     max_replan_path_length_ratio: float = 3.0
+    min_replan_path_length_baseline_m: float = DEFAULT_MIN_REPLAN_PATH_LENGTH_BASELINE_M
     planner_inflate_radius_m: float = 0.0
     planner_snap_radius_m: float = planner.DEFAULT_SNAP_RADIUS_M
     run_local_min_hit_count: int = 2
@@ -710,9 +713,11 @@ def plan_with_run_local_map(
         if old_remaining_waypoints is not None:
             plan_diag.old_remaining_waypoint_count = len(old_remaining_waypoints)
             plan_diag.old_path_length_m = waypoint_path_length_m(old_remaining_waypoints)
-            if (
-                plan_diag.old_path_length_m
-                and plan.path_length_m > plan_diag.old_path_length_m * run_local_map.config.max_replan_path_length_ratio
+            if replan_path_too_long(
+                plan.path_length_m,
+                plan_diag.old_path_length_m,
+                run_local_map.config.max_replan_path_length_ratio,
+                run_local_map.config.min_replan_path_length_baseline_m,
             ):
                 raise ObstacleOverlayError("replan_path_too_long")
 
@@ -960,6 +965,18 @@ def waypoint_path_length_m(waypoints):
     return total
 
 
+def replan_path_length_limit(old_path_length_m, max_ratio, min_baseline_m):
+    if not old_path_length_m:
+        return None
+    baseline = max(float(old_path_length_m), float(min_baseline_m))
+    return baseline * float(max_ratio)
+
+
+def replan_path_too_long(new_path_length_m, old_path_length_m, max_ratio, min_baseline_m):
+    limit = replan_path_length_limit(old_path_length_m, max_ratio, min_baseline_m)
+    return limit is not None and float(new_path_length_m) > limit
+
+
 def artifact_paths(output_dir, run_id, sequence=1):
     output_dir = Path(output_dir)
     stem = f"{run_id}_updated_{sequence:03d}"
@@ -1040,9 +1057,11 @@ def build_replan_result(
         if old_remaining_waypoints is not None:
             diagnostics.old_remaining_waypoint_count = len(old_remaining_waypoints)
             diagnostics.old_path_length_m = waypoint_path_length_m(old_remaining_waypoints)
-            if (
-                diagnostics.old_path_length_m
-                and plan.path_length_m > diagnostics.old_path_length_m * config.max_replan_path_length_ratio
+            if replan_path_too_long(
+                plan.path_length_m,
+                diagnostics.old_path_length_m,
+                config.max_replan_path_length_ratio,
+                config.min_replan_path_length_baseline_m,
             ):
                 raise ObstacleOverlayError("replan_path_too_long")
 

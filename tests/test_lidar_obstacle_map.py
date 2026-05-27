@@ -58,6 +58,26 @@ class LidarObstacleMapTest(unittest.TestCase):
                 self.assertAlmostEqual(result[0], expected[0])
                 self.assertAlmostEqual(result[1], expected[1])
 
+    def test_replan_path_length_guard_uses_minimum_baseline_for_short_suffixes(self):
+        self.assertFalse(overlay.replan_path_too_long(
+            new_path_length_m=1.20,
+            old_path_length_m=0.20,
+            max_ratio=3.0,
+            min_baseline_m=0.75,
+        ))
+        self.assertTrue(overlay.replan_path_too_long(
+            new_path_length_m=2.30,
+            old_path_length_m=0.20,
+            max_ratio=3.0,
+            min_baseline_m=0.75,
+        ))
+        self.assertTrue(overlay.replan_path_too_long(
+            new_path_length_m=3.10,
+            old_path_length_m=1.00,
+            max_ratio=3.0,
+            min_baseline_m=0.75,
+        ))
+
     def test_overlay_filters_points_and_inflates_free_cells(self):
         occ = free_map()
         config = overlay.ObstacleOverlayConfig(
