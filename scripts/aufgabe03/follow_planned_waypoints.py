@@ -68,6 +68,7 @@ DEFAULT_FORWARD_STOP_HEADING_ERROR_DEG = 18.0
 DEFAULT_MIN_WAYPOINT_SPACING_M = 0.12
 DEFAULT_START_SELECTION = "path-progress"
 DEFAULT_START_ON_PATH_TOLERANCE_M = 0.25
+DEFAULT_ODOM_FRAME = "odom"
 DEFAULT_SCAN_HALF_ANGLE_DEG = 35.0
 DEFAULT_HARD_STOP_RANGE_M = 0.16
 DEFAULT_MIN_SCAN_RANGE_M = 0.40
@@ -668,6 +669,12 @@ def quaternion_to_yaw_deg(x, y, z, w):
     siny_cosp = 2.0 * (w * z + x * y)
     cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
     return math.degrees(math.atan2(siny_cosp, cosy_cosp))
+
+
+def stamp_to_sec(stamp):
+    if stamp is None:
+        return None
+    return float(stamp.sec) + float(stamp.nanosec) / 1_000_000_000.0
 
 
 def waypoint_distance(a, b):
@@ -1394,6 +1401,27 @@ class WaypointFollower(Node):
                 return transform_to_pose2d(transform, frame), frame
             except Exception as exc:
                 errors.append(f"{frame}: {exc}")
+        odom_frame = getattr(self.args, "odom_frame", DEFAULT_ODOM_FRAME)
+        for frame in ordered_base_frames(self.args.base_frame, self.args.fallback_base_frame):
+            try:
+                map_from_odom = self.tf_buffer.lookup_transform(
+                    self.args.map_frame,
+                    odom_frame,
+                    Time(),
+                )
+                odom_from_base = self.tf_buffer.lookup_transform(
+                    odom_frame,
+                    frame,
+                    Time(),
+                )
+                self.base_frame_used = frame
+                return compose_2d_pose(
+                    map_from_odom,
+                    odom_from_base,
+                    frame,
+                ), frame
+            except Exception as exc:
+                errors.append(f"split {self.args.map_frame}->{odom_frame}->{frame}: {exc}")
         raise RuntimeError("Could not lookup TF pose: " + "; ".join(errors))
 
     def update_tf_tracking(self, pose):
@@ -1476,7 +1504,14 @@ class WaypointFollower(Node):
         )
 
     def check_health_or_raise(self):
-        pose, frame = self.lookup_pose()
+        try:
+            pose, frame = self.lookup_pose()
+        except RuntimeError as exc:
+            raise RecoverableHealthError(
+                "tf_lookup",
+                self.args.tf_recovery_time_sec,
+                str(exc),
+            ) from exc
         if pose.stamp_sec is None:
             raise RuntimeError("TF pose has no usable timestamp.")
         pose_age = time.time() - pose.stamp_sec
@@ -2076,8 +2111,7 @@ class RecoverableHealthError(RuntimeError):
 def transform_to_pose2d(transform, frame_id):
     translation = transform.transform.translation
     rotation = transform.transform.rotation
-    stamp = transform.header.stamp
-    stamp_sec = float(stamp.sec) + float(stamp.nanosec) / 1_000_000_000.0
+    stamp_sec = stamp_to_sec(transform.header.stamp)
     return Pose2D(
         x=float(translation.x),
         y=float(translation.y),
@@ -2089,6 +2123,24 @@ def transform_to_pose2d(transform, frame_id):
         ),
         stamp_sec=stamp_sec,
         frame_id=frame_id,
+    )
+
+
+def compose_2d_pose(parent_from_mid, mid_from_child, child_frame_id):
+    parent_pose = transform_to_pose2d(parent_from_mid, parent_from_mid.header.frame_id)
+    child_pose = transform_to_pose2d(mid_from_child, child_frame_id)
+    yaw_rad = math.radians(parent_pose.yaw_deg)
+    cos_yaw = math.cos(yaw_rad)
+    sin_yaw = math.sin(yaw_rad)
+    x = parent_pose.x + cos_yaw * child_pose.x - sin_yaw * child_pose.y
+    y = parent_pose.y + sin_yaw * child_pose.x + cos_yaw * child_pose.y
+    yaw_deg = shortest_angle_delta_deg(0.0, parent_pose.yaw_deg + child_pose.yaw_deg)
+    return Pose2D(
+        x=x,
+        y=y,
+        yaw_deg=yaw_deg,
+        stamp_sec=child_pose.stamp_sec,
+        frame_id=child_frame_id,
     )
 
 
@@ -2210,6 +2262,7 @@ def parse_args(argv):
         choices=["path-progress", "fixed-skip"],
     )
     parser.add_argument("--start-on-path-tolerance-m", default=DEFAULT_START_ON_PATH_TOLERANCE_M, type=float)
+    parser.add_argument("--odom-frame", default=DEFAULT_ODOM_FRAME)
     parser.add_argument("--scan-half-angle-deg", default=DEFAULT_SCAN_HALF_ANGLE_DEG, type=float)
     parser.add_argument("--hard-stop-range-m", default=DEFAULT_HARD_STOP_RANGE_M, type=float)
     parser.add_argument("--min-scan-range-m", default=DEFAULT_MIN_SCAN_RANGE_M, type=float)

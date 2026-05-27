@@ -253,6 +253,7 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
         self.assertEqual(args.max_scan_age_sec, 8.0)
         self.assertEqual(args.max_amcl_age_sec, 15.0)
         self.assertEqual(args.startup_timeout_sec, 20.0)
+        self.assertEqual(args.odom_frame, "odom")
         self.assertEqual(args.min_scan_range_m, 0.40)
         self.assertFalse(args.require_amcl_startup)
         self.assertEqual(args.max_waypoint_time_sec, 180.0)
@@ -638,6 +639,75 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
         self.assertAlmostEqual(
             follower.shortest_angle_delta_deg(179.0, -179.0),
             2.0,
+        )
+
+    def test_lookup_pose_uses_split_tf_fallback_for_stale_map_odom(self):
+        def transform(parent, child, x, y, yaw_deg, stamp_sec):
+            return argparse.Namespace(
+                header=argparse.Namespace(
+                    frame_id=parent,
+                    stamp=argparse.Namespace(
+                        sec=int(stamp_sec),
+                        nanosec=int((stamp_sec - int(stamp_sec)) * 1_000_000_000),
+                    ),
+                ),
+                child_frame_id=child,
+                transform=argparse.Namespace(
+                    translation=argparse.Namespace(x=x, y=y, z=0.0),
+                    rotation=argparse.Namespace(
+                        x=0.0,
+                        y=0.0,
+                        z=math.sin(math.radians(yaw_deg) / 2.0),
+                        w=math.cos(math.radians(yaw_deg) / 2.0),
+                    ),
+                ),
+            )
+
+        class Buffer:
+            def __init__(self):
+                self.calls = []
+
+            def lookup_transform(self, target, source, _time):
+                self.calls.append((target, source))
+                if target == "map" and source in {"base_footprint", "base_link"}:
+                    raise RuntimeError("Lookup would require extrapolation into the past")
+                if target == "map" and source == "odom":
+                    return transform("map", "odom", 1.0, 2.0, 90.0, 10.0)
+                if target == "odom" and source == "base_footprint":
+                    return transform("odom", "base_footprint", 0.5, 0.2, 15.0, 20.0)
+                raise RuntimeError(f"unexpected lookup {target}->{source}")
+
+        node = argparse.Namespace(
+            args=default_args(
+                map_frame="map",
+                odom_frame="odom",
+                base_frame="base_footprint",
+                fallback_base_frame="base_link",
+            ),
+            tf_buffer=Buffer(),
+            base_frame_used="",
+        )
+        original_time = follower.Time
+        follower.Time = lambda: object()
+        try:
+            pose, frame = follower.WaypointFollower.lookup_pose(node)
+        finally:
+            follower.Time = original_time
+
+        self.assertEqual(frame, "base_footprint")
+        self.assertEqual(node.base_frame_used, "base_footprint")
+        self.assertAlmostEqual(pose.x, 0.8)
+        self.assertAlmostEqual(pose.y, 2.5)
+        self.assertAlmostEqual(pose.yaw_deg, 105.0)
+        self.assertAlmostEqual(pose.stamp_sec, 20.0)
+        self.assertEqual(
+            node.tf_buffer.calls,
+            [
+                ("map", "base_footprint"),
+                ("map", "base_link"),
+                ("map", "odom"),
+                ("odom", "base_footprint"),
+            ],
         )
 
     def test_target_heading_distance_and_tolerances(self):
@@ -1125,6 +1195,23 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "TF pose is stale"):
             follower.WaypointFollower.check_health_or_raise(node)
+
+    def test_tf_lookup_failure_uses_recovery_path(self):
+        node = argparse.Namespace(
+            args=default_args(tf_recovery_time_sec=2.5),
+        )
+
+        def lookup_pose():
+            raise RuntimeError("Could not lookup TF pose: extrapolation into the past")
+
+        node.lookup_pose = lookup_pose
+
+        with self.assertRaises(follower.RecoverableHealthError) as context:
+            follower.WaypointFollower.check_health_or_raise(node)
+
+        self.assertEqual(context.exception.reason, "tf_lookup")
+        self.assertEqual(context.exception.timeout_sec, 2.5)
+        self.assertIn("extrapolation into the past", str(context.exception))
 
     def test_bad_amcl_covariance_can_pause_for_recovery(self):
         node = FakeHealthNode(
