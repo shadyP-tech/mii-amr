@@ -120,7 +120,6 @@ INITIAL_RUN_LOCAL_MAP_NONFATAL_REASONS = {
 
 REPLAN_TRIGGER_SCAN_BLOCKAGE = "scan_blockage"
 REPLAN_TRIGGER_KNOWN_CORRIDOR = "known_corridor"
-REPEATED_SCAN_REPAIR_REASON = "persistent_scan_blockage_after_existing_map_repair"
 
 
 def run_local_map_has_confirmed_obstacles(run_local_map):
@@ -1228,7 +1227,6 @@ class WaypointFollower(Node):
         self.run_local_map = None
         self.live_replan_attempt_count = 0
         self.known_corridor_repair_count = 0
-        self.last_scan_block_repair_signature = None
         self.last_known_corridor_repair_signature = None
         self.suppressed_known_corridor_signature = None
         self.rviz_last_blocked_cells = set()
@@ -1337,8 +1335,6 @@ class WaypointFollower(Node):
         self.last_amcl_received_sec = time.time()
 
     def publish_velocity(self, linear_x, angular_z):
-        if abs(linear_x) > 1e-9 or abs(angular_z) > 1e-9:
-            self.last_scan_block_repair_signature = None
         msg = Twist()
         msg.linear.x = linear_x
         msg.angular.z = angular_z
@@ -1712,7 +1708,7 @@ class WaypointFollower(Node):
         index = self.first_motion_waypoint_index(replanned, current_pose)
         return replanned[index:]
 
-    def scan_block_repair_signature(self, waypoints):
+    def route_signature(self, waypoints):
         waypoints = list(waypoints)
         if not waypoints:
             return ()
@@ -1726,21 +1722,12 @@ class WaypointFollower(Node):
             round(goal.y, 3),
         )
 
-    def remember_scan_repair_or_raise(self, waypoints):
-        signature = self.scan_block_repair_signature(waypoints)
-        if (
-            signature
-            and signature == getattr(self, "last_scan_block_repair_signature", None)
-        ):
-            raise RuntimeError(f"lidar_replan_failed:{REPEATED_SCAN_REPAIR_REASON}")
-        self.last_scan_block_repair_signature = signature
-
     def remember_known_corridor_repair(self, waypoints):
-        self.last_known_corridor_repair_signature = self.scan_block_repair_signature(waypoints)
+        self.last_known_corridor_repair_signature = self.route_signature(waypoints)
         self.suppressed_known_corridor_signature = None
 
     def suppress_repeated_known_corridor_repair(self, waypoints):
-        signature = self.scan_block_repair_signature(waypoints)
+        signature = self.route_signature(waypoints)
         if (
             not signature
             or signature != getattr(self, "last_known_corridor_repair_signature", None)
@@ -2054,7 +2041,6 @@ class WaypointFollower(Node):
                 ):
                     reached_count += 1
                     self.reached_count = reached_count
-                    self.last_scan_block_repair_signature = None
                     self.last_known_corridor_repair_signature = None
                     self.suppressed_known_corridor_signature = None
                     self.stop_repeatedly()
@@ -2101,7 +2087,6 @@ class WaypointFollower(Node):
                                 "status": "replan_artifact_only_complete",
                             }
                         waypoints = self.prune_replanned_waypoints_for_progress(replanned, pose)
-                        self.remember_scan_repair_or_raise(waypoints)
                         waypoint_index = 0
                         replanned_current = True
                         break
