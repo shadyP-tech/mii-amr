@@ -1571,6 +1571,78 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
         self.assertFalse(plan_called)
         self.assertEqual(node.live_replan_attempt_count, 0)
 
+    def test_scan_blockage_after_lidar_budget_repairs_with_existing_map(self):
+        class ReplanNode:
+            replan_after_blockage = follower.WaypointFollower.replan_after_blockage
+            plan_with_existing_run_local_map = (
+                follower.WaypointFollower.plan_with_existing_run_local_map
+            )
+            update_replan_diagnostics = follower.WaypointFollower.update_replan_diagnostics
+            validate_replan_result = follower.WaypointFollower.validate_replan_result
+            replanned_waypoints_from_result = (
+                follower.WaypointFollower.replanned_waypoints_from_result
+            )
+            first_motion_waypoint = follower.WaypointFollower.first_motion_waypoint
+
+            def __init__(self):
+                self.args = default_args(
+                    max_replans=2,
+                    run_local_map_update_mode="forward",
+                    goal_tolerance_m=0.12,
+                    waypoint_tolerance_m=0.12,
+                    robot_footprint_radius_m=0.18,
+                )
+                self.live_replan_attempt_count = self.args.max_replans
+                self.known_corridor_repair_count = 0
+                self.diagnostics = follower.RuntimeDiagnostics()
+                self.run_local_map = argparse.Namespace(confirmed_raw_cells={(1, 1)})
+                self.logger = FakeLogger()
+
+            def get_logger(self):
+                return self.logger
+
+        node = ReplanNode()
+        old_remaining = [
+            follower.Waypoint(1, 0.5, 0.0),
+            follower.Waypoint(2, 1.0, 0.0),
+        ]
+        update_called = False
+
+        def update_lidar(*_args, **_kwargs):
+            nonlocal update_called
+            update_called = True
+            raise AssertionError("exhausted LiDAR budget should not request another map update")
+
+        def plan_existing(*_args, **_kwargs):
+            return follower.lidar_obstacle_map.ReplanResult(
+                success=True,
+                reason="run_local_replan_completed",
+                diagnostics=follower.lidar_obstacle_map.ObstacleOverlayDiagnostics(),
+                waypoints=[(0, 0.0, 0.0), (1, 1.0, 0.0)],
+                run_local_map=node.run_local_map,
+            )
+
+        original_update = follower.replan_runtime.perform_lidar_replan
+        original_existing = follower.replan_runtime.plan_existing_run_local_map
+        follower.replan_runtime.perform_lidar_replan = update_lidar
+        follower.replan_runtime.plan_existing_run_local_map = plan_existing
+        try:
+            replanned = follower.WaypointFollower.replan_after_blockage(
+                node,
+                follower.Pose2D(0.0, 0.0, 0.0),
+                old_remaining,
+                trigger=follower.REPLAN_TRIGGER_SCAN_BLOCKAGE,
+            )
+        finally:
+            follower.replan_runtime.perform_lidar_replan = original_update
+            follower.replan_runtime.plan_existing_run_local_map = original_existing
+
+        self.assertFalse(update_called)
+        self.assertEqual([(wp.x, wp.y) for wp in replanned], [(0.0, 0.0), (1.0, 0.0)])
+        self.assertEqual(node.live_replan_attempt_count, node.args.max_replans)
+        self.assertEqual(node.known_corridor_repair_count, 1)
+        self.assertEqual(len(node.logger.warnings), 1)
+
     def test_known_corridor_blockage_repairs_existing_map_without_spending_lidar_budget(self):
         class ReplanNode:
             replan_after_blockage = follower.WaypointFollower.replan_after_blockage

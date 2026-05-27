@@ -1833,6 +1833,21 @@ class WaypointFollower(Node):
             )
             return replanned
         if self.live_replan_attempt_count >= self.args.max_replans:
+            if (
+                trigger == REPLAN_TRIGGER_SCAN_BLOCKAGE
+                and run_local_map_has_confirmed_obstacles(self.run_local_map)
+            ):
+                replanned = self.plan_with_existing_run_local_map(
+                    current_pose,
+                    old_remaining_waypoints,
+                    sequence=sequence,
+                )
+                self.known_corridor_repair_count = known_corridor_repair_count + 1
+                self.get_logger().warn(
+                    "LiDAR replan budget exhausted; repaired route with existing "
+                    "run-local map after scan blockage."
+                )
+                return replanned
             raise RuntimeError("lidar_replan_failed:max_replans_exceeded")
         if self.args.run_local_map_update_mode == "none":
             replanned = self.plan_with_existing_run_local_map(
