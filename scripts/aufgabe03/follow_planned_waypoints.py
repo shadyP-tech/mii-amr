@@ -1344,10 +1344,16 @@ class WaypointFollower(Node):
         for _ in range(STOP_PUBLISH_COUNT):
             if rclpy.ok():
                 self.pub.publish(msg)
-            time.sleep(sleep_sec)
+            self.spin_for(sleep_sec)
 
     def spin_once(self, timeout_sec):
         rclpy.spin_once(self, timeout_sec=timeout_sec)
+
+    def spin_for(self, duration_sec, step_sec=0.05):
+        deadline = time.time() + max(0.0, duration_sec)
+        while rclpy.ok() and time.time() < deadline:
+            timeout_sec = min(step_sec, max(0.0, deadline - time.time()))
+            rclpy.spin_once(self, timeout_sec=timeout_sec)
 
     def wait_for_startup_gate(self, timeout_sec=None):
         if timeout_sec is None:
@@ -1541,7 +1547,11 @@ class WaypointFollower(Node):
             else time.time() - self.last_scan_received_sec
         )
         if not age_ok(scan_age, self.args.max_scan_age_sec):
-            raise RuntimeError(f"/scan is stale: age={scan_age}")
+            raise RecoverableHealthError(
+                "scan_stale",
+                self.args.max_scan_age_sec,
+                f"/scan is stale: age={scan_age}",
+            )
 
         amcl_health = self.current_amcl_health()
         if amcl_health.warnings:
@@ -1981,7 +1991,7 @@ class WaypointFollower(Node):
                     reached_count += 1
                     self.reached_count = reached_count
                     self.stop_repeatedly()
-                    time.sleep(self.args.settle_sec)
+                    self.spin_for(self.args.settle_sec)
                     reached_current = True
                     break
 

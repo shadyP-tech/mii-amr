@@ -1213,6 +1213,17 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
         self.assertEqual(context.exception.timeout_sec, 2.5)
         self.assertIn("extrapolation into the past", str(context.exception))
 
+    def test_stale_scan_uses_recovery_path(self):
+        node = FakeHealthNode(max_scan_age_sec=1.0)
+        node.last_scan_received_sec = time.time() - 2.0
+
+        with self.assertRaises(follower.RecoverableHealthError) as context:
+            follower.WaypointFollower.check_health_or_raise(node)
+
+        self.assertEqual(context.exception.reason, "scan_stale")
+        self.assertEqual(context.exception.timeout_sec, 1.0)
+        self.assertIn("/scan is stale", str(context.exception))
+
     def test_bad_amcl_covariance_can_pause_for_recovery(self):
         node = FakeHealthNode(
             amcl_warnings=["high_cov_x"],
