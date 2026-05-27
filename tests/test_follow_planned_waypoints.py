@@ -1369,6 +1369,7 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
             follower.Waypoint(11, 0.5, 0.0),
         ]
         node.stop_repeatedly = lambda: None
+        node.spin_for = lambda _duration_sec: None
         node.get_logger = lambda: node.logger
 
         original_rclpy = follower.rclpy
@@ -1425,6 +1426,7 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
             follower.Waypoint(11, 0.5, 0.0),
         ]
         node.stop_repeatedly = lambda: None
+        node.spin_for = lambda _duration_sec: None
         node.get_logger = lambda: node.logger
         node.publish_rviz_route = publish_route
 
@@ -1440,6 +1442,84 @@ class FollowPlannedWaypointsTest(unittest.TestCase):
             follower.rclpy = original_rclpy
 
         self.assertIn([10, 11], published_routes)
+
+    def test_known_corridor_replan_prunes_reached_prefix(self):
+        class ReplanPruned(Exception):
+            pass
+
+        class FakeRclpy:
+            calls = 0
+
+            @classmethod
+            def ok(cls):
+                cls.calls += 1
+                return cls.calls <= 3
+
+            @staticmethod
+            def spin_once(_node, timeout_sec=0.0):
+                return None
+
+        args = follower.parse_args(["--dry-run", "--enable-lidar-map-replan"])
+        node = argparse.Namespace(
+            args=args,
+            diagnostics=follower.RuntimeDiagnostics(),
+            reached_count=0,
+            start_pose=None,
+            final_pose=None,
+            last_amcl_health=None,
+            last_scan_safety=None,
+            base_frame_used="base_footprint",
+            logger=FakeLogger(),
+            run_local_map=object(),
+        )
+        pose = follower.Pose2D(0.405, 0.335, 0.0, stamp_sec=time.time())
+        amcl = follower.AmclHealth(True, [], 0.01, 0.01, 0.01, 0.1)
+        published_routes = []
+
+        def publish_route(waypoints, current_pose=None, current_waypoint_index=0):
+            route = [waypoint.index for waypoint in waypoints]
+            published_routes.append(route)
+            if route == [1, 2]:
+                raise ReplanPruned()
+
+        node.check_health_or_recover = lambda: (pose, "base_footprint", amcl)
+        node.initialize_run_local_route = lambda _pose, waypoints: list(waypoints)
+        node.check_scan_or_raise = lambda _mode: follower.ScanSafety(True, "clear", 4, 1.0, 1.0)
+        node.corridor_blocked_cells = lambda _pose, _remaining: {(1, 1)}
+        node.replan_after_blockage = lambda _pose, _remaining, **_kwargs: [
+            follower.Waypoint(0, 0.405, 0.335),
+            follower.Waypoint(1, 0.955, 0.335),
+            follower.Waypoint(2, 1.105, -0.015),
+        ]
+        node.stop_repeatedly = lambda: None
+        node.spin_for = lambda _duration_sec: None
+        node.get_logger = lambda: node.logger
+        node.publish_rviz_route = publish_route
+        node.prune_replanned_waypoints_for_progress = (
+            follower.WaypointFollower.prune_replanned_waypoints_for_progress.__get__(
+                node,
+                type(node),
+            )
+        )
+        node.first_motion_waypoint_index = (
+            follower.WaypointFollower.first_motion_waypoint_index.__get__(
+                node,
+                type(node),
+            )
+        )
+
+        original_rclpy = follower.rclpy
+        follower.rclpy = FakeRclpy
+        try:
+            with self.assertRaises(ReplanPruned):
+                follower.WaypointFollower.follow_waypoints(
+                    node,
+                    [follower.Waypoint(0, 0.955, 0.335)],
+                )
+        finally:
+            follower.rclpy = original_rclpy
+
+        self.assertIn([1, 2], published_routes)
 
     def test_initial_run_local_empty_map_continues_with_static_route(self):
         class InitialMapNode:

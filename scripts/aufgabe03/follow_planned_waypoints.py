@@ -1690,6 +1690,22 @@ class WaypointFollower(Node):
                 return waypoint
         return replanned[-1]
 
+    def first_motion_waypoint_index(self, replanned, current_pose):
+        for index, waypoint in enumerate(replanned):
+            distance_m = math.hypot(
+                waypoint.x - current_pose.x,
+                waypoint.y - current_pose.y,
+            )
+            if distance_m > self.args.waypoint_tolerance_m:
+                return index
+        return max(0, len(replanned) - 1)
+
+    def prune_replanned_waypoints_for_progress(self, replanned, current_pose):
+        if not replanned:
+            return replanned
+        index = self.first_motion_waypoint_index(replanned, current_pose)
+        return replanned[index:]
+
     def validate_replan_result(
         self,
         result,
@@ -2033,7 +2049,7 @@ class WaypointFollower(Node):
                                 "base_frame_used": self.base_frame_used,
                                 "status": "replan_artifact_only_complete",
                             }
-                        waypoints = replanned
+                        waypoints = self.prune_replanned_waypoints_for_progress(replanned, pose)
                         waypoint_index = 0
                         replanned_current = True
                         break
@@ -2066,7 +2082,7 @@ class WaypointFollower(Node):
                                 "base_frame_used": self.base_frame_used,
                                 "status": "replan_artifact_only_complete",
                             }
-                        waypoints = replanned
+                        waypoints = self.prune_replanned_waypoints_for_progress(replanned, pose)
                         waypoint_index = 0
                         replanned_current = True
                         break
