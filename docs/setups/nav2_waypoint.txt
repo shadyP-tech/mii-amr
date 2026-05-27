@@ -278,6 +278,19 @@ default route, then continues to a middle return leg. It is 2.94 m long. For a
 delayed obstacle test, place the temporary obstacle on the return leg near
 `x=0.6, y=0.435` after the robot has left the initial straight segment.
 
+Bottom-left to top-right middle route dry-run:
+
+```bash
+python3 scripts/aufgabe03/two_stage_waypoint_run.py \
+  --waypoints results/aufgabe03/aufgabe03_bottom_left_to_top_right_waypoints.csv \
+  --run-id bottom_left_top_right_dry \
+  --dry-run
+```
+
+This separate route stages at the lower-left side of the usable map, drives
+through the center, and finishes at an upper-right target. It has 3 waypoints,
+is 2.89 m long, and starts with a staging yaw of 23.7 deg.
+
 Robot artifact-only validation after the normal arena-prior run is stable:
 
 ```bash
