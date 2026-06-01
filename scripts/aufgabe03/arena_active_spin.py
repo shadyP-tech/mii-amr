@@ -40,6 +40,15 @@ DEFAULT_STOP_HZ = 10.0
 ACTIVE_EXPLORE_FRONTIER_CLUSTER_MATCH_M = 0.35
 ACTIVE_EXPLORE_FRONTIER_TARGET_MATCH_M = 0.45
 ACTIVE_EXPLORE_FRONTIER_REACHED_PATH_M = 0.15
+ACTIVE_EXPLORE_SHADOW_EMPTY_REPLANS_TO_COMPLETE = 2
+ACTIVE_EXPLORE_PHASE_SHADOW = "shadow_explore"
+ACTIVE_EXPLORE_PHASE_LOCALIZATION_POSE = "localization_pose"
+ACTIVE_EXPLORE_PHASE_LOCALIZATION_SPIN = "localization_spin"
+ACTIVE_EXPLORE_LOCALIZATION_CANDIDATE_KINDS = (
+    "suspected_heater_approach",
+    "provisional_center",
+    "lateral_recenter",
+)
 
 
 class ActiveExploreMotionError(RuntimeError):
@@ -240,6 +249,35 @@ def candidate_visible_shadow_count(candidate):
 
 def candidate_cluster_centroid(candidate):
     return finite_point_2d((candidate.metadata or {}).get("cluster_centroid_world"))
+
+
+def candidate_path_needs_motion(candidate):
+    path_length = None if candidate is None else candidate.path_length_m
+    return path_length is None or path_length > ACTIVE_EXPLORE_FRONTIER_REACHED_PATH_M
+
+
+def candidate_is_accepted_shadow_frontier(candidate):
+    return (
+        candidate is not None
+        and candidate.accepted
+        and candidate.kind == "obstacle_shadow_frontier"
+    )
+
+
+def candidate_is_moving_shadow_frontier(candidate):
+    return (
+        candidate_is_accepted_shadow_frontier(candidate)
+        and candidate_visible_shadow_count(candidate) > 0
+        and candidate_path_needs_motion(candidate)
+    )
+
+
+def candidate_is_localization_pose_candidate(candidate):
+    return (
+        candidate is not None
+        and candidate.accepted
+        and candidate.kind in ACTIVE_EXPLORE_LOCALIZATION_CANDIDATE_KINDS
+    )
 
 
 def active_explore_curve_execution_record(
@@ -977,6 +1015,7 @@ def initial_diagnostics(config: ArenaActiveSpinConfig):
             "enabled": recovery_mode == "active_explore",
             "mode": recovery_mode,
             "executor": config.recovery_executor,
+            "active_explore_phase": ACTIVE_EXPLORE_PHASE_SHADOW,
             "use_accumulated_map": config.active_explore_use_accumulated_map,
             "map_max_samples": config.active_explore_map_max_samples,
             "temporary_map": {
@@ -987,6 +1026,10 @@ def initial_diagnostics(config: ArenaActiveSpinConfig):
             "attempts": [],
             "total_distance_m": 0.0,
             "persistent_frontier_goal": None,
+            "shadow_frontier_empty_replans": 0,
+            "shadow_explore_complete": False,
+            "shadow_frontier_status": None,
+            "localization_candidate_policy": None,
         },
         "samples": {
             "scan_samples_collected": 0,
@@ -1079,6 +1122,9 @@ class ArenaActiveSpinSession:
         self.explore_samples = []
         self.rejected_samples = 0
         self.active_explore_frontier_goal = None
+        self.active_explore_phase = ACTIVE_EXPLORE_PHASE_SHADOW
+        self.shadow_frontier_empty_replans = 0
+        self.shadow_explore_complete = False
         self.diagnostics = initial_diagnostics(config)
         self.scan_subscription = node.create_subscription(
             scan_msg_type,
@@ -1212,6 +1258,11 @@ class ArenaActiveSpinSession:
         print(f"  full min range: {spin_safety['full_min_range_m']}")
         print(f"  required min range: {spin_safety['required_min_range_m']}")
         print("  expected action: replan toward active-explore frontier without rotating")
+
+    def print_active_explore_phase_spin_skip(self, reason):
+        print("\nArena-active post-motion spin skipped")
+        print(f"  reason: {reason}")
+        print("  expected action: keep exploring obstacle shadow without rotating")
 
     def odom_callback(self, msg):
         self.latest_odom_pose = odom_pose_from_msg(msg)
@@ -1658,6 +1709,151 @@ class ArenaActiveSpinSession:
             self.active_explore_frontier_goal_diagnostics()
         )
 
+    def set_active_explore_phase(self, phase):
+        self.active_explore_phase = phase
+        self.diagnostics["active_explore"]["active_explore_phase"] = phase
+
+    def update_active_explore_phase_diagnostics(self):
+        self.diagnostics["active_explore"]["active_explore_phase"] = (
+            self.active_explore_phase
+        )
+        self.diagnostics["active_explore"]["shadow_frontier_empty_replans"] = (
+            self.shadow_frontier_empty_replans
+        )
+        self.diagnostics["active_explore"]["shadow_explore_complete"] = (
+            self.shadow_explore_complete
+        )
+
+    def shadow_frontier_status_from_plan(self, plan):
+        accepted_frontiers = [
+            candidate
+            for candidate in plan.candidates
+            if candidate_is_accepted_shadow_frontier(candidate)
+        ]
+        visible_frontiers = [
+            candidate
+            for candidate in accepted_frontiers
+            if candidate_visible_shadow_count(candidate) > 0
+        ]
+        moving_frontiers = [
+            candidate
+            for candidate in visible_frontiers
+            if candidate_path_needs_motion(candidate)
+        ]
+        path_lengths = [
+            candidate.path_length_m
+            for candidate in visible_frontiers
+            if candidate.path_length_m is not None
+        ]
+        status = {
+            "accepted_frontier_count": len(accepted_frontiers),
+            "visible_shadow_frontier_count": len(visible_frontiers),
+            "moving_shadow_frontier_count": len(moving_frontiers),
+            "best_visible_shadow_count": (
+                max(
+                    candidate_visible_shadow_count(candidate)
+                    for candidate in visible_frontiers
+                )
+                if visible_frontiers
+                else 0
+            ),
+            "min_visible_frontier_path_m": min(path_lengths) if path_lengths else None,
+            "max_visible_frontier_path_m": max(path_lengths) if path_lengths else None,
+            "frontier_motion_threshold_m": ACTIVE_EXPLORE_FRONTIER_REACHED_PATH_M,
+            "empty_replans_required": (
+                ACTIVE_EXPLORE_SHADOW_EMPTY_REPLANS_TO_COMPLETE
+            ),
+            "empty": len(moving_frontiers) == 0,
+        }
+        return status
+
+    def update_shadow_explore_phase_from_plan(self, plan):
+        status = self.shadow_frontier_status_from_plan(plan)
+        if self.active_explore_phase != ACTIVE_EXPLORE_PHASE_SHADOW:
+            status["empty_replans"] = self.shadow_frontier_empty_replans
+            status["complete"] = self.shadow_explore_complete
+            self.diagnostics["active_explore"]["shadow_frontier_status"] = status
+            self.update_active_explore_phase_diagnostics()
+            return status
+
+        if status["moving_shadow_frontier_count"] > 0:
+            self.shadow_frontier_empty_replans = 0
+            self.shadow_explore_complete = False
+        else:
+            self.shadow_frontier_empty_replans += 1
+            if (
+                self.shadow_frontier_empty_replans
+                >= ACTIVE_EXPLORE_SHADOW_EMPTY_REPLANS_TO_COMPLETE
+            ):
+                self.shadow_explore_complete = True
+                self.clear_active_explore_frontier_goal("shadow_frontier_exhausted")
+                self.set_active_explore_phase(ACTIVE_EXPLORE_PHASE_LOCALIZATION_POSE)
+
+        status["empty_replans"] = self.shadow_frontier_empty_replans
+        status["complete"] = self.shadow_explore_complete
+        self.diagnostics["active_explore"]["shadow_frontier_status"] = status
+        self.update_active_explore_phase_diagnostics()
+        return status
+
+    def moving_shadow_frontier_candidates(self, plan):
+        return tuple(
+            candidate
+            for candidate in plan.candidates
+            if candidate_is_moving_shadow_frontier(candidate)
+        )
+
+    def best_scored_candidate(self, candidates):
+        if not candidates:
+            return None
+        return sorted(
+            candidates,
+            key=lambda candidate: (
+                -(candidate.score if candidate.score is not None else -math.inf),
+                (
+                    candidate.path_length_m
+                    if candidate.path_length_m is not None
+                    else math.inf
+                ),
+            ),
+        )[0]
+
+    def localization_pose_candidate(self, plan):
+        candidates = [
+            candidate
+            for candidate in plan.candidates
+            if candidate_is_localization_pose_candidate(candidate)
+        ]
+        policy = {
+            "eligible_kinds": list(ACTIVE_EXPLORE_LOCALIZATION_CANDIDATE_KINDS),
+            "candidate_count": len(candidates),
+            "selected_kind": None,
+            "reason": "",
+        }
+        if not candidates:
+            policy["reason"] = "no_localization_pose_candidate"
+            return None, policy
+
+        priority = {
+            "suspected_heater_approach": 0,
+            "provisional_center": 1,
+            "lateral_recenter": 1,
+        }
+        candidates.sort(
+            key=lambda candidate: (
+                priority.get(candidate.kind, 99),
+                -(candidate.score if candidate.score is not None else -math.inf),
+                (
+                    candidate.path_length_m
+                    if candidate.path_length_m is not None
+                    else math.inf
+                ),
+            )
+        )
+        selected = candidates[0]
+        policy["selected_kind"] = selected.kind
+        policy["reason"] = "selected"
+        return selected, policy
+
     def frontier_goal_candidate_match(self, goal, candidate):
         match = {
             "matched": False,
@@ -1708,11 +1904,12 @@ class ArenaActiveSpinSession:
         match["reason"] = "matched"
         return match
 
-    def matching_active_explore_frontier_candidate(self, plan):
+    def matching_active_explore_frontier_candidate(self, plan, candidates=None):
         if self.active_explore_frontier_goal is None:
             return None, None
         matches = []
-        for candidate in plan.candidates:
+        candidate_iterable = plan.candidates if candidates is None else candidates
+        for candidate in candidate_iterable:
             match = self.frontier_goal_candidate_match(
                 self.active_explore_frontier_goal,
                 candidate,
@@ -1807,6 +2004,116 @@ class ArenaActiveSpinSession:
             "persistent_frontier_abandon_reason": abandon_reason,
         }
 
+    def apply_active_explore_phase_selection(self, plan, attempt_index):
+        default_selected = plan.selected
+        shadow_status = self.update_shadow_explore_phase_from_plan(plan)
+        localization_policy = None
+        persistent_match = None
+        abandon_reason = None
+        continue_without_motion = False
+
+        def diagnostics(effective_selected, selection_policy):
+            return {
+                "active_explore_phase": self.active_explore_phase,
+                "shadow_frontier_empty_replans": self.shadow_frontier_empty_replans,
+                "shadow_explore_complete": self.shadow_explore_complete,
+                "shadow_frontier_status": shadow_status,
+                "default_selected": (
+                    None if default_selected is None else default_selected.to_dict()
+                ),
+                "effective_selected": (
+                    None if effective_selected is None else effective_selected.to_dict()
+                ),
+                "selection_policy": selection_policy,
+                "persistent_frontier_goal": self.active_explore_frontier_goal_diagnostics(),
+                "persistent_frontier_match": persistent_match,
+                "persistent_frontier_abandon_reason": abandon_reason,
+                "localization_candidate_policy": localization_policy,
+                "continue_without_motion": continue_without_motion,
+            }
+
+        if not plan.ok:
+            if self.active_explore_frontier_goal is not None:
+                abandon_reason = plan.reason or "plan_not_ok"
+                self.clear_active_explore_frontier_goal(abandon_reason)
+            return plan, diagnostics(None, "plan_not_ok")
+
+        if self.active_explore_phase == ACTIVE_EXPLORE_PHASE_SHADOW:
+            moving_frontiers = self.moving_shadow_frontier_candidates(plan)
+            if not moving_frontiers:
+                if self.active_explore_frontier_goal is not None:
+                    abandon_reason = "no_moving_shadow_frontier"
+                    self.clear_active_explore_frontier_goal(abandon_reason)
+                continue_without_motion = True
+                gated_plan = ActiveExplorePlan(
+                    False,
+                    "shadow_frontier_empty_replan_wait",
+                    None,
+                    plan.candidates,
+                    plan.grid,
+                )
+                return gated_plan, diagnostics(None, "shadow_frontier_required")
+
+            effective_selected = None
+            selection_policy = "shadow_frontier_best"
+            if self.active_explore_frontier_goal is not None:
+                effective_selected, persistent_match = (
+                    self.matching_active_explore_frontier_candidate(
+                        plan,
+                        candidates=moving_frontiers,
+                    )
+                )
+                if effective_selected is not None:
+                    selection_policy = "persistent_frontier"
+                else:
+                    abandon_reason = "no_matching_accepted_frontier"
+                    self.clear_active_explore_frontier_goal(abandon_reason)
+
+            if effective_selected is None:
+                effective_selected = self.best_scored_candidate(moving_frontiers)
+
+            if effective_selected is not None:
+                self.store_active_explore_frontier_goal(effective_selected, attempt_index)
+                effective_plan = ActiveExplorePlan(
+                    True,
+                    plan.reason,
+                    effective_selected,
+                    plan.candidates,
+                    plan.grid,
+                )
+                return effective_plan, diagnostics(effective_selected, selection_policy)
+
+        localization_candidate, localization_policy = (
+            self.localization_pose_candidate(plan)
+        )
+        self.diagnostics["active_explore"]["localization_candidate_policy"] = (
+            localization_policy
+        )
+        if self.active_explore_frontier_goal is not None:
+            abandon_reason = abandon_reason or "shadow_explore_complete"
+            self.clear_active_explore_frontier_goal(abandon_reason)
+        if localization_candidate is None:
+            no_pose_plan = ActiveExplorePlan(
+                False,
+                localization_policy["reason"],
+                None,
+                plan.candidates,
+                plan.grid,
+            )
+            return no_pose_plan, diagnostics(None, "localization_pose_required")
+
+        effective_plan = ActiveExplorePlan(
+            True,
+            plan.reason,
+            localization_candidate,
+            plan.candidates,
+            plan.grid,
+        )
+        return effective_plan, diagnostics(
+            localization_candidate,
+            "localization_pose",
+        )
+
     def active_explore_steps_from_candidate(self, candidate, distance_limit_m=None):
         points = list(candidate.simplified_path_world or candidate.path_world)
         if len(points) < 2:
@@ -1868,7 +2175,18 @@ class ArenaActiveSpinSession:
             f"max angular={self.config.active_explore_curve_max_angular_rad_s:.3f} rad/s"
         )
         print(f"  curve path points: {len(path_points)}")
-        print("  expected action: follow short odom-frame curve, stop, then spin again")
+        if candidate.kind == "obstacle_shadow_frontier":
+            print(
+                "  expected action: follow short odom-frame curve, "
+                "update temporary map, then replan without forced spin"
+            )
+        elif self.active_explore_phase == ACTIVE_EXPLORE_PHASE_LOCALIZATION_POSE:
+            print(
+                "  expected action: follow localization-friendly curve, "
+                "stop, then spin if safe"
+            )
+        else:
+            print("  expected action: follow short odom-frame curve and stop")
         if self.config.require_operator_confirmation:
             self.input_fn("Press Enter to start active-explore recovery, or Ctrl+C to abort: ")
 
@@ -2101,7 +2419,7 @@ class ArenaActiveSpinSession:
         ):
             attempt_index = len(self.diagnostics["active_explore"]["attempts"])
             plan = self.plan_active_explore_recovery(result)
-            plan, selection_diagnostics = self.apply_active_explore_persistent_selection(
+            plan, selection_diagnostics = self.apply_active_explore_phase_selection(
                 plan,
                 attempt_index,
             )
@@ -2138,6 +2456,9 @@ class ArenaActiveSpinSession:
 
             if not plan.ok or plan.selected is None:
                 attempt_record["execution"]["stop_reason"] = plan.reason
+                attempts += 1
+                if selection_diagnostics.get("continue_without_motion"):
+                    continue
                 break
 
             if self.config.recovery_executor == "dry_run":
@@ -2197,16 +2518,49 @@ class ArenaActiveSpinSession:
             attempt_record["execution"] = motion_record
             self.diagnostics["active_explore"]["total_distance_m"] = total_distance
             attempts += 1
+            if plan.selected.kind == "obstacle_shadow_frontier":
+                decision = {
+                    "action": "skip",
+                    "reason": "shadow_exploration_not_complete",
+                    "active_explore_phase": self.active_explore_phase,
+                    "shadow_explore_complete": self.shadow_explore_complete,
+                    "shadow_frontier_status": self.diagnostics["active_explore"].get(
+                        "shadow_frontier_status"
+                    ),
+                }
+                attempt_record["post_motion_spin_decision"] = decision
+                attempt_record["post_recovery_spin_skipped"] = True
+                attempt_record["post_recovery_spin_skip_reason"] = decision["reason"]
+                self.print_active_explore_phase_spin_skip(decision["reason"])
+                continue
+
             spin_safety = self.active_explore_spin_safety()
             attempt_record["post_motion_spin_safety"] = spin_safety
             if not spin_safety["ok"]:
+                decision = {
+                    "action": "skip",
+                    "reason": spin_safety["reason"],
+                    "active_explore_phase": self.active_explore_phase,
+                    "shadow_explore_complete": self.shadow_explore_complete,
+                    "spin_safety": spin_safety,
+                }
+                attempt_record["post_motion_spin_decision"] = decision
                 stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
                 attempt_record["post_recovery_spin_skipped"] = True
                 attempt_record["post_recovery_spin_skip_reason"] = spin_safety["reason"]
                 self.print_active_explore_spin_skip(spin_safety)
                 continue
 
+            decision = {
+                "action": "spin",
+                "reason": "localization_pose_reached",
+                "active_explore_phase": ACTIVE_EXPLORE_PHASE_LOCALIZATION_SPIN,
+                "shadow_explore_complete": self.shadow_explore_complete,
+                "spin_safety": spin_safety,
+            }
+            attempt_record["post_motion_spin_decision"] = decision
             attempt_record["post_recovery_spin_skipped"] = False
+            self.set_active_explore_phase(ACTIVE_EXPLORE_PHASE_LOCALIZATION_SPIN)
             self.run_spin_attempt(
                 publisher,
                 attempt_index=len(self.diagnostics["spin_attempts"]),
@@ -2220,6 +2574,8 @@ class ArenaActiveSpinSession:
             )
             if result.success:
                 self.clear_active_explore_frontier_goal("localization_success")
+            else:
+                self.set_active_explore_phase(ACTIVE_EXPLORE_PHASE_LOCALIZATION_POSE)
         return result
 
     def finish_failure(self, reason, exception=None):
