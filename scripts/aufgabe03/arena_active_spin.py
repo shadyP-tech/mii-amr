@@ -172,6 +172,11 @@ class ArenaActiveSpinConfig:
     active_explore_use_accumulated_map: bool = True
     active_explore_map_max_samples: int = 240
     active_explore_temporary_map_publish_period_sec: float = 1.0
+    active_explore_curve_lookahead_m: float = 0.18
+    active_explore_curve_goal_tolerance_m: float = 0.05
+    active_explore_curve_linear_speed_mps: float = 0.06
+    active_explore_curve_max_angular_rad_s: float = 0.45
+    active_explore_min_progress_before_spin_m: float = 0.05
     arena_config: ArenaGeometryConfig = field(default_factory=ArenaGeometryConfig)
 
 
@@ -185,6 +190,92 @@ def shortest_angle_delta_rad(start_rad, end_rad):
 
 def clamp(value, low, high):
     return max(low, min(high, value))
+
+
+def distance_2d(a, b):
+    return math.hypot(float(a[0]) - float(b[0]), float(a[1]) - float(b[1]))
+
+
+def truncate_polyline_by_distance(points, max_distance_m):
+    if len(points) < 2:
+        raise RuntimeError("active_explore_curve_path_too_short")
+    if max_distance_m <= 0.0:
+        raise RuntimeError("active_explore_distance_limit_exhausted")
+    truncated = [points[0]]
+    remaining = float(max_distance_m)
+    previous = points[0]
+    for point in points[1:]:
+        segment = distance_2d(previous, point)
+        if segment <= 1e-9:
+            previous = point
+            continue
+        if segment <= remaining + 1e-9:
+            truncated.append(point)
+            remaining -= segment
+            previous = point
+            if remaining <= 1e-9:
+                break
+            continue
+        ratio = remaining / segment
+        truncated.append(
+            (
+                previous[0] + ratio * (point[0] - previous[0]),
+                previous[1] + ratio * (point[1] - previous[1]),
+            )
+        )
+        break
+    if len(truncated) < 2:
+        raise RuntimeError("active_explore_curve_path_too_short")
+    return tuple(truncated)
+
+
+def active_explore_curve_path(candidate, current_pose, max_distance_m):
+    source = list(candidate.path_world)
+    if len(source) < 2:
+        source = list(candidate.simplified_path_world)
+    if len(source) < 2:
+        raise RuntimeError("active_explore_curve_path_too_short")
+    start = (float(current_pose.x), float(current_pose.y))
+    if distance_2d(start, source[0]) <= 0.10:
+        points = [start, *source[1:]]
+    else:
+        points = [start, *source]
+    return truncate_polyline_by_distance(points, max_distance_m)
+
+
+def select_curve_lookahead_target(path_points, current_point, lookahead_m):
+    if not path_points:
+        raise RuntimeError("active_explore_curve_path_too_short")
+    nearest_index = min(
+        range(len(path_points)),
+        key=lambda index: distance_2d(current_point, path_points[index]),
+    )
+    for point in path_points[nearest_index + 1 :]:
+        if distance_2d(current_point, point) >= lookahead_m:
+            return point
+    return path_points[-1]
+
+
+def pure_pursuit_curve_command(
+    current_pose,
+    target_point,
+    lookahead_m,
+    linear_speed_mps,
+    max_angular_rad_s,
+):
+    dx = float(target_point[0]) - float(current_pose.x)
+    dy = float(target_point[1]) - float(current_pose.y)
+    target_heading = math.atan2(dy, dx)
+    yaw = math.radians(float(current_pose.yaw_deg))
+    alpha = normalize_angle_rad(target_heading - yaw)
+    linear_scale = clamp(math.cos(abs(alpha)), 0.35, 1.0)
+    linear_x = abs(linear_speed_mps) * linear_scale
+    angular_z = clamp(
+        2.0 * linear_x * math.sin(alpha) / max(0.01, lookahead_m),
+        -abs(max_angular_rad_s),
+        abs(max_angular_rad_s),
+    )
+    return linear_x, angular_z, alpha
 
 
 def temporary_map_cell_to_occupancy(value):
@@ -878,6 +969,7 @@ class ArenaActiveSpinSession:
         sleep_fn=time.sleep,
         analyze_fn=analyze_scan_samples,
         temporary_map_callback=None,
+        active_explore_plan_callback=None,
     ):
         self.node = node
         self.config = config
@@ -888,6 +980,7 @@ class ArenaActiveSpinSession:
         self.sleep_fn = sleep_fn
         self.analyze_fn = analyze_fn
         self.temporary_map_callback = temporary_map_callback
+        self.active_explore_plan_callback = active_explore_plan_callback
         self.last_temporary_map_publish_sec = None
         self.latest_scan = None
         self.latest_scan_received_sec = None
@@ -990,6 +1083,18 @@ class ArenaActiveSpinSession:
             self.temporary_map_callback(grid)
         except Exception as exc:
             self.diagnostics["active_explore"]["temporary_map"]["publish_error"] = str(exc)
+
+    def publish_active_explore_plan_if_ready(self, plan, move_limit_m):
+        if self.active_explore_plan_callback is None or self.latest_odom_pose is None:
+            return
+        try:
+            self.active_explore_plan_callback(
+                plan,
+                self.latest_odom_pose,
+                move_limit_m,
+            )
+        except Exception as exc:
+            self.diagnostics["active_explore"]["path_viz_publish_error"] = str(exc)
 
     def odom_callback(self, msg):
         self.latest_odom_pose = odom_pose_from_msg(msg)
@@ -1438,78 +1543,160 @@ class ArenaActiveSpinSession:
             raise RuntimeError("active_explore_no_motion_steps")
         return steps
 
-    def print_active_explore_prompt(self, candidate, steps):
+    def print_active_explore_prompt(self, candidate, path_points):
         print("\nArena-active active-explore recovery")
         print(f"  executor: {self.config.recovery_executor}")
         print(f"  selected candidate: {candidate.kind}")
         print(f"  score: {candidate.score}")
         print(f"  score components: {candidate.score_components}")
         print(f"  path length: {candidate.path_length_m}")
-        for index, step in enumerate(steps, start=1):
-            print(
-                f"  step {index}: "
-                f"distance={step.planned_distance_m:.3f} m, "
-                f"target odom heading={math.degrees(step.odom_heading_rad):.1f} deg"
-            )
-        print("  expected action: follow short odom-frame path, stop, then spin again")
+        print(
+            "  curve follower: "
+            f"lookahead={self.config.active_explore_curve_lookahead_m:.3f} m, "
+            f"linear={self.config.active_explore_curve_linear_speed_mps:.3f} m/s, "
+            f"max angular={self.config.active_explore_curve_max_angular_rad_s:.3f} rad/s"
+        )
+        print(f"  curve path points: {len(path_points)}")
+        print("  expected action: follow short odom-frame curve, stop, then spin again")
         if self.config.require_operator_confirmation:
             self.input_fn("Press Enter to start active-explore recovery, or Ctrl+C to abort: ")
+
+    def publish_curve_command(self, publisher, linear_x, angular_z):
+        command = self.twist_factory()
+        command.linear.x = float(linear_x)
+        command.angular.z = float(angular_z)
+        publisher.publish(command)
 
     def execute_active_explore_cmd_vel(self, publisher, candidate, distance_limit_m=None):
         previous_collecting = self.collecting_explore_map
         self.collecting_explore_map = True
         try:
             self.wait_for_fresh_inputs()
-            steps = self.active_explore_steps_from_candidate(
+            move_limit = self.config.active_explore_max_single_move_m
+            if distance_limit_m is not None:
+                move_limit = min(move_limit, max(0.0, distance_limit_m))
+            path_points = active_explore_curve_path(
                 candidate,
-                distance_limit_m=distance_limit_m,
+                self.latest_odom_pose,
+                move_limit,
             )
-            self.print_active_explore_prompt(candidate, steps)
+            self.print_active_explore_prompt(candidate, path_points)
             self.refresh_fresh_inputs_after_prompt()
-            clearance = evaluate_reposition_clearance(self.latest_scan, self.config)
-            update_safety_minima(self.diagnostics, clearance)
-            if not clearance.ok:
-                raise RuntimeError(f"active_explore_precheck_clearance_failed:{clearance.reason}")
 
             start = self.now()
+            deadline = self.now() + max(
+                8.0,
+                move_limit
+                / max(0.01, abs(self.config.active_explore_curve_linear_speed_mps))
+                + 5.0,
+            )
+            period = 1.0 / self.config.control_rate_hz
+            final_target = path_points[-1]
+            previous_point = (
+                float(self.latest_odom_pose.x),
+                float(self.latest_odom_pose.y),
+            )
             total_driven = 0.0
-            step_records = []
-            for index, step in enumerate(steps):
-                if index > 0:
-                    self.wait_for_fresh_inputs()
-                step_start = self.now()
-                self.turn_to_heading(publisher, step.odom_heading_rad)
-                stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
-                self.wait_for_fresh_inputs()
-                driven = self.drive_forward(publisher, step.planned_distance_m)
-                stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
-                total_driven += driven
-                if total_driven > self.config.active_explore_max_single_move_m + 1e-6:
-                    raise RuntimeError("active_explore_single_move_distance_exceeded")
-                step_records.append(
+            curve_samples = []
+
+            while self.rclpy.ok() and self.now() <= deadline:
+                self.rclpy.spin_once(self.node, timeout_sec=period)
+                scan_age = self.fresh_scan_age_sec()
+                odom_age = self.fresh_odom_age_sec()
+                if scan_age is None or scan_age > self.config.max_odom_scan_age_sec:
+                    raise RuntimeError("stale_scan_during_active_explore_curve")
+                if odom_age is None or odom_age > self.config.max_odom_scan_age_sec:
+                    raise RuntimeError("stale_odom_during_active_explore_curve")
+                if self.latest_odom_pose is None:
+                    raise RuntimeError("fresh_odom_unavailable_during_active_explore_curve")
+
+                current_point = (
+                    float(self.latest_odom_pose.x),
+                    float(self.latest_odom_pose.y),
+                )
+                delta = distance_2d(previous_point, current_point)
+                if math.isfinite(delta):
+                    total_driven += delta
+                previous_point = current_point
+
+                clearance = evaluate_reposition_clearance(self.latest_scan, self.config)
+                update_safety_minima(self.diagnostics, clearance)
+                if not clearance.ok:
+                    stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
+                    if total_driven >= self.config.active_explore_min_progress_before_spin_m:
+                        return {
+                            "executor": "cmd_vel_curve",
+                            "executed": True,
+                            "candidate_kind": candidate.kind,
+                            "candidate_score": candidate.score,
+                            "path_length_m": candidate.path_length_m,
+                            "curve_path_world": list(path_points),
+                            "curve_samples": curve_samples,
+                            "driven_distance_m": total_driven,
+                            "duration_sec": self.now() - start,
+                            "stop_reason": "clearance_stop_after_progress",
+                            "clearance_failure_reason": clearance.reason,
+                        }
+                    raise RuntimeError(
+                        f"active_explore_curve_clearance_failed:{clearance.reason}"
+                    )
+
+                if (
+                    total_driven >= move_limit
+                    or distance_2d(current_point, final_target)
+                    <= self.config.active_explore_curve_goal_tolerance_m
+                ):
+                    stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
+                    return {
+                        "executor": "cmd_vel_curve",
+                        "executed": True,
+                        "candidate_kind": candidate.kind,
+                        "candidate_score": candidate.score,
+                        "path_length_m": candidate.path_length_m,
+                        "curve_path_world": list(path_points),
+                        "curve_samples": curve_samples,
+                        "driven_distance_m": total_driven,
+                        "duration_sec": self.now() - start,
+                        "stop_reason": "completed",
+                    }
+
+                target = select_curve_lookahead_target(
+                    path_points,
+                    current_point,
+                    self.config.active_explore_curve_lookahead_m,
+                )
+                linear_x, angular_z, alpha = pure_pursuit_curve_command(
+                    self.latest_odom_pose,
+                    target,
+                    self.config.active_explore_curve_lookahead_m,
+                    self.config.active_explore_curve_linear_speed_mps,
+                    self.config.active_explore_curve_max_angular_rad_s,
+                )
+                remaining = max(0.0, move_limit - total_driven)
+                linear_x = min(linear_x, remaining / max(period, 1e-6))
+                curve_samples.append(
                     {
-                        **step.to_dict(),
-                        "driven_distance_m": driven,
-                        "duration_sec": self.now() - step_start,
+                        "odom_x": float(self.latest_odom_pose.x),
+                        "odom_y": float(self.latest_odom_pose.y),
+                        "odom_yaw_rad": math.radians(float(self.latest_odom_pose.yaw_deg)),
+                        "target_x": float(target[0]),
+                        "target_y": float(target[1]),
+                        "alpha_rad": alpha,
+                        "linear_x_mps": linear_x,
+                        "angular_z_rad_s": angular_z,
+                        "front_clearance_m": clearance.front_min_m,
+                        "left_clearance_m": clearance.left_min_m,
+                        "right_clearance_m": clearance.right_min_m,
                     }
                 )
+                self.publish_curve_command(publisher, linear_x, angular_z)
+
+            raise RuntimeError("active_explore_curve_timeout")
         except Exception:
             stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
             raise
         finally:
             self.collecting_explore_map = previous_collecting
-
-        return {
-            "executor": "cmd_vel",
-            "executed": True,
-            "candidate_kind": candidate.kind,
-            "candidate_score": candidate.score,
-            "path_length_m": candidate.path_length_m,
-            "steps": step_records,
-            "driven_distance_m": total_driven,
-            "duration_sec": self.now() - start,
-            "stop_reason": "completed",
-        }
 
     def run_legacy_recovery(self, publisher, result):
         reposition_attempts = 0
@@ -1616,6 +1803,11 @@ class ArenaActiveSpinSession:
                 },
             }
             self.diagnostics["active_explore"]["attempts"].append(attempt_record)
+            preview_limit = min(
+                self.config.active_explore_max_single_move_m,
+                max(0.0, self.config.active_explore_max_total_distance_m - total_distance),
+            )
+            self.publish_active_explore_plan_if_ready(plan, preview_limit)
 
             if not plan.ok or plan.selected is None:
                 attempt_record["execution"]["stop_reason"] = plan.reason
@@ -1734,6 +1926,7 @@ def run_arena_active_spin(
     sleep_fn=time.sleep,
     analyze_fn=analyze_scan_samples,
     temporary_map_callback=None,
+    active_explore_plan_callback=None,
 ):
     session = ArenaActiveSpinSession(
         node,
@@ -1748,5 +1941,6 @@ def run_arena_active_spin(
         sleep_fn=sleep_fn,
         analyze_fn=analyze_fn,
         temporary_map_callback=temporary_map_callback,
+        active_explore_plan_callback=active_explore_plan_callback,
     )
     return session.run(publisher)

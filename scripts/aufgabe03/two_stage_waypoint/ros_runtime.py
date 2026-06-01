@@ -3,14 +3,16 @@ import time
 
 try:
     import rclpy
-    from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
+    from geometry_msgs.msg import Point, PoseStamped, PoseWithCovarianceStamped, Twist
     from nav_msgs.msg import OccupancyGrid, Odometry
+    from nav_msgs.msg import Path as NavPath
     from nav2_msgs.action import FollowPath, NavigateToPose
     from rclpy.action import ActionClient
     from rclpy.node import Node
     from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
     from rclpy.time import Time
     from sensor_msgs.msg import LaserScan
+    from visualization_msgs.msg import Marker, MarkerArray
     import tf2_ros
 except ImportError:
     rclpy = None
@@ -23,8 +25,13 @@ except ImportError:
     qos_profile_sensor_data = None
     Time = None
     LaserScan = object
+    Point = None
+    PoseStamped = None
     OccupancyGrid = None
     Odometry = object
+    NavPath = None
+    Marker = None
+    MarkerArray = None
     tf2_ros = None
 
     class _FallbackStamp:
@@ -71,6 +78,7 @@ except ImportError:
 
 from arena_active_spin import (
     ArenaActiveSpinConfig,
+    active_explore_curve_path,
     run_arena_active_spin,
     temporary_map_occupancy_data,
     write_diagnostics_json,
@@ -228,6 +236,21 @@ def arena_active_config_from_args(args):
         active_explore_temporary_map_publish_period_sec=(
             args.arena_active_temporary_map_publish_period_sec
         ),
+        active_explore_curve_lookahead_m=(
+            args.arena_active_explore_curve_lookahead_m
+        ),
+        active_explore_curve_goal_tolerance_m=(
+            args.arena_active_explore_curve_goal_tolerance_m
+        ),
+        active_explore_curve_linear_speed_mps=(
+            args.arena_active_explore_curve_linear_speed_mps
+        ),
+        active_explore_curve_max_angular_rad_s=(
+            args.arena_active_explore_curve_max_angular_rad_s
+        ),
+        active_explore_min_progress_before_spin_m=(
+            args.arena_active_explore_min_progress_before_spin_m
+        ),
         arena_config=arena_config,
     )
 
@@ -260,6 +283,175 @@ def build_temporary_map_message(grid, frame_id, stamp):
     msg.info.origin.orientation.w = 1.0
     msg.data = temporary_map_occupancy_data(grid)
     return msg
+
+
+def point_msg(x, y, z=0.0):
+    point = Point()
+    point.x = float(x)
+    point.y = float(y)
+    point.z = float(z)
+    return point
+
+
+def pose_stamped_msg(x, y, frame_id, stamp):
+    pose = PoseStamped()
+    pose.header.frame_id = frame_id
+    pose.header.stamp = stamp
+    pose.pose.position.x = float(x)
+    pose.pose.position.y = float(y)
+    pose.pose.position.z = 0.0
+    pose.pose.orientation.w = 1.0
+    return pose
+
+
+def build_arena_explore_path_message(plan, current_pose, move_limit_m, frame_id, stamp):
+    if NavPath is None or PoseStamped is None:
+        raise RuntimeError("nav_msgs/geometry_msgs path types are unavailable")
+    msg = NavPath()
+    msg.header.frame_id = frame_id
+    msg.header.stamp = stamp
+    points = ()
+    if plan is not None and plan.selected is not None and current_pose is not None:
+        points = active_explore_curve_path(plan.selected, current_pose, move_limit_m)
+    msg.poses = [pose_stamped_msg(x, y, frame_id, stamp) for x, y in points]
+    return msg
+
+
+def apply_marker_common(marker, frame_id, stamp, namespace, marker_id, color):
+    marker.header.frame_id = frame_id
+    marker.header.stamp = stamp
+    marker.ns = namespace
+    marker.id = marker_id
+    marker.action = Marker.ADD
+    marker.pose.orientation.w = 1.0
+    marker.color.r = color[0]
+    marker.color.g = color[1]
+    marker.color.b = color[2]
+    marker.color.a = color[3]
+
+
+def delete_all_marker():
+    marker = Marker()
+    marker.action = Marker.DELETEALL
+    return marker
+
+
+def line_strip_marker(frame_id, stamp, namespace, marker_id, points, color, width_m):
+    if not points:
+        return None
+    marker = Marker()
+    apply_marker_common(marker, frame_id, stamp, namespace, marker_id, color)
+    marker.type = Marker.LINE_STRIP
+    marker.scale.x = width_m
+    marker.points = [point_msg(x, y, 0.04) for x, y in points]
+    return marker
+
+
+def sphere_list_marker(frame_id, stamp, namespace, marker_id, points, color, scale_m):
+    if not points:
+        return None
+    marker = Marker()
+    apply_marker_common(marker, frame_id, stamp, namespace, marker_id, color)
+    marker.type = Marker.SPHERE_LIST
+    marker.scale.x = scale_m
+    marker.scale.y = scale_m
+    marker.scale.z = scale_m
+    marker.points = [point_msg(x, y, 0.06) for x, y in points]
+    return marker
+
+
+def append_marker(markers, marker):
+    if marker is not None:
+        markers.append(marker)
+
+
+def build_arena_explore_candidate_markers(
+    plan,
+    current_pose,
+    move_limit_m,
+    frame_id,
+    stamp,
+):
+    if Marker is None or MarkerArray is None or Point is None:
+        raise RuntimeError("visualization_msgs marker types are unavailable")
+    markers = [delete_all_marker()]
+    if plan is None:
+        return MarkerArray(markers=markers)
+
+    selected = plan.selected
+    accepted = [
+        (candidate.target_x, candidate.target_y)
+        for candidate in plan.candidates
+        if candidate.accepted
+    ]
+    rejected = [
+        (candidate.target_x, candidate.target_y)
+        for candidate in plan.candidates
+        if not candidate.accepted
+    ]
+    append_marker(
+        markers,
+        sphere_list_marker(
+            frame_id,
+            stamp,
+            "active_explore_accepted_candidates",
+            1,
+            accepted,
+            (0.0, 0.65, 1.0, 0.9),
+            0.06,
+        ),
+    )
+    append_marker(
+        markers,
+        sphere_list_marker(
+            frame_id,
+            stamp,
+            "active_explore_rejected_candidates",
+            2,
+            rejected,
+            (1.0, 0.25, 0.15, 0.65),
+            0.045,
+        ),
+    )
+    if selected is not None:
+        curve_points = active_explore_curve_path(selected, current_pose, move_limit_m)
+        append_marker(
+            markers,
+            line_strip_marker(
+                frame_id,
+                stamp,
+                "active_explore_selected_astar_path",
+                3,
+                selected.path_world,
+                (0.0, 0.65, 1.0, 0.70),
+                0.012,
+            ),
+        )
+        append_marker(
+            markers,
+            line_strip_marker(
+                frame_id,
+                stamp,
+                "active_explore_selected_curve_path",
+                4,
+                curve_points,
+                (0.0, 0.95, 0.25, 1.0),
+                0.025,
+            ),
+        )
+        append_marker(
+            markers,
+            sphere_list_marker(
+                frame_id,
+                stamp,
+                "active_explore_selected_candidate",
+                5,
+                [(selected.target_x, selected.target_y)],
+                (0.0, 0.95, 0.25, 1.0),
+                0.08,
+            ),
+        )
+    return MarkerArray(markers=markers)
 
 
 def build_initial_pose_message(
@@ -347,6 +539,8 @@ class TwoStageCoordinator(Node):
         self.active_goal_handle = None
         self.selected_base_frame = ""
         self.arena_temporary_map_pub = None
+        self.arena_explore_path_pub = None
+        self.arena_explore_marker_pub = None
 
         self.cmd_vel_pub = self.create_publisher(Twist, args.cmd_vel_topic, 10)
         self.initial_pose_pub = self.create_publisher(
@@ -364,6 +558,23 @@ class TwoStageCoordinator(Node):
                 OccupancyGrid,
                 args.arena_active_temporary_map_topic,
                 rviz_occupancy_grid_qos_profile(),
+            )
+        if args.arena_active_publish_explore_path:
+            if NavPath is None or PoseStamped is None or MarkerArray is None:
+                raise RuntimeError(
+                    "ROS RViz path/marker message types are unavailable; "
+                    "source a ROS 2 Humble environment first"
+                )
+            qos = rviz_occupancy_grid_qos_profile()
+            self.arena_explore_path_pub = self.create_publisher(
+                NavPath,
+                args.arena_active_explore_path_topic,
+                qos,
+            )
+            self.arena_explore_marker_pub = self.create_publisher(
+                MarkerArray,
+                args.arena_active_explore_candidate_marker_topic,
+                qos,
             )
         self.scan_sub = self.create_subscription(
             LaserScan,
@@ -487,6 +698,11 @@ class TwoStageCoordinator(Node):
                 if self.arena_temporary_map_pub is not None
                 else None
             ),
+            active_explore_plan_callback=(
+                self.publish_arena_active_explore_plan
+                if self.arena_explore_path_pub is not None
+                else None
+            ),
         )
 
     def publish_arena_active_temporary_map(self, grid):
@@ -496,6 +712,25 @@ class TwoStageCoordinator(Node):
             self.get_clock().now().to_msg(),
         )
         self.arena_temporary_map_pub.publish(msg)
+
+    def publish_arena_active_explore_plan(self, plan, current_pose, move_limit_m):
+        stamp = self.get_clock().now().to_msg()
+        path_msg = build_arena_explore_path_message(
+            plan,
+            current_pose,
+            move_limit_m,
+            self.args.arena_active_temporary_map_frame,
+            stamp,
+        )
+        marker_msg = build_arena_explore_candidate_markers(
+            plan,
+            current_pose,
+            move_limit_m,
+            self.args.arena_active_temporary_map_frame,
+            stamp,
+        )
+        self.arena_explore_path_pub.publish(path_msg)
+        self.arena_explore_marker_pub.publish(marker_msg)
 
     def publish_arena_active_initial_pose(self, pose_prior, arena_result):
         var_x, var_y, var_yaw = validate_pose_prior_for_initialpose(pose_prior)

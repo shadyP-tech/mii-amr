@@ -780,7 +780,7 @@ def shadow_cell_visible_from(grid: LocalGrid, viewpoint_cell, shadow_cell):
     for cell in ray[1:-1]:
         if not in_bounds(grid, cell):
             return False
-        if grid.cells[cell[1]][cell[0]] != CELL_FREE:
+        if grid.cells[cell[1]][cell[0]] in {CELL_OCCUPIED, CELL_INFLATED}:
             return False
     return True
 
