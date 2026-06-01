@@ -37,6 +37,16 @@ from arena_active_explore import (
 
 DEFAULT_STOP_COUNT = 10
 DEFAULT_STOP_HZ = 10.0
+ACTIVE_EXPLORE_FRONTIER_CLUSTER_MATCH_M = 0.35
+ACTIVE_EXPLORE_FRONTIER_TARGET_MATCH_M = 0.45
+ACTIVE_EXPLORE_FRONTIER_REACHED_PATH_M = 0.15
+
+
+class ActiveExploreMotionError(RuntimeError):
+    def __init__(self, reason, record):
+        super().__init__(reason)
+        self.reason = reason
+        self.record = record
 
 
 @dataclass(frozen=True)
@@ -194,6 +204,65 @@ def clamp(value, low, high):
 
 def distance_2d(a, b):
     return math.hypot(float(a[0]) - float(b[0]), float(a[1]) - float(b[1]))
+
+
+def finite_point_2d(value):
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        return None
+    x = value[0]
+    y = value[1]
+    try:
+        x = float(x)
+        y = float(y)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(x) or not math.isfinite(y):
+        return None
+    return [x, y]
+
+
+def candidate_visible_shadow_count(candidate):
+    if candidate is None:
+        return 0
+    metadata = candidate.metadata or {}
+    value = metadata.get("visible_cluster_shadow_count")
+    if value is None:
+        value = candidate.score_components.get("visible_shadow_unknown_count")
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def candidate_cluster_centroid(candidate):
+    return finite_point_2d((candidate.metadata or {}).get("cluster_centroid_world"))
+
+
+def active_explore_curve_execution_record(
+    candidate,
+    path_points,
+    curve_samples,
+    driven_distance_m,
+    duration_sec,
+    stop_reason,
+    **extra,
+):
+    record = {
+        "executor": "cmd_vel_curve",
+        "executed": True,
+        "candidate_kind": candidate.kind,
+        "candidate_score": candidate.score,
+        "path_length_m": candidate.path_length_m,
+        "curve_path_world": [[float(x), float(y)] for x, y in path_points],
+        "curve_samples": list(curve_samples),
+        "driven_distance_m": float(driven_distance_m),
+        "duration_sec": float(duration_sec),
+        "stop_reason": stop_reason,
+    }
+    record.update(extra)
+    return record
 
 
 def truncate_polyline_by_distance(points, max_distance_m):
@@ -901,6 +970,7 @@ def initial_diagnostics(config: ArenaActiveSpinConfig):
             },
             "attempts": [],
             "total_distance_m": 0.0,
+            "persistent_frontier_goal": None,
         },
         "samples": {
             "scan_samples_collected": 0,
@@ -992,6 +1062,7 @@ class ArenaActiveSpinSession:
         self.samples = []
         self.explore_samples = []
         self.rejected_samples = 0
+        self.active_explore_frontier_goal = None
         self.diagnostics = initial_diagnostics(config)
         self.scan_subscription = node.create_subscription(
             scan_msg_type,
@@ -1496,6 +1567,200 @@ class ArenaActiveSpinSession:
             grid=grid,
         )
 
+    def active_explore_frontier_goal_diagnostics(self):
+        if self.active_explore_frontier_goal is None:
+            return None
+        goal = dict(self.active_explore_frontier_goal)
+        if goal.get("cluster_centroid_world") is not None:
+            goal["cluster_centroid_world"] = list(goal["cluster_centroid_world"])
+        return goal
+
+    def clear_active_explore_frontier_goal(self, _reason):
+        self.active_explore_frontier_goal = None
+        self.diagnostics["active_explore"]["persistent_frontier_goal"] = None
+
+    def store_active_explore_frontier_goal(self, candidate, attempt_index):
+        metadata = candidate.metadata or {}
+        previous = self.active_explore_frontier_goal or {}
+        cluster_centroid = candidate_cluster_centroid(candidate)
+        goal = {
+            "target_x": float(candidate.target_x),
+            "target_y": float(candidate.target_y),
+            "cluster_centroid_world": cluster_centroid,
+            "cluster_size": metadata.get("cluster_size"),
+            "visible_cluster_shadow_count": candidate_visible_shadow_count(candidate),
+            "created_attempt_index": previous.get(
+                "created_attempt_index",
+                attempt_index,
+            ),
+            "last_matched_attempt_index": attempt_index,
+            "driven_toward_goal_m": float(previous.get("driven_toward_goal_m", 0.0)),
+        }
+        self.active_explore_frontier_goal = goal
+        self.diagnostics["active_explore"]["persistent_frontier_goal"] = (
+            self.active_explore_frontier_goal_diagnostics()
+        )
+        return goal
+
+    def update_active_explore_frontier_progress(self, driven_distance_m):
+        if self.active_explore_frontier_goal is None:
+            return
+        self.active_explore_frontier_goal["driven_toward_goal_m"] = float(
+            self.active_explore_frontier_goal.get("driven_toward_goal_m", 0.0)
+        ) + max(0.0, float(driven_distance_m))
+        self.diagnostics["active_explore"]["persistent_frontier_goal"] = (
+            self.active_explore_frontier_goal_diagnostics()
+        )
+
+    def frontier_goal_candidate_match(self, goal, candidate):
+        match = {
+            "matched": False,
+            "reason": "",
+            "target_distance_m": None,
+            "cluster_centroid_distance_m": None,
+            "visible_cluster_shadow_count": candidate_visible_shadow_count(candidate),
+            "candidate": None if candidate is None else candidate.to_dict(),
+        }
+        if candidate is None or candidate.kind != "obstacle_shadow_frontier":
+            match["reason"] = "not_obstacle_shadow_frontier"
+            return match
+        if not candidate.accepted:
+            match["reason"] = candidate.rejection_reason or "candidate_rejected"
+            return match
+        if match["visible_cluster_shadow_count"] <= 0:
+            match["reason"] = "visible_shadow_zero"
+            return match
+
+        goal_target = [goal.get("target_x"), goal.get("target_y")]
+        if all(value is not None for value in goal_target):
+            match["target_distance_m"] = distance_2d(
+                goal_target,
+                [candidate.target_x, candidate.target_y],
+            )
+
+        goal_cluster = finite_point_2d(goal.get("cluster_centroid_world"))
+        candidate_cluster = candidate_cluster_centroid(candidate)
+        if goal_cluster is not None and candidate_cluster is not None:
+            match["cluster_centroid_distance_m"] = distance_2d(
+                goal_cluster,
+                candidate_cluster,
+            )
+
+        target_ok = (
+            match["target_distance_m"] is not None
+            and match["target_distance_m"] <= ACTIVE_EXPLORE_FRONTIER_TARGET_MATCH_M
+        )
+        cluster_ok = (
+            match["cluster_centroid_distance_m"] is not None
+            and match["cluster_centroid_distance_m"]
+            <= ACTIVE_EXPLORE_FRONTIER_CLUSTER_MATCH_M
+        )
+        if not target_ok and not cluster_ok:
+            match["reason"] = "frontier_goal_mismatch"
+            return match
+        match["matched"] = True
+        match["reason"] = "matched"
+        return match
+
+    def matching_active_explore_frontier_candidate(self, plan):
+        if self.active_explore_frontier_goal is None:
+            return None, None
+        matches = []
+        for candidate in plan.candidates:
+            match = self.frontier_goal_candidate_match(
+                self.active_explore_frontier_goal,
+                candidate,
+            )
+            if match["matched"]:
+                target_distance = match["target_distance_m"]
+                path_length = candidate.path_length_m
+                matches.append(
+                    (
+                        (
+                            target_distance if target_distance is not None else math.inf,
+                            -match["visible_cluster_shadow_count"],
+                            path_length if path_length is not None else math.inf,
+                        ),
+                        candidate,
+                        match,
+                    )
+                )
+        if not matches:
+            return None, None
+        matches.sort(key=lambda item: item[0])
+        return matches[0][1], matches[0][2]
+
+    def apply_active_explore_persistent_selection(self, plan, attempt_index):
+        default_selected = plan.selected
+        effective_selected = default_selected
+        selection_policy = "score_best"
+        persistent_match = None
+        abandon_reason = None
+
+        if not plan.ok or default_selected is None:
+            if self.active_explore_frontier_goal is not None:
+                abandon_reason = plan.reason or "plan_not_ok"
+                self.clear_active_explore_frontier_goal(abandon_reason)
+            return plan, {
+                "default_selected": None,
+                "effective_selected": None,
+                "selection_policy": selection_policy,
+                "persistent_frontier_goal": self.active_explore_frontier_goal_diagnostics(),
+                "persistent_frontier_match": None,
+                "persistent_frontier_abandon_reason": abandon_reason,
+            }
+
+        if self.active_explore_frontier_goal is not None:
+            matched_candidate, persistent_match = (
+                self.matching_active_explore_frontier_candidate(plan)
+            )
+            if matched_candidate is not None:
+                effective_selected = matched_candidate
+                selection_policy = "persistent_frontier"
+            else:
+                abandon_reason = "no_matching_accepted_frontier"
+                self.clear_active_explore_frontier_goal(abandon_reason)
+
+        if effective_selected.kind == "obstacle_shadow_frontier":
+            visible_count = candidate_visible_shadow_count(effective_selected)
+            path_length = effective_selected.path_length_m
+            if visible_count <= 0:
+                abandon_reason = abandon_reason or "selected_frontier_visible_shadow_zero"
+                self.clear_active_explore_frontier_goal(abandon_reason)
+            elif (
+                path_length is not None
+                and path_length <= ACTIVE_EXPLORE_FRONTIER_REACHED_PATH_M
+            ):
+                abandon_reason = abandon_reason or "persistent_frontier_goal_reached"
+                self.clear_active_explore_frontier_goal(abandon_reason)
+            else:
+                self.store_active_explore_frontier_goal(
+                    effective_selected,
+                    attempt_index,
+                )
+        elif self.active_explore_frontier_goal is not None:
+            abandon_reason = abandon_reason or "selected_candidate_not_frontier"
+            self.clear_active_explore_frontier_goal(abandon_reason)
+
+        effective_plan = plan
+        if effective_selected is not default_selected:
+            effective_plan = ActiveExplorePlan(
+                plan.ok,
+                plan.reason,
+                effective_selected,
+                plan.candidates,
+                plan.grid,
+            )
+
+        return effective_plan, {
+            "default_selected": default_selected.to_dict(),
+            "effective_selected": effective_selected.to_dict(),
+            "selection_policy": selection_policy,
+            "persistent_frontier_goal": self.active_explore_frontier_goal_diagnostics(),
+            "persistent_frontier_match": persistent_match,
+            "persistent_frontier_abandon_reason": abandon_reason,
+        }
+
     def active_explore_steps_from_candidate(self, candidate, distance_limit_m=None):
         points = list(candidate.simplified_path_world or candidate.path_world)
         if len(points) < 2:
@@ -1624,19 +1889,15 @@ class ArenaActiveSpinSession:
                 if not clearance.ok:
                     stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
                     if total_driven >= self.config.active_explore_min_progress_before_spin_m:
-                        return {
-                            "executor": "cmd_vel_curve",
-                            "executed": True,
-                            "candidate_kind": candidate.kind,
-                            "candidate_score": candidate.score,
-                            "path_length_m": candidate.path_length_m,
-                            "curve_path_world": list(path_points),
-                            "curve_samples": curve_samples,
-                            "driven_distance_m": total_driven,
-                            "duration_sec": self.now() - start,
-                            "stop_reason": "clearance_stop_after_progress",
-                            "clearance_failure_reason": clearance.reason,
-                        }
+                        return active_explore_curve_execution_record(
+                            candidate,
+                            path_points,
+                            curve_samples,
+                            total_driven,
+                            self.now() - start,
+                            "clearance_stop_after_progress",
+                            clearance_failure_reason=clearance.reason,
+                        )
                     raise RuntimeError(
                         f"active_explore_curve_clearance_failed:{clearance.reason}"
                     )
@@ -1647,18 +1908,14 @@ class ArenaActiveSpinSession:
                     <= self.config.active_explore_curve_goal_tolerance_m
                 ):
                     stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
-                    return {
-                        "executor": "cmd_vel_curve",
-                        "executed": True,
-                        "candidate_kind": candidate.kind,
-                        "candidate_score": candidate.score,
-                        "path_length_m": candidate.path_length_m,
-                        "curve_path_world": list(path_points),
-                        "curve_samples": curve_samples,
-                        "driven_distance_m": total_driven,
-                        "duration_sec": self.now() - start,
-                        "stop_reason": "completed",
-                    }
+                    return active_explore_curve_execution_record(
+                        candidate,
+                        path_points,
+                        curve_samples,
+                        total_driven,
+                        self.now() - start,
+                        "completed",
+                    )
 
                 target = select_curve_lookahead_target(
                     path_points,
@@ -1691,7 +1948,25 @@ class ArenaActiveSpinSession:
                 )
                 self.publish_curve_command(publisher, linear_x, angular_z)
 
-            raise RuntimeError("active_explore_curve_timeout")
+            timeout_sec = deadline - start
+            record = active_explore_curve_execution_record(
+                candidate,
+                path_points,
+                curve_samples,
+                total_driven,
+                self.now() - start,
+                "timeout_stop_after_progress",
+                timeout_sec=timeout_sec,
+            )
+            if total_driven >= self.config.active_explore_min_progress_before_spin_m:
+                stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
+                return record
+            record["executed"] = False
+            record["stop_reason"] = "active_explore_curve_timeout_before_progress"
+            raise ActiveExploreMotionError(
+                "active_explore_curve_timeout_before_progress",
+                record,
+            )
         except Exception:
             stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
             raise
@@ -1778,7 +2053,12 @@ class ArenaActiveSpinSession:
             and attempts < self.config.active_explore_max_attempts
             and total_distance < self.config.active_explore_max_total_distance_m
         ):
+            attempt_index = len(self.diagnostics["active_explore"]["attempts"])
             plan = self.plan_active_explore_recovery(result)
+            plan, selection_diagnostics = self.apply_active_explore_persistent_selection(
+                plan,
+                attempt_index,
+            )
             plan_dict = plan.to_dict()
             rejected_unknown = [
                 candidate
@@ -1786,12 +2066,13 @@ class ArenaActiveSpinSession:
                 if candidate.rejection_reason == "goal_unknown"
             ]
             attempt_record = {
-                "attempt_index": len(self.diagnostics["active_explore"]["attempts"]),
+                "attempt_index": attempt_index,
                 "stage": "active_explore",
                 "executor": self.config.recovery_executor,
                 "previous_failure_reason": result.failure_reason,
                 "previous_classifier_reason": result.short_wall_classification.reason,
                 "plan": plan_dict,
+                **selection_diagnostics,
                 "local_grid_stats": (
                     None if plan.grid is None else plan.grid.to_dict()["cell_counts"]
                 ),
@@ -1835,16 +2116,36 @@ class ArenaActiveSpinSession:
                 self.config.active_explore_max_total_distance_m - total_distance
             )
             self.diagnostics["fallback_used"] = True
-            motion_record = self.execute_active_explore_cmd_vel(
-                publisher,
-                plan.selected,
-                distance_limit_m=remaining_distance,
-            )
+            try:
+                motion_record = self.execute_active_explore_cmd_vel(
+                    publisher,
+                    plan.selected,
+                    distance_limit_m=remaining_distance,
+                )
+            except ActiveExploreMotionError as exc:
+                motion_record = exc.record
+                attempt_record["execution"] = motion_record
+                total_distance += float(motion_record.get("driven_distance_m", 0.0))
+                self.diagnostics["active_explore"]["total_distance_m"] = total_distance
+                self.update_active_explore_frontier_progress(
+                    motion_record.get("driven_distance_m", 0.0)
+                )
+                self.clear_active_explore_frontier_goal(exc.reason)
+                raise
+            except Exception:
+                self.clear_active_explore_frontier_goal("active_explore_motion_failed")
+                raise
             total_distance += float(motion_record.get("driven_distance_m", 0.0))
+            self.update_active_explore_frontier_progress(
+                motion_record.get("driven_distance_m", 0.0)
+            )
             if total_distance > self.config.active_explore_max_total_distance_m + 1e-6:
                 motion_record["stop_reason"] = "active_explore_total_distance_exceeded"
                 attempt_record["execution"] = motion_record
                 self.diagnostics["active_explore"]["total_distance_m"] = total_distance
+                self.clear_active_explore_frontier_goal(
+                    "active_explore_total_distance_exceeded"
+                )
                 raise RuntimeError("active_explore_total_distance_exceeded")
 
             attempt_record["execution"] = motion_record
@@ -1861,6 +2162,8 @@ class ArenaActiveSpinSession:
             attempt_record["post_recovery_classifier_reason"] = (
                 result.short_wall_classification.reason
             )
+            if result.success:
+                self.clear_active_explore_frontier_goal("localization_success")
         return result
 
     def finish_failure(self, reason, exception=None):
