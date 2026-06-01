@@ -30,6 +30,7 @@ class ActiveExploreConfig:
     inflation_radius_m: float = 0.28
     unknown_blocked: bool = True
     max_path_segments: int = 3
+    side_bias: str = "none"
     target_nearest_short_wall_range_m: float = 1.65
     center_min_step_m: float = 0.25
     lateral_offset_threshold_m: float = 0.25
@@ -658,12 +659,23 @@ def min_scan_range_in_sector(scan, lower_deg, upper_deg):
     return min(values) if values else None
 
 
-def score_candidate(raw, grid, path):
+def side_bias_component(raw, side_bias):
+    if side_bias == "none":
+        return 0.0
+    angle_deg = raw.metadata.get("sector_center_deg")
+    if angle_deg is None:
+        return 0.0
+    preferred_sign = -1.0 if side_bias == "right" else 1.0
+    return clamp(preferred_sign * float(angle_deg) / 90.0, -1.0, 1.0)
+
+
+def score_candidate(raw, grid, path, config):
     length = path_length_m(path, grid.resolution_m)
     turns = turn_count_for_path(path)
     clearance = nearest_blocked_distance_m(grid, path)
     clearance_component = clamp(clearance / 0.50, 0.0, 1.0)
     unknown_ratio = unknown_ratio_near_path(grid, path)
+    side_bias = side_bias_component(raw, config.side_bias)
     components = {
         "geometry_progress": raw.geometry_progress,
         "heater_potential": raw.heater_potential,
@@ -671,11 +683,13 @@ def score_candidate(raw, grid, path):
         "path_length": length,
         "turn_count": turns,
         "unknown_ratio": unknown_ratio,
+        "side_bias": side_bias,
     }
     score = (
         3.0 * components["geometry_progress"]
         + 2.0 * components["heater_potential"]
         + 1.5 * components["clearance_margin"]
+        + 1.0 * components["side_bias"]
         - 1.0 * components["path_length"]
         - 0.5 * components["turn_count"]
         - 4.0 * components["unknown_ratio"]
@@ -736,7 +750,7 @@ def plan_candidate(raw, grid, config: ActiveExploreConfig):
             path_length_m=length,
             metadata=raw.metadata,
         )
-    score, components = score_candidate(raw, grid, path)
+    score, components = score_candidate(raw, grid, path, config)
     simplified = simplify_path_cells(path)
     return ActiveExploreCandidate(
         raw.kind,

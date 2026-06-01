@@ -214,6 +214,7 @@ def arena_active_config_from_args(args):
         ),
         active_explore_unknown_blocked=args.arena_active_explore_unknown_blocked,
         active_explore_max_path_segments=args.arena_active_explore_max_path_segments,
+        active_explore_side_bias=args.arena_active_explore_side_bias,
         arena_config=arena_config,
     )
 

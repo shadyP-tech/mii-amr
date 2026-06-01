@@ -161,6 +161,7 @@ def print_dry_run(args, waypoints, staging_goal, follower_command):
         "  active-explore unknown blocked: "
         f"{'yes' if args.arena_active_explore_unknown_blocked else 'no'}"
     )
+    print(f"  active-explore side bias: {args.arena_active_explore_side_bias}")
     print(f"Wait before custom follower: {'yes' if args.wait_before_follow else 'no'}")
     print(
         "Arena-active internal confirmations: "
@@ -592,6 +593,15 @@ def parse_args(argv):
         "--arena-active-explore-max-path-segments",
         default=3,
         type=int,
+    )
+    parser.add_argument(
+        "--arena-active-explore-side-bias",
+        choices=["none", "right", "left"],
+        default="none",
+        help=(
+            "Prefer local open-corridor recovery candidates on one side of the "
+            "robot before the second arena-active spin."
+        ),
     )
     parser.add_argument("--arena-length-m", default=3.90, type=float)
     parser.add_argument("--arena-width-m", type=float)

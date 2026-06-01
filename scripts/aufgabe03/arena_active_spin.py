@@ -163,6 +163,7 @@ class ArenaActiveSpinConfig:
     active_explore_inflation_radius_m: float = 0.28
     active_explore_unknown_blocked: bool = True
     active_explore_max_path_segments: int = 3
+    active_explore_side_bias: str = "none"
     arena_config: ArenaGeometryConfig = field(default_factory=ArenaGeometryConfig)
 
 
@@ -730,6 +731,7 @@ def active_explore_config_from_arena_config(config: ArenaActiveSpinConfig):
         inflation_radius_m=config.active_explore_inflation_radius_m,
         unknown_blocked=config.active_explore_unknown_blocked,
         max_path_segments=config.active_explore_max_path_segments,
+        side_bias=config.active_explore_side_bias,
         target_nearest_short_wall_range_m=(
             config.center_reposition_target_nearest_short_wall_range_m
         ),
