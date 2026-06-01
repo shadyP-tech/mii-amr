@@ -162,6 +162,11 @@ def print_dry_run(args, waypoints, staging_goal, follower_command):
         f"{'yes' if args.arena_active_explore_unknown_blocked else 'no'}"
     )
     print(f"  active-explore side bias: {args.arena_active_explore_side_bias}")
+    print(
+        "  active-explore accumulated map: "
+        f"{'yes' if args.arena_active_explore_use_accumulated_map else 'no'}"
+    )
+    print(f"  active-explore map max samples: {args.arena_active_explore_map_max_samples}")
     print(f"Wait before custom follower: {'yes' if args.wait_before_follow else 'no'}")
     print(
         "Arena-active internal confirmations: "
@@ -603,6 +608,27 @@ def parse_args(argv):
             "robot before the second arena-active spin."
         ),
     )
+    parser.add_argument(
+        "--arena-active-explore-use-accumulated-map",
+        dest="arena_active_explore_use_accumulated_map",
+        action="store_true",
+        default=True,
+        help=(
+            "Plan active-explore recovery with the temporary odom-frame map "
+            "accumulated from the first spin and recovery motion scans."
+        ),
+    )
+    parser.add_argument(
+        "--no-arena-active-explore-accumulated-map",
+        dest="arena_active_explore_use_accumulated_map",
+        action="store_false",
+        help="Plan active-explore recovery from only the latest scan.",
+    )
+    parser.add_argument(
+        "--arena-active-explore-map-max-samples",
+        default=240,
+        type=int,
+    )
     parser.add_argument("--arena-length-m", default=3.90, type=float)
     parser.add_argument("--arena-width-m", type=float)
     parser.add_argument("--arena-heater-wall-width-m", default=2.016, type=float)
@@ -780,6 +806,8 @@ def validate_args(parser, args):
         parser.error("--arena-active-explore-max-attempts must be >= 1")
     if args.arena_active_explore_max_path_segments < 1:
         parser.error("--arena-active-explore-max-path-segments must be >= 1")
+    if args.arena_active_explore_map_max_samples < 1:
+        parser.error("--arena-active-explore-map-max-samples must be >= 1")
     if (
         args.arena_active_recovery_mode != "active_explore"
         and args.arena_active_recovery_executor != "dry_run"

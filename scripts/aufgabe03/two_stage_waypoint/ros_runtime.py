@@ -215,6 +215,10 @@ def arena_active_config_from_args(args):
         active_explore_unknown_blocked=args.arena_active_explore_unknown_blocked,
         active_explore_max_path_segments=args.arena_active_explore_max_path_segments,
         active_explore_side_bias=args.arena_active_explore_side_bias,
+        active_explore_use_accumulated_map=(
+            args.arena_active_explore_use_accumulated_map
+        ),
+        active_explore_map_max_samples=args.arena_active_explore_map_max_samples,
         arena_config=arena_config,
     )
 

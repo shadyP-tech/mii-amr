@@ -2,8 +2,8 @@
 """
 Odom-frame active exploration helpers for arena-prior localization recovery.
 
-This module is ROS-free. It builds a small local occupancy grid from one
-LaserScan-like message, proposes short observation-zone moves, plans with A*,
+This module is ROS-free. It builds a small odom-frame occupancy grid from
+LaserScan-like messages, proposes short observation-zone moves, plans with A*,
 and returns diagnostics. Runtime motion remains in arena_active_spin.py.
 """
 
@@ -210,7 +210,7 @@ def set_cell(cells, cell, value):
         cells[y][x] = value
 
 
-def mark_scan_ray(cells, grid, start_cell, endpoint_cell, occupied):
+def mark_scan_ray(cells, grid, start_cell, endpoint_cell, occupied, preserve_occupied=False):
     ray = [
         cell
         for cell in bresenham_cells(start_cell, endpoint_cell)
@@ -220,9 +220,18 @@ def mark_scan_ray(cells, grid, start_cell, endpoint_cell, occupied):
         return
     free_cells = ray[:-1] if occupied else ray
     for cell in free_cells:
+        if preserve_occupied and grid_cell_value(cells, cell) == CELL_OCCUPIED:
+            continue
         set_cell(cells, cell, CELL_FREE)
     if occupied and in_bounds(grid, ray[-1]):
         set_cell(cells, ray[-1], CELL_OCCUPIED)
+
+
+def grid_cell_value(cells, cell):
+    x, y = cell
+    if 0 <= y < len(cells) and 0 <= x < len(cells[y]):
+        return cells[y][x]
+    return CELL_UNKNOWN
 
 
 def inflated_cells_for(grid, occupied_cells, radius_m):
@@ -239,7 +248,7 @@ def inflated_cells_for(grid, occupied_cells, radius_m):
     return inflated
 
 
-def build_local_grid(scan, robot_pose, config: ActiveExploreConfig):
+def empty_local_grid(robot_pose, config: ActiveExploreConfig):
     width = int(round(config.grid_size_m / config.grid_resolution_m))
     height = width
     origin_x = float(robot_pose.x) - config.grid_size_m / 2.0
@@ -256,7 +265,14 @@ def build_local_grid(scan, robot_pose, config: ActiveExploreConfig):
     )
     robot_cell = world_to_cell(placeholder, robot_pose.x, robot_pose.y)
     set_cell(mutable, robot_cell, CELL_FREE)
-    yaw = yaw_rad_from_pose(robot_pose)
+    return placeholder, mutable, robot_cell
+
+
+def mark_scan_on_grid(mutable, grid, scan, scan_pose, config, preserve_occupied=False):
+    start_cell = world_to_cell(grid, scan_pose.x, scan_pose.y)
+    if not in_bounds(grid, start_cell):
+        return set()
+    yaw = yaw_rad_from_pose(scan_pose)
     max_ray_m = config.grid_size_m / 2.0 - config.grid_resolution_m
     occupied_cells = set()
 
@@ -265,14 +281,33 @@ def build_local_grid(scan, robot_pose, config: ActiveExploreConfig):
             continue
         distance = min(float(raw_range), max_ray_m)
         angle = yaw + float(scan.angle_min) + index * float(scan.angle_increment)
-        end_x = float(robot_pose.x) + distance * math.cos(angle)
-        end_y = float(robot_pose.y) + distance * math.sin(angle)
-        end_cell = world_to_cell(placeholder, end_x, end_y)
+        end_x = float(scan_pose.x) + distance * math.cos(angle)
+        end_y = float(scan_pose.y) + distance * math.sin(angle)
+        end_cell = world_to_cell(grid, end_x, end_y)
         occupied = float(raw_range) < min(float(scan.range_max), max_ray_m)
-        mark_scan_ray(mutable, placeholder, robot_cell, end_cell, occupied)
-        if occupied and in_bounds(placeholder, end_cell):
+        mark_scan_ray(
+            mutable,
+            grid,
+            start_cell,
+            end_cell,
+            occupied,
+            preserve_occupied=preserve_occupied,
+        )
+        if occupied and in_bounds(grid, end_cell):
             occupied_cells.add(end_cell)
+    return occupied_cells
 
+
+def finalize_grid(robot_pose, config, mutable, robot_cell, occupied_cells):
+    placeholder = LocalGrid(
+        float(robot_pose.x) - config.grid_size_m / 2.0,
+        float(robot_pose.y) - config.grid_size_m / 2.0,
+        config.grid_resolution_m,
+        len(mutable[0]),
+        len(mutable),
+        tuple(tuple(row) for row in mutable),
+        robot_cell,
+    )
     inflated = inflated_cells_for(
         placeholder,
         occupied_cells,
@@ -284,14 +319,47 @@ def build_local_grid(scan, robot_pose, config: ActiveExploreConfig):
             mutable[y][x] = CELL_INFLATED
     set_cell(mutable, robot_cell, CELL_FREE)
     return LocalGrid(
-        origin_x,
-        origin_y,
+        placeholder.origin_x,
+        placeholder.origin_y,
         config.grid_resolution_m,
-        width,
-        height,
+        placeholder.width,
+        placeholder.height,
         tuple(tuple(row) for row in mutable),
         robot_cell,
     )
+
+
+def build_local_grid(scan, robot_pose, config: ActiveExploreConfig):
+    grid, mutable, robot_cell = empty_local_grid(robot_pose, config)
+    occupied_cells = mark_scan_on_grid(
+        mutable,
+        grid,
+        scan,
+        robot_pose,
+        config,
+        preserve_occupied=False,
+    )
+    return finalize_grid(robot_pose, config, mutable, robot_cell, occupied_cells)
+
+
+def build_local_grid_from_scan_samples(scan_samples, robot_pose, config: ActiveExploreConfig):
+    grid, mutable, robot_cell = empty_local_grid(robot_pose, config)
+    occupied_cells = set()
+    for sample in scan_samples:
+        scan_pose = getattr(sample, "odom_pose", None)
+        if scan_pose is None:
+            continue
+        occupied_cells.update(
+            mark_scan_on_grid(
+                mutable,
+                grid,
+                sample,
+                scan_pose,
+                config,
+                preserve_occupied=True,
+            )
+        )
+    return finalize_grid(robot_pose, config, mutable, robot_cell, occupied_cells)
 
 
 def traversable(grid: LocalGrid, cell, unknown_blocked=True):
@@ -777,6 +845,7 @@ def plan_active_explore_recovery(
     robot_pose,
     config: ActiveExploreConfig,
     origin_yaw_rad=0.0,
+    grid=None,
 ):
     raw_candidates, reason = generate_raw_candidates(
         result,
@@ -787,7 +856,7 @@ def plan_active_explore_recovery(
     )
     if reason != "ok":
         return ActiveExplorePlan(False, reason, None, (), None)
-    grid = build_local_grid(scan, robot_pose, config)
+    grid = grid or build_local_grid(scan, robot_pose, config)
     candidates = tuple(plan_candidate(raw, grid, config) for raw in raw_candidates)
     accepted = [candidate for candidate in candidates if candidate.accepted]
     if not accepted:

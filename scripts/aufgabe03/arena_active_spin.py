@@ -25,6 +25,7 @@ from arena_geometry_localizer import (
 from arena_active_explore import (
     ActiveExploreConfig,
     ActiveExplorePlan,
+    build_local_grid_from_scan_samples,
     geometry_is_recoverable,
     plan_active_explore_recovery,
 )
@@ -164,6 +165,8 @@ class ArenaActiveSpinConfig:
     active_explore_unknown_blocked: bool = True
     active_explore_max_path_segments: int = 3
     active_explore_side_bias: str = "none"
+    active_explore_use_accumulated_map: bool = True
+    active_explore_map_max_samples: int = 240
     arena_config: ArenaGeometryConfig = field(default_factory=ArenaGeometryConfig)
 
 
@@ -773,6 +776,13 @@ def initial_diagnostics(config: ArenaActiveSpinConfig):
             "enabled": recovery_mode == "active_explore",
             "mode": recovery_mode,
             "executor": config.recovery_executor,
+            "use_accumulated_map": config.active_explore_use_accumulated_map,
+            "map_max_samples": config.active_explore_map_max_samples,
+            "temporary_map": {
+                "frame": "odom",
+                "scan_samples_stored": 0,
+                "grid": None,
+            },
             "attempts": [],
             "total_distance_m": 0.0,
         },
@@ -857,7 +867,9 @@ class ArenaActiveSpinSession:
         self.latest_odom_yaw_rad = None
         self.latest_odom_received_sec = None
         self.collecting = False
+        self.collecting_explore_map = False
         self.samples = []
+        self.explore_samples = []
         self.rejected_samples = 0
         self.diagnostics = initial_diagnostics(config)
         self.scan_subscription = node.create_subscription(
@@ -880,15 +892,36 @@ class ArenaActiveSpinSession:
         received_sec = self.now()
         self.latest_scan = msg
         self.latest_scan_received_sec = received_sec
-        if not self.collecting:
+        collecting_localizer = self.collecting
+        collecting_explore = (
+            effective_recovery_mode(self.config) == "active_explore"
+            and self.config.active_explore_use_accumulated_map
+            and (self.collecting or self.collecting_explore_map)
+        )
+        if not collecting_localizer and not collecting_explore:
             return
         if self.latest_odom_pose is None or self.latest_odom_received_sec is None:
-            self.rejected_samples += 1
+            if collecting_localizer:
+                self.rejected_samples += 1
             return
         if received_sec - self.latest_odom_received_sec > self.config.max_odom_scan_age_sec:
-            self.rejected_samples += 1
+            if collecting_localizer:
+                self.rejected_samples += 1
             return
-        self.samples.append(scan_sample_from_msg(msg, self.latest_odom_pose))
+        sample = scan_sample_from_msg(msg, self.latest_odom_pose)
+        if collecting_localizer:
+            self.samples.append(sample)
+        if collecting_explore:
+            self.append_explore_sample(sample)
+
+    def append_explore_sample(self, sample):
+        self.explore_samples.append(sample)
+        max_samples = max(1, int(self.config.active_explore_map_max_samples))
+        if len(self.explore_samples) > max_samples:
+            del self.explore_samples[: len(self.explore_samples) - max_samples]
+        self.diagnostics["active_explore"]["temporary_map"]["scan_samples_stored"] = (
+            len(self.explore_samples)
+        )
 
     def odom_callback(self, msg):
         self.latest_odom_pose = odom_pose_from_msg(msg)
@@ -1268,12 +1301,30 @@ class ArenaActiveSpinSession:
             return ActiveExplorePlan(False, reason, None, (), None)
         self.wait_for_fresh_inputs()
         origin_yaw = self.first_sample_origin_yaw_rad()
+        grid = None
+        if (
+            self.config.active_explore_use_accumulated_map
+            and self.explore_samples
+            and self.latest_odom_pose is not None
+        ):
+            grid = build_local_grid_from_scan_samples(
+                self.explore_samples,
+                self.latest_odom_pose,
+                active_config,
+            )
+            self.diagnostics["active_explore"]["temporary_map"] = {
+                "frame": "odom",
+                "source": "accumulated_spin_and_recovery_scans",
+                "scan_samples_stored": len(self.explore_samples),
+                "grid": grid.to_dict(),
+            }
         return plan_active_explore_recovery(
             result,
             self.latest_scan,
             self.latest_odom_pose,
             active_config,
             origin_yaw_rad=origin_yaw,
+            grid=grid,
         )
 
     def active_explore_steps_from_candidate(self, candidate, distance_limit_m=None):
@@ -1341,22 +1392,24 @@ class ArenaActiveSpinSession:
             self.input_fn("Press Enter to start active-explore recovery, or Ctrl+C to abort: ")
 
     def execute_active_explore_cmd_vel(self, publisher, candidate, distance_limit_m=None):
-        self.wait_for_fresh_inputs()
-        steps = self.active_explore_steps_from_candidate(
-            candidate,
-            distance_limit_m=distance_limit_m,
-        )
-        self.print_active_explore_prompt(candidate, steps)
-        self.refresh_fresh_inputs_after_prompt()
-        clearance = evaluate_reposition_clearance(self.latest_scan, self.config)
-        update_safety_minima(self.diagnostics, clearance)
-        if not clearance.ok:
-            raise RuntimeError(f"active_explore_precheck_clearance_failed:{clearance.reason}")
-
-        start = self.now()
-        total_driven = 0.0
-        step_records = []
+        previous_collecting = self.collecting_explore_map
+        self.collecting_explore_map = True
         try:
+            self.wait_for_fresh_inputs()
+            steps = self.active_explore_steps_from_candidate(
+                candidate,
+                distance_limit_m=distance_limit_m,
+            )
+            self.print_active_explore_prompt(candidate, steps)
+            self.refresh_fresh_inputs_after_prompt()
+            clearance = evaluate_reposition_clearance(self.latest_scan, self.config)
+            update_safety_minima(self.diagnostics, clearance)
+            if not clearance.ok:
+                raise RuntimeError(f"active_explore_precheck_clearance_failed:{clearance.reason}")
+
+            start = self.now()
+            total_driven = 0.0
+            step_records = []
             for index, step in enumerate(steps):
                 if index > 0:
                     self.wait_for_fresh_inputs()
@@ -1379,6 +1432,8 @@ class ArenaActiveSpinSession:
         except Exception:
             stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
             raise
+        finally:
+            self.collecting_explore_map = previous_collecting
 
         return {
             "executor": "cmd_vel",
