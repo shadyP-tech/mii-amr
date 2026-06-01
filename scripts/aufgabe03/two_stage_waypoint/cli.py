@@ -12,6 +12,9 @@ from .model import (
     DEFAULT_AMCL_SETTLE_MIN_SEC,
     DEFAULT_ARENA_ACTIVE_MAX_POST_AMCL_PRIOR_POSITION_ERROR_M,
     DEFAULT_ARENA_ACTIVE_MAX_POST_AMCL_PRIOR_YAW_ERROR_DEG,
+    DEFAULT_ARENA_ACTIVE_TEMPORARY_MAP_FRAME,
+    DEFAULT_ARENA_ACTIVE_TEMPORARY_MAP_PUBLISH_PERIOD_SEC,
+    DEFAULT_ARENA_ACTIVE_TEMPORARY_MAP_TOPIC,
     DEFAULT_ARENA_ACTIVE_VALIDATION_TIMEOUT_SEC,
     DEFAULT_ARRIVAL_TOLERANCE_M,
     DEFAULT_ARRIVAL_YAW_TOLERANCE_DEG,
@@ -166,12 +169,18 @@ def print_dry_run(args, waypoints, staging_goal, follower_command):
         "  active-explore unknown blocked: "
         f"{'yes' if args.arena_active_explore_unknown_blocked else 'no'}"
     )
-    print(f"  active-explore side bias: {args.arena_active_explore_side_bias}")
     print(
         "  active-explore accumulated map: "
         f"{'yes' if args.arena_active_explore_use_accumulated_map else 'no'}"
     )
     print(f"  active-explore map max samples: {args.arena_active_explore_map_max_samples}")
+    print(
+        "  active-explore temporary map RViz: "
+        f"{'enabled' if args.arena_active_publish_temporary_map else 'disabled'}"
+    )
+    if args.arena_active_publish_temporary_map:
+        print(f"  active-explore temporary map topic: {args.arena_active_temporary_map_topic}")
+        print(f"  active-explore temporary map frame: {args.arena_active_temporary_map_frame}")
     print(f"Wait before custom follower: {'yes' if args.wait_before_follow else 'no'}")
     print(
         "Arena-active internal confirmations: "
@@ -613,15 +622,6 @@ def parse_args(argv):
         type=int,
     )
     parser.add_argument(
-        "--arena-active-explore-side-bias",
-        choices=["none", "right", "left"],
-        default="none",
-        help=(
-            "Prefer local open-corridor recovery candidates on one side of the "
-            "robot before the second arena-active spin."
-        ),
-    )
-    parser.add_argument(
         "--arena-active-explore-use-accumulated-map",
         dest="arena_active_explore_use_accumulated_map",
         action="store_true",
@@ -641,6 +641,35 @@ def parse_args(argv):
         "--arena-active-explore-map-max-samples",
         default=240,
         type=int,
+    )
+    parser.add_argument(
+        "--arena-active-publish-temporary-map",
+        dest="arena_active_publish_temporary_map",
+        action="store_true",
+        default=True,
+        help=(
+            "Publish the active-explore temporary odom-frame map as a "
+            "nav_msgs/OccupancyGrid for RViz."
+        ),
+    )
+    parser.add_argument(
+        "--no-arena-active-temporary-map-viz",
+        dest="arena_active_publish_temporary_map",
+        action="store_false",
+        help="Do not publish the active-explore temporary map RViz topic.",
+    )
+    parser.add_argument(
+        "--arena-active-temporary-map-topic",
+        default=DEFAULT_ARENA_ACTIVE_TEMPORARY_MAP_TOPIC,
+    )
+    parser.add_argument(
+        "--arena-active-temporary-map-frame",
+        default=DEFAULT_ARENA_ACTIVE_TEMPORARY_MAP_FRAME,
+    )
+    parser.add_argument(
+        "--arena-active-temporary-map-publish-period-sec",
+        default=DEFAULT_ARENA_ACTIVE_TEMPORARY_MAP_PUBLISH_PERIOD_SEC,
+        type=float,
     )
     parser.add_argument("--arena-length-m", default=3.90, type=float)
     parser.add_argument("--arena-width-m", type=float)
@@ -764,6 +793,7 @@ def validate_args(parser, args):
         "arena_active_explore_grid_resolution_m",
         "arena_active_explore_grid_size_m",
         "arena_active_explore_inflation_radius_m",
+        "arena_active_temporary_map_publish_period_sec",
         "arena_length_m",
         "arena_heater_wall_width_m",
         "arena_clean_wall_width_m",
@@ -826,6 +856,10 @@ def validate_args(parser, args):
         parser.error("--arena-active-explore-max-path-segments must be >= 1")
     if args.arena_active_explore_map_max_samples < 1:
         parser.error("--arena-active-explore-map-max-samples must be >= 1")
+    if not args.arena_active_temporary_map_topic:
+        parser.error("--arena-active-temporary-map-topic must not be empty")
+    if not args.arena_active_temporary_map_frame:
+        parser.error("--arena-active-temporary-map-frame must not be empty")
     if (
         args.arena_active_recovery_mode != "active_explore"
         and args.arena_active_recovery_executor != "dry_run"

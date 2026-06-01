@@ -34,7 +34,6 @@ class ActiveExploreConfig:
     inflation_radius_m: float = 0.28
     unknown_blocked: bool = True
     max_path_segments: int = 3
-    side_bias: str = "none"
     target_nearest_short_wall_range_m: float = 1.65
     center_min_step_m: float = 0.25
     lateral_offset_threshold_m: float = 0.25
@@ -751,14 +750,51 @@ def min_scan_range_in_sector(scan, lower_deg, upper_deg):
     return min(values) if values else None
 
 
-def side_bias_component(raw, side_bias):
-    if side_bias == "none":
-        return 0.0
-    angle_deg = raw.metadata.get("sector_center_deg")
-    if angle_deg is None:
-        return 0.0
-    preferred_sign = -1.0 if side_bias == "right" else 1.0
-    return clamp(preferred_sign * float(angle_deg) / 90.0, -1.0, 1.0)
+def obstacle_shadow_unknown_cells(grid: LocalGrid):
+    shadow_cells = set()
+    for y, row in enumerate(grid.cells):
+        for x, value in enumerate(row):
+            if value != CELL_UNKNOWN:
+                continue
+            cell = (x, y)
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    if dx == 0 and dy == 0:
+                        continue
+                    neighbor = (x + dx, y + dy)
+                    if not in_bounds(grid, neighbor):
+                        continue
+                    neighbor_value = grid.cells[neighbor[1]][neighbor[0]]
+                    if neighbor_value in {CELL_OCCUPIED, CELL_INFLATED}:
+                        shadow_cells.add(cell)
+                        break
+                if cell in shadow_cells:
+                    break
+    return shadow_cells
+
+
+def shadow_cell_visible_from(grid: LocalGrid, viewpoint_cell, shadow_cell):
+    ray = bresenham_cells(viewpoint_cell, shadow_cell)
+    if len(ray) < 2:
+        return False
+    for cell in ray[1:-1]:
+        if not in_bounds(grid, cell):
+            return False
+        if grid.cells[cell[1]][cell[0]] != CELL_FREE:
+            return False
+    return True
+
+
+def shadow_information_gain_components(grid: LocalGrid, viewpoint_cell):
+    shadow_cells = obstacle_shadow_unknown_cells(grid)
+    visible_count = sum(
+        1
+        for shadow_cell in shadow_cells
+        if shadow_cell_visible_from(grid, viewpoint_cell, shadow_cell)
+    )
+    total_count = len(shadow_cells)
+    gain = clamp(visible_count / 20.0, 0.0, 1.0)
+    return gain, visible_count, total_count
 
 
 def score_candidate(raw, grid, path, config):
@@ -766,25 +802,32 @@ def score_candidate(raw, grid, path, config):
     turns = turn_count_for_path(path)
     clearance = nearest_blocked_distance_m(grid, path)
     clearance_component = clamp(clearance / 0.50, 0.0, 1.0)
-    unknown_ratio = unknown_ratio_near_path(grid, path)
-    side_bias = side_bias_component(raw, config.side_bias)
+    path_unknown_ratio = unknown_ratio_near_path(grid, path)
+    viewpoint_cell = path[-1]
+    (
+        shadow_information_gain,
+        visible_shadow_unknown_count,
+        total_shadow_unknown_count,
+    ) = shadow_information_gain_components(grid, viewpoint_cell)
     components = {
         "geometry_progress": raw.geometry_progress,
         "heater_potential": raw.heater_potential,
         "clearance_margin": clearance_component,
         "path_length": length,
         "turn_count": turns,
-        "unknown_ratio": unknown_ratio,
-        "side_bias": side_bias,
+        "path_unknown_ratio": path_unknown_ratio,
+        "shadow_information_gain": shadow_information_gain,
+        "visible_shadow_unknown_count": visible_shadow_unknown_count,
+        "total_shadow_unknown_count": total_shadow_unknown_count,
     }
     score = (
-        3.0 * components["geometry_progress"]
+        5.0 * components["shadow_information_gain"]
         + 2.0 * components["heater_potential"]
         + 1.5 * components["clearance_margin"]
-        + 1.0 * components["side_bias"]
+        + 0.75 * components["geometry_progress"]
         - 1.0 * components["path_length"]
         - 0.5 * components["turn_count"]
-        - 4.0 * components["unknown_ratio"]
+        - 4.0 * components["path_unknown_ratio"]
     )
     return score, components
 

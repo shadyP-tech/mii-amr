@@ -4,11 +4,11 @@ import time
 try:
     import rclpy
     from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
-    from nav_msgs.msg import Odometry
+    from nav_msgs.msg import OccupancyGrid, Odometry
     from nav2_msgs.action import FollowPath, NavigateToPose
     from rclpy.action import ActionClient
     from rclpy.node import Node
-    from rclpy.qos import qos_profile_sensor_data
+    from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
     from rclpy.time import Time
     from sensor_msgs.msg import LaserScan
     import tf2_ros
@@ -18,9 +18,12 @@ except ImportError:
     NavigateToPose = None
     ActionClient = None
     Node = object
+    DurabilityPolicy = None
+    QoSProfile = None
     qos_profile_sensor_data = None
     Time = None
     LaserScan = object
+    OccupancyGrid = None
     Odometry = object
     tf2_ros = None
 
@@ -69,6 +72,7 @@ except ImportError:
 from arena_active_spin import (
     ArenaActiveSpinConfig,
     run_arena_active_spin,
+    temporary_map_occupancy_data,
     write_diagnostics_json,
 )
 from arena_geometry_localizer import ArenaGeometryConfig
@@ -217,13 +221,45 @@ def arena_active_config_from_args(args):
         ),
         active_explore_unknown_blocked=args.arena_active_explore_unknown_blocked,
         active_explore_max_path_segments=args.arena_active_explore_max_path_segments,
-        active_explore_side_bias=args.arena_active_explore_side_bias,
         active_explore_use_accumulated_map=(
             args.arena_active_explore_use_accumulated_map
         ),
         active_explore_map_max_samples=args.arena_active_explore_map_max_samples,
+        active_explore_temporary_map_publish_period_sec=(
+            args.arena_active_temporary_map_publish_period_sec
+        ),
         arena_config=arena_config,
     )
+
+
+def rviz_occupancy_grid_qos_profile():
+    if QoSProfile is None or DurabilityPolicy is None:
+        return 1
+    qos = QoSProfile(depth=1)
+    qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+    return qos
+
+
+def build_temporary_map_message(grid, frame_id, stamp):
+    if OccupancyGrid is None:
+        raise RuntimeError(
+            "nav_msgs.msg.OccupancyGrid is unavailable; source ROS 2 Humble first"
+        )
+    msg = OccupancyGrid()
+    msg.header.frame_id = frame_id
+    msg.header.stamp = stamp
+    msg.info.resolution = float(grid.resolution_m)
+    msg.info.width = int(grid.width)
+    msg.info.height = int(grid.height)
+    msg.info.origin.position.x = float(grid.origin_x)
+    msg.info.origin.position.y = float(grid.origin_y)
+    msg.info.origin.position.z = 0.0
+    msg.info.origin.orientation.x = 0.0
+    msg.info.origin.orientation.y = 0.0
+    msg.info.origin.orientation.z = 0.0
+    msg.info.origin.orientation.w = 1.0
+    msg.data = temporary_map_occupancy_data(grid)
+    return msg
 
 
 def build_initial_pose_message(
@@ -310,6 +346,7 @@ class TwoStageCoordinator(Node):
         self.last_amcl_received_sec = None
         self.active_goal_handle = None
         self.selected_base_frame = ""
+        self.arena_temporary_map_pub = None
 
         self.cmd_vel_pub = self.create_publisher(Twist, args.cmd_vel_topic, 10)
         self.initial_pose_pub = self.create_publisher(
@@ -317,6 +354,17 @@ class TwoStageCoordinator(Node):
             args.initial_pose_topic,
             10,
         )
+        if args.arena_active_publish_temporary_map:
+            if OccupancyGrid is None:
+                raise RuntimeError(
+                    "nav_msgs.msg.OccupancyGrid is unavailable; "
+                    "source a ROS 2 Humble environment first"
+                )
+            self.arena_temporary_map_pub = self.create_publisher(
+                OccupancyGrid,
+                args.arena_active_temporary_map_topic,
+                rviz_occupancy_grid_qos_profile(),
+            )
         self.scan_sub = self.create_subscription(
             LaserScan,
             args.scan_topic,
@@ -434,7 +482,20 @@ class TwoStageCoordinator(Node):
             LaserScan,
             Odometry,
             qos_profile_sensor_data,
+            temporary_map_callback=(
+                self.publish_arena_active_temporary_map
+                if self.arena_temporary_map_pub is not None
+                else None
+            ),
         )
+
+    def publish_arena_active_temporary_map(self, grid):
+        msg = build_temporary_map_message(
+            grid,
+            self.args.arena_active_temporary_map_frame,
+            self.get_clock().now().to_msg(),
+        )
+        self.arena_temporary_map_pub.publish(msg)
 
     def publish_arena_active_initial_pose(self, pose_prior, arena_result):
         var_x, var_y, var_yaw = validate_pose_prior_for_initialpose(pose_prior)

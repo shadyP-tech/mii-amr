@@ -25,6 +25,10 @@ from arena_geometry_localizer import (
 from arena_active_explore import (
     ActiveExploreConfig,
     ActiveExplorePlan,
+    CELL_FREE,
+    CELL_INFLATED,
+    CELL_OCCUPIED,
+    CELL_UNKNOWN,
     build_local_grid_from_scan_samples,
     geometry_is_recoverable,
     plan_active_explore_recovery,
@@ -165,9 +169,9 @@ class ArenaActiveSpinConfig:
     active_explore_inflation_radius_m: float = 0.28
     active_explore_unknown_blocked: bool = True
     active_explore_max_path_segments: int = 3
-    active_explore_side_bias: str = "none"
     active_explore_use_accumulated_map: bool = True
     active_explore_map_max_samples: int = 240
+    active_explore_temporary_map_publish_period_sec: float = 1.0
     arena_config: ArenaGeometryConfig = field(default_factory=ArenaGeometryConfig)
 
 
@@ -181,6 +185,26 @@ def shortest_angle_delta_rad(start_rad, end_rad):
 
 def clamp(value, low, high):
     return max(low, min(high, value))
+
+
+def temporary_map_cell_to_occupancy(value):
+    if value == CELL_UNKNOWN:
+        return -1
+    if value == CELL_FREE:
+        return 0
+    if value == CELL_INFLATED:
+        return 70
+    if value == CELL_OCCUPIED:
+        return 100
+    return -1
+
+
+def temporary_map_occupancy_data(grid):
+    return [
+        temporary_map_cell_to_occupancy(value)
+        for row in grid.cells
+        for value in row
+    ]
 
 
 def opposite_axis_side(axis_side):
@@ -736,7 +760,6 @@ def active_explore_config_from_arena_config(config: ArenaActiveSpinConfig):
         inflation_radius_m=config.active_explore_inflation_radius_m,
         unknown_blocked=config.active_explore_unknown_blocked,
         max_path_segments=config.active_explore_max_path_segments,
-        side_bias=config.active_explore_side_bias,
         target_nearest_short_wall_range_m=(
             config.center_reposition_target_nearest_short_wall_range_m
         ),
@@ -854,6 +877,7 @@ class ArenaActiveSpinSession:
         time_fn=time.time,
         sleep_fn=time.sleep,
         analyze_fn=analyze_scan_samples,
+        temporary_map_callback=None,
     ):
         self.node = node
         self.config = config
@@ -863,6 +887,8 @@ class ArenaActiveSpinSession:
         self.time_fn = time_fn
         self.sleep_fn = sleep_fn
         self.analyze_fn = analyze_fn
+        self.temporary_map_callback = temporary_map_callback
+        self.last_temporary_map_publish_sec = None
         self.latest_scan = None
         self.latest_scan_received_sec = None
         self.latest_odom_pose = None
@@ -924,6 +950,46 @@ class ArenaActiveSpinSession:
         self.diagnostics["active_explore"]["temporary_map"]["scan_samples_stored"] = (
             len(self.explore_samples)
         )
+        self.publish_temporary_map_if_ready()
+
+    def update_temporary_map_diagnostics(self, grid):
+        self.diagnostics["active_explore"]["temporary_map"] = {
+            "frame": "odom",
+            "source": "accumulated_spin_and_recovery_scans",
+            "scan_samples_stored": len(self.explore_samples),
+            "grid": grid.to_dict(),
+        }
+
+    def publish_temporary_map_if_ready(self, force=False, grid=None):
+        if self.temporary_map_callback is None:
+            return
+        if (
+            effective_recovery_mode(self.config) != "active_explore"
+            or not self.config.active_explore_use_accumulated_map
+            or not self.explore_samples
+            or self.latest_odom_pose is None
+        ):
+            return
+        now = self.now()
+        period_sec = self.config.active_explore_temporary_map_publish_period_sec
+        if (
+            not force
+            and self.last_temporary_map_publish_sec is not None
+            and now - self.last_temporary_map_publish_sec < period_sec
+        ):
+            return
+        if grid is None:
+            grid = build_local_grid_from_scan_samples(
+                self.explore_samples,
+                self.latest_odom_pose,
+                active_explore_config_from_arena_config(self.config),
+            )
+        self.update_temporary_map_diagnostics(grid)
+        self.last_temporary_map_publish_sec = now
+        try:
+            self.temporary_map_callback(grid)
+        except Exception as exc:
+            self.diagnostics["active_explore"]["temporary_map"]["publish_error"] = str(exc)
 
     def odom_callback(self, msg):
         self.latest_odom_pose = odom_pose_from_msg(msg)
@@ -1314,12 +1380,8 @@ class ArenaActiveSpinSession:
                 self.latest_odom_pose,
                 active_config,
             )
-            self.diagnostics["active_explore"]["temporary_map"] = {
-                "frame": "odom",
-                "source": "accumulated_spin_and_recovery_scans",
-                "scan_samples_stored": len(self.explore_samples),
-                "grid": grid.to_dict(),
-            }
+            self.update_temporary_map_diagnostics(grid)
+            self.publish_temporary_map_if_ready(force=True, grid=grid)
         return plan_active_explore_recovery(
             result,
             self.latest_scan,
@@ -1671,6 +1733,7 @@ def run_arena_active_spin(
     time_fn=time.time,
     sleep_fn=time.sleep,
     analyze_fn=analyze_scan_samples,
+    temporary_map_callback=None,
 ):
     session = ArenaActiveSpinSession(
         node,
@@ -1684,5 +1747,6 @@ def run_arena_active_spin(
         time_fn=time_fn,
         sleep_fn=sleep_fn,
         analyze_fn=analyze_fn,
+        temporary_map_callback=temporary_map_callback,
     )
     return session.run(publisher)
