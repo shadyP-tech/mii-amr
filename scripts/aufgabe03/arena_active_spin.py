@@ -57,6 +57,7 @@ ACTIVE_EXPLORE_FRONTIER_UNREACHABLE_REASONS = {
     "path_too_long",
 }
 ACTIVE_EXPLORE_SHADOW_APPROACH_MIN_PATH_CLEARANCE_M = 0.10
+ACTIVE_EXPLORE_SHADOW_APPROACH_GOAL_DRIFT_TOLERANCE_M = 0.02
 LOCALIZER_FILTER_WALL_MARGIN_CELLS = 2
 LOCALIZER_FILTER_WALL_EXPAND_CELLS = 1
 LOCALIZER_FILTER_MIN_WALL_LENGTH_M = 0.45
@@ -318,6 +319,33 @@ def candidate_has_safe_shadow_approach_clearance(candidate):
         clearance is not None
         and clearance >= ACTIVE_EXPLORE_SHADOW_APPROACH_MIN_PATH_CLEARANCE_M
     )
+
+
+def candidate_target_point(candidate):
+    if candidate is None:
+        return None
+    return finite_point_2d([candidate.target_x, candidate.target_y])
+
+
+def candidate_path_start_point(candidate):
+    if candidate is None:
+        return None
+    if candidate.path_world:
+        return finite_point_2d(candidate.path_world[0])
+    if candidate.simplified_path_world:
+        return finite_point_2d(candidate.simplified_path_world[0])
+    return None
+
+
+def candidate_path_unknown_ratio(candidate):
+    if candidate is None:
+        return 0.0
+    value = (candidate.score_components or {}).get("path_unknown_ratio", 0.0)
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return value if math.isfinite(value) else 0.0
 
 
 def active_explore_curve_execution_record(
@@ -2187,6 +2215,78 @@ class ArenaActiveSpinSession:
             ),
         )[0]
 
+    def shadow_approach_goal_reference(self, plan):
+        goal = self.active_explore_frontier_goal or {}
+        target = finite_point_2d([goal.get("target_x"), goal.get("target_y")])
+        if target is not None:
+            return target, "persistent_frontier_target"
+
+        cluster = finite_point_2d(goal.get("cluster_centroid_world"))
+        if cluster is not None:
+            return cluster, "persistent_frontier_cluster"
+
+        frontier_candidates = [
+            candidate
+            for candidate in plan.candidates
+            if candidate is not None and candidate.kind == "obstacle_shadow_frontier"
+        ]
+        frontier_candidates.sort(
+            key=lambda candidate: (
+                -candidate_visible_shadow_count(candidate),
+                (
+                    0
+                    if candidate.rejection_reason
+                    in ACTIVE_EXPLORE_FRONTIER_UNREACHABLE_REASONS
+                    else 1
+                ),
+                (
+                    candidate.path_length_m
+                    if candidate.path_length_m is not None
+                    else math.inf
+                ),
+            )
+        )
+        for candidate in frontier_candidates:
+            target = candidate_target_point(candidate)
+            if target is not None:
+                return target, "generated_frontier_target"
+        for candidate in frontier_candidates:
+            cluster = candidate_cluster_centroid(candidate)
+            if cluster is not None:
+                return cluster, "generated_frontier_cluster"
+        return None, None
+
+    def shadow_approach_start_point(self, candidate):
+        if self.latest_odom_pose is not None:
+            return [float(self.latest_odom_pose.x), float(self.latest_odom_pose.y)]
+        return candidate_path_start_point(candidate)
+
+    def shadow_approach_goal_metrics(self, candidate, goal_point):
+        start = self.shadow_approach_start_point(candidate)
+        target = candidate_target_point(candidate)
+        if target is None and candidate.path_world:
+            target = finite_point_2d(candidate.path_world[-1])
+        if target is None and candidate.simplified_path_world:
+            target = finite_point_2d(candidate.simplified_path_world[-1])
+        before = distance_2d(start, goal_point) if start is not None else None
+        after = distance_2d(target, goal_point) if target is not None else None
+        progress = (
+            before - after
+            if before is not None and after is not None
+            else None
+        )
+        return {
+            "sector_center_deg": (candidate.metadata or {}).get("sector_center_deg"),
+            "target_x": None if target is None else target[0],
+            "target_y": None if target is None else target[1],
+            "frontier_distance_before_m": before,
+            "frontier_distance_after_m": after,
+            "frontier_progress_m": progress,
+            "path_min_clearance_m": candidate_path_min_clearance_m(candidate),
+            "path_unknown_ratio": candidate_path_unknown_ratio(candidate),
+            "score": candidate.score,
+        }
+
     def shadow_approach_fallback_candidate(self, plan):
         candidates = [
             candidate
@@ -2198,12 +2298,31 @@ class ArenaActiveSpinSession:
             for candidate in candidates
             if candidate_has_safe_shadow_approach_clearance(candidate)
         ]
+        goal_point, goal_source = self.shadow_approach_goal_reference(plan)
         policy = {
             "candidate_count": len(candidates),
             "safe_candidate_count": len(safe_candidates),
             "min_path_clearance_m": (
                 ACTIVE_EXPLORE_SHADOW_APPROACH_MIN_PATH_CLEARANCE_M
             ),
+            "goal_drift_tolerance_m": (
+                ACTIVE_EXPLORE_SHADOW_APPROACH_GOAL_DRIFT_TOLERANCE_M
+            ),
+            "goal_reference": (
+                None
+                if goal_point is None
+                else {
+                    "source": goal_source,
+                    "x": goal_point[0],
+                    "y": goal_point[1],
+                }
+            ),
+            "goal_aware_candidate_count": 0,
+            "goal_drift_rejected_count": 0,
+            "candidate_goal_metrics": [],
+            "selected_frontier_distance_before_m": None,
+            "selected_frontier_distance_after_m": None,
+            "selected_frontier_progress_m": None,
             "selected_kind": None,
             "selected_sector_center_deg": None,
             "reason": "",
@@ -2214,12 +2333,80 @@ class ArenaActiveSpinSession:
         if not safe_candidates:
             policy["reason"] = "no_safe_open_corridor_candidate"
             return None, policy
-        selected = self.best_scored_candidate(safe_candidates)
+        ranked = []
+        for candidate in safe_candidates:
+            metrics = (
+                self.shadow_approach_goal_metrics(candidate, goal_point)
+                if goal_point is not None
+                else {
+                    "sector_center_deg": (candidate.metadata or {}).get(
+                        "sector_center_deg"
+                    ),
+                    "target_x": candidate.target_x,
+                    "target_y": candidate.target_y,
+                    "frontier_distance_before_m": None,
+                    "frontier_distance_after_m": None,
+                    "frontier_progress_m": None,
+                    "path_min_clearance_m": candidate_path_min_clearance_m(candidate),
+                    "path_unknown_ratio": candidate_path_unknown_ratio(candidate),
+                    "score": candidate.score,
+                }
+            )
+            progress = metrics["frontier_progress_m"]
+            accepted_for_goal = (
+                goal_point is None
+                or progress is None
+                or progress >= -ACTIVE_EXPLORE_SHADOW_APPROACH_GOAL_DRIFT_TOLERANCE_M
+            )
+            metrics["accepted_goal_aware"] = accepted_for_goal
+            metrics["rejection_reason"] = "" if accepted_for_goal else "goal_drift"
+            policy["candidate_goal_metrics"].append(metrics)
+            if not accepted_for_goal:
+                policy["goal_drift_rejected_count"] += 1
+                continue
+            ranked.append((candidate, metrics))
+
+        policy["goal_aware_candidate_count"] = len(ranked)
+        if not ranked:
+            policy["reason"] = "no_goal_progress_open_corridor_candidate"
+            return None, policy
+
+        selected, selected_metrics = sorted(
+            ranked,
+            key=lambda item: (
+                -(
+                    item[1]["frontier_progress_m"]
+                    if item[1]["frontier_progress_m"] is not None
+                    else 0.0
+                ),
+                -(
+                    item[1]["path_min_clearance_m"]
+                    if item[1]["path_min_clearance_m"] is not None
+                    else -math.inf
+                ),
+                item[1]["path_unknown_ratio"],
+                -(item[0].score if item[0].score is not None else -math.inf),
+                (
+                    item[0].path_length_m
+                    if item[0].path_length_m is not None
+                    else math.inf
+                ),
+            ),
+        )[0]
         policy["reason"] = "selected"
         policy["selected_kind"] = selected.kind
         policy["selected_sector_center_deg"] = (selected.metadata or {}).get(
             "sector_center_deg"
         )
+        policy["selected_frontier_distance_before_m"] = selected_metrics[
+            "frontier_distance_before_m"
+        ]
+        policy["selected_frontier_distance_after_m"] = selected_metrics[
+            "frontier_distance_after_m"
+        ]
+        policy["selected_frontier_progress_m"] = selected_metrics[
+            "frontier_progress_m"
+        ]
         return selected, policy
 
     def localization_pose_candidate(self, plan):
@@ -2448,9 +2635,6 @@ class ArenaActiveSpinSession:
         if self.active_explore_phase == ACTIVE_EXPLORE_PHASE_SHADOW:
             moving_frontiers = self.moving_shadow_frontier_candidates(plan)
             if not moving_frontiers:
-                if self.active_explore_frontier_goal is not None:
-                    abandon_reason = "no_moving_shadow_frontier"
-                    self.clear_active_explore_frontier_goal(abandon_reason)
                 if shadow_status["shadow_frontier_state"] == "unreachable":
                     fallback, shadow_approach_policy = (
                         self.shadow_approach_fallback_candidate(plan)
@@ -2459,11 +2643,15 @@ class ArenaActiveSpinSession:
                         "shadow_approach_fallback_policy"
                     ] = shadow_approach_policy
                     if fallback is None:
-                        reason = (
-                            "shadow_frontier_unreachable_no_safe_approach_candidate"
-                            if shadow_approach_policy["candidate_count"] > 0
-                            else "shadow_frontier_unreachable_no_approach_candidate"
-                        )
+                        if shadow_approach_policy["candidate_count"] <= 0:
+                            reason = "shadow_frontier_unreachable_no_approach_candidate"
+                        elif (
+                            shadow_approach_policy["reason"]
+                            == "no_safe_open_corridor_candidate"
+                        ):
+                            reason = "shadow_frontier_unreachable_no_safe_approach_candidate"
+                        else:
+                            reason = "shadow_frontier_unreachable_no_goal_approach_candidate"
                         gated_plan = ActiveExplorePlan(
                             False,
                             reason,
@@ -2486,6 +2674,9 @@ class ArenaActiveSpinSession:
                         fallback,
                         "shadow_approach_fallback",
                     )
+                if self.active_explore_frontier_goal is not None:
+                    abandon_reason = "no_moving_shadow_frontier"
+                    self.clear_active_explore_frontier_goal(abandon_reason)
                 continue_without_motion = True
                 gated_plan = ActiveExplorePlan(
                     False,
