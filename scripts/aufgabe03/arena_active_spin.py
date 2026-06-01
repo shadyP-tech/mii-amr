@@ -31,7 +31,9 @@ from arena_active_explore import (
     CELL_UNKNOWN,
     build_local_grid_from_scan_samples,
     geometry_is_recoverable,
+    in_bounds,
     plan_active_explore_recovery,
+    world_to_cell,
 )
 
 
@@ -49,6 +51,15 @@ ACTIVE_EXPLORE_LOCALIZATION_CANDIDATE_KINDS = (
     "provisional_center",
     "lateral_recenter",
 )
+ACTIVE_EXPLORE_FRONTIER_UNREACHABLE_REASONS = {
+    "no_connected_path",
+    "path_too_long",
+}
+LOCALIZER_FILTER_WALL_MARGIN_CELLS = 2
+LOCALIZER_FILTER_WALL_EXPAND_CELLS = 1
+LOCALIZER_FILTER_MIN_WALL_LENGTH_M = 0.45
+LOCALIZER_FILTER_MIN_WALL_ASPECT_RATIO = 3.0
+LOCALIZER_FILTER_MAX_WALL_THICKNESS_M = 0.20
 
 
 class ActiveExploreMotionError(RuntimeError):
@@ -280,6 +291,14 @@ def candidate_is_localization_pose_candidate(candidate):
     )
 
 
+def candidate_is_accepted_open_corridor(candidate):
+    return (
+        candidate is not None
+        and candidate.accepted
+        and candidate.kind == "open_corridor"
+    )
+
+
 def active_explore_curve_execution_record(
     candidate,
     path_points,
@@ -405,6 +424,194 @@ def temporary_map_occupancy_data(grid):
         for row in grid.cells
         for value in row
     ]
+
+
+def valid_scan_range_count(samples):
+    count = 0
+    for sample in samples:
+        for value in sample.ranges:
+            if value is None or not math.isfinite(value):
+                continue
+            if value < sample.range_min or value > sample.range_max:
+                continue
+            count += 1
+    return count
+
+
+def scan_endpoint_world(sample, index, raw_range):
+    pose = sample.odom_pose
+    if pose is None:
+        return None
+    angle = float(sample.angle_min) + index * float(sample.angle_increment)
+    local_x = float(raw_range) * math.cos(angle)
+    local_y = float(raw_range) * math.sin(angle)
+    yaw = math.radians(float(pose.yaw_deg))
+    cos_yaw = math.cos(yaw)
+    sin_yaw = math.sin(yaw)
+    return (
+        float(pose.x) + cos_yaw * local_x - sin_yaw * local_y,
+        float(pose.y) + sin_yaw * local_x + cos_yaw * local_y,
+    )
+
+
+def neighbors_8_cells(cell):
+    x, y = cell
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            if dx == 0 and dy == 0:
+                continue
+            yield (x + dx, y + dy)
+
+
+def cluster_cells_8(cells):
+    remaining = set(cells)
+    clusters = []
+    while remaining:
+        start = remaining.pop()
+        cluster = {start}
+        stack = [start]
+        while stack:
+            cell = stack.pop()
+            for neighbor in neighbors_8_cells(cell):
+                if neighbor not in remaining:
+                    continue
+                remaining.remove(neighbor)
+                cluster.add(neighbor)
+                stack.append(neighbor)
+        clusters.append(frozenset(cluster))
+    return tuple(clusters)
+
+
+def occupied_cells_from_grid(grid):
+    cells = []
+    for y, row in enumerate(grid.cells):
+        for x, value in enumerate(row):
+            if value == CELL_OCCUPIED:
+                cells.append((x, y))
+    return tuple(cells)
+
+
+def blocked_cells_from_grid(grid):
+    cells = []
+    for y, row in enumerate(grid.cells):
+        for x, value in enumerate(row):
+            if value in {CELL_OCCUPIED, CELL_INFLATED}:
+                cells.append((x, y))
+    return tuple(cells)
+
+
+def cell_bounds(cells):
+    xs = [cell[0] for cell in cells]
+    ys = [cell[1] for cell in cells]
+    return min(xs), max(xs), min(ys), max(ys)
+
+
+def cluster_is_wall_like(grid, cluster, occupied_envelope):
+    min_x, max_x, min_y, max_y = cell_bounds(cluster)
+    env_min_x, env_max_x, env_min_y, env_max_y = occupied_envelope
+    margin = LOCALIZER_FILTER_WALL_MARGIN_CELLS
+    near_outer_envelope = (
+        min_x <= env_min_x + margin
+        or max_x >= env_max_x - margin
+        or min_y <= env_min_y + margin
+        or max_y >= env_max_y - margin
+    )
+    near_grid_boundary = (
+        min_x <= margin
+        or min_y <= margin
+        or max_x >= grid.width - 1 - margin
+        or max_y >= grid.height - 1 - margin
+    )
+    if not near_outer_envelope and not near_grid_boundary:
+        return False
+
+    span_x = max_x - min_x + 1
+    span_y = max_y - min_y + 1
+    long_cells = max(span_x, span_y)
+    short_cells = max(1, min(span_x, span_y))
+    long_m = long_cells * grid.resolution_m
+    short_m = short_cells * grid.resolution_m
+    aspect = long_cells / short_cells
+    return (
+        long_m >= LOCALIZER_FILTER_MIN_WALL_LENGTH_M
+        and short_m <= LOCALIZER_FILTER_MAX_WALL_THICKNESS_M
+        and aspect >= LOCALIZER_FILTER_MIN_WALL_ASPECT_RATIO
+    )
+
+
+def expand_cells(grid, cells, radius_cells):
+    expanded = set()
+    for cell_x, cell_y in cells:
+        for dy in range(-radius_cells, radius_cells + 1):
+            for dx in range(-radius_cells, radius_cells + 1):
+                cell = (cell_x + dx, cell_y + dy)
+                if in_bounds(grid, cell):
+                    expanded.add(cell)
+    return expanded
+
+
+def temporary_grid_localizer_obstacle_mask(grid):
+    occupied = occupied_cells_from_grid(grid)
+    if not occupied:
+        return set(), set(), {
+            "occupied_cluster_count": 0,
+            "protected_wall_cluster_count": 0,
+        }
+
+    occupied_envelope = cell_bounds(occupied)
+    protected_wall_cells = set()
+    protected_wall_cluster_count = 0
+    clusters = cluster_cells_8(occupied)
+    for cluster in clusters:
+        if not cluster_is_wall_like(grid, cluster, occupied_envelope):
+            continue
+        protected_wall_cluster_count += 1
+        protected_wall_cells.update(cluster)
+
+    protected_wall_cells = expand_cells(
+        grid,
+        protected_wall_cells,
+        LOCALIZER_FILTER_WALL_EXPAND_CELLS,
+    )
+    obstacle_mask = set(blocked_cells_from_grid(grid)) - protected_wall_cells
+    diagnostics = {
+        "occupied_cluster_count": len(clusters),
+        "protected_wall_cluster_count": protected_wall_cluster_count,
+    }
+    return obstacle_mask, protected_wall_cells, diagnostics
+
+
+def filter_scan_samples_with_temporary_obstacle_map(samples, grid, obstacle_mask):
+    filtered = []
+    filtered_range_count = 0
+    for sample in samples:
+        ranges = list(sample.ranges)
+        for index, raw_range in enumerate(ranges):
+            if raw_range is None or not math.isfinite(raw_range):
+                continue
+            if raw_range < sample.range_min or raw_range > sample.range_max:
+                continue
+            endpoint = scan_endpoint_world(sample, index, raw_range)
+            if endpoint is None:
+                continue
+            cell = world_to_cell(grid, endpoint[0], endpoint[1])
+            if not in_bounds(grid, cell):
+                continue
+            if cell not in obstacle_mask:
+                continue
+            ranges[index] = float("inf")
+            filtered_range_count += 1
+        filtered.append(
+            ScanSample(
+                ranges=ranges,
+                angle_min=sample.angle_min,
+                angle_increment=sample.angle_increment,
+                range_min=sample.range_min,
+                range_max=sample.range_max,
+                odom_pose=sample.odom_pose,
+            )
+        )
+    return filtered, filtered_range_count
 
 
 def opposite_axis_side(axis_side):
@@ -1030,6 +1237,10 @@ def initial_diagnostics(config: ArenaActiveSpinConfig):
             "shadow_explore_complete": False,
             "shadow_frontier_status": None,
             "localization_candidate_policy": None,
+            "localizer_filter": {
+                "enabled": False,
+                "reason": "not_run",
+            },
         },
         "samples": {
             "scan_samples_collected": 0,
@@ -1436,14 +1647,97 @@ class ArenaActiveSpinSession:
             }
         )
 
+    def active_explore_localizer_filter_reason_disabled(self):
+        if effective_recovery_mode(self.config) != "active_explore":
+            return "not_active_explore"
+        if not self.config.active_explore_use_accumulated_map:
+            return "accumulated_map_disabled"
+        attempt_index = self.diagnostics.get("spin", {}).get("attempt_index")
+        if attempt_index == 0:
+            return "first_spin"
+        if self.active_explore_phase != ACTIVE_EXPLORE_PHASE_LOCALIZATION_SPIN:
+            return "not_final_active_explore_localization_spin"
+        if not self.shadow_explore_complete:
+            return "shadow_explore_not_complete"
+        return None
+
+    def active_explore_localizer_filter_grid(self):
+        if not self.explore_samples:
+            return None, "no_temporary_map_samples"
+        if self.latest_odom_pose is None:
+            return None, "missing_latest_odom_pose"
+        grid = build_local_grid_from_scan_samples(
+            self.explore_samples,
+            self.latest_odom_pose,
+            active_explore_config_from_arena_config(self.config),
+        )
+        self.update_temporary_map_diagnostics(grid)
+        return grid, "ok"
+
+    def active_explore_filtered_localizer_samples(self):
+        diagnostics = {
+            "enabled": False,
+            "reason": "",
+            "input_sample_count": len(self.samples),
+            "output_sample_count": len(self.samples),
+            "valid_ranges_before": valid_scan_range_count(self.samples),
+            "valid_ranges_after": valid_scan_range_count(self.samples),
+            "filtered_range_count": 0,
+            "obstacle_mask_cell_count": 0,
+            "protected_wall_cell_count": 0,
+            "temporary_grid_cell_counts": None,
+            "final_spin_attempt_index": self.diagnostics.get("spin", {}).get(
+                "attempt_index"
+            ),
+        }
+        disabled_reason = self.active_explore_localizer_filter_reason_disabled()
+        if disabled_reason is not None:
+            diagnostics["reason"] = disabled_reason
+            self.diagnostics["active_explore"]["localizer_filter"] = diagnostics
+            return self.samples
+
+        grid, grid_reason = self.active_explore_localizer_filter_grid()
+        if grid is None:
+            diagnostics["reason"] = grid_reason
+            self.diagnostics["active_explore"]["localizer_filter"] = diagnostics
+            return self.samples
+
+        diagnostics["temporary_grid_cell_counts"] = grid.to_dict()["cell_counts"]
+        obstacle_mask, protected_wall_cells, mask_diagnostics = (
+            temporary_grid_localizer_obstacle_mask(grid)
+        )
+        diagnostics.update(mask_diagnostics)
+        diagnostics["obstacle_mask_cell_count"] = len(obstacle_mask)
+        diagnostics["protected_wall_cell_count"] = len(protected_wall_cells)
+        if not obstacle_mask:
+            diagnostics["reason"] = "no_temporary_obstacle_mask"
+            self.diagnostics["active_explore"]["localizer_filter"] = diagnostics
+            return self.samples
+
+        filtered_samples, filtered_range_count = (
+            filter_scan_samples_with_temporary_obstacle_map(
+                self.samples,
+                grid,
+                obstacle_mask,
+            )
+        )
+        diagnostics["enabled"] = True
+        diagnostics["reason"] = "filtered_temporary_obstacles"
+        diagnostics["output_sample_count"] = len(filtered_samples)
+        diagnostics["filtered_range_count"] = filtered_range_count
+        diagnostics["valid_ranges_after"] = valid_scan_range_count(filtered_samples)
+        self.diagnostics["active_explore"]["localizer_filter"] = diagnostics
+        return filtered_samples
+
     def analyze_result(self):
         if len(self.samples) < self.config.min_scan_samples:
             raise RuntimeError(
                 "insufficient_scan_samples:"
                 f"{len(self.samples)}<{self.config.min_scan_samples}"
             )
+        localizer_samples = self.active_explore_filtered_localizer_samples()
         result = self.analyze_fn(
-            self.samples,
+            localizer_samples,
             self.config.arena_config,
             range_stride=self.config.range_stride,
             max_points=self.config.max_points,
@@ -1725,10 +2019,20 @@ class ArenaActiveSpinSession:
         )
 
     def shadow_frontier_status_from_plan(self, plan):
-        accepted_frontiers = [
+        frontier_candidates = [
             candidate
             for candidate in plan.candidates
-            if candidate_is_accepted_shadow_frontier(candidate)
+            if candidate is not None and candidate.kind == "obstacle_shadow_frontier"
+        ]
+        accepted_frontiers = [
+            candidate
+            for candidate in frontier_candidates
+            if candidate.accepted
+        ]
+        rejected_frontiers = [
+            candidate
+            for candidate in frontier_candidates
+            if not candidate.accepted
         ]
         visible_frontiers = [
             candidate
@@ -1745,16 +2049,35 @@ class ArenaActiveSpinSession:
             for candidate in visible_frontiers
             if candidate.path_length_m is not None
         ]
+        all_visible_counts = [
+            candidate_visible_shadow_count(candidate)
+            for candidate in frontier_candidates
+            if candidate_visible_shadow_count(candidate) > 0
+        ]
+        rejection_reasons = {}
+        unreachable_frontiers = []
+        for candidate in rejected_frontiers:
+            reason = candidate.rejection_reason or "unknown"
+            rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
+            if reason in ACTIVE_EXPLORE_FRONTIER_UNREACHABLE_REASONS:
+                unreachable_frontiers.append(candidate)
+        if moving_frontiers:
+            shadow_frontier_state = "reachable"
+        elif frontier_candidates:
+            shadow_frontier_state = "unreachable"
+        else:
+            shadow_frontier_state = "absent"
         status = {
+            "frontier_candidate_count": len(frontier_candidates),
             "accepted_frontier_count": len(accepted_frontiers),
+            "rejected_frontier_count": len(rejected_frontiers),
+            "frontier_rejection_reasons": rejection_reasons,
+            "unreachable_frontier_count": len(unreachable_frontiers),
             "visible_shadow_frontier_count": len(visible_frontiers),
             "moving_shadow_frontier_count": len(moving_frontiers),
             "best_visible_shadow_count": (
-                max(
-                    candidate_visible_shadow_count(candidate)
-                    for candidate in visible_frontiers
-                )
-                if visible_frontiers
+                max(all_visible_counts)
+                if all_visible_counts
                 else 0
             ),
             "min_visible_frontier_path_m": min(path_lengths) if path_lengths else None,
@@ -1763,7 +2086,8 @@ class ArenaActiveSpinSession:
             "empty_replans_required": (
                 ACTIVE_EXPLORE_SHADOW_EMPTY_REPLANS_TO_COMPLETE
             ),
-            "empty": len(moving_frontiers) == 0,
+            "shadow_frontier_state": shadow_frontier_state,
+            "empty": shadow_frontier_state == "absent",
         }
         return status
 
@@ -1776,10 +2100,10 @@ class ArenaActiveSpinSession:
             self.update_active_explore_phase_diagnostics()
             return status
 
-        if status["moving_shadow_frontier_count"] > 0:
+        if status["shadow_frontier_state"] == "reachable":
             self.shadow_frontier_empty_replans = 0
             self.shadow_explore_complete = False
-        else:
+        elif status["shadow_frontier_state"] == "absent":
             self.shadow_frontier_empty_replans += 1
             if (
                 self.shadow_frontier_empty_replans
@@ -1788,6 +2112,9 @@ class ArenaActiveSpinSession:
                 self.shadow_explore_complete = True
                 self.clear_active_explore_frontier_goal("shadow_frontier_exhausted")
                 self.set_active_explore_phase(ACTIVE_EXPLORE_PHASE_LOCALIZATION_POSE)
+        else:
+            self.shadow_frontier_empty_replans = 0
+            self.shadow_explore_complete = False
 
         status["empty_replans"] = self.shadow_frontier_empty_replans
         status["complete"] = self.shadow_explore_complete
@@ -1816,6 +2143,14 @@ class ArenaActiveSpinSession:
                 ),
             ),
         )[0]
+
+    def shadow_approach_fallback_candidate(self, plan):
+        candidates = [
+            candidate
+            for candidate in plan.candidates
+            if candidate_is_accepted_open_corridor(candidate)
+        ]
+        return self.best_scored_candidate(candidates)
 
     def localization_pose_candidate(self, plan):
         candidates = [
@@ -2044,6 +2379,31 @@ class ArenaActiveSpinSession:
                 if self.active_explore_frontier_goal is not None:
                     abandon_reason = "no_moving_shadow_frontier"
                     self.clear_active_explore_frontier_goal(abandon_reason)
+                if shadow_status["shadow_frontier_state"] == "unreachable":
+                    fallback = self.shadow_approach_fallback_candidate(plan)
+                    if fallback is None:
+                        gated_plan = ActiveExplorePlan(
+                            False,
+                            "shadow_frontier_unreachable_no_approach_candidate",
+                            None,
+                            plan.candidates,
+                            plan.grid,
+                        )
+                        return gated_plan, diagnostics(
+                            None,
+                            "shadow_approach_fallback",
+                        )
+                    effective_plan = ActiveExplorePlan(
+                        True,
+                        plan.reason,
+                        fallback,
+                        plan.candidates,
+                        plan.grid,
+                    )
+                    return effective_plan, diagnostics(
+                        fallback,
+                        "shadow_approach_fallback",
+                    )
                 continue_without_motion = True
                 gated_plan = ActiveExplorePlan(
                     False,
@@ -2518,7 +2878,10 @@ class ArenaActiveSpinSession:
             attempt_record["execution"] = motion_record
             self.diagnostics["active_explore"]["total_distance_m"] = total_distance
             attempts += 1
-            if plan.selected.kind == "obstacle_shadow_frontier":
+            if (
+                plan.selected.kind == "obstacle_shadow_frontier"
+                or attempt_record.get("selection_policy") == "shadow_approach_fallback"
+            ):
                 decision = {
                     "action": "skip",
                     "reason": "shadow_exploration_not_complete",
