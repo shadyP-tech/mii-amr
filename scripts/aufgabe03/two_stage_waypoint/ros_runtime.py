@@ -227,6 +227,12 @@ def arena_active_config_from_args(args):
         active_explore_inflation_radius_m=(
             args.arena_active_explore_inflation_radius_m
         ),
+        active_explore_soft_clearance_radius_m=(
+            args.arena_active_explore_soft_clearance_radius_m
+        ),
+        active_explore_soft_clearance_weight=(
+            args.arena_active_explore_soft_clearance_weight
+        ),
         active_explore_unknown_blocked=args.arena_active_explore_unknown_blocked,
         active_explore_max_path_segments=args.arena_active_explore_max_path_segments,
         active_explore_use_accumulated_map=(

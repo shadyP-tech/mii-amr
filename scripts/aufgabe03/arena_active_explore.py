@@ -32,6 +32,8 @@ class ActiveExploreConfig:
     grid_resolution_m: float = 0.05
     grid_size_m: float = 4.0
     inflation_radius_m: float = 0.28
+    soft_clearance_radius_m: float = 0.35
+    soft_clearance_weight: float = 3.0
     unknown_blocked: bool = True
     max_path_segments: int = 3
     target_nearest_short_wall_range_m: float = 1.65
@@ -398,6 +400,63 @@ def movement_cost(a, b, resolution_m):
     return math.hypot(b[0] - a[0], b[1] - a[1]) * resolution_m
 
 
+def blocked_cells(grid: LocalGrid):
+    cells = []
+    for y, row in enumerate(grid.cells):
+        for x, value in enumerate(row):
+            if value in {CELL_OCCUPIED, CELL_INFLATED}:
+                cells.append((x, y))
+    return tuple(cells)
+
+
+def blocked_distance_field(grid: LocalGrid):
+    blocked = blocked_cells(grid)
+    fallback = grid.resolution_m * max(grid.width, grid.height)
+    rows = []
+    for y in range(grid.height):
+        row = []
+        for x in range(grid.width):
+            cell = (x, y)
+            if not blocked:
+                row.append(fallback)
+                continue
+            row.append(
+                min(
+                    movement_cost(cell, blocked_cell, grid.resolution_m)
+                    for blocked_cell in blocked
+                )
+            )
+        rows.append(tuple(row))
+    return tuple(rows)
+
+
+def clearance_distance_for_cell(clearance_distance_field, cell):
+    x, y = cell
+    return clearance_distance_field[y][x]
+
+
+def soft_clearance_cell_penalty(clearance_m, config: ActiveExploreConfig):
+    radius = float(config.soft_clearance_radius_m)
+    weight = float(config.soft_clearance_weight)
+    if radius <= 0.0 or weight <= 0.0 or clearance_m >= radius:
+        return 0.0
+    normalized = (radius - max(0.0, clearance_m)) / radius
+    return weight * normalized * normalized
+
+
+def path_soft_clearance_penalty(path, clearance_distance_field, config):
+    if not path:
+        return 0.0
+    penalties = [
+        soft_clearance_cell_penalty(
+            clearance_distance_for_cell(clearance_distance_field, cell),
+            config,
+        )
+        for cell in path
+    ]
+    return sum(penalties) / len(penalties)
+
+
 def reconstruct_path(came_from, current):
     path = [current]
     while current in came_from:
@@ -407,7 +466,14 @@ def reconstruct_path(came_from, current):
     return path
 
 
-def astar(grid: LocalGrid, start, goal, unknown_blocked=True):
+def astar(
+    grid: LocalGrid,
+    start,
+    goal,
+    unknown_blocked=True,
+    clearance_distance_field=None,
+    config: ActiveExploreConfig | None = None,
+):
     if not traversable(grid, start, unknown_blocked):
         raise ValueError("start_not_free")
     if not traversable(grid, goal, unknown_blocked):
@@ -422,11 +488,24 @@ def astar(grid: LocalGrid, start, goal, unknown_blocked=True):
         if current == goal:
             return reconstruct_path(came_from, current)
         for neighbor in neighbors_8(grid, current, unknown_blocked):
-            tentative = g_score[current] + movement_cost(
+            base_cost = movement_cost(
                 current,
                 neighbor,
                 grid.resolution_m,
             )
+            clearance_penalty = 0.0
+            if clearance_distance_field is not None and config is not None:
+                clearance_penalty = (
+                    soft_clearance_cell_penalty(
+                        clearance_distance_for_cell(
+                            clearance_distance_field,
+                            neighbor,
+                        ),
+                        config,
+                    )
+                    * grid.resolution_m
+                )
+            tentative = g_score[current] + base_cost + clearance_penalty
             if tentative >= g_score.get(neighbor, math.inf):
                 continue
             came_from[neighbor] = current
@@ -474,12 +553,15 @@ def turn_count_for_path(path):
     return max(0, len(simplified) - 2)
 
 
-def nearest_blocked_distance_m(grid: LocalGrid, path):
-    blocked = []
-    for y, row in enumerate(grid.cells):
-        for x, value in enumerate(row):
-            if value in {CELL_OCCUPIED, CELL_INFLATED}:
-                blocked.append((x, y))
+def nearest_blocked_distance_m(grid: LocalGrid, path, clearance_distance_field=None):
+    if clearance_distance_field is not None:
+        if not path:
+            return grid.resolution_m * max(grid.width, grid.height)
+        return min(
+            clearance_distance_for_cell(clearance_distance_field, path_cell)
+            for path_cell in path
+        )
+    blocked = blocked_cells(grid)
     if not blocked:
         return grid.resolution_m * max(grid.width, grid.height)
     best = math.inf
@@ -851,7 +933,11 @@ def visible_cluster_shadow_cells(grid: LocalGrid, viewpoint_cell, cluster):
     )
 
 
-def generate_obstacle_shadow_frontier_candidates(grid: LocalGrid, config):
+def generate_obstacle_shadow_frontier_candidates(
+    grid: LocalGrid,
+    config,
+    clearance_distance_field=None,
+):
     min_viewpoint_distance_m = 0.15
     max_viewpoint_distance_m = 0.90
     max_clusters = 8
@@ -862,6 +948,7 @@ def generate_obstacle_shadow_frontier_candidates(grid: LocalGrid, config):
         if config.max_candidate_path_m is not None
         else config.max_total_distance_m
     )
+    clearance_distance_field = clearance_distance_field or blocked_distance_field(grid)
 
     clusters = [
         cluster
@@ -916,6 +1003,10 @@ def generate_obstacle_shadow_frontier_candidates(grid: LocalGrid, config):
                 visible_cells = visible_cluster_shadow_cells(grid, cell, cluster)
                 if not visible_cells:
                     continue
+                viewpoint_clearance_m = clearance_distance_for_cell(
+                    clearance_distance_field,
+                    cell,
+                )
                 visible_centroid = cluster_centroid_world(grid, visible_cells)
                 target_x, target_y = cell_to_world(grid, cell)
                 heading = math.atan2(
@@ -943,6 +1034,7 @@ def generate_obstacle_shadow_frontier_candidates(grid: LocalGrid, config):
                         ],
                         "target_cell": [cell[0], cell[1]],
                         "visible_cluster_shadow_count": len(visible_cells),
+                        "viewpoint_clearance_m": viewpoint_clearance_m,
                         "nearest_shadow_distance_m": cluster_distance_m,
                         "straight_line_path_estimate_m": robot_distance_m,
                     },
@@ -951,6 +1043,7 @@ def generate_obstacle_shadow_frontier_candidates(grid: LocalGrid, config):
                     (
                         (
                             -len(visible_cells),
+                            -viewpoint_clearance_m,
                             robot_distance_m,
                             cluster_distance_m,
                             y,
@@ -971,11 +1064,16 @@ def generate_obstacle_shadow_frontier_candidates(grid: LocalGrid, config):
     return tuple(raw)
 
 
-def score_candidate(raw, grid, path, config):
+def score_candidate(raw, grid, path, config, clearance_distance_field=None):
     length = path_length_m(path, grid.resolution_m)
     turns = turn_count_for_path(path)
-    clearance = nearest_blocked_distance_m(grid, path)
+    clearance = nearest_blocked_distance_m(grid, path, clearance_distance_field)
     clearance_component = clamp(clearance / 0.50, 0.0, 1.0)
+    soft_clearance_penalty = (
+        0.0
+        if clearance_distance_field is None
+        else path_soft_clearance_penalty(path, clearance_distance_field, config)
+    )
     path_unknown_ratio = unknown_ratio_near_path(grid, path)
     viewpoint_cell = path[-1]
     (
@@ -990,6 +1088,8 @@ def score_candidate(raw, grid, path, config):
         "path_length": length,
         "turn_count": turns,
         "path_unknown_ratio": path_unknown_ratio,
+        "path_min_clearance_m": clearance,
+        "path_soft_clearance_penalty": soft_clearance_penalty,
         "shadow_information_gain": shadow_information_gain,
         "visible_shadow_unknown_count": visible_shadow_unknown_count,
         "total_shadow_unknown_count": total_shadow_unknown_count,
@@ -1002,11 +1102,17 @@ def score_candidate(raw, grid, path, config):
         - 1.0 * components["path_length"]
         - 0.5 * components["turn_count"]
         - 4.0 * components["path_unknown_ratio"]
+        - 2.0 * components["path_soft_clearance_penalty"]
     )
     return score, components
 
 
-def plan_candidate(raw, grid, config: ActiveExploreConfig):
+def plan_candidate(
+    raw,
+    grid,
+    config: ActiveExploreConfig,
+    clearance_distance_field=None,
+):
     target_cell = world_to_cell(grid, raw.target_x, raw.target_y)
     if not in_bounds(grid, target_cell):
         return ActiveExploreCandidate(
@@ -1034,7 +1140,15 @@ def plan_candidate(raw, grid, config: ActiveExploreConfig):
             metadata=raw.metadata,
         )
     try:
-        path = astar(grid, grid.robot_cell, target_cell, config.unknown_blocked)
+        clearance_distance_field = clearance_distance_field or blocked_distance_field(grid)
+        path = astar(
+            grid,
+            grid.robot_cell,
+            target_cell,
+            config.unknown_blocked,
+            clearance_distance_field=clearance_distance_field,
+            config=config,
+        )
     except ValueError as exc:
         return ActiveExploreCandidate(
             raw.kind,
@@ -1067,7 +1181,13 @@ def plan_candidate(raw, grid, config: ActiveExploreConfig):
                 "path_length_limit_m": max_candidate_path_m,
             },
         )
-    score, components = score_candidate(raw, grid, path, config)
+    score, components = score_candidate(
+        raw,
+        grid,
+        path,
+        config,
+        clearance_distance_field,
+    )
     simplified = simplify_path_cells(path)
     return ActiveExploreCandidate(
         raw.kind,
@@ -1106,12 +1226,22 @@ def plan_active_explore_recovery(
     if reason != "ok":
         return ActiveExplorePlan(False, reason, None, (), None)
     grid = grid or build_local_grid(scan, robot_pose, config)
+    clearance_distance_field = blocked_distance_field(grid)
     frontier_candidates = generate_obstacle_shadow_frontier_candidates(
         grid,
         config,
+        clearance_distance_field=clearance_distance_field,
     )
     raw_candidates = tuple(frontier_candidates) + tuple(raw_candidates)
-    candidates = tuple(plan_candidate(raw, grid, config) for raw in raw_candidates)
+    candidates = tuple(
+        plan_candidate(
+            raw,
+            grid,
+            config,
+            clearance_distance_field=clearance_distance_field,
+        )
+        for raw in raw_candidates
+    )
     accepted = [candidate for candidate in candidates if candidate.accepted]
     if not accepted:
         return ActiveExplorePlan(False, "no_reachable_candidate", None, candidates, grid)

@@ -177,6 +177,8 @@ class ArenaActiveSpinConfig:
     active_explore_grid_resolution_m: float = 0.05
     active_explore_grid_size_m: float = 4.0
     active_explore_inflation_radius_m: float = 0.28
+    active_explore_soft_clearance_radius_m: float = 0.35
+    active_explore_soft_clearance_weight: float = 3.0
     active_explore_unknown_blocked: bool = True
     active_explore_max_path_segments: int = 3
     active_explore_use_accumulated_map: bool = True
@@ -827,6 +829,18 @@ def evaluate_reposition_clearance(scan, config: ArenaActiveSpinConfig):
     return SectorClearance(True, "ok", front, left, right, rear)
 
 
+def min_valid_scan_range(scan):
+    values = [
+        float(value)
+        for value in getattr(scan, "ranges", [])
+        if value is not None
+        and math.isfinite(float(value))
+        and float(value) >= float(scan.range_min)
+        and float(value) <= float(scan.range_max)
+    ]
+    return min(values) if values else None
+
+
 def dynamic_lateral_heading_from_scan(scan, current_yaw_rad):
     left = min_sector_range(scan, [(60.0, 120.0)])
     right = min_sector_range(scan, [(-120.0, -60.0)])
@@ -918,6 +932,8 @@ def active_explore_config_from_arena_config(config: ArenaActiveSpinConfig):
         grid_resolution_m=config.active_explore_grid_resolution_m,
         grid_size_m=config.active_explore_grid_size_m,
         inflation_radius_m=config.active_explore_inflation_radius_m,
+        soft_clearance_radius_m=config.active_explore_soft_clearance_radius_m,
+        soft_clearance_weight=config.active_explore_soft_clearance_weight,
         unknown_blocked=config.active_explore_unknown_blocked,
         max_path_segments=config.active_explore_max_path_segments,
         target_nearest_short_wall_range_m=(
@@ -1166,6 +1182,36 @@ class ArenaActiveSpinSession:
             )
         except Exception as exc:
             self.diagnostics["active_explore"]["path_viz_publish_error"] = str(exc)
+
+    def active_explore_spin_safety(self):
+        self.wait_for_fresh_inputs()
+        clearance = evaluate_clearance(self.latest_scan, self.config)
+        update_safety_minima(self.diagnostics, clearance)
+        full_min_range = min_valid_scan_range(self.latest_scan)
+        required = self.config.min_front_clearance_m
+        if full_min_range is None:
+            ok = False
+            reason = "spin_clearance_missing"
+        elif full_min_range < required:
+            ok = False
+            reason = "spin_full_clearance_below_front_limit"
+        else:
+            ok = True
+            reason = "ok"
+        return {
+            "ok": ok,
+            "reason": reason,
+            "full_min_range_m": full_min_range,
+            "required_min_range_m": required,
+            "sector_clearance": asdict(clearance),
+        }
+
+    def print_active_explore_spin_skip(self, spin_safety):
+        print("\nArena-active post-motion spin skipped")
+        print(f"  reason: {spin_safety['reason']}")
+        print(f"  full min range: {spin_safety['full_min_range_m']}")
+        print(f"  required min range: {spin_safety['required_min_range_m']}")
+        print("  expected action: replan toward active-explore frontier without rotating")
 
     def odom_callback(self, msg):
         self.latest_odom_pose = odom_pose_from_msg(msg)
@@ -2151,6 +2197,16 @@ class ArenaActiveSpinSession:
             attempt_record["execution"] = motion_record
             self.diagnostics["active_explore"]["total_distance_m"] = total_distance
             attempts += 1
+            spin_safety = self.active_explore_spin_safety()
+            attempt_record["post_motion_spin_safety"] = spin_safety
+            if not spin_safety["ok"]:
+                stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
+                attempt_record["post_recovery_spin_skipped"] = True
+                attempt_record["post_recovery_spin_skip_reason"] = spin_safety["reason"]
+                self.print_active_explore_spin_skip(spin_safety)
+                continue
+
+            attempt_record["post_recovery_spin_skipped"] = False
             self.run_spin_attempt(
                 publisher,
                 attempt_index=len(self.diagnostics["spin_attempts"]),

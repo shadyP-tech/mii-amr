@@ -97,6 +97,16 @@ def temporary_map_config_from_args(args):
         grid_resolution_m=args.grid_resolution_m,
         grid_size_m=args.grid_size_m,
         inflation_radius_m=args.inflation_radius_m,
+        soft_clearance_radius_m=getattr(
+            args,
+            "soft_clearance_radius_m",
+            defaults.soft_clearance_radius_m,
+        ),
+        soft_clearance_weight=getattr(
+            args,
+            "soft_clearance_weight",
+            defaults.soft_clearance_weight,
+        ),
         unknown_blocked=getattr(args, "unknown_blocked", defaults.unknown_blocked),
     )
 
@@ -619,6 +629,16 @@ def build_arg_parser():
         default=defaults.inflation_radius_m,
         type=float,
     )
+    parser.add_argument(
+        "--soft-clearance-radius-m",
+        default=defaults.soft_clearance_radius_m,
+        type=float,
+    )
+    parser.add_argument(
+        "--soft-clearance-weight",
+        default=defaults.soft_clearance_weight,
+        type=float,
+    )
     return parser
 
 
@@ -635,6 +655,10 @@ def validate_args(parser, args):
     ]:
         if getattr(args, field) <= 0.0:
             parser.error(f"--{field.replace('_', '-')} must be greater than zero")
+    if args.soft_clearance_radius_m < 0.0:
+        parser.error("--soft-clearance-radius-m must be >= 0")
+    if args.soft_clearance_weight < 0.0:
+        parser.error("--soft-clearance-weight must be >= 0")
     if args.max_candidate_path_m is not None and args.max_candidate_path_m <= 0.0:
         parser.error("--max-candidate-path-m must be greater than zero")
     if args.map_max_samples < 1:

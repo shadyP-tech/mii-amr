@@ -168,6 +168,11 @@ def print_dry_run(args, waypoints, staging_goal, follower_command):
         f"{args.arena_active_explore_inflation_radius_m:.3f} m"
     )
     print(
+        "  active-explore soft clearance: "
+        f"radius={args.arena_active_explore_soft_clearance_radius_m:.3f} m, "
+        f"weight={args.arena_active_explore_soft_clearance_weight:.3f}"
+    )
+    print(
         "  active-explore unknown blocked: "
         f"{'yes' if args.arena_active_explore_unknown_blocked else 'no'}"
     )
@@ -629,6 +634,25 @@ def parse_args(argv):
         type=float,
     )
     parser.add_argument(
+        "--arena-active-explore-soft-clearance-radius-m",
+        default=0.35,
+        type=float,
+        help=(
+            "Soft obstacle-clearance radius used as an A* cost. Unlike "
+            "inflation, this does not block cells; it biases paths toward "
+            "the middle of passable gaps."
+        ),
+    )
+    parser.add_argument(
+        "--arena-active-explore-soft-clearance-weight",
+        default=3.0,
+        type=float,
+        help=(
+            "Weight for the active-explore soft obstacle-clearance A* cost. "
+            "Set to 0 to disable the soft preference."
+        ),
+    )
+    parser.add_argument(
         "--arena-active-explore-unknown-blocked",
         dest="arena_active_explore_unknown_blocked",
         action="store_true",
@@ -933,6 +957,10 @@ def validate_args(parser, args):
         parser.error("--arena-active-explore-max-path-segments must be >= 1")
     if args.arena_active_explore_map_max_samples < 1:
         parser.error("--arena-active-explore-map-max-samples must be >= 1")
+    if args.arena_active_explore_soft_clearance_radius_m < 0.0:
+        parser.error("--arena-active-explore-soft-clearance-radius-m must be >= 0")
+    if args.arena_active_explore_soft_clearance_weight < 0.0:
+        parser.error("--arena-active-explore-soft-clearance-weight must be >= 0")
     if (
         args.arena_active_explore_curve_goal_tolerance_m
         > args.arena_active_explore_curve_lookahead_m
