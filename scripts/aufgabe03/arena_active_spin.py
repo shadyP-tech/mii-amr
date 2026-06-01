@@ -30,6 +30,7 @@ from arena_active_explore import (
     CELL_OCCUPIED,
     CELL_UNKNOWN,
     build_local_grid_from_scan_samples,
+    build_observed_local_grid_from_scan_samples,
     geometry_is_recoverable,
     in_bounds,
     plan_active_explore_recovery,
@@ -55,6 +56,7 @@ ACTIVE_EXPLORE_FRONTIER_UNREACHABLE_REASONS = {
     "no_connected_path",
     "path_too_long",
 }
+ACTIVE_EXPLORE_SHADOW_APPROACH_MIN_PATH_CLEARANCE_M = 0.14
 LOCALIZER_FILTER_WALL_MARGIN_CELLS = 2
 LOCALIZER_FILTER_WALL_EXPAND_CELLS = 1
 LOCALIZER_FILTER_MIN_WALL_LENGTH_M = 0.45
@@ -296,6 +298,25 @@ def candidate_is_accepted_open_corridor(candidate):
         candidate is not None
         and candidate.accepted
         and candidate.kind == "open_corridor"
+    )
+
+
+def candidate_path_min_clearance_m(candidate):
+    if candidate is None:
+        return None
+    value = (candidate.score_components or {}).get("path_min_clearance_m")
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def candidate_has_safe_shadow_approach_clearance(candidate):
+    clearance = candidate_path_min_clearance_m(candidate)
+    return (
+        clearance is not None
+        and clearance >= ACTIVE_EXPLORE_SHADOW_APPROACH_MIN_PATH_CLEARANCE_M
     )
 
 
@@ -1237,6 +1258,7 @@ def initial_diagnostics(config: ArenaActiveSpinConfig):
             "shadow_explore_complete": False,
             "shadow_frontier_status": None,
             "localization_candidate_policy": None,
+            "shadow_approach_fallback_policy": None,
             "localizer_filter": {
                 "enabled": False,
                 "reason": "not_run",
@@ -1389,15 +1411,20 @@ class ArenaActiveSpinSession:
         )
         self.publish_temporary_map_if_ready()
 
-    def update_temporary_map_diagnostics(self, grid):
+    def update_temporary_map_diagnostics(self, planning_grid, display_grid=None):
+        display_counts = None
+        if display_grid is not None:
+            display_counts = display_grid.to_dict()
         self.diagnostics["active_explore"]["temporary_map"] = {
             "frame": "odom",
             "source": "accumulated_spin_and_recovery_scans",
             "scan_samples_stored": len(self.explore_samples),
-            "grid": grid.to_dict(),
+            "display_grid": display_counts,
+            "planning_grid": planning_grid.to_dict(),
+            "grid": planning_grid.to_dict(),
         }
 
-    def publish_temporary_map_if_ready(self, force=False, grid=None):
+    def publish_temporary_map_if_ready(self, force=False, grid=None, display_grid=None):
         if self.temporary_map_callback is None:
             return
         if (
@@ -1415,16 +1442,23 @@ class ArenaActiveSpinSession:
             and now - self.last_temporary_map_publish_sec < period_sec
         ):
             return
+        active_config = active_explore_config_from_arena_config(self.config)
         if grid is None:
             grid = build_local_grid_from_scan_samples(
                 self.explore_samples,
                 self.latest_odom_pose,
-                active_explore_config_from_arena_config(self.config),
+                active_config,
             )
-        self.update_temporary_map_diagnostics(grid)
+        if display_grid is None:
+            display_grid = build_observed_local_grid_from_scan_samples(
+                self.explore_samples,
+                self.latest_odom_pose,
+                active_config,
+            )
+        self.update_temporary_map_diagnostics(grid, display_grid=display_grid)
         self.last_temporary_map_publish_sec = now
         try:
-            self.temporary_map_callback(grid)
+            self.temporary_map_callback(display_grid, grid)
         except Exception as exc:
             self.diagnostics["active_explore"]["temporary_map"]["publish_error"] = str(exc)
 
@@ -1947,8 +1981,17 @@ class ArenaActiveSpinSession:
                 self.latest_odom_pose,
                 active_config,
             )
-            self.update_temporary_map_diagnostics(grid)
-            self.publish_temporary_map_if_ready(force=True, grid=grid)
+            display_grid = build_observed_local_grid_from_scan_samples(
+                self.explore_samples,
+                self.latest_odom_pose,
+                active_config,
+            )
+            self.update_temporary_map_diagnostics(grid, display_grid=display_grid)
+            self.publish_temporary_map_if_ready(
+                force=True,
+                grid=grid,
+                display_grid=display_grid,
+            )
         return plan_active_explore_recovery(
             result,
             self.latest_scan,
@@ -2150,7 +2193,34 @@ class ArenaActiveSpinSession:
             for candidate in plan.candidates
             if candidate_is_accepted_open_corridor(candidate)
         ]
-        return self.best_scored_candidate(candidates)
+        safe_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate_has_safe_shadow_approach_clearance(candidate)
+        ]
+        policy = {
+            "candidate_count": len(candidates),
+            "safe_candidate_count": len(safe_candidates),
+            "min_path_clearance_m": (
+                ACTIVE_EXPLORE_SHADOW_APPROACH_MIN_PATH_CLEARANCE_M
+            ),
+            "selected_kind": None,
+            "selected_sector_center_deg": None,
+            "reason": "",
+        }
+        if not candidates:
+            policy["reason"] = "no_open_corridor_candidate"
+            return None, policy
+        if not safe_candidates:
+            policy["reason"] = "no_safe_open_corridor_candidate"
+            return None, policy
+        selected = self.best_scored_candidate(safe_candidates)
+        policy["reason"] = "selected"
+        policy["selected_kind"] = selected.kind
+        policy["selected_sector_center_deg"] = (selected.metadata or {}).get(
+            "sector_center_deg"
+        )
+        return selected, policy
 
     def localization_pose_candidate(self, plan):
         candidates = [
@@ -2343,6 +2413,7 @@ class ArenaActiveSpinSession:
         default_selected = plan.selected
         shadow_status = self.update_shadow_explore_phase_from_plan(plan)
         localization_policy = None
+        shadow_approach_policy = None
         persistent_match = None
         abandon_reason = None
         continue_without_motion = False
@@ -2364,6 +2435,7 @@ class ArenaActiveSpinSession:
                 "persistent_frontier_match": persistent_match,
                 "persistent_frontier_abandon_reason": abandon_reason,
                 "localization_candidate_policy": localization_policy,
+                "shadow_approach_fallback_policy": shadow_approach_policy,
                 "continue_without_motion": continue_without_motion,
             }
 
@@ -2380,11 +2452,21 @@ class ArenaActiveSpinSession:
                     abandon_reason = "no_moving_shadow_frontier"
                     self.clear_active_explore_frontier_goal(abandon_reason)
                 if shadow_status["shadow_frontier_state"] == "unreachable":
-                    fallback = self.shadow_approach_fallback_candidate(plan)
+                    fallback, shadow_approach_policy = (
+                        self.shadow_approach_fallback_candidate(plan)
+                    )
+                    self.diagnostics["active_explore"][
+                        "shadow_approach_fallback_policy"
+                    ] = shadow_approach_policy
                     if fallback is None:
+                        reason = (
+                            "shadow_frontier_unreachable_no_safe_approach_candidate"
+                            if shadow_approach_policy["candidate_count"] > 0
+                            else "shadow_frontier_unreachable_no_approach_candidate"
+                        )
                         gated_plan = ActiveExplorePlan(
                             False,
-                            "shadow_frontier_unreachable_no_approach_candidate",
+                            reason,
                             None,
                             plan.candidates,
                             plan.grid,

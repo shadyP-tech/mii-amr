@@ -17,6 +17,7 @@ from .model import (
     DEFAULT_ARENA_ACTIVE_TEMPORARY_MAP_FRAME,
     DEFAULT_ARENA_ACTIVE_TEMPORARY_MAP_PUBLISH_PERIOD_SEC,
     DEFAULT_ARENA_ACTIVE_TEMPORARY_MAP_TOPIC,
+    DEFAULT_ARENA_ACTIVE_TEMPORARY_PLANNING_MAP_TOPIC,
     DEFAULT_ARENA_ACTIVE_VALIDATION_TIMEOUT_SEC,
     DEFAULT_ARRIVAL_TOLERANCE_M,
     DEFAULT_ARRIVAL_YAW_TOLERANCE_DEG,
@@ -197,7 +198,14 @@ def print_dry_run(args, waypoints, staging_goal, follower_command):
         f"{'enabled' if args.arena_active_publish_temporary_map else 'disabled'}"
     )
     if args.arena_active_publish_temporary_map:
-        print(f"  active-explore temporary map topic: {args.arena_active_temporary_map_topic}")
+        print(
+            "  active-explore temporary observed map topic: "
+            f"{args.arena_active_temporary_map_topic}"
+        )
+        print(
+            "  active-explore temporary planning map topic: "
+            f"{args.arena_active_temporary_planning_map_topic}"
+        )
         print(f"  active-explore temporary map frame: {args.arena_active_temporary_map_frame}")
     print(
         "  active-explore path RViz: "
@@ -720,19 +728,23 @@ def parse_args(argv):
         action="store_true",
         default=True,
         help=(
-            "Publish the active-explore temporary odom-frame map as a "
-            "nav_msgs/OccupancyGrid for RViz."
+            "Publish the active-explore observed and planning temporary "
+            "odom-frame maps as nav_msgs/OccupancyGrid topics for RViz."
         ),
     )
     parser.add_argument(
         "--no-arena-active-temporary-map-viz",
         dest="arena_active_publish_temporary_map",
         action="store_false",
-        help="Do not publish the active-explore temporary map RViz topic.",
+        help="Do not publish the active-explore temporary map RViz topics.",
     )
     parser.add_argument(
         "--arena-active-temporary-map-topic",
         default=DEFAULT_ARENA_ACTIVE_TEMPORARY_MAP_TOPIC,
+    )
+    parser.add_argument(
+        "--arena-active-temporary-planning-map-topic",
+        default=DEFAULT_ARENA_ACTIVE_TEMPORARY_PLANNING_MAP_TOPIC,
     )
     parser.add_argument(
         "--arena-active-temporary-map-frame",
@@ -975,6 +987,16 @@ def validate_args(parser, args):
         parser.error("--arena-active-explore-curve-max-angular-rad-s must be <= 0.80")
     if not args.arena_active_temporary_map_topic:
         parser.error("--arena-active-temporary-map-topic must not be empty")
+    if not args.arena_active_temporary_planning_map_topic:
+        parser.error("--arena-active-temporary-planning-map-topic must not be empty")
+    if (
+        args.arena_active_temporary_planning_map_topic
+        == args.arena_active_temporary_map_topic
+    ):
+        parser.error(
+            "--arena-active-temporary-planning-map-topic must differ from "
+            "--arena-active-temporary-map-topic"
+        )
     if not args.arena_active_temporary_map_frame:
         parser.error("--arena-active-temporary-map-frame must not be empty")
     if not args.arena_active_explore_path_topic:

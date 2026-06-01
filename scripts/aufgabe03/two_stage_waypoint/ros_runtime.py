@@ -545,6 +545,7 @@ class TwoStageCoordinator(Node):
         self.active_goal_handle = None
         self.selected_base_frame = ""
         self.arena_temporary_map_pub = None
+        self.arena_temporary_planning_map_pub = None
         self.arena_explore_path_pub = None
         self.arena_explore_marker_pub = None
 
@@ -563,6 +564,11 @@ class TwoStageCoordinator(Node):
             self.arena_temporary_map_pub = self.create_publisher(
                 OccupancyGrid,
                 args.arena_active_temporary_map_topic,
+                rviz_occupancy_grid_qos_profile(),
+            )
+            self.arena_temporary_planning_map_pub = self.create_publisher(
+                OccupancyGrid,
+                args.arena_active_temporary_planning_map_topic,
                 rviz_occupancy_grid_qos_profile(),
             )
         if args.arena_active_publish_explore_path:
@@ -701,7 +707,10 @@ class TwoStageCoordinator(Node):
             qos_profile_sensor_data,
             temporary_map_callback=(
                 self.publish_arena_active_temporary_map
-                if self.arena_temporary_map_pub is not None
+                if (
+                    self.arena_temporary_map_pub is not None
+                    or self.arena_temporary_planning_map_pub is not None
+                )
                 else None
             ),
             active_explore_plan_callback=(
@@ -711,13 +720,22 @@ class TwoStageCoordinator(Node):
             ),
         )
 
-    def publish_arena_active_temporary_map(self, grid):
-        msg = build_temporary_map_message(
-            grid,
-            self.args.arena_active_temporary_map_frame,
-            self.get_clock().now().to_msg(),
-        )
-        self.arena_temporary_map_pub.publish(msg)
+    def publish_arena_active_temporary_map(self, display_grid, planning_grid=None):
+        stamp = self.get_clock().now().to_msg()
+        if self.arena_temporary_map_pub is not None:
+            msg = build_temporary_map_message(
+                display_grid,
+                self.args.arena_active_temporary_map_frame,
+                stamp,
+            )
+            self.arena_temporary_map_pub.publish(msg)
+        if self.arena_temporary_planning_map_pub is not None:
+            msg = build_temporary_map_message(
+                planning_grid if planning_grid is not None else display_grid,
+                self.args.arena_active_temporary_map_frame,
+                stamp,
+            )
+            self.arena_temporary_planning_map_pub.publish(msg)
 
     def publish_arena_active_explore_plan(self, plan, current_pose, move_limit_m):
         stamp = self.get_clock().now().to_msg()

@@ -303,7 +303,14 @@ def mark_scan_on_grid(mutable, grid, scan, scan_pose, config, preserve_occupied=
     return occupied_cells
 
 
-def finalize_grid(robot_pose, config, mutable, robot_cell, occupied_cells):
+def finalize_grid(
+    robot_pose,
+    config,
+    mutable,
+    robot_cell,
+    occupied_cells,
+    inflation_radius_m=None,
+):
     placeholder = LocalGrid(
         float(robot_pose.x) - config.grid_size_m / 2.0,
         float(robot_pose.y) - config.grid_size_m / 2.0,
@@ -313,15 +320,18 @@ def finalize_grid(robot_pose, config, mutable, robot_cell, occupied_cells):
         tuple(tuple(row) for row in mutable),
         robot_cell,
     )
-    inflated = inflated_cells_for(
-        placeholder,
-        occupied_cells,
-        config.inflation_radius_m,
-    )
-    for cell in inflated:
-        x, y = cell
-        if mutable[y][x] != CELL_OCCUPIED:
-            mutable[y][x] = CELL_INFLATED
+    if inflation_radius_m is None:
+        inflation_radius_m = config.inflation_radius_m
+    if inflation_radius_m > 0.0:
+        inflated = inflated_cells_for(
+            placeholder,
+            occupied_cells,
+            inflation_radius_m,
+        )
+        for cell in inflated:
+            x, y = cell
+            if mutable[y][x] != CELL_OCCUPIED:
+                mutable[y][x] = CELL_INFLATED
     set_cell(mutable, robot_cell, CELL_FREE)
     return LocalGrid(
         placeholder.origin_x,
@@ -334,7 +344,12 @@ def finalize_grid(robot_pose, config, mutable, robot_cell, occupied_cells):
     )
 
 
-def build_local_grid(scan, robot_pose, config: ActiveExploreConfig):
+def build_local_grid(
+    scan,
+    robot_pose,
+    config: ActiveExploreConfig,
+    inflation_radius_m=None,
+):
     grid, mutable, robot_cell = empty_local_grid(robot_pose, config)
     occupied_cells = mark_scan_on_grid(
         mutable,
@@ -344,10 +359,22 @@ def build_local_grid(scan, robot_pose, config: ActiveExploreConfig):
         config,
         preserve_occupied=False,
     )
-    return finalize_grid(robot_pose, config, mutable, robot_cell, occupied_cells)
+    return finalize_grid(
+        robot_pose,
+        config,
+        mutable,
+        robot_cell,
+        occupied_cells,
+        inflation_radius_m=inflation_radius_m,
+    )
 
 
-def build_local_grid_from_scan_samples(scan_samples, robot_pose, config: ActiveExploreConfig):
+def build_local_grid_from_scan_samples(
+    scan_samples,
+    robot_pose,
+    config: ActiveExploreConfig,
+    inflation_radius_m=None,
+):
     grid, mutable, robot_cell = empty_local_grid(robot_pose, config)
     occupied_cells = set()
     for sample in scan_samples:
@@ -364,7 +391,31 @@ def build_local_grid_from_scan_samples(scan_samples, robot_pose, config: ActiveE
                 preserve_occupied=True,
             )
         )
-    return finalize_grid(robot_pose, config, mutable, robot_cell, occupied_cells)
+    return finalize_grid(
+        robot_pose,
+        config,
+        mutable,
+        robot_cell,
+        occupied_cells,
+        inflation_radius_m=inflation_radius_m,
+    )
+
+
+def build_observed_local_grid(scan, robot_pose, config: ActiveExploreConfig):
+    return build_local_grid(scan, robot_pose, config, inflation_radius_m=0.0)
+
+
+def build_observed_local_grid_from_scan_samples(
+    scan_samples,
+    robot_pose,
+    config: ActiveExploreConfig,
+):
+    return build_local_grid_from_scan_samples(
+        scan_samples,
+        robot_pose,
+        config,
+        inflation_radius_m=0.0,
+    )
 
 
 def traversable(grid: LocalGrid, cell, unknown_blocked=True):

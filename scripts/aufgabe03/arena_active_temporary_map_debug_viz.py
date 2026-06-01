@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Publish the arena-active temporary exploration map for RViz.
+Publish the arena-active temporary exploration maps for RViz.
 
 This node is read-only: it subscribes to /scan and /odom, rebuilds the same
-odom-frame LocalGrid used by active-explore localization recovery, and publishes
-it as a nav_msgs/OccupancyGrid. It does not publish /cmd_vel or interact with
-Nav2.
+odom-frame LocalGrid used by active-explore localization recovery, publishes an
+observed OccupancyGrid for free-space inspection, and publishes the inflated
+planning OccupancyGrid on a second topic. It does not publish /cmd_vel or
+interact with Nav2.
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ from arena_active_explore import (
     ActiveExplorePlan,
     RawCandidate,
     build_local_grid_from_scan_samples,
+    build_observed_local_grid_from_scan_samples,
     grid_cell_counts,
     min_scan_range_in_sector,
     normalize_angle_rad,
@@ -51,6 +53,7 @@ from arena_active_explore import (
     point_from_heading,
 )
 from arena_active_spin import (
+    ArenaActiveSpinConfig,
     active_explore_curve_path,
     odom_pose_from_msg,
     scan_sample_from_msg,
@@ -62,14 +65,21 @@ from two_stage_waypoint.model import (
     DEFAULT_ARENA_ACTIVE_TEMPORARY_MAP_FRAME,
     DEFAULT_ARENA_ACTIVE_TEMPORARY_MAP_PUBLISH_PERIOD_SEC,
     DEFAULT_ARENA_ACTIVE_TEMPORARY_MAP_TOPIC,
+    DEFAULT_ARENA_ACTIVE_TEMPORARY_PLANNING_MAP_TOPIC,
 )
 
 
 DEFAULT_SCAN_TOPIC = "/scan"
 DEFAULT_ODOM_TOPIC = "/odom"
-DEFAULT_MAX_ODOM_SCAN_AGE_SEC = 0.20
-DEFAULT_MAP_MAX_SAMPLES = 240
 DEFAULT_STATUS_PERIOD_SEC = 2.0
+
+
+def arena_active_default(field_name):
+    return ArenaActiveSpinConfig.__dataclass_fields__[field_name].default
+
+
+DEFAULT_MAX_ODOM_SCAN_AGE_SEC = arena_active_default("max_odom_scan_age_sec")
+DEFAULT_MAP_MAX_SAMPLES = arena_active_default("active_explore_map_max_samples")
 
 
 @dataclass(frozen=True)
@@ -89,25 +99,64 @@ COLOR_TEXT = Rgba(0.95, 0.95, 0.95, 1.0)
 
 
 def temporary_map_config_from_args(args):
-    defaults = ActiveExploreConfig()
     return ActiveExploreConfig(
-        max_single_move_m=getattr(args, "max_single_move_m", defaults.max_single_move_m),
-        max_total_distance_m=getattr(args, "max_total_distance_m", defaults.max_total_distance_m),
-        max_candidate_path_m=getattr(args, "max_candidate_path_m", defaults.max_candidate_path_m),
+        max_attempts=arena_active_default("active_explore_max_attempts"),
+        max_single_move_m=getattr(
+            args,
+            "max_single_move_m",
+            arena_active_default("active_explore_max_single_move_m"),
+        ),
+        max_total_distance_m=getattr(
+            args,
+            "max_total_distance_m",
+            arena_active_default("active_explore_max_total_distance_m"),
+        ),
+        max_candidate_path_m=getattr(
+            args,
+            "max_candidate_path_m",
+            arena_active_default("active_explore_max_candidate_path_m"),
+        ),
         grid_resolution_m=args.grid_resolution_m,
         grid_size_m=args.grid_size_m,
         inflation_radius_m=args.inflation_radius_m,
         soft_clearance_radius_m=getattr(
             args,
             "soft_clearance_radius_m",
-            defaults.soft_clearance_radius_m,
+            arena_active_default("active_explore_soft_clearance_radius_m"),
         ),
         soft_clearance_weight=getattr(
             args,
             "soft_clearance_weight",
-            defaults.soft_clearance_weight,
+            arena_active_default("active_explore_soft_clearance_weight"),
         ),
-        unknown_blocked=getattr(args, "unknown_blocked", defaults.unknown_blocked),
+        unknown_blocked=getattr(
+            args,
+            "unknown_blocked",
+            arena_active_default("active_explore_unknown_blocked"),
+        ),
+        max_path_segments=arena_active_default("active_explore_max_path_segments"),
+        target_nearest_short_wall_range_m=arena_active_default(
+            "center_reposition_target_nearest_short_wall_range_m"
+        ),
+        center_min_step_m=arena_active_default("center_reposition_min_step_m"),
+        lateral_offset_threshold_m=arena_active_default(
+            "center_reposition_lateral_offset_threshold_m"
+        ),
+        lateral_target_offset_m=arena_active_default(
+            "center_reposition_lateral_target_offset_m"
+        ),
+        heater_approach_target_range_m=arena_active_default(
+            "center_reposition_heater_approach_target_range_m"
+        ),
+        heater_approach_min_selected_score=arena_active_default(
+            "center_reposition_heater_approach_min_selected_score"
+        ),
+        heater_approach_max_opposite_score=arena_active_default(
+            "center_reposition_heater_approach_max_opposite_score"
+        ),
+        heater_approach_min_delta=arena_active_default(
+            "center_reposition_heater_approach_min_delta"
+        ),
     )
 
 
@@ -118,12 +167,25 @@ def trim_scan_samples(samples, max_samples):
     return samples[-max_samples:]
 
 
-def build_debug_grid(scan_samples, latest_odom_pose, config):
+def require_debug_grid_inputs(scan_samples, latest_odom_pose):
     if not scan_samples:
         raise RuntimeError("No scan samples are available for the temporary map")
     if latest_odom_pose is None:
         raise RuntimeError("No odom pose is available for the temporary map")
+
+
+def build_debug_grid(scan_samples, latest_odom_pose, config):
+    require_debug_grid_inputs(scan_samples, latest_odom_pose)
     return build_local_grid_from_scan_samples(scan_samples, latest_odom_pose, config)
+
+
+def build_debug_display_grid(scan_samples, latest_odom_pose, config):
+    require_debug_grid_inputs(scan_samples, latest_odom_pose)
+    return build_observed_local_grid_from_scan_samples(
+        scan_samples,
+        latest_odom_pose,
+        config,
+    )
 
 
 def open_corridor_raw_candidates(scan, robot_pose, config):
@@ -425,6 +487,11 @@ class ArenaActiveTemporaryMapDebugViz(Node):
             args.map_topic,
             rviz_occupancy_grid_qos_profile(),
         )
+        self.planning_map_pub = self.create_publisher(
+            OccupancyGrid,
+            args.planning_map_topic,
+            rviz_occupancy_grid_qos_profile(),
+        )
         self.path_pub = None
         self.marker_pub = None
         if args.publish_path_viz:
@@ -458,7 +525,9 @@ class ArenaActiveTemporaryMapDebugViz(Node):
         self.timer = self.create_timer(args.publish_period_sec, self.timer_callback)
         self.get_logger().info(
             "Publishing arena-active temporary map debug visualization: "
-            f"map={args.map_topic}, frame={args.map_frame}, "
+            f"observed_map={args.map_topic}, "
+            f"planning_map={args.planning_map_topic}, "
+            f"frame={args.map_frame}, "
             f"scan={args.scan_topic}, odom={args.odom_topic}, "
             f"path={args.path_topic if args.publish_path_viz else 'disabled'}"
         )
@@ -489,15 +558,26 @@ class ArenaActiveTemporaryMapDebugViz(Node):
             self.log_status_if_due("waiting_for_scan_and_odom")
             return
         try:
-            grid = build_debug_grid(
+            planning_grid = build_debug_grid(
                 self.scan_samples,
                 self.latest_odom_pose,
                 self.config,
             )
+            display_grid = build_debug_display_grid(
+                self.scan_samples,
+                self.latest_odom_pose,
+                self.config,
+            )
+            stamp = self.get_clock().now().to_msg()
             msg = build_occupancy_grid_message(
-                grid,
+                display_grid,
                 self.args.map_frame,
-                self.get_clock().now().to_msg(),
+                stamp,
+            )
+            planning_msg = build_occupancy_grid_message(
+                planning_grid,
+                self.args.map_frame,
+                stamp,
             )
             plan = None
             path_msg = None
@@ -506,10 +586,9 @@ class ArenaActiveTemporaryMapDebugViz(Node):
                 plan = build_debug_active_explore_plan(
                     self.latest_scan,
                     self.latest_odom_pose,
-                    grid,
+                    planning_grid,
                     self.config,
                 )
-                stamp = self.get_clock().now().to_msg()
                 points = ()
                 if plan.selected is not None:
                     points = executable_path_points(
@@ -529,11 +608,13 @@ class ArenaActiveTemporaryMapDebugViz(Node):
             self.get_logger().warn(f"Could not build temporary map: {exc}")
             return
         self.map_pub.publish(msg)
+        self.planning_map_pub.publish(planning_msg)
         if path_msg is not None and self.path_pub is not None:
             self.path_pub.publish(path_msg)
         if marker_msg is not None and self.marker_pub is not None:
             self.marker_pub.publish(marker_msg)
-        counts = grid_cell_counts(grid)
+        display_counts = grid_cell_counts(display_grid)
+        planning_counts = grid_cell_counts(planning_grid)
         selected_text = ""
         if plan is not None:
             selected_text = (
@@ -543,10 +624,13 @@ class ArenaActiveTemporaryMapDebugViz(Node):
         self.log_status_if_due(
             "published "
             f"samples={len(self.scan_samples)} "
-            f"free={counts['free']} "
-            f"occupied={counts['occupied']} "
-            f"inflated={counts['inflated']} "
-            f"unknown={counts['unknown']} "
+            f"observed_free={display_counts['free']} "
+            f"observed_occupied={display_counts['occupied']} "
+            f"observed_unknown={display_counts['unknown']} "
+            f"planning_free={planning_counts['free']} "
+            f"planning_occupied={planning_counts['occupied']} "
+            f"planning_inflated={planning_counts['inflated']} "
+            f"planning_unknown={planning_counts['unknown']} "
             f"rejected_scans={self.rejected_scan_count}"
             f"{selected_text}"
         )
@@ -560,16 +644,19 @@ class ArenaActiveTemporaryMapDebugViz(Node):
 
 
 def build_arg_parser():
-    defaults = ActiveExploreConfig()
     parser = argparse.ArgumentParser(
         description=(
-            "Publish a read-only RViz OccupancyGrid for the arena-active "
-            "temporary odom-frame map."
+            "Publish read-only RViz OccupancyGrids for the observed and "
+            "planning arena-active temporary odom-frame maps."
         ),
     )
     parser.add_argument("--scan-topic", default=DEFAULT_SCAN_TOPIC)
     parser.add_argument("--odom-topic", default=DEFAULT_ODOM_TOPIC)
     parser.add_argument("--map-topic", default=DEFAULT_ARENA_ACTIVE_TEMPORARY_MAP_TOPIC)
+    parser.add_argument(
+        "--planning-map-topic",
+        default=DEFAULT_ARENA_ACTIVE_TEMPORARY_PLANNING_MAP_TOPIC,
+    )
     parser.add_argument("--map-frame", default=DEFAULT_ARENA_ACTIVE_TEMPORARY_MAP_FRAME)
     parser.add_argument("--path-topic", default=DEFAULT_ARENA_ACTIVE_EXPLORE_PATH_TOPIC)
     parser.add_argument(
@@ -580,7 +667,10 @@ def build_arg_parser():
         "--no-path-viz",
         dest="publish_path_viz",
         action="store_false",
-        help="Publish only the temporary map; skip the preview path and candidate markers.",
+        help=(
+            "Publish only the temporary maps; skip the preview path and "
+            "candidate markers."
+        ),
     )
     parser.set_defaults(publish_path_viz=True)
     parser.add_argument(
@@ -597,13 +687,13 @@ def build_arg_parser():
     parser.add_argument("--map-max-samples", default=DEFAULT_MAP_MAX_SAMPLES, type=int)
     parser.add_argument(
         "--max-single-move-m",
-        default=defaults.max_single_move_m,
+        default=arena_active_default("active_explore_max_single_move_m"),
         type=float,
         help="Maximum executable active-explore curve path length shown in RViz.",
     )
     parser.add_argument(
         "--max-total-distance-m",
-        default=defaults.max_total_distance_m,
+        default=arena_active_default("active_explore_max_total_distance_m"),
         type=float,
     )
     parser.add_argument("--max-candidate-path-m", type=float)
@@ -611,7 +701,7 @@ def build_arg_parser():
         "--unknown-blocked",
         dest="unknown_blocked",
         action="store_true",
-        default=defaults.unknown_blocked,
+        default=arena_active_default("active_explore_unknown_blocked"),
     )
     parser.add_argument(
         "--allow-unknown",
@@ -620,23 +710,27 @@ def build_arg_parser():
     )
     parser.add_argument(
         "--grid-resolution-m",
-        default=defaults.grid_resolution_m,
+        default=arena_active_default("active_explore_grid_resolution_m"),
         type=float,
     )
-    parser.add_argument("--grid-size-m", default=defaults.grid_size_m, type=float)
+    parser.add_argument(
+        "--grid-size-m",
+        default=arena_active_default("active_explore_grid_size_m"),
+        type=float,
+    )
     parser.add_argument(
         "--inflation-radius-m",
-        default=defaults.inflation_radius_m,
+        default=arena_active_default("active_explore_inflation_radius_m"),
         type=float,
     )
     parser.add_argument(
         "--soft-clearance-radius-m",
-        default=defaults.soft_clearance_radius_m,
+        default=arena_active_default("active_explore_soft_clearance_radius_m"),
         type=float,
     )
     parser.add_argument(
         "--soft-clearance-weight",
-        default=defaults.soft_clearance_weight,
+        default=arena_active_default("active_explore_soft_clearance_weight"),
         type=float,
     )
     return parser
@@ -663,6 +757,14 @@ def validate_args(parser, args):
         parser.error("--max-candidate-path-m must be greater than zero")
     if args.map_max_samples < 1:
         parser.error("--map-max-samples must be >= 1")
+    if not args.map_topic:
+        parser.error("--map-topic must not be empty")
+    if not args.planning_map_topic:
+        parser.error("--planning-map-topic must not be empty")
+    if args.planning_map_topic == args.map_topic:
+        parser.error("--planning-map-topic must differ from --map-topic")
+    if not args.map_frame:
+        parser.error("--map-frame must not be empty")
     for field in [
         "scan_topic",
         "odom_topic",
