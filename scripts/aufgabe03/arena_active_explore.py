@@ -19,6 +19,9 @@ CELL_FREE = 0
 CELL_OCCUPIED = 1
 CELL_INFLATED = 2
 
+FAILURE_POSE_NOT_UNIQUE = "pose_not_unique"
+FAILURE_WALL_SEPARATION_OUT_OF_TOLERANCE = "wall_separation_out_of_tolerance"
+
 
 @dataclass(frozen=True)
 class ActiveExploreConfig:
@@ -536,9 +539,18 @@ def candidate_profile_valid(candidate):
 
 
 def geometry_is_recoverable(result, config: ActiveExploreConfig):
-    if result.success or result.failure_reason != "pose_not_unique":
-        return False, "not_pose_not_unique"
+    if result.success:
+        return False, "already_localized"
+    if result.failure_reason not in {
+        FAILURE_POSE_NOT_UNIQUE,
+        FAILURE_WALL_SEPARATION_OUT_OF_TOLERANCE,
+    }:
+        return False, "not_recoverable_failure"
     long_fit = result.long_wall_fit
+    if long_fit is None:
+        return False, "invalid_long_wall_fit"
+    if result.failure_reason == FAILURE_WALL_SEPARATION_OUT_OF_TOLERANCE:
+        return True, "ok"
     if not getattr(long_fit, "ok", False) or long_fit.axis_angle_rad is None:
         return False, "invalid_long_wall_fit"
     candidates = result.short_wall_candidates or {}
@@ -571,7 +583,12 @@ def generate_raw_candidates(
     positive = candidates.get("axis_positive")
     negative_range = candidate_range(negative)
     positive_range = candidate_range(positive)
-    axis_heading = normalize_angle_rad(origin_yaw_rad + long_fit.axis_angle_rad)
+    axis_angle = getattr(long_fit, "axis_angle_rad", None)
+    axis_heading = (
+        yaw_rad_from_pose(robot_pose)
+        if axis_angle is None
+        else normalize_angle_rad(origin_yaw_rad + axis_angle)
+    )
     normal_angle = getattr(long_fit, "normal_angle_rad", None)
     normal_heading = (
         None
@@ -580,32 +597,33 @@ def generate_raw_candidates(
     )
     raw = []
 
-    if negative_range <= positive_range:
-        nearest_side = "axis_negative"
-        nearest_range = negative_range
-        away_heading = axis_heading
-    else:
-        nearest_side = "axis_positive"
-        nearest_range = positive_range
-        away_heading = normalize_angle_rad(axis_heading + math.pi)
-    center_step = config.target_nearest_short_wall_range_m - nearest_range
-    if center_step >= config.center_min_step_m:
-        distance = min(center_step, config.max_single_move_m)
-        x, y = point_from_heading(robot_pose, away_heading, distance)
-        raw.append(
-            RawCandidate(
-                "provisional_center",
-                x,
-                y,
-                away_heading,
-                geometry_progress=distance / config.max_single_move_m,
-                metadata={
-                    "nearest_side": nearest_side,
-                    "nearest_range_m": nearest_range,
-                    "requested_step_m": center_step,
-                },
+    if negative_range is not None and positive_range is not None:
+        if negative_range <= positive_range:
+            nearest_side = "axis_negative"
+            nearest_range = negative_range
+            away_heading = axis_heading
+        else:
+            nearest_side = "axis_positive"
+            nearest_range = positive_range
+            away_heading = normalize_angle_rad(axis_heading + math.pi)
+        center_step = config.target_nearest_short_wall_range_m - nearest_range
+        if center_step >= config.center_min_step_m:
+            distance = min(center_step, config.max_single_move_m)
+            x, y = point_from_heading(robot_pose, away_heading, distance)
+            raw.append(
+                RawCandidate(
+                    "provisional_center",
+                    x,
+                    y,
+                    away_heading,
+                    geometry_progress=distance / config.max_single_move_m,
+                    metadata={
+                        "nearest_side": nearest_side,
+                        "nearest_range_m": nearest_range,
+                        "requested_step_m": center_step,
+                    },
+                )
             )
-        )
 
     lateral_offset = getattr(long_fit, "lateral_offset_m", None)
     if (
@@ -638,7 +656,12 @@ def generate_raw_candidates(
             )
         )
 
-    if candidate_profile_valid(negative) and candidate_profile_valid(positive):
+    if (
+        negative_range is not None
+        and positive_range is not None
+        and candidate_profile_valid(negative)
+        and candidate_profile_valid(positive)
+    ):
         negative_score = candidate_heater_score(negative)
         positive_score = candidate_heater_score(positive)
         if negative_score is not None and positive_score is not None:
