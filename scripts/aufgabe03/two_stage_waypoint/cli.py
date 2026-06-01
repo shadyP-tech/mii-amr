@@ -148,6 +148,11 @@ def print_dry_run(args, waypoints, staging_goal, follower_command):
         "  active-explore max total distance: "
         f"{args.arena_active_explore_max_total_distance_m:.3f} m"
     )
+    if args.arena_active_explore_max_candidate_path_m is not None:
+        print(
+            "  active-explore max candidate path: "
+            f"{args.arena_active_explore_max_candidate_path_m:.3f} m"
+        )
     print(
         "  active-explore grid: "
         f"{args.arena_active_explore_grid_size_m:.2f} m @ "
@@ -569,6 +574,14 @@ def parse_args(argv):
         type=float,
     )
     parser.add_argument(
+        "--arena-active-explore-max-candidate-path-m",
+        type=float,
+        help=(
+            "Maximum A* path length accepted for a recovery candidate. "
+            "The executed movement is still capped by max-single-move."
+        ),
+    )
+    parser.add_argument(
         "--arena-active-explore-grid-resolution-m",
         default=0.05,
         type=float,
@@ -763,6 +776,11 @@ def validate_args(parser, args):
     for field in positive_float_fields:
         if getattr(args, field) <= 0.0:
             parser.error(f"--{field.replace('_', '-')} must be greater than zero")
+    if (
+        args.arena_active_explore_max_candidate_path_m is not None
+        and args.arena_active_explore_max_candidate_path_m <= 0.0
+    ):
+        parser.error("--arena-active-explore-max-candidate-path-m must be greater than zero")
     if args.stable_amcl_samples < 1:
         parser.error("--stable-amcl-samples must be >= 1")
     if args.amcl_settle_min_sec < 0.0:

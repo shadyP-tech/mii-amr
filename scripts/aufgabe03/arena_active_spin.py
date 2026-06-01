@@ -159,6 +159,7 @@ class ArenaActiveSpinConfig:
     active_explore_max_attempts: int = 2
     active_explore_max_single_move_m: float = 0.45
     active_explore_max_total_distance_m: float = 0.90
+    active_explore_max_candidate_path_m: float | None = None
     active_explore_grid_resolution_m: float = 0.05
     active_explore_grid_size_m: float = 4.0
     active_explore_inflation_radius_m: float = 0.28
@@ -729,6 +730,7 @@ def active_explore_config_from_arena_config(config: ArenaActiveSpinConfig):
         max_attempts=config.active_explore_max_attempts,
         max_single_move_m=config.active_explore_max_single_move_m,
         max_total_distance_m=config.active_explore_max_total_distance_m,
+        max_candidate_path_m=config.active_explore_max_candidate_path_m,
         grid_resolution_m=config.active_explore_grid_resolution_m,
         grid_size_m=config.active_explore_grid_size_m,
         inflation_radius_m=config.active_explore_inflation_radius_m,

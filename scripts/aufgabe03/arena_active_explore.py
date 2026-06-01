@@ -28,6 +28,7 @@ class ActiveExploreConfig:
     max_attempts: int = 2
     max_single_move_m: float = 0.45
     max_total_distance_m: float = 0.90
+    max_candidate_path_m: float | None = None
     grid_resolution_m: float = 0.05
     grid_size_m: float = 4.0
     inflation_radius_m: float = 0.28
@@ -828,7 +829,12 @@ def plan_candidate(raw, grid, config: ActiveExploreConfig):
             metadata=raw.metadata,
         )
     length = path_length_m(path, grid.resolution_m)
-    if length > config.max_single_move_m:
+    max_candidate_path_m = (
+        config.max_candidate_path_m
+        if config.max_candidate_path_m is not None
+        else config.max_total_distance_m
+    )
+    if length > max_candidate_path_m:
         return ActiveExploreCandidate(
             raw.kind,
             raw.target_x,
@@ -839,7 +845,10 @@ def plan_candidate(raw, grid, config: ActiveExploreConfig):
             path_cells=tuple(path),
             path_world=tuple(cell_to_world(grid, cell) for cell in path),
             path_length_m=length,
-            metadata=raw.metadata,
+            metadata={
+                **raw.metadata,
+                "path_length_limit_m": max_candidate_path_m,
+            },
         )
     score, components = score_candidate(raw, grid, path, config)
     simplified = simplify_path_cells(path)

@@ -205,6 +205,9 @@ def arena_active_config_from_args(args):
         active_explore_max_total_distance_m=(
             args.arena_active_explore_max_total_distance_m
         ),
+        active_explore_max_candidate_path_m=(
+            args.arena_active_explore_max_candidate_path_m
+        ),
         active_explore_grid_resolution_m=(
             args.arena_active_explore_grid_resolution_m
         ),
