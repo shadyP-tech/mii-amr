@@ -982,6 +982,37 @@ class TwoStageCoordinator(Node):
 
     def verify_arrival(self, staging_goal, waypoints=None):
         pose, frame = self.lookup_pose(description="arrival TF")
+        arrival = TwoStageCoordinator.arrival_check_from_pose(
+            self,
+            staging_goal,
+            pose,
+            frame,
+            waypoints=waypoints,
+        )
+        if not arrival.strict_position_ok and not arrival.handoff_path_ok:
+            raise RuntimeError(
+                "Arrival position check failed: "
+                f"error={arrival.position_error_m:.3f} m, "
+                f"limit={self.args.arrival_tolerance_m:.3f} m"
+            )
+        if not arrival.strict_yaw_ok and not arrival.handoff_path_ok:
+            raise RuntimeError(
+                "Arrival yaw check failed: "
+                f"error={arrival.yaw_error_deg:.1f} deg, "
+                f"limit={self.args.arrival_yaw_tolerance_deg:.1f} deg"
+            )
+        if not arrival.strict_position_ok or not arrival.strict_yaw_ok:
+            self.get_logger().warn(
+                "Nav2 staging missed the strict arrival gate, but handoff is "
+                "allowed because the robot is close to the waypoint path: "
+                f"position_error={arrival.position_error_m:.3f} m, "
+                f"yaw_error={arrival.yaw_error_deg:.1f} deg, "
+                f"distance_to_path={arrival.distance_to_path_m:.3f} m, "
+                f"path_limit={self.args.follower_start_on_path_tolerance_m:.3f} m"
+            )
+        return arrival
+
+    def arrival_check_from_pose(self, staging_goal, pose, frame, waypoints=None):
         position_error = math.hypot(
             pose.x - staging_goal.waypoint.x,
             pose.y - staging_goal.waypoint.y,
@@ -996,28 +1027,6 @@ class TwoStageCoordinator(Node):
             distance_to_path_m is not None
             and distance_to_path_m <= self.args.follower_start_on_path_tolerance_m
         )
-
-        if not strict_position_ok and not handoff_path_ok:
-            raise RuntimeError(
-                "Arrival position check failed: "
-                f"error={position_error:.3f} m, "
-                f"limit={self.args.arrival_tolerance_m:.3f} m"
-            )
-        if not strict_yaw_ok and not handoff_path_ok:
-            raise RuntimeError(
-                "Arrival yaw check failed: "
-                f"error={yaw_error:.1f} deg, "
-                f"limit={self.args.arrival_yaw_tolerance_deg:.1f} deg"
-            )
-        if not strict_position_ok or not strict_yaw_ok:
-            self.get_logger().warn(
-                "Nav2 staging missed the strict arrival gate, but handoff is "
-                "allowed because the robot is close to the waypoint path: "
-                f"position_error={position_error:.3f} m, "
-                f"yaw_error={yaw_error:.1f} deg, "
-                f"distance_to_path={distance_to_path_m:.3f} m, "
-                f"path_limit={self.args.follower_start_on_path_tolerance_m:.3f} m"
-            )
         return ArrivalCheck(
             pose,
             frame,

@@ -81,6 +81,7 @@ from .model import (
 )
 from .pure import (
     build_follower_command,
+    distance_pose_to_waypoint_path_m,
     load_waypoints,
     staging_goal_from_waypoints,
     timestamp_now,
@@ -1162,11 +1163,30 @@ def main(argv=None):
             frame,
         )
 
-        phase_start = time.time()
-        diagnostics.nav2_result_status = node.navigate_to_staging(staging_goal)
-        diagnostics.nav2_duration_sec = time.time() - phase_start
-
-        arrival = node.verify_arrival(staging_goal, waypoints)
+        post_amcl_distance_to_path_m = distance_pose_to_waypoint_path_m(
+            post_amcl_pose,
+            waypoints,
+        )
+        if post_amcl_distance_to_path_m <= args.follower_start_on_path_tolerance_m:
+            diagnostics.nav2_result_status = "SKIPPED_PATH_HANDOFF"
+            diagnostics.nav2_duration_sec = 0.0
+            node.get_logger().info(
+                "Skipping Nav2 staging because arena-active recovery already "
+                "ended close to the waypoint path: "
+                f"distance_to_path={post_amcl_distance_to_path_m:.3f} m, "
+                f"limit={args.follower_start_on_path_tolerance_m:.3f} m"
+            )
+            arrival = node.arrival_check_from_pose(
+                staging_goal,
+                post_amcl_pose,
+                frame,
+                waypoints=waypoints,
+            )
+        else:
+            phase_start = time.time()
+            diagnostics.nav2_result_status = node.navigate_to_staging(staging_goal)
+            diagnostics.nav2_duration_sec = time.time() - phase_start
+            arrival = node.verify_arrival(staging_goal, waypoints)
         diagnostics.selected_base_frame = arrival.base_frame
         diagnostics.tf_arrival_x = arrival.pose.x
         diagnostics.tf_arrival_y = arrival.pose.y
