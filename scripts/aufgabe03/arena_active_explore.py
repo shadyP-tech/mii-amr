@@ -31,8 +31,8 @@ class ActiveExploreConfig:
     max_candidate_path_m: float | None = None
     grid_resolution_m: float = 0.05
     grid_size_m: float = 4.0
-    inflation_radius_m: float = 0.28
-    soft_clearance_radius_m: float = 0.35
+    inflation_radius_m: float = 0.15
+    soft_clearance_radius_m: float = 0.20
     soft_clearance_weight: float = 3.0
     unknown_blocked: bool = True
     max_path_segments: int = 3

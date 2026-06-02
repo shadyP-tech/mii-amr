@@ -52,13 +52,10 @@ from arena_active_explore import (
     plan_candidate,
     point_from_heading,
 )
-from arena_active_spin import (
-    ArenaActiveSpinConfig,
-    active_explore_curve_path,
-    odom_pose_from_msg,
-    scan_sample_from_msg,
-    temporary_map_occupancy_data,
-)
+from arena_active_spin_core.curve_following import active_explore_curve_path
+from arena_active_spin_core.models import ArenaActiveSpinConfig
+from arena_active_spin_core.scan_safety import odom_pose_from_msg, scan_sample_from_msg
+from arena_active_spin_core.temporary_map import temporary_map_occupancy_data
 from two_stage_waypoint.model import (
     DEFAULT_ARENA_ACTIVE_EXPLORE_CANDIDATE_MARKER_TOPIC,
     DEFAULT_ARENA_ACTIVE_EXPLORE_PATH_TOPIC,

@@ -198,12 +198,12 @@ def run_local_config_from_args(args):
     inflation_radius = getattr(
         args,
         "run_local_map_inflation_radius_m",
-        getattr(args, "obstacle_inflate_radius_m", 0.22),
+        getattr(args, "obstacle_inflate_radius_m", 0.15),
     )
     return lidar_obstacle_map.RunLocalMapConfig(
         min_hit_count=getattr(args, "run_local_map_min_hit_count", 2),
         inflation_radius_m=inflation_radius,
-        robot_footprint_radius_m=getattr(args, "robot_footprint_radius_m", 0.18),
+        robot_footprint_radius_m=getattr(args, "robot_footprint_radius_m", 0.10),
         clearance_margin_m=getattr(args, "run_local_map_clearance_margin_m", 0.04),
         static_wall_exclusion_radius_m=getattr(
             args,

@@ -79,8 +79,8 @@ class ObservationBatch:
 @dataclass(frozen=True)
 class RunLocalMapConfig:
     min_hit_count: int = 2
-    inflation_radius_m: float = 0.22
-    robot_footprint_radius_m: float = 0.18
+    inflation_radius_m: float = 0.15
+    robot_footprint_radius_m: float = 0.10
     clearance_margin_m: float = 0.04
     static_wall_exclusion_radius_m: float = 0.04
     min_used_points: int = 3
@@ -152,10 +152,10 @@ class ObstacleOverlayConfig:
     forward_half_width_m: float = 0.18
     angle_window_deg: float = 45.0
     min_range_m: float = 0.12
-    robot_footprint_radius_m: float = 0.18
+    robot_footprint_radius_m: float = 0.10
     min_cluster_size: int = 3
     min_cluster_width_m: float = 0.05
-    inflate_radius_m: float = 0.22
+    inflate_radius_m: float = 0.15
     max_start_snap_m: float = 0.20
     max_goal_snap_m: float = 0.30
     max_replan_path_length_ratio: float = 3.0

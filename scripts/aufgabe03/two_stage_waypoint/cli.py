@@ -141,11 +141,13 @@ def print_dry_run(args, waypoints, staging_goal, follower_command):
     print(f"  cmd_vel topic: {args.cmd_vel_topic}")
     print(f"  scan topic: {args.scan_topic}")
     print(f"  odom topic: {args.odom_topic}")
-    print(f"  follow path action: {args.follow_path_action}")
     print("Arena-active recovery:")
     print(f"  mode: {args.arena_active_recovery_mode}")
     print(f"  executor: {args.arena_active_recovery_executor}")
-    print(f"  active-explore max attempts: {args.arena_active_explore_max_attempts}")
+    print(
+        "  active-explore max motion segments: "
+        f"{args.arena_active_explore_max_attempts}"
+    )
     print(
         "  active-explore max single move: "
         f"{args.arena_active_explore_max_single_move_m:.3f} m"
@@ -275,7 +277,6 @@ def parse_args(argv):
     )
 
     parser.add_argument("--navigate-action", default="/navigate_to_pose")
-    parser.add_argument("--follow-path-action", default="/follow_path")
     parser.add_argument("--initial-pose-topic", default="/initialpose")
     parser.add_argument("--amcl-topic", default="/amcl_pose")
     parser.add_argument("--cmd-vel-topic", default="/cmd_vel")
@@ -515,7 +516,7 @@ def parse_args(argv):
     )
     parser.add_argument(
         "--arena-active-recovery-executor",
-        choices=["dry_run", "cmd_vel", "nav2_follow_path"],
+        choices=["dry_run", "cmd_vel"],
         default="dry_run",
     )
     parser.add_argument("--arena-active-center-reposition-max-attempts", default=1, type=int)
@@ -607,7 +608,22 @@ def parse_args(argv):
         default=1.10,
         type=float,
     )
-    parser.add_argument("--arena-active-explore-max-attempts", default=2, type=int)
+    parser.add_argument("--arena-active-explore-max-attempts", default=6, type=int)
+    parser.add_argument(
+        "--arena-active-explore-shadow-completion-confirmations",
+        default=2,
+        type=int,
+    )
+    parser.add_argument(
+        "--arena-active-explore-max-shadow-stall-replans",
+        default=3,
+        type=int,
+    )
+    parser.add_argument(
+        "--arena-active-explore-max-localization-pose-attempts",
+        default=2,
+        type=int,
+    )
     parser.add_argument(
         "--arena-active-explore-max-single-move-m",
         default=0.45,
@@ -638,12 +654,12 @@ def parse_args(argv):
     )
     parser.add_argument(
         "--arena-active-explore-inflation-radius-m",
-        default=0.28,
+        default=0.15,
         type=float,
     )
     parser.add_argument(
         "--arena-active-explore-soft-clearance-radius-m",
-        default=0.35,
+        default=0.20,
         type=float,
         help=(
             "Soft obstacle-clearance radius used as an A* cost. Unlike "
@@ -965,6 +981,16 @@ def validate_args(parser, args):
         )
     if args.arena_active_explore_max_attempts < 1:
         parser.error("--arena-active-explore-max-attempts must be >= 1")
+    if args.arena_active_explore_shadow_completion_confirmations < 1:
+        parser.error(
+            "--arena-active-explore-shadow-completion-confirmations must be >= 1"
+        )
+    if args.arena_active_explore_max_shadow_stall_replans < 1:
+        parser.error("--arena-active-explore-max-shadow-stall-replans must be >= 1")
+    if args.arena_active_explore_max_localization_pose_attempts < 1:
+        parser.error(
+            "--arena-active-explore-max-localization-pose-attempts must be >= 1"
+        )
     if args.arena_active_explore_max_path_segments < 1:
         parser.error("--arena-active-explore-max-path-segments must be >= 1")
     if args.arena_active_explore_map_max_samples < 1:

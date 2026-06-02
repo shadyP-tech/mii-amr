@@ -6,7 +6,7 @@ try:
     from geometry_msgs.msg import Point, PoseStamped, PoseWithCovarianceStamped, Twist
     from nav_msgs.msg import OccupancyGrid, Odometry
     from nav_msgs.msg import Path as NavPath
-    from nav2_msgs.action import FollowPath, NavigateToPose
+    from nav2_msgs.action import NavigateToPose
     from rclpy.action import ActionClient
     from rclpy.node import Node
     from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
@@ -16,7 +16,6 @@ try:
     import tf2_ros
 except ImportError:
     rclpy = None
-    FollowPath = None
     NavigateToPose = None
     ActionClient = None
     Node = object
@@ -76,13 +75,11 @@ except ImportError:
             self.linear = _FallbackPosition()
             self.angular = _FallbackPosition()
 
-from arena_active_spin import (
-    ArenaActiveSpinConfig,
-    active_explore_curve_path,
-    run_arena_active_spin,
-    temporary_map_occupancy_data,
-    write_diagnostics_json,
-)
+from arena_active_spin_core.curve_following import active_explore_curve_path
+from arena_active_spin_core.diagnostics import write_diagnostics_json
+from arena_active_spin_core.models import ArenaActiveSpinConfig
+from arena_active_spin_core.session import run_arena_active_spin
+from arena_active_spin_core.temporary_map import temporary_map_occupancy_data
 from arena_geometry_localizer import ArenaGeometryConfig
 
 from .model import (
@@ -150,7 +147,6 @@ def arena_active_config_from_args(args):
         min_rear_clearance_m=args.arena_active_min_rear_clearance_m,
         require_operator_confirmation=args.arena_active_require_operator_confirmation,
         allow_extra_cmd_vel_publishers=args.arena_active_allow_extra_cmd_vel_publishers,
-        on_failure="abort",
         dry_run=False,
         range_stride=args.arena_active_range_stride,
         max_points=args.arena_active_max_points,
@@ -241,6 +237,15 @@ def arena_active_config_from_args(args):
         active_explore_map_max_samples=args.arena_active_explore_map_max_samples,
         active_explore_temporary_map_publish_period_sec=(
             args.arena_active_temporary_map_publish_period_sec
+        ),
+        active_explore_shadow_completion_confirmations=(
+            args.arena_active_explore_shadow_completion_confirmations
+        ),
+        active_explore_max_shadow_stall_replans=(
+            args.arena_active_explore_max_shadow_stall_replans
+        ),
+        active_explore_max_localization_pose_attempts=(
+            args.arena_active_explore_max_localization_pose_attempts
         ),
         active_explore_curve_lookahead_m=(
             args.arena_active_explore_curve_lookahead_m
@@ -601,17 +606,6 @@ class TwoStageCoordinator(Node):
             10,
         )
         self.navigate_client = ActionClient(self, NavigateToPose, args.navigate_action)
-        self.follow_path_client = None
-        if (
-            args.arena_active_recovery_mode == "active_explore"
-            and args.arena_active_recovery_executor == "nav2_follow_path"
-        ):
-            if FollowPath is None:
-                raise RuntimeError(
-                    "nav2_msgs.action.FollowPath is unavailable; "
-                    "source a Nav2 Humble environment first"
-                )
-            self.follow_path_client = ActionClient(self, FollowPath, args.follow_path_action)
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
@@ -670,8 +664,6 @@ class TwoStageCoordinator(Node):
         requirements = required_preflight_interfaces(self.args)
         for action in requirements.actions:
             client = self.navigate_client
-            if action == self.args.follow_path_action:
-                client = self.follow_path_client
             if client is None or not client.wait_for_server(
                 timeout_sec=self.args.preflight_timeout_sec,
             ):
