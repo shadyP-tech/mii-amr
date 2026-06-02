@@ -1705,6 +1705,50 @@ class WaypointFollower(Node):
                 return index
         return max(0, len(replanned) - 1)
 
+    def replan_start_artifact_distance_limit_m(self):
+        start_on_path_tolerance_m = getattr(
+            self.args,
+            "start_on_path_tolerance_m",
+            self.args.waypoint_tolerance_m,
+        )
+        return max(
+            self.args.waypoint_tolerance_m,
+            min(0.35, max(0.0, float(start_on_path_tolerance_m))),
+        )
+
+    def first_forward_motion_waypoint_index(self, replanned, current_pose):
+        if not replanned:
+            return 0
+        first_motion_index = WaypointFollower.first_motion_waypoint_index(
+            self,
+            replanned,
+            current_pose,
+        )
+        artifact_distance_limit_m = (
+            WaypointFollower.replan_start_artifact_distance_limit_m(self)
+        )
+        pose = lidar_obstacle_map.Pose2D(
+            current_pose.x,
+            current_pose.y,
+            current_pose.yaw_deg,
+        )
+        for index in range(first_motion_index, len(replanned)):
+            waypoint = replanned[index]
+            distance_m = math.hypot(
+                waypoint.x - current_pose.x,
+                waypoint.y - current_pose.y,
+            )
+            first_base = lidar_obstacle_map.map_point_to_base(
+                waypoint.x,
+                waypoint.y,
+                pose,
+            )
+            if first_base.x >= -self.args.robot_footprint_radius_m:
+                return index
+            if distance_m > artifact_distance_limit_m:
+                return index
+        return max(0, len(replanned) - 1)
+
     def prune_replanned_waypoints_for_progress(self, replanned, current_pose):
         if not replanned:
             return replanned
@@ -1791,7 +1835,17 @@ class WaypointFollower(Node):
         new_pairs = [(round(wp.x, 3), round(wp.y, 3)) for wp in replanned]
         if require_changed and old_pairs == new_pairs:
             raise RuntimeError("lidar_replan_failed:updated_path_matches_old_path")
-        motion_waypoint = self.first_motion_waypoint(replanned, current_pose)
+        first_motion_index = WaypointFollower.first_motion_waypoint_index(
+            self,
+            replanned,
+            current_pose,
+        )
+        forward_motion_index = WaypointFollower.first_forward_motion_waypoint_index(
+            self,
+            replanned,
+            current_pose,
+        )
+        motion_waypoint = replanned[forward_motion_index]
         first_base = lidar_obstacle_map.map_point_to_base(
             motion_waypoint.x,
             motion_waypoint.y,
@@ -1807,6 +1861,14 @@ class WaypointFollower(Node):
             obstacle_path_overlap = set(result.path_cells).intersection(result.inflated_obstacle_cells)
             if obstacle_path_overlap:
                 raise RuntimeError("lidar_replan_failed:path_crosses_obstacle_cells")
+        if forward_motion_index > first_motion_index:
+            logger = self.get_logger() if hasattr(self, "get_logger") else None
+            if logger is not None:
+                logger.warn(
+                    "Pruned behind-the-robot startup waypoint(s) from LiDAR replan: "
+                    f"removed={forward_motion_index}"
+                )
+            return replanned[forward_motion_index:]
         return replanned
 
     def initialize_run_local_route(self, current_pose, waypoints):
