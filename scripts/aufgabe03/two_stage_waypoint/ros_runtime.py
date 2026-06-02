@@ -989,26 +989,17 @@ class TwoStageCoordinator(Node):
             frame,
             waypoints=waypoints,
         )
-        if not arrival.strict_position_ok and not arrival.handoff_path_ok:
+        if not arrival.strict_position_ok:
             raise RuntimeError(
                 "Arrival position check failed: "
                 f"error={arrival.position_error_m:.3f} m, "
                 f"limit={self.args.arrival_tolerance_m:.3f} m"
             )
-        if not arrival.strict_yaw_ok and not arrival.handoff_path_ok:
+        if not arrival.strict_yaw_ok:
             raise RuntimeError(
                 "Arrival yaw check failed: "
                 f"error={arrival.yaw_error_deg:.1f} deg, "
                 f"limit={self.args.arrival_yaw_tolerance_deg:.1f} deg"
-            )
-        if not arrival.strict_position_ok or not arrival.strict_yaw_ok:
-            self.get_logger().warn(
-                "Nav2 staging missed the strict arrival gate, but handoff is "
-                "allowed because the robot is close to the waypoint path: "
-                f"position_error={arrival.position_error_m:.3f} m, "
-                f"yaw_error={arrival.yaw_error_deg:.1f} deg, "
-                f"distance_to_path={arrival.distance_to_path_m:.3f} m, "
-                f"path_limit={self.args.follower_start_on_path_tolerance_m:.3f} m"
             )
         return arrival
 
@@ -1023,17 +1014,13 @@ class TwoStageCoordinator(Node):
         distance_to_path_m = None
         if waypoints is not None:
             distance_to_path_m = distance_pose_to_waypoint_path_m(pose, waypoints)
-        handoff_path_ok = (
-            distance_to_path_m is not None
-            and distance_to_path_m <= self.args.follower_start_on_path_tolerance_m
-        )
         return ArrivalCheck(
             pose,
             frame,
             position_error,
             yaw_error,
             distance_to_path_m=distance_to_path_m,
-            handoff_path_ok=handoff_path_ok,
+            handoff_path_ok=False,
             strict_position_ok=strict_position_ok,
             strict_yaw_ok=strict_yaw_ok,
         )
