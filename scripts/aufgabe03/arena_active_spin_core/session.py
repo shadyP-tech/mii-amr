@@ -120,6 +120,7 @@ class ArenaActiveSpinSession:
         self.collecting_explore_map = False
         self.samples = []
         self.explore_samples = []
+        self.active_explore_final_spin_memory_samples = None
         self.rejected_samples = 0
         self.diagnostics = initial_diagnostics(config)
         self.active_explore_policy = ActiveExplorePolicy(self.diagnostics)
@@ -464,18 +465,35 @@ class ArenaActiveSpinSession:
             return "shadow_explore_not_complete"
         return None
 
-    def active_explore_localizer_filter_grid(self):
-        if not self.explore_samples:
+    def active_explore_localizer_filter_grid(self, grid_samples=None):
+        samples = self.explore_samples if grid_samples is None else grid_samples
+        if not samples:
             return None, "no_temporary_map_samples"
         if self.latest_odom_pose is None:
             return None, "missing_latest_odom_pose"
         grid = build_local_grid_from_scan_samples(
-            self.explore_samples,
+            samples,
             self.latest_odom_pose,
             active_explore_config_from_arena_config(self.config),
         )
         self.update_temporary_map_diagnostics(grid)
         return grid, "ok"
+
+    def active_explore_localizer_memory_samples(self):
+        if self.active_explore_final_spin_memory_samples is not None:
+            return list(self.active_explore_final_spin_memory_samples)
+        return list(self.explore_samples)
+
+    def combined_active_explore_localizer_samples(self, memory_samples):
+        combined = []
+        seen = set()
+        for sample in list(memory_samples) + list(self.samples):
+            key = id(sample)
+            if key in seen:
+                continue
+            seen.add(key)
+            combined.append(sample)
+        return combined
 
     def active_explore_filtered_localizer_samples(self):
         diagnostics = {
@@ -483,6 +501,10 @@ class ArenaActiveSpinSession:
             "reason": "",
             "input_sample_count": len(self.samples),
             "output_sample_count": len(self.samples),
+            "memory_sample_count": 0,
+            "final_spin_sample_count": len(self.samples),
+            "combined_sample_count": len(self.samples),
+            "used_accumulated_memory": False,
             "valid_ranges_before": valid_scan_range_count(self.samples),
             "valid_ranges_after": valid_scan_range_count(self.samples),
             "filtered_range_count": 0,
@@ -499,11 +521,22 @@ class ArenaActiveSpinSession:
             self.diagnostics["active_explore"]["localizer_filter"] = diagnostics
             return self.samples
 
-        grid, grid_reason = self.active_explore_localizer_filter_grid()
+        memory_samples = self.active_explore_localizer_memory_samples()
+        combined_samples = self.combined_active_explore_localizer_samples(memory_samples)
+        valid_ranges_before = valid_scan_range_count(combined_samples)
+        diagnostics["memory_sample_count"] = len(memory_samples)
+        diagnostics["combined_sample_count"] = len(combined_samples)
+        diagnostics["input_sample_count"] = len(combined_samples)
+        diagnostics["output_sample_count"] = len(combined_samples)
+        diagnostics["used_accumulated_memory"] = bool(memory_samples)
+        diagnostics["valid_ranges_before"] = valid_ranges_before
+        diagnostics["valid_ranges_after"] = valid_ranges_before
+
+        grid, grid_reason = self.active_explore_localizer_filter_grid(memory_samples)
         if grid is None:
             diagnostics["reason"] = grid_reason
             self.diagnostics["active_explore"]["localizer_filter"] = diagnostics
-            return self.samples
+            return combined_samples
 
         diagnostics["temporary_grid_cell_counts"] = grid.to_dict()["cell_counts"]
         obstacle_mask, protected_wall_cells, mask_diagnostics = (
@@ -515,30 +548,39 @@ class ArenaActiveSpinSession:
         if not obstacle_mask:
             diagnostics["reason"] = "no_temporary_obstacle_mask"
             self.diagnostics["active_explore"]["localizer_filter"] = diagnostics
-            return self.samples
+            return combined_samples
 
         filtered_samples, filtered_range_count = (
             filter_scan_samples_with_temporary_obstacle_map(
-                self.samples,
+                combined_samples,
                 grid,
                 obstacle_mask,
             )
         )
+        filtered_valid_ranges_after = valid_scan_range_count(filtered_samples)
+        if valid_ranges_before > 0 and filtered_valid_ranges_after <= 0:
+            diagnostics["reason"] = "obstacle_filter_removed_all_ranges"
+            diagnostics["filtered_range_count"] = filtered_range_count
+            diagnostics["filtered_valid_ranges_after"] = filtered_valid_ranges_after
+            self.diagnostics["active_explore"]["localizer_filter"] = diagnostics
+            return combined_samples
+
         diagnostics["enabled"] = True
         diagnostics["reason"] = "filtered_temporary_obstacles"
         diagnostics["output_sample_count"] = len(filtered_samples)
         diagnostics["filtered_range_count"] = filtered_range_count
-        diagnostics["valid_ranges_after"] = valid_scan_range_count(filtered_samples)
+        diagnostics["valid_ranges_after"] = filtered_valid_ranges_after
         self.diagnostics["active_explore"]["localizer_filter"] = diagnostics
         return filtered_samples
 
     def analyze_result(self):
-        if len(self.samples) < self.config.min_scan_samples:
+        localizer_samples = self.active_explore_filtered_localizer_samples()
+        if len(localizer_samples) < self.config.min_scan_samples:
             raise RuntimeError(
                 "insufficient_scan_samples:"
-                f"{len(self.samples)}<{self.config.min_scan_samples}"
+                f"{len(localizer_samples)}<{self.config.min_scan_samples}"
             )
-        localizer_samples = self.active_explore_filtered_localizer_samples()
+        self.diagnostics["samples"]["scan_samples_used"] = len(localizer_samples)
         result = self.analyze_fn(
             localizer_samples,
             self.config.arena_config,
@@ -1093,11 +1135,16 @@ class ArenaActiveSpinSession:
         attempt_record["post_motion_spin_decision"] = decision
         attempt_record["post_recovery_spin_skipped"] = False
         self.active_explore_policy.set_phase(ACTIVE_EXPLORE_PHASE_LOCALIZATION_SPIN)
-        self.run_spin_attempt(
-            publisher,
-            attempt_index=len(self.diagnostics["spin_attempts"]),
-        )
-        result = self.analyze_result()
+        previous_memory_samples = self.active_explore_final_spin_memory_samples
+        self.active_explore_final_spin_memory_samples = tuple(self.explore_samples)
+        try:
+            self.run_spin_attempt(
+                publisher,
+                attempt_index=len(self.diagnostics["spin_attempts"]),
+            )
+            result = self.analyze_result()
+        finally:
+            self.active_explore_final_spin_memory_samples = previous_memory_samples
         attempt_record["post_recovery_spin_result"] = result.to_dict()
         attempt_record["post_recovery_success"] = result.success
         attempt_record["post_recovery_failure_reason"] = result.failure_reason

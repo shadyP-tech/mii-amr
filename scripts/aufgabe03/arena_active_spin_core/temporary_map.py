@@ -121,36 +121,81 @@ def cell_bounds(cells):
     return min(xs), max(xs), min(ys), max(ys)
 
 
-def cluster_is_wall_like(grid, cluster, occupied_envelope):
+def cluster_geometry(grid, cluster):
     min_x, max_x, min_y, max_y = cell_bounds(cluster)
-    env_min_x, env_max_x, env_min_y, env_max_y = occupied_envelope
-    margin = LOCALIZER_FILTER_WALL_MARGIN_CELLS
-    near_outer_envelope = (
-        min_x <= env_min_x + margin
-        or max_x >= env_max_x - margin
-        or min_y <= env_min_y + margin
-        or max_y >= env_max_y - margin
-    )
-    near_grid_boundary = (
-        min_x <= margin
-        or min_y <= margin
-        or max_x >= grid.width - 1 - margin
-        or max_y >= grid.height - 1 - margin
-    )
-    if not near_outer_envelope and not near_grid_boundary:
-        return False
-
     span_x = max_x - min_x + 1
     span_y = max_y - min_y + 1
     long_cells = max(span_x, span_y)
     short_cells = max(1, min(span_x, span_y))
-    long_m = long_cells * grid.resolution_m
-    short_m = short_cells * grid.resolution_m
-    aspect = long_cells / short_cells
+    return {
+        "min_x": min_x,
+        "max_x": max_x,
+        "min_y": min_y,
+        "max_y": max_y,
+        "span_x": span_x,
+        "span_y": span_y,
+        "long_m": long_cells * grid.resolution_m,
+        "short_m": short_cells * grid.resolution_m,
+        "aspect": long_cells / short_cells,
+    }
+
+
+def cluster_near_grid_boundary(grid, geometry):
+    margin = LOCALIZER_FILTER_WALL_MARGIN_CELLS
     return (
-        long_m >= LOCALIZER_FILTER_MIN_WALL_LENGTH_M
-        and short_m <= LOCALIZER_FILTER_MAX_WALL_THICKNESS_M
-        and aspect >= LOCALIZER_FILTER_MIN_WALL_ASPECT_RATIO
+        geometry["min_x"] <= margin
+        or geometry["min_y"] <= margin
+        or geometry["max_x"] >= grid.width - 1 - margin
+        or geometry["max_y"] >= grid.height - 1 - margin
+    )
+
+
+def cluster_near_occupied_envelope(geometry, occupied_envelope):
+    env_min_x, env_max_x, env_min_y, env_max_y = occupied_envelope
+    margin = LOCALIZER_FILTER_WALL_MARGIN_CELLS
+    return (
+        geometry["min_x"] <= env_min_x + margin
+        or geometry["max_x"] >= env_max_x - margin
+        or geometry["min_y"] <= env_min_y + margin
+        or geometry["max_y"] >= env_max_y - margin
+    )
+
+
+def cluster_is_wall_like(grid, cluster, occupied_envelope):
+    geometry = cluster_geometry(grid, cluster)
+    near_outer_envelope = cluster_near_occupied_envelope(geometry, occupied_envelope)
+    near_grid_boundary = cluster_near_grid_boundary(grid, geometry)
+    if not near_outer_envelope and not near_grid_boundary:
+        return False
+
+    return (
+        geometry["long_m"] >= LOCALIZER_FILTER_MIN_WALL_LENGTH_M
+        and geometry["short_m"] <= LOCALIZER_FILTER_MAX_WALL_THICKNESS_M
+        and geometry["aspect"] >= LOCALIZER_FILTER_MIN_WALL_ASPECT_RATIO
+    )
+
+
+def cluster_is_compact_obstacle_like(grid, cluster, occupied_envelope):
+    geometry = cluster_geometry(grid, cluster)
+    if cluster_near_grid_boundary(grid, geometry):
+        return False
+    if cluster_is_wall_like(grid, cluster, occupied_envelope):
+        return False
+    if (
+        cluster_near_occupied_envelope(geometry, occupied_envelope)
+        and (
+            geometry["long_m"] >= LOCALIZER_FILTER_MIN_WALL_LENGTH_M
+            or geometry["aspect"] >= 1.5
+        )
+    ):
+        return False
+    max_obstacle_long_m = max(
+        0.90,
+        min(1.50, 0.35 * min(grid.width, grid.height) * grid.resolution_m),
+    )
+    return (
+        geometry["long_m"] <= max_obstacle_long_m
+        and geometry["aspect"] < LOCALIZER_FILTER_MIN_WALL_ASPECT_RATIO
     )
 
 
@@ -167,18 +212,29 @@ def expand_cells(grid, cells, radius_cells):
 
 def temporary_grid_localizer_obstacle_mask(grid):
     occupied = occupied_cells_from_grid(grid)
+    blocked = set(blocked_cells_from_grid(grid))
     if not occupied:
         return set(), set(), {
             "occupied_cluster_count": 0,
             "protected_wall_cluster_count": 0,
+            "obstacle_core_cluster_count": 0,
+            "obstacle_mask_cell_count": 0,
+            "protected_wall_cell_count": 0,
+            "blocked_cell_count": len(blocked),
+            "mask_reason": "no_occupied_cells",
         }
 
     occupied_envelope = cell_bounds(occupied)
     protected_wall_cells = set()
     protected_wall_cluster_count = 0
+    obstacle_core_cells = set()
+    obstacle_core_cluster_count = 0
     clusters = cluster_cells_8(occupied)
     for cluster in clusters:
         if not cluster_is_wall_like(grid, cluster, occupied_envelope):
+            if cluster_is_compact_obstacle_like(grid, cluster, occupied_envelope):
+                obstacle_core_cluster_count += 1
+                obstacle_core_cells.update(cluster)
             continue
         protected_wall_cluster_count += 1
         protected_wall_cells.update(cluster)
@@ -188,10 +244,27 @@ def temporary_grid_localizer_obstacle_mask(grid):
         protected_wall_cells,
         LOCALIZER_FILTER_WALL_EXPAND_CELLS,
     )
-    obstacle_mask = set(blocked_cells_from_grid(grid)) - protected_wall_cells
+    obstacle_mask = set(obstacle_core_cells)
+    if obstacle_core_cells:
+        expanded_obstacle_cells = expand_cells(
+            grid,
+            obstacle_core_cells,
+            max(1, LOCALIZER_FILTER_WALL_EXPAND_CELLS + 1),
+        )
+        obstacle_mask.update(blocked & expanded_obstacle_cells)
+    obstacle_mask -= protected_wall_cells
     diagnostics = {
         "occupied_cluster_count": len(clusters),
         "protected_wall_cluster_count": protected_wall_cluster_count,
+        "obstacle_core_cluster_count": obstacle_core_cluster_count,
+        "obstacle_mask_cell_count": len(obstacle_mask),
+        "protected_wall_cell_count": len(protected_wall_cells),
+        "blocked_cell_count": len(blocked),
+        "mask_reason": (
+            "compact_obstacle_clusters"
+            if obstacle_mask
+            else "no_compact_temporary_obstacle_cluster"
+        ),
     }
     return obstacle_mask, protected_wall_cells, diagnostics
 
