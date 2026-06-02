@@ -120,6 +120,7 @@ class ArenaActiveSpinSession:
         self.collecting_explore_map = False
         self.samples = []
         self.explore_samples = []
+        self.active_explore_startup_spin_samples = ()
         self.active_explore_final_spin_memory_samples = None
         self.rejected_samples = 0
         self.diagnostics = initial_diagnostics(config)
@@ -442,6 +443,11 @@ class ArenaActiveSpinSession:
         self.collecting = False
         stop_repeatedly(publisher, self.twist_factory, self.sleep_fn)
         self.sleep_fn(self.config.stop_settle_sec)
+        if (
+            attempt_index == 0
+            and effective_recovery_mode(self.config) == "active_explore"
+        ):
+            self.active_explore_startup_spin_samples = tuple(self.samples)
         self.diagnostics["spin_attempts"].append(
             {
                 **self.diagnostics["spin"],
@@ -484,16 +490,199 @@ class ArenaActiveSpinSession:
             return list(self.active_explore_final_spin_memory_samples)
         return list(self.explore_samples)
 
-    def combined_active_explore_localizer_samples(self, memory_samples):
-        combined = []
+    def dedupe_samples_by_identity(self, sample_groups):
+        deduped = []
         seen = set()
-        for sample in list(memory_samples) + list(self.samples):
-            key = id(sample)
-            if key in seen:
+        for samples in sample_groups:
+            for sample in samples:
+                key = id(sample)
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(sample)
+        return deduped
+
+    def stride_valid_range_count_for_sample(self, sample):
+        stride = max(1, int(self.config.range_stride))
+        count = 0
+        for index, value in enumerate(sample.ranges):
+            if index % stride != 0:
                 continue
-            seen.add(key)
-            combined.append(sample)
-        return combined
+            if value is None or not math.isfinite(value):
+                continue
+            if value < sample.range_min or value > sample.range_max:
+                continue
+            count += 1
+        return count
+
+    def select_samples_for_point_budget(self, samples, point_budget):
+        samples = list(samples)
+        if not samples or point_budget <= 0:
+            return []
+        point_counts = [
+            self.stride_valid_range_count_for_sample(sample)
+            for sample in samples
+        ]
+        valid_indices = [
+            index
+            for index, point_count in enumerate(point_counts)
+            if point_count > 0
+        ]
+        if not valid_indices:
+            return []
+        total_points = sum(point_counts[index] for index in valid_indices)
+        if total_points <= point_budget:
+            return [samples[index] for index in valid_indices]
+        average_points = total_points / len(valid_indices)
+        target_count = max(1, int(point_budget / max(1.0, average_points)))
+        target_count = min(target_count, len(valid_indices))
+        if target_count == 1:
+            selected_indices = [valid_indices[len(valid_indices) // 2]]
+        else:
+            selected_indices = []
+            max_position = len(valid_indices) - 1
+            for selection_index in range(target_count):
+                position = round(selection_index * max_position / (target_count - 1))
+                selected_indices.append(valid_indices[position])
+            selected_indices = sorted(set(selected_indices))
+
+        selected = []
+        used_points = 0
+        for index in selected_indices:
+            point_count = point_counts[index]
+            if selected and used_points + point_count > point_budget:
+                continue
+            selected.append(samples[index])
+            used_points += point_count
+        if not selected:
+            selected.append(samples[selected_indices[0]])
+        return selected
+
+    def pose_bin_for_mapping_sample(self, sample):
+        pose = sample.odom_pose
+        if pose is None:
+            return None
+        try:
+            x = float(pose.x)
+            y = float(pose.y)
+            yaw_deg = float(pose.yaw_deg)
+        except (TypeError, ValueError):
+            return None
+        if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(yaw_deg)):
+            return None
+        yaw_wrapped_deg = ((yaw_deg + 180.0) % 360.0) - 180.0
+        return (
+            math.floor(x / 0.15),
+            math.floor(y / 0.15),
+            math.floor(yaw_wrapped_deg / 20.0),
+        )
+
+    def active_explore_mapping_memory_candidates(self, memory_samples, excluded_ids):
+        candidates = []
+        pose_bins = set()
+        for sample in memory_samples:
+            if id(sample) in excluded_ids:
+                continue
+            pose_bin = self.pose_bin_for_mapping_sample(sample)
+            if pose_bin is None or pose_bin in pose_bins:
+                continue
+            pose_bins.add(pose_bin)
+            candidates.append(sample)
+        return candidates, len(pose_bins)
+
+    def active_explore_localizer_point_budgets(self, final_samples, startup_samples):
+        max_points = max(1, int(self.config.max_points or 1))
+        final_budget = int(round(max_points * 0.40))
+        startup_budget = int(round(max_points * 0.40))
+        mapping_budget = max(0, max_points - final_budget - startup_budget)
+        if not startup_samples:
+            final_budget += startup_budget
+            startup_budget = 0
+        if not final_samples:
+            startup_budget += final_budget
+            final_budget = 0
+        if not final_samples and not startup_samples:
+            mapping_budget = max_points
+        return final_budget, startup_budget, mapping_budget
+
+    def balanced_active_explore_localizer_samples(self, memory_samples):
+        memory_samples = list(memory_samples)
+        final_samples = list(self.samples)
+        startup_samples = list(self.active_explore_startup_spin_samples)
+        raw_combined_samples = self.dedupe_samples_by_identity(
+            (memory_samples, final_samples)
+        )
+        final_budget, startup_budget, mapping_budget = (
+            self.active_explore_localizer_point_budgets(
+                final_samples,
+                startup_samples,
+            )
+        )
+
+        selected_final = self.select_samples_for_point_budget(
+            final_samples,
+            final_budget,
+        )
+        selected_startup = self.select_samples_for_point_budget(
+            startup_samples,
+            startup_budget,
+        )
+        excluded_ids = {id(sample) for sample in final_samples}
+        excluded_ids.update(id(sample) for sample in startup_samples)
+        mapping_candidates, pose_bin_count = (
+            self.active_explore_mapping_memory_candidates(
+                memory_samples,
+                excluded_ids,
+            )
+        )
+        selected_mapping = self.select_samples_for_point_budget(
+            mapping_candidates,
+            mapping_budget,
+        )
+
+        balanced_samples = []
+        seen = set()
+        selected_counts = {
+            "final_spin": 0,
+            "startup_spin": 0,
+            "mapping_memory": 0,
+        }
+        for group_name, samples in (
+            ("final_spin", selected_final),
+            ("startup_spin", selected_startup),
+            ("mapping_memory", selected_mapping),
+        ):
+            for sample in samples:
+                key = id(sample)
+                if key in seen:
+                    continue
+                seen.add(key)
+                balanced_samples.append(sample)
+                selected_counts[group_name] += 1
+
+        diagnostics = {
+            "raw_combined_sample_count": len(raw_combined_samples),
+            "startup_spin_sample_count": len(startup_samples),
+            "selected_final_spin_sample_count": selected_counts["final_spin"],
+            "selected_startup_spin_sample_count": selected_counts["startup_spin"],
+            "selected_mapping_memory_sample_count": selected_counts["mapping_memory"],
+            "balanced_sample_count": len(balanced_samples),
+            "localizer_sample_order": [
+                group_name
+                for group_name in (
+                    "final_spin",
+                    "startup_spin",
+                    "mapping_memory",
+                )
+                if selected_counts[group_name] > 0
+            ],
+            "final_spin_point_budget": final_budget,
+            "startup_spin_point_budget": startup_budget,
+            "mapping_memory_point_budget": mapping_budget,
+            "mapping_memory_candidate_count": len(mapping_candidates),
+            "mapping_memory_pose_bin_count": pose_bin_count,
+        }
+        return balanced_samples, diagnostics
 
     def active_explore_filtered_localizer_samples(self):
         diagnostics = {
@@ -503,7 +692,19 @@ class ArenaActiveSpinSession:
             "output_sample_count": len(self.samples),
             "memory_sample_count": 0,
             "final_spin_sample_count": len(self.samples),
+            "startup_spin_sample_count": len(self.active_explore_startup_spin_samples),
+            "raw_combined_sample_count": len(self.samples),
             "combined_sample_count": len(self.samples),
+            "selected_final_spin_sample_count": len(self.samples),
+            "selected_startup_spin_sample_count": 0,
+            "selected_mapping_memory_sample_count": 0,
+            "balanced_sample_count": len(self.samples),
+            "localizer_sample_order": ["raw_current_spin"] if self.samples else [],
+            "final_spin_point_budget": 0,
+            "startup_spin_point_budget": 0,
+            "mapping_memory_point_budget": 0,
+            "mapping_memory_candidate_count": 0,
+            "mapping_memory_pose_bin_count": 0,
             "used_accumulated_memory": False,
             "valid_ranges_before": valid_scan_range_count(self.samples),
             "valid_ranges_after": valid_scan_range_count(self.samples),
@@ -522,13 +723,19 @@ class ArenaActiveSpinSession:
             return self.samples
 
         memory_samples = self.active_explore_localizer_memory_samples()
-        combined_samples = self.combined_active_explore_localizer_samples(memory_samples)
-        valid_ranges_before = valid_scan_range_count(combined_samples)
+        localizer_samples, balance_diagnostics = (
+            self.balanced_active_explore_localizer_samples(memory_samples)
+        )
+        valid_ranges_before = valid_scan_range_count(localizer_samples)
         diagnostics["memory_sample_count"] = len(memory_samples)
-        diagnostics["combined_sample_count"] = len(combined_samples)
-        diagnostics["input_sample_count"] = len(combined_samples)
-        diagnostics["output_sample_count"] = len(combined_samples)
-        diagnostics["used_accumulated_memory"] = bool(memory_samples)
+        diagnostics.update(balance_diagnostics)
+        diagnostics["combined_sample_count"] = len(localizer_samples)
+        diagnostics["input_sample_count"] = len(localizer_samples)
+        diagnostics["output_sample_count"] = len(localizer_samples)
+        diagnostics["used_accumulated_memory"] = (
+            balance_diagnostics["selected_startup_spin_sample_count"] > 0
+            or balance_diagnostics["selected_mapping_memory_sample_count"] > 0
+        )
         diagnostics["valid_ranges_before"] = valid_ranges_before
         diagnostics["valid_ranges_after"] = valid_ranges_before
 
@@ -536,7 +743,7 @@ class ArenaActiveSpinSession:
         if grid is None:
             diagnostics["reason"] = grid_reason
             self.diagnostics["active_explore"]["localizer_filter"] = diagnostics
-            return combined_samples
+            return localizer_samples
 
         diagnostics["temporary_grid_cell_counts"] = grid.to_dict()["cell_counts"]
         obstacle_mask, protected_wall_cells, mask_diagnostics = (
@@ -548,11 +755,11 @@ class ArenaActiveSpinSession:
         if not obstacle_mask:
             diagnostics["reason"] = "no_temporary_obstacle_mask"
             self.diagnostics["active_explore"]["localizer_filter"] = diagnostics
-            return combined_samples
+            return localizer_samples
 
         filtered_samples, filtered_range_count = (
             filter_scan_samples_with_temporary_obstacle_map(
-                combined_samples,
+                localizer_samples,
                 grid,
                 obstacle_mask,
             )
@@ -563,7 +770,7 @@ class ArenaActiveSpinSession:
             diagnostics["filtered_range_count"] = filtered_range_count
             diagnostics["filtered_valid_ranges_after"] = filtered_valid_ranges_after
             self.diagnostics["active_explore"]["localizer_filter"] = diagnostics
-            return combined_samples
+            return localizer_samples
 
         diagnostics["enabled"] = True
         diagnostics["reason"] = "filtered_temporary_obstacles"
