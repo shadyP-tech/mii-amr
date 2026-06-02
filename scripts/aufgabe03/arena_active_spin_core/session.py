@@ -1079,9 +1079,13 @@ class ArenaActiveSpinSession:
             self.print_active_explore_spin_skip(spin_safety)
             return None
 
+        mission_decision = attempt_record.get("mission_decision", {})
+        spin_reason = "localization_pose_reached"
+        if mission_decision.get("action") == EXPLORE_ACTION_RUN_LOCALIZATION_SPIN:
+            spin_reason = mission_decision.get("reason") or spin_reason
         decision = {
             "action": "spin",
-            "reason": "localization_pose_reached",
+            "reason": spin_reason,
             "active_explore_phase": ACTIVE_EXPLORE_PHASE_LOCALIZATION_SPIN,
             "shadow_explore_complete": self.shadow_explore_complete,
             "spin_safety": spin_safety,

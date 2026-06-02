@@ -518,6 +518,60 @@ class ExploreMissionController:
             localization_policy
         )
         if selected is None:
+            if self._current_pose_localization_spin_allowed(plan, map_status):
+                if (
+                    self.localization_pose_attempts
+                    >= self.config.active_explore_max_localization_pose_attempts
+                ):
+                    diagnostics = self._diagnostics(
+                        plan,
+                        map_status,
+                        None,
+                        "current_pose_localization_spin",
+                        localization_candidate_policy=localization_policy,
+                        continue_without_motion=False,
+                        current_pose_localization_spin=True,
+                    )
+                    fail_plan = self._effective_plan(
+                        plan,
+                        None,
+                        ok=False,
+                        reason="no_localization_pose_candidate",
+                    )
+                    return self._decision(
+                        EXPLORE_ACTION_FAIL,
+                        fail_plan,
+                        None,
+                        "no_localization_pose_candidate",
+                        diagnostics,
+                    )
+
+                self.localization_pose_attempts += 1
+                self.phase = EXPLORE_PHASE_LOCALIZATION_SPIN
+                self._sync_policy_phase()
+                diagnostics = self._diagnostics(
+                    plan,
+                    map_status,
+                    None,
+                    "current_pose_localization_spin",
+                    localization_candidate_policy=localization_policy,
+                    continue_without_motion=False,
+                    current_pose_localization_spin=True,
+                )
+                spin_plan = self._effective_plan(
+                    plan,
+                    None,
+                    ok=True,
+                    reason="current_pose_localization_spin",
+                )
+                return self._decision(
+                    EXPLORE_ACTION_RUN_LOCALIZATION_SPIN,
+                    spin_plan,
+                    None,
+                    "current_pose_localization_spin",
+                    diagnostics,
+                )
+
             self.localization_pose_attempts += 1
             reason = localization_policy["reason"]
             diagnostics = self._diagnostics(
@@ -639,6 +693,18 @@ class ExploreMissionController:
                 )
 
         return self._select_shadow_candidate(plan, map_status, current_pose_point)
+
+    def _current_pose_localization_spin_allowed(self, plan, map_status):
+        if self.phase != EXPLORE_PHASE_HEATER_APPROACH:
+            return False
+        if map_status.get("shadow_unknown_cell_count") != 0:
+            return False
+        for key in ("active_shadow_frontier_count", "reachable_shadow_frontier_count"):
+            count = map_status.get(key)
+            if count is not None and int(count) > 0:
+                return False
+        shadow_status = self.policy.shadow_frontier_status_from_plan(plan)
+        return shadow_status["shadow_frontier_state"] == "absent"
 
     def record_motion(self, decision, motion_result: ExploreMissionMotionResult):
         if decision.action != EXPLORE_ACTION_DRIVE_CANDIDATE:
