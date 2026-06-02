@@ -10,12 +10,17 @@ from arena_active_explore import (
 
 from .active_explore_policy import (
     ActiveExplorePolicy,
+    candidate_has_safe_shadow_approach_clearance,
+    candidate_is_accepted_open_corridor,
     candidate_path_needs_motion,
+    candidate_path_min_clearance_m,
+    candidate_path_unknown_ratio,
     candidate_is_localization_pose_candidate,
     candidate_visible_shadow_count,
 )
 from .models import (
     ACTIVE_EXPLORE_FRONTIER_UNREACHABLE_REASONS,
+    ACTIVE_EXPLORE_LOCALIZATION_ESCAPE_MIN_PATH_M,
     ACTIVE_EXPLORE_PHASE_LOCALIZATION_POSE,
     ACTIVE_EXPLORE_PHASE_LOCALIZATION_SPIN,
     ACTIVE_EXPLORE_PHASE_SHADOW,
@@ -294,6 +299,10 @@ class ExploreMissionController:
                 "shadow_approach_fallback_policy",
                 None,
             ),
+            "localization_escape_policy": extra.pop(
+                "localization_escape_policy",
+                None,
+            ),
             "continue_without_motion": extra.pop("continue_without_motion", False),
         }
         diagnostics.update(extra)
@@ -303,6 +312,9 @@ class ExploreMissionController:
         )
         self.diagnostics["active_explore"]["shadow_approach_fallback_policy"] = (
             diagnostics["shadow_approach_fallback_policy"]
+        )
+        self.diagnostics["active_explore"]["localization_escape_policy"] = (
+            diagnostics["localization_escape_policy"]
         )
         self._update_diagnostics()
         return diagnostics
@@ -518,6 +530,23 @@ class ExploreMissionController:
             localization_policy
         )
         if selected is None:
+            escape, escape_policy = self._localization_escape_candidate(plan)
+            if escape is not None:
+                diagnostics = self._diagnostics(
+                    plan,
+                    map_status,
+                    escape,
+                    "localization_escape_open_corridor",
+                    localization_candidate_policy=localization_policy,
+                    localization_escape_policy=escape_policy,
+                )
+                return self._drive_decision(
+                    plan,
+                    escape,
+                    "localization_escape_open_corridor",
+                    diagnostics,
+                )
+
             if self._current_pose_localization_spin_allowed(plan, map_status):
                 if (
                     self.localization_pose_attempts
@@ -529,6 +558,7 @@ class ExploreMissionController:
                         None,
                         "current_pose_localization_spin",
                         localization_candidate_policy=localization_policy,
+                        localization_escape_policy=escape_policy,
                         continue_without_motion=False,
                         current_pose_localization_spin=True,
                     )
@@ -555,6 +585,7 @@ class ExploreMissionController:
                     None,
                     "current_pose_localization_spin",
                     localization_candidate_policy=localization_policy,
+                    localization_escape_policy=escape_policy,
                     continue_without_motion=False,
                     current_pose_localization_spin=True,
                 )
@@ -580,6 +611,7 @@ class ExploreMissionController:
                 None,
                 "localization_pose_required",
                 localization_candidate_policy=localization_policy,
+                localization_escape_policy=escape_policy,
                 continue_without_motion=(
                     self.localization_pose_attempts
                     < self.config.active_explore_max_localization_pose_attempts
@@ -619,6 +651,113 @@ class ExploreMissionController:
             "localization_pose_selected",
             diagnostics,
         )
+
+    def _localization_escape_candidate(self, plan):
+        candidates = [
+            candidate
+            for candidate in plan.candidates
+            if candidate_is_accepted_open_corridor(candidate)
+        ]
+        policy = {
+            "candidate_count": len(candidates),
+            "safe_candidate_count": 0,
+            "min_path_length_m": ACTIVE_EXPLORE_LOCALIZATION_ESCAPE_MIN_PATH_M,
+            "min_path_clearance_m": None,
+            "selected_kind": None,
+            "selected_sector_center_deg": None,
+            "selected_path_length_m": None,
+            "selected_path_min_clearance_m": None,
+            "selected_path_unknown_ratio": None,
+            "candidate_metrics": [],
+            "reason": "",
+        }
+        if not candidates:
+            policy["reason"] = "no_open_corridor_candidate"
+            return None, policy
+
+        ranked = []
+        for candidate in candidates:
+            path_length = candidate.path_length_m
+            path_length = (
+                float(path_length)
+                if path_length is not None
+                else 0.0
+            )
+            path_min_clearance = candidate_path_min_clearance_m(candidate)
+            path_unknown_ratio = candidate_path_unknown_ratio(candidate)
+            path_long_enough = path_length >= ACTIVE_EXPLORE_LOCALIZATION_ESCAPE_MIN_PATH_M
+            path_clear_enough = candidate_has_safe_shadow_approach_clearance(candidate)
+            accepted = path_long_enough and path_clear_enough
+            metrics = {
+                "kind": candidate.kind,
+                "sector_center_deg": (candidate.metadata or {}).get(
+                    "sector_center_deg"
+                ),
+                "path_length_m": path_length,
+                "path_min_clearance_m": path_min_clearance,
+                "path_unknown_ratio": path_unknown_ratio,
+                "score": candidate.score,
+                "accepted": accepted,
+                "rejection_reason": "",
+            }
+            if not path_long_enough:
+                metrics["rejection_reason"] = "path_too_short"
+            elif not path_clear_enough:
+                metrics["rejection_reason"] = "path_clearance_too_low"
+            policy["candidate_metrics"].append(metrics)
+            if not accepted:
+                continue
+            ranked.append((candidate, metrics))
+
+        policy["safe_candidate_count"] = len(ranked)
+        if policy["candidate_metrics"]:
+            clearances = [
+                metric["path_min_clearance_m"]
+                for metric in policy["candidate_metrics"]
+                if metric["path_min_clearance_m"] is not None
+            ]
+            policy["min_path_clearance_m"] = min(clearances) if clearances else None
+        if not ranked:
+            policy["reason"] = "no_safe_localization_escape_candidate"
+            return None, policy
+
+        selected = None
+        selected_metrics = None
+        if plan.selected is not None:
+            for candidate, metrics in ranked:
+                if candidate is plan.selected:
+                    selected = candidate
+                    selected_metrics = metrics
+                    policy["reason"] = "selected_default_open_corridor"
+                    break
+        if selected is None:
+            selected, selected_metrics = sorted(
+                ranked,
+                key=lambda item: (
+                    -(
+                        item[1]["path_min_clearance_m"]
+                        if item[1]["path_min_clearance_m"] is not None
+                        else -1.0
+                    ),
+                    item[1]["path_unknown_ratio"],
+                    -(item[0].score if item[0].score is not None else -1.0),
+                    item[1]["path_length_m"],
+                ),
+            )[0]
+            policy["reason"] = "selected_best_open_corridor"
+
+        policy["selected_kind"] = selected.kind
+        policy["selected_sector_center_deg"] = (selected.metadata or {}).get(
+            "sector_center_deg"
+        )
+        policy["selected_path_length_m"] = selected_metrics["path_length_m"]
+        policy["selected_path_min_clearance_m"] = selected_metrics[
+            "path_min_clearance_m"
+        ]
+        policy["selected_path_unknown_ratio"] = selected_metrics[
+            "path_unknown_ratio"
+        ]
+        return selected, policy
 
     def next_decision(self, result, plan, map_status, current_pose_point=None):
         self.last_shadow_unknown_cell_count = map_status.get("shadow_unknown_cell_count")
@@ -717,7 +856,10 @@ class ExploreMissionController:
             self._update_diagnostics()
             return
         if selected.kind in {"obstacle_shadow_frontier", "open_corridor"}:
-            if decision.diagnostics.get("selection_policy") == "localization_pose":
+            if decision.diagnostics.get("selection_policy") in {
+                "localization_pose",
+                "localization_escape_open_corridor",
+            }:
                 self.localization_pose_attempts += 1
                 self.phase = EXPLORE_PHASE_LOCALIZATION_SPIN
             else:
