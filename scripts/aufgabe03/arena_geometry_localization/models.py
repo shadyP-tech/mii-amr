@@ -90,7 +90,7 @@ class ArenaGeometryConfig:
     profile_clean_line_support_low: float = 0.45
     profile_clean_line_support_high: float = 0.80
     profile_relative_heater_min_score: float = 0.85
-    profile_relative_heater_min_delta: float = 0.15
+    profile_relative_heater_min_delta: float = 0.12
     profile_relative_opposite_max_heater_score: float = 0.80
     profile_relative_selected_max_clean_score: float = 0.55
     profile_relative_min_protrusion_clusters: int = 2
