@@ -735,6 +735,9 @@ class ArenaActiveSpinSession:
                 attempt_index=len(self.diagnostics["spin_attempts"]),
             )
             result = self.analyze_result()
+            attempt_record["post_recovery_localizer_filter"] = (
+                self.diagnostics["active_explore"].get("localizer_filter")
+            )
         finally:
             self.active_explore_final_spin_memory_samples = previous_memory_samples
         attempt_record["post_recovery_spin_result"] = result.to_dict()
