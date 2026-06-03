@@ -38,6 +38,25 @@ def candidate_profile_valid(candidate):
     return failed is None and features.get("validity_failed_reason") is None
 
 
+def short_wall_ranges(result):
+    candidates = result.short_wall_candidates or {}
+    negative = candidates.get("axis_negative")
+    positive = candidates.get("axis_positive")
+    return (
+        negative,
+        positive,
+        candidate_range(negative),
+        candidate_range(positive),
+    )
+
+
+def short_wall_range_sum_ok(negative_range, positive_range, config):
+    if negative_range is None or positive_range is None:
+        return False
+    range_sum_error = negative_range + positive_range - config.arena_length_m
+    return abs(range_sum_error) <= config.max_short_wall_range_sum_error_m
+
+
 def geometry_is_recoverable(result, config: ActiveExploreConfig):
     if result.success:
         return False, "already_localized"
@@ -53,16 +72,14 @@ def geometry_is_recoverable(result, config: ActiveExploreConfig):
         return True, "ok"
     if not getattr(long_fit, "ok", False) or long_fit.axis_angle_rad is None:
         return False, "invalid_long_wall_fit"
-    candidates = result.short_wall_candidates or {}
-    negative = candidates.get("axis_negative")
-    positive = candidates.get("axis_positive")
-    negative_range = candidate_range(negative)
-    positive_range = candidate_range(positive)
+    _negative, _positive, negative_range, positive_range = short_wall_ranges(result)
     if negative_range is None or positive_range is None:
         return False, "missing_short_wall_ranges"
-    range_sum_error = negative_range + positive_range - config.arena_length_m
-    if abs(range_sum_error) > config.max_short_wall_range_sum_error_m:
-        return False, "range_sum_invalid"
+    if not short_wall_range_sum_ok(negative_range, positive_range, config):
+        # Obstacle geometry can look like a short wall and corrupt the range
+        # sum. Still allow scan-grid shadow exploration, but suppress
+        # range-dependent recovery candidates below.
+        return True, "ok"
     return True, "ok"
 
 
@@ -83,6 +100,11 @@ def generate_raw_candidates(
     positive = candidates.get("axis_positive")
     negative_range = candidate_range(negative)
     positive_range = candidate_range(positive)
+    ranges_trustworthy = short_wall_range_sum_ok(
+        negative_range,
+        positive_range,
+        config,
+    )
     axis_angle = getattr(long_fit, "axis_angle_rad", None)
     axis_heading = (
         yaw_rad_from_pose(robot_pose)
@@ -97,7 +119,11 @@ def generate_raw_candidates(
     )
     raw = []
 
-    if negative_range is not None and positive_range is not None:
+    if (
+        ranges_trustworthy
+        and negative_range is not None
+        and positive_range is not None
+    ):
         if negative_range <= positive_range:
             nearest_side = "axis_negative"
             nearest_range = negative_range
@@ -157,7 +183,8 @@ def generate_raw_candidates(
         )
 
     if (
-        negative_range is not None
+        ranges_trustworthy
+        and negative_range is not None
         and positive_range is not None
         and candidate_profile_valid(negative)
         and candidate_profile_valid(positive)
@@ -248,4 +275,3 @@ def min_scan_range_in_sector(scan, lower_deg, upper_deg):
         if lower_deg <= angle <= upper_deg:
             values.append(float(raw_range))
     return min(values) if values else None
-
