@@ -92,6 +92,8 @@ class ArenaGeometryConfig:
     profile_relative_heater_min_score: float = 0.85
     profile_relative_heater_min_delta: float = 0.12
     profile_relative_opposite_max_heater_score: float = 0.80
+    profile_relative_strong_heater_min_score: float = 0.98
+    profile_relative_strong_opposite_max_heater_score: float = 0.90
     profile_relative_selected_max_clean_score: float = 0.55
     profile_relative_min_protrusion_clusters: int = 2
     profile_relative_min_protrusion_fraction: float = 0.10
@@ -246,6 +248,8 @@ class ShortWallClassification:
     relative_heater_score: float | None = None
     relative_opposite_heater_score: float | None = None
     relative_opposite_max_heater_score: float | None = None
+    relative_strong_heater_min_score: float | None = None
+    relative_strong_opposite_max_heater_score: float | None = None
     relative_min_protrusion_clusters: int | None = None
     relative_min_protrusion_fraction: float | None = None
     relative_confidence_raw: float | None = None
@@ -282,6 +286,10 @@ class ShortWallClassification:
             "relative_heater_score": self.relative_heater_score,
             "relative_opposite_heater_score": self.relative_opposite_heater_score,
             "relative_opposite_max_heater_score": self.relative_opposite_max_heater_score,
+            "relative_strong_heater_min_score": self.relative_strong_heater_min_score,
+            "relative_strong_opposite_max_heater_score": (
+                self.relative_strong_opposite_max_heater_score
+            ),
             "relative_min_protrusion_clusters": self.relative_min_protrusion_clusters,
             "relative_min_protrusion_fraction": self.relative_min_protrusion_fraction,
             "relative_confidence_raw": self.relative_confidence_raw,
@@ -309,6 +317,8 @@ class PairwiseShortWallClassification:
     relative_heater_score: float | None = None
     relative_opposite_heater_score: float | None = None
     relative_opposite_max_heater_score: float | None = None
+    relative_strong_heater_min_score: float | None = None
+    relative_strong_opposite_max_heater_score: float | None = None
     relative_min_protrusion_clusters: int | None = None
     relative_min_protrusion_fraction: float | None = None
     relative_confidence_raw: float | None = None

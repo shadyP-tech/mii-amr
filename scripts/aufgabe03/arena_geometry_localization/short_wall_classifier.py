@@ -54,17 +54,30 @@ def classify_short_wall_relative_heater(
         "relative_heater_score": selected_heater_score,
         "relative_opposite_heater_score": opposite_heater_score,
         "relative_opposite_max_heater_score": config.profile_relative_opposite_max_heater_score,
+        "relative_strong_heater_min_score": config.profile_relative_strong_heater_min_score,
+        "relative_strong_opposite_max_heater_score": (
+            config.profile_relative_strong_opposite_max_heater_score
+        ),
         "relative_min_protrusion_clusters": config.profile_relative_min_protrusion_clusters,
         "relative_min_protrusion_fraction": config.profile_relative_min_protrusion_fraction,
         "relative_confidence_raw": selected_heater_score,
     }
+    strong_winner_with_tolerable_opposite = (
+        selected_heater_score >= config.profile_relative_strong_heater_min_score
+        and opposite_heater_score
+        <= config.profile_relative_strong_opposite_max_heater_score
+        and heater_delta >= config.profile_relative_heater_min_delta
+    )
 
     if selected_heater_score < config.profile_relative_heater_min_score:
         return PairwiseShortWallClassification(
             reason="pairwise_profile_relative_heater_score_too_low",
             **relative_common,
         )
-    if opposite_heater_score > config.profile_relative_opposite_max_heater_score:
+    if (
+        opposite_heater_score > config.profile_relative_opposite_max_heater_score
+        and not strong_winner_with_tolerable_opposite
+    ):
         return PairwiseShortWallClassification(
             reason="pairwise_profile_relative_opposite_too_heater_like",
             **relative_common,
@@ -302,6 +315,10 @@ def copy_candidate_with_pairwise_result(
         relative_heater_score=pairwise.relative_heater_score,
         relative_opposite_heater_score=pairwise.relative_opposite_heater_score,
         relative_opposite_max_heater_score=pairwise.relative_opposite_max_heater_score,
+        relative_strong_heater_min_score=pairwise.relative_strong_heater_min_score,
+        relative_strong_opposite_max_heater_score=(
+            pairwise.relative_strong_opposite_max_heater_score
+        ),
         relative_min_protrusion_clusters=pairwise.relative_min_protrusion_clusters,
         relative_min_protrusion_fraction=pairwise.relative_min_protrusion_fraction,
         relative_confidence_raw=pairwise.relative_confidence_raw,
