@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from arena_geometry_localizer import ArenaGeometryConfig
+from arena_geometry_localization import ArenaGeometryConfig
 
 
 DEFAULT_STOP_COUNT = 10
@@ -22,6 +22,7 @@ ACTIVE_EXPLORE_LOCALIZATION_CANDIDATE_KINDS = (
 )
 ACTIVE_EXPLORE_FRONTIER_UNREACHABLE_REASONS = {
     "no_connected_path",
+    "path_too_many_segments",
     "path_too_long",
 }
 ACTIVE_EXPLORE_SHADOW_APPROACH_MIN_PATH_CLEARANCE_M = 0.10
@@ -135,6 +136,7 @@ class ArenaActiveSpinConfig:
     require_operator_confirmation: bool = True
     allow_extra_cmd_vel_publishers: bool = False
     dry_run: bool = False
+    verbose: bool = False
     range_stride: int = 6
     max_points: int = 3000
     control_rate_hz: float = 10.0

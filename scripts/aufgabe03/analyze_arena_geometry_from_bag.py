@@ -12,7 +12,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from arena_geometry_localizer import (
+from arena_geometry_localization import (
     ArenaGeometryConfig,
     Pose2D,
     ScanSample,

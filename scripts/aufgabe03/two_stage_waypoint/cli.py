@@ -10,14 +10,8 @@ from .experiment_log import append_csv_row, build_log_row
 from .model import (
     CSV_HEADER,
     DEFAULT_AMCL_SETTLE_MIN_SEC,
-    DEFAULT_ARENA_ACTIVE_EXPLORE_CANDIDATE_MARKER_TOPIC,
-    DEFAULT_ARENA_ACTIVE_EXPLORE_PATH_TOPIC,
     DEFAULT_ARENA_ACTIVE_MAX_POST_AMCL_PRIOR_POSITION_ERROR_M,
     DEFAULT_ARENA_ACTIVE_MAX_POST_AMCL_PRIOR_YAW_ERROR_DEG,
-    DEFAULT_ARENA_ACTIVE_TEMPORARY_MAP_FRAME,
-    DEFAULT_ARENA_ACTIVE_TEMPORARY_MAP_PUBLISH_PERIOD_SEC,
-    DEFAULT_ARENA_ACTIVE_TEMPORARY_MAP_TOPIC,
-    DEFAULT_ARENA_ACTIVE_TEMPORARY_PLANNING_MAP_TOPIC,
     DEFAULT_ARENA_ACTIVE_VALIDATION_TIMEOUT_SEC,
     DEFAULT_ARRIVAL_TOLERANCE_M,
     DEFAULT_ARRIVAL_YAW_TOLERANCE_DEG,
@@ -87,6 +81,42 @@ from .pure import (
 )
 
 
+DEFAULT_ARENA_ACTIVE_PROFILE = "default"
+
+ARENA_ACTIVE_PROFILE_DEFAULTS = {
+    DEFAULT_ARENA_ACTIVE_PROFILE: {},
+    "real_shadow": {
+        "arena_active_explore_max_attempts": 12,
+        "arena_active_explore_max_single_move_m": 0.80,
+        "arena_active_explore_max_total_distance_m": 5.00,
+        "arena_active_explore_max_candidate_path_m": 1.80,
+        "arena_active_explore_grid_size_m": 5.0,
+        "arena_active_explore_inflation_radius_m": 0.12,
+        "arena_active_explore_soft_clearance_radius_m": 0.15,
+        "arena_active_explore_soft_clearance_weight": 2.0,
+        "arena_active_explore_curve_lookahead_m": 0.16,
+        "arena_active_explore_curve_linear_speed_mps": 0.05,
+        "arena_active_explore_curve_max_angular_rad_s": 0.40,
+        "arena_active_explore_map_max_samples": 1500,
+    },
+}
+
+
+def preparse_arena_active_profile(argv):
+    profile_parser = argparse.ArgumentParser(add_help=False)
+    profile_parser.add_argument(
+        "--arena-active-profile",
+        choices=tuple(ARENA_ACTIVE_PROFILE_DEFAULTS),
+        default=DEFAULT_ARENA_ACTIVE_PROFILE,
+    )
+    profile_args, _unknown = profile_parser.parse_known_args(argv or [])
+    return profile_args.arena_active_profile
+
+
+def arena_active_profile_default(profile, field, fallback):
+    return ARENA_ACTIVE_PROFILE_DEFAULTS[profile].get(field, fallback)
+
+
 def run_follower_command(command, runner=subprocess.run):
     return runner(command, check=False, shell=False)
 
@@ -120,7 +150,10 @@ def require_motion_confirmation(args, staging_goal, follower_command):
         f"y={staging_goal.waypoint.y:.3f}, "
         f"yaw={staging_goal.yaw_deg:.1f} deg"
     )
-    print("Follower command:", shlex.join(follower_command))
+    if args.verbose:
+        print("Follower command:", shlex.join(follower_command))
+    else:
+        print("Follower command: hidden; use --dry-run --verbose to inspect")
     response = input("Type RUN to start arena-prior two-stage run: ").strip()
     return response == "RUN"
 
@@ -134,6 +167,23 @@ def print_dry_run(args, waypoints, staging_goal, follower_command):
         f"x={staging_goal.waypoint.x:.3f}, y={staging_goal.waypoint.y:.3f}"
     )
     print(f"Computed staging yaw: {staging_goal.yaw_deg:.1f} deg")
+    print(
+        "Arena-active: "
+        f"profile={args.arena_active_profile}, "
+        f"mode={args.arena_active_recovery_mode}, "
+        f"executor={args.arena_active_recovery_executor}"
+    )
+    print(f"Wait before custom follower: {'yes' if args.wait_before_follow else 'no'}")
+    print(f"LiDAR map replan: {'enabled' if args.enable_lidar_map_replan else 'disabled'}")
+    print(f"Follower command: {shlex.join(follower_command)}")
+    print(f"Log path: {args.results_csv}")
+    from .ros_runtime import rclpy
+
+    print(f"ROS imports available: {'yes' if rclpy is not None else 'no'}")
+    if not args.verbose:
+        print("Detailed config hidden; rerun with --verbose to print all parameters.")
+        return
+
     print("ROS interfaces:")
     print(f"  navigate action: {args.navigate_action}")
     print(f"  initial pose topic: {args.initial_pose_topic}")
@@ -142,11 +192,16 @@ def print_dry_run(args, waypoints, staging_goal, follower_command):
     print(f"  scan topic: {args.scan_topic}")
     print(f"  odom topic: {args.odom_topic}")
     print("Arena-active recovery:")
+    print(f"  profile: {args.arena_active_profile}")
     print(f"  mode: {args.arena_active_recovery_mode}")
     print(f"  executor: {args.arena_active_recovery_executor}")
     print(
-        "  active-explore max motion segments: "
+        "  active-explore max attempts: "
         f"{args.arena_active_explore_max_attempts}"
+    )
+    print(
+        "  active-explore max path segments: "
+        f"{args.arena_active_explore_max_path_segments}"
     )
     print(
         "  active-explore max single move: "
@@ -196,29 +251,9 @@ def print_dry_run(args, waypoints, staging_goal, follower_command):
         f"{args.arena_active_explore_min_progress_before_spin_m:.3f} m"
     )
     print(
-        "  active-explore temporary map RViz: "
-        f"{'enabled' if args.arena_active_publish_temporary_map else 'disabled'}"
+        "  active-explore RViz helper: "
+        "use scripts/aufgabe03/arena_active_temporary_map_debug_viz.py separately"
     )
-    if args.arena_active_publish_temporary_map:
-        print(
-            "  active-explore temporary observed map topic: "
-            f"{args.arena_active_temporary_map_topic}"
-        )
-        print(
-            "  active-explore temporary planning map topic: "
-            f"{args.arena_active_temporary_planning_map_topic}"
-        )
-        print(f"  active-explore temporary map frame: {args.arena_active_temporary_map_frame}")
-    print(
-        "  active-explore path RViz: "
-        f"{'enabled' if args.arena_active_publish_explore_path else 'disabled'}"
-    )
-    if args.arena_active_publish_explore_path:
-        print(f"  active-explore path topic: {args.arena_active_explore_path_topic}")
-        print(
-            "  active-explore candidate marker topic: "
-            f"{args.arena_active_explore_candidate_marker_topic}"
-        )
     print(f"Wait before custom follower: {'yes' if args.wait_before_follow else 'no'}")
     print(
         "Arena-active internal confirmations: "
@@ -237,14 +272,10 @@ def print_dry_run(args, waypoints, staging_goal, follower_command):
         print(f"  update mode: {args.run_local_map_update_mode}")
         print(f"  min hit count: {args.run_local_map_min_hit_count}")
         print(f"  inflation radius: {args.run_local_map_inflation_radius_m:.3f} m")
-    print(f"Follower command: {shlex.join(follower_command)}")
-    print(f"Log path: {args.results_csv}")
-    from .ros_runtime import rclpy
-
-    print(f"ROS imports available: {'yes' if rclpy is not None else 'no'}")
 
 
 def parse_args(argv):
+    arena_active_profile = preparse_arena_active_profile(argv)
     parser = argparse.ArgumentParser(
         description=(
             "Run arena-prior localization, Nav2 staging, and waypoint following."
@@ -282,6 +313,16 @@ def parse_args(argv):
     parser.add_argument("--cmd-vel-topic", default="/cmd_vel")
     parser.add_argument("--scan-topic", default="/scan")
     parser.add_argument("--odom-topic", default="/odom")
+    parser.add_argument(
+        "--arena-active-profile",
+        choices=tuple(ARENA_ACTIVE_PROFILE_DEFAULTS),
+        default=arena_active_profile,
+        help=(
+            "Apply a named arena-active tuning preset. real_shadow applies "
+            "the successful real-robot shadow exploration parameters; it does "
+            "not enable active_explore or cmd_vel by itself."
+        ),
+    )
     parser.add_argument("--follower-script", default=DEFAULT_FOLLOWER_SCRIPT, type=Path)
     parser.add_argument("--python-executable", default="python3")
     parser.add_argument(
@@ -608,7 +649,15 @@ def parse_args(argv):
         default=1.10,
         type=float,
     )
-    parser.add_argument("--arena-active-explore-max-attempts", default=6, type=int)
+    parser.add_argument(
+        "--arena-active-explore-max-attempts",
+        default=arena_active_profile_default(
+            arena_active_profile,
+            "arena_active_explore_max_attempts",
+            6,
+        ),
+        type=int,
+    )
     parser.add_argument(
         "--arena-active-explore-shadow-completion-confirmations",
         default=2,
@@ -626,16 +675,29 @@ def parse_args(argv):
     )
     parser.add_argument(
         "--arena-active-explore-max-single-move-m",
-        default=0.45,
+        default=arena_active_profile_default(
+            arena_active_profile,
+            "arena_active_explore_max_single_move_m",
+            0.45,
+        ),
         type=float,
     )
     parser.add_argument(
         "--arena-active-explore-max-total-distance-m",
-        default=0.90,
+        default=arena_active_profile_default(
+            arena_active_profile,
+            "arena_active_explore_max_total_distance_m",
+            0.90,
+        ),
         type=float,
     )
     parser.add_argument(
         "--arena-active-explore-max-candidate-path-m",
+        default=arena_active_profile_default(
+            arena_active_profile,
+            "arena_active_explore_max_candidate_path_m",
+            None,
+        ),
         type=float,
         help=(
             "Maximum A* path length accepted for a recovery candidate. "
@@ -649,17 +711,29 @@ def parse_args(argv):
     )
     parser.add_argument(
         "--arena-active-explore-grid-size-m",
-        default=4.0,
+        default=arena_active_profile_default(
+            arena_active_profile,
+            "arena_active_explore_grid_size_m",
+            4.0,
+        ),
         type=float,
     )
     parser.add_argument(
         "--arena-active-explore-inflation-radius-m",
-        default=0.15,
+        default=arena_active_profile_default(
+            arena_active_profile,
+            "arena_active_explore_inflation_radius_m",
+            0.15,
+        ),
         type=float,
     )
     parser.add_argument(
         "--arena-active-explore-soft-clearance-radius-m",
-        default=0.20,
+        default=arena_active_profile_default(
+            arena_active_profile,
+            "arena_active_explore_soft_clearance_radius_m",
+            0.20,
+        ),
         type=float,
         help=(
             "Soft obstacle-clearance radius used as an A* cost. Unlike "
@@ -669,7 +743,11 @@ def parse_args(argv):
     )
     parser.add_argument(
         "--arena-active-explore-soft-clearance-weight",
-        default=3.0,
+        default=arena_active_profile_default(
+            arena_active_profile,
+            "arena_active_explore_soft_clearance_weight",
+            3.0,
+        ),
         type=float,
         help=(
             "Weight for the active-explore soft obstacle-clearance A* cost. "
@@ -694,7 +772,11 @@ def parse_args(argv):
     )
     parser.add_argument(
         "--arena-active-explore-curve-lookahead-m",
-        default=0.18,
+        default=arena_active_profile_default(
+            arena_active_profile,
+            "arena_active_explore_curve_lookahead_m",
+            0.18,
+        ),
         type=float,
     )
     parser.add_argument(
@@ -704,12 +786,20 @@ def parse_args(argv):
     )
     parser.add_argument(
         "--arena-active-explore-curve-linear-speed-mps",
-        default=0.06,
+        default=arena_active_profile_default(
+            arena_active_profile,
+            "arena_active_explore_curve_linear_speed_mps",
+            0.06,
+        ),
         type=float,
     )
     parser.add_argument(
         "--arena-active-explore-curve-max-angular-rad-s",
-        default=0.45,
+        default=arena_active_profile_default(
+            arena_active_profile,
+            "arena_active_explore_curve_max_angular_rad_s",
+            0.45,
+        ),
         type=float,
     )
     parser.add_argument(
@@ -735,65 +825,12 @@ def parse_args(argv):
     )
     parser.add_argument(
         "--arena-active-explore-map-max-samples",
-        default=240,
+        default=arena_active_profile_default(
+            arena_active_profile,
+            "arena_active_explore_map_max_samples",
+            240,
+        ),
         type=int,
-    )
-    parser.add_argument(
-        "--arena-active-publish-temporary-map",
-        dest="arena_active_publish_temporary_map",
-        action="store_true",
-        default=True,
-        help=(
-            "Publish the active-explore observed and planning temporary "
-            "odom-frame maps as nav_msgs/OccupancyGrid topics for RViz."
-        ),
-    )
-    parser.add_argument(
-        "--no-arena-active-temporary-map-viz",
-        dest="arena_active_publish_temporary_map",
-        action="store_false",
-        help="Do not publish the active-explore temporary map RViz topics.",
-    )
-    parser.add_argument(
-        "--arena-active-temporary-map-topic",
-        default=DEFAULT_ARENA_ACTIVE_TEMPORARY_MAP_TOPIC,
-    )
-    parser.add_argument(
-        "--arena-active-temporary-planning-map-topic",
-        default=DEFAULT_ARENA_ACTIVE_TEMPORARY_PLANNING_MAP_TOPIC,
-    )
-    parser.add_argument(
-        "--arena-active-temporary-map-frame",
-        default=DEFAULT_ARENA_ACTIVE_TEMPORARY_MAP_FRAME,
-    )
-    parser.add_argument(
-        "--arena-active-temporary-map-publish-period-sec",
-        default=DEFAULT_ARENA_ACTIVE_TEMPORARY_MAP_PUBLISH_PERIOD_SEC,
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-publish-explore-path",
-        dest="arena_active_publish_explore_path",
-        action="store_true",
-        default=True,
-        help=(
-            "Publish the selected active-explore executable path and candidate "
-            "markers for RViz."
-        ),
-    )
-    parser.add_argument(
-        "--no-arena-active-explore-path-viz",
-        dest="arena_active_publish_explore_path",
-        action="store_false",
-        help="Do not publish active-explore path and candidate marker RViz topics.",
-    )
-    parser.add_argument(
-        "--arena-active-explore-path-topic",
-        default=DEFAULT_ARENA_ACTIVE_EXPLORE_PATH_TOPIC,
-    )
-    parser.add_argument(
-        "--arena-active-explore-candidate-marker-topic",
-        default=DEFAULT_ARENA_ACTIVE_EXPLORE_CANDIDATE_MARKER_TOPIC,
     )
     parser.add_argument("--arena-length-m", default=3.90, type=float)
     parser.add_argument("--arena-width-m", type=float)
@@ -821,6 +858,11 @@ def parse_args(argv):
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--yes", action="store_true")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print detailed configuration and arena-active diagnostic prompts.",
+    )
     parser.add_argument("--no-log", action="store_true")
     args = parser.parse_args(argv)
 
@@ -922,7 +964,6 @@ def validate_args(parser, args):
         "arena_active_explore_curve_linear_speed_mps",
         "arena_active_explore_curve_max_angular_rad_s",
         "arena_active_explore_min_progress_before_spin_m",
-        "arena_active_temporary_map_publish_period_sec",
         "arena_length_m",
         "arena_heater_wall_width_m",
         "arena_clean_wall_width_m",
@@ -1011,24 +1052,6 @@ def validate_args(parser, args):
         parser.error("--arena-active-explore-curve-linear-speed-mps must be <= 0.10")
     if args.arena_active_explore_curve_max_angular_rad_s > 0.80:
         parser.error("--arena-active-explore-curve-max-angular-rad-s must be <= 0.80")
-    if not args.arena_active_temporary_map_topic:
-        parser.error("--arena-active-temporary-map-topic must not be empty")
-    if not args.arena_active_temporary_planning_map_topic:
-        parser.error("--arena-active-temporary-planning-map-topic must not be empty")
-    if (
-        args.arena_active_temporary_planning_map_topic
-        == args.arena_active_temporary_map_topic
-    ):
-        parser.error(
-            "--arena-active-temporary-planning-map-topic must differ from "
-            "--arena-active-temporary-map-topic"
-        )
-    if not args.arena_active_temporary_map_frame:
-        parser.error("--arena-active-temporary-map-frame must not be empty")
-    if not args.arena_active_explore_path_topic:
-        parser.error("--arena-active-explore-path-topic must not be empty")
-    if not args.arena_active_explore_candidate_marker_topic:
-        parser.error("--arena-active-explore-candidate-marker-topic must not be empty")
     if (
         args.arena_active_recovery_mode != "active_explore"
         and args.arena_active_recovery_executor != "dry_run"

@@ -311,6 +311,8 @@ def build_follower_command(args):
     ]
     if args.wait_before_follow:
         command.append("--wait-before-follow")
+    if getattr(args, "verbose", False):
+        command.append("--verbose")
     if args.enable_lidar_map_replan:
         command.extend([
             "--enable-lidar-map-replan",

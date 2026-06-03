@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 
-from arena_geometry_localizer import Pose2D, ScanSample
+from arena_geometry_localization import Pose2D, ScanSample
 
 from .math_utils import normalize_angle_rad
 from .models import ArenaActiveSpinConfig, PosePrior, SectorClearance

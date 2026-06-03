@@ -1258,12 +1258,13 @@ class WaypointFollower(Node):
                 args.rviz_obstacle_marker_topic,
                 rviz_qos,
             )
-            self.get_logger().info(
-                "Publishing RViz visualization: "
-                f"path={args.rviz_path_topic}, "
-                f"waypoints={args.rviz_waypoint_marker_topic}, "
-                f"obstacles={args.rviz_obstacle_marker_topic}"
-            )
+            if args.verbose:
+                self.get_logger().info(
+                    "Publishing RViz visualization: "
+                    f"path={args.rviz_path_topic}, "
+                    f"waypoints={args.rviz_waypoint_marker_topic}, "
+                    f"obstacles={args.rviz_obstacle_marker_topic}"
+                )
         self.scan_sub = self.create_subscription(
             LaserScan,
             "/scan",
@@ -2365,20 +2366,36 @@ def print_dry_run(args, raw_waypoints, executable_waypoints):
     print(f"Waypoint CSV: {args.waypoints}")
     print(f"Raw waypoints: {len(raw_waypoints)}")
     print(f"Executable waypoints: {len(executable_waypoints)}")
+    if executable_waypoints:
+        first = executable_waypoints[0]
+        last = executable_waypoints[-1]
+        print(
+            "First executable waypoint: "
+            f"source index {first.index}, x={first.x:.3f}, y={first.y:.3f}"
+        )
+        print(
+            "Last executable waypoint: "
+            f"source index {last.index}, x={last.x:.3f}, y={last.y:.3f}"
+        )
+    print(f"Start selection: {args.start_selection}")
+    print(f"Wait before follow: {'yes' if args.wait_before_follow else 'no'}")
+    print(f"LiDAR map replan: {'enabled' if args.enable_lidar_map_replan else 'disabled'}")
+    print(f"Log path: {args.results_csv}")
+    if not args.verbose:
+        print("Detailed route/config hidden; rerun with --verbose to print it.")
+        return
+
     print(f"Map frame: {args.map_frame}")
     print(f"Base frame: {args.base_frame}, fallback: {args.fallback_base_frame}")
     print(f"Linear speed: {args.linear_speed:.3f} m/s")
     print(f"Max angular speed: {args.max_angular_speed:.3f} rad/s")
     print(f"Waypoint tolerance: {args.waypoint_tolerance_m:.3f} m")
     print(f"Goal tolerance: {args.goal_tolerance_m:.3f} m")
-    print(f"Start selection: {args.start_selection}")
-    print(f"Wait before follow: {'yes' if args.wait_before_follow else 'no'}")
     print(f"RViz visualization: {'disabled' if args.no_rviz_visualization else 'enabled'}")
     if not args.no_rviz_visualization:
         print(f"  path topic: {args.rviz_path_topic}")
         print(f"  waypoint markers: {args.rviz_waypoint_marker_topic}")
         print(f"  obstacle markers: {args.rviz_obstacle_marker_topic}")
-    print(f"LiDAR map replan: {'enabled' if args.enable_lidar_map_replan else 'disabled'}")
     if args.enable_lidar_map_replan:
         print(f"  artifact only: {'yes' if args.lidar_replan_artifact_only else 'no'}")
         print(f"  static map: {args.static_map}")
@@ -2564,6 +2581,11 @@ def parse_args(argv):
     parser.add_argument("--wait-before-follow", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--yes", action="store_true")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print detailed route/configuration output.",
+    )
     parser.add_argument("--no-log", action="store_true")
     args = parser.parse_args(argv)
 
@@ -2729,12 +2751,13 @@ def main(argv=None):
             start_selection.selected_waypoint_index
         )
         node.diagnostics.distance_to_path_m = start_selection.distance_to_path_m
-        node.get_logger().info(
-            "Selected executable route: "
-            f"segment={start_selection.selected_segment_index}, "
-            f"first_waypoint={start_selection.selected_waypoint_index}, "
-            f"distance_to_path={start_selection.distance_to_path_m}"
-        )
+        if args.verbose:
+            node.get_logger().info(
+                "Selected executable route: "
+                f"segment={start_selection.selected_segment_index}, "
+                f"first_waypoint={start_selection.selected_waypoint_index}, "
+                f"distance_to_path={start_selection.distance_to_path_m}"
+            )
         node.publish_rviz_route(executable_waypoints, current_pose=start_pose)
         node.publish_rviz_obstacles()
         if not wait_before_follow_confirmation(args, start_pose, executable_waypoints):

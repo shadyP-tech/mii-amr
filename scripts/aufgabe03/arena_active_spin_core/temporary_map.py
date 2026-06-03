@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 
-from arena_geometry_localizer import ScanSample
+from arena_geometry_localization import ScanSample
 from arena_active_explore import (
     CELL_FREE,
     CELL_INFLATED,
