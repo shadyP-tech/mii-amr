@@ -94,6 +94,7 @@ ARENA_ACTIVE_PROFILE_DEFAULTS = {
         "arena_active_explore_inflation_radius_m": 0.12,
         "arena_active_explore_soft_clearance_radius_m": 0.15,
         "arena_active_explore_soft_clearance_weight": 2.0,
+        "arena_active_explore_max_path_segments": 7,
         "arena_active_explore_curve_lookahead_m": 0.16,
         "arena_active_explore_curve_linear_speed_mps": 0.05,
         "arena_active_explore_curve_max_angular_rad_s": 0.40,
@@ -767,7 +768,11 @@ def parse_args(argv):
     )
     parser.add_argument(
         "--arena-active-explore-max-path-segments",
-        default=3,
+        default=arena_active_profile_default(
+            arena_active_profile,
+            "arena_active_explore_max_path_segments",
+            3,
+        ),
         type=int,
     )
     parser.add_argument(
