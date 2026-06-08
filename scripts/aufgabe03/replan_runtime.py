@@ -10,6 +10,7 @@ lidar_obstacle_map module. It intentionally does not implement waypoint control.
 from __future__ import annotations
 
 import math
+import copy
 import time
 
 try:
@@ -217,6 +218,23 @@ def run_local_config_from_args(args):
         max_start_snap_m=getattr(args, "max_start_snap_m", 0.20),
         max_goal_snap_m=getattr(args, "max_goal_snap_m", 0.30),
     )
+
+
+def args_with_obstacle_roi(
+    args,
+    *,
+    forward_distance_m=None,
+    forward_half_width_m=None,
+    angle_window_deg=None,
+):
+    retry_args = copy.copy(args)
+    if forward_distance_m is not None:
+        retry_args.obstacle_forward_distance_m = forward_distance_m
+    if forward_half_width_m is not None:
+        retry_args.obstacle_forward_half_width_m = forward_half_width_m
+    if angle_window_deg is not None:
+        retry_args.obstacle_angle_window_deg = angle_window_deg
+    return retry_args
 
 
 def artifact_prefix_from_args(args, sequence=None):
@@ -537,18 +555,20 @@ def update_run_local_map_from_latest_scan(
     sequence,
     min_scan_received_sec=None,
     min_scan_stamp_sec=None,
+    scan_args=None,
 ):
-    scan_mode = getattr(args, "run_local_map_update_mode", "forward")
+    scan_args = scan_args or args
+    scan_mode = getattr(scan_args, "run_local_map_update_mode", "forward")
     if min_scan_received_sec is None and min_scan_stamp_sec is None:
         observations, scan, scan_age, tf_age, lookup_mode = observations_from_latest_scan(
             node,
-            args,
+            scan_args,
             scan_mode=scan_mode,
         )
     else:
         observations, scan, scan_age, tf_age, lookup_mode = wait_for_observations_from_fresh_scan(
             node,
-            args,
+            scan_args,
             scan_mode=scan_mode,
             min_scan_received_sec=min_scan_received_sec,
             min_scan_stamp_sec=min_scan_stamp_sec,
@@ -572,6 +592,7 @@ def perform_lidar_replan(
     goal_waypoint,
     old_remaining_waypoints,
     sequence,
+    scan_args=None,
 ):
     node.stop_repeatedly()
     min_scan_received_sec = time.time() if hasattr(node, "spin_once") else None
@@ -584,4 +605,5 @@ def perform_lidar_replan(
         sequence=sequence,
         min_scan_received_sec=min_scan_received_sec,
         min_scan_stamp_sec=min_scan_received_sec,
+        scan_args=scan_args,
     )

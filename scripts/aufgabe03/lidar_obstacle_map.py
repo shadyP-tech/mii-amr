@@ -147,6 +147,17 @@ class RunLocalPlanDiagnostics:
 
 
 @dataclass(frozen=True)
+class RunLocalPruneResult:
+    requested_cells: int = 0
+    removed_raw_cells: int = 0
+    removed_inflated_cells: int = 0
+    raw_cells_before: int = 0
+    raw_cells_after: int = 0
+    inflated_cells_before: int = 0
+    inflated_cells_after: int = 0
+
+
+@dataclass(frozen=True)
 class ObstacleOverlayConfig:
     forward_distance_m: float = 0.55
     forward_half_width_m: float = 0.18
@@ -469,6 +480,34 @@ class RunLocalObstacleMap:
             self.static_map,
             self.confirmed_raw_cells,
             self.config.inflation_radius_m,
+        )
+
+    def remove_raw_cells(self, cells):
+        requested = set(cells or ())
+        raw_before = set(self.confirmed_raw_cells)
+        inflated_before = set(self.inflated_obstacle_cells)
+        removable = raw_before.intersection(requested)
+        if not removable:
+            return RunLocalPruneResult(
+                requested_cells=len(requested),
+                raw_cells_before=len(raw_before),
+                raw_cells_after=len(raw_before),
+                inflated_cells_before=len(inflated_before),
+                inflated_cells_after=len(inflated_before),
+            )
+
+        for cell in removable:
+            self.hit_counts.pop(cell, None)
+        self.rebuild_confirmed_cells()
+        inflated_after = set(self.inflated_obstacle_cells)
+        return RunLocalPruneResult(
+            requested_cells=len(requested),
+            removed_raw_cells=len(removable),
+            removed_inflated_cells=max(0, len(inflated_before) - len(inflated_after)),
+            raw_cells_before=len(raw_before),
+            raw_cells_after=len(self.confirmed_raw_cells),
+            inflated_cells_before=len(inflated_before),
+            inflated_cells_after=len(inflated_after),
         )
 
     def raw_cells_in_radius(self, center_cell, radius_m):
@@ -863,6 +902,23 @@ def path_corridor_blocked_cells(
     check_distance_m,
     corridor_radius_m,
 ):
+    checked = path_corridor_cells(
+        occupancy_map,
+        current_pose,
+        waypoints,
+        check_distance_m,
+        corridor_radius_m,
+    )
+    return checked.intersection(blocked_cells)
+
+
+def path_corridor_cells(
+    occupancy_map,
+    current_pose,
+    waypoints,
+    check_distance_m,
+    corridor_radius_m,
+):
     if not waypoints:
         return set()
     checked = set()
@@ -891,7 +947,7 @@ def path_corridor_blocked_cells(
         if remaining <= 0.0:
             break
         previous = waypoint
-    return checked.intersection(blocked_cells)
+    return checked
 
 
 def build_overlay_map(occupancy_map, base_points, robot_pose, config):

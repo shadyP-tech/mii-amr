@@ -112,6 +112,11 @@ DEFAULT_RUN_LOCAL_MAP_MAX_REJECTED_RATIO = 0.90
 DEFAULT_RUN_LOCAL_MAP_CORRIDOR_CHECK_DISTANCE_M = 0.75
 DEFAULT_RUN_LOCAL_MAP_CLEARANCE_MARGIN_M = 0.04
 DEFAULT_RUN_LOCAL_MAP_MAX_UPDATES = 3
+DEFAULT_RUN_LOCAL_MAP_SPARSE_RETRY_COUNT = 2
+DEFAULT_RUN_LOCAL_MAP_SPARSE_RETRY_FORWARD_HALF_WIDTH_M = 0.40
+DEFAULT_RUN_LOCAL_MAP_SPARSE_RETRY_ANGLE_WINDOW_DEG = 75.0
+DEFAULT_RUN_LOCAL_MAP_SPARSE_RETRY_FORWARD_DISTANCE_M = 1.00
+DEFAULT_RUN_LOCAL_MAP_PRUNE_BEHIND_DISTANCE_M = 0.20
 
 INITIAL_RUN_LOCAL_MAP_NONFATAL_REASONS = {
     lidar_obstacle_map.RUN_LOCAL_FAILURE_TOO_FEW_SCAN_POINTS,
@@ -235,6 +240,10 @@ CSV_HEADER = BASE_CSV_HEADER + [
     "run_local_inflation_radius_m",
     "run_local_map_yaml",
     "run_local_waypoints_csv",
+    "run_local_sparse_retry_count",
+    "run_local_sparse_retry_mode",
+    "run_local_pruned_raw_cells",
+    "run_local_pruned_inflated_cells",
     "run_local_cell_source_counts",
 ]
 
@@ -348,6 +357,10 @@ class RuntimeDiagnostics:
     run_local_inflation_radius_m: float | None = None
     run_local_map_yaml: str = ""
     run_local_waypoints_csv: str = ""
+    run_local_sparse_retry_count: int = 0
+    run_local_sparse_retry_mode: str = ""
+    run_local_pruned_raw_cells: int = 0
+    run_local_pruned_inflated_cells: int = 0
     run_local_cell_source_counts: dict[str, int] | str = ""
 
     @property
@@ -1154,6 +1167,10 @@ def build_log_row(
         "" if diagnostics.run_local_inflation_radius_m is None else diagnostics.run_local_inflation_radius_m,
         diagnostics.run_local_map_yaml,
         diagnostics.run_local_waypoints_csv,
+        diagnostics.run_local_sparse_retry_count,
+        diagnostics.run_local_sparse_retry_mode,
+        diagnostics.run_local_pruned_raw_cells,
+        diagnostics.run_local_pruned_inflated_cells,
         diagnostics.run_local_cell_source_counts,
     ]
 
@@ -1933,6 +1950,73 @@ class WaypointFollower(Node):
         self.diagnostics.run_local_path_blocked_cell_count = len(blocked)
         return blocked
 
+    def prune_run_local_obstacles_after_progress(self, current_pose, remaining_waypoints):
+        if self.run_local_map is None or not run_local_map_has_confirmed_obstacles(self.run_local_map):
+            return None
+        prune_distance_m = getattr(
+            self.args,
+            "run_local_map_prune_behind_distance_m",
+            DEFAULT_RUN_LOCAL_MAP_PRUNE_BEHIND_DISTANCE_M,
+        )
+        if prune_distance_m <= 0.0:
+            return None
+        pose = lidar_obstacle_map.Pose2D(
+            current_pose.x,
+            current_pose.y,
+            current_pose.yaw_deg,
+        )
+        candidate_cells = set()
+        metadata = self.run_local_map.static_map.metadata
+        for cell in self.run_local_map.confirmed_raw_cells:
+            world_x, world_y = lidar_obstacle_map.planner.grid_to_world(
+                cell[0],
+                cell[1],
+                metadata,
+            )
+            base_point = lidar_obstacle_map.map_point_to_base(world_x, world_y, pose)
+            if base_point.x < -prune_distance_m:
+                candidate_cells.add(cell)
+        if not candidate_cells:
+            return None
+
+        corridor_radius_m = (
+            self.args.run_local_map_corridor_radius_m
+            if self.args.run_local_map_corridor_radius_m is not None
+            else 0.0
+        )
+        corridor_cells = lidar_obstacle_map.path_corridor_cells(
+            self.run_local_map.static_map,
+            pose,
+            remaining_waypoints,
+            self.args.run_local_map_corridor_check_distance_m,
+            corridor_radius_m,
+        )
+        protected_cells = set()
+        for cell in candidate_cells:
+            inflated = lidar_obstacle_map.inflate_cells(
+                self.run_local_map.static_map,
+                {cell},
+                self.run_local_map.config.inflation_radius_m,
+            )
+            if inflated.intersection(corridor_cells):
+                protected_cells.add(cell)
+
+        prune_cells = candidate_cells.difference(protected_cells)
+        if not prune_cells:
+            return None
+        result = self.run_local_map.remove_raw_cells(prune_cells)
+        if result.removed_raw_cells:
+            self.diagnostics.run_local_pruned_raw_cells += result.removed_raw_cells
+            self.diagnostics.run_local_pruned_inflated_cells += result.removed_inflated_cells
+            self.diagnostics.run_local_cell_source_counts = self.run_local_map.cell_source_counts()
+            self.get_logger().info(
+                "Pruned passed run-local obstacle cells: "
+                f"raw={result.removed_raw_cells}, "
+                f"inflated={result.removed_inflated_cells}"
+            )
+            publish_rviz_obstacles_if_available(self)
+        return result
+
     def plan_with_existing_run_local_map(
         self,
         current_pose,
@@ -1962,6 +2046,82 @@ class WaypointFollower(Node):
             goal_waypoint,
             require_changed=True,
         )
+
+    def sparse_retry_scan_args(self):
+        return replan_runtime.args_with_obstacle_roi(
+            self.args,
+            forward_distance_m=getattr(
+                self.args,
+                "run_local_map_sparse_retry_forward_distance_m",
+                DEFAULT_RUN_LOCAL_MAP_SPARSE_RETRY_FORWARD_DISTANCE_M,
+            ),
+            forward_half_width_m=getattr(
+                self.args,
+                "run_local_map_sparse_retry_forward_half_width_m",
+                DEFAULT_RUN_LOCAL_MAP_SPARSE_RETRY_FORWARD_HALF_WIDTH_M,
+            ),
+            angle_window_deg=getattr(
+                self.args,
+                "run_local_map_sparse_retry_angle_window_deg",
+                DEFAULT_RUN_LOCAL_MAP_SPARSE_RETRY_ANGLE_WINDOW_DEG,
+            ),
+        )
+
+    def retry_sparse_lidar_replan(
+        self,
+        current_pose,
+        goal_waypoint,
+        old_remaining_waypoints,
+        sequence,
+    ):
+        retry_limit = getattr(
+            self.args,
+            "run_local_map_sparse_retry_count",
+            DEFAULT_RUN_LOCAL_MAP_SPARSE_RETRY_COUNT,
+        )
+        last_result = None
+        retry_args = self.sparse_retry_scan_args()
+        retry_mode = (
+            "expanded_forward:"
+            f"distance={retry_args.obstacle_forward_distance_m:.3f},"
+            f"half_width={retry_args.obstacle_forward_half_width_m:.3f},"
+            f"angle={retry_args.obstacle_angle_window_deg:.1f}"
+        )
+        for retry_index in range(1, retry_limit + 1):
+            self.stop_repeatedly()
+            self.get_logger().warn(
+                "LiDAR map update returned too few accepted scan points; "
+                f"retrying with expanded forward ROI ({retry_index}/{retry_limit})."
+            )
+            result = replan_runtime.perform_lidar_replan(
+                self,
+                self.args,
+                current_pose,
+                goal_waypoint,
+                old_remaining_waypoints,
+                sequence=sequence,
+                scan_args=retry_args,
+            )
+            self.diagnostics.run_local_sparse_retry_count = retry_index
+            self.diagnostics.run_local_sparse_retry_mode = retry_mode
+            last_result = result
+            if result.success:
+                self.get_logger().info(
+                    "Sparse LiDAR map update retry succeeded: "
+                    f"attempt={retry_index}"
+                )
+                return result
+            if result.reason != lidar_obstacle_map.RUN_LOCAL_FAILURE_TOO_FEW_SCAN_POINTS:
+                self.get_logger().warn(
+                    "Sparse LiDAR map update retry stopped on non-sparse failure: "
+                    f"reason={result.reason}"
+                )
+                return result
+        self.get_logger().warn(
+            "Sparse LiDAR map update retries exhausted; "
+            f"reason={lidar_obstacle_map.RUN_LOCAL_FAILURE_TOO_FEW_SCAN_POINTS}"
+        )
+        return last_result
 
     def replan_after_blockage(
         self,
@@ -2038,6 +2198,22 @@ class WaypointFollower(Node):
                 "LiDAR map update failed; replanned with existing run-local map."
             )
             return replanned
+        if (
+            trigger == REPLAN_TRIGGER_SCAN_BLOCKAGE
+            and not result.success
+            and result.reason == lidar_obstacle_map.RUN_LOCAL_FAILURE_TOO_FEW_SCAN_POINTS
+            and getattr(
+                self.args,
+                "run_local_map_sparse_retry_count",
+                DEFAULT_RUN_LOCAL_MAP_SPARSE_RETRY_COUNT,
+            ) > 0
+        ):
+            result = self.retry_sparse_lidar_replan(
+                current_pose,
+                goal_waypoint,
+                old_remaining_waypoints,
+                sequence,
+            )
         self.update_replan_diagnostics(result)
         if not result.success and self.run_local_map is not None:
             rejected_reasons = {
@@ -2136,6 +2312,12 @@ class WaypointFollower(Node):
                 ):
                     reached_count += 1
                     self.reached_count = reached_count
+                    if self.args.enable_lidar_map_replan:
+                        WaypointFollower.prune_run_local_obstacles_after_progress(
+                            self,
+                            pose,
+                            waypoints[waypoint_index + 1:],
+                        )
                     self.last_known_corridor_repair_signature = None
                     self.suppressed_known_corridor_signature = None
                     self.last_scan_block_budget_repair_signature = None
@@ -2190,6 +2372,11 @@ class WaypointFollower(Node):
                     raise BlockedByScanError(exc.scan_safety, waypoint) from exc
                 if self.args.enable_lidar_map_replan and self.run_local_map is not None:
                     remaining = waypoints[waypoint_index:]
+                    WaypointFollower.prune_run_local_obstacles_after_progress(
+                        self,
+                        pose,
+                        remaining,
+                    )
                     blocked_cells = self.corridor_blocked_cells(pose, remaining)
                     if blocked_cells and not self.suppress_repeated_known_corridor_repair(remaining):
                         publish_rviz_obstacles_if_available(self, blocked_cells)
@@ -2408,6 +2595,8 @@ def print_dry_run(args, raw_waypoints, executable_waypoints):
         print(f"  update mode: {args.run_local_map_update_mode}")
         print(f"  min hit count: {args.run_local_map_min_hit_count}")
         print(f"  inflation radius: {args.run_local_map_inflation_radius_m:.3f} m")
+        print(f"  sparse retry count: {args.run_local_map_sparse_retry_count}")
+        print(f"  prune behind distance: {args.run_local_map_prune_behind_distance_m:.3f} m")
     if args.start_selection == "path-progress":
         print(
             "Runtime route selection uses live TF after startup; "
@@ -2577,6 +2766,31 @@ def parse_args(argv):
         default=DEFAULT_RUN_LOCAL_MAP_MAX_UPDATES,
         type=int,
     )
+    parser.add_argument(
+        "--run-local-map-sparse-retry-count",
+        default=DEFAULT_RUN_LOCAL_MAP_SPARSE_RETRY_COUNT,
+        type=int,
+    )
+    parser.add_argument(
+        "--run-local-map-sparse-retry-forward-half-width-m",
+        default=DEFAULT_RUN_LOCAL_MAP_SPARSE_RETRY_FORWARD_HALF_WIDTH_M,
+        type=float,
+    )
+    parser.add_argument(
+        "--run-local-map-sparse-retry-angle-window-deg",
+        default=DEFAULT_RUN_LOCAL_MAP_SPARSE_RETRY_ANGLE_WINDOW_DEG,
+        type=float,
+    )
+    parser.add_argument(
+        "--run-local-map-sparse-retry-forward-distance-m",
+        default=DEFAULT_RUN_LOCAL_MAP_SPARSE_RETRY_FORWARD_DISTANCE_M,
+        type=float,
+    )
+    parser.add_argument(
+        "--run-local-map-prune-behind-distance-m",
+        default=DEFAULT_RUN_LOCAL_MAP_PRUNE_BEHIND_DISTANCE_M,
+        type=float,
+    )
     parser.add_argument("--run-local-map-artifact-prefix")
     parser.add_argument("--wait-before-follow", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -2641,6 +2855,10 @@ def validate_args(parser, args):
         "run_local_map_max_scan_age_sec",
         "run_local_map_corridor_check_distance_m",
         "run_local_map_clearance_margin_m",
+        "run_local_map_sparse_retry_forward_half_width_m",
+        "run_local_map_sparse_retry_angle_window_deg",
+        "run_local_map_sparse_retry_forward_distance_m",
+        "run_local_map_prune_behind_distance_m",
     ]
     for field in positive_fields:
         if getattr(args, field) <= 0.0:
@@ -2683,6 +2901,10 @@ def validate_args(parser, args):
         parser.error("--run-local-map-corridor-radius-m must be greater than zero")
     if args.run_local_map_max_updates < 1:
         parser.error("--run-local-map-max-updates must be >= 1")
+    if args.run_local_map_sparse_retry_count < 0:
+        parser.error("--run-local-map-sparse-retry-count must be >= 0")
+    if args.run_local_map_sparse_retry_angle_window_deg > 90.0:
+        parser.error("--run-local-map-sparse-retry-angle-window-deg must be <= 90")
     if args.obstacle_min_cluster_size < 1:
         parser.error("--obstacle-min-cluster-size must be >= 1")
 
