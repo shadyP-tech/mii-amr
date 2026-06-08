@@ -676,6 +676,31 @@ class ArenaCoverageDrive(Node):
             return None
         return time.time() - self.latest_odom_received_sec
 
+    def wait_for_fresh_shadow_inputs(self, args, timeout_sec=None):
+        if timeout_sec is None:
+            timeout_sec = max(TOPIC_TIMEOUT_SEC, args.shadow_max_odom_scan_age_sec + 1.0)
+        start = time.time()
+        while rclpy.ok():
+            rclpy.spin_once(self, timeout_sec=0.05)
+            scan_age = self.fresh_scan_age_sec()
+            odom_age = self.fresh_odom_age_sec()
+            if (
+                scan_age is not None
+                and odom_age is not None
+                and scan_age <= args.shadow_max_odom_scan_age_sec
+                and odom_age <= args.shadow_max_odom_scan_age_sec
+            ):
+                return
+            if time.time() - start > timeout_sec:
+                scan_text = "none" if scan_age is None else f"{scan_age:.3f}"
+                odom_text = "none" if odom_age is None else f"{odom_age:.3f}"
+                raise RuntimeError(
+                    "timed_out_waiting_for_fresh_shadow_inputs:"
+                    f"scan_age_sec={scan_text},odom_age_sec={odom_text},"
+                    f"max_age_sec={args.shadow_max_odom_scan_age_sec:.3f}"
+                )
+        raise RuntimeError("ROS shutdown while waiting for fresh shadow inputs.")
+
     def wait_for_topics(self, timeout_sec=TOPIC_TIMEOUT_SEC):
         start = time.time()
         while rclpy.ok():
@@ -716,6 +741,7 @@ class ArenaCoverageDrive(Node):
         for _ in range(STOP_PUBLISH_COUNT):
             if rclpy.ok():
                 self.pub.publish(msg)
+                rclpy.spin_once(self, timeout_sec=0.0)
             time.sleep(sleep_sec)
 
     def check_scan_or_raise(self, mode, args):
@@ -900,6 +926,7 @@ class ArenaCoverageDrive(Node):
         return record
 
     def execute_shadow_curve(self, candidate, args, distance_limit_m):
+        self.wait_for_fresh_shadow_inputs(args)
         if self.latest_odom_pose is None:
             raise RuntimeError("shadow_curve_missing_latest_odom_pose")
         move_limit = min(args.shadow_max_single_move_m, max(0.0, distance_limit_m))
@@ -1104,6 +1131,7 @@ class ArenaCoverageDrive(Node):
 
         self._record_shadow_phase(diagnostics, "seed_scan", "initial_seed_spin")
         self.rotate(360.0, args)
+        self.wait_for_fresh_shadow_inputs(args)
         summary = replace(summary, spin_count=summary.spin_count + 1)
 
         recent_attempts = []
@@ -1128,6 +1156,7 @@ class ArenaCoverageDrive(Node):
                 diagnostics["summary"] = summary.to_dict()
                 raise RuntimeError("shadow_total_distance_exhausted")
 
+            self.wait_for_fresh_shadow_inputs(args)
             plan = self._plan_shadow_move(config, recent_attempts)
             self._record_shadow_phase(
                 diagnostics,
@@ -1227,6 +1256,7 @@ class ArenaCoverageDrive(Node):
                     "shadow_exhausted_verify_spin",
                 )
                 self.rotate(360.0, args)
+                self.wait_for_fresh_shadow_inputs(args)
                 summary = replace(
                     summary,
                     spin_count=summary.spin_count + 1,
