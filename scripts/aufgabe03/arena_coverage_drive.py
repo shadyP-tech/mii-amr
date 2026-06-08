@@ -9,11 +9,12 @@ commands while /odom terminates primitives and /scan provides an emergency stop.
 
 import argparse
 import csv
+import json
 import math
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -32,6 +33,22 @@ except ImportError:
     Odometry = object
     LaserScan = object
 
+from arena_active_spin_core.curve_following import (
+    active_explore_curve_path,
+    pure_pursuit_curve_command,
+    select_curve_lookahead_target,
+)
+from arena_active_spin_core.math_utils import distance_2d
+from arena_active_spin_core.scan_safety import odom_pose_from_msg, scan_sample_from_msg
+from arena_shadow_coverage import (
+    NO_SHADOW_REASONS,
+    ShadowCoverageConfig,
+    ShadowCoverageSummary,
+    ShadowScanSample,
+    plan_shadow_coverage_move,
+    prune_shadow_samples,
+)
+
 
 ARENA_LENGTH_M = 3.90
 ARENA_WIDTH_M = 1.898
@@ -48,6 +65,34 @@ DEFAULT_MIN_SCAN_RANGE_M = 0.28
 DEFAULT_HARD_STOP_RANGE_M = 0.18
 DEFAULT_SCAN_HALF_ANGLE_DEG = 35.0
 DEFAULT_MAX_ACTION_TIME_SEC = 90.0
+
+DEFAULT_SHADOW_MAX_ATTEMPTS = 12
+DEFAULT_SHADOW_MAX_SINGLE_MOVE_M = 0.80
+DEFAULT_SHADOW_MAX_TOTAL_DISTANCE_M = 5.0
+DEFAULT_SHADOW_MAX_CANDIDATE_PATH_M = 3.0
+DEFAULT_SHADOW_GRID_SIZE_M = 5.0
+DEFAULT_SHADOW_GRID_RESOLUTION_M = 0.05
+DEFAULT_SHADOW_INFLATION_RADIUS_M = 0.12
+DEFAULT_SHADOW_SOFT_CLEARANCE_RADIUS_M = 0.15
+DEFAULT_SHADOW_SOFT_CLEARANCE_WEIGHT = 2.0
+DEFAULT_SHADOW_MAX_PATH_SEGMENTS = 24
+DEFAULT_SHADOW_MAX_SAMPLES = 1500
+DEFAULT_SHADOW_MAX_SAMPLE_AGE_SEC = 30.0
+DEFAULT_SHADOW_MAX_SAMPLE_TRAVEL_M = 1.25
+DEFAULT_SHADOW_MAX_SAMPLE_YAW_SPAN_DEG = 420.0
+DEFAULT_SHADOW_EMERGENCY_STOP_DISTANCE_M = 0.18
+DEFAULT_SHADOW_SIDE_STOP_DISTANCE_M = 0.16
+DEFAULT_SHADOW_MIN_VISIBLE_CELLS = 3
+DEFAULT_SHADOW_MIN_MOVE_LENGTH_M = 0.12
+DEFAULT_SHADOW_RECENT_TARGET_RADIUS_M = 0.25
+DEFAULT_SHADOW_COMPLETION_CONFIRMATIONS = 2
+DEFAULT_SHADOW_CURVE_LOOKAHEAD_M = 0.16
+DEFAULT_SHADOW_CURVE_GOAL_TOLERANCE_M = 0.04
+DEFAULT_SHADOW_CURVE_LINEAR_SPEED_MPS = 0.05
+DEFAULT_SHADOW_CURVE_MAX_ANGULAR_RADPS = 0.40
+DEFAULT_SHADOW_MAX_ODOM_SCAN_AGE_SEC = 0.5
+DEFAULT_MAPPER_TOPIC = "/map"
+DEFAULT_MAPPER_TOPIC_TIMEOUT_SEC = 5.0
 
 COMMAND_PERIOD_SEC = 0.05
 TOPIC_TIMEOUT_SEC = 5.0
@@ -95,6 +140,15 @@ class ScanSafety:
     valid_count: int
     min_range_m: float | None
     percentile_5_m: float | None
+
+
+@dataclass(frozen=True)
+class CurveSafety:
+    safe: bool
+    reason: str
+    front: ScanSafety
+    left_min_m: float | None
+    right_min_m: float | None
 
 
 def shortest_angle_delta_deg(start_deg, end_deg):
@@ -259,6 +313,121 @@ def evaluate_scan_safety(
     return ScanSafety(True, "clear", len(selected), min_range, percentile_5)
 
 
+def valid_scan_ranges_in_sectors(
+    ranges,
+    angle_min,
+    angle_increment,
+    range_min,
+    range_max,
+    sectors_deg,
+):
+    selected = []
+    for index, raw_range in enumerate(ranges):
+        if not math.isfinite(raw_range):
+            continue
+        if raw_range < range_min or raw_range > range_max:
+            continue
+        angle = math.degrees(normalize_angle_rad(angle_min + index * angle_increment))
+        if any(lower <= angle <= upper for lower, upper in sectors_deg):
+            selected.append(float(raw_range))
+    return selected
+
+
+def min_scan_range_in_sectors(scan, sectors_deg):
+    selected = valid_scan_ranges_in_sectors(
+        scan.ranges,
+        scan.angle_min,
+        scan.angle_increment,
+        scan.range_min,
+        scan.range_max,
+        sectors_deg,
+    )
+    return min(selected) if selected else None
+
+
+def evaluate_shadow_curve_safety(scan, args):
+    front = evaluate_scan_safety(
+        scan.ranges,
+        scan.angle_min,
+        scan.angle_increment,
+        scan.range_min,
+        scan.range_max,
+        "forward",
+        args.scan_half_angle_deg,
+        args.min_scan_range_m,
+        args.shadow_emergency_stop_distance_m,
+    )
+    if not front.safe:
+        return CurveSafety(False, f"front_{front.reason}", front, None, None)
+
+    left = min_scan_range_in_sectors(scan, [(60.0, 120.0)])
+    right = min_scan_range_in_sectors(scan, [(-120.0, -60.0)])
+    if left is None:
+        return CurveSafety(False, "left_clearance_missing", front, left, right)
+    if right is None:
+        return CurveSafety(False, "right_clearance_missing", front, left, right)
+    if left < args.shadow_side_stop_distance_m:
+        return CurveSafety(False, "left_clearance_below_limit", front, left, right)
+    if right < args.shadow_side_stop_distance_m:
+        return CurveSafety(False, "right_clearance_below_limit", front, left, right)
+    return CurveSafety(True, "clear", front, left, right)
+
+
+def shadow_config_from_args(args):
+    return ShadowCoverageConfig(
+        max_attempts=args.shadow_max_attempts,
+        max_single_move_m=args.shadow_max_single_move_m,
+        max_total_distance_m=args.shadow_max_total_distance_m,
+        max_candidate_path_m=args.shadow_max_candidate_path_m,
+        grid_resolution_m=args.shadow_grid_resolution_m,
+        grid_size_m=args.shadow_grid_size_m,
+        inflation_radius_m=args.shadow_inflation_radius_m,
+        soft_clearance_radius_m=args.shadow_soft_clearance_radius_m,
+        soft_clearance_weight=args.shadow_soft_clearance_weight,
+        unknown_blocked=args.shadow_unknown_blocked,
+        max_path_segments=args.shadow_max_path_segments,
+        max_samples=args.shadow_max_samples,
+        max_sample_age_sec=args.shadow_max_sample_age_sec,
+        max_sample_travel_m=args.shadow_max_sample_travel_m,
+        max_sample_yaw_span_deg=args.shadow_max_sample_yaw_span_deg,
+        min_visible_shadow_cells=args.shadow_min_visible_cells,
+        min_move_length_m=args.shadow_min_move_length_m,
+        recent_target_radius_m=args.shadow_recent_target_radius_m,
+        min_endpoint_clearance_m=args.shadow_side_stop_distance_m,
+        completion_confirmations=args.shadow_completion_confirmations,
+    )
+
+
+def shadow_diagnostics_path_for_args(args):
+    if args.no_shadow_diagnostics:
+        return None
+    if args.shadow_diagnostics_json is not None:
+        return args.shadow_diagnostics_json
+    return Path("results/aufgabe03") / f"{args.run_id}_shadow_coverage.json"
+
+
+def shadow_notes_summary(diagnostics):
+    summary = diagnostics.get("summary", {})
+    if not summary:
+        return "shadow_mode=experimental"
+    return (
+        "shadow_mode=experimental"
+        f";shadow_attempts={summary.get('attempts', 0)}"
+        f";shadow_moves={summary.get('moves_executed', 0)}"
+        f";shadow_distance_m={float(summary.get('total_distance_m', 0.0)):.3f}"
+        f";shadow_stop={summary.get('stop_reason', '')}"
+        f";shadow_fallback={summary.get('fallback_used', False)}"
+    )
+
+
+def write_shadow_diagnostics(path, diagnostics):
+    if path is None:
+        return
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(diagnostics, indent=2, sort_keys=True) + "\n")
+
+
 def validate_motion_config(args, route):
     errors = []
     if not (0.0 < args.linear_speed <= 0.15):
@@ -289,6 +458,59 @@ def validate_motion_config(args, route):
             f"long-axis margin {margin:.3f} m is below "
             f"{DEFAULT_SAFETY_MARGIN_M:.3f} m"
         )
+
+    if getattr(args, "coverage_mode", "fixed") == "shadow":
+        if args.shadow_max_attempts < 1:
+            errors.append("--shadow-max-attempts must be >= 1")
+        if args.shadow_completion_confirmations < 1:
+            errors.append("--shadow-completion-confirmations must be >= 1")
+        for attr, label in (
+            ("shadow_max_single_move_m", "--shadow-max-single-move"),
+            ("shadow_max_total_distance_m", "--shadow-max-total-distance"),
+            ("shadow_grid_size_m", "--shadow-grid-size"),
+            ("shadow_grid_resolution_m", "--shadow-grid-resolution"),
+            ("shadow_max_sample_age_sec", "--shadow-max-sample-age-sec"),
+            ("shadow_max_sample_travel_m", "--shadow-max-sample-travel"),
+            ("shadow_max_sample_yaw_span_deg", "--shadow-max-sample-yaw-span-deg"),
+            ("shadow_emergency_stop_distance_m", "--shadow-emergency-stop-distance"),
+            ("shadow_side_stop_distance_m", "--shadow-side-stop-distance"),
+            ("shadow_min_move_length_m", "--shadow-min-move-length"),
+            ("shadow_recent_target_radius_m", "--shadow-recent-target-radius"),
+            ("shadow_curve_lookahead_m", "--shadow-curve-lookahead"),
+            ("shadow_curve_goal_tolerance_m", "--shadow-curve-goal-tolerance"),
+            ("shadow_curve_linear_speed_mps", "--shadow-curve-linear-speed"),
+            ("shadow_curve_max_angular_radps", "--shadow-curve-max-angular"),
+            ("shadow_max_odom_scan_age_sec", "--shadow-max-odom-scan-age-sec"),
+            ("mapper_topic_timeout_sec", "--mapper-topic-timeout-sec"),
+        ):
+            if getattr(args, attr) <= 0.0:
+                errors.append(f"{label} must be greater than zero")
+        if args.shadow_max_candidate_path_m is not None and args.shadow_max_candidate_path_m <= 0.0:
+            errors.append("--shadow-max-candidate-path must be greater than zero")
+        if args.shadow_inflation_radius_m < 0.0:
+            errors.append("--shadow-inflation must be non-negative")
+        if args.shadow_soft_clearance_radius_m < 0.0:
+            errors.append("--shadow-soft-clearance-radius must be non-negative")
+        if args.shadow_soft_clearance_weight < 0.0:
+            errors.append("--shadow-soft-clearance-weight must be non-negative")
+        if args.shadow_max_path_segments < 1:
+            errors.append("--shadow-max-path-segments must be >= 1")
+        if args.shadow_max_samples < 1:
+            errors.append("--shadow-max-samples must be >= 1")
+        if args.shadow_min_visible_cells < 1:
+            errors.append("--shadow-min-visible-cells must be >= 1")
+        if args.shadow_emergency_stop_distance_m < ROBOT_RADIUS_M:
+            errors.append("--shadow-emergency-stop-distance must be >= robot radius")
+        if args.shadow_side_stop_distance_m < ROBOT_RADIUS_M:
+            errors.append("--shadow-side-stop-distance must be >= robot radius")
+        if args.shadow_emergency_stop_distance_m >= args.min_scan_range_m:
+            errors.append("--shadow-emergency-stop-distance must be below --min-scan-range-m")
+        if args.shadow_curve_goal_tolerance_m > args.shadow_curve_lookahead_m:
+            errors.append("--shadow-curve-goal-tolerance must be <= --shadow-curve-lookahead")
+        if args.shadow_curve_linear_speed_mps > 0.10:
+            errors.append("--shadow-curve-linear-speed must be <= 0.10")
+        if args.shadow_curve_max_angular_radps > 0.80:
+            errors.append("--shadow-curve-max-angular must be <= 0.80")
 
     if errors:
         raise ValueError("; ".join(errors))
@@ -373,6 +595,19 @@ class ArenaCoverageDrive(Node):
         super().__init__("arena_coverage_drive")
         self.last_odom = None
         self.last_scan = None
+        self.last_scan_received_sec = None
+        self.latest_odom_pose = None
+        self.latest_odom_received_sec = None
+        self.shadow_collecting = False
+        self.shadow_segment_index = 0
+        self.shadow_samples = []
+        self.shadow_max_samples = DEFAULT_SHADOW_MAX_SAMPLES
+        self.shadow_max_odom_scan_age_sec = DEFAULT_SHADOW_MAX_ODOM_SCAN_AGE_SEC
+        self.shadow_sample_rejections = {
+            "missing_odom": 0,
+            "stale_odom": 0,
+        }
+        self.shadow_diagnostics = {}
 
         self.pub = self.create_publisher(Twist, "/cmd_vel", 10)
         self.odom_sub = self.create_subscription(
@@ -389,11 +624,57 @@ class ArenaCoverageDrive(Node):
         )
         time.sleep(1.0)
 
+    def configure_shadow_collection(self, args):
+        self.shadow_collecting = args.coverage_mode == "shadow"
+        self.shadow_max_samples = int(args.shadow_max_samples)
+        self.shadow_max_odom_scan_age_sec = float(args.shadow_max_odom_scan_age_sec)
+        self.shadow_segment_index = 0
+        self.shadow_samples = []
+        self.shadow_sample_rejections = {
+            "missing_odom": 0,
+            "stale_odom": 0,
+        }
+
+    def begin_shadow_segment(self):
+        self.shadow_segment_index += 1
+
     def odom_callback(self, msg):
         self.last_odom = msg
+        self.latest_odom_pose = odom_pose_from_msg(msg)
+        self.latest_odom_received_sec = time.time()
 
     def scan_callback(self, msg):
+        received_sec = time.time()
         self.last_scan = msg
+        self.last_scan_received_sec = received_sec
+        if not self.shadow_collecting:
+            return
+        if self.latest_odom_pose is None or self.latest_odom_received_sec is None:
+            self.shadow_sample_rejections["missing_odom"] += 1
+            return
+        if received_sec - self.latest_odom_received_sec > self.shadow_max_odom_scan_age_sec:
+            self.shadow_sample_rejections["stale_odom"] += 1
+            return
+        sample = scan_sample_from_msg(msg, self.latest_odom_pose)
+        self.shadow_samples.append(
+            ShadowScanSample.from_scan_sample(
+                sample,
+                stamp_sec=received_sec,
+                segment_index=self.shadow_segment_index,
+            )
+        )
+        if len(self.shadow_samples) > self.shadow_max_samples:
+            del self.shadow_samples[: len(self.shadow_samples) - self.shadow_max_samples]
+
+    def fresh_scan_age_sec(self):
+        if self.last_scan_received_sec is None:
+            return None
+        return time.time() - self.last_scan_received_sec
+
+    def fresh_odom_age_sec(self):
+        if self.latest_odom_received_sec is None:
+            return None
+        return time.time() - self.latest_odom_received_sec
 
     def wait_for_topics(self, timeout_sec=TOPIC_TIMEOUT_SEC):
         start = time.time()
@@ -413,6 +694,15 @@ class ArenaCoverageDrive(Node):
             rclpy.spin_once(self, timeout_sec=0.1)
 
         raise RuntimeError("ROS shutdown while waiting for /odom and /scan.")
+
+    def wait_for_mapper_topic(self, args):
+        start = time.time()
+        while rclpy.ok() and time.time() - start <= args.mapper_topic_timeout_sec:
+            topics = {name for name, _types in self.get_topic_names_and_types()}
+            if args.mapper_topic in topics:
+                return True
+            rclpy.spin_once(self, timeout_sec=0.1)
+        return False
 
     def publish_velocity(self, linear_x, angular_z):
         msg = Twist()
@@ -582,20 +872,459 @@ class ArenaCoverageDrive(Node):
             self.stop_repeatedly()
             time.sleep(args.settle_sec)
 
+    def _shadow_curve_record(
+        self,
+        candidate,
+        path_points,
+        curve_samples,
+        driven_distance_m,
+        duration_sec,
+        stop_reason,
+        **extra,
+    ):
+        record = {
+            "executor": "shadow_cmd_vel_curve",
+            "executed": True,
+            "candidate_kind": candidate.kind,
+            "candidate_score": candidate.score,
+            "target_x": float(candidate.target_x),
+            "target_y": float(candidate.target_y),
+            "path_length_m": candidate.path_length_m,
+            "curve_path_world": [[float(x), float(y)] for x, y in path_points],
+            "curve_samples": list(curve_samples),
+            "driven_distance_m": float(driven_distance_m),
+            "duration_sec": float(duration_sec),
+            "stop_reason": stop_reason,
+        }
+        record.update(extra)
+        return record
+
+    def execute_shadow_curve(self, candidate, args, distance_limit_m):
+        if self.latest_odom_pose is None:
+            raise RuntimeError("shadow_curve_missing_latest_odom_pose")
+        move_limit = min(args.shadow_max_single_move_m, max(0.0, distance_limit_m))
+        path_points = active_explore_curve_path(
+            candidate,
+            self.latest_odom_pose,
+            move_limit,
+        )
+        start = time.time()
+        deadline = start + max(
+            8.0,
+            move_limit / max(0.01, abs(args.shadow_curve_linear_speed_mps)) + 5.0,
+        )
+        final_target = path_points[-1]
+        candidate_goal = (
+            candidate.path_world[-1]
+            if candidate.path_world
+            else (
+                candidate.simplified_path_world[-1]
+                if candidate.simplified_path_world
+                else (candidate.target_x, candidate.target_y)
+            )
+        )
+        path_truncated = (
+            distance_2d(final_target, candidate_goal)
+            > args.shadow_curve_goal_tolerance_m
+        )
+        previous_point = (
+            float(self.latest_odom_pose.x),
+            float(self.latest_odom_pose.y),
+        )
+        total_driven = 0.0
+        curve_samples = []
+
+        try:
+            while rclpy.ok() and time.time() <= deadline:
+                rclpy.spin_once(self, timeout_sec=COMMAND_PERIOD_SEC)
+                scan_age = self.fresh_scan_age_sec()
+                odom_age = self.fresh_odom_age_sec()
+                if scan_age is None or scan_age > args.shadow_max_odom_scan_age_sec:
+                    raise RuntimeError("stale_scan_during_shadow_curve")
+                if odom_age is None or odom_age > args.shadow_max_odom_scan_age_sec:
+                    raise RuntimeError("stale_odom_during_shadow_curve")
+                if self.latest_odom_pose is None:
+                    raise RuntimeError("fresh_odom_unavailable_during_shadow_curve")
+
+                current_point = (
+                    float(self.latest_odom_pose.x),
+                    float(self.latest_odom_pose.y),
+                )
+                delta = distance_2d(previous_point, current_point)
+                if math.isfinite(delta):
+                    total_driven += delta
+                previous_point = current_point
+
+                safety = evaluate_shadow_curve_safety(self.last_scan, args)
+                if not safety.safe:
+                    self.stop_repeatedly()
+                    final_target_distance_m = distance_2d(current_point, final_target)
+                    return self._shadow_curve_record(
+                        candidate,
+                        path_points,
+                        curve_samples,
+                        total_driven,
+                        time.time() - start,
+                        f"safety_stop:{safety.reason}",
+                        safety_reason=safety.reason,
+                        final_target_distance_m=final_target_distance_m,
+                        goal_reached=(
+                            final_target_distance_m
+                            <= args.shadow_curve_goal_tolerance_m
+                        ),
+                        path_truncated=path_truncated,
+                    )
+
+                final_target_distance_m = distance_2d(current_point, final_target)
+                if (
+                    total_driven >= move_limit
+                    or final_target_distance_m <= args.shadow_curve_goal_tolerance_m
+                ):
+                    self.stop_repeatedly()
+                    return self._shadow_curve_record(
+                        candidate,
+                        path_points,
+                        curve_samples,
+                        total_driven,
+                        time.time() - start,
+                        "completed",
+                        final_target_distance_m=final_target_distance_m,
+                        goal_reached=(
+                            final_target_distance_m
+                            <= args.shadow_curve_goal_tolerance_m
+                        ),
+                        path_truncated=path_truncated,
+                    )
+
+                target = select_curve_lookahead_target(
+                    path_points,
+                    current_point,
+                    args.shadow_curve_lookahead_m,
+                )
+                linear_x, angular_z, alpha = pure_pursuit_curve_command(
+                    self.latest_odom_pose,
+                    target,
+                    args.shadow_curve_lookahead_m,
+                    args.shadow_curve_linear_speed_mps,
+                    args.shadow_curve_max_angular_radps,
+                )
+                remaining = max(0.0, move_limit - total_driven)
+                linear_x = min(linear_x, remaining / max(COMMAND_PERIOD_SEC, 1e-6))
+                curve_samples.append(
+                    {
+                        "odom_x": float(self.latest_odom_pose.x),
+                        "odom_y": float(self.latest_odom_pose.y),
+                        "odom_yaw_deg": float(self.latest_odom_pose.yaw_deg),
+                        "target_x": float(target[0]),
+                        "target_y": float(target[1]),
+                        "alpha_rad": alpha,
+                        "linear_x_mps": linear_x,
+                        "angular_z_rad_s": angular_z,
+                        "front_min_m": safety.front.min_range_m,
+                        "left_min_m": safety.left_min_m,
+                        "right_min_m": safety.right_min_m,
+                    }
+                )
+                self.publish_velocity(linear_x, angular_z)
+                time.sleep(COMMAND_PERIOD_SEC)
+
+            final_target_distance_m = distance_2d(
+                (
+                    float(self.latest_odom_pose.x),
+                    float(self.latest_odom_pose.y),
+                ),
+                final_target,
+            )
+            self.stop_repeatedly()
+            return self._shadow_curve_record(
+                candidate,
+                path_points,
+                curve_samples,
+                total_driven,
+                time.time() - start,
+                "timeout_stop_after_progress",
+                timeout_sec=deadline - start,
+                final_target_distance_m=final_target_distance_m,
+                goal_reached=(
+                    final_target_distance_m <= args.shadow_curve_goal_tolerance_m
+                ),
+                path_truncated=path_truncated,
+            )
+        except Exception:
+            self.stop_repeatedly()
+            raise
+
+    def _record_shadow_phase(self, diagnostics, phase, reason, plan=None):
+        record = {
+            "phase": phase,
+            "reason": reason,
+            "sample_count": len(self.shadow_samples),
+        }
+        if plan is not None:
+            record["plan"] = plan.to_dict()
+        diagnostics.setdefault("phases", []).append(record)
+
+    def _plan_shadow_move(self, config, recent_attempts):
+        pruned, _window = prune_shadow_samples(
+            self.shadow_samples,
+            config,
+            now_sec=time.time(),
+            current_segment=self.shadow_segment_index,
+        )
+        return plan_shadow_coverage_move(pruned, config, recent_attempts)
+
+    def execute_shadow_coverage(self, args, fallback_route):
+        config = shadow_config_from_args(args)
+        diagnostics = {
+            "coverage_mode": "shadow",
+            "experimental": True,
+            "config": config.__dict__,
+            "mapper": {
+                "topic": args.mapper_topic,
+                "required": args.require_mapper_topic,
+                "available": None,
+            },
+            "phases": [],
+            "executions": [],
+            "recent_attempts": [],
+            "safety_events": [],
+            "sample_rejections": self.shadow_sample_rejections,
+        }
+        self.shadow_diagnostics = diagnostics
+        summary = ShadowCoverageSummary(final_phase="seed_scan")
+        mapper_available = self.wait_for_mapper_topic(args)
+        diagnostics["mapper"]["available"] = mapper_available
+        if not mapper_available:
+            message = f"Mapper topic {args.mapper_topic!r} was not seen before shadow coverage."
+            if args.require_mapper_topic:
+                summary = replace(summary, stop_reason="mapper_topic_missing", final_phase="failed")
+                diagnostics["summary"] = summary.to_dict()
+                raise RuntimeError(message)
+            self.get_logger().warn(message)
+
+        self._record_shadow_phase(diagnostics, "seed_scan", "initial_seed_spin")
+        self.rotate(360.0, args)
+        summary = replace(summary, spin_count=summary.spin_count + 1)
+
+        recent_attempts = []
+        confirmations = 0
+        shadow_motion_executed = False
+
+        while rclpy.ok():
+            if summary.attempts >= args.shadow_max_attempts:
+                summary = replace(
+                    summary,
+                    stop_reason="shadow_motion_attempts_exhausted",
+                    final_phase="failed",
+                )
+                diagnostics["summary"] = summary.to_dict()
+                raise RuntimeError("shadow_motion_attempts_exhausted")
+            if summary.total_distance_m >= args.shadow_max_total_distance_m:
+                summary = replace(
+                    summary,
+                    stop_reason="shadow_total_distance_exhausted",
+                    final_phase="failed",
+                )
+                diagnostics["summary"] = summary.to_dict()
+                raise RuntimeError("shadow_total_distance_exhausted")
+
+            plan = self._plan_shadow_move(config, recent_attempts)
+            self._record_shadow_phase(
+                diagnostics,
+                "shadow_mapping",
+                plan.reason,
+                plan=plan,
+            )
+
+            if plan.ok:
+                confirmations = 0
+                self.begin_shadow_segment()
+                remaining_distance = args.shadow_max_total_distance_m - summary.total_distance_m
+                record = self.execute_shadow_curve(
+                    plan.selected,
+                    args,
+                    distance_limit_m=remaining_distance,
+                )
+                diagnostics["executions"].append(record)
+                if record["stop_reason"] != "completed":
+                    diagnostics["safety_events"].append(
+                        {
+                            "attempt": summary.attempts,
+                            "reason": record["stop_reason"],
+                            "target_x": record["target_x"],
+                            "target_y": record["target_y"],
+                        }
+                    )
+                    summary = replace(
+                        summary,
+                        attempts=summary.attempts + 1,
+                        moves_executed=summary.moves_executed + 1,
+                        total_distance_m=(
+                            summary.total_distance_m
+                            + float(record.get("driven_distance_m", 0.0))
+                        ),
+                        stop_reason=record["stop_reason"],
+                        final_phase="failed",
+                    )
+                    diagnostics["summary"] = summary.to_dict()
+                    raise RuntimeError(record["stop_reason"])
+                shadow_motion_executed = True
+                recent_attempt = {
+                    "target_x": float(plan.selected.target_x),
+                    "target_y": float(plan.selected.target_y),
+                    "reason": record["stop_reason"],
+                    "driven_distance_m": record.get("driven_distance_m", 0.0),
+                }
+                recent_attempts.append(recent_attempt)
+                diagnostics["recent_attempts"].append(recent_attempt)
+                summary = replace(
+                    summary,
+                    attempts=summary.attempts + 1,
+                    moves_executed=summary.moves_executed + 1,
+                    total_distance_m=(
+                        summary.total_distance_m
+                        + float(record.get("driven_distance_m", 0.0))
+                    ),
+                    final_phase="shadow_mapping",
+                )
+                time.sleep(args.settle_sec)
+                continue
+
+            if plan.reason in NO_SHADOW_REASONS:
+                if (
+                    not shadow_motion_executed
+                    and not args.no_shadow_fallback_route
+                ):
+                    self._record_shadow_phase(
+                        diagnostics,
+                        "fixed_fallback",
+                        "no_shadow_move_before_motion",
+                    )
+                    self.execute_route(fallback_route, args)
+                    summary = replace(
+                        summary,
+                        fallback_used=True,
+                        stop_reason="fixed_fallback_completed",
+                        final_phase="complete",
+                    )
+                    diagnostics["summary"] = summary.to_dict()
+                    return summary
+
+                confirmations += 1
+                self._record_shadow_phase(
+                    diagnostics,
+                    "shadow_confirm",
+                    f"confirmation_{confirmations}",
+                    plan=plan,
+                )
+                if confirmations < args.shadow_completion_confirmations:
+                    continue
+
+                self.begin_shadow_segment()
+                self._record_shadow_phase(
+                    diagnostics,
+                    "final_verify_spin",
+                    "shadow_exhausted_verify_spin",
+                )
+                self.rotate(360.0, args)
+                summary = replace(
+                    summary,
+                    spin_count=summary.spin_count + 1,
+                    final_phase="final_verify_spin",
+                )
+                verify_plan = self._plan_shadow_move(config, recent_attempts)
+                self._record_shadow_phase(
+                    diagnostics,
+                    "final_verify_plan",
+                    verify_plan.reason,
+                    plan=verify_plan,
+                )
+                if verify_plan.ok:
+                    confirmations = 0
+                    self._record_shadow_phase(
+                        diagnostics,
+                        "shadow_mapping",
+                        "verification_found_new_shadow",
+                        plan=verify_plan,
+                    )
+                    continue
+                if verify_plan.reason in NO_SHADOW_REASONS:
+                    summary = replace(
+                        summary,
+                        stop_reason="shadow_complete_verified",
+                        final_phase="complete",
+                    )
+                    diagnostics["summary"] = summary.to_dict()
+                    return summary
+                summary = replace(
+                    summary,
+                    stop_reason=f"shadow_final_verify_failed:{verify_plan.reason}",
+                    final_phase="failed",
+                )
+                diagnostics["summary"] = summary.to_dict()
+                raise RuntimeError(summary.stop_reason)
+
+            if not shadow_motion_executed and not args.no_shadow_fallback_route:
+                self._record_shadow_phase(
+                    diagnostics,
+                    "fixed_fallback",
+                    f"shadow_plan_failed_before_motion:{plan.reason}",
+                    plan=plan,
+                )
+                self.execute_route(fallback_route, args)
+                summary = replace(
+                    summary,
+                    fallback_used=True,
+                    stop_reason="fixed_fallback_completed",
+                    final_phase="complete",
+                )
+                diagnostics["summary"] = summary.to_dict()
+                return summary
+
+            summary = replace(
+                summary,
+                stop_reason=f"shadow_plan_failed:{plan.reason}",
+                final_phase="failed",
+            )
+            diagnostics["summary"] = summary.to_dict()
+            raise RuntimeError(summary.stop_reason)
+
+        summary = replace(
+            summary,
+            stop_reason="ros_shutdown_during_shadow_coverage",
+            final_phase="failed",
+        )
+        diagnostics["summary"] = summary.to_dict()
+        raise RuntimeError("ROS shutdown during shadow coverage.")
+
 
 def print_dry_run(args, route):
     print("Arena coverage dry run")
     print(f"Arena: {ARENA_WIDTH_M:.3f} m x {ARENA_LENGTH_M:.3f} m")
     print(f"Assumed start: center, facing along the {ARENA_LENGTH_M:.2f} m axis")
     print("Assumptions:")
-    print("  - Cartographer is already running")
-    print("  - RViz shows /map, /scan, /tf, and robot pose updates")
+    print("  - the external mapper is already running")
+    print("  - RViz shows /map or mapper feedback, /scan, /tf, and robot pose updates")
     print("  - no large obstacle is inside the arena")
     print("  - operator is ready to stop the robot")
     print()
-    print("Route:")
-    for index, action in enumerate(route, start=1):
-        print(f"  {index}. {route_action_text(action)}")
+    print(f"Coverage mode: {args.coverage_mode}")
+    if args.coverage_mode == "shadow":
+        print("Experimental shadow coverage:")
+        print("  - motion-only; the odom-frame shadow grid is not the saved map")
+        print("  - initial seed spin, shadow-frontier curves, final verification spin")
+        print(f"  - mapper topic: {args.mapper_topic} (strict={args.require_mapper_topic})")
+        print(f"  - max attempts: {args.shadow_max_attempts}")
+        print(f"  - max single move: {args.shadow_max_single_move_m:.3f} m")
+        print(f"  - max total distance: {args.shadow_max_total_distance_m:.3f} m")
+        print(f"  - sample window: current + previous segment, max {args.shadow_max_samples} samples")
+        print(f"  - side stop distance: {args.shadow_side_stop_distance_m:.3f} m")
+        print(f"  - fixed fallback before shadow motion: {not args.no_shadow_fallback_route}")
+        print(f"  - diagnostics: {shadow_diagnostics_path_for_args(args)}")
+    else:
+        print("Route:")
+        for index, action in enumerate(route, start=1):
+            print(f"  {index}. {route_action_text(action)}")
 
     positions = route_long_axis_positions(route)
     margin = route_long_axis_margin_m(route)
@@ -625,9 +1354,18 @@ def require_motion_confirmation(args, route):
     print("  - clear the arena of large obstacles")
     print("  - keep an operator near the TurtleBot")
     print("  - keep Ctrl+C and physical stop available")
-    print("  - run Cartographer and verify RViz feedback first")
+    print("  - run the external mapper and verify RViz feedback first")
     print(f"Run ID: {args.run_id}")
-    print(f"Route: {route_actions_text(route)}")
+    print(f"Coverage mode: {args.coverage_mode}")
+    if args.coverage_mode == "shadow":
+        print("Experimental shadow coverage is enabled.")
+        print("  - the temporary odom-frame shadow grid is not the saved map")
+        print("  - static map saving remains external")
+        print(f"  - mapper topic check: {args.mapper_topic}")
+        print(f"  - max shadow distance: {args.shadow_max_total_distance_m:.3f} m")
+        print(f"  - side stop distance: {args.shadow_side_stop_distance_m:.3f} m")
+    else:
+        print(f"Route: {route_actions_text(route)}")
     response = input("Type RUN to start arena coverage motion: ").strip()
     return response == "RUN"
 
@@ -698,6 +1436,222 @@ def parse_args(argv):
         help="Maximum time allowed for a single primitive.",
     )
     parser.add_argument(
+        "--coverage-mode",
+        default="fixed",
+        choices=["fixed", "shadow"],
+        help="Coverage motion mode. shadow is experimental and motion-only.",
+    )
+    parser.add_argument(
+        "--shadow-max-attempts",
+        default=DEFAULT_SHADOW_MAX_ATTEMPTS,
+        type=int,
+        help="Maximum experimental shadow curve motions.",
+    )
+    parser.add_argument(
+        "--shadow-max-single-move",
+        dest="shadow_max_single_move_m",
+        default=DEFAULT_SHADOW_MAX_SINGLE_MOVE_M,
+        type=float,
+        help="Maximum distance for one shadow curve motion in meters.",
+    )
+    parser.add_argument(
+        "--shadow-max-total-distance",
+        dest="shadow_max_total_distance_m",
+        default=DEFAULT_SHADOW_MAX_TOTAL_DISTANCE_M,
+        type=float,
+        help="Maximum total shadow curve distance in meters.",
+    )
+    parser.add_argument(
+        "--shadow-max-candidate-path",
+        dest="shadow_max_candidate_path_m",
+        default=DEFAULT_SHADOW_MAX_CANDIDATE_PATH_M,
+        type=float,
+        help="Maximum planned candidate path length in meters.",
+    )
+    parser.add_argument(
+        "--shadow-grid-size",
+        dest="shadow_grid_size_m",
+        default=DEFAULT_SHADOW_GRID_SIZE_M,
+        type=float,
+        help="Temporary odom-frame shadow grid size in meters.",
+    )
+    parser.add_argument(
+        "--shadow-grid-resolution",
+        dest="shadow_grid_resolution_m",
+        default=DEFAULT_SHADOW_GRID_RESOLUTION_M,
+        type=float,
+        help="Temporary shadow grid resolution in meters.",
+    )
+    parser.add_argument(
+        "--shadow-inflation",
+        dest="shadow_inflation_radius_m",
+        default=DEFAULT_SHADOW_INFLATION_RADIUS_M,
+        type=float,
+        help="Planning inflation radius for the temporary shadow grid.",
+    )
+    parser.add_argument(
+        "--shadow-soft-clearance-radius",
+        dest="shadow_soft_clearance_radius_m",
+        default=DEFAULT_SHADOW_SOFT_CLEARANCE_RADIUS_M,
+        type=float,
+        help="Soft clearance penalty radius for shadow A*.",
+    )
+    parser.add_argument(
+        "--shadow-soft-clearance-weight",
+        default=DEFAULT_SHADOW_SOFT_CLEARANCE_WEIGHT,
+        type=float,
+        help="Soft clearance penalty weight for shadow A*.",
+    )
+    parser.add_argument(
+        "--shadow-max-path-segments",
+        default=DEFAULT_SHADOW_MAX_PATH_SEGMENTS,
+        type=int,
+        help="Maximum simplified A* path segments for a shadow candidate.",
+    )
+    parser.add_argument(
+        "--shadow-max-samples",
+        default=DEFAULT_SHADOW_MAX_SAMPLES,
+        type=int,
+        help="Maximum stored scan samples for shadow planning.",
+    )
+    parser.add_argument(
+        "--shadow-max-sample-age-sec",
+        default=DEFAULT_SHADOW_MAX_SAMPLE_AGE_SEC,
+        type=float,
+        help="Maximum shadow sample age in seconds.",
+    )
+    parser.add_argument(
+        "--shadow-max-sample-travel",
+        dest="shadow_max_sample_travel_m",
+        default=DEFAULT_SHADOW_MAX_SAMPLE_TRAVEL_M,
+        type=float,
+        help="Maximum odom travel span for retained shadow samples.",
+    )
+    parser.add_argument(
+        "--shadow-max-sample-yaw-span-deg",
+        default=DEFAULT_SHADOW_MAX_SAMPLE_YAW_SPAN_DEG,
+        type=float,
+        help="Maximum accumulated odom yaw span for retained shadow samples.",
+    )
+    parser.add_argument(
+        "--shadow-emergency-stop-distance",
+        dest="shadow_emergency_stop_distance_m",
+        default=DEFAULT_SHADOW_EMERGENCY_STOP_DISTANCE_M,
+        type=float,
+        help="Runtime front emergency stop distance for shadow curves.",
+    )
+    parser.add_argument(
+        "--shadow-side-stop-distance",
+        dest="shadow_side_stop_distance_m",
+        default=DEFAULT_SHADOW_SIDE_STOP_DISTANCE_M,
+        type=float,
+        help="Runtime side stop distance for shadow curves.",
+    )
+    parser.add_argument(
+        "--shadow-min-visible-cells",
+        default=DEFAULT_SHADOW_MIN_VISIBLE_CELLS,
+        type=int,
+        help="Minimum visible shadow cells required for a candidate.",
+    )
+    parser.add_argument(
+        "--shadow-min-move-length",
+        dest="shadow_min_move_length_m",
+        default=DEFAULT_SHADOW_MIN_MOVE_LENGTH_M,
+        type=float,
+        help="Minimum accepted shadow candidate path length.",
+    )
+    parser.add_argument(
+        "--shadow-recent-target-radius",
+        dest="shadow_recent_target_radius_m",
+        default=DEFAULT_SHADOW_RECENT_TARGET_RADIUS_M,
+        type=float,
+        help="Radius for rejecting recently attempted shadow targets.",
+    )
+    parser.add_argument(
+        "--shadow-completion-confirmations",
+        default=DEFAULT_SHADOW_COMPLETION_CONFIRMATIONS,
+        type=int,
+        help="Consecutive no-shadow replans before final verification spin.",
+    )
+    parser.add_argument(
+        "--shadow-curve-lookahead",
+        dest="shadow_curve_lookahead_m",
+        default=DEFAULT_SHADOW_CURVE_LOOKAHEAD_M,
+        type=float,
+        help="Pure-pursuit lookahead for shadow curves.",
+    )
+    parser.add_argument(
+        "--shadow-curve-goal-tolerance",
+        dest="shadow_curve_goal_tolerance_m",
+        default=DEFAULT_SHADOW_CURVE_GOAL_TOLERANCE_M,
+        type=float,
+        help="Goal tolerance for shadow curve execution.",
+    )
+    parser.add_argument(
+        "--shadow-curve-linear-speed",
+        dest="shadow_curve_linear_speed_mps",
+        default=DEFAULT_SHADOW_CURVE_LINEAR_SPEED_MPS,
+        type=float,
+        help="Linear speed for shadow curve execution.",
+    )
+    parser.add_argument(
+        "--shadow-curve-max-angular",
+        dest="shadow_curve_max_angular_radps",
+        default=DEFAULT_SHADOW_CURVE_MAX_ANGULAR_RADPS,
+        type=float,
+        help="Maximum angular speed for shadow curve execution.",
+    )
+    parser.add_argument(
+        "--shadow-max-odom-scan-age-sec",
+        default=DEFAULT_SHADOW_MAX_ODOM_SCAN_AGE_SEC,
+        type=float,
+        help="Maximum odom age allowed when pairing scan samples.",
+    )
+    parser.add_argument(
+        "--shadow-unknown-blocked",
+        dest="shadow_unknown_blocked",
+        action="store_true",
+        default=True,
+        help="Treat unknown grid cells as blocked for shadow planning.",
+    )
+    parser.add_argument(
+        "--shadow-unknown-free",
+        dest="shadow_unknown_blocked",
+        action="store_false",
+        help="Allow shadow planning through unknown grid cells.",
+    )
+    parser.add_argument(
+        "--no-shadow-fallback-route",
+        action="store_true",
+        help="Disable fixed-route fallback before any shadow motion.",
+    )
+    parser.add_argument(
+        "--mapper-topic",
+        default=DEFAULT_MAPPER_TOPIC,
+        help="Mapper output topic checked before experimental shadow motion.",
+    )
+    parser.add_argument(
+        "--mapper-topic-timeout-sec",
+        default=DEFAULT_MAPPER_TOPIC_TIMEOUT_SEC,
+        type=float,
+        help="Seconds to wait for the mapper topic before warning or failing.",
+    )
+    parser.add_argument(
+        "--require-mapper-topic",
+        action="store_true",
+        help="Fail before motion if --mapper-topic is unavailable.",
+    )
+    parser.add_argument(
+        "--shadow-diagnostics-json",
+        type=Path,
+        help="Path for experimental shadow diagnostics JSON.",
+    )
+    parser.add_argument(
+        "--no-shadow-diagnostics",
+        action="store_true",
+        help="Do not write experimental shadow diagnostics JSON.",
+    )
+    parser.add_argument(
         "--results-csv",
         default=DEFAULT_RESULTS_CSV,
         type=Path,
@@ -758,6 +1712,7 @@ def main(argv=None):
 
     rclpy.init()
     node = ArenaCoverageDrive()
+    node.configure_shadow_collection(args)
     status = "failed"
     notes = args.notes
     odom_start = None
@@ -769,9 +1724,20 @@ def main(argv=None):
         node.wait_for_topics()
         odom_start = odom_to_xy_yaw(node.last_odom)
         node.get_logger().info(
-            "Starting arena coverage route: " + route_actions_text(route)
+            "Starting arena coverage mode: " + args.coverage_mode
         )
-        node.execute_route(route, args)
+        if args.coverage_mode == "shadow":
+            summary = node.execute_shadow_coverage(args, route)
+            notes = f"{args.notes};{shadow_notes_summary(node.shadow_diagnostics)}"
+            node.get_logger().info(
+                "Completed experimental shadow coverage: "
+                + json.dumps(summary.to_dict(), sort_keys=True)
+            )
+        else:
+            node.get_logger().info(
+                "Starting arena coverage route: " + route_actions_text(route)
+            )
+            node.execute_route(route, args)
 
         for _ in range(10):
             rclpy.spin_once(node, timeout_sec=0.05)
@@ -782,12 +1748,30 @@ def main(argv=None):
     except KeyboardInterrupt:
         status = "interrupted"
         notes = f"{args.notes};keyboard_interrupt"
+        if args.coverage_mode == "shadow":
+            node.shadow_diagnostics["exception"] = "keyboard_interrupt"
+            node.shadow_diagnostics.setdefault(
+                "summary",
+                ShadowCoverageSummary(
+                    stop_reason="keyboard_interrupt",
+                    final_phase="failed",
+                ).to_dict(),
+            )
         print("Interrupted. Sending stop command...")
         return_code = 130
 
     except Exception as exc:
         status = "failed"
         notes = f"{args.notes};{exc}"
+        if args.coverage_mode == "shadow":
+            node.shadow_diagnostics["exception"] = str(exc)
+            node.shadow_diagnostics.setdefault(
+                "summary",
+                ShadowCoverageSummary(
+                    stop_reason=str(exc),
+                    final_phase="failed",
+                ).to_dict(),
+            )
         node.get_logger().error(str(exc))
         return_code = 1
 
@@ -806,6 +1790,20 @@ def main(argv=None):
                     node.get_logger().info(f"Saved run log to {args.results_csv}")
                 except Exception as log_exc:
                     print(f"Could not write arena coverage log: {log_exc}", file=sys.stderr)
+
+            if args.coverage_mode == "shadow":
+                try:
+                    write_shadow_diagnostics(
+                        shadow_diagnostics_path_for_args(args),
+                        node.shadow_diagnostics,
+                    )
+                    if not args.no_shadow_diagnostics:
+                        node.get_logger().info(
+                            "Saved shadow diagnostics to "
+                            f"{shadow_diagnostics_path_for_args(args)}"
+                        )
+                except Exception as diag_exc:
+                    print(f"Could not write shadow diagnostics: {diag_exc}", file=sys.stderr)
 
             node.destroy_node()
             rclpy.shutdown()
