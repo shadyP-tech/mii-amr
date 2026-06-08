@@ -690,6 +690,16 @@ class TwoStageCoordinator(Node):
             frame,
             waypoints=waypoints,
         )
+        if arrival.handoff_path_ok:
+            if not arrival.strict_position_ok or not arrival.strict_yaw_ok:
+                self.get_logger().warn(
+                    "Nav2 staging missed the exact waypoint but is on the "
+                    "planned path; handing off to custom follower: "
+                    f"position_error={arrival.position_error_m:.3f} m, "
+                    f"yaw_error={arrival.yaw_error_deg:.1f} deg, "
+                    f"distance_to_path={arrival.distance_to_path_m:.3f} m"
+                )
+            return arrival
         if not arrival.strict_position_ok:
             raise RuntimeError(
                 "Arrival position check failed: "
@@ -713,15 +723,19 @@ class TwoStageCoordinator(Node):
         strict_position_ok = position_error <= self.args.arrival_tolerance_m
         strict_yaw_ok = yaw_error <= self.args.arrival_yaw_tolerance_deg
         distance_to_path_m = None
+        handoff_path_ok = False
         if waypoints is not None:
             distance_to_path_m = distance_pose_to_waypoint_path_m(pose, waypoints)
+            handoff_path_ok = (
+                distance_to_path_m <= self.args.follower_start_on_path_tolerance_m
+            )
         return ArrivalCheck(
             pose,
             frame,
             position_error,
             yaw_error,
             distance_to_path_m=distance_to_path_m,
-            handoff_path_ok=False,
+            handoff_path_ok=handoff_path_ok,
             strict_position_ok=strict_position_ok,
             strict_yaw_ok=strict_yaw_ok,
         )
