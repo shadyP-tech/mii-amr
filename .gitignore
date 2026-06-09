@@ -27,3 +27,6 @@ results/**/latest_tracker_pose.csv
 results/**/latest_tracker_pose.sample.csv
 .codex/
 .codex
+
+tests/
+docs/

@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-"""
-Run the real TurtleBot supervisor-route validation experiment.
-
-The route action list is loaded from ``results/aufgabe02/supervisor_route_prediction.json``.
-This runner is intended for the final-target camera setup: the camera tracker
-does not validate the start pose, but it must publish a fresh final pose after
-the robot reaches the target area.
-"""
 
 import argparse
 import csv

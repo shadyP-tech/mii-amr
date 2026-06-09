@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-"""
-Predict endpoint uncertainty by composing empirical motion primitives.
-
-The predictor samples F30/CW90/CCW90 primitives from a JSON model created by
-``build_motion_primitives_model.py`` and propagates the final pose with Monte
-Carlo simulation.
-"""
 
 import argparse
 import csv

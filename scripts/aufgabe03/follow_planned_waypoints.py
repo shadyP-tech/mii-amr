@@ -7,11 +7,9 @@ localization/AMCL is already running, but it publishes /cmd_vel itself.
 """
 
 import argparse
-import csv
 import math
 import sys
 import time
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -43,7 +41,90 @@ except ImportError:
     tf2_ros = None
 
 import lidar_obstacle_map
+import map_path_planner
 import replan_runtime
+from waypoint_following.command_smoothing import (  # noqa: E402
+    COMMAND_SMOOTHING_MODES,
+    COMMAND_SMOOTHING_OFF,
+    COMMAND_SMOOTHING_RATE_LIMIT,
+    CommandSmoother,
+    CommandSmoothingConfig,
+)
+from waypoint_following.controllers import (  # noqa: E402
+    PathController,
+    PurePursuitController,
+    StopGoController,
+    build_path_controller,
+    should_rotate,
+    velocity_command,
+)
+from waypoint_following.math_utils import (  # noqa: E402
+    clamp,
+    normalize_angle_rad,
+    quaternion_to_yaw_deg,
+    shortest_angle_delta_deg,
+)
+from waypoint_following.models import (  # noqa: E402
+    AmclHealth,
+    ControllerStep,
+    Pose2D,
+    RouteState,
+    ScanSafety,
+    StartSelection,
+    TargetState,
+    TrackingPathValidation,
+    TwistCommand,
+    Waypoint,
+)
+from waypoint_following.path_curves import (  # noqa: E402
+    polyline_lookahead_target,
+    pure_pursuit_curve_command,
+    select_curve_lookahead_target,
+)
+from waypoint_following.path_progress import (  # noqa: E402
+    distance_point_to_segment_m,
+    downsample_waypoints,
+    heading_between,
+    is_heading_change,
+    load_tracking_path_csv,
+    load_waypoints,
+    nearest_path_segment,
+    prepare_executable_waypoints,
+    select_executable_waypoints,
+    select_path_progress_waypoints,
+    target_state,
+    validate_tracking_path_geometry,
+    validate_tracking_point_structure,
+    waypoint_distance,
+    waypoint_reached,
+)
+from waypoint_following.lookahead_guard import (  # noqa: E402
+    LOOKAHEAD_GUARD_MODES,
+    LOOKAHEAD_GUARD_OFF,
+    LOOKAHEAD_GUARD_STATIC_AND_RUN_LOCAL,
+    LOOKAHEAD_GUARD_STATIC_MAP,
+    LookaheadGuard,
+    dense_route_signature,
+    guard_block_signature,
+    static_inflated_blocked_cells,
+)
+from waypoint_following.replanning import ReplanManager  # noqa: E402
+from waypoint_following.run_logging import (  # noqa: E402
+    BASE_CSV_HEADER,
+    CSV_HEADER,
+    RuntimeDiagnostics,
+    append_csv_row,
+    build_log_row,
+    migrate_csv_header,
+    pose_fields,
+)
+from waypoint_following.scan_safety import (  # noqa: E402
+    FORWARD_SOFT_STOP_MIN_CLOSE_RANGES,
+    evaluate_scan_safety,
+    percentile,
+    valid_scan_ranges,
+)
+
 
 
 DEFAULT_WAYPOINTS_CSV = Path("results/aufgabe03/aufgabe03_waypoints.csv")
@@ -68,6 +149,22 @@ DEFAULT_FORWARD_STOP_HEADING_ERROR_DEG = 18.0
 DEFAULT_MIN_WAYPOINT_SPACING_M = 0.12
 DEFAULT_START_SELECTION = "path-progress"
 DEFAULT_START_ON_PATH_TOLERANCE_M = 0.25
+DEFAULT_CONTROLLER = "stop-go"
+DEFAULT_PATH_LOOKAHEAD_M = 0.18
+DEFAULT_PURE_PURSUIT_LOOKAHEAD_GUARD = LOOKAHEAD_GUARD_OFF
+DEFAULT_PURE_PURSUIT_MIN_GUARDED_LOOKAHEAD_M = 0.12
+DEFAULT_PURE_PURSUIT_LOOKAHEAD_GUARD_STATIC_INFLATION_RADIUS_M = (
+    map_path_planner.DEFAULT_INFLATE_RADIUS_M
+)
+DEFAULT_PURE_PURSUIT_COMMAND_SMOOTHING = COMMAND_SMOOTHING_RATE_LIMIT
+DEFAULT_PURE_PURSUIT_MAX_LINEAR_ACCEL_MPS2 = 0.06
+DEFAULT_PURE_PURSUIT_MAX_LINEAR_DECEL_MPS2 = 0.12
+DEFAULT_PURE_PURSUIT_MAX_ANGULAR_ACCEL_RADPS2 = 0.18
+DEFAULT_PURE_PURSUIT_MAX_ANGULAR_DECEL_RADPS2 = 0.36
+DEFAULT_PURE_PURSUIT_FINAL_DECEL_DISTANCE_M = 0.30
+DEFAULT_TRACKING_ENDPOINT_TOLERANCE_M = 0.10
+DEFAULT_TRACKING_START_TOLERANCE_M = 0.20
+DEFAULT_TRACKING_MAX_SEGMENT_M = 0.30
 DEFAULT_ODOM_FRAME = "odom"
 DEFAULT_SCAN_HALF_ANGLE_DEG = 35.0
 DEFAULT_HARD_STOP_RANGE_M = 0.16
@@ -125,6 +222,7 @@ INITIAL_RUN_LOCAL_MAP_NONFATAL_REASONS = {
 
 REPLAN_TRIGGER_SCAN_BLOCKAGE = "scan_blockage"
 REPLAN_TRIGGER_KNOWN_CORRIDOR = "known_corridor"
+REPLAN_TRIGGER_LOOKAHEAD_GUARD = "lookahead_guard"
 
 
 def run_local_map_has_confirmed_obstacles(run_local_map):
@@ -139,6 +237,220 @@ def lidar_replan_failure(reason):
         return RuntimeError(message)
     return RuntimeError(f"lidar_replan_failed:{message}")
 
+
+def warn_logger(logger, message):
+    if logger is None:
+        return
+    warn = getattr(logger, "warn", None)
+    if warn is not None:
+        warn(message)
+
+
+def build_sparse_tracking_validation(source, point_count, status):
+    return TrackingPathValidation(
+        source=source,
+        point_count=point_count,
+        validation_status=status,
+    )
+
+
+def prepare_tracking_setup(
+    args,
+    route_waypoints,
+    current_pose=None,
+    logger=None,
+    structural_only=False,
+):
+    route_waypoints = list(route_waypoints)
+    if getattr(args, "controller", DEFAULT_CONTROLLER) != "pure-pursuit":
+        return None, build_sparse_tracking_validation(
+            source="ignored_stop_go",
+            point_count=0,
+            status="ignored",
+        )
+
+    if not getattr(args, "tracking_path_csv", None):
+        message = (
+            "Pure-pursuit has no --tracking-path-csv; "
+            "falling back to sparse waypoint geometry."
+        )
+        warn_logger(logger, message)
+        return None, build_sparse_tracking_validation(
+            source="waypoints",
+            point_count=len(route_waypoints),
+            status="fallback_sparse_waypoints",
+        )
+
+    tracking_points, warnings = load_tracking_path_csv(
+        args.tracking_path_csv,
+        max_segment_m=args.tracking_max_segment_m,
+    )
+    for warning in warnings:
+        warn_logger(logger, warning)
+    if structural_only:
+        return tracking_points, TrackingPathValidation(
+            source="csv",
+            point_count=len(tracking_points),
+            validation_status="structural_ok",
+            warnings=tuple(warnings),
+        )
+    validation = validate_tracking_path_geometry(
+        route_waypoints,
+        tracking_points,
+        endpoint_tolerance_m=args.tracking_endpoint_tolerance_m,
+        start_tolerance_m=args.tracking_start_tolerance_m,
+        allow_mismatch=args.allow_tracking_path_mismatch,
+        current_pose=current_pose,
+        source="csv",
+        structural_warnings=warnings,
+    )
+    for warning in validation.warnings:
+        warn_logger(logger, warning)
+    return tracking_points, validation
+
+
+def format_optional_m(value):
+    return "n/a" if value is None else f"{value:.3f}"
+
+
+def notes_with_tracking_metadata(notes, args, tracking_validation):
+    if (
+        getattr(args, "controller", DEFAULT_CONTROLLER) != "pure-pursuit"
+        or tracking_validation is None
+    ):
+        return notes
+    return (
+        f"{notes};controller={args.controller};"
+        f"tracking_source={tracking_validation.source};"
+        f"tracking_point_count={tracking_validation.point_count};"
+        f"tracking_validation_status={tracking_validation.validation_status}"
+    )
+
+
+def build_lookahead_guard(args, run_local_map_fn=None):
+    if getattr(args, "controller", DEFAULT_CONTROLLER) != "pure-pursuit":
+        return None
+    guard_mode = getattr(
+        args,
+        "pure_pursuit_lookahead_guard",
+        DEFAULT_PURE_PURSUIT_LOOKAHEAD_GUARD,
+    )
+    if guard_mode == LOOKAHEAD_GUARD_OFF:
+        return None
+    return LookaheadGuard.from_static_map(
+        args.static_map,
+        args.pure_pursuit_lookahead_guard_static_inflation_radius_m,
+        mode=guard_mode,
+        run_local_map_fn=run_local_map_fn,
+    )
+
+
+def command_smoothing_active(args):
+    return (
+        getattr(args, "controller", DEFAULT_CONTROLLER) == "pure-pursuit"
+        and getattr(
+            args,
+            "pure_pursuit_command_smoothing",
+            DEFAULT_PURE_PURSUIT_COMMAND_SMOOTHING,
+        )
+        == COMMAND_SMOOTHING_RATE_LIMIT
+    )
+
+
+def build_command_smoother(args):
+    if not command_smoothing_active(args):
+        return None
+    return CommandSmoother(
+        CommandSmoothingConfig(
+            max_linear_accel_mps2=args.pure_pursuit_max_linear_accel_mps2,
+            max_linear_decel_mps2=args.pure_pursuit_max_linear_decel_mps2,
+            max_angular_accel_radps2=args.pure_pursuit_max_angular_accel_radps2,
+            max_angular_decel_radps2=args.pure_pursuit_max_angular_decel_radps2,
+            final_decel_distance_m=args.pure_pursuit_final_decel_distance_m,
+            min_smoothed_linear_speed_mps=(
+                args.pure_pursuit_min_smoothed_linear_speed_mps
+            ),
+        )
+    )
+
+
+def reset_command_smoother(node):
+    smoother = getattr(node, "command_smoother", None)
+    if smoother is not None:
+        smoother.reset()
+    if hasattr(node, "last_smoothed_command_time_sec"):
+        node.last_smoothed_command_time_sec = None
+
+
+def smoothing_dt_sec(node, now_sec):
+    args = node.args
+    default_dt = 1.0 / args.control_rate_hz
+    max_dt = 2.0 / args.control_rate_hz
+    previous_sec = getattr(node, "last_smoothed_command_time_sec", None)
+    if previous_sec is None:
+        return default_dt
+    dt_sec = now_sec - previous_sec
+    if not math.isfinite(dt_sec):
+        return default_dt
+    return clamp(dt_sec, 0.0, max_dt)
+
+
+def smoothed_step_command(node, step, now_sec):
+    smoother = getattr(node, "command_smoother", None)
+    if smoother is None:
+        return step.command
+    if step.command.linear_x == 0.0 and step.command.angular_z == 0.0:
+        reset_command_smoother(node)
+        return step.command
+    dt_sec = smoothing_dt_sec(node, now_sec)
+    command = smoother.apply(
+        step.command,
+        dt_sec,
+        step.distance_m,
+        node.args.pure_pursuit_goal_tolerance_m,
+    )
+    node.last_smoothed_command_time_sec = now_sec
+    return command
+
+
+def notes_with_smoothing_metadata(notes, args):
+    if not command_smoothing_active(args):
+        return notes
+    return (
+        f"{notes};pure_pursuit_command_smoothing="
+        f"{args.pure_pursuit_command_smoothing};"
+        "pure_pursuit_max_linear_accel_mps2="
+        f"{args.pure_pursuit_max_linear_accel_mps2:.3f};"
+        "pure_pursuit_max_linear_decel_mps2="
+        f"{args.pure_pursuit_max_linear_decel_mps2:.3f};"
+        "pure_pursuit_max_angular_accel_radps2="
+        f"{args.pure_pursuit_max_angular_accel_radps2:.3f};"
+        "pure_pursuit_max_angular_decel_radps2="
+        f"{args.pure_pursuit_max_angular_decel_radps2:.3f};"
+        "pure_pursuit_final_decel_distance_m="
+        f"{args.pure_pursuit_final_decel_distance_m:.3f};"
+        "pure_pursuit_min_smoothed_linear_speed_mps="
+        f"{args.pure_pursuit_min_smoothed_linear_speed_mps:.3f}"
+    )
+
+
+def notes_with_guard_metadata(notes, args, guard_result):
+    if (
+        getattr(args, "controller", DEFAULT_CONTROLLER) != "pure-pursuit"
+        or getattr(args, "pure_pursuit_lookahead_guard", LOOKAHEAD_GUARD_OFF)
+        == LOOKAHEAD_GUARD_OFF
+        or guard_result is None
+    ):
+        return notes
+    return (
+        f"{notes};lookahead_guard={args.pure_pursuit_lookahead_guard};"
+        f"lookahead_guard_status={guard_result.status};"
+        "lookahead_guard_selected_distance_m="
+        f"{format_optional_m(guard_result.selected_target_distance_m)};"
+        f"lookahead_guard_blocked_cell_count={guard_result.blocked_cell_count}"
+    )
+
+
 DEFAULT_STARTUP_TIMEOUT_SEC = 20.0
 STOP_PUBLISH_COUNT = 10
 STOP_PUBLISH_HZ = 10.0
@@ -151,224 +463,6 @@ RVIZ_COLOR_LABEL = (0.95, 0.95, 0.95, 1.0)
 RVIZ_COLOR_CONFIRMED_OBSTACLE = (0.05, 0.95, 0.22, 0.85)
 RVIZ_COLOR_INFLATED_OBSTACLE = (0.9, 0.25, 1.0, 0.30)
 RVIZ_COLOR_BLOCKED_CORRIDOR = (1.0, 0.45, 0.0, 0.80)
-
-BASE_CSV_HEADER = [
-    "timestamp",
-    "run_id",
-    "waypoint_csv",
-    "waypoint_count",
-    "reached_count",
-    "status",
-    "blocked_waypoint_index",
-    "blocked_waypoint_x",
-    "blocked_waypoint_y",
-    "timeout_waypoint_index",
-    "base_frame_used",
-    "start_x",
-    "start_y",
-    "start_yaw_deg",
-    "final_x",
-    "final_y",
-    "final_yaw_deg",
-    "min_scan_range_m",
-    "p05_scan_range_m",
-    "amcl_var_x",
-    "amcl_var_y",
-    "amcl_var_yaw",
-    "linear_speed_mps",
-    "min_linear_speed_mps",
-    "linear_gain",
-    "max_angular_speed_radps",
-    "yaw_gain",
-    "notes",
-]
-
-CSV_HEADER = BASE_CSV_HEADER + [
-    "selected_start_segment_index",
-    "selected_start_waypoint_index",
-    "distance_to_path_m",
-    "tf_pose_age_sec",
-    "max_tf_update_gap_sec",
-    "tf_stale_warning_count",
-    "localization_warning_count",
-    "recovery_pause_count",
-    "max_abs_yaw_error_deg",
-    "mean_abs_yaw_error_deg",
-    "rotate_seconds",
-    "forward_seconds",
-    "final_status_reason",
-    "replan_count",
-    "last_replan_reason",
-    "updated_map_yaml",
-    "updated_waypoints_csv",
-    "detected_obstacle_count",
-    "candidate_scan_points",
-    "filtered_obstacle_points",
-    "raw_obstacle_cells",
-    "free_obstacle_cells",
-    "inflated_cells_total",
-    "inflated_cells_newly_occupied",
-    "inflated_cells_over_static_occupied",
-    "scan_frame",
-    "scan_age_sec",
-    "tf_age_sec",
-    "tf_lookup_mode",
-    "start_snap_distance_m",
-    "goal_snap_distance_m",
-    "old_remaining_waypoint_count",
-    "new_waypoint_count",
-    "old_path_length_m",
-    "new_path_length_m",
-    "replan_duration_sec",
-    "run_local_map_updates",
-    "run_local_replan_count",
-    "run_local_last_replan_reason",
-    "run_local_no_path_reason",
-    "run_local_start_cell_blocked",
-    "run_local_goal_cell_blocked",
-    "run_local_path_blocked_cell_count",
-    "run_local_scan_points_valid",
-    "run_local_scan_points_used",
-    "run_local_scan_points_rejected_invalid_range",
-    "run_local_scan_points_rejected_static",
-    "run_local_scan_points_rejected_bounds",
-    "run_local_scan_points_rejected_wall_band",
-    "run_local_scan_points_rejected_low_confidence",
-    "run_local_update_rejected_reason",
-    "run_local_initial_scan_count",
-    "run_local_corridor_check_distance_m",
-    "run_local_inflation_radius_m",
-    "run_local_map_yaml",
-    "run_local_waypoints_csv",
-    "run_local_sparse_retry_count",
-    "run_local_sparse_retry_mode",
-    "run_local_pruned_raw_cells",
-    "run_local_pruned_inflated_cells",
-    "run_local_cell_source_counts",
-]
-
-
-@dataclass(frozen=True)
-class Waypoint:
-    index: int
-    x: float
-    y: float
-
-
-@dataclass(frozen=True)
-class Pose2D:
-    x: float
-    y: float
-    yaw_deg: float
-    stamp_sec: float | None = None
-    frame_id: str = ""
-
-
-@dataclass(frozen=True)
-class TargetState:
-    distance_m: float
-    heading_deg: float
-    yaw_error_deg: float
-
-
-@dataclass(frozen=True)
-class ScanSafety:
-    safe: bool
-    reason: str
-    valid_count: int
-    min_range_m: float | None
-    percentile_5_m: float | None
-
-
-@dataclass(frozen=True)
-class AmclHealth:
-    ok: bool
-    warnings: list[str]
-    cov_x: float | None
-    cov_y: float | None
-    cov_yaw: float | None
-    age_sec: float | None
-
-
-@dataclass(frozen=True)
-class StartSelection:
-    waypoints: list[Waypoint]
-    selected_segment_index: int | None
-    selected_waypoint_index: int | None
-    distance_to_path_m: float | None
-
-
-@dataclass
-class RuntimeDiagnostics:
-    selected_start_segment_index: int | None = None
-    selected_start_waypoint_index: int | None = None
-    distance_to_path_m: float | None = None
-    tf_pose_age_sec: float | None = None
-    max_tf_update_gap_sec: float | None = None
-    tf_stale_warning_count: int = 0
-    localization_warning_count: int = 0
-    recovery_pause_count: int = 0
-    max_abs_yaw_error_deg: float = 0.0
-    yaw_error_sum_deg: float = 0.0
-    yaw_error_count: int = 0
-    rotate_seconds: float = 0.0
-    forward_seconds: float = 0.0
-    final_status_reason: str = ""
-    replan_count: int = 0
-    last_replan_reason: str = ""
-    updated_map_yaml: str = ""
-    updated_waypoints_csv: str = ""
-    detected_obstacle_count: int = 0
-    candidate_scan_points: int = 0
-    filtered_obstacle_points: int = 0
-    raw_obstacle_cells: int = 0
-    free_obstacle_cells: int = 0
-    inflated_cells_total: int = 0
-    inflated_cells_newly_occupied: int = 0
-    inflated_cells_over_static_occupied: int = 0
-    scan_frame: str = ""
-    scan_age_sec: float | None = None
-    tf_age_sec: float | None = None
-    tf_lookup_mode: str = ""
-    start_snap_distance_m: float | None = None
-    goal_snap_distance_m: float | None = None
-    old_remaining_waypoint_count: int = 0
-    new_waypoint_count: int = 0
-    old_path_length_m: float | None = None
-    new_path_length_m: float | None = None
-    replan_duration_sec: float | None = None
-    run_local_map_updates: int = 0
-    run_local_replan_count: int = 0
-    run_local_last_replan_reason: str = ""
-    run_local_no_path_reason: str = ""
-    run_local_start_cell_blocked: bool = False
-    run_local_goal_cell_blocked: bool = False
-    run_local_path_blocked_cell_count: int = 0
-    run_local_scan_points_valid: int = 0
-    run_local_scan_points_used: int = 0
-    run_local_scan_points_rejected_invalid_range: int = 0
-    run_local_scan_points_rejected_static: int = 0
-    run_local_scan_points_rejected_bounds: int = 0
-    run_local_scan_points_rejected_wall_band: int = 0
-    run_local_scan_points_rejected_low_confidence: int = 0
-    run_local_update_rejected_reason: str = ""
-    run_local_initial_scan_count: int = 0
-    run_local_corridor_check_distance_m: float | None = None
-    run_local_inflation_radius_m: float | None = None
-    run_local_map_yaml: str = ""
-    run_local_waypoints_csv: str = ""
-    run_local_sparse_retry_count: int = 0
-    run_local_sparse_retry_mode: str = ""
-    run_local_pruned_raw_cells: int = 0
-    run_local_pruned_inflated_cells: int = 0
-    run_local_cell_source_counts: dict[str, int] | str = ""
-
-    @property
-    def mean_abs_yaw_error_deg(self):
-        if self.yaw_error_count == 0:
-            return 0.0
-        return self.yaw_error_sum_deg / self.yaw_error_count
-
 
 def rviz_messages_available():
     return all(
@@ -666,361 +760,10 @@ def publish_rviz_obstacles_if_available(node, blocked_cells=None):
         publish(blocked_cells=blocked_cells)
 
 
-def clamp(value, lower, upper):
-    return max(lower, min(upper, value))
-
-
-def shortest_angle_delta_deg(start_deg, end_deg):
-    return (end_deg - start_deg + 180.0) % 360.0 - 180.0
-
-
-def normalize_angle_rad(angle_rad):
-    return (angle_rad + math.pi) % (2.0 * math.pi) - math.pi
-
-
-def quaternion_to_yaw_deg(x, y, z, w):
-    siny_cosp = 2.0 * (w * z + x * y)
-    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-    return math.degrees(math.atan2(siny_cosp, cosy_cosp))
-
-
 def stamp_to_sec(stamp):
     if stamp is None:
         return None
     return float(stamp.sec) + float(stamp.nanosec) / 1_000_000_000.0
-
-
-def waypoint_distance(a, b):
-    return math.hypot(b.x - a.x, b.y - a.y)
-
-
-def heading_between(a, b):
-    return math.degrees(math.atan2(b.y - a.y, b.x - a.x))
-
-
-def target_state(current_pose, waypoint):
-    dx = waypoint.x - current_pose.x
-    dy = waypoint.y - current_pose.y
-    heading = math.degrees(math.atan2(dy, dx))
-    return TargetState(
-        distance_m=math.hypot(dx, dy),
-        heading_deg=heading,
-        yaw_error_deg=shortest_angle_delta_deg(current_pose.yaw_deg, heading),
-    )
-
-
-def waypoint_reached(distance_m, is_final, waypoint_tolerance_m, goal_tolerance_m):
-    tolerance = goal_tolerance_m if is_final else waypoint_tolerance_m
-    return distance_m <= tolerance
-
-
-def should_rotate(current_mode, yaw_error_deg, start_threshold_deg, stop_threshold_deg):
-    abs_error = abs(yaw_error_deg)
-    if current_mode == "rotate":
-        return abs_error > stop_threshold_deg
-    return abs_error > start_threshold_deg
-
-
-def velocity_command(
-    distance_m,
-    yaw_error_deg,
-    rotate_mode,
-    linear_speed_mps,
-    min_linear_speed_mps,
-    linear_gain,
-    max_angular_speed_radps,
-    yaw_gain,
-    forward_yaw_deadband_deg=0.0,
-    forward_stop_heading_error_deg=180.0,
-):
-    angular_z = clamp(
-        math.radians(yaw_error_deg) * yaw_gain,
-        -max_angular_speed_radps,
-        max_angular_speed_radps,
-    )
-    abs_yaw_error = abs(yaw_error_deg)
-    if rotate_mode or abs_yaw_error >= forward_stop_heading_error_deg:
-        return 0.0, angular_z
-
-    linear_x = clamp(
-        distance_m * linear_gain,
-        min_linear_speed_mps,
-        linear_speed_mps,
-    )
-    if abs_yaw_error <= forward_yaw_deadband_deg:
-        return linear_x, 0.0
-
-    scale_span = forward_stop_heading_error_deg - forward_yaw_deadband_deg
-    heading_scale = 1.0
-    if scale_span > 0.0:
-        heading_scale = 1.0 - (abs_yaw_error - forward_yaw_deadband_deg) / scale_span
-    heading_scale = clamp(heading_scale, 0.0, 1.0)
-    linear_x *= heading_scale
-    if linear_x > 0.0:
-        linear_x = max(min_linear_speed_mps, linear_x)
-    return linear_x, angular_z
-
-
-def load_waypoints(path):
-    path = Path(path)
-    with path.open(newline="") as file:
-        reader = csv.DictReader(file)
-        fieldnames = reader.fieldnames or []
-        required = {"index", "world_x_m", "world_y_m"}
-        missing = sorted(required - set(fieldnames))
-        if missing:
-            raise ValueError(
-                f"{path} is missing required column(s): {', '.join(missing)}"
-            )
-
-        waypoints = []
-        previous_xy = None
-        for row in reader:
-            waypoint = Waypoint(
-                index=int(float(row["index"])),
-                x=float(row["world_x_m"]),
-                y=float(row["world_y_m"]),
-            )
-            xy = (waypoint.x, waypoint.y)
-            if previous_xy is not None and xy == previous_xy:
-                continue
-            previous_xy = xy
-            waypoints.append(waypoint)
-
-    if not waypoints:
-        raise ValueError(f"{path} does not contain any waypoints")
-    return waypoints
-
-
-def is_heading_change(previous_wp, current_wp, next_wp, tolerance_deg=1.0):
-    incoming = heading_between(previous_wp, current_wp)
-    outgoing = heading_between(current_wp, next_wp)
-    return abs(shortest_angle_delta_deg(incoming, outgoing)) > tolerance_deg
-
-
-def downsample_waypoints(waypoints, min_spacing_m):
-    if len(waypoints) <= 2:
-        return list(waypoints)
-
-    selected = [waypoints[0]]
-    for index in range(1, len(waypoints) - 1):
-        current = waypoints[index]
-        if is_heading_change(waypoints[index - 1], current, waypoints[index + 1]):
-            selected.append(current)
-            continue
-        if waypoint_distance(selected[-1], current) >= min_spacing_m:
-            selected.append(current)
-
-    if selected[-1] != waypoints[-1]:
-        selected.append(waypoints[-1])
-    return selected
-
-
-def prepare_executable_waypoints(waypoints, skip_first=True, min_spacing_m=0.0):
-    executable = list(waypoints[1:] if skip_first else waypoints)
-    if min_spacing_m > 0.0:
-        executable = downsample_waypoints(executable, min_spacing_m)
-    if len(executable) < 2:
-        raise ValueError(
-            "Waypoint CSV needs at least two executable waypoints after processing"
-        )
-    return executable
-
-
-def distance_point_to_segment_m(point, segment_start, segment_end):
-    dx = segment_end.x - segment_start.x
-    dy = segment_end.y - segment_start.y
-    length_sq = dx * dx + dy * dy
-    if length_sq == 0.0:
-        return math.hypot(point.x - segment_start.x, point.y - segment_start.y), 0.0
-    projection = (
-        (point.x - segment_start.x) * dx + (point.y - segment_start.y) * dy
-    ) / length_sq
-    projection = clamp(projection, 0.0, 1.0)
-    closest_x = segment_start.x + projection * dx
-    closest_y = segment_start.y + projection * dy
-    return math.hypot(point.x - closest_x, point.y - closest_y), projection
-
-
-def nearest_path_segment(point, waypoints):
-    if len(waypoints) < 2:
-        raise ValueError("Need at least two waypoints for path-progress selection")
-
-    best = None
-    for segment_index in range(len(waypoints) - 1):
-        distance_m, projection = distance_point_to_segment_m(
-            point,
-            waypoints[segment_index],
-            waypoints[segment_index + 1],
-        )
-        candidate = (distance_m, segment_index, projection)
-        if best is None or candidate < best:
-            best = candidate
-    return best
-
-
-def select_path_progress_waypoints(
-    waypoints,
-    current_pose,
-    start_on_path_tolerance_m,
-    waypoint_tolerance_m,
-    goal_tolerance_m,
-    min_spacing_m=0.0,
-):
-    distance_to_path_m, segment_index, _projection = nearest_path_segment(
-        current_pose,
-        waypoints,
-    )
-    if distance_to_path_m > start_on_path_tolerance_m:
-        raise ValueError(
-            "Current pose is too far from the planned path: "
-            f"distance={distance_to_path_m:.3f} m, "
-            f"tolerance={start_on_path_tolerance_m:.3f} m"
-        )
-
-    next_index = min(segment_index + 1, len(waypoints) - 1)
-    while next_index < len(waypoints) - 1:
-        waypoint = waypoints[next_index]
-        distance_m = math.hypot(waypoint.x - current_pose.x, waypoint.y - current_pose.y)
-        if not waypoint_reached(
-            distance_m,
-            is_final=False,
-            waypoint_tolerance_m=waypoint_tolerance_m,
-            goal_tolerance_m=goal_tolerance_m,
-        ):
-            break
-        next_index += 1
-
-    selected = list(waypoints[next_index:])
-    if min_spacing_m > 0.0 and len(selected) > 1:
-        selected = downsample_waypoints(selected, min_spacing_m)
-    if not selected:
-        selected = [waypoints[-1]]
-
-    return StartSelection(
-        waypoints=selected,
-        selected_segment_index=segment_index,
-        selected_waypoint_index=selected[0].index,
-        distance_to_path_m=distance_to_path_m,
-    )
-
-
-def select_executable_waypoints(
-    waypoints,
-    current_pose,
-    start_selection,
-    start_on_path_tolerance_m,
-    waypoint_tolerance_m,
-    goal_tolerance_m,
-    min_spacing_m,
-    skip_first=True,
-):
-    if start_selection == "fixed-skip":
-        selected = prepare_executable_waypoints(
-            waypoints,
-            skip_first=skip_first,
-            min_spacing_m=min_spacing_m,
-        )
-        return StartSelection(
-            waypoints=selected,
-            selected_segment_index=None,
-            selected_waypoint_index=selected[0].index,
-            distance_to_path_m=None,
-        )
-    if start_selection == "path-progress":
-        return select_path_progress_waypoints(
-            waypoints,
-            current_pose,
-            start_on_path_tolerance_m,
-            waypoint_tolerance_m,
-            goal_tolerance_m,
-            min_spacing_m=min_spacing_m,
-        )
-    raise ValueError(f"unsupported start selection mode: {start_selection!r}")
-
-
-def percentile(values, percent):
-    if not values:
-        raise ValueError("percentile requires at least one value")
-    ordered = sorted(values)
-    if len(ordered) == 1:
-        return ordered[0]
-    rank = (percent / 100.0) * (len(ordered) - 1)
-    lower = math.floor(rank)
-    upper = math.ceil(rank)
-    if lower == upper:
-        return ordered[int(rank)]
-    weight = rank - lower
-    return ordered[lower] + (ordered[upper] - ordered[lower]) * weight
-
-
-def valid_scan_ranges(
-    ranges,
-    angle_min,
-    angle_increment,
-    range_min,
-    range_max,
-    sector_half_angle_deg=None,
-):
-    selected = []
-    half_angle_rad = (
-        math.radians(sector_half_angle_deg)
-        if sector_half_angle_deg is not None
-        else None
-    )
-    for index, raw_range in enumerate(ranges):
-        if not math.isfinite(raw_range):
-            continue
-        if raw_range < range_min or raw_range > range_max:
-            continue
-        if half_angle_rad is not None:
-            angle = normalize_angle_rad(angle_min + index * angle_increment)
-            if abs(angle) > half_angle_rad:
-                continue
-        selected.append(float(raw_range))
-    return selected
-
-
-def evaluate_scan_safety(
-    ranges,
-    angle_min,
-    angle_increment,
-    range_min,
-    range_max,
-    mode,
-    scan_half_angle_deg,
-    hard_stop_range_m,
-    min_scan_range_m,
-    rotation_stop_range_m,
-):
-    if mode not in {"forward", "rotate"}:
-        raise ValueError(f"unsupported scan mode: {mode!r}")
-
-    sector = scan_half_angle_deg if mode == "forward" else None
-    selected = valid_scan_ranges(
-        ranges,
-        angle_min,
-        angle_increment,
-        range_min,
-        range_max,
-        sector_half_angle_deg=sector,
-    )
-    if not selected:
-        return ScanSafety(False, "no_valid_scan_ranges", 0, None, None)
-
-    min_range = min(selected)
-    percentile_5 = percentile(selected, 5.0)
-    soft_threshold = min_scan_range_m if mode == "forward" else rotation_stop_range_m
-
-    if min_range < hard_stop_range_m:
-        return ScanSafety(False, "hard_stop", len(selected), min_range, percentile_5)
-    if mode == "forward":
-        close_count = sum(1 for value in selected if value < min_scan_range_m)
-        if close_count >= FORWARD_SOFT_STOP_MIN_CLOSE_RANGES:
-            return ScanSafety(False, "soft_stop", len(selected), min_range, percentile_5)
-    if percentile_5 < soft_threshold:
-        return ScanSafety(False, "soft_stop", len(selected), min_range, percentile_5)
-    return ScanSafety(True, "clear", len(selected), min_range, percentile_5)
 
 
 def amcl_covariances(covariance):
@@ -1068,155 +811,6 @@ def ordered_base_frames(base_frame, fallback_base_frame):
     return frames
 
 
-def build_log_row(
-    args,
-    waypoint_count,
-    reached_count,
-    status,
-    notes,
-    start_pose=None,
-    final_pose=None,
-    blocked_waypoint=None,
-    timeout_waypoint=None,
-    base_frame_used="",
-    scan_safety=None,
-    amcl_health=None,
-    diagnostics=None,
-):
-    diagnostics = diagnostics or RuntimeDiagnostics()
-    blocked = blocked_waypoint or Waypoint("", "", "")
-    timeout = timeout_waypoint or Waypoint("", "", "")
-    return [
-        datetime.now().isoformat(timespec="seconds"),
-        args.run_id,
-        str(args.waypoints),
-        waypoint_count,
-        reached_count,
-        status,
-        blocked.index,
-        blocked.x,
-        blocked.y,
-        timeout.index,
-        base_frame_used,
-        *(pose_fields(start_pose)),
-        *(pose_fields(final_pose)),
-        "" if scan_safety is None or scan_safety.min_range_m is None else scan_safety.min_range_m,
-        "" if scan_safety is None or scan_safety.percentile_5_m is None else scan_safety.percentile_5_m,
-        "" if amcl_health is None or amcl_health.cov_x is None else amcl_health.cov_x,
-        "" if amcl_health is None or amcl_health.cov_y is None else amcl_health.cov_y,
-        "" if amcl_health is None or amcl_health.cov_yaw is None else amcl_health.cov_yaw,
-        args.linear_speed,
-        args.min_linear_speed,
-        args.linear_gain,
-        args.max_angular_speed,
-        args.yaw_gain,
-        notes,
-        "" if diagnostics.selected_start_segment_index is None else diagnostics.selected_start_segment_index,
-        "" if diagnostics.selected_start_waypoint_index is None else diagnostics.selected_start_waypoint_index,
-        "" if diagnostics.distance_to_path_m is None else diagnostics.distance_to_path_m,
-        "" if diagnostics.tf_pose_age_sec is None else diagnostics.tf_pose_age_sec,
-        "" if diagnostics.max_tf_update_gap_sec is None else diagnostics.max_tf_update_gap_sec,
-        diagnostics.tf_stale_warning_count,
-        diagnostics.localization_warning_count,
-        diagnostics.recovery_pause_count,
-        diagnostics.max_abs_yaw_error_deg,
-        diagnostics.mean_abs_yaw_error_deg,
-        diagnostics.rotate_seconds,
-        diagnostics.forward_seconds,
-        diagnostics.final_status_reason,
-        diagnostics.replan_count,
-        diagnostics.last_replan_reason,
-        diagnostics.updated_map_yaml,
-        diagnostics.updated_waypoints_csv,
-        diagnostics.detected_obstacle_count,
-        diagnostics.candidate_scan_points,
-        diagnostics.filtered_obstacle_points,
-        diagnostics.raw_obstacle_cells,
-        diagnostics.free_obstacle_cells,
-        diagnostics.inflated_cells_total,
-        diagnostics.inflated_cells_newly_occupied,
-        diagnostics.inflated_cells_over_static_occupied,
-        diagnostics.scan_frame,
-        "" if diagnostics.scan_age_sec is None else diagnostics.scan_age_sec,
-        "" if diagnostics.tf_age_sec is None else diagnostics.tf_age_sec,
-        diagnostics.tf_lookup_mode,
-        "" if diagnostics.start_snap_distance_m is None else diagnostics.start_snap_distance_m,
-        "" if diagnostics.goal_snap_distance_m is None else diagnostics.goal_snap_distance_m,
-        diagnostics.old_remaining_waypoint_count,
-        diagnostics.new_waypoint_count,
-        "" if diagnostics.old_path_length_m is None else diagnostics.old_path_length_m,
-        "" if diagnostics.new_path_length_m is None else diagnostics.new_path_length_m,
-        "" if diagnostics.replan_duration_sec is None else diagnostics.replan_duration_sec,
-        diagnostics.run_local_map_updates,
-        diagnostics.run_local_replan_count,
-        diagnostics.run_local_last_replan_reason,
-        diagnostics.run_local_no_path_reason,
-        diagnostics.run_local_start_cell_blocked,
-        diagnostics.run_local_goal_cell_blocked,
-        diagnostics.run_local_path_blocked_cell_count,
-        diagnostics.run_local_scan_points_valid,
-        diagnostics.run_local_scan_points_used,
-        diagnostics.run_local_scan_points_rejected_invalid_range,
-        diagnostics.run_local_scan_points_rejected_static,
-        diagnostics.run_local_scan_points_rejected_bounds,
-        diagnostics.run_local_scan_points_rejected_wall_band,
-        diagnostics.run_local_scan_points_rejected_low_confidence,
-        diagnostics.run_local_update_rejected_reason,
-        diagnostics.run_local_initial_scan_count,
-        "" if diagnostics.run_local_corridor_check_distance_m is None else diagnostics.run_local_corridor_check_distance_m,
-        "" if diagnostics.run_local_inflation_radius_m is None else diagnostics.run_local_inflation_radius_m,
-        diagnostics.run_local_map_yaml,
-        diagnostics.run_local_waypoints_csv,
-        diagnostics.run_local_sparse_retry_count,
-        diagnostics.run_local_sparse_retry_mode,
-        diagnostics.run_local_pruned_raw_cells,
-        diagnostics.run_local_pruned_inflated_cells,
-        diagnostics.run_local_cell_source_counts,
-    ]
-
-
-def pose_fields(pose):
-    if pose is None:
-        return ["", "", ""]
-    return [pose.x, pose.y, pose.yaw_deg]
-
-
-def append_csv_row(path, header, row):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    file_exists = path.exists() and path.stat().st_size > 0
-    if file_exists:
-        with path.open(newline="") as file:
-            existing_header = next(csv.reader(file), None)
-        if existing_header == header:
-            pass
-        elif existing_header and header[: len(existing_header)] == existing_header:
-            migrate_csv_header(path, header)
-        else:
-            raise RuntimeError(
-                f"{path} has an unrecognized schema. Move or migrate it first."
-            )
-    with path.open("a", newline="") as file:
-        writer = csv.writer(file)
-        if not file_exists:
-            writer.writerow(header)
-        writer.writerow(row)
-
-
-def migrate_csv_header(path, header):
-    path = Path(path)
-    with path.open(newline="") as file:
-        rows = list(csv.reader(file))
-
-    migrated = [header]
-    for row in rows[1:]:
-        migrated.append(row + [""] * (len(header) - len(row)))
-
-    with path.open("w", newline="") as file:
-        writer = csv.writer(file)
-        writer.writerows(migrated)
-
-
 class WaypointFollower(Node):
     def __init__(self, args):
         if rclpy is None:
@@ -1247,7 +841,39 @@ class WaypointFollower(Node):
         self.last_known_corridor_repair_signature = None
         self.suppressed_known_corridor_signature = None
         self.last_scan_block_budget_repair_signature = None
+        self.last_lookahead_guard_block_signature = None
+        self.last_lookahead_guard_result = None
+        self.command_smoother = build_command_smoother(args)
+        self.last_smoothed_command_time_sec = None
+        self.last_replan_tracking_points = None
+        self.last_replan_tracking_source = "waypoints"
+        self.last_replan_tracking_validation = None
         self.rviz_last_blocked_cells = set()
+        self.replan_manager = ReplanManager(self)
+        self.lookahead_guard = build_lookahead_guard(
+            args,
+            run_local_map_fn=lambda: self.run_local_map,
+        )
+        if self.lookahead_guard is not None and args.verbose:
+            self.get_logger().info(
+                "Pure-pursuit lookahead guard enabled: "
+                f"mode={args.pure_pursuit_lookahead_guard}, "
+                "unknown_cells=blocked, "
+                "static_inflation_radius_m="
+                f"{args.pure_pursuit_lookahead_guard_static_inflation_radius_m:.3f}, "
+                f"static_blocked_cells={len(self.lookahead_guard.static_blocked_cells)}"
+            )
+        if self.command_smoother is not None and args.verbose:
+            self.get_logger().info(
+                "Pure-pursuit command smoothing enabled: "
+                f"mode={args.pure_pursuit_command_smoothing}, "
+                f"linear_accel={args.pure_pursuit_max_linear_accel_mps2:.3f}, "
+                f"linear_decel={args.pure_pursuit_max_linear_decel_mps2:.3f}, "
+                f"angular_accel={args.pure_pursuit_max_angular_accel_radps2:.3f}, "
+                f"angular_decel={args.pure_pursuit_max_angular_decel_radps2:.3f}, "
+                f"final_decel_distance={args.pure_pursuit_final_decel_distance_m:.3f}, "
+                "dt_clamp=[0, 2/control_rate_hz]"
+            )
 
         self.pub = self.create_publisher(Twist, "/cmd_vel", 10)
         self.rviz_path_pub = None
@@ -1356,12 +982,16 @@ class WaypointFollower(Node):
     def publish_velocity(self, linear_x, angular_z):
         if linear_x != 0.0 or angular_z != 0.0:
             self.last_scan_block_budget_repair_signature = None
+            self.last_lookahead_guard_block_signature = None
+        else:
+            reset_command_smoother(self)
         msg = Twist()
         msg.linear.x = linear_x
         msg.angular.z = angular_z
         self.pub.publish(msg)
 
     def stop_repeatedly(self):
+        reset_command_smoother(self)
         msg = Twist()
         sleep_sec = 1.0 / STOP_PUBLISH_HZ
         for _ in range(STOP_PUBLISH_COUNT):
@@ -1703,6 +1333,78 @@ class WaypointFollower(Node):
             for index, x, y in result.waypoints
         ]
 
+    def replanned_tracking_points_from_result(self, result):
+        path_points = getattr(result, "path_points", None) or []
+        converted = []
+        for point in path_points:
+            if isinstance(point, Waypoint):
+                converted.append(point)
+            else:
+                converted.append(Waypoint(point[0], point[1], point[2]))
+        return converted
+
+    def remember_replan_tracking_replacement(self, result, replanned, current_pose):
+        self.last_replan_tracking_points = None
+        self.last_replan_tracking_source = "waypoints"
+        self.last_replan_tracking_validation = None
+        if getattr(self.args, "controller", DEFAULT_CONTROLLER) != "pure-pursuit":
+            return
+
+        path_points = WaypointFollower.replanned_tracking_points_from_result(
+            self,
+            result,
+        )
+        if not path_points:
+            self.last_replan_tracking_points = list(replanned)
+            self.last_replan_tracking_source = "replan_sparse_fallback"
+            self.last_replan_tracking_validation = TrackingPathValidation(
+                source="replan_sparse_fallback",
+                point_count=len(replanned),
+                validation_status="fallback_sparse_waypoints",
+            )
+            self.get_logger().warn(
+                "Pure-pursuit LiDAR replan did not include dense path_points; "
+                "falling back to sparse replanned waypoints for tracking."
+            )
+            return
+
+        structural_warnings = validate_tracking_point_structure(
+            path_points,
+            max_segment_m=getattr(
+                self.args,
+                "tracking_max_segment_m",
+                DEFAULT_TRACKING_MAX_SEGMENT_M,
+            ),
+            label="replan tracking path",
+        )
+        validation = validate_tracking_path_geometry(
+            replanned,
+            path_points,
+            endpoint_tolerance_m=getattr(
+                self.args,
+                "tracking_endpoint_tolerance_m",
+                DEFAULT_TRACKING_ENDPOINT_TOLERANCE_M,
+            ),
+            start_tolerance_m=getattr(
+                self.args,
+                "tracking_start_tolerance_m",
+                DEFAULT_TRACKING_START_TOLERANCE_M,
+            ),
+            allow_mismatch=getattr(
+                self.args,
+                "allow_tracking_path_mismatch",
+                False,
+            ),
+            current_pose=current_pose,
+            source="replan",
+            structural_warnings=structural_warnings,
+        )
+        for warning in validation.warnings:
+            self.get_logger().warn(warning)
+        self.last_replan_tracking_points = path_points
+        self.last_replan_tracking_source = validation.source
+        self.last_replan_tracking_validation = validation
+
     def first_motion_waypoint(self, replanned, current_pose):
         for waypoint in replanned:
             distance_m = math.hypot(
@@ -1886,7 +1588,13 @@ class WaypointFollower(Node):
                     "Pruned behind-the-robot startup waypoint(s) from LiDAR replan: "
                     f"removed={forward_motion_index}"
                 )
-            return replanned[forward_motion_index:]
+            replanned = replanned[forward_motion_index:]
+        WaypointFollower.remember_replan_tracking_replacement(
+            self,
+            result,
+            replanned,
+            current_pose,
+        )
         return replanned
 
     def initialize_run_local_route(self, current_pose, waypoints):
@@ -2250,7 +1958,12 @@ class WaypointFollower(Node):
         )
         return replanned
 
-    def follow_waypoints(self, waypoints):
+    def follow_waypoints(
+        self,
+        waypoints,
+        tracking_points=None,
+        tracking_validation=None,
+    ):
         reached_count = 0
         start_pose, _frame, amcl_health = self.check_health_or_recover()
         final_pose = start_pose
@@ -2258,12 +1971,72 @@ class WaypointFollower(Node):
         self.start_pose = start_pose
         self.final_pose = final_pose
         self.last_amcl_health = amcl_health
+        if not hasattr(self, "command_smoother"):
+            self.command_smoother = build_command_smoother(self.args)
+        if not hasattr(self, "last_smoothed_command_time_sec"):
+            self.last_smoothed_command_time_sec = None
+        reset_command_smoother(self)
 
         waypoints = list(waypoints)
+        continuous_tracking = self.args.controller == "pure-pursuit"
+        if not continuous_tracking:
+            tracking_points = None
+            tracking_validation = build_sparse_tracking_validation(
+                source="ignored_stop_go",
+                point_count=0,
+                status="ignored",
+            )
+        tracking_source = (
+            tracking_validation.source
+            if tracking_validation is not None
+            else ("csv" if tracking_points is not None else "waypoints")
+        )
+        route_state = RouteState(
+            waypoints,
+            tracking_points=tracking_points,
+            tracking_source=tracking_source,
+            tracking_validation=tracking_validation,
+        )
+        controller = build_path_controller(
+            self.args,
+            lookahead_guard=getattr(self, "lookahead_guard", None),
+        )
+        replan_manager = getattr(self, "replan_manager", ReplanManager(self))
         publish_rviz_route_if_available(self, waypoints, current_pose=start_pose)
         publish_rviz_obstacles_if_available(self)
         if self.args.enable_lidar_map_replan:
-            waypoints = self.initialize_run_local_route(start_pose, waypoints)
+            waypoints = replan_manager.initialize_route(start_pose, waypoints)
+            last_replan_tracking_points = getattr(
+                self,
+                "last_replan_tracking_points",
+                None,
+            )
+            replacement_tracking_points = (
+                last_replan_tracking_points
+                if last_replan_tracking_points is not None
+                else tracking_points
+            )
+            replacement_tracking_source = (
+                getattr(self, "last_replan_tracking_source", "waypoints")
+                if last_replan_tracking_points is not None
+                else tracking_source
+            )
+            replacement_tracking_validation = (
+                getattr(self, "last_replan_tracking_validation", None)
+                if last_replan_tracking_points is not None
+                else tracking_validation
+            )
+            route_state.replace_route(
+                waypoints,
+                tracking_points=replacement_tracking_points,
+                tracking_source=replacement_tracking_source,
+                tracking_validation=replacement_tracking_validation,
+            )
+            reset_command_smoother(self)
+            controller = build_path_controller(
+                self.args,
+                lookahead_guard=getattr(self, "lookahead_guard", None),
+            )
             publish_rviz_route_if_available(self, waypoints, current_pose=start_pose)
             if self.args.lidar_replan_artifact_only:
                 self.stop_repeatedly()
@@ -2277,22 +2050,20 @@ class WaypointFollower(Node):
                     "status": "replan_artifact_only_complete",
                 }
 
-        waypoint_index = 0
-        while waypoint_index < len(waypoints):
-            waypoint = waypoints[waypoint_index]
+        while not route_state.complete:
+            waypoint = route_state.current_waypoint()
             publish_rviz_route_if_available(
                 self,
-                waypoints[waypoint_index:],
+                route_state.remaining(),
                 current_pose=final_pose,
                 current_waypoint_index=0,
             )
             self.get_logger().info(
-                f"[{waypoint_index + 1}/{len(waypoints)}] "
+                f"[{route_state.current_waypoint_index + 1}/{len(route_state.waypoints)}] "
                 f"target waypoint {waypoint.index}: "
                 f"x={waypoint.x:.3f}, y={waypoint.y:.3f}"
             )
             waypoint_start = time.time()
-            mode = "forward"
             reached_current = False
             replanned_current = False
 
@@ -2301,49 +2072,157 @@ class WaypointFollower(Node):
                 final_pose = pose
                 self.final_pose = final_pose
                 self.last_amcl_health = amcl_health
-                state = target_state(pose, waypoint)
-                is_final = waypoint_index == len(waypoints) - 1
-
-                if waypoint_reached(
-                    state.distance_m,
-                    is_final,
-                    self.args.waypoint_tolerance_m,
-                    self.args.goal_tolerance_m,
+                step = controller.compute(pose, route_state)
+                self.last_lookahead_guard_result = step.guard_result
+                if (
+                    self.args.verbose
+                    and step.guard_result is not None
+                    and step.guard_result.status != "clear"
                 ):
-                    reached_count += 1
+                    self.get_logger().info(
+                        "Pure-pursuit lookahead guard result: "
+                        f"mode={self.args.pure_pursuit_lookahead_guard}, "
+                        f"status={step.guard_result.status}, "
+                        "selected_distance_m="
+                        f"{format_optional_m(step.guard_result.selected_target_distance_m)}, "
+                        f"blocked_cells={step.guard_result.blocked_cell_count}"
+                    )
+
+                if step.reached:
+                    if continuous_tracking:
+                        route_state.mark_complete()
+                        reached_count = len(route_state.waypoints)
+                    else:
+                        reached_count += 1
                     self.reached_count = reached_count
                     if self.args.enable_lidar_map_replan:
-                        WaypointFollower.prune_run_local_obstacles_after_progress(
-                            self,
+                        replan_manager.prune_after_progress(
                             pose,
-                            waypoints[waypoint_index + 1:],
+                            route_state.waypoints[
+                                route_state.current_waypoint_index + 1:
+                            ],
                         )
                     self.last_known_corridor_repair_signature = None
                     self.suppressed_known_corridor_signature = None
                     self.last_scan_block_budget_repair_signature = None
+                    self.last_lookahead_guard_block_signature = None
+                    reset_command_smoother(self)
                     self.stop_repeatedly()
                     self.spin_for(self.args.settle_sec)
+                    if not continuous_tracking:
+                        route_state.advance()
                     reached_current = True
                     break
+
+                if continuous_tracking:
+                    before_index = route_state.current_waypoint_index
+                    if route_state.advance_if_reached(
+                        pose,
+                        self.args.waypoint_tolerance_m,
+                        self.args.pure_pursuit_goal_tolerance_m,
+                    ):
+                        reached_count = max(
+                            reached_count,
+                            route_state.current_waypoint_index,
+                        )
+                        self.reached_count = reached_count
+                    if route_state.current_waypoint_index != before_index:
+                        waypoint_start = time.time()
 
                 if time.time() - waypoint_start > self.args.max_waypoint_time_sec:
                     raise WaypointTimeoutError(waypoint)
 
-                rotate_mode = should_rotate(
-                    mode,
-                    state.yaw_error_deg,
-                    self.args.rotate_start_heading_error_deg,
-                    self.args.rotate_stop_heading_error_deg,
-                )
-                mode = "rotate" if rotate_mode else "forward"
+                if step.mode == "blocked":
+                    if self.args.verbose and step.guard_result is not None:
+                        self.get_logger().warn(
+                            "Pure-pursuit lookahead guard blocked motion: "
+                            f"status={step.guard_result.status}, "
+                            f"blocked_cells={step.guard_result.blocked_cell_count}"
+                        )
+                    reset_command_smoother(self)
+                    self.stop_repeatedly()
+                    last_scan_safety = self.check_scan_or_raise("forward")
+                    self.last_scan_safety = last_scan_safety
+                    if not self.args.enable_lidar_map_replan:
+                        raise RuntimeError("pure_pursuit_lookahead_blocked")
+                    guard_signature = guard_block_signature(
+                        pose,
+                        route_state.remaining_tracking_points(),
+                    )
+                    if (
+                        guard_signature
+                        == getattr(
+                            self,
+                            "last_lookahead_guard_block_signature",
+                            None,
+                        )
+                    ):
+                        raise RuntimeError(
+                            "pure_pursuit_lookahead_blocked_after_unchanged_replan"
+                        )
+                    self.last_lookahead_guard_block_signature = guard_signature
+                    remaining = route_state.remaining()
+                    replanned = replan_manager.replan_after_blockage(
+                        pose,
+                        remaining,
+                        trigger=REPLAN_TRIGGER_LOOKAHEAD_GUARD,
+                    )
+                    publish_rviz_route_if_available(
+                        self,
+                        replanned,
+                        current_pose=pose,
+                        current_waypoint_index=0,
+                    )
+                    if self.args.lidar_replan_artifact_only:
+                        self.stop_repeatedly()
+                        return {
+                            "reached_count": reached_count,
+                            "start_pose": start_pose,
+                            "final_pose": final_pose,
+                            "scan_safety": last_scan_safety,
+                            "amcl_health": amcl_health,
+                            "base_frame_used": self.base_frame_used,
+                            "status": "replan_artifact_only_complete",
+                        }
+                    waypoints = self.prune_replanned_waypoints_for_progress(
+                        replanned,
+                        pose,
+                    )
+                    route_state.replace_route(
+                        waypoints,
+                        tracking_points=getattr(
+                            self,
+                            "last_replan_tracking_points",
+                            None,
+                        ),
+                        tracking_source=getattr(
+                            self,
+                            "last_replan_tracking_source",
+                            "waypoints",
+                        ),
+                        tracking_validation=getattr(
+                            self,
+                            "last_replan_tracking_validation",
+                            None,
+                        ),
+                    )
+                    reset_command_smoother(self)
+                    controller = build_path_controller(
+                        self.args,
+                        lookahead_guard=getattr(self, "lookahead_guard", None),
+                    )
+                    replanned_current = True
+                    break
+
                 try:
-                    last_scan_safety = self.check_scan_or_raise(mode)
+                    last_scan_safety = self.check_scan_or_raise(step.mode)
                     self.last_scan_safety = last_scan_safety
                     self.last_scan_block_budget_repair_signature = None
                 except BlockedByScanError as exc:
+                    reset_command_smoother(self)
                     if self.args.enable_lidar_map_replan:
-                        remaining = waypoints[waypoint_index:]
-                        replanned = self.replan_after_blockage(
+                        remaining = route_state.remaining()
+                        replanned = replan_manager.replan_after_blockage(
                             pose,
                             remaining,
                             trigger=REPLAN_TRIGGER_SCAN_BLOCKAGE,
@@ -2366,22 +2245,43 @@ class WaypointFollower(Node):
                                 "status": "replan_artifact_only_complete",
                             }
                         waypoints = self.prune_replanned_waypoints_for_progress(replanned, pose)
-                        waypoint_index = 0
+                        route_state.replace_route(
+                            waypoints,
+                            tracking_points=getattr(
+                                self,
+                                "last_replan_tracking_points",
+                                None,
+                            ),
+                            tracking_source=getattr(
+                                self,
+                                "last_replan_tracking_source",
+                                "waypoints",
+                            ),
+                            tracking_validation=getattr(
+                                self,
+                                "last_replan_tracking_validation",
+                                None,
+                            ),
+                        )
+                        reset_command_smoother(self)
+                        controller = build_path_controller(
+                            self.args,
+                            lookahead_guard=getattr(self, "lookahead_guard", None),
+                        )
                         replanned_current = True
                         break
                     raise BlockedByScanError(exc.scan_safety, waypoint) from exc
                 if self.args.enable_lidar_map_replan and self.run_local_map is not None:
-                    remaining = waypoints[waypoint_index:]
-                    WaypointFollower.prune_run_local_obstacles_after_progress(
-                        self,
+                    remaining = route_state.remaining()
+                    replan_manager.prune_after_progress(
                         pose,
                         remaining,
                     )
-                    blocked_cells = self.corridor_blocked_cells(pose, remaining)
+                    blocked_cells = replan_manager.corridor_blocked_cells(pose, remaining)
                     if blocked_cells and not self.suppress_repeated_known_corridor_repair(remaining):
                         publish_rviz_obstacles_if_available(self, blocked_cells)
                         self.stop_repeatedly()
-                        replanned = self.replan_after_blockage(
+                        replanned = replan_manager.replan_after_blockage(
                             pose,
                             remaining,
                             trigger=REPLAN_TRIGGER_KNOWN_CORRIDOR,
@@ -2404,36 +2304,46 @@ class WaypointFollower(Node):
                                 "status": "replan_artifact_only_complete",
                             }
                         waypoints = self.prune_replanned_waypoints_for_progress(replanned, pose)
+                        route_state.replace_route(
+                            waypoints,
+                            tracking_points=getattr(
+                                self,
+                                "last_replan_tracking_points",
+                                None,
+                            ),
+                            tracking_source=getattr(
+                                self,
+                                "last_replan_tracking_source",
+                                "waypoints",
+                            ),
+                            tracking_validation=getattr(
+                                self,
+                                "last_replan_tracking_validation",
+                                None,
+                            ),
+                        )
+                        reset_command_smoother(self)
+                        controller = build_path_controller(
+                            self.args,
+                            lookahead_guard=getattr(self, "lookahead_guard", None),
+                        )
                         self.remember_known_corridor_repair(waypoints)
-                        waypoint_index = 0
                         replanned_current = True
                         break
-                linear_x, angular_z = velocity_command(
-                    state.distance_m,
-                    state.yaw_error_deg,
-                    rotate_mode,
-                    self.args.linear_speed,
-                    self.args.min_linear_speed,
-                    self.args.linear_gain,
-                    self.args.max_angular_speed,
-                    self.args.yaw_gain,
-                    self.args.forward_yaw_deadband_deg,
-                    self.args.forward_stop_heading_error_deg,
-                )
+                command = smoothed_step_command(self, step, time.time())
                 self.record_motion_sample(
-                    state.yaw_error_deg,
-                    linear_x,
-                    angular_z,
+                    step.yaw_error_deg,
+                    command.linear_x,
+                    command.angular_z,
                     1.0 / self.args.control_rate_hz,
                 )
-                self.publish_velocity(linear_x, angular_z)
+                self.publish_velocity(command.linear_x, command.angular_z)
                 rclpy.spin_once(self, timeout_sec=1.0 / self.args.control_rate_hz)
                 time.sleep(1.0 / self.args.control_rate_hz)
 
             if replanned_current:
                 continue
             if reached_current:
-                waypoint_index += 1
                 continue
             raise RuntimeError("ROS shutdown while following waypoints")
 
@@ -2548,7 +2458,13 @@ def wait_before_follow_confirmation(args, current_pose, executable_waypoints, in
     return response == "RUN"
 
 
-def print_dry_run(args, raw_waypoints, executable_waypoints):
+def print_dry_run(
+    args,
+    raw_waypoints,
+    executable_waypoints,
+    tracking_validation=None,
+    lookahead_guard=None,
+):
     print("Waypoint follower dry run")
     print(f"Waypoint CSV: {args.waypoints}")
     print(f"Raw waypoints: {len(raw_waypoints)}")
@@ -2574,10 +2490,88 @@ def print_dry_run(args, raw_waypoints, executable_waypoints):
 
     print(f"Map frame: {args.map_frame}")
     print(f"Base frame: {args.base_frame}, fallback: {args.fallback_base_frame}")
+    print(f"Controller: {args.controller}")
+    if tracking_validation is not None:
+        print(f"controller={args.controller}")
+        print(f"tracking_source={tracking_validation.source}")
+        print(f"tracking_point_count={tracking_validation.point_count}")
+        print(
+            "tracking_endpoint_error_m="
+            f"{format_optional_m(tracking_validation.endpoint_error_m)}"
+        )
+        if tracking_validation.start_projection_error_m is None:
+            print(
+                "tracking_start_error_m="
+                f"{format_optional_m(tracking_validation.start_error_m)}"
+            )
+        else:
+            print(
+                "tracking_start_projection_error_m="
+                f"{format_optional_m(tracking_validation.start_projection_error_m)}"
+            )
+        print(
+            "tracking_validation_status="
+            f"{tracking_validation.validation_status}"
+        )
     print(f"Linear speed: {args.linear_speed:.3f} m/s")
     print(f"Max angular speed: {args.max_angular_speed:.3f} rad/s")
     print(f"Waypoint tolerance: {args.waypoint_tolerance_m:.3f} m")
     print(f"Goal tolerance: {args.goal_tolerance_m:.3f} m")
+    if args.controller == "pure-pursuit":
+        print(f"Path lookahead: {args.path_lookahead_m:.3f} m")
+        print(
+            "Pure-pursuit goal tolerance: "
+            f"{args.pure_pursuit_goal_tolerance_m:.3f} m"
+        )
+        print(f"Tracking path CSV: {args.tracking_path_csv or 'none'}")
+        print(f"pure_pursuit_lookahead_guard={args.pure_pursuit_lookahead_guard}")
+        print(
+            "pure_pursuit_min_guarded_lookahead_m="
+            f"{args.pure_pursuit_min_guarded_lookahead_m:.3f}"
+        )
+        if args.pure_pursuit_lookahead_guard != LOOKAHEAD_GUARD_OFF:
+            print(
+                "lookahead_guard_static_inflation_radius_m="
+                f"{args.pure_pursuit_lookahead_guard_static_inflation_radius_m:.3f}"
+            )
+            print("lookahead_guard_unknown_cells=blocked")
+            print(
+                "lookahead_guard_static_blocked_cell_count="
+                f"{len(lookahead_guard.static_blocked_cells) if lookahead_guard else 'n/a'}"
+            )
+            print("lookahead_guard_status=configured")
+            print("lookahead_guard_selected_target_distance_m=n/a")
+            print("lookahead_guard_blocked_cell_count=n/a")
+        print(
+            "pure_pursuit_command_smoothing="
+            f"{args.pure_pursuit_command_smoothing}"
+        )
+        if args.pure_pursuit_command_smoothing == COMMAND_SMOOTHING_RATE_LIMIT:
+            print(
+                "pure_pursuit_max_linear_accel_mps2="
+                f"{args.pure_pursuit_max_linear_accel_mps2:.3f}"
+            )
+            print(
+                "pure_pursuit_max_linear_decel_mps2="
+                f"{args.pure_pursuit_max_linear_decel_mps2:.3f}"
+            )
+            print(
+                "pure_pursuit_max_angular_accel_radps2="
+                f"{args.pure_pursuit_max_angular_accel_radps2:.3f}"
+            )
+            print(
+                "pure_pursuit_max_angular_decel_radps2="
+                f"{args.pure_pursuit_max_angular_decel_radps2:.3f}"
+            )
+            print(
+                "pure_pursuit_final_decel_distance_m="
+                f"{args.pure_pursuit_final_decel_distance_m:.3f}"
+            )
+            print(
+                "pure_pursuit_min_smoothed_linear_speed_mps="
+                f"{args.pure_pursuit_min_smoothed_linear_speed_mps:.3f}"
+            )
+            print("pure_pursuit_smoothing_dt_clamp=[0,2/control_rate_hz]")
     print(f"RViz visualization: {'disabled' if args.no_rviz_visualization else 'enabled'}")
     if not args.no_rviz_visualization:
         print(f"  path topic: {args.rviz_path_topic}")
@@ -2626,6 +2620,76 @@ def parse_args(argv):
     parser.add_argument("--forward-stop-heading-error-deg", default=DEFAULT_FORWARD_STOP_HEADING_ERROR_DEG, type=float)
     parser.add_argument("--waypoint-tolerance-m", default=DEFAULT_WAYPOINT_TOLERANCE_M, type=float)
     parser.add_argument("--goal-tolerance-m", default=DEFAULT_GOAL_TOLERANCE_M, type=float)
+    parser.add_argument(
+        "--controller",
+        default=DEFAULT_CONTROLLER,
+        choices=["stop-go", "pure-pursuit"],
+    )
+    parser.add_argument("--path-lookahead-m", default=DEFAULT_PATH_LOOKAHEAD_M, type=float)
+    parser.add_argument("--pure-pursuit-goal-tolerance-m", type=float)
+    parser.add_argument(
+        "--pure-pursuit-lookahead-guard",
+        default=DEFAULT_PURE_PURSUIT_LOOKAHEAD_GUARD,
+        choices=LOOKAHEAD_GUARD_MODES,
+    )
+    parser.add_argument(
+        "--pure-pursuit-min-guarded-lookahead-m",
+        default=DEFAULT_PURE_PURSUIT_MIN_GUARDED_LOOKAHEAD_M,
+        type=float,
+    )
+    parser.add_argument(
+        "--pure-pursuit-lookahead-guard-static-inflation-radius-m",
+        default=DEFAULT_PURE_PURSUIT_LOOKAHEAD_GUARD_STATIC_INFLATION_RADIUS_M,
+        type=float,
+    )
+    parser.add_argument(
+        "--pure-pursuit-command-smoothing",
+        default=DEFAULT_PURE_PURSUIT_COMMAND_SMOOTHING,
+        choices=COMMAND_SMOOTHING_MODES,
+    )
+    parser.add_argument(
+        "--pure-pursuit-max-linear-accel-mps2",
+        default=DEFAULT_PURE_PURSUIT_MAX_LINEAR_ACCEL_MPS2,
+        type=float,
+    )
+    parser.add_argument(
+        "--pure-pursuit-max-linear-decel-mps2",
+        default=DEFAULT_PURE_PURSUIT_MAX_LINEAR_DECEL_MPS2,
+        type=float,
+    )
+    parser.add_argument(
+        "--pure-pursuit-max-angular-accel-radps2",
+        default=DEFAULT_PURE_PURSUIT_MAX_ANGULAR_ACCEL_RADPS2,
+        type=float,
+    )
+    parser.add_argument(
+        "--pure-pursuit-max-angular-decel-radps2",
+        default=DEFAULT_PURE_PURSUIT_MAX_ANGULAR_DECEL_RADPS2,
+        type=float,
+    )
+    parser.add_argument(
+        "--pure-pursuit-final-decel-distance-m",
+        default=DEFAULT_PURE_PURSUIT_FINAL_DECEL_DISTANCE_M,
+        type=float,
+    )
+    parser.add_argument("--pure-pursuit-min-smoothed-linear-speed-mps", type=float)
+    parser.add_argument("--tracking-path-csv", type=Path)
+    parser.add_argument(
+        "--tracking-endpoint-tolerance-m",
+        default=DEFAULT_TRACKING_ENDPOINT_TOLERANCE_M,
+        type=float,
+    )
+    parser.add_argument(
+        "--tracking-start-tolerance-m",
+        default=DEFAULT_TRACKING_START_TOLERANCE_M,
+        type=float,
+    )
+    parser.add_argument(
+        "--tracking-max-segment-m",
+        default=DEFAULT_TRACKING_MAX_SEGMENT_M,
+        type=float,
+    )
+    parser.add_argument("--allow-tracking-path-mismatch", action="store_true")
     parser.add_argument(
         "--rotate-start-heading-error-deg",
         default=DEFAULT_ROTATE_START_HEADING_ERROR_DEG,
@@ -2805,6 +2869,10 @@ def parse_args(argv):
 
     if not args.run_id:
         args.run_id = datetime.now().strftime("waypoint_follow_%Y%m%d_%H%M%S")
+    if args.pure_pursuit_goal_tolerance_m is None:
+        args.pure_pursuit_goal_tolerance_m = args.goal_tolerance_m
+    if args.pure_pursuit_min_smoothed_linear_speed_mps is None:
+        args.pure_pursuit_min_smoothed_linear_speed_mps = args.min_linear_speed
     validate_args(parser, args)
     return args
 
@@ -2818,6 +2886,12 @@ def validate_args(parser, args):
         "yaw_gain",
         "waypoint_tolerance_m",
         "goal_tolerance_m",
+        "path_lookahead_m",
+        "pure_pursuit_goal_tolerance_m",
+        "pure_pursuit_min_guarded_lookahead_m",
+        "tracking_endpoint_tolerance_m",
+        "tracking_start_tolerance_m",
+        "tracking_max_segment_m",
         "rotate_start_heading_error_deg",
         "rotate_stop_heading_error_deg",
         "scan_half_angle_deg",
@@ -2907,6 +2981,31 @@ def validate_args(parser, args):
         parser.error("--run-local-map-sparse-retry-angle-window-deg must be <= 90")
     if args.obstacle_min_cluster_size < 1:
         parser.error("--obstacle-min-cluster-size must be >= 1")
+    if args.pure_pursuit_lookahead_guard_static_inflation_radius_m < 0.0:
+        parser.error(
+            "--pure-pursuit-lookahead-guard-static-inflation-radius-m "
+            "must be non-negative"
+        )
+    non_negative_fields = [
+        "pure_pursuit_max_linear_accel_mps2",
+        "pure_pursuit_max_linear_decel_mps2",
+        "pure_pursuit_max_angular_accel_radps2",
+        "pure_pursuit_max_angular_decel_radps2",
+        "pure_pursuit_min_smoothed_linear_speed_mps",
+    ]
+    for field in non_negative_fields:
+        if getattr(args, field) < 0.0:
+            parser.error(f"--{field.replace('_', '-')} must be non-negative")
+    if args.pure_pursuit_min_smoothed_linear_speed_mps > args.linear_speed:
+        parser.error(
+            "--pure-pursuit-min-smoothed-linear-speed-mps must be <= "
+            "--linear-speed"
+        )
+    if args.pure_pursuit_final_decel_distance_m <= args.goal_tolerance_m:
+        parser.error(
+            "--pure-pursuit-final-decel-distance-m must be greater than "
+            "--goal-tolerance-m"
+        )
 
 
 def main(argv=None):
@@ -2919,12 +3018,23 @@ def main(argv=None):
             skip_first=not args.no_skip_first_waypoint,
             min_spacing_m=args.min_waypoint_spacing_m,
         )
+        preview_tracking_points, preview_tracking_validation = prepare_tracking_setup(
+            args,
+            raw_waypoints,
+        )
+        preview_lookahead_guard = build_lookahead_guard(args)
     except Exception as exc:
         print(f"follow_planned_waypoints.py: error: {exc}", file=sys.stderr)
         return 2
 
     if args.dry_run:
-        print_dry_run(args, raw_waypoints, preview_waypoints)
+        print_dry_run(
+            args,
+            raw_waypoints,
+            preview_waypoints,
+            tracking_validation=preview_tracking_validation,
+            lookahead_guard=preview_lookahead_guard,
+        )
         return 0
 
     if not require_motion_confirmation(args, preview_waypoints):
@@ -2944,6 +3054,8 @@ def main(argv=None):
     notes = args.notes
     reached_count = 0
     executable_waypoints = preview_waypoints
+    tracking_points = preview_tracking_points
+    tracking_validation = preview_tracking_validation
     start_pose = None
     final_pose = None
     blocked_waypoint = None
@@ -2966,6 +3078,12 @@ def main(argv=None):
             skip_first=not args.no_skip_first_waypoint,
         )
         executable_waypoints = start_selection.waypoints
+        tracking_points, tracking_validation = prepare_tracking_setup(
+            args,
+            raw_waypoints,
+            current_pose=start_pose,
+            logger=node.get_logger(),
+        )
         node.diagnostics.selected_start_segment_index = (
             start_selection.selected_segment_index
         )
@@ -2991,19 +3109,36 @@ def main(argv=None):
         else:
             if args.wait_before_follow:
                 node.refresh_after_operator_wait(time.time())
-            result = node.follow_waypoints(executable_waypoints)
+            result = node.follow_waypoints(
+                executable_waypoints,
+                tracking_points=tracking_points,
+                tracking_validation=tracking_validation,
+            )
             reached_count = result["reached_count"]
             start_pose = result["start_pose"]
             final_pose = result["final_pose"]
             scan_safety = result["scan_safety"]
             amcl_health = result["amcl_health"]
             status = result.get("status", "completed")
+            notes = notes_with_tracking_metadata(notes, args, tracking_validation)
+            notes = notes_with_smoothing_metadata(notes, args)
+            notes = notes_with_guard_metadata(
+                notes,
+                args,
+                getattr(node, "last_lookahead_guard_result", None),
+            )
             node.diagnostics.final_status_reason = status
             return_code = 0
 
     except KeyboardInterrupt:
         status = "interrupted"
         notes = f"{args.notes};keyboard_interrupt"
+        notes = notes_with_smoothing_metadata(notes, args)
+        notes = notes_with_guard_metadata(
+            notes,
+            args,
+            getattr(node, "last_lookahead_guard_result", None),
+        )
         node.diagnostics.final_status_reason = "keyboard_interrupt"
         print("Interrupted. Sending stop command...")
         return_code = 130
@@ -3011,6 +3146,12 @@ def main(argv=None):
     except BlockedByScanError as exc:
         status = "blocked"
         notes = f"{args.notes};{exc}"
+        notes = notes_with_smoothing_metadata(notes, args)
+        notes = notes_with_guard_metadata(
+            notes,
+            args,
+            getattr(node, "last_lookahead_guard_result", None),
+        )
         node.diagnostics.final_status_reason = str(exc)
         reached_count = node.reached_count
         start_pose = node.start_pose
@@ -3024,6 +3165,12 @@ def main(argv=None):
     except WaypointTimeoutError as exc:
         status = "timeout"
         notes = f"{args.notes};{exc}"
+        notes = notes_with_smoothing_metadata(notes, args)
+        notes = notes_with_guard_metadata(
+            notes,
+            args,
+            getattr(node, "last_lookahead_guard_result", None),
+        )
         node.diagnostics.final_status_reason = str(exc)
         reached_count = node.reached_count
         start_pose = node.start_pose
@@ -3037,6 +3184,12 @@ def main(argv=None):
     except Exception as exc:
         status = "failed"
         notes = f"{args.notes};{exc}"
+        notes = notes_with_smoothing_metadata(notes, args)
+        notes = notes_with_guard_metadata(
+            notes,
+            args,
+            getattr(node, "last_lookahead_guard_result", None),
+        )
         node.diagnostics.final_status_reason = str(exc)
         reached_count = node.reached_count
         start_pose = node.start_pose

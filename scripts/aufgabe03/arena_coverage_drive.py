@@ -1203,8 +1203,13 @@ class ArenaCoverageDrive(Node):
                     "target_y": float(plan.selected.target_y),
                     "reason": record["stop_reason"],
                     "driven_distance_m": record.get("driven_distance_m", 0.0),
+                    "path_truncated": bool(record.get("path_truncated")),
                 }
-                recent_attempts.append(recent_attempt)
+                recent_attempt["used_for_candidate_rejection"] = not recent_attempt[
+                    "path_truncated"
+                ]
+                if recent_attempt["used_for_candidate_rejection"]:
+                    recent_attempts.append(recent_attempt)
                 diagnostics["recent_attempts"].append(recent_attempt)
                 summary = replace(
                     summary,

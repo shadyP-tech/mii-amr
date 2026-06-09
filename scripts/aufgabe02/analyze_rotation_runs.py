@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-"""
-Analyze repeated real in-place rotation runs.
-
-The tracker yaw currently uses the opposite sign from ROS/odom for clockwise
-turns, so the default analysis applies a -1 sign correction before computing
-tracker yaw statistics.
-"""
 
 import argparse
 import csv

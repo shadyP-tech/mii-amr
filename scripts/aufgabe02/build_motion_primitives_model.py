@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-"""
-Build empirical motion primitives for probabilistic path endpoint prediction.
-
-The script is independent of ROS and camera hardware.  It uses already-recorded
-tracker CSV rows to estimate local-frame displacement and yaw-change models for
-named forward and rotation commands.
-"""
 
 import argparse
 import csv

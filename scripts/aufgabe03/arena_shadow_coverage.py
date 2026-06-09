@@ -28,7 +28,6 @@ from arena_active_explore import (
 
 NO_SHADOW_REASONS = {
     "no_shadow_frontier",
-    "no_reachable_shadow",
 }
 
 
@@ -431,7 +430,11 @@ def plan_shadow_coverage_move(samples, config: ShadowCoverageConfig, recent_atte
     status = _shadow_status(grid, candidates, raw_shadow_unknown_count)
 
     if not accepted:
-        reason = "no_shadow_frontier" if not raw_candidates else "no_reachable_shadow"
+        reason = (
+            "no_shadow_frontier"
+            if not raw_candidates or raw_shadow_unknown_count <= 0
+            else "shadow_blocked_or_incomplete"
+        )
         return ShadowMovePlan(
             False,
             reason,

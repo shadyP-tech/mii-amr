@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Sequence
 
 import map_path_planner as planner
+from waypoint_following.models import Waypoint
 
 
 DEFAULT_STATIC_MAP = Path("maps/aufgabe03/arena_1p898x3p9_auto.yaml")
@@ -236,6 +237,7 @@ class ReplanResult:
     updated_path_ppm: str | None = None
     detected_obstacles_csv: str | None = None
     waypoints: list[tuple[int, float, float]] = field(default_factory=list)
+    path_points: list[Waypoint] = field(default_factory=list)
     path_cells: list[tuple[int, int]] = field(default_factory=list)
     inflated_obstacle_cells: set[tuple[int, int]] = field(default_factory=set)
     run_local_map: "RunLocalObstacleMap | None" = None
@@ -789,6 +791,7 @@ def plan_with_run_local_map(
         overlay_diag.updated_waypoints_csv = str(paths["waypoints_csv"])
         overlay_diag.run_local_map_yaml = str(paths["map_yaml"])
         overlay_diag.run_local_waypoints_csv = str(paths["waypoints_csv"])
+        path_rows = planner.build_path_rows(plan.path, planning_map.metadata)
         waypoint_rows = planner.build_path_rows(plan.waypoints, planning_map.metadata)
         return ReplanResult(
             success=True,
@@ -803,6 +806,10 @@ def plan_with_run_local_map(
             waypoints=[
                 (int(row[0]), float(row[3]), float(row[4]))
                 for row in waypoint_rows
+            ],
+            path_points=[
+                Waypoint(int(row[0]), float(row[3]), float(row[4]))
+                for row in path_rows
             ],
             path_cells=list(plan.path),
             inflated_obstacle_cells=set(planning_overlay),
@@ -1139,6 +1146,7 @@ def build_replan_result(
         )
         write_obstacle_csv(paths["obstacles_csv"], obstacle_rows)
         diagnostics.replan_duration_sec = time.time() - start_time
+        path_rows = planner.build_path_rows(plan.path, updated_map.metadata)
         waypoint_rows = planner.build_path_rows(plan.waypoints, updated_map.metadata)
         return ReplanResult(
             success=True,
@@ -1153,6 +1161,10 @@ def build_replan_result(
             waypoints=[
                 (int(row[0]), float(row[3]), float(row[4]))
                 for row in waypoint_rows
+            ],
+            path_points=[
+                Waypoint(int(row[0]), float(row[3]), float(row[4]))
+                for row in path_rows
             ],
             path_cells=list(plan.path),
             inflated_obstacle_cells=inflated_cells,
