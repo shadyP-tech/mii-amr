@@ -1249,8 +1249,7 @@ class WaypointFollower(Node):
             return
         self.last_route_projection_status = status_key
         self.last_route_projection_log_sec = now_sec
-        log = self.get_logger().warn if warning else self.get_logger().info
-        log(
+        message = (
             "Pure-pursuit route projection: "
             f"status={status}, "
             "projection_status="
@@ -1272,6 +1271,10 @@ class WaypointFollower(Node):
             f"track_angular_cap={self.args.pure_pursuit_max_track_angular_speed_radps:.3f}, "
             f"rotate_angular_cap={self.args.pure_pursuit_max_rotate_angular_speed_radps:.3f}"
         )
+        if warning:
+            self.get_logger().warn(message)
+        else:
+            self.get_logger().info(message)
 
     def stop_repeatedly(self):
         reset_command_smoother(self)
