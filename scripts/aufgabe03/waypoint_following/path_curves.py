@@ -7,6 +7,7 @@ from .math_utils import clamp, distance_2d, normalize_angle_rad, shortest_angle_
 
 
 ROUTE_HEADING_LOOKAHEAD_M = 0.16
+PATH_SEGMENT_EPS_M = 1e-6
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,13 @@ class RouteProjection:
     branch_lock_stable_count: int = 0
     branch_lock_progress_span_m: float = 0.0
     branch_lock_release_required_span_m: float = 0.0
+    branch_compatible_length_m: float = 0.0
+    branch_target_clipped_to_heading_break: bool = False
+    branch_heading_break: bool = False
+    branch_end_progress_m: float | None = None
+    branch_compatible_target_progress_m: float | None = None
+    heading_break_delta_deg: float | None = None
+    next_heading_error_deg: float | None = None
 
 
 @dataclass(frozen=True)
@@ -50,6 +58,20 @@ class RouteHeading:
     source: str
     target_point: tuple[float, float] | None = None
     lookahead_m: float = 0.0
+
+
+@dataclass(frozen=True)
+class BranchCompatiblePath:
+    path_points: list[tuple[float, float]]
+    compatible_length_m: float
+    branch_end_point: tuple[float, float]
+    branch_target_clipped_to_heading_break: bool
+    heading_break: bool
+    branch_end_progress_m: float
+    branch_compatible_target_progress_m: float
+    next_heading_deg: float | None
+    heading_break_delta_deg: float | None
+    next_heading_error_deg: float | None
 
 
 def truncate_polyline_by_distance(points, max_distance_m):
@@ -668,6 +690,114 @@ def route_points_from_projection(points, projection):
     result = [projection.projected_point]
     result.extend(route[index + 1 :])
     return result
+
+
+def _append_distinct_point(points, point):
+    normalized = (float(point[0]), float(point[1]))
+    if not points or distance_2d(points[-1], normalized) > PATH_SEGMENT_EPS_M:
+        points.append(normalized)
+
+
+def branch_compatible_path_from_projection(
+    points,
+    projection,
+    preferred_heading_deg,
+    heading_tolerance_deg,
+    lookahead_m,
+    current_yaw_deg=None,
+):
+    route = [(float(x), float(y)) for x, y in points]
+    if len(route) < 2:
+        raise RuntimeError("route_projection_path_too_short")
+    cumulative = route_cumulative_distances(route)
+    if cumulative[-1] <= PATH_SEGMENT_EPS_M:
+        raise RuntimeError("route_projection_path_too_short")
+
+    start_progress_m = clamp(
+        float(projection.route_progress_m),
+        0.0,
+        cumulative[-1],
+    )
+    start_x, start_y, start_index, _start_ratio = route_point_at_progress(
+        route,
+        cumulative,
+        start_progress_m,
+    )
+    start_point = (start_x, start_y)
+    path_points = [start_point]
+    preferred_heading = float(preferred_heading_deg)
+    heading_tolerance = abs(float(heading_tolerance_deg))
+    branch_end_progress_m = start_progress_m
+    branch_end_point = start_point
+    heading_break = False
+    next_heading_deg = None
+    heading_break_delta_deg = None
+
+    for index in range(max(0, start_index), len(route) - 1):
+        segment_start_progress = cumulative[index]
+        segment_end_progress = cumulative[index + 1]
+        segment_length = segment_end_progress - segment_start_progress
+        if segment_length <= PATH_SEGMENT_EPS_M:
+            continue
+        if segment_end_progress <= start_progress_m + PATH_SEGMENT_EPS_M:
+            continue
+
+        segment_start = route[index]
+        segment_end = route[index + 1]
+        segment_heading = math.degrees(
+            math.atan2(
+                segment_end[1] - segment_start[1],
+                segment_end[0] - segment_start[0],
+            )
+        )
+        heading_error = abs(
+            shortest_angle_delta_deg(preferred_heading, segment_heading)
+        )
+        local_start_progress = max(start_progress_m, segment_start_progress)
+        if heading_error > heading_tolerance:
+            heading_break = True
+            next_heading_deg = segment_heading
+            heading_break_delta_deg = heading_error
+            if local_start_progress > branch_end_progress_m + PATH_SEGMENT_EPS_M:
+                branch_end_progress_m = local_start_progress
+                end_x, end_y, _index, _ratio = route_point_at_progress(
+                    route,
+                    cumulative,
+                    branch_end_progress_m,
+                )
+                branch_end_point = (end_x, end_y)
+                _append_distinct_point(path_points, branch_end_point)
+            break
+
+        branch_end_progress_m = segment_end_progress
+        branch_end_point = segment_end
+        _append_distinct_point(path_points, branch_end_point)
+
+    compatible_length_m = max(0.0, branch_end_progress_m - start_progress_m)
+    lookahead = max(0.0, float(lookahead_m))
+    target_progress_m = min(start_progress_m + lookahead, branch_end_progress_m)
+    clipped_to_break = (
+        heading_break
+        and start_progress_m + lookahead > branch_end_progress_m + PATH_SEGMENT_EPS_M
+    )
+    next_heading_error_deg = None
+    if next_heading_deg is not None and current_yaw_deg is not None:
+        next_heading_error_deg = shortest_angle_delta_deg(
+            float(current_yaw_deg),
+            next_heading_deg,
+        )
+    return BranchCompatiblePath(
+        path_points=path_points,
+        compatible_length_m=compatible_length_m,
+        branch_end_point=branch_end_point,
+        branch_target_clipped_to_heading_break=clipped_to_break,
+        heading_break=heading_break,
+        branch_end_progress_m=branch_end_progress_m,
+        branch_compatible_target_progress_m=target_progress_m,
+        next_heading_deg=next_heading_deg,
+        heading_break_delta_deg=heading_break_delta_deg,
+        next_heading_error_deg=next_heading_error_deg,
+    )
 
 
 def lookahead_target_from_route_anchor(path_points, lookahead_m):

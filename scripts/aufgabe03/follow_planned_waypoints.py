@@ -54,6 +54,7 @@ from waypoint_following.controllers import (  # noqa: E402
     FORWARD_CONTROL_MODES,
     FORWARD_CONTROL_ROUTE_DAMPED,
     FORWARD_CONTROL_TARGET_BEARING,
+    POST_ROTATE_BRANCH_END_TOLERANCE_M,
     POST_ROTATE_BRANCH_HEADING_TOLERANCE_DEG,
     POST_ROTATE_BRANCH_MIN_RELEASE_PROGRESS_M,
     POST_ROTATE_BRANCH_RELEASE_STABLE_SAMPLES,
@@ -86,9 +87,12 @@ from waypoint_following.models import (  # noqa: E402
     Waypoint,
 )
 from waypoint_following.path_curves import (  # noqa: E402
+    BranchCompatiblePath,
+    PATH_SEGMENT_EPS_M,
     ROUTE_HEADING_LOOKAHEAD_M,
     RouteHeading,
     RouteProjection,
+    branch_compatible_path_from_projection,
     lookahead_target_from_route_anchor,
     polyline_lookahead_target,
     project_point_to_route,
@@ -632,7 +636,11 @@ def notes_with_route_projection_metadata(notes, args, node):
         "pure_pursuit_post_rotate_branch_release_samples="
         f"{POST_ROTATE_BRANCH_RELEASE_STABLE_SAMPLES};"
         "pure_pursuit_post_rotate_branch_min_release_progress_m="
-        f"{POST_ROTATE_BRANCH_MIN_RELEASE_PROGRESS_M:.3f}"
+        f"{POST_ROTATE_BRANCH_MIN_RELEASE_PROGRESS_M:.3f};"
+        "pure_pursuit_post_rotate_branch_target_clip_count="
+        f"{getattr(node, 'post_rotate_branch_target_clip_count', 0)};"
+        "pure_pursuit_post_rotate_branch_heading_break_handoff_count="
+        f"{getattr(node, 'post_rotate_branch_heading_break_handoff_count', 0)}"
     )
 
 
@@ -1072,6 +1080,8 @@ class WaypointFollower(Node):
         self.post_rotate_branch_ambiguity_failures = 0
         self.post_rotate_branch_rejected_wrong_heading_count = 0
         self.post_rotate_branch_max_heading_error_deg = 0.0
+        self.post_rotate_branch_target_clip_count = 0
+        self.post_rotate_branch_heading_break_handoff_count = 0
         self.last_projection_acquisition_status = ""
         self.last_projection_lock_sample_count = 0
         self._current_path_controller = None
@@ -1401,6 +1411,22 @@ class WaypointFollower(Node):
                 self.post_rotate_branch_max_heading_error_deg,
                 controller_branch_max_error,
             )
+        controller_branch_clip_count = getattr(
+            controller,
+            "post_rotate_branch_target_clip_count",
+            None,
+        )
+        if controller_branch_clip_count is not None:
+            self.post_rotate_branch_target_clip_count = controller_branch_clip_count
+        controller_branch_handoff_count = getattr(
+            controller,
+            "post_rotate_branch_heading_break_handoff_count",
+            None,
+        )
+        if controller_branch_handoff_count is not None:
+            self.post_rotate_branch_heading_break_handoff_count = (
+                controller_branch_handoff_count
+            )
         self.last_projection_acquisition_status = getattr(
             projection,
             "projection_status",
@@ -1495,6 +1521,20 @@ class WaypointFollower(Node):
             f"{getattr(projection, 'branch_lock_progress_span_m', 0.0):.3f}, "
             "branch_lock_release_required_span_m="
             f"{getattr(projection, 'branch_lock_release_required_span_m', 0.0):.3f}, "
+            "branch_compatible_length_m="
+            f"{getattr(projection, 'branch_compatible_length_m', 0.0):.3f}, "
+            "branch_target_clipped_to_heading_break="
+            f"{getattr(projection, 'branch_target_clipped_to_heading_break', False)}, "
+            "branch_heading_break="
+            f"{getattr(projection, 'branch_heading_break', False)}, "
+            "branch_end_progress_m="
+            f"{format_optional_m(getattr(projection, 'branch_end_progress_m', None))}, "
+            "branch_compatible_target_progress_m="
+            f"{format_optional_m(getattr(projection, 'branch_compatible_target_progress_m', None))}, "
+            "heading_break_delta_deg="
+            f"{format_optional_m(getattr(projection, 'heading_break_delta_deg', None))}, "
+            "next_heading_error_deg="
+            f"{format_optional_m(getattr(projection, 'next_heading_error_deg', None))}, "
             f"cross_track_error_m={projection.cross_track_error_m:.3f}, "
             f"signed_cross_track_error_m={projection.signed_cross_track_error_m:.3f}, "
             f"route_heading_deg={projection.route_heading_deg:.1f}, "

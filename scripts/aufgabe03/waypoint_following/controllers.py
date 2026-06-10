@@ -10,6 +10,7 @@ from .path_curves import (
     ROUTE_HEADING_LOOKAHEAD_M,
     RouteHeading,
     RouteProjection,
+    branch_compatible_path_from_projection,
     lookahead_target_from_route_anchor,
     project_point_to_route,
     project_point_to_route_branch_window,
@@ -18,6 +19,7 @@ from .path_curves import (
     route_cumulative_distances,
     route_heading_at_progress,
     route_heading_from_projection,
+    route_point_at_progress,
     route_points_from_projection,
 )
 from .path_progress import target_state, waypoint_reached
@@ -37,6 +39,7 @@ ROTATE_ANCHOR_ROUTE_HEADING_EXIT_SAMPLES = 3
 POST_ROTATE_BRANCH_HEADING_TOLERANCE_DEG = 60.0
 POST_ROTATE_BRANCH_RELEASE_STABLE_SAMPLES = 2
 POST_ROTATE_BRANCH_MIN_RELEASE_PROGRESS_M = 0.18
+POST_ROTATE_BRANCH_END_TOLERANCE_M = 0.03
 ANGULAR_FEASIBILITY_STOP_EPS_MPS = 0.003
 FORWARD_CONTROL_TARGET_BEARING = "target-bearing"
 FORWARD_CONTROL_ROUTE_DAMPED = "route-damped"
@@ -244,6 +247,8 @@ class PurePursuitController:
         self.post_rotate_branch_ambiguity_failures = 0
         self.post_rotate_branch_rejected_wrong_heading_count = 0
         self.post_rotate_branch_max_heading_error_deg = 0.0
+        self.post_rotate_branch_target_clip_count = 0
+        self.post_rotate_branch_heading_break_handoff_count = 0
         self.last_rotate_sign = 1.0
         self.rotate_gate_entries = 0
 
@@ -265,6 +270,8 @@ class PurePursuitController:
         self.post_rotate_branch_ambiguity_failures = 0
         self.post_rotate_branch_rejected_wrong_heading_count = 0
         self.post_rotate_branch_max_heading_error_deg = 0.0
+        self.post_rotate_branch_target_clip_count = 0
+        self.post_rotate_branch_heading_break_handoff_count = 0
 
     def compute(self, pose, route_state):
         final_goal = route_state.final_goal()
@@ -730,6 +737,15 @@ class PurePursuitController:
             )
         except RuntimeError as error:
             if str(error) == "pure_pursuit_branch_ambiguous":
+                handoff = self._branch_heading_break_handoff_from_lock(
+                    pose,
+                    route_points,
+                    lock,
+                    distance_to_goal,
+                    release_span_m,
+                )
+                if handoff is not None:
+                    return handoff
                 lock.ambiguity_failures += 1
                 self.post_rotate_branch_ambiguity_failures += 1
             raise
@@ -792,13 +808,65 @@ class PurePursuitController:
             lock.rotate_anchor_aligned_sample_count,
             lock.rotate_anchor_handoff_reason,
         )
+        branch_path = branch_compatible_path_from_projection(
+            route_points,
+            projection,
+            math.degrees(lock.preferred_heading_rad),
+            POST_ROTATE_BRANCH_HEADING_TOLERANCE_DEG,
+            lookahead_m,
+            current_yaw_deg=pose.yaw_deg,
+        )
+        if branch_path.branch_target_clipped_to_heading_break:
+            self.post_rotate_branch_target_clip_count += 1
+        projection = replace(
+            projection,
+            branch_compatible_length_m=branch_path.compatible_length_m,
+            branch_target_clipped_to_heading_break=(
+                branch_path.branch_target_clipped_to_heading_break
+            ),
+            branch_heading_break=branch_path.heading_break,
+            branch_end_progress_m=branch_path.branch_end_progress_m,
+            branch_compatible_target_progress_m=(
+                branch_path.branch_compatible_target_progress_m
+            ),
+            heading_break_delta_deg=branch_path.heading_break_delta_deg,
+            next_heading_error_deg=branch_path.next_heading_error_deg,
+        )
+        branch_end_delta_m = branch_path.branch_end_progress_m - projection.route_progress_m
+        selected_branch_error = getattr(
+            projection,
+            "selected_branch_heading_error_deg",
+            None,
+        )
+        still_on_locked_branch = (
+            selected_branch_error is None
+            or abs(float(selected_branch_error))
+            <= POST_ROTATE_BRANCH_HEADING_TOLERANCE_DEG
+        )
+        at_branch_end = branch_path.heading_break and (
+            0.0 <= branch_end_delta_m <= POST_ROTATE_BRANCH_END_TOLERANCE_M
+            or (
+                abs(branch_end_delta_m) <= POST_ROTATE_BRANCH_END_TOLERANCE_M
+                and still_on_locked_branch
+            )
+        )
+        if at_branch_end and branch_path.next_heading_deg is not None:
+            return self._branch_heading_break_rotate_step(
+                pose,
+                projection,
+                branch_path,
+                distance_to_goal,
+            )
 
-        path_points = route_points_from_projection(route_points, projection)
+        path_points = branch_path.path_points
         target_point = lookahead_target_from_route_anchor(
             path_points,
-            min(lookahead_m, max(0.0, projection.remaining_route_m)),
+            min(lookahead_m, max(0.0, branch_path.compatible_length_m)),
         )
-        command_lookahead_m = max(0.01, min(lookahead_m, projection.remaining_route_m))
+        command_lookahead_m = max(
+            0.01,
+            min(lookahead_m, branch_path.compatible_length_m),
+        )
         geometry = pure_pursuit_geometry(pose, target_point, command_lookahead_m)
         route_heading = route_heading_from_projection(
             route_points,
@@ -908,6 +976,169 @@ class PurePursuitController:
             "forward",
             route_heading,
             forward_control_result=forward_control_result,
+        )
+
+    def _branch_heading_break_handoff_from_lock(
+        self,
+        pose,
+        route_points,
+        lock,
+        distance_to_goal,
+        release_span_m,
+    ):
+        route = [(float(x), float(y)) for x, y in route_points]
+        if len(route) < 2:
+            return None
+        cumulative = route_cumulative_distances(route)
+        if not cumulative or cumulative[-1] <= 1e-9:
+            return None
+        progress_m = clamp(float(lock.last_progress_m), 0.0, cumulative[-1])
+        x, y, segment_index, segment_ratio = route_point_at_progress(
+            route,
+            cumulative,
+            progress_m,
+        )
+        projected_point = (x, y)
+        cross_track_m = math.hypot(float(pose.x) - x, float(pose.y) - y)
+        preferred_heading_deg = math.degrees(lock.preferred_heading_rad)
+        has_preceding_compatible_segment = False
+        for index in range(min(segment_index, len(route) - 2), -1, -1):
+            segment_start_progress = cumulative[index]
+            segment_end_progress = cumulative[index + 1]
+            if segment_start_progress > progress_m + 1e-9:
+                continue
+            segment_length = segment_end_progress - segment_start_progress
+            if segment_length <= 1e-9:
+                continue
+            start = route[index]
+            end = route[index + 1]
+            preceding_heading_deg = math.degrees(
+                math.atan2(end[1] - start[1], end[0] - start[0])
+            )
+            if (
+                abs(shortest_angle_delta_deg(preferred_heading_deg, preceding_heading_deg))
+                <= POST_ROTATE_BRANCH_HEADING_TOLERANCE_DEG
+            ):
+                has_preceding_compatible_segment = True
+                break
+        if not has_preceding_compatible_segment:
+            return None
+        projection = RouteProjection(
+            projected_point,
+            segment_index,
+            segment_ratio,
+            progress_m,
+            preferred_heading_deg,
+            shortest_angle_delta_deg(float(pose.yaw_deg), preferred_heading_deg),
+            cross_track_m,
+            0.0,
+            max(0.0, cumulative[-1] - progress_m),
+            projection_status="post_rotate_branch_lock",
+            route_progress_delta_m=0.0,
+            raw_projection_progress_m=progress_m,
+            raw_projection_segment_index=segment_index,
+            effective_projection_progress_m=progress_m,
+            preferred_branch_heading_deg=preferred_heading_deg,
+            selected_segment_heading_deg=preferred_heading_deg,
+            selected_branch_heading_error_deg=0.0,
+            branch_lock_stable_count=int(lock.stable_count),
+            branch_lock_progress_span_m=max(0.0, progress_m - lock.start_progress_m),
+            branch_lock_release_required_span_m=float(release_span_m),
+            local_cross_track_m=cross_track_m,
+            rotate_anchor_route_heading_aligned_samples=int(
+                lock.rotate_anchor_aligned_sample_count
+            ),
+            rotate_anchor_handoff_reason=str(lock.rotate_anchor_handoff_reason),
+        )
+        if (
+            projection.cross_track_error_m
+            > getattr(self.args, "pure_pursuit_max_cross_track_error_m", 0.25)
+        ):
+            self.post_rotate_branch_lock = None
+            return ControllerStep(
+                TwistCommand(0.0, 0.0),
+                "off_route",
+                projection.projected_point,
+                distance_to_goal,
+                projection.heading_error_to_route_deg,
+                False,
+                route_projection_result=projection,
+                pure_pursuit_status="off_route",
+            )
+        branch_path = branch_compatible_path_from_projection(
+            route,
+            projection,
+            preferred_heading_deg,
+            POST_ROTATE_BRANCH_HEADING_TOLERANCE_DEG,
+            0.0,
+            current_yaw_deg=pose.yaw_deg,
+        )
+        if (
+            not branch_path.heading_break
+            or branch_path.next_heading_deg is None
+            or branch_path.compatible_length_m > POST_ROTATE_BRANCH_END_TOLERANCE_M
+        ):
+            return None
+        projection = replace(
+            projection,
+            branch_compatible_length_m=branch_path.compatible_length_m,
+            branch_target_clipped_to_heading_break=(
+                branch_path.branch_target_clipped_to_heading_break
+            ),
+            branch_heading_break=branch_path.heading_break,
+            branch_end_progress_m=branch_path.branch_end_progress_m,
+            branch_compatible_target_progress_m=(
+                branch_path.branch_compatible_target_progress_m
+            ),
+            heading_break_delta_deg=branch_path.heading_break_delta_deg,
+            next_heading_error_deg=branch_path.next_heading_error_deg,
+        )
+        return self._branch_heading_break_rotate_step(
+            pose,
+            projection,
+            branch_path,
+            distance_to_goal,
+        )
+
+    def _branch_heading_break_rotate_step(
+        self,
+        pose,
+        projection,
+        branch_path,
+        distance_to_goal,
+    ):
+        self.mode = "rotate"
+        self.post_rotate_branch_lock = None
+        self.post_rotate_branch_heading_break_handoff_count += 1
+        next_heading_error_deg = shortest_angle_delta_deg(
+            float(pose.yaw_deg),
+            float(branch_path.next_heading_deg),
+        )
+        route_heading = RouteHeading(
+            float(branch_path.next_heading_deg),
+            next_heading_error_deg,
+            "branch_heading_break",
+            branch_path.branch_end_point,
+            0.0,
+        )
+        self._activate_rotate_anchor(projection, route_heading)
+        angular_z = clamp(
+            math.radians(next_heading_error_deg) * self.args.yaw_gain,
+            -abs(self.args.pure_pursuit_max_rotate_angular_speed_radps),
+            abs(self.args.pure_pursuit_max_rotate_angular_speed_radps),
+        )
+        return ControllerStep(
+            TwistCommand(0.0, angular_z),
+            "rotate",
+            branch_path.branch_end_point,
+            distance_to_goal,
+            next_heading_error_deg,
+            False,
+            route_projection_result=projection,
+            pure_pursuit_status="rotate_gate",
+            route_heading_result=route_heading,
+            pure_pursuit_rotate_reason="branch_heading_break",
+            pure_pursuit_rotate_source="route_heading",
         )
 
     def _forward_command_from_geometry(
