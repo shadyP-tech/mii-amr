@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Protocol
 
 from .math_utils import clamp, shortest_angle_delta_deg
 from .models import ControllerStep, RouteState, TwistCommand
 from .path_curves import (
     ROUTE_HEADING_LOOKAHEAD_M,
+    RouteHeading,
+    RouteProjection,
     lookahead_target_from_route_anchor,
     project_point_to_route,
+    project_point_to_route_progress_window,
     pure_pursuit_curve_command,
+    route_cumulative_distances,
     route_heading_from_projection,
     route_points_from_projection,
 )
@@ -24,6 +29,20 @@ from .velocity_scheduler import (
 
 PROJECTION_LOCK_REQUIRED_SAMPLES = 3
 PROJECTION_LOCK_PROGRESS_TOLERANCE_M = 0.03
+ROTATE_ANCHOR_LOCAL_WINDOW_BACK_M = 0.08
+ROTATE_ANCHOR_LOCAL_WINDOW_FORWARD_M = 0.20
+
+
+@dataclass
+class RotateProjectionAnchor:
+    progress_m: float
+    segment_index: int
+    segment_ratio: float
+    projected_point: tuple[float, float]
+    route_heading_rad: float
+    cross_track_m: float
+    max_backward_delta_m: float = 0.0
+    max_forward_delta_m: float = 0.0
 
 
 class PathController(Protocol):
@@ -163,6 +182,11 @@ class PurePursuitController:
         self.projection_locked = False
         self.projection_lock_sample_count = 0
         self.max_projection_backward_delta_m = 0.0
+        self.max_rotate_anchor_backward_delta_m = 0.0
+        self.max_rotate_anchor_forward_delta_m = 0.0
+        self.rotate_anchor_activations = 0
+        self.last_accepted_projection = None
+        self.rotate_projection_anchor = None
         self.last_rotate_sign = 1.0
         self.rotate_gate_entries = 0
 
@@ -172,6 +196,11 @@ class PurePursuitController:
         self.projection_locked = False
         self.projection_lock_sample_count = 0
         self.max_projection_backward_delta_m = 0.0
+        self.max_rotate_anchor_backward_delta_m = 0.0
+        self.max_rotate_anchor_forward_delta_m = 0.0
+        self.rotate_anchor_activations = 0
+        self.last_accepted_projection = None
+        self.rotate_projection_anchor = None
 
     def compute(self, pose, route_state):
         final_goal = route_state.final_goal()
@@ -216,6 +245,23 @@ class PurePursuitController:
 
         current_point = (float(pose.x), float(pose.y))
         lookahead_m = getattr(self.args, "path_lookahead_m", 0.18)
+        tracking_points = route_state.effective_tracking_points()
+        route_points = [(float(wp.x), float(wp.y)) for wp in tracking_points]
+        if len(route_points) < 2:
+            route_points = [current_point, (float(final_goal.x), float(final_goal.y))]
+
+        if self.rotate_projection_anchor is not None:
+            return self._compute_with_rotate_anchor(
+                pose,
+                route_state,
+                route_points,
+                final_goal,
+                distance_to_goal,
+                goal_tolerance_m,
+                lookahead_m,
+                current_point,
+            )
+
         route_state.advance_tracking_progress(
             pose,
             max(
@@ -223,33 +269,52 @@ class PurePursuitController:
                 getattr(self.args, "pure_pursuit_max_cross_track_error_m", 0.25),
             ),
         )
-        tracking_points = route_state.effective_tracking_points()
-        route_points = [(float(wp.x), float(wp.y)) for wp in tracking_points]
-        if len(route_points) < 2:
-            route_points = [current_point, (float(final_goal.x), float(final_goal.y))]
         start_segment = (
             max(0, self.last_projection_segment_index - 1)
             if self.last_projection_segment_index is not None
             else max(0, route_state.tracking_progress_index - 1)
         )
-        projection = project_point_to_route(
-            route_points,
-            pose,
-            start_segment_index=start_segment,
-            previous_progress_m=self.last_route_progress_m,
-            max_forward_jump_m=max(2.0 * lookahead_m, 0.35),
-            backward_tolerance_m=0.03,
-            allow_backward=not self.projection_locked,
-            projection_status="locked" if self.projection_locked else "acquiring",
-        )
+        try:
+            projection = project_point_to_route(
+                route_points,
+                pose,
+                start_segment_index=start_segment,
+                previous_progress_m=self.last_route_progress_m,
+                max_forward_jump_m=max(2.0 * lookahead_m, 0.35),
+                backward_tolerance_m=0.03,
+                allow_backward=not self.projection_locked,
+                projection_status="locked" if self.projection_locked else "acquiring",
+            )
+        except RuntimeError as error:
+            if (
+                str(error) != "route_projection_moved_backward"
+                or self.last_accepted_projection is None
+            ):
+                raise
+            anchor_heading = route_heading_from_projection(
+                route_points,
+                self.last_accepted_projection,
+                pose.yaw_deg,
+                ROUTE_HEADING_LOOKAHEAD_M,
+            )
+            self._activate_rotate_anchor(
+                self.last_accepted_projection,
+                anchor_heading,
+            )
+            return self._compute_with_rotate_anchor(
+                pose,
+                route_state,
+                route_points,
+                final_goal,
+                distance_to_goal,
+                goal_tolerance_m,
+                lookahead_m,
+                current_point,
+                require_rotate=True,
+            )
         self.max_projection_backward_delta_m = max(
             self.max_projection_backward_delta_m,
             projection.route_progress_backward_delta_m,
-        )
-        self.last_projection_segment_index = projection.segment_index
-        route_state.tracking_progress_index = max(
-            route_state.tracking_progress_index,
-            projection.segment_index,
         )
         if (
             projection.cross_track_error_m
@@ -265,8 +330,7 @@ class PurePursuitController:
                 route_projection_result=projection,
                 pure_pursuit_status="off_route",
             )
-        self.last_route_progress_m = projection.route_progress_m
-        self._update_projection_lock(projection)
+        self._accept_projection(projection, route_state)
 
         path_points = route_points_from_projection(route_points, projection)
         target_point = lookahead_target_from_route_anchor(
@@ -299,6 +363,16 @@ class PurePursuitController:
         if rotate_mode:
             if self.mode != "rotate":
                 self.rotate_gate_entries += 1
+            self._activate_rotate_anchor(projection, route_heading)
+            projection = self._projection_from_rotate_anchor(
+                route_points,
+                pose,
+                projection,
+            )
+            route_heading = self._route_heading_from_rotate_anchor(pose)
+            if rotate_source == "route_heading":
+                rotate_error_deg = route_heading.heading_error_deg or rotate_error_deg
+                rotate_error_rad = math.radians(rotate_error_deg)
             self.mode = "rotate"
             angular_z = clamp(
                 rotate_error_rad * self.args.yaw_gain,
@@ -390,6 +464,301 @@ class PurePursuitController:
             projection,
             "forward",
             route_heading,
+        )
+
+    def _compute_with_rotate_anchor(
+        self,
+        pose,
+        route_state,
+        route_points,
+        final_goal,
+        distance_to_goal,
+        goal_tolerance_m,
+        lookahead_m,
+        current_point,
+        require_rotate=False,
+    ):
+        anchor = self.rotate_projection_anchor
+        if anchor is None:
+            raise RuntimeError("rotate_projection_anchor_missing")
+
+        try:
+            raw_projection = project_point_to_route_progress_window(
+                route_points,
+                pose,
+                anchor.progress_m - ROTATE_ANCHOR_LOCAL_WINDOW_BACK_M,
+                anchor.progress_m + ROTATE_ANCHOR_LOCAL_WINDOW_FORWARD_M,
+                previous_progress_m=anchor.progress_m,
+                projection_status="rotate_anchor_raw",
+            )
+        except RuntimeError:
+            self.rotate_projection_anchor = None
+            return ControllerStep(
+                TwistCommand(0.0, 0.0),
+                "off_route",
+                anchor.projected_point,
+                distance_to_goal,
+                0.0,
+                False,
+                pure_pursuit_status="off_route",
+            )
+
+        if (
+            raw_projection.cross_track_error_m
+            > getattr(self.args, "pure_pursuit_max_cross_track_error_m", 0.25)
+        ):
+            projection = self._projection_from_rotate_anchor(
+                route_points,
+                pose,
+                raw_projection,
+            )
+            self.rotate_projection_anchor = None
+            return ControllerStep(
+                TwistCommand(0.0, 0.0),
+                "off_route",
+                projection.projected_point,
+                distance_to_goal,
+                projection.heading_error_to_route_deg,
+                False,
+                route_projection_result=projection,
+                pure_pursuit_status="off_route",
+            )
+
+        projection = self._projection_from_rotate_anchor(
+            route_points,
+            pose,
+            raw_projection,
+        )
+        route_heading = self._route_heading_from_rotate_anchor(pose)
+        path_points = route_points_from_projection(route_points, projection)
+        target_point = lookahead_target_from_route_anchor(
+            path_points,
+            min(lookahead_m, max(0.0, projection.remaining_route_m)),
+        )
+        command_lookahead_m = max(0.01, min(lookahead_m, projection.remaining_route_m))
+        geometry = pure_pursuit_geometry(pose, target_point, command_lookahead_m)
+        alpha_rad = self._stable_alpha_for_rotate(geometry.alpha_rad)
+        alpha_deg = math.degrees(alpha_rad)
+        rotate_mode, rotate_reason, rotate_source, rotate_error_deg = (
+            self._route_heading_rotate_gate(
+                alpha_deg,
+                route_heading,
+                distance_to_goal,
+                goal_tolerance_m,
+            )
+        )
+        if require_rotate and not rotate_mode:
+            self.rotate_projection_anchor = None
+            raise RuntimeError("route_projection_moved_backward")
+
+        rotate_error_rad = (
+            alpha_rad
+            if rotate_source == "alpha"
+            else math.radians(rotate_error_deg)
+        )
+        if rotate_mode:
+            self.mode = "rotate"
+            angular_z = clamp(
+                rotate_error_rad * self.args.yaw_gain,
+                -abs(self.args.pure_pursuit_max_rotate_angular_speed_radps),
+                abs(self.args.pure_pursuit_max_rotate_angular_speed_radps),
+            )
+            return ControllerStep(
+                TwistCommand(0.0, angular_z),
+                "rotate",
+                target_point,
+                distance_to_goal,
+                rotate_error_deg,
+                False,
+                route_projection_result=projection,
+                pure_pursuit_status="rotate_gate",
+                route_heading_result=route_heading,
+                pure_pursuit_rotate_reason=rotate_reason,
+                pure_pursuit_rotate_source=rotate_source,
+            )
+
+        self.mode = "forward"
+        guard_result = None
+        if self.lookahead_guard is not None:
+            target_point, guard_result = self.lookahead_guard.select_target(
+                pose,
+                path_points,
+                current_point,
+                target_point,
+                lookahead_m,
+                getattr(self.args, "pure_pursuit_min_guarded_lookahead_m", 0.12),
+                final_goal=final_goal,
+                distance_to_goal_m=distance_to_goal,
+            )
+            if not guard_result.safe:
+                self.reset_route_projection_state()
+                target_heading_deg = math.degrees(
+                    math.atan2(
+                        target_point[1] - pose.y,
+                        target_point[0] - pose.x,
+                    )
+                )
+                return ControllerStep(
+                    TwistCommand(0.0, 0.0),
+                    "blocked",
+                    target_point,
+                    distance_to_goal,
+                    shortest_angle_delta_deg(pose.yaw_deg, target_heading_deg),
+                    False,
+                    guard_result,
+                    route_heading_result=route_heading,
+                )
+            if guard_result.selected_target_distance_m is not None:
+                command_lookahead_m = guard_result.selected_target_distance_m
+            geometry = pure_pursuit_geometry(pose, target_point, command_lookahead_m)
+            alpha_rad = geometry.alpha_rad
+
+        linear_x, angular_z, alpha_rad, mode, velocity_schedule_result = (
+            self._forward_command_from_geometry(
+                pose,
+                target_point,
+                command_lookahead_m,
+                geometry,
+            )
+        )
+        self._accept_projection(projection, route_state)
+        self.rotate_projection_anchor = None
+        return ControllerStep(
+            TwistCommand(linear_x, angular_z),
+            mode,
+            target_point,
+            distance_to_goal,
+            math.degrees(alpha_rad),
+            False,
+            guard_result,
+            velocity_schedule_result,
+            projection,
+            "forward",
+            route_heading,
+        )
+
+    def _forward_command_from_geometry(
+        self,
+        pose,
+        target_point,
+        command_lookahead_m,
+        geometry,
+    ):
+        speed_profile = getattr(
+            self.args,
+            "pure_pursuit_speed_profile",
+            SPEED_PROFILE_FIXED,
+        )
+        velocity_schedule_result = None
+        if speed_profile == SPEED_PROFILE_FIXED:
+            linear_x, angular_z, alpha_rad = pure_pursuit_curve_command(
+                pose,
+                target_point,
+                command_lookahead_m,
+                self.args.linear_speed,
+                self.args.pure_pursuit_max_track_angular_speed_radps,
+                self.args.pure_pursuit_rotate_start_heading_error_deg,
+            )
+            mode = "forward"
+        else:
+            velocity_schedule_result = self.velocity_scheduler.schedule(
+                geometry,
+                allow_rotate=False,
+            )
+            linear_x = velocity_schedule_result.command.linear_x
+            angular_z = velocity_schedule_result.command.angular_z
+            alpha_rad = geometry.alpha_rad
+            mode = velocity_schedule_result.mode
+        return linear_x, angular_z, alpha_rad, mode, velocity_schedule_result
+
+    def _accept_projection(self, projection, route_state):
+        self.last_projection_segment_index = projection.segment_index
+        route_state.tracking_progress_index = max(
+            route_state.tracking_progress_index,
+            projection.segment_index,
+        )
+        self.last_route_progress_m = projection.route_progress_m
+        self.last_accepted_projection = projection
+        self._update_projection_lock(projection)
+
+    def _activate_rotate_anchor(self, projection, route_heading):
+        if self.rotate_projection_anchor is not None:
+            return
+        heading_deg = (
+            route_heading.heading_deg
+            if route_heading is not None and route_heading.heading_deg is not None
+            else projection.route_heading_deg
+        )
+        self.rotate_projection_anchor = RotateProjectionAnchor(
+            progress_m=float(projection.route_progress_m),
+            segment_index=int(projection.segment_index),
+            segment_ratio=float(projection.segment_ratio),
+            projected_point=(
+                float(projection.projected_point[0]),
+                float(projection.projected_point[1]),
+            ),
+            route_heading_rad=math.radians(float(heading_deg)),
+            cross_track_m=float(projection.cross_track_error_m),
+        )
+        self.rotate_anchor_activations += 1
+
+    def _route_heading_from_rotate_anchor(self, pose):
+        anchor = self.rotate_projection_anchor
+        if anchor is None:
+            return RouteHeading(None, None, "unavailable")
+        heading_deg = math.degrees(anchor.route_heading_rad)
+        return RouteHeading(
+            heading_deg,
+            shortest_angle_delta_deg(float(pose.yaw_deg), heading_deg),
+            "rotate_anchor",
+            anchor.projected_point,
+            0.0,
+        )
+
+    def _projection_from_rotate_anchor(self, route_points, pose, raw_projection):
+        anchor = self.rotate_projection_anchor
+        if anchor is None:
+            raise RuntimeError("rotate_projection_anchor_missing")
+        cumulative = route_cumulative_distances(route_points)
+        total_length = cumulative[-1] if cumulative else anchor.progress_m
+        heading_deg = math.degrees(anchor.route_heading_rad)
+        heading_error = shortest_angle_delta_deg(float(pose.yaw_deg), heading_deg)
+        raw_progress = float(raw_projection.route_progress_m)
+        progress_delta = raw_progress - anchor.progress_m
+        backward_delta = max(0.0, -progress_delta)
+        forward_delta = max(0.0, progress_delta)
+        anchor.max_backward_delta_m = max(anchor.max_backward_delta_m, backward_delta)
+        anchor.max_forward_delta_m = max(anchor.max_forward_delta_m, forward_delta)
+        self.max_rotate_anchor_backward_delta_m = max(
+            self.max_rotate_anchor_backward_delta_m,
+            anchor.max_backward_delta_m,
+        )
+        self.max_rotate_anchor_forward_delta_m = max(
+            self.max_rotate_anchor_forward_delta_m,
+            anchor.max_forward_delta_m,
+        )
+        return RouteProjection(
+            projected_point=anchor.projected_point,
+            segment_index=anchor.segment_index,
+            segment_ratio=anchor.segment_ratio,
+            route_progress_m=anchor.progress_m,
+            route_heading_deg=heading_deg,
+            heading_error_to_route_deg=heading_error,
+            cross_track_error_m=raw_projection.cross_track_error_m,
+            signed_cross_track_error_m=raw_projection.signed_cross_track_error_m,
+            remaining_route_m=max(0.0, total_length - anchor.progress_m),
+            projection_status="rotate_anchor",
+            route_progress_delta_m=0.0,
+            route_progress_backward_delta_m=0.0,
+            route_progress_forward_delta_m=0.0,
+            raw_projection_progress_m=raw_progress,
+            raw_projection_segment_index=raw_projection.segment_index,
+            effective_projection_progress_m=anchor.progress_m,
+            anchor_progress_m=anchor.progress_m,
+            anchor_segment_index=anchor.segment_index,
+            rotate_anchor_backward_delta_m=backward_delta,
+            rotate_anchor_forward_delta_m=forward_delta,
+            local_cross_track_m=raw_projection.cross_track_error_m,
         )
 
     def _stable_alpha_for_rotate(self, alpha_rad):

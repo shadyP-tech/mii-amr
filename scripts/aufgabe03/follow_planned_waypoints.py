@@ -85,6 +85,7 @@ from waypoint_following.path_curves import (  # noqa: E402
     lookahead_target_from_route_anchor,
     polyline_lookahead_target,
     project_point_to_route,
+    project_point_to_route_progress_window,
     pure_pursuit_curve_command,
     route_heading_from_projection,
     route_points_from_projection,
@@ -575,7 +576,13 @@ def notes_with_route_projection_metadata(notes, args, node):
         "pure_pursuit_last_rotate_reason="
         f"{getattr(node, 'last_pure_pursuit_rotate_reason', '')};"
         "pure_pursuit_last_rotate_source="
-        f"{getattr(node, 'last_pure_pursuit_rotate_source', '')}"
+        f"{getattr(node, 'last_pure_pursuit_rotate_source', '')};"
+        "pure_pursuit_rotate_anchor_activations="
+        f"{getattr(node, 'pure_pursuit_rotate_anchor_activations', 0)};"
+        "pure_pursuit_max_rotate_anchor_backward_delta_m="
+        f"{getattr(node, 'max_rotate_anchor_backward_delta_m', 0.0):.3f};"
+        "pure_pursuit_max_rotate_anchor_forward_delta_m="
+        f"{getattr(node, 'max_rotate_anchor_forward_delta_m', 0.0):.3f}"
     )
 
 
@@ -1006,6 +1013,9 @@ class WaypointFollower(Node):
         self.last_pure_pursuit_rotate_reason = ""
         self.last_pure_pursuit_rotate_source = ""
         self.max_projection_backward_delta_m = 0.0
+        self.max_rotate_anchor_backward_delta_m = 0.0
+        self.max_rotate_anchor_forward_delta_m = 0.0
+        self.pure_pursuit_rotate_anchor_activations = 0
         self.last_projection_acquisition_status = ""
         self.last_projection_lock_sample_count = 0
         self._current_path_controller = None
@@ -1259,6 +1269,22 @@ class WaypointFollower(Node):
             self.max_projection_backward_delta_m,
             float(getattr(projection, "route_progress_backward_delta_m", 0.0)),
         )
+        self.max_rotate_anchor_backward_delta_m = max(
+            self.max_rotate_anchor_backward_delta_m,
+            float(getattr(projection, "rotate_anchor_backward_delta_m", 0.0)),
+        )
+        self.max_rotate_anchor_forward_delta_m = max(
+            self.max_rotate_anchor_forward_delta_m,
+            float(getattr(projection, "rotate_anchor_forward_delta_m", 0.0)),
+        )
+        controller = getattr(self, "_current_path_controller", None)
+        controller_anchor_activations = getattr(
+            controller,
+            "rotate_anchor_activations",
+            None,
+        )
+        if controller_anchor_activations is not None:
+            self.pure_pursuit_rotate_anchor_activations = controller_anchor_activations
         self.last_projection_acquisition_status = getattr(
             projection,
             "projection_status",
@@ -1318,6 +1344,22 @@ class WaypointFollower(Node):
             f"{getattr(projection, 'route_progress_backward_delta_m', 0.0):.3f}, "
             "route_progress_forward_delta_m="
             f"{getattr(projection, 'route_progress_forward_delta_m', 0.0):.3f}, "
+            "raw_projection_progress_m="
+            f"{format_optional_m(getattr(projection, 'raw_projection_progress_m', None))}, "
+            "raw_projection_segment_index="
+            f"{getattr(projection, 'raw_projection_segment_index', None)}, "
+            "effective_projection_progress_m="
+            f"{format_optional_m(getattr(projection, 'effective_projection_progress_m', None))}, "
+            "anchor_progress_m="
+            f"{format_optional_m(getattr(projection, 'anchor_progress_m', None))}, "
+            "anchor_segment_index="
+            f"{getattr(projection, 'anchor_segment_index', None)}, "
+            "rotate_anchor_backward_delta_m="
+            f"{getattr(projection, 'rotate_anchor_backward_delta_m', 0.0):.3f}, "
+            "rotate_anchor_forward_delta_m="
+            f"{getattr(projection, 'rotate_anchor_forward_delta_m', 0.0):.3f}, "
+            "local_cross_track_m="
+            f"{format_optional_m(getattr(projection, 'local_cross_track_m', None))}, "
             f"cross_track_error_m={projection.cross_track_error_m:.3f}, "
             f"signed_cross_track_error_m={projection.signed_cross_track_error_m:.3f}, "
             f"route_heading_deg={projection.route_heading_deg:.1f}, "

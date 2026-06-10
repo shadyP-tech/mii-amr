@@ -24,6 +24,14 @@ class RouteProjection:
     route_progress_delta_m: float | None = None
     route_progress_backward_delta_m: float = 0.0
     route_progress_forward_delta_m: float = 0.0
+    raw_projection_progress_m: float | None = None
+    raw_projection_segment_index: int | None = None
+    effective_projection_progress_m: float | None = None
+    anchor_progress_m: float | None = None
+    anchor_segment_index: int | None = None
+    rotate_anchor_backward_delta_m: float = 0.0
+    rotate_anchor_forward_delta_m: float = 0.0
+    local_cross_track_m: float | None = None
 
 
 @dataclass(frozen=True)
@@ -263,6 +271,129 @@ def project_point_to_route(
             route_progress_delta_m = 0.0
     elif previous_progress_m is not None:
         route_progress_delta_m = progress_m - float(previous_progress_m)
+        route_progress_forward_delta_m = max(0.0, route_progress_delta_m)
+
+    start = route[segment_index]
+    end = route[segment_index + 1]
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    route_heading_deg = math.degrees(math.atan2(dy, dx))
+    heading_error = shortest_angle_delta_deg(float(current_pose.yaw_deg), route_heading_deg)
+    signed_error = (
+        dx * (current[1] - projected[1])
+        - dy * (current[0] - projected[0])
+    ) / max(1e-9, math.hypot(dx, dy))
+    return RouteProjection(
+        projected_point=projected,
+        segment_index=segment_index,
+        segment_ratio=ratio,
+        route_progress_m=progress_m,
+        route_heading_deg=route_heading_deg,
+        heading_error_to_route_deg=heading_error,
+        cross_track_error_m=distance_m,
+        signed_cross_track_error_m=signed_error,
+        remaining_route_m=max(0.0, cumulative[-1] - progress_m),
+        projection_status=projection_status,
+        route_progress_delta_m=route_progress_delta_m,
+        route_progress_backward_delta_m=route_progress_backward_delta_m,
+        route_progress_forward_delta_m=route_progress_forward_delta_m,
+    )
+
+
+def project_point_to_route_progress_window(
+    points,
+    current_pose,
+    min_progress_m,
+    max_progress_m,
+    previous_progress_m=None,
+    projection_status="rotate_anchor_raw",
+):
+    route = [(float(x), float(y)) for x, y in points]
+    if len(route) < 2:
+        raise RuntimeError("route_projection_path_too_short")
+    cumulative = route_cumulative_distances(route)
+    if cumulative[-1] <= 1e-9:
+        raise RuntimeError("route_projection_path_too_short")
+
+    window_min = clamp(float(min_progress_m), 0.0, cumulative[-1])
+    window_max = clamp(float(max_progress_m), 0.0, cumulative[-1])
+    if window_max < window_min:
+        raise RuntimeError("route_projection_local_window_empty")
+
+    current = (float(current_pose.x), float(current_pose.y))
+    best = None
+    for index in range(len(route) - 1):
+        start_progress = cumulative[index]
+        end_progress = cumulative[index + 1]
+        segment_length = end_progress - start_progress
+        if segment_length <= 1e-9:
+            continue
+        overlap_start = max(start_progress, window_min)
+        overlap_end = min(end_progress, window_max)
+        if overlap_end < overlap_start - 1e-9:
+            continue
+
+        if overlap_end - overlap_start <= 1e-9:
+            point_x, point_y, _segment_index, _ratio = route_point_at_progress(
+                route,
+                cumulative,
+                overlap_start,
+            )
+            projected = (point_x, point_y)
+            ratio = clamp(
+                (overlap_start - start_progress) / segment_length,
+                0.0,
+                1.0,
+            )
+            distance_m = distance_2d(current, projected)
+            progress_m = overlap_start
+        else:
+            start_ratio = clamp(
+                (overlap_start - start_progress) / segment_length,
+                0.0,
+                1.0,
+            )
+            end_ratio = clamp(
+                (overlap_end - start_progress) / segment_length,
+                0.0,
+                1.0,
+            )
+            start = route[index]
+            end = route[index + 1]
+            clipped_start = (
+                start[0] + start_ratio * (end[0] - start[0]),
+                start[1] + start_ratio * (end[1] - start[1]),
+            )
+            clipped_end = (
+                start[0] + end_ratio * (end[0] - start[0]),
+                start[1] + end_ratio * (end[1] - start[1]),
+            )
+            distance_m, clipped_ratio, projected = _projection_on_segment(
+                current,
+                clipped_start,
+                clipped_end,
+            )
+            progress_m = overlap_start + clipped_ratio * (overlap_end - overlap_start)
+            ratio = clamp(
+                (progress_m - start_progress) / segment_length,
+                0.0,
+                1.0,
+            )
+
+        candidate = (distance_m, progress_m, index, ratio, projected)
+        if best is None or candidate < best:
+            best = candidate
+
+    if best is None:
+        raise RuntimeError("route_projection_local_window_empty")
+
+    distance_m, progress_m, segment_index, ratio, projected = best
+    route_progress_delta_m = None
+    route_progress_backward_delta_m = 0.0
+    route_progress_forward_delta_m = 0.0
+    if previous_progress_m is not None:
+        route_progress_delta_m = progress_m - float(previous_progress_m)
+        route_progress_backward_delta_m = max(0.0, -route_progress_delta_m)
         route_progress_forward_delta_m = max(0.0, route_progress_delta_m)
 
     start = route[segment_index]
