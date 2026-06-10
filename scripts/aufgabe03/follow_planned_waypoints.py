@@ -77,8 +77,12 @@ from waypoint_following.models import (  # noqa: E402
     Waypoint,
 )
 from waypoint_following.path_curves import (  # noqa: E402
+    RouteProjection,
+    lookahead_target_from_route_anchor,
     polyline_lookahead_target,
+    project_point_to_route,
     pure_pursuit_curve_command,
+    route_points_from_projection,
     select_curve_lookahead_target,
 )
 from waypoint_following.path_progress import (  # noqa: E402
@@ -180,10 +184,13 @@ DEFAULT_PURE_PURSUIT_MAX_LATERAL_ACCEL_MPS2 = 0.04
 DEFAULT_PURE_PURSUIT_TURN_SPEED_MARGIN = 0.85
 DEFAULT_PURE_PURSUIT_ROTATE_START_HEADING_ERROR_DEG = 75.0
 DEFAULT_PURE_PURSUIT_ROTATE_STOP_HEADING_ERROR_DEG = 35.0
+DEFAULT_PURE_PURSUIT_MAX_TRACK_ANGULAR_SPEED_RADPS = 0.12
 DEFAULT_PURE_PURSUIT_HEADING_DEADBAND_DEG = 4.0
 DEFAULT_PURE_PURSUIT_LATERAL_DEADBAND_M = 0.03
 DEFAULT_PURE_PURSUIT_CURVATURE_LIMIT_START_HEADING_ERROR_DEG = 12.0
 DEFAULT_PURE_PURSUIT_CURVATURE_LIMIT_FULL_HEADING_ERROR_DEG = 30.0
+DEFAULT_PURE_PURSUIT_CROSS_TRACK_WARNING_M = 0.15
+DEFAULT_PURE_PURSUIT_MAX_CROSS_TRACK_ERROR_M = 0.25
 DEFAULT_TRACKING_ENDPOINT_TOLERANCE_M = 0.10
 DEFAULT_TRACKING_START_TOLERANCE_M = 0.20
 DEFAULT_TRACKING_MAX_SEGMENT_M = 0.30
@@ -406,6 +413,8 @@ def reset_command_smoother(node):
         node.last_velocity_scheduler_status = None
     if hasattr(node, "last_velocity_scheduler_log_sec"):
         node.last_velocity_scheduler_log_sec = None
+    if hasattr(node, "last_smoothed_motion_mode"):
+        node.last_smoothed_motion_mode = None
 
 
 def smoothing_dt_sec(node, now_sec):
@@ -428,14 +437,27 @@ def smoothed_step_command(node, step, now_sec):
     if step.command.linear_x == 0.0 and step.command.angular_z == 0.0:
         reset_command_smoother(node)
         return step.command
+    previous_mode = getattr(node, "last_smoothed_motion_mode", None)
+    if step.mode == "rotate" and previous_mode != "rotate":
+        smoother.reset()
+        if hasattr(node, "last_smoothed_command_time_sec"):
+            node.last_smoothed_command_time_sec = None
     dt_sec = smoothing_dt_sec(node, now_sec)
+    raw_command = (
+        TwistCommand(0.0, step.command.angular_z)
+        if step.mode == "rotate"
+        else step.command
+    )
     command = smoother.apply(
-        step.command,
+        raw_command,
         dt_sec,
         step.distance_m,
         node.args.pure_pursuit_goal_tolerance_m,
     )
+    if step.mode == "rotate":
+        command = TwistCommand(0.0, command.angular_z)
     node.last_smoothed_command_time_sec = now_sec
+    node.last_smoothed_motion_mode = step.mode
     return command
 
 
@@ -470,6 +492,15 @@ def notes_with_velocity_scheduler_metadata(notes, args):
         f"{args.linear_speed:.3f};"
         "pure_pursuit_default_max_angular_speed_resolved_radps="
         f"{args.max_angular_speed:.3f};"
+        "pure_pursuit_target_source=route_projection;"
+        "pure_pursuit_max_track_angular_speed_radps="
+        f"{args.pure_pursuit_max_track_angular_speed_radps:.3f};"
+        "pure_pursuit_max_rotate_angular_speed_radps="
+        f"{args.pure_pursuit_max_rotate_angular_speed_radps:.3f};"
+        "pure_pursuit_cross_track_warning_m="
+        f"{args.pure_pursuit_cross_track_warning_m:.3f};"
+        "pure_pursuit_max_cross_track_error_m="
+        f"{args.pure_pursuit_max_cross_track_error_m:.3f};"
         "pure_pursuit_max_lateral_accel_mps2="
         f"{args.pure_pursuit_max_lateral_accel_mps2:.3f};"
         "pure_pursuit_turn_speed_margin="
@@ -486,6 +517,28 @@ def notes_with_velocity_scheduler_metadata(notes, args):
         f"{args.pure_pursuit_rotate_start_heading_error_deg:.3f};"
         "pure_pursuit_rotate_stop_heading_error_deg="
         f"{args.pure_pursuit_rotate_stop_heading_error_deg:.3f}"
+    )
+
+
+def notes_with_route_projection_metadata(notes, args, node):
+    if getattr(args, "controller", DEFAULT_CONTROLLER) != "pure-pursuit":
+        return notes
+    count = getattr(node, "cross_track_error_count", 0)
+    mean_error = (
+        0.0
+        if count <= 0
+        else getattr(node, "cross_track_error_sum_m", 0.0) / count
+    )
+    return (
+        f"{notes};pure_pursuit_target_source=route_projection;"
+        "pure_pursuit_max_cross_track_error_observed_m="
+        f"{getattr(node, 'max_cross_track_error_m', 0.0):.3f};"
+        "pure_pursuit_mean_abs_cross_track_error_m="
+        f"{mean_error:.3f};"
+        "pure_pursuit_max_route_heading_error_deg="
+        f"{getattr(node, 'max_route_heading_error_deg', 0.0):.3f};"
+        "pure_pursuit_rotate_gate_entries="
+        f"{getattr(node, 'pure_pursuit_rotate_gate_entries', 0)}"
     )
 
 
@@ -900,8 +953,17 @@ class WaypointFollower(Node):
         self.last_lookahead_guard_result = None
         self.command_smoother = build_command_smoother(args)
         self.last_smoothed_command_time_sec = None
+        self.last_smoothed_motion_mode = None
         self.last_velocity_scheduler_status = None
         self.last_velocity_scheduler_log_sec = None
+        self.last_route_projection_status = None
+        self.last_route_projection_log_sec = None
+        self.pure_pursuit_rotate_gate_entries = 0
+        self.last_recorded_pure_pursuit_status = None
+        self.max_cross_track_error_m = 0.0
+        self.cross_track_error_sum_m = 0.0
+        self.cross_track_error_count = 0
+        self.max_route_heading_error_deg = 0.0
         self.last_replan_tracking_points = None
         self.last_replan_tracking_source = "waypoints"
         self.last_replan_tracking_validation = None
@@ -926,6 +988,10 @@ class WaypointFollower(Node):
                 f"profile={args.pure_pursuit_speed_profile}, "
                 f"resolved_linear_speed={args.linear_speed:.3f}, "
                 f"resolved_max_angular_speed={args.max_angular_speed:.3f}, "
+                f"track_angular_cap={args.pure_pursuit_max_track_angular_speed_radps:.3f}, "
+                f"rotate_angular_cap={args.pure_pursuit_max_rotate_angular_speed_radps:.3f}, "
+                f"cross_track_warning={args.pure_pursuit_cross_track_warning_m:.3f}, "
+                f"cross_track_max={args.pure_pursuit_max_cross_track_error_m:.3f}, "
                 f"max_lateral_accel={args.pure_pursuit_max_lateral_accel_mps2:.3f}, "
                 f"turn_speed_margin={args.pure_pursuit_turn_speed_margin:.3f}, "
                 f"heading_deadband={args.pure_pursuit_heading_deadband_deg:.1f} deg, "
@@ -1095,6 +1161,59 @@ class WaypointFollower(Node):
             f"scheduled_v={result.scheduled_linear_x:.3f}, "
             f"raw_omega={result.raw_angular_z:.3f}, "
             f"scheduled_omega={result.scheduled_angular_z:.3f}"
+        )
+
+    def record_route_projection_result(self, step):
+        projection = getattr(step, "route_projection_result", None)
+        if projection is None:
+            return
+        error_m = abs(float(projection.cross_track_error_m))
+        self.max_cross_track_error_m = max(self.max_cross_track_error_m, error_m)
+        self.cross_track_error_sum_m += error_m
+        self.cross_track_error_count += 1
+        self.max_route_heading_error_deg = max(
+            self.max_route_heading_error_deg,
+            abs(float(projection.heading_error_to_route_deg)),
+        )
+        status = getattr(step, "pure_pursuit_status", "") or step.mode
+        if status == "rotate_gate" and self.last_recorded_pure_pursuit_status != status:
+            self.pure_pursuit_rotate_gate_entries += 1
+        self.last_recorded_pure_pursuit_status = status
+
+    def maybe_log_route_projection_result(self, step, now_sec):
+        projection = getattr(step, "route_projection_result", None)
+        if (
+            projection is None
+            or not self.args.verbose
+            or self.args.controller != "pure-pursuit"
+        ):
+            return
+        status = getattr(step, "pure_pursuit_status", "") or step.mode
+        warning = (
+            abs(float(projection.cross_track_error_m))
+            >= self.args.pure_pursuit_cross_track_warning_m
+        )
+        status_key = f"{status}:{warning}"
+        status_changed = status_key != self.last_route_projection_status
+        log_due = (
+            self.last_route_projection_log_sec is None
+            or now_sec - self.last_route_projection_log_sec >= 2.0
+        )
+        if not status_changed and not log_due:
+            return
+        self.last_route_projection_status = status_key
+        self.last_route_projection_log_sec = now_sec
+        log = self.get_logger().warn if warning else self.get_logger().info
+        log(
+            "Pure-pursuit route projection: "
+            f"status={status}, "
+            f"cross_track_error_m={projection.cross_track_error_m:.3f}, "
+            f"signed_cross_track_error_m={projection.signed_cross_track_error_m:.3f}, "
+            f"route_heading_deg={projection.route_heading_deg:.1f}, "
+            f"heading_error_to_route_deg={projection.heading_error_to_route_deg:.1f}, "
+            f"target={step.target}, "
+            f"track_angular_cap={self.args.pure_pursuit_max_track_angular_speed_radps:.3f}, "
+            f"rotate_angular_cap={self.args.pure_pursuit_max_rotate_angular_speed_radps:.3f}"
         )
 
     def stop_repeatedly(self):
@@ -2181,6 +2300,9 @@ class WaypointFollower(Node):
                 self.last_amcl_health = amcl_health
                 step = controller.compute(pose, route_state)
                 self.last_lookahead_guard_result = step.guard_result
+                if hasattr(self, "record_route_projection_result"):
+                    self.record_route_projection_result(step)
+                    self.maybe_log_route_projection_result(step, time.time())
                 if hasattr(self, "maybe_log_velocity_scheduler_result"):
                     self.maybe_log_velocity_scheduler_result(
                         step.velocity_schedule_result,
@@ -2243,6 +2365,11 @@ class WaypointFollower(Node):
 
                 if time.time() - waypoint_start > self.args.max_waypoint_time_sec:
                     raise WaypointTimeoutError(waypoint)
+
+                if step.mode == "off_route":
+                    reset_command_smoother(self)
+                    self.stop_repeatedly()
+                    raise RuntimeError("pure_pursuit_off_tracking_route")
 
                 if step.mode == "blocked":
                     if self.args.verbose and step.guard_result is not None:
@@ -2644,6 +2771,23 @@ def print_dry_run(
             "pure_pursuit_default_max_angular_speed_resolved_radps="
             f"{args.max_angular_speed:.3f}"
         )
+        print("pure_pursuit_target_source=route_projection")
+        print(
+            "pure_pursuit_max_track_angular_speed_radps="
+            f"{args.pure_pursuit_max_track_angular_speed_radps:.3f}"
+        )
+        print(
+            "pure_pursuit_max_rotate_angular_speed_radps="
+            f"{args.pure_pursuit_max_rotate_angular_speed_radps:.3f}"
+        )
+        print(
+            "pure_pursuit_cross_track_warning_m="
+            f"{args.pure_pursuit_cross_track_warning_m:.3f}"
+        )
+        print(
+            "pure_pursuit_max_cross_track_error_m="
+            f"{args.pure_pursuit_max_cross_track_error_m:.3f}"
+        )
         print(
             "pure_pursuit_max_lateral_accel_mps2="
             f"{args.pure_pursuit_max_lateral_accel_mps2:.3f}"
@@ -2759,6 +2903,12 @@ def print_dry_run(
 
 
 def parse_args(argv):
+    parse_argv = list(argv) if argv is not None else sys.argv[1:]
+    max_angular_speed_explicit = any(
+        token == "--max-angular-speed"
+        or token.startswith("--max-angular-speed=")
+        for token in parse_argv
+    )
     parser = argparse.ArgumentParser(
         description="Follow planned A* waypoints using TF pose and /cmd_vel.",
     )
@@ -2847,6 +2997,22 @@ def parse_args(argv):
     parser.add_argument(
         "--pure-pursuit-rotate-stop-heading-error-deg",
         default=DEFAULT_PURE_PURSUIT_ROTATE_STOP_HEADING_ERROR_DEG,
+        type=float,
+    )
+    parser.add_argument(
+        "--pure-pursuit-max-track-angular-speed-radps",
+        default=DEFAULT_PURE_PURSUIT_MAX_TRACK_ANGULAR_SPEED_RADPS,
+        type=float,
+    )
+    parser.add_argument("--pure-pursuit-max-rotate-angular-speed-radps", type=float)
+    parser.add_argument(
+        "--pure-pursuit-cross-track-warning-m",
+        default=DEFAULT_PURE_PURSUIT_CROSS_TRACK_WARNING_M,
+        type=float,
+    )
+    parser.add_argument(
+        "--pure-pursuit-max-cross-track-error-m",
+        default=DEFAULT_PURE_PURSUIT_MAX_CROSS_TRACK_ERROR_M,
         type=float,
     )
     parser.add_argument("--pure-pursuit-min-curvature-linear-speed-mps", type=float)
@@ -3068,7 +3234,7 @@ def parse_args(argv):
         help="Print detailed route/configuration output.",
     )
     parser.add_argument("--no-log", action="store_true")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(parse_argv)
 
     if not args.run_id:
         args.run_id = datetime.now().strftime("waypoint_follow_%Y%m%d_%H%M%S")
@@ -3083,6 +3249,13 @@ def parse_args(argv):
             DEFAULT_PURE_PURSUIT_MAX_ANGULAR_SPEED_RADPS
             if args.controller == "pure-pursuit"
             else DEFAULT_MAX_ANGULAR_SPEED_RADPS
+        )
+    args.max_angular_speed_explicit = max_angular_speed_explicit
+    if args.pure_pursuit_max_rotate_angular_speed_radps is None:
+        args.pure_pursuit_max_rotate_angular_speed_radps = (
+            args.max_angular_speed
+            if args.controller == "pure-pursuit" and max_angular_speed_explicit
+            else DEFAULT_PURE_PURSUIT_MAX_ANGULAR_SPEED_RADPS
         )
     if args.pure_pursuit_goal_tolerance_m is None:
         args.pure_pursuit_goal_tolerance_m = args.goal_tolerance_m
@@ -3109,6 +3282,10 @@ def validate_args(parser, args):
         "pure_pursuit_max_lateral_accel_mps2",
         "pure_pursuit_rotate_start_heading_error_deg",
         "pure_pursuit_rotate_stop_heading_error_deg",
+        "pure_pursuit_max_track_angular_speed_radps",
+        "pure_pursuit_max_rotate_angular_speed_radps",
+        "pure_pursuit_cross_track_warning_m",
+        "pure_pursuit_max_cross_track_error_m",
         "tracking_endpoint_tolerance_m",
         "tracking_start_tolerance_m",
         "tracking_max_segment_m",
@@ -3221,6 +3398,11 @@ def validate_args(parser, args):
             parser.error(f"--{field.replace('_', '-')} must be non-negative")
     if not (0.0 < args.pure_pursuit_turn_speed_margin <= 1.0):
         parser.error("--pure-pursuit-turn-speed-margin must be > 0 and <= 1")
+    if args.pure_pursuit_cross_track_warning_m > args.pure_pursuit_max_cross_track_error_m:
+        parser.error(
+            "--pure-pursuit-cross-track-warning-m must be <= "
+            "--pure-pursuit-max-cross-track-error-m"
+        )
     if not (
         args.pure_pursuit_heading_deadband_deg
         < args.pure_pursuit_curvature_limit_start_heading_error_deg
@@ -3361,6 +3543,7 @@ def main(argv=None):
             notes = f"{args.notes};wait_before_follow_cancelled"
             notes = notes_with_velocity_scheduler_metadata(notes, args)
             notes = notes_with_smoothing_metadata(notes, args)
+            notes = notes_with_route_projection_metadata(notes, args, node)
             node.diagnostics.final_status_reason = "wait_before_follow_cancelled"
             print("Waypoint following cancelled before custom follower start.")
             return_code = 130
@@ -3381,6 +3564,7 @@ def main(argv=None):
             notes = notes_with_tracking_metadata(notes, args, tracking_validation)
             notes = notes_with_velocity_scheduler_metadata(notes, args)
             notes = notes_with_smoothing_metadata(notes, args)
+            notes = notes_with_route_projection_metadata(notes, args, node)
             notes = notes_with_guard_metadata(
                 notes,
                 args,
@@ -3394,6 +3578,7 @@ def main(argv=None):
         notes = f"{args.notes};keyboard_interrupt"
         notes = notes_with_velocity_scheduler_metadata(notes, args)
         notes = notes_with_smoothing_metadata(notes, args)
+        notes = notes_with_route_projection_metadata(notes, args, node)
         notes = notes_with_guard_metadata(
             notes,
             args,
@@ -3408,6 +3593,7 @@ def main(argv=None):
         notes = f"{args.notes};{exc}"
         notes = notes_with_velocity_scheduler_metadata(notes, args)
         notes = notes_with_smoothing_metadata(notes, args)
+        notes = notes_with_route_projection_metadata(notes, args, node)
         notes = notes_with_guard_metadata(
             notes,
             args,
@@ -3428,6 +3614,7 @@ def main(argv=None):
         notes = f"{args.notes};{exc}"
         notes = notes_with_velocity_scheduler_metadata(notes, args)
         notes = notes_with_smoothing_metadata(notes, args)
+        notes = notes_with_route_projection_metadata(notes, args, node)
         notes = notes_with_guard_metadata(
             notes,
             args,
@@ -3448,6 +3635,7 @@ def main(argv=None):
         notes = f"{args.notes};{exc}"
         notes = notes_with_velocity_scheduler_metadata(notes, args)
         notes = notes_with_smoothing_metadata(notes, args)
+        notes = notes_with_route_projection_metadata(notes, args, node)
         notes = notes_with_guard_metadata(
             notes,
             args,

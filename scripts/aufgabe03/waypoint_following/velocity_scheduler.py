@@ -95,7 +95,11 @@ class PurePursuitVelocityScheduler:
             PurePursuitVelocityConfig(
                 linear_speed_mps=getattr(args, "linear_speed", 0.04),
                 min_linear_speed_mps=getattr(args, "min_linear_speed", 0.012),
-                max_angular_speed_radps=getattr(args, "max_angular_speed", 0.09),
+                max_angular_speed_radps=getattr(
+                    args,
+                    "pure_pursuit_max_track_angular_speed_radps",
+                    getattr(args, "max_angular_speed", 0.09),
+                ),
                 yaw_gain=getattr(args, "yaw_gain", 0.35),
                 max_lateral_accel_mps2=getattr(
                     args,
@@ -150,13 +154,13 @@ class PurePursuitVelocityScheduler:
     def reset(self):
         self.mode = "forward"
 
-    def schedule(self, geometry):
+    def schedule(self, geometry, allow_rotate=True):
         alpha_deg = math.degrees(geometry.alpha_rad)
         raw_linear = abs(self.config.linear_speed_mps)
         curvature = float(geometry.curvature_1pm)
         lateral_error_m = geometry.lookahead_m * math.sin(geometry.alpha_rad)
         raw_angular_z = raw_linear * curvature
-        if self._should_rotate(alpha_deg):
+        if allow_rotate and self._should_rotate(alpha_deg):
             self.mode = "rotate"
             angular_z = clamp(
                 math.radians(alpha_deg) * self.config.yaw_gain,

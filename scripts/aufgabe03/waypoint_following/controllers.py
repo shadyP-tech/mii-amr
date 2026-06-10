@@ -5,7 +5,12 @@ from typing import Protocol
 
 from .math_utils import clamp, shortest_angle_delta_deg
 from .models import ControllerStep, RouteState, TwistCommand
-from .path_curves import polyline_lookahead_target, pure_pursuit_curve_command
+from .path_curves import (
+    lookahead_target_from_route_anchor,
+    project_point_to_route,
+    pure_pursuit_curve_command,
+    route_points_from_projection,
+)
 from .path_progress import target_state, waypoint_reached
 from .velocity_scheduler import (
     SPEED_PROFILE_CURVATURE_AWARE,
@@ -146,6 +151,11 @@ class PurePursuitController:
         self.args = args
         self.lookahead_guard = lookahead_guard
         self.velocity_scheduler = PurePursuitVelocityScheduler.from_args(args)
+        self.mode = "forward"
+        self.last_projection_segment_index = None
+        self.last_route_progress_m = None
+        self.last_rotate_sign = 1.0
+        self.rotate_gate_entries = 0
 
     def compute(self, pose, route_state):
         final_goal = route_state.final_goal()
@@ -192,18 +202,85 @@ class PurePursuitController:
         lookahead_m = getattr(self.args, "path_lookahead_m", 0.18)
         route_state.advance_tracking_progress(
             pose,
-            min(self.args.waypoint_tolerance_m, lookahead_m),
+            max(
+                min(self.args.waypoint_tolerance_m, lookahead_m),
+                getattr(self.args, "pure_pursuit_max_cross_track_error_m", 0.25),
+            ),
         )
-        path_points = [current_point]
-        path_points.extend(
-            (float(wp.x), float(wp.y))
-            for wp in route_state.remaining_tracking_points()
+        tracking_points = route_state.effective_tracking_points()
+        route_points = [(float(wp.x), float(wp.y)) for wp in tracking_points]
+        if len(route_points) < 2:
+            route_points = [current_point, (float(final_goal.x), float(final_goal.y))]
+        start_segment = (
+            max(0, self.last_projection_segment_index - 1)
+            if self.last_projection_segment_index is not None
+            else max(0, route_state.tracking_progress_index - 1)
         )
-        if len(path_points) == 1:
-            path_points.append((float(final_goal.x), float(final_goal.y)))
-        target_point = polyline_lookahead_target(path_points, current_point, lookahead_m)
+        projection = project_point_to_route(
+            route_points,
+            pose,
+            start_segment_index=start_segment,
+            previous_progress_m=self.last_route_progress_m,
+            max_forward_jump_m=max(2.0 * lookahead_m, 0.35),
+            backward_tolerance_m=0.03,
+        )
+        self.last_projection_segment_index = projection.segment_index
+        self.last_route_progress_m = projection.route_progress_m
+        route_state.tracking_progress_index = max(
+            route_state.tracking_progress_index,
+            projection.segment_index,
+        )
+        if (
+            projection.cross_track_error_m
+            > getattr(self.args, "pure_pursuit_max_cross_track_error_m", 0.25)
+        ):
+            return ControllerStep(
+                TwistCommand(0.0, 0.0),
+                "off_route",
+                projection.projected_point,
+                distance_to_goal,
+                projection.heading_error_to_route_deg,
+                False,
+                route_projection_result=projection,
+                pure_pursuit_status="off_route",
+            )
+
+        path_points = route_points_from_projection(route_points, projection)
+        target_point = lookahead_target_from_route_anchor(
+            path_points,
+            min(lookahead_m, max(0.0, projection.remaining_route_m)),
+        )
+        command_lookahead_m = max(0.01, min(lookahead_m, projection.remaining_route_m))
+        geometry = pure_pursuit_geometry(pose, target_point, command_lookahead_m)
+        alpha_rad = self._stable_alpha_for_rotate(geometry.alpha_rad)
+        alpha_deg = math.degrees(alpha_rad)
+        rotate_mode = should_rotate(
+            self.mode,
+            alpha_deg,
+            self.args.pure_pursuit_rotate_start_heading_error_deg,
+            self.args.pure_pursuit_rotate_stop_heading_error_deg,
+        )
+        if rotate_mode:
+            if self.mode != "rotate":
+                self.rotate_gate_entries += 1
+            self.mode = "rotate"
+            angular_z = clamp(
+                alpha_rad * self.args.yaw_gain,
+                -abs(self.args.pure_pursuit_max_rotate_angular_speed_radps),
+                abs(self.args.pure_pursuit_max_rotate_angular_speed_radps),
+            )
+            return ControllerStep(
+                TwistCommand(0.0, angular_z),
+                "rotate",
+                target_point,
+                distance_to_goal,
+                alpha_deg,
+                False,
+                route_projection_result=projection,
+                pure_pursuit_status="rotate_gate",
+            )
+        self.mode = "forward"
         guard_result = None
-        command_lookahead_m = lookahead_m
         if self.lookahead_guard is not None:
             target_point, guard_result = self.lookahead_guard.select_target(
                 pose,
@@ -233,6 +310,8 @@ class PurePursuitController:
                 )
             if guard_result.selected_target_distance_m is not None:
                 command_lookahead_m = guard_result.selected_target_distance_m
+            geometry = pure_pursuit_geometry(pose, target_point, command_lookahead_m)
+            alpha_rad = geometry.alpha_rad
         speed_profile = getattr(
             self.args,
             "pure_pursuit_speed_profile",
@@ -245,12 +324,15 @@ class PurePursuitController:
                 target_point,
                 command_lookahead_m,
                 self.args.linear_speed,
-                self.args.max_angular_speed,
+                self.args.pure_pursuit_max_track_angular_speed_radps,
+                self.args.pure_pursuit_rotate_start_heading_error_deg,
             )
             mode = "forward"
         else:
-            geometry = pure_pursuit_geometry(pose, target_point, command_lookahead_m)
-            velocity_schedule_result = self.velocity_scheduler.schedule(geometry)
+            velocity_schedule_result = self.velocity_scheduler.schedule(
+                geometry,
+                allow_rotate=False,
+            )
             linear_x = velocity_schedule_result.command.linear_x
             angular_z = velocity_schedule_result.command.angular_z
             alpha_rad = geometry.alpha_rad
@@ -264,7 +346,16 @@ class PurePursuitController:
             False,
             guard_result,
             velocity_schedule_result,
+            projection,
+            "forward",
         )
+
+    def _stable_alpha_for_rotate(self, alpha_rad):
+        if abs(abs(alpha_rad) - math.pi) <= math.radians(0.5):
+            return math.copysign(math.pi, self.last_rotate_sign)
+        if abs(alpha_rad) > 1e-9:
+            self.last_rotate_sign = 1.0 if alpha_rad > 0.0 else -1.0
+        return alpha_rad
 
 
 def build_path_controller(args, lookahead_guard=None) -> PathController:

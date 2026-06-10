@@ -83,6 +83,8 @@ class ControllerStep:
     reached: bool
     guard_result: LookaheadGuardResult | None = None
     velocity_schedule_result: object | None = None
+    route_projection_result: object | None = None
+    pure_pursuit_status: str = ""
 
 
 @dataclass(frozen=True)
