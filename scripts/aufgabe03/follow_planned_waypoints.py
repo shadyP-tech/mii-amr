@@ -119,6 +119,7 @@ from waypoint_following.run_logging import (  # noqa: E402
     pose_fields,
 )
 from waypoint_following.velocity_scheduler import (  # noqa: E402
+    SCHEDULER_STATUS_DEADBAND,
     SPEED_PROFILE_CURVATURE_AWARE,
     SPEED_PROFILE_FIXED,
     SPEED_PROFILE_MODES,
@@ -150,6 +151,7 @@ DEFAULT_PURE_PURSUIT_LINEAR_SPEED_MPS = 0.06
 DEFAULT_MIN_LINEAR_SPEED_MPS = 0.012
 DEFAULT_LINEAR_GAIN = 0.25
 DEFAULT_MAX_ANGULAR_SPEED_RADPS = 0.09
+DEFAULT_PURE_PURSUIT_MAX_ANGULAR_SPEED_RADPS = 0.20
 DEFAULT_YAW_GAIN = 0.35
 DEFAULT_WAYPOINT_TOLERANCE_M = 0.12
 DEFAULT_GOAL_TOLERANCE_M = 0.12
@@ -173,11 +175,15 @@ DEFAULT_PURE_PURSUIT_MAX_LINEAR_DECEL_MPS2 = 0.12
 DEFAULT_PURE_PURSUIT_MAX_ANGULAR_ACCEL_RADPS2 = 0.18
 DEFAULT_PURE_PURSUIT_MAX_ANGULAR_DECEL_RADPS2 = 0.36
 DEFAULT_PURE_PURSUIT_FINAL_DECEL_DISTANCE_M = 0.30
-DEFAULT_PURE_PURSUIT_SPEED_PROFILE = SPEED_PROFILE_CURVATURE_AWARE
+DEFAULT_PURE_PURSUIT_SPEED_PROFILE = SPEED_PROFILE_FIXED
 DEFAULT_PURE_PURSUIT_MAX_LATERAL_ACCEL_MPS2 = 0.04
 DEFAULT_PURE_PURSUIT_TURN_SPEED_MARGIN = 0.85
 DEFAULT_PURE_PURSUIT_ROTATE_START_HEADING_ERROR_DEG = 75.0
 DEFAULT_PURE_PURSUIT_ROTATE_STOP_HEADING_ERROR_DEG = 35.0
+DEFAULT_PURE_PURSUIT_HEADING_DEADBAND_DEG = 4.0
+DEFAULT_PURE_PURSUIT_LATERAL_DEADBAND_M = 0.03
+DEFAULT_PURE_PURSUIT_CURVATURE_LIMIT_START_HEADING_ERROR_DEG = 12.0
+DEFAULT_PURE_PURSUIT_CURVATURE_LIMIT_FULL_HEADING_ERROR_DEG = 30.0
 DEFAULT_TRACKING_ENDPOINT_TOLERANCE_M = 0.10
 DEFAULT_TRACKING_START_TOLERANCE_M = 0.20
 DEFAULT_TRACKING_MAX_SEGMENT_M = 0.30
@@ -396,6 +402,10 @@ def reset_command_smoother(node):
         smoother.reset()
     if hasattr(node, "last_smoothed_command_time_sec"):
         node.last_smoothed_command_time_sec = None
+    if hasattr(node, "last_velocity_scheduler_status"):
+        node.last_velocity_scheduler_status = None
+    if hasattr(node, "last_velocity_scheduler_log_sec"):
+        node.last_velocity_scheduler_log_sec = None
 
 
 def smoothing_dt_sec(node, now_sec):
@@ -458,10 +468,20 @@ def notes_with_velocity_scheduler_metadata(notes, args):
         f"{args.pure_pursuit_speed_profile};"
         "pure_pursuit_default_linear_speed_resolved_mps="
         f"{args.linear_speed:.3f};"
+        "pure_pursuit_default_max_angular_speed_resolved_radps="
+        f"{args.max_angular_speed:.3f};"
         "pure_pursuit_max_lateral_accel_mps2="
         f"{args.pure_pursuit_max_lateral_accel_mps2:.3f};"
         "pure_pursuit_turn_speed_margin="
         f"{args.pure_pursuit_turn_speed_margin:.3f};"
+        "pure_pursuit_heading_deadband_deg="
+        f"{args.pure_pursuit_heading_deadband_deg:.3f};"
+        "pure_pursuit_lateral_deadband_m="
+        f"{args.pure_pursuit_lateral_deadband_m:.3f};"
+        "pure_pursuit_curvature_limit_start_heading_error_deg="
+        f"{args.pure_pursuit_curvature_limit_start_heading_error_deg:.3f};"
+        "pure_pursuit_curvature_limit_full_heading_error_deg="
+        f"{args.pure_pursuit_curvature_limit_full_heading_error_deg:.3f};"
         "pure_pursuit_rotate_start_heading_error_deg="
         f"{args.pure_pursuit_rotate_start_heading_error_deg:.3f};"
         "pure_pursuit_rotate_stop_heading_error_deg="
@@ -880,6 +900,8 @@ class WaypointFollower(Node):
         self.last_lookahead_guard_result = None
         self.command_smoother = build_command_smoother(args)
         self.last_smoothed_command_time_sec = None
+        self.last_velocity_scheduler_status = None
+        self.last_velocity_scheduler_log_sec = None
         self.last_replan_tracking_points = None
         self.last_replan_tracking_source = "waypoints"
         self.last_replan_tracking_validation = None
@@ -903,8 +925,15 @@ class WaypointFollower(Node):
                 "Pure-pursuit speed profile: "
                 f"profile={args.pure_pursuit_speed_profile}, "
                 f"resolved_linear_speed={args.linear_speed:.3f}, "
+                f"resolved_max_angular_speed={args.max_angular_speed:.3f}, "
                 f"max_lateral_accel={args.pure_pursuit_max_lateral_accel_mps2:.3f}, "
                 f"turn_speed_margin={args.pure_pursuit_turn_speed_margin:.3f}, "
+                f"heading_deadband={args.pure_pursuit_heading_deadband_deg:.1f} deg, "
+                f"lateral_deadband={args.pure_pursuit_lateral_deadband_m:.3f} m, "
+                "curvature_limit_start="
+                f"{args.pure_pursuit_curvature_limit_start_heading_error_deg:.1f} deg, "
+                "curvature_limit_full="
+                f"{args.pure_pursuit_curvature_limit_full_heading_error_deg:.1f} deg, "
                 "rotate_start="
                 f"{args.pure_pursuit_rotate_start_heading_error_deg:.1f} deg, "
                 "rotate_stop="
@@ -1036,6 +1065,37 @@ class WaypointFollower(Node):
         msg.linear.x = linear_x
         msg.angular.z = angular_z
         self.pub.publish(msg)
+
+    def maybe_log_velocity_scheduler_result(self, result, now_sec):
+        if (
+            result is None
+            or not self.args.verbose
+            or self.args.controller != "pure-pursuit"
+            or self.args.pure_pursuit_speed_profile != SPEED_PROFILE_CURVATURE_AWARE
+            or result.status == SCHEDULER_STATUS_DEADBAND
+        ):
+            return
+        status_changed = result.status != self.last_velocity_scheduler_status
+        log_due = (
+            self.last_velocity_scheduler_log_sec is None
+            or now_sec - self.last_velocity_scheduler_log_sec >= 2.0
+        )
+        if not status_changed and not log_due:
+            return
+        self.last_velocity_scheduler_status = result.status
+        self.last_velocity_scheduler_log_sec = now_sec
+        self.get_logger().info(
+            "Pure-pursuit scheduler: "
+            f"status={result.status}, "
+            f"alpha_deg={result.alpha_deg:.2f}, "
+            f"lateral_error_m={result.lateral_error_m:.3f}, "
+            f"angular_scale={result.angular_scale:.3f}, "
+            f"speed_limit_blend={result.speed_limit_blend:.3f}, "
+            f"raw_v={result.raw_linear_x:.3f}, "
+            f"scheduled_v={result.scheduled_linear_x:.3f}, "
+            f"raw_omega={result.raw_angular_z:.3f}, "
+            f"scheduled_omega={result.scheduled_angular_z:.3f}"
+        )
 
     def stop_repeatedly(self):
         reset_command_smoother(self)
@@ -2121,6 +2181,11 @@ class WaypointFollower(Node):
                 self.last_amcl_health = amcl_health
                 step = controller.compute(pose, route_state)
                 self.last_lookahead_guard_result = step.guard_result
+                if hasattr(self, "maybe_log_velocity_scheduler_result"):
+                    self.maybe_log_velocity_scheduler_result(
+                        step.velocity_schedule_result,
+                        time.time(),
+                    )
                 if (
                     self.args.verbose
                     and step.guard_result is not None
@@ -2576,12 +2641,32 @@ def print_dry_run(
             f"{args.linear_speed:.3f}"
         )
         print(
+            "pure_pursuit_default_max_angular_speed_resolved_radps="
+            f"{args.max_angular_speed:.3f}"
+        )
+        print(
             "pure_pursuit_max_lateral_accel_mps2="
             f"{args.pure_pursuit_max_lateral_accel_mps2:.3f}"
         )
         print(
             "pure_pursuit_turn_speed_margin="
             f"{args.pure_pursuit_turn_speed_margin:.3f}"
+        )
+        print(
+            "pure_pursuit_heading_deadband_deg="
+            f"{args.pure_pursuit_heading_deadband_deg:.3f}"
+        )
+        print(
+            "pure_pursuit_lateral_deadband_m="
+            f"{args.pure_pursuit_lateral_deadband_m:.3f}"
+        )
+        print(
+            "pure_pursuit_curvature_limit_start_heading_error_deg="
+            f"{args.pure_pursuit_curvature_limit_start_heading_error_deg:.3f}"
+        )
+        print(
+            "pure_pursuit_curvature_limit_full_heading_error_deg="
+            f"{args.pure_pursuit_curvature_limit_full_heading_error_deg:.3f}"
         )
         print(
             "pure_pursuit_rotate_start_heading_error_deg="
@@ -2686,7 +2771,7 @@ def parse_args(argv):
     parser.add_argument("--linear-speed", type=float)
     parser.add_argument("--min-linear-speed", default=DEFAULT_MIN_LINEAR_SPEED_MPS, type=float)
     parser.add_argument("--linear-gain", default=DEFAULT_LINEAR_GAIN, type=float)
-    parser.add_argument("--max-angular-speed", default=DEFAULT_MAX_ANGULAR_SPEED_RADPS, type=float)
+    parser.add_argument("--max-angular-speed", type=float)
     parser.add_argument("--yaw-gain", default=DEFAULT_YAW_GAIN, type=float)
     parser.add_argument("--forward-yaw-deadband-deg", default=DEFAULT_FORWARD_YAW_DEADBAND_DEG, type=float)
     parser.add_argument("--forward-stop-heading-error-deg", default=DEFAULT_FORWARD_STOP_HEADING_ERROR_DEG, type=float)
@@ -2732,6 +2817,26 @@ def parse_args(argv):
     parser.add_argument(
         "--pure-pursuit-turn-speed-margin",
         default=DEFAULT_PURE_PURSUIT_TURN_SPEED_MARGIN,
+        type=float,
+    )
+    parser.add_argument(
+        "--pure-pursuit-heading-deadband-deg",
+        default=DEFAULT_PURE_PURSUIT_HEADING_DEADBAND_DEG,
+        type=float,
+    )
+    parser.add_argument(
+        "--pure-pursuit-lateral-deadband-m",
+        default=DEFAULT_PURE_PURSUIT_LATERAL_DEADBAND_M,
+        type=float,
+    )
+    parser.add_argument(
+        "--pure-pursuit-curvature-limit-start-heading-error-deg",
+        default=DEFAULT_PURE_PURSUIT_CURVATURE_LIMIT_START_HEADING_ERROR_DEG,
+        type=float,
+    )
+    parser.add_argument(
+        "--pure-pursuit-curvature-limit-full-heading-error-deg",
+        default=DEFAULT_PURE_PURSUIT_CURVATURE_LIMIT_FULL_HEADING_ERROR_DEG,
         type=float,
     )
     parser.add_argument(
@@ -2973,6 +3078,12 @@ def parse_args(argv):
             if args.controller == "pure-pursuit"
             else DEFAULT_LINEAR_SPEED_MPS
         )
+    if args.max_angular_speed is None:
+        args.max_angular_speed = (
+            DEFAULT_PURE_PURSUIT_MAX_ANGULAR_SPEED_RADPS
+            if args.controller == "pure-pursuit"
+            else DEFAULT_MAX_ANGULAR_SPEED_RADPS
+        )
     if args.pure_pursuit_goal_tolerance_m is None:
         args.pure_pursuit_goal_tolerance_m = args.goal_tolerance_m
     if args.pure_pursuit_min_curvature_linear_speed_mps is None:
@@ -3102,12 +3213,32 @@ def validate_args(parser, args):
         "pure_pursuit_max_angular_decel_radps2",
         "pure_pursuit_min_smoothed_linear_speed_mps",
         "pure_pursuit_min_curvature_linear_speed_mps",
+        "pure_pursuit_heading_deadband_deg",
+        "pure_pursuit_lateral_deadband_m",
     ]
     for field in non_negative_fields:
         if getattr(args, field) < 0.0:
             parser.error(f"--{field.replace('_', '-')} must be non-negative")
     if not (0.0 < args.pure_pursuit_turn_speed_margin <= 1.0):
         parser.error("--pure-pursuit-turn-speed-margin must be > 0 and <= 1")
+    if not (
+        args.pure_pursuit_heading_deadband_deg
+        < args.pure_pursuit_curvature_limit_start_heading_error_deg
+        < args.pure_pursuit_curvature_limit_full_heading_error_deg
+    ):
+        parser.error(
+            "--pure-pursuit-heading-deadband-deg must be < "
+            "--pure-pursuit-curvature-limit-start-heading-error-deg must be < "
+            "--pure-pursuit-curvature-limit-full-heading-error-deg"
+        )
+    if (
+        args.pure_pursuit_curvature_limit_full_heading_error_deg
+        >= args.pure_pursuit_rotate_start_heading_error_deg
+    ):
+        parser.error(
+            "--pure-pursuit-curvature-limit-full-heading-error-deg must be < "
+            "--pure-pursuit-rotate-start-heading-error-deg"
+        )
     if (
         args.pure_pursuit_rotate_stop_heading_error_deg
         >= args.pure_pursuit_rotate_start_heading_error_deg

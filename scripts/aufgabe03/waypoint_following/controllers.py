@@ -236,7 +236,7 @@ class PurePursuitController:
         speed_profile = getattr(
             self.args,
             "pure_pursuit_speed_profile",
-            SPEED_PROFILE_CURVATURE_AWARE,
+            SPEED_PROFILE_FIXED,
         )
         velocity_schedule_result = None
         if speed_profile == SPEED_PROFILE_FIXED:
