@@ -51,6 +51,9 @@ from waypoint_following.command_smoothing import (  # noqa: E402
     CommandSmoothingConfig,
 )
 from waypoint_following.controllers import (  # noqa: E402
+    FORWARD_CONTROL_MODES,
+    FORWARD_CONTROL_ROUTE_DAMPED,
+    FORWARD_CONTROL_TARGET_BEARING,
     POST_ROTATE_BRANCH_HEADING_TOLERANCE_DEG,
     POST_ROTATE_BRANCH_MIN_RELEASE_PROGRESS_M,
     POST_ROTATE_BRANCH_RELEASE_STABLE_SAMPLES,
@@ -191,6 +194,11 @@ DEFAULT_PURE_PURSUIT_MAX_ANGULAR_ACCEL_RADPS2 = 0.18
 DEFAULT_PURE_PURSUIT_MAX_ANGULAR_DECEL_RADPS2 = 0.36
 DEFAULT_PURE_PURSUIT_FINAL_DECEL_DISTANCE_M = 0.30
 DEFAULT_PURE_PURSUIT_SPEED_PROFILE = SPEED_PROFILE_FIXED
+DEFAULT_PURE_PURSUIT_FORWARD_CONTROL = FORWARD_CONTROL_TARGET_BEARING
+DEFAULT_PURE_PURSUIT_ROUTE_HEADING_BLEND = 0.45
+DEFAULT_PURE_PURSUIT_CROSS_TRACK_GAIN = 0.4
+DEFAULT_PURE_PURSUIT_CROSS_TRACK_SPEED_FLOOR_MPS = 0.04
+DEFAULT_PURE_PURSUIT_MAX_CROSS_TRACK_CORRECTION_DEG = 15.0
 DEFAULT_PURE_PURSUIT_MAX_LATERAL_ACCEL_MPS2 = 0.04
 DEFAULT_PURE_PURSUIT_TURN_SPEED_MARGIN = 0.85
 DEFAULT_PURE_PURSUIT_ROTATE_START_HEADING_ERROR_DEG = 75.0
@@ -507,6 +515,16 @@ def notes_with_velocity_scheduler_metadata(notes, args):
     return (
         f"{notes};pure_pursuit_speed_profile="
         f"{args.pure_pursuit_speed_profile};"
+        "pure_pursuit_forward_control="
+        f"{args.pure_pursuit_forward_control};"
+        "pure_pursuit_route_heading_blend="
+        f"{args.pure_pursuit_route_heading_blend:.3f};"
+        "pure_pursuit_cross_track_gain="
+        f"{args.pure_pursuit_cross_track_gain:.3f};"
+        "pure_pursuit_cross_track_speed_floor_mps="
+        f"{args.pure_pursuit_cross_track_speed_floor_mps:.3f};"
+        "pure_pursuit_max_cross_track_correction_deg="
+        f"{args.pure_pursuit_max_cross_track_correction_deg:.3f};"
         "pure_pursuit_default_linear_speed_resolved_mps="
         f"{args.linear_speed:.3f};"
         "pure_pursuit_default_max_angular_speed_resolved_radps="
@@ -1064,6 +1082,13 @@ class WaypointFollower(Node):
             self.get_logger().info(
                 "Pure-pursuit speed profile: "
                 f"profile={args.pure_pursuit_speed_profile}, "
+                f"forward_control={args.pure_pursuit_forward_control}, "
+                f"route_heading_blend={args.pure_pursuit_route_heading_blend:.3f}, "
+                f"cross_track_gain={args.pure_pursuit_cross_track_gain:.3f}, "
+                "cross_track_speed_floor="
+                f"{args.pure_pursuit_cross_track_speed_floor_mps:.3f}, "
+                "max_cross_track_correction="
+                f"{args.pure_pursuit_max_cross_track_correction_deg:.1f} deg, "
                 f"resolved_linear_speed={args.linear_speed:.3f}, "
                 f"resolved_max_angular_speed={args.max_angular_speed:.3f}, "
                 f"track_angular_cap={args.pure_pursuit_max_track_angular_speed_radps:.3f}, "
@@ -1394,6 +1419,7 @@ class WaypointFollower(Node):
         self.last_route_projection_status = status_key
         self.last_route_projection_log_sec = now_sec
         route_heading = getattr(step, "route_heading_result", None)
+        forward_control = getattr(step, "forward_control_result", None)
         message = (
             "Pure-pursuit route projection: "
             f"status={status}, "
@@ -1448,6 +1474,26 @@ class WaypointFollower(Node):
             f"{format_optional_m(getattr(route_heading, 'heading_deg', None) if route_heading is not None else None)}, "
             "smoothed_route_heading_error_deg="
             f"{format_optional_m(getattr(route_heading, 'heading_error_deg', None) if route_heading is not None else None)}, "
+            "forward_control="
+            f"{getattr(forward_control, 'mode', '') if forward_control is not None else ''}, "
+            "forward_control_fallback="
+            f"{getattr(forward_control, 'fallback_reason', '') if forward_control is not None else ''}, "
+            "alpha_deg="
+            f"{format_optional_m(getattr(forward_control, 'alpha_deg', None) if forward_control is not None else None)}, "
+            "forward_route_heading_error_deg="
+            f"{format_optional_m(getattr(forward_control, 'route_heading_error_deg', None) if forward_control is not None else None)}, "
+            "forward_signed_cross_track_error_m="
+            f"{format_optional_m(getattr(forward_control, 'signed_cross_track_error_m', None) if forward_control is not None else None)}, "
+            "cte_correction_deg="
+            f"{format_optional_m(getattr(forward_control, 'cte_correction_deg', None) if forward_control is not None else None)}, "
+            "blended_forward_error_deg="
+            f"{format_optional_m(getattr(forward_control, 'blended_forward_error_deg', None) if forward_control is not None else None)}, "
+            "speed_taper_error_deg="
+            f"{format_optional_m(getattr(forward_control, 'speed_taper_error_deg', None) if forward_control is not None else None)}, "
+            "raw_angular_z="
+            f"{format_optional_m(getattr(forward_control, 'raw_angular_z', None) if forward_control is not None else None)}, "
+            "command_angular_z="
+            f"{format_optional_m(getattr(forward_control, 'command_angular_z', None) if forward_control is not None else None)}, "
             "rotate_reason="
             f"{getattr(step, 'pure_pursuit_rotate_reason', '')}, "
             "rotate_source="
@@ -3018,6 +3064,23 @@ def print_dry_run(
             f"{args.pure_pursuit_goal_tolerance_m:.3f} m"
         )
         print(f"pure_pursuit_speed_profile={args.pure_pursuit_speed_profile}")
+        print(f"pure_pursuit_forward_control={args.pure_pursuit_forward_control}")
+        print(
+            "pure_pursuit_route_heading_blend="
+            f"{args.pure_pursuit_route_heading_blend:.3f}"
+        )
+        print(
+            "pure_pursuit_cross_track_gain="
+            f"{args.pure_pursuit_cross_track_gain:.3f}"
+        )
+        print(
+            "pure_pursuit_cross_track_speed_floor_mps="
+            f"{args.pure_pursuit_cross_track_speed_floor_mps:.3f}"
+        )
+        print(
+            "pure_pursuit_max_cross_track_correction_deg="
+            f"{args.pure_pursuit_max_cross_track_correction_deg:.3f}"
+        )
         print(
             "pure_pursuit_default_linear_speed_resolved_mps="
             f"{args.linear_speed:.3f}"
@@ -3245,6 +3308,31 @@ def parse_args(argv):
         "--pure-pursuit-speed-profile",
         default=DEFAULT_PURE_PURSUIT_SPEED_PROFILE,
         choices=SPEED_PROFILE_MODES,
+    )
+    parser.add_argument(
+        "--pure-pursuit-forward-control",
+        default=DEFAULT_PURE_PURSUIT_FORWARD_CONTROL,
+        choices=FORWARD_CONTROL_MODES,
+    )
+    parser.add_argument(
+        "--pure-pursuit-route-heading-blend",
+        default=DEFAULT_PURE_PURSUIT_ROUTE_HEADING_BLEND,
+        type=float,
+    )
+    parser.add_argument(
+        "--pure-pursuit-cross-track-gain",
+        default=DEFAULT_PURE_PURSUIT_CROSS_TRACK_GAIN,
+        type=float,
+    )
+    parser.add_argument(
+        "--pure-pursuit-cross-track-speed-floor-mps",
+        default=DEFAULT_PURE_PURSUIT_CROSS_TRACK_SPEED_FLOOR_MPS,
+        type=float,
+    )
+    parser.add_argument(
+        "--pure-pursuit-max-cross-track-correction-deg",
+        default=DEFAULT_PURE_PURSUIT_MAX_CROSS_TRACK_CORRECTION_DEG,
+        type=float,
     )
     parser.add_argument(
         "--pure-pursuit-max-lateral-accel-mps2",
@@ -3583,6 +3671,7 @@ def validate_args(parser, args):
         "pure_pursuit_route_heading_rotate_stop_deg",
         "pure_pursuit_max_track_angular_speed_radps",
         "pure_pursuit_max_rotate_angular_speed_radps",
+        "pure_pursuit_cross_track_speed_floor_mps",
         "pure_pursuit_cross_track_warning_m",
         "pure_pursuit_max_cross_track_error_m",
         "tracking_endpoint_tolerance_m",
@@ -3691,10 +3780,25 @@ def validate_args(parser, args):
         "pure_pursuit_min_curvature_linear_speed_mps",
         "pure_pursuit_heading_deadband_deg",
         "pure_pursuit_lateral_deadband_m",
+        "pure_pursuit_cross_track_gain",
+        "pure_pursuit_max_cross_track_correction_deg",
     ]
     for field in non_negative_fields:
         if getattr(args, field) < 0.0:
             parser.error(f"--{field.replace('_', '-')} must be non-negative")
+    if not (0.0 <= args.pure_pursuit_route_heading_blend <= 1.0):
+        parser.error("--pure-pursuit-route-heading-blend must be between 0 and 1")
+    if args.pure_pursuit_max_cross_track_correction_deg > 90.0:
+        parser.error("--pure-pursuit-max-cross-track-correction-deg must be <= 90")
+    if (
+        args.controller == "pure-pursuit"
+        and args.pure_pursuit_forward_control == FORWARD_CONTROL_ROUTE_DAMPED
+        and args.pure_pursuit_speed_profile != SPEED_PROFILE_FIXED
+    ):
+        parser.error(
+            "--pure-pursuit-forward-control route-damped requires "
+            "--pure-pursuit-speed-profile fixed"
+        )
     if not (0.0 < args.pure_pursuit_turn_speed_margin <= 1.0):
         parser.error("--pure-pursuit-turn-speed-margin must be > 0 and <= 1")
     if args.pure_pursuit_cross_track_warning_m > args.pure_pursuit_max_cross_track_error_m:

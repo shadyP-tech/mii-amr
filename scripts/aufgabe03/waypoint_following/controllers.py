@@ -4,7 +4,7 @@ import math
 from dataclasses import dataclass, replace
 from typing import Protocol
 
-from .math_utils import clamp, shortest_angle_delta_deg
+from .math_utils import clamp, normalize_angle_rad, shortest_angle_delta_deg
 from .models import ControllerStep, RouteState, TwistCommand
 from .path_curves import (
     ROUTE_HEADING_LOOKAHEAD_M,
@@ -36,6 +36,12 @@ ROTATE_ANCHOR_LOCAL_WINDOW_FORWARD_M = 0.20
 POST_ROTATE_BRANCH_HEADING_TOLERANCE_DEG = 60.0
 POST_ROTATE_BRANCH_RELEASE_STABLE_SAMPLES = 2
 POST_ROTATE_BRANCH_MIN_RELEASE_PROGRESS_M = 0.18
+FORWARD_CONTROL_TARGET_BEARING = "target-bearing"
+FORWARD_CONTROL_ROUTE_DAMPED = "route-damped"
+FORWARD_CONTROL_MODES = (
+    FORWARD_CONTROL_TARGET_BEARING,
+    FORWARD_CONTROL_ROUTE_DAMPED,
+)
 
 
 @dataclass
@@ -61,6 +67,20 @@ class PostRotateBranchLock:
     max_heading_error_deg: float = 0.0
     activations: int = 0
     ambiguity_failures: int = 0
+
+
+@dataclass(frozen=True)
+class ForwardControlResult:
+    mode: str
+    fallback_reason: str
+    alpha_deg: float
+    route_heading_error_deg: float | None
+    signed_cross_track_error_m: float | None
+    cte_correction_deg: float
+    blended_forward_error_deg: float
+    speed_taper_error_deg: float
+    raw_angular_z: float
+    command_angular_z: float
 
 
 class PathController(Protocol):
@@ -474,13 +494,19 @@ class PurePursuitController:
         )
         velocity_schedule_result = None
         if speed_profile == SPEED_PROFILE_FIXED:
-            linear_x, angular_z, alpha_rad = pure_pursuit_curve_command(
+            (
+                linear_x,
+                angular_z,
+                alpha_rad,
+                forward_control_result,
+            ) = self._fixed_forward_command(
                 pose,
                 target_point,
                 command_lookahead_m,
-                self.args.linear_speed,
-                self.args.pure_pursuit_max_track_angular_speed_radps,
-                self.args.pure_pursuit_rotate_start_heading_error_deg,
+                route_heading,
+                projection,
+                geometry,
+                allow_route_damped=True,
             )
             mode = "forward"
         else:
@@ -492,6 +518,7 @@ class PurePursuitController:
             angular_z = velocity_schedule_result.command.angular_z
             alpha_rad = geometry.alpha_rad
             mode = velocity_schedule_result.mode
+            forward_control_result = None
         return ControllerStep(
             TwistCommand(linear_x, angular_z),
             mode,
@@ -504,6 +531,7 @@ class PurePursuitController:
             projection,
             "forward",
             route_heading,
+            forward_control_result=forward_control_result,
         )
 
     def _compute_with_rotate_anchor(
@@ -654,7 +682,7 @@ class PurePursuitController:
             geometry = pure_pursuit_geometry(pose, target_point, command_lookahead_m)
             alpha_rad = geometry.alpha_rad
 
-        linear_x, angular_z, alpha_rad, mode, velocity_schedule_result = (
+        linear_x, angular_z, alpha_rad, mode, velocity_schedule_result, forward_control_result = (
             self._forward_command_from_geometry(
                 pose,
                 target_point,
@@ -676,6 +704,7 @@ class PurePursuitController:
             projection,
             "forward",
             route_heading,
+            forward_control_result=forward_control_result,
         )
 
     def _compute_with_post_rotate_branch_lock(
@@ -858,7 +887,7 @@ class PurePursuitController:
             geometry = pure_pursuit_geometry(pose, target_point, command_lookahead_m)
             alpha_rad = geometry.alpha_rad
 
-        linear_x, angular_z, alpha_rad, mode, velocity_schedule_result = (
+        linear_x, angular_z, alpha_rad, mode, velocity_schedule_result, forward_control_result = (
             self._forward_command_from_geometry(
                 pose,
                 target_point,
@@ -881,6 +910,7 @@ class PurePursuitController:
             projection,
             "forward",
             route_heading,
+            forward_control_result=forward_control_result,
         )
 
     def _forward_command_from_geometry(
@@ -889,6 +919,9 @@ class PurePursuitController:
         target_point,
         command_lookahead_m,
         geometry,
+        route_heading=None,
+        projection=None,
+        allow_route_damped=False,
     ):
         speed_profile = getattr(
             self.args,
@@ -896,14 +929,18 @@ class PurePursuitController:
             SPEED_PROFILE_FIXED,
         )
         velocity_schedule_result = None
+        forward_control_result = None
         if speed_profile == SPEED_PROFILE_FIXED:
-            linear_x, angular_z, alpha_rad = pure_pursuit_curve_command(
-                pose,
-                target_point,
-                command_lookahead_m,
-                self.args.linear_speed,
-                self.args.pure_pursuit_max_track_angular_speed_radps,
-                self.args.pure_pursuit_rotate_start_heading_error_deg,
+            linear_x, angular_z, alpha_rad, forward_control_result = (
+                self._fixed_forward_command(
+                    pose,
+                    target_point,
+                    command_lookahead_m,
+                    route_heading,
+                    projection,
+                    geometry,
+                    allow_route_damped=allow_route_damped,
+                )
             )
             mode = "forward"
         else:
@@ -915,7 +952,153 @@ class PurePursuitController:
             angular_z = velocity_schedule_result.command.angular_z
             alpha_rad = geometry.alpha_rad
             mode = velocity_schedule_result.mode
-        return linear_x, angular_z, alpha_rad, mode, velocity_schedule_result
+        return linear_x, angular_z, alpha_rad, mode, velocity_schedule_result, forward_control_result
+
+    def _fixed_forward_command(
+        self,
+        pose,
+        target_point,
+        command_lookahead_m,
+        route_heading,
+        projection,
+        geometry,
+        allow_route_damped,
+    ):
+        forward_control = getattr(
+            self.args,
+            "pure_pursuit_forward_control",
+            FORWARD_CONTROL_TARGET_BEARING,
+        )
+        if not allow_route_damped or forward_control != FORWARD_CONTROL_ROUTE_DAMPED:
+            linear_x, angular_z, alpha_rad = pure_pursuit_curve_command(
+                pose,
+                target_point,
+                command_lookahead_m,
+                self.args.linear_speed,
+                self.args.pure_pursuit_max_track_angular_speed_radps,
+                self.args.pure_pursuit_rotate_start_heading_error_deg,
+            )
+            return linear_x, angular_z, alpha_rad, ForwardControlResult(
+                FORWARD_CONTROL_TARGET_BEARING,
+                "",
+                math.degrees(alpha_rad),
+                None,
+                None,
+                0.0,
+                math.degrees(alpha_rad),
+                math.degrees(abs(alpha_rad)),
+                angular_z,
+                angular_z,
+            )
+
+        if (
+            route_heading is None
+            or route_heading.heading_error_deg is None
+            or projection is None
+        ):
+            linear_x, angular_z, alpha_rad = pure_pursuit_curve_command(
+                pose,
+                target_point,
+                command_lookahead_m,
+                self.args.linear_speed,
+                self.args.pure_pursuit_max_track_angular_speed_radps,
+                self.args.pure_pursuit_rotate_start_heading_error_deg,
+            )
+            return linear_x, angular_z, alpha_rad, ForwardControlResult(
+                FORWARD_CONTROL_TARGET_BEARING,
+                "route_heading_unavailable",
+                math.degrees(alpha_rad),
+                None,
+                None,
+                0.0,
+                math.degrees(alpha_rad),
+                math.degrees(abs(alpha_rad)),
+                angular_z,
+                angular_z,
+            )
+
+        return self._route_damped_fixed_forward_command(
+            geometry,
+            route_heading,
+            projection,
+        )
+
+    def _route_damped_fixed_forward_command(self, geometry, route_heading, projection):
+        alpha_rad = geometry.alpha_rad
+        alpha_deg = math.degrees(alpha_rad)
+        route_heading_error_deg = float(route_heading.heading_error_deg)
+        signed_cross_track_error_m = float(projection.signed_cross_track_error_m)
+        cte_speed_ref = max(
+            abs(float(self.args.linear_speed)),
+            float(self.args.pure_pursuit_cross_track_speed_floor_mps),
+        )
+        cte_correction_rad = -math.atan2(
+            float(self.args.pure_pursuit_cross_track_gain)
+            * signed_cross_track_error_m,
+            cte_speed_ref,
+        )
+        cte_correction_deg = clamp(
+            math.degrees(cte_correction_rad),
+            -abs(float(self.args.pure_pursuit_max_cross_track_correction_deg)),
+            abs(float(self.args.pure_pursuit_max_cross_track_correction_deg)),
+        )
+        route_error_rad = normalize_angle_rad(
+            math.radians(route_heading_error_deg + cte_correction_deg)
+        )
+        blended_error_rad = self._circular_blend_error(
+            alpha_rad,
+            route_error_rad,
+            float(self.args.pure_pursuit_route_heading_blend),
+        )
+        speed_taper_error_rad = max(
+            abs(blended_error_rad),
+            abs(math.radians(route_heading_error_deg)),
+        )
+        linear_x = self._fixed_linear_speed_for_error(speed_taper_error_rad)
+        raw_angular_z = blended_error_rad * self.args.yaw_gain
+        angular_z = clamp(
+            raw_angular_z,
+            -abs(self.args.pure_pursuit_max_track_angular_speed_radps),
+            abs(self.args.pure_pursuit_max_track_angular_speed_radps),
+        )
+        return linear_x, angular_z, blended_error_rad, ForwardControlResult(
+            FORWARD_CONTROL_ROUTE_DAMPED,
+            "",
+            alpha_deg,
+            route_heading_error_deg,
+            signed_cross_track_error_m,
+            cte_correction_deg,
+            math.degrees(blended_error_rad),
+            math.degrees(speed_taper_error_rad),
+            raw_angular_z,
+            angular_z,
+        )
+
+    @staticmethod
+    def _circular_blend_error(alpha_rad, route_error_rad, blend):
+        weight = clamp(float(blend), 0.0, 1.0)
+        x = (1.0 - weight) * math.cos(alpha_rad) + weight * math.cos(route_error_rad)
+        y = (1.0 - weight) * math.sin(alpha_rad) + weight * math.sin(route_error_rad)
+        if math.hypot(x, y) < 1e-6:
+            return normalize_angle_rad(route_error_rad)
+        return normalize_angle_rad(math.atan2(y, x))
+
+    def _fixed_linear_speed_for_error(self, error_rad):
+        rotate_start_rad = max(
+            1e-6,
+            math.radians(abs(self.args.pure_pursuit_rotate_start_heading_error_deg)),
+        )
+        abs_error = abs(float(error_rad))
+        if abs_error >= rotate_start_rad:
+            return 0.0
+        start_cos = math.cos(rotate_start_rad)
+        denominator = max(1e-6, 1.0 - start_cos)
+        linear_scale = clamp(
+            (math.cos(abs_error) - start_cos) / denominator,
+            0.0,
+            1.0,
+        )
+        return abs(float(self.args.linear_speed)) * linear_scale
 
     def _accept_projection(self, projection, route_state):
         self.last_projection_segment_index = projection.segment_index

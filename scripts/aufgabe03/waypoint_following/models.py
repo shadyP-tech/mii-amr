@@ -88,6 +88,7 @@ class ControllerStep:
     route_heading_result: object | None = None
     pure_pursuit_rotate_reason: str = ""
     pure_pursuit_rotate_source: str = ""
+    forward_control_result: object | None = None
 
 
 @dataclass(frozen=True)
