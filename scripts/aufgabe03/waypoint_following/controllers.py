@@ -35,6 +35,7 @@ ROTATE_ANCHOR_LOCAL_WINDOW_BACK_M = 0.08
 ROTATE_ANCHOR_LOCAL_WINDOW_FORWARD_M = 0.20
 POST_ROTATE_BRANCH_HEADING_TOLERANCE_DEG = 60.0
 POST_ROTATE_BRANCH_RELEASE_STABLE_SAMPLES = 2
+POST_ROTATE_BRANCH_MIN_RELEASE_PROGRESS_M = 0.18
 
 
 @dataclass
@@ -691,6 +692,8 @@ class PurePursuitController:
         lock = self.post_rotate_branch_lock
         if lock is None:
             raise RuntimeError("post_rotate_branch_lock_missing")
+        release_span_m = self._post_rotate_branch_release_span_m(lookahead_m)
+        max_span_m = self._post_rotate_branch_max_span_m(lookahead_m)
         try:
             projection = project_point_to_route_branch_window(
                 route_points,
@@ -703,6 +706,7 @@ class PurePursuitController:
                 heading_lookahead_m=ROUTE_HEADING_LOOKAHEAD_M,
                 stable_count=lock.stable_count,
                 branch_lock_start_progress_m=lock.start_progress_m,
+                branch_lock_release_required_span_m=release_span_m,
             )
         except RuntimeError as error:
             if str(error) == "pure_pursuit_branch_ambiguous":
@@ -740,10 +744,7 @@ class PurePursuitController:
                 pure_pursuit_status="off_route",
             )
 
-        if (
-            projection.branch_lock_progress_span_m
-            > max(2.0 * lookahead_m, 0.35) + 1e-9
-        ):
+        if projection.branch_lock_progress_span_m > max_span_m + 1e-9:
             lock.ambiguity_failures += 1
             self.post_rotate_branch_ambiguity_failures += 1
             self.post_rotate_branch_lock = None
@@ -751,16 +752,24 @@ class PurePursuitController:
 
         lock.last_progress_m = projection.route_progress_m
         lock.last_segment_index = projection.segment_index
-        if self._branch_release_probe_safe(
-            route_points,
-            pose,
-            lock,
-            lookahead_m,
-        ):
-            lock.stable_count += 1
-        else:
+        effective_span_m = max(0.0, lock.last_progress_m - lock.start_progress_m)
+        if effective_span_m + 1e-9 < release_span_m:
             lock.stable_count = 0
-        projection = self._with_branch_lock_stable_count(projection, lock.stable_count)
+        else:
+            if self._branch_release_probe_safe(
+                route_points,
+                pose,
+                lock,
+                lookahead_m,
+            ):
+                lock.stable_count += 1
+            else:
+                lock.stable_count = 0
+        projection = self._with_branch_lock_metadata(
+            projection,
+            lock.stable_count,
+            release_span_m,
+        )
 
         path_points = route_points_from_projection(route_points, projection)
         target_point = lookahead_target_from_route_anchor(
@@ -965,6 +974,8 @@ class PurePursuitController:
             )
         except RuntimeError:
             return False
+        if probe.route_progress_backward_delta_m > 1e-6:
+            return False
         if probe.route_progress_m + 1e-9 < lock.last_progress_m:
             return False
         if (
@@ -988,10 +999,22 @@ class PurePursuitController:
         )
 
     @staticmethod
-    def _with_branch_lock_stable_count(projection, stable_count):
+    def _post_rotate_branch_release_span_m(lookahead_m):
+        return max(float(lookahead_m), POST_ROTATE_BRANCH_MIN_RELEASE_PROGRESS_M)
+
+    @staticmethod
+    def _post_rotate_branch_max_span_m(lookahead_m):
+        release_span_m = PurePursuitController._post_rotate_branch_release_span_m(
+            lookahead_m
+        )
+        return max(2.0 * float(lookahead_m), 0.35, release_span_m + 0.10)
+
+    @staticmethod
+    def _with_branch_lock_metadata(projection, stable_count, release_span_m):
         return replace(
             projection,
             branch_lock_stable_count=int(stable_count),
+            branch_lock_release_required_span_m=float(release_span_m),
         )
 
     def _route_heading_from_rotate_anchor(self, pose):

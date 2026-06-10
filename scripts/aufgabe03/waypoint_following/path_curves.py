@@ -38,6 +38,7 @@ class RouteProjection:
     rejected_wrong_heading_segment_count: int = 0
     branch_lock_stable_count: int = 0
     branch_lock_progress_span_m: float = 0.0
+    branch_lock_release_required_span_m: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -351,6 +352,7 @@ def project_point_to_route_branch_window(
     projection_status="post_rotate_branch_lock",
     stable_count=0,
     branch_lock_start_progress_m=None,
+    branch_lock_release_required_span_m=0.0,
 ):
     route = [(float(x), float(y)) for x, y in points]
     if len(route) < 2:
@@ -528,6 +530,7 @@ def project_point_to_route_branch_window(
         rejected_wrong_heading_segment_count=rejected_wrong_heading_count,
         branch_lock_stable_count=int(stable_count),
         branch_lock_progress_span_m=branch_lock_progress_span_m,
+        branch_lock_release_required_span_m=float(branch_lock_release_required_span_m),
         local_cross_track_m=distance_m,
     )
 

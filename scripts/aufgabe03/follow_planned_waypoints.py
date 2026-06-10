@@ -52,6 +52,7 @@ from waypoint_following.command_smoothing import (  # noqa: E402
 )
 from waypoint_following.controllers import (  # noqa: E402
     POST_ROTATE_BRANCH_HEADING_TOLERANCE_DEG,
+    POST_ROTATE_BRANCH_MIN_RELEASE_PROGRESS_M,
     POST_ROTATE_BRANCH_RELEASE_STABLE_SAMPLES,
     PathController,
     PROJECTION_LOCK_PROGRESS_TOLERANCE_M,
@@ -598,7 +599,9 @@ def notes_with_route_projection_metadata(notes, args, node):
         "pure_pursuit_post_rotate_branch_heading_tolerance_deg="
         f"{POST_ROTATE_BRANCH_HEADING_TOLERANCE_DEG:.3f};"
         "pure_pursuit_post_rotate_branch_release_samples="
-        f"{POST_ROTATE_BRANCH_RELEASE_STABLE_SAMPLES}"
+        f"{POST_ROTATE_BRANCH_RELEASE_STABLE_SAMPLES};"
+        "pure_pursuit_post_rotate_branch_min_release_progress_m="
+        f"{POST_ROTATE_BRANCH_MIN_RELEASE_PROGRESS_M:.3f}"
     )
 
 
@@ -1433,6 +1436,8 @@ class WaypointFollower(Node):
             f"{getattr(projection, 'branch_lock_stable_count', 0)}, "
             "branch_lock_progress_span_m="
             f"{getattr(projection, 'branch_lock_progress_span_m', 0.0):.3f}, "
+            "branch_lock_release_required_span_m="
+            f"{getattr(projection, 'branch_lock_release_required_span_m', 0.0):.3f}, "
             f"cross_track_error_m={projection.cross_track_error_m:.3f}, "
             f"signed_cross_track_error_m={projection.signed_cross_track_error_m:.3f}, "
             f"route_heading_deg={projection.route_heading_deg:.1f}, "
@@ -3065,6 +3070,10 @@ def print_dry_run(
         print(
             "pure_pursuit_post_rotate_branch_release_samples="
             f"{POST_ROTATE_BRANCH_RELEASE_STABLE_SAMPLES}"
+        )
+        print(
+            "pure_pursuit_post_rotate_branch_min_release_progress_m="
+            f"{POST_ROTATE_BRANCH_MIN_RELEASE_PROGRESS_M:.3f}"
         )
         print(
             "pure_pursuit_max_lateral_accel_mps2="
