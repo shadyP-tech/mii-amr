@@ -33,6 +33,7 @@ PROJECTION_LOCK_REQUIRED_SAMPLES = 3
 PROJECTION_LOCK_PROGRESS_TOLERANCE_M = 0.03
 ROTATE_ANCHOR_LOCAL_WINDOW_BACK_M = 0.08
 ROTATE_ANCHOR_LOCAL_WINDOW_FORWARD_M = 0.20
+ROTATE_ANCHOR_ROUTE_HEADING_EXIT_SAMPLES = 3
 POST_ROTATE_BRANCH_HEADING_TOLERANCE_DEG = 60.0
 POST_ROTATE_BRANCH_RELEASE_STABLE_SAMPLES = 2
 POST_ROTATE_BRANCH_MIN_RELEASE_PROGRESS_M = 0.18
@@ -54,6 +55,9 @@ class RotateProjectionAnchor:
     cross_track_m: float
     max_backward_delta_m: float = 0.0
     max_forward_delta_m: float = 0.0
+    route_heading_aligned_sample_count: int = 0
+    max_route_heading_aligned_sample_count: int = 0
+    handoff_reason: str = ""
 
 
 @dataclass
@@ -67,6 +71,9 @@ class PostRotateBranchLock:
     max_heading_error_deg: float = 0.0
     activations: int = 0
     ambiguity_failures: int = 0
+    rotate_anchor_aligned_sample_count: int = 0
+    rotate_anchor_handoff_reason: str = ""
+    suppress_alpha_rotate: bool = False
 
 
 @dataclass(frozen=True)
@@ -222,6 +229,8 @@ class PurePursuitController:
         self.max_projection_backward_delta_m = 0.0
         self.max_rotate_anchor_backward_delta_m = 0.0
         self.max_rotate_anchor_forward_delta_m = 0.0
+        self.max_rotate_anchor_aligned_samples = 0
+        self.last_rotate_anchor_aligned_samples = 0
         self.rotate_anchor_activations = 0
         self.last_accepted_projection = None
         self.rotate_projection_anchor = None
@@ -241,6 +250,8 @@ class PurePursuitController:
         self.max_projection_backward_delta_m = 0.0
         self.max_rotate_anchor_backward_delta_m = 0.0
         self.max_rotate_anchor_forward_delta_m = 0.0
+        self.max_rotate_anchor_aligned_samples = 0
+        self.last_rotate_anchor_aligned_samples = 0
         self.rotate_anchor_activations = 0
         self.last_accepted_projection = None
         self.rotate_projection_anchor = None
@@ -560,6 +571,7 @@ class PurePursuitController:
                 projection_status="rotate_anchor_raw",
             )
         except RuntimeError:
+            self.last_rotate_anchor_aligned_samples = 0
             self.rotate_projection_anchor = None
             return ControllerStep(
                 TwistCommand(0.0, 0.0),
@@ -580,6 +592,7 @@ class PurePursuitController:
                 pose,
                 raw_projection,
             )
+            self.last_rotate_anchor_aligned_samples = 0
             self.rotate_projection_anchor = None
             return ControllerStep(
                 TwistCommand(0.0, 0.0),
@@ -592,12 +605,13 @@ class PurePursuitController:
                 pure_pursuit_status="off_route",
             )
 
+        route_heading = self._route_heading_from_rotate_anchor(pose)
+        self._update_rotate_anchor_alignment(anchor, route_heading)
         projection = self._projection_from_rotate_anchor(
             route_points,
             pose,
             raw_projection,
         )
-        route_heading = self._route_heading_from_rotate_anchor(pose)
         path_points = route_points_from_projection(route_points, projection)
         target_point = lookahead_target_from_route_anchor(
             path_points,
@@ -616,6 +630,7 @@ class PurePursuitController:
             )
         )
         if require_rotate and not rotate_mode:
+            self.last_rotate_anchor_aligned_samples = 0
             self.rotate_projection_anchor = None
             raise RuntimeError("route_projection_moved_backward")
 
@@ -624,6 +639,23 @@ class PurePursuitController:
             if rotate_source == "alpha"
             else math.radians(rotate_error_deg)
         )
+        if rotate_mode and self._rotate_anchor_stable_handoff_ready(anchor):
+            self.mode = "forward"
+            anchor.handoff_reason = "route_heading_stable"
+            self._activate_post_rotate_branch_lock(anchor)
+            self.rotate_projection_anchor = None
+            return self._compute_with_post_rotate_branch_lock(
+                pose,
+                route_state,
+                route_points,
+                final_goal,
+                distance_to_goal,
+                goal_tolerance_m,
+                lookahead_m,
+                current_point,
+                suppress_alpha_rotate=True,
+            )
+
         if rotate_mode:
             self.mode = "rotate"
             angular_z = clamp(
@@ -646,65 +678,18 @@ class PurePursuitController:
             )
 
         self.mode = "forward"
+        anchor.handoff_reason = "rotate_gate_clear"
         self._activate_post_rotate_branch_lock(anchor)
-        guard_result = None
-        if self.lookahead_guard is not None:
-            target_point, guard_result = self.lookahead_guard.select_target(
-                pose,
-                path_points,
-                current_point,
-                target_point,
-                lookahead_m,
-                getattr(self.args, "pure_pursuit_min_guarded_lookahead_m", 0.12),
-                final_goal=final_goal,
-                distance_to_goal_m=distance_to_goal,
-            )
-            if not guard_result.safe:
-                self.reset_route_projection_state()
-                target_heading_deg = math.degrees(
-                    math.atan2(
-                        target_point[1] - pose.y,
-                        target_point[0] - pose.x,
-                    )
-                )
-                return ControllerStep(
-                    TwistCommand(0.0, 0.0),
-                    "blocked",
-                    target_point,
-                    distance_to_goal,
-                    shortest_angle_delta_deg(pose.yaw_deg, target_heading_deg),
-                    False,
-                    guard_result,
-                    route_heading_result=route_heading,
-                )
-            if guard_result.selected_target_distance_m is not None:
-                command_lookahead_m = guard_result.selected_target_distance_m
-            geometry = pure_pursuit_geometry(pose, target_point, command_lookahead_m)
-            alpha_rad = geometry.alpha_rad
-
-        linear_x, angular_z, alpha_rad, mode, velocity_schedule_result, forward_control_result = (
-            self._forward_command_from_geometry(
-                pose,
-                target_point,
-                command_lookahead_m,
-                geometry,
-            )
-        )
-        self._accept_projection(projection, route_state)
         self.rotate_projection_anchor = None
-        return ControllerStep(
-            TwistCommand(linear_x, angular_z),
-            mode,
-            target_point,
+        return self._compute_with_post_rotate_branch_lock(
+            pose,
+            route_state,
+            route_points,
+            final_goal,
             distance_to_goal,
-            math.degrees(alpha_rad),
-            False,
-            guard_result,
-            velocity_schedule_result,
-            projection,
-            "forward",
-            route_heading,
-            forward_control_result=forward_control_result,
+            goal_tolerance_m,
+            lookahead_m,
+            current_point,
         )
 
     def _compute_with_post_rotate_branch_lock(
@@ -717,6 +702,7 @@ class PurePursuitController:
         goal_tolerance_m,
         lookahead_m,
         current_point,
+        suppress_alpha_rotate=False,
     ):
         lock = self.post_rotate_branch_lock
         if lock is None:
@@ -798,6 +784,8 @@ class PurePursuitController:
             projection,
             lock.stable_count,
             release_span_m,
+            lock.rotate_anchor_aligned_sample_count,
+            lock.rotate_anchor_handoff_reason,
         )
 
         path_points = route_points_from_projection(route_points, projection)
@@ -828,7 +816,11 @@ class PurePursuitController:
             if rotate_source == "alpha"
             else math.radians(rotate_error_deg)
         )
-        if rotate_mode:
+        alpha_rotate_suppressed = (
+            (suppress_alpha_rotate or lock.suppress_alpha_rotate)
+            and rotate_source == "alpha"
+        )
+        if rotate_mode and not alpha_rotate_suppressed:
             self.mode = "rotate"
             self.post_rotate_branch_lock = None
             self._activate_rotate_anchor(projection, route_heading)
@@ -1140,8 +1132,48 @@ class PurePursuitController:
             last_progress_m=float(anchor.progress_m),
             last_segment_index=int(anchor.segment_index),
             start_progress_m=float(anchor.progress_m),
+            rotate_anchor_aligned_sample_count=(
+                int(getattr(anchor, "route_heading_aligned_sample_count", 0))
+            ),
+            rotate_anchor_handoff_reason=str(
+                getattr(anchor, "handoff_reason", "")
+            ),
+            suppress_alpha_rotate=(
+                getattr(anchor, "handoff_reason", "") == "route_heading_stable"
+            ),
         )
         self.post_rotate_branch_lock_activations += 1
+
+    def _update_rotate_anchor_alignment(self, anchor, route_heading):
+        route_error = (
+            route_heading.heading_error_deg if route_heading is not None else None
+        )
+        if (
+            route_error is not None
+            and abs(float(route_error))
+            <= self.args.pure_pursuit_route_heading_rotate_stop_deg
+        ):
+            anchor.route_heading_aligned_sample_count += 1
+        else:
+            anchor.route_heading_aligned_sample_count = 0
+        anchor.max_route_heading_aligned_sample_count = max(
+            anchor.max_route_heading_aligned_sample_count,
+            anchor.route_heading_aligned_sample_count,
+        )
+        self.last_rotate_anchor_aligned_samples = (
+            anchor.route_heading_aligned_sample_count
+        )
+        self.max_rotate_anchor_aligned_samples = max(
+            self.max_rotate_anchor_aligned_samples,
+            anchor.max_route_heading_aligned_sample_count,
+        )
+
+    @staticmethod
+    def _rotate_anchor_stable_handoff_ready(anchor):
+        return (
+            anchor.route_heading_aligned_sample_count
+            >= ROTATE_ANCHOR_ROUTE_HEADING_EXIT_SAMPLES
+        )
 
     def _branch_release_probe_safe(self, route_points, pose, lock, lookahead_m):
         try:
@@ -1193,11 +1225,21 @@ class PurePursuitController:
         return max(2.0 * float(lookahead_m), 0.35, release_span_m + 0.10)
 
     @staticmethod
-    def _with_branch_lock_metadata(projection, stable_count, release_span_m):
+    def _with_branch_lock_metadata(
+        projection,
+        stable_count,
+        release_span_m,
+        rotate_anchor_aligned_samples=0,
+        rotate_anchor_handoff_reason="",
+    ):
         return replace(
             projection,
             branch_lock_stable_count=int(stable_count),
             branch_lock_release_required_span_m=float(release_span_m),
+            rotate_anchor_route_heading_aligned_samples=int(
+                rotate_anchor_aligned_samples
+            ),
+            rotate_anchor_handoff_reason=str(rotate_anchor_handoff_reason),
         )
 
     def _route_heading_from_rotate_anchor(self, pose):
@@ -1256,6 +1298,10 @@ class PurePursuitController:
             anchor_segment_index=anchor.segment_index,
             rotate_anchor_backward_delta_m=backward_delta,
             rotate_anchor_forward_delta_m=forward_delta,
+            rotate_anchor_route_heading_aligned_samples=(
+                anchor.route_heading_aligned_sample_count
+            ),
+            rotate_anchor_handoff_reason=anchor.handoff_reason,
             local_cross_track_m=raw_projection.cross_track_error_m,
         )
 

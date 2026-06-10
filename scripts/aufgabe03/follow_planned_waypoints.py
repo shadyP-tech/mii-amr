@@ -57,6 +57,7 @@ from waypoint_following.controllers import (  # noqa: E402
     POST_ROTATE_BRANCH_HEADING_TOLERANCE_DEG,
     POST_ROTATE_BRANCH_MIN_RELEASE_PROGRESS_M,
     POST_ROTATE_BRANCH_RELEASE_STABLE_SAMPLES,
+    ROTATE_ANCHOR_ROUTE_HEADING_EXIT_SAMPLES,
     PathController,
     PROJECTION_LOCK_PROGRESS_TOLERANCE_M,
     PROJECTION_LOCK_REQUIRED_SAMPLES,
@@ -606,6 +607,12 @@ def notes_with_route_projection_metadata(notes, args, node):
         f"{getattr(node, 'max_rotate_anchor_backward_delta_m', 0.0):.3f};"
         "pure_pursuit_max_rotate_anchor_forward_delta_m="
         f"{getattr(node, 'max_rotate_anchor_forward_delta_m', 0.0):.3f};"
+        "pure_pursuit_last_rotate_anchor_aligned_samples="
+        f"{getattr(node, 'last_rotate_anchor_aligned_samples', 0)};"
+        "pure_pursuit_max_rotate_anchor_aligned_samples="
+        f"{getattr(node, 'max_rotate_anchor_aligned_samples', 0)};"
+        "pure_pursuit_rotate_anchor_route_heading_exit_samples="
+        f"{ROTATE_ANCHOR_ROUTE_HEADING_EXIT_SAMPLES};"
         "pure_pursuit_post_rotate_branch_lock_activations="
         f"{getattr(node, 'post_rotate_branch_lock_activations', 0)};"
         "pure_pursuit_post_rotate_branch_max_heading_error_deg="
@@ -1052,6 +1059,8 @@ class WaypointFollower(Node):
         self.max_projection_backward_delta_m = 0.0
         self.max_rotate_anchor_backward_delta_m = 0.0
         self.max_rotate_anchor_forward_delta_m = 0.0
+        self.last_rotate_anchor_aligned_samples = 0
+        self.max_rotate_anchor_aligned_samples = 0
         self.pure_pursuit_rotate_anchor_activations = 0
         self.post_rotate_branch_lock_activations = 0
         self.post_rotate_branch_ambiguity_failures = 0
@@ -1329,6 +1338,14 @@ class WaypointFollower(Node):
             self.max_rotate_anchor_forward_delta_m,
             float(getattr(projection, "rotate_anchor_forward_delta_m", 0.0)),
         )
+        aligned_samples = int(
+            getattr(projection, "rotate_anchor_route_heading_aligned_samples", 0)
+        )
+        self.last_rotate_anchor_aligned_samples = aligned_samples
+        self.max_rotate_anchor_aligned_samples = max(
+            self.max_rotate_anchor_aligned_samples,
+            aligned_samples,
+        )
         controller = getattr(self, "_current_path_controller", None)
         controller_anchor_activations = getattr(
             controller,
@@ -1448,6 +1465,10 @@ class WaypointFollower(Node):
             f"{getattr(projection, 'rotate_anchor_backward_delta_m', 0.0):.3f}, "
             "rotate_anchor_forward_delta_m="
             f"{getattr(projection, 'rotate_anchor_forward_delta_m', 0.0):.3f}, "
+            "rotate_anchor_route_heading_aligned_samples="
+            f"{getattr(projection, 'rotate_anchor_route_heading_aligned_samples', 0)}, "
+            "rotate_anchor_handoff_reason="
+            f"{getattr(projection, 'rotate_anchor_handoff_reason', '')}, "
             "local_cross_track_m="
             f"{format_optional_m(getattr(projection, 'local_cross_track_m', None))}, "
             "preferred_branch_heading_deg="
@@ -3133,6 +3154,10 @@ def print_dry_run(
         print(
             "pure_pursuit_post_rotate_branch_release_samples="
             f"{POST_ROTATE_BRANCH_RELEASE_STABLE_SAMPLES}"
+        )
+        print(
+            "pure_pursuit_rotate_anchor_route_heading_exit_samples="
+            f"{ROTATE_ANCHOR_ROUTE_HEADING_EXIT_SAMPLES}"
         )
         print(
             "pure_pursuit_post_rotate_branch_min_release_progress_m="

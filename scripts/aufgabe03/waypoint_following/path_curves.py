@@ -31,6 +31,8 @@ class RouteProjection:
     anchor_segment_index: int | None = None
     rotate_anchor_backward_delta_m: float = 0.0
     rotate_anchor_forward_delta_m: float = 0.0
+    rotate_anchor_route_heading_aligned_samples: int = 0
+    rotate_anchor_handoff_reason: str = ""
     local_cross_track_m: float | None = None
     preferred_branch_heading_deg: float | None = None
     selected_segment_heading_deg: float | None = None
