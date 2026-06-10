@@ -51,6 +51,8 @@ from waypoint_following.command_smoothing import (  # noqa: E402
     CommandSmoothingConfig,
 )
 from waypoint_following.controllers import (  # noqa: E402
+    POST_ROTATE_BRANCH_HEADING_TOLERANCE_DEG,
+    POST_ROTATE_BRANCH_RELEASE_STABLE_SAMPLES,
     PathController,
     PROJECTION_LOCK_PROGRESS_TOLERANCE_M,
     PROJECTION_LOCK_REQUIRED_SAMPLES,
@@ -85,8 +87,10 @@ from waypoint_following.path_curves import (  # noqa: E402
     lookahead_target_from_route_anchor,
     polyline_lookahead_target,
     project_point_to_route,
+    project_point_to_route_branch_window,
     project_point_to_route_progress_window,
     pure_pursuit_curve_command,
+    route_heading_at_progress,
     route_heading_from_projection,
     route_points_from_projection,
     select_curve_lookahead_target,
@@ -582,7 +586,19 @@ def notes_with_route_projection_metadata(notes, args, node):
         "pure_pursuit_max_rotate_anchor_backward_delta_m="
         f"{getattr(node, 'max_rotate_anchor_backward_delta_m', 0.0):.3f};"
         "pure_pursuit_max_rotate_anchor_forward_delta_m="
-        f"{getattr(node, 'max_rotate_anchor_forward_delta_m', 0.0):.3f}"
+        f"{getattr(node, 'max_rotate_anchor_forward_delta_m', 0.0):.3f};"
+        "pure_pursuit_post_rotate_branch_lock_activations="
+        f"{getattr(node, 'post_rotate_branch_lock_activations', 0)};"
+        "pure_pursuit_post_rotate_branch_max_heading_error_deg="
+        f"{getattr(node, 'post_rotate_branch_max_heading_error_deg', 0.0):.3f};"
+        "pure_pursuit_post_rotate_branch_rejected_wrong_heading_count="
+        f"{getattr(node, 'post_rotate_branch_rejected_wrong_heading_count', 0)};"
+        "pure_pursuit_post_rotate_branch_ambiguity_failures="
+        f"{getattr(node, 'post_rotate_branch_ambiguity_failures', 0)};"
+        "pure_pursuit_post_rotate_branch_heading_tolerance_deg="
+        f"{POST_ROTATE_BRANCH_HEADING_TOLERANCE_DEG:.3f};"
+        "pure_pursuit_post_rotate_branch_release_samples="
+        f"{POST_ROTATE_BRANCH_RELEASE_STABLE_SAMPLES}"
     )
 
 
@@ -1016,6 +1032,10 @@ class WaypointFollower(Node):
         self.max_rotate_anchor_backward_delta_m = 0.0
         self.max_rotate_anchor_forward_delta_m = 0.0
         self.pure_pursuit_rotate_anchor_activations = 0
+        self.post_rotate_branch_lock_activations = 0
+        self.post_rotate_branch_ambiguity_failures = 0
+        self.post_rotate_branch_rejected_wrong_heading_count = 0
+        self.post_rotate_branch_max_heading_error_deg = 0.0
         self.last_projection_acquisition_status = ""
         self.last_projection_lock_sample_count = 0
         self._current_path_controller = None
@@ -1057,6 +1077,10 @@ class WaypointFollower(Node):
                 f"{args.pure_pursuit_route_heading_rotate_start_deg:.1f} deg, "
                 "route_heading_rotate_stop="
                 f"{args.pure_pursuit_route_heading_rotate_stop_deg:.1f} deg, "
+                "post_rotate_branch_heading_tolerance="
+                f"{POST_ROTATE_BRANCH_HEADING_TOLERANCE_DEG:.1f} deg, "
+                "post_rotate_branch_release_samples="
+                f"{POST_ROTATE_BRANCH_RELEASE_STABLE_SAMPLES}, "
                 f"max_lateral_accel={args.pure_pursuit_max_lateral_accel_mps2:.3f}, "
                 f"turn_speed_margin={args.pure_pursuit_turn_speed_margin:.3f}, "
                 f"heading_deadband={args.pure_pursuit_heading_deadband_deg:.1f} deg, "
@@ -1285,6 +1309,43 @@ class WaypointFollower(Node):
         )
         if controller_anchor_activations is not None:
             self.pure_pursuit_rotate_anchor_activations = controller_anchor_activations
+        self.post_rotate_branch_rejected_wrong_heading_count += int(
+            getattr(projection, "rejected_wrong_heading_segment_count", 0),
+        )
+        branch_heading_error = getattr(
+            projection,
+            "selected_branch_heading_error_deg",
+            None,
+        )
+        if branch_heading_error is not None:
+            self.post_rotate_branch_max_heading_error_deg = max(
+                self.post_rotate_branch_max_heading_error_deg,
+                abs(float(branch_heading_error)),
+            )
+        controller_branch_activations = getattr(
+            controller,
+            "post_rotate_branch_lock_activations",
+            None,
+        )
+        if controller_branch_activations is not None:
+            self.post_rotate_branch_lock_activations = controller_branch_activations
+        controller_branch_failures = getattr(
+            controller,
+            "post_rotate_branch_ambiguity_failures",
+            None,
+        )
+        if controller_branch_failures is not None:
+            self.post_rotate_branch_ambiguity_failures = controller_branch_failures
+        controller_branch_max_error = getattr(
+            controller,
+            "post_rotate_branch_max_heading_error_deg",
+            None,
+        )
+        if controller_branch_max_error is not None:
+            self.post_rotate_branch_max_heading_error_deg = max(
+                self.post_rotate_branch_max_heading_error_deg,
+                controller_branch_max_error,
+            )
         self.last_projection_acquisition_status = getattr(
             projection,
             "projection_status",
@@ -1360,6 +1421,18 @@ class WaypointFollower(Node):
             f"{getattr(projection, 'rotate_anchor_forward_delta_m', 0.0):.3f}, "
             "local_cross_track_m="
             f"{format_optional_m(getattr(projection, 'local_cross_track_m', None))}, "
+            "preferred_branch_heading_deg="
+            f"{format_optional_m(getattr(projection, 'preferred_branch_heading_deg', None))}, "
+            "selected_segment_heading_deg="
+            f"{format_optional_m(getattr(projection, 'selected_segment_heading_deg', None))}, "
+            "selected_branch_heading_error_deg="
+            f"{format_optional_m(getattr(projection, 'selected_branch_heading_error_deg', None))}, "
+            "rejected_wrong_heading_segment_count="
+            f"{getattr(projection, 'rejected_wrong_heading_segment_count', 0)}, "
+            "branch_lock_stable_count="
+            f"{getattr(projection, 'branch_lock_stable_count', 0)}, "
+            "branch_lock_progress_span_m="
+            f"{getattr(projection, 'branch_lock_progress_span_m', 0.0):.3f}, "
             f"cross_track_error_m={projection.cross_track_error_m:.3f}, "
             f"signed_cross_track_error_m={projection.signed_cross_track_error_m:.3f}, "
             f"route_heading_deg={projection.route_heading_deg:.1f}, "
@@ -2984,6 +3057,14 @@ def print_dry_run(
         print(
             "pure_pursuit_route_heading_rotate_stop_deg="
             f"{args.pure_pursuit_route_heading_rotate_stop_deg:.3f}"
+        )
+        print(
+            "pure_pursuit_post_rotate_branch_heading_tolerance_deg="
+            f"{POST_ROTATE_BRANCH_HEADING_TOLERANCE_DEG:.3f}"
+        )
+        print(
+            "pure_pursuit_post_rotate_branch_release_samples="
+            f"{POST_ROTATE_BRANCH_RELEASE_STABLE_SAMPLES}"
         )
         print(
             "pure_pursuit_max_lateral_accel_mps2="

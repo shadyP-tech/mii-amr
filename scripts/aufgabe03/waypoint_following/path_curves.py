@@ -32,6 +32,12 @@ class RouteProjection:
     rotate_anchor_backward_delta_m: float = 0.0
     rotate_anchor_forward_delta_m: float = 0.0
     local_cross_track_m: float | None = None
+    preferred_branch_heading_deg: float | None = None
+    selected_segment_heading_deg: float | None = None
+    selected_branch_heading_error_deg: float | None = None
+    rejected_wrong_heading_segment_count: int = 0
+    branch_lock_stable_count: int = 0
+    branch_lock_progress_span_m: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -208,6 +214,39 @@ def route_heading_from_projection(
     )
 
 
+def route_heading_at_progress(
+    points,
+    progress_m,
+    heading_lookahead_m=ROUTE_HEADING_LOOKAHEAD_M,
+):
+    route = [(float(x), float(y)) for x, y in points]
+    if len(route) < 2:
+        return None
+    cumulative = route_cumulative_distances(route)
+    if not cumulative or cumulative[-1] <= 1e-9:
+        return None
+    progress = clamp(float(progress_m), 0.0, cumulative[-1])
+    x, y, segment_index, _ratio = route_point_at_progress(route, cumulative, progress)
+    projection = RouteProjection(
+        projected_point=(x, y),
+        segment_index=segment_index,
+        segment_ratio=0.0,
+        route_progress_m=progress,
+        route_heading_deg=0.0,
+        heading_error_to_route_deg=0.0,
+        cross_track_error_m=0.0,
+        signed_cross_track_error_m=0.0,
+        remaining_route_m=max(0.0, cumulative[-1] - progress),
+    )
+    route_heading = route_heading_from_projection(
+        route,
+        projection,
+        current_yaw_deg=0.0,
+        heading_lookahead_m=heading_lookahead_m,
+    )
+    return route_heading.heading_deg
+
+
 def project_point_to_route(
     points,
     current_pose,
@@ -297,6 +336,199 @@ def project_point_to_route(
         route_progress_delta_m=route_progress_delta_m,
         route_progress_backward_delta_m=route_progress_backward_delta_m,
         route_progress_forward_delta_m=route_progress_forward_delta_m,
+    )
+
+
+def project_point_to_route_branch_window(
+    points,
+    current_pose,
+    min_progress_m,
+    max_progress_m,
+    preferred_heading_deg,
+    heading_tolerance_deg,
+    previous_progress_m=None,
+    heading_lookahead_m=ROUTE_HEADING_LOOKAHEAD_M,
+    projection_status="post_rotate_branch_lock",
+    stable_count=0,
+    branch_lock_start_progress_m=None,
+):
+    route = [(float(x), float(y)) for x, y in points]
+    if len(route) < 2:
+        raise RuntimeError("route_projection_path_too_short")
+    cumulative = route_cumulative_distances(route)
+    if cumulative[-1] <= 1e-9:
+        raise RuntimeError("route_projection_path_too_short")
+
+    window_min = clamp(float(min_progress_m), 0.0, cumulative[-1])
+    window_max = clamp(float(max_progress_m), 0.0, cumulative[-1])
+    if window_max < window_min:
+        raise RuntimeError("pure_pursuit_branch_ambiguous")
+
+    current = (float(current_pose.x), float(current_pose.y))
+    best = None
+    rejected_wrong_heading_count = 0
+    max_rejected_heading_error = 0.0
+    preferred_heading = float(preferred_heading_deg)
+    heading_tolerance = abs(float(heading_tolerance_deg))
+
+    for index in range(len(route) - 1):
+        start_progress = cumulative[index]
+        end_progress = cumulative[index + 1]
+        segment_length = end_progress - start_progress
+        if segment_length <= 1e-9:
+            continue
+        overlap_start = max(start_progress, window_min)
+        overlap_end = min(end_progress, window_max)
+        if overlap_end < overlap_start - 1e-9:
+            continue
+
+        if overlap_end - overlap_start <= 1e-9:
+            point_x, point_y, _segment_index, _ratio = route_point_at_progress(
+                route,
+                cumulative,
+                overlap_start,
+            )
+            projected = (point_x, point_y)
+            ratio = clamp(
+                (overlap_start - start_progress) / segment_length,
+                0.0,
+                1.0,
+            )
+            distance_m = distance_2d(current, projected)
+            progress_m = overlap_start
+        else:
+            start_ratio = clamp(
+                (overlap_start - start_progress) / segment_length,
+                0.0,
+                1.0,
+            )
+            end_ratio = clamp(
+                (overlap_end - start_progress) / segment_length,
+                0.0,
+                1.0,
+            )
+            start = route[index]
+            end = route[index + 1]
+            clipped_start = (
+                start[0] + start_ratio * (end[0] - start[0]),
+                start[1] + start_ratio * (end[1] - start[1]),
+            )
+            clipped_end = (
+                start[0] + end_ratio * (end[0] - start[0]),
+                start[1] + end_ratio * (end[1] - start[1]),
+            )
+            distance_m, clipped_ratio, projected = _projection_on_segment(
+                current,
+                clipped_start,
+                clipped_end,
+            )
+            progress_m = overlap_start + clipped_ratio * (overlap_end - overlap_start)
+            ratio = clamp(
+                (progress_m - start_progress) / segment_length,
+                0.0,
+                1.0,
+            )
+
+        candidate_heading = route_heading_at_progress(
+            route,
+            progress_m,
+            heading_lookahead_m,
+        )
+        if candidate_heading is None:
+            continue
+        heading_error = abs(shortest_angle_delta_deg(preferred_heading, candidate_heading))
+        if heading_error > heading_tolerance:
+            rejected_wrong_heading_count += 1
+            max_rejected_heading_error = max(max_rejected_heading_error, heading_error)
+            continue
+
+        candidate = (distance_m, heading_error, -progress_m, index, ratio, projected, candidate_heading)
+        if best is None or candidate < best:
+            best = candidate
+
+    if best is None:
+        raise RuntimeError("pure_pursuit_branch_ambiguous")
+
+    (
+        distance_m,
+        heading_error,
+        negative_selected_progress_m,
+        segment_index,
+        selected_ratio,
+        selected_projected,
+        selected_heading,
+    ) = best
+    selected_progress_m = -negative_selected_progress_m
+    effective_progress_m = selected_progress_m
+    if previous_progress_m is not None:
+        effective_progress_m = max(float(previous_progress_m), selected_progress_m)
+    x, y, effective_segment_index, effective_ratio = route_point_at_progress(
+        route,
+        cumulative,
+        effective_progress_m,
+    )
+    effective_projected = (x, y)
+    effective_cross_track = distance_2d(current, effective_projected)
+    route_progress_delta_m = None
+    route_progress_backward_delta_m = 0.0
+    route_progress_forward_delta_m = 0.0
+    if previous_progress_m is not None:
+        route_progress_delta_m = effective_progress_m - float(previous_progress_m)
+        route_progress_backward_delta_m = max(0.0, -route_progress_delta_m)
+        route_progress_forward_delta_m = max(0.0, route_progress_delta_m)
+
+    start = route[effective_segment_index]
+    end = route[effective_segment_index + 1]
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    signed_error = (
+        dx * (current[1] - effective_projected[1])
+        - dy * (current[0] - effective_projected[0])
+    ) / max(1e-9, math.hypot(dx, dy))
+    selected_segment_heading = math.degrees(math.atan2(dy, dx))
+    effective_heading = route_heading_at_progress(
+        route,
+        effective_progress_m,
+        heading_lookahead_m,
+    )
+    if effective_heading is None:
+        effective_heading = selected_heading
+    effective_heading_error = abs(
+        shortest_angle_delta_deg(preferred_heading, effective_heading)
+    )
+    branch_lock_progress_span_m = 0.0
+    if branch_lock_start_progress_m is not None:
+        branch_lock_progress_span_m = max(
+            0.0,
+            effective_progress_m - float(branch_lock_start_progress_m),
+        )
+    return RouteProjection(
+        projected_point=effective_projected,
+        segment_index=effective_segment_index,
+        segment_ratio=effective_ratio,
+        route_progress_m=effective_progress_m,
+        route_heading_deg=effective_heading,
+        heading_error_to_route_deg=shortest_angle_delta_deg(
+            float(current_pose.yaw_deg),
+            effective_heading,
+        ),
+        cross_track_error_m=effective_cross_track,
+        signed_cross_track_error_m=signed_error,
+        remaining_route_m=max(0.0, cumulative[-1] - effective_progress_m),
+        projection_status=projection_status,
+        route_progress_delta_m=route_progress_delta_m,
+        route_progress_backward_delta_m=route_progress_backward_delta_m,
+        route_progress_forward_delta_m=route_progress_forward_delta_m,
+        raw_projection_progress_m=selected_progress_m,
+        raw_projection_segment_index=segment_index,
+        effective_projection_progress_m=effective_progress_m,
+        preferred_branch_heading_deg=preferred_heading,
+        selected_segment_heading_deg=selected_segment_heading,
+        selected_branch_heading_error_deg=effective_heading_error,
+        rejected_wrong_heading_segment_count=rejected_wrong_heading_count,
+        branch_lock_stable_count=int(stable_count),
+        branch_lock_progress_span_m=branch_lock_progress_span_m,
+        local_cross_track_m=distance_m,
     )
 
 
