@@ -118,6 +118,16 @@ from waypoint_following.run_logging import (  # noqa: E402
     migrate_csv_header,
     pose_fields,
 )
+from waypoint_following.velocity_scheduler import (  # noqa: E402
+    SPEED_PROFILE_CURVATURE_AWARE,
+    SPEED_PROFILE_FIXED,
+    SPEED_PROFILE_MODES,
+    PurePursuitGeometry,
+    PurePursuitVelocityConfig,
+    PurePursuitVelocityScheduler,
+    VelocityScheduleResult,
+    pure_pursuit_geometry,
+)
 from waypoint_following.scan_safety import (  # noqa: E402
     FORWARD_SOFT_STOP_MIN_CLOSE_RANGES,
     evaluate_scan_safety,
@@ -136,6 +146,7 @@ DEFAULT_RVIZ_WAYPOINT_MARKER_TOPIC = "/mii_amr/planned_waypoints"
 DEFAULT_RVIZ_OBSTACLE_MARKER_TOPIC = "/mii_amr/run_local_obstacles"
 
 DEFAULT_LINEAR_SPEED_MPS = 0.04
+DEFAULT_PURE_PURSUIT_LINEAR_SPEED_MPS = 0.06
 DEFAULT_MIN_LINEAR_SPEED_MPS = 0.012
 DEFAULT_LINEAR_GAIN = 0.25
 DEFAULT_MAX_ANGULAR_SPEED_RADPS = 0.09
@@ -162,6 +173,11 @@ DEFAULT_PURE_PURSUIT_MAX_LINEAR_DECEL_MPS2 = 0.12
 DEFAULT_PURE_PURSUIT_MAX_ANGULAR_ACCEL_RADPS2 = 0.18
 DEFAULT_PURE_PURSUIT_MAX_ANGULAR_DECEL_RADPS2 = 0.36
 DEFAULT_PURE_PURSUIT_FINAL_DECEL_DISTANCE_M = 0.30
+DEFAULT_PURE_PURSUIT_SPEED_PROFILE = SPEED_PROFILE_CURVATURE_AWARE
+DEFAULT_PURE_PURSUIT_MAX_LATERAL_ACCEL_MPS2 = 0.04
+DEFAULT_PURE_PURSUIT_TURN_SPEED_MARGIN = 0.85
+DEFAULT_PURE_PURSUIT_ROTATE_START_HEADING_ERROR_DEG = 75.0
+DEFAULT_PURE_PURSUIT_ROTATE_STOP_HEADING_ERROR_DEG = 35.0
 DEFAULT_TRACKING_ENDPOINT_TOLERANCE_M = 0.10
 DEFAULT_TRACKING_START_TOLERANCE_M = 0.20
 DEFAULT_TRACKING_MAX_SEGMENT_M = 0.30
@@ -431,6 +447,25 @@ def notes_with_smoothing_metadata(notes, args):
         f"{args.pure_pursuit_final_decel_distance_m:.3f};"
         "pure_pursuit_min_smoothed_linear_speed_mps="
         f"{args.pure_pursuit_min_smoothed_linear_speed_mps:.3f}"
+    )
+
+
+def notes_with_velocity_scheduler_metadata(notes, args):
+    if getattr(args, "controller", DEFAULT_CONTROLLER) != "pure-pursuit":
+        return notes
+    return (
+        f"{notes};pure_pursuit_speed_profile="
+        f"{args.pure_pursuit_speed_profile};"
+        "pure_pursuit_default_linear_speed_resolved_mps="
+        f"{args.linear_speed:.3f};"
+        "pure_pursuit_max_lateral_accel_mps2="
+        f"{args.pure_pursuit_max_lateral_accel_mps2:.3f};"
+        "pure_pursuit_turn_speed_margin="
+        f"{args.pure_pursuit_turn_speed_margin:.3f};"
+        "pure_pursuit_rotate_start_heading_error_deg="
+        f"{args.pure_pursuit_rotate_start_heading_error_deg:.3f};"
+        "pure_pursuit_rotate_stop_heading_error_deg="
+        f"{args.pure_pursuit_rotate_stop_heading_error_deg:.3f}"
     )
 
 
@@ -862,6 +897,18 @@ class WaypointFollower(Node):
                 "static_inflation_radius_m="
                 f"{args.pure_pursuit_lookahead_guard_static_inflation_radius_m:.3f}, "
                 f"static_blocked_cells={len(self.lookahead_guard.static_blocked_cells)}"
+            )
+        if args.controller == "pure-pursuit" and args.verbose:
+            self.get_logger().info(
+                "Pure-pursuit speed profile: "
+                f"profile={args.pure_pursuit_speed_profile}, "
+                f"resolved_linear_speed={args.linear_speed:.3f}, "
+                f"max_lateral_accel={args.pure_pursuit_max_lateral_accel_mps2:.3f}, "
+                f"turn_speed_margin={args.pure_pursuit_turn_speed_margin:.3f}, "
+                "rotate_start="
+                f"{args.pure_pursuit_rotate_start_heading_error_deg:.1f} deg, "
+                "rotate_stop="
+                f"{args.pure_pursuit_rotate_stop_heading_error_deg:.1f} deg"
             )
         if self.command_smoother is not None and args.verbose:
             self.get_logger().info(
@@ -2523,6 +2570,31 @@ def print_dry_run(
             "Pure-pursuit goal tolerance: "
             f"{args.pure_pursuit_goal_tolerance_m:.3f} m"
         )
+        print(f"pure_pursuit_speed_profile={args.pure_pursuit_speed_profile}")
+        print(
+            "pure_pursuit_default_linear_speed_resolved_mps="
+            f"{args.linear_speed:.3f}"
+        )
+        print(
+            "pure_pursuit_max_lateral_accel_mps2="
+            f"{args.pure_pursuit_max_lateral_accel_mps2:.3f}"
+        )
+        print(
+            "pure_pursuit_turn_speed_margin="
+            f"{args.pure_pursuit_turn_speed_margin:.3f}"
+        )
+        print(
+            "pure_pursuit_rotate_start_heading_error_deg="
+            f"{args.pure_pursuit_rotate_start_heading_error_deg:.3f}"
+        )
+        print(
+            "pure_pursuit_rotate_stop_heading_error_deg="
+            f"{args.pure_pursuit_rotate_stop_heading_error_deg:.3f}"
+        )
+        print(
+            "pure_pursuit_min_curvature_linear_speed_mps="
+            f"{args.pure_pursuit_min_curvature_linear_speed_mps:.3f}"
+        )
         print(f"Tracking path CSV: {args.tracking_path_csv or 'none'}")
         print(f"pure_pursuit_lookahead_guard={args.pure_pursuit_lookahead_guard}")
         print(
@@ -2611,7 +2683,7 @@ def parse_args(argv):
     parser.add_argument("--map-frame", default="map")
     parser.add_argument("--base-frame", default="base_footprint")
     parser.add_argument("--fallback-base-frame", default="base_link")
-    parser.add_argument("--linear-speed", default=DEFAULT_LINEAR_SPEED_MPS, type=float)
+    parser.add_argument("--linear-speed", type=float)
     parser.add_argument("--min-linear-speed", default=DEFAULT_MIN_LINEAR_SPEED_MPS, type=float)
     parser.add_argument("--linear-gain", default=DEFAULT_LINEAR_GAIN, type=float)
     parser.add_argument("--max-angular-speed", default=DEFAULT_MAX_ANGULAR_SPEED_RADPS, type=float)
@@ -2647,6 +2719,32 @@ def parse_args(argv):
         default=DEFAULT_PURE_PURSUIT_COMMAND_SMOOTHING,
         choices=COMMAND_SMOOTHING_MODES,
     )
+    parser.add_argument(
+        "--pure-pursuit-speed-profile",
+        default=DEFAULT_PURE_PURSUIT_SPEED_PROFILE,
+        choices=SPEED_PROFILE_MODES,
+    )
+    parser.add_argument(
+        "--pure-pursuit-max-lateral-accel-mps2",
+        default=DEFAULT_PURE_PURSUIT_MAX_LATERAL_ACCEL_MPS2,
+        type=float,
+    )
+    parser.add_argument(
+        "--pure-pursuit-turn-speed-margin",
+        default=DEFAULT_PURE_PURSUIT_TURN_SPEED_MARGIN,
+        type=float,
+    )
+    parser.add_argument(
+        "--pure-pursuit-rotate-start-heading-error-deg",
+        default=DEFAULT_PURE_PURSUIT_ROTATE_START_HEADING_ERROR_DEG,
+        type=float,
+    )
+    parser.add_argument(
+        "--pure-pursuit-rotate-stop-heading-error-deg",
+        default=DEFAULT_PURE_PURSUIT_ROTATE_STOP_HEADING_ERROR_DEG,
+        type=float,
+    )
+    parser.add_argument("--pure-pursuit-min-curvature-linear-speed-mps", type=float)
     parser.add_argument(
         "--pure-pursuit-max-linear-accel-mps2",
         default=DEFAULT_PURE_PURSUIT_MAX_LINEAR_ACCEL_MPS2,
@@ -2869,8 +2967,16 @@ def parse_args(argv):
 
     if not args.run_id:
         args.run_id = datetime.now().strftime("waypoint_follow_%Y%m%d_%H%M%S")
+    if args.linear_speed is None:
+        args.linear_speed = (
+            DEFAULT_PURE_PURSUIT_LINEAR_SPEED_MPS
+            if args.controller == "pure-pursuit"
+            else DEFAULT_LINEAR_SPEED_MPS
+        )
     if args.pure_pursuit_goal_tolerance_m is None:
         args.pure_pursuit_goal_tolerance_m = args.goal_tolerance_m
+    if args.pure_pursuit_min_curvature_linear_speed_mps is None:
+        args.pure_pursuit_min_curvature_linear_speed_mps = args.min_linear_speed
     if args.pure_pursuit_min_smoothed_linear_speed_mps is None:
         args.pure_pursuit_min_smoothed_linear_speed_mps = args.min_linear_speed
     validate_args(parser, args)
@@ -2889,6 +2995,9 @@ def validate_args(parser, args):
         "path_lookahead_m",
         "pure_pursuit_goal_tolerance_m",
         "pure_pursuit_min_guarded_lookahead_m",
+        "pure_pursuit_max_lateral_accel_mps2",
+        "pure_pursuit_rotate_start_heading_error_deg",
+        "pure_pursuit_rotate_stop_heading_error_deg",
         "tracking_endpoint_tolerance_m",
         "tracking_start_tolerance_m",
         "tracking_max_segment_m",
@@ -2992,13 +3101,29 @@ def validate_args(parser, args):
         "pure_pursuit_max_angular_accel_radps2",
         "pure_pursuit_max_angular_decel_radps2",
         "pure_pursuit_min_smoothed_linear_speed_mps",
+        "pure_pursuit_min_curvature_linear_speed_mps",
     ]
     for field in non_negative_fields:
         if getattr(args, field) < 0.0:
             parser.error(f"--{field.replace('_', '-')} must be non-negative")
+    if not (0.0 < args.pure_pursuit_turn_speed_margin <= 1.0):
+        parser.error("--pure-pursuit-turn-speed-margin must be > 0 and <= 1")
+    if (
+        args.pure_pursuit_rotate_stop_heading_error_deg
+        >= args.pure_pursuit_rotate_start_heading_error_deg
+    ):
+        parser.error(
+            "--pure-pursuit-rotate-stop-heading-error-deg must be < "
+            "--pure-pursuit-rotate-start-heading-error-deg"
+        )
     if args.pure_pursuit_min_smoothed_linear_speed_mps > args.linear_speed:
         parser.error(
             "--pure-pursuit-min-smoothed-linear-speed-mps must be <= "
+            "--linear-speed"
+        )
+    if args.pure_pursuit_min_curvature_linear_speed_mps > args.linear_speed:
+        parser.error(
+            "--pure-pursuit-min-curvature-linear-speed-mps must be <= "
             "--linear-speed"
         )
     if args.pure_pursuit_final_decel_distance_m <= args.goal_tolerance_m:
@@ -3103,6 +3228,8 @@ def main(argv=None):
         if not wait_before_follow_confirmation(args, start_pose, executable_waypoints):
             status = "interrupted"
             notes = f"{args.notes};wait_before_follow_cancelled"
+            notes = notes_with_velocity_scheduler_metadata(notes, args)
+            notes = notes_with_smoothing_metadata(notes, args)
             node.diagnostics.final_status_reason = "wait_before_follow_cancelled"
             print("Waypoint following cancelled before custom follower start.")
             return_code = 130
@@ -3121,6 +3248,7 @@ def main(argv=None):
             amcl_health = result["amcl_health"]
             status = result.get("status", "completed")
             notes = notes_with_tracking_metadata(notes, args, tracking_validation)
+            notes = notes_with_velocity_scheduler_metadata(notes, args)
             notes = notes_with_smoothing_metadata(notes, args)
             notes = notes_with_guard_metadata(
                 notes,
@@ -3133,6 +3261,7 @@ def main(argv=None):
     except KeyboardInterrupt:
         status = "interrupted"
         notes = f"{args.notes};keyboard_interrupt"
+        notes = notes_with_velocity_scheduler_metadata(notes, args)
         notes = notes_with_smoothing_metadata(notes, args)
         notes = notes_with_guard_metadata(
             notes,
@@ -3146,6 +3275,7 @@ def main(argv=None):
     except BlockedByScanError as exc:
         status = "blocked"
         notes = f"{args.notes};{exc}"
+        notes = notes_with_velocity_scheduler_metadata(notes, args)
         notes = notes_with_smoothing_metadata(notes, args)
         notes = notes_with_guard_metadata(
             notes,
@@ -3165,6 +3295,7 @@ def main(argv=None):
     except WaypointTimeoutError as exc:
         status = "timeout"
         notes = f"{args.notes};{exc}"
+        notes = notes_with_velocity_scheduler_metadata(notes, args)
         notes = notes_with_smoothing_metadata(notes, args)
         notes = notes_with_guard_metadata(
             notes,
@@ -3184,6 +3315,7 @@ def main(argv=None):
     except Exception as exc:
         status = "failed"
         notes = f"{args.notes};{exc}"
+        notes = notes_with_velocity_scheduler_metadata(notes, args)
         notes = notes_with_smoothing_metadata(notes, args)
         notes = notes_with_guard_metadata(
             notes,

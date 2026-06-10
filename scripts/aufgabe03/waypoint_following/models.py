@@ -82,6 +82,7 @@ class ControllerStep:
     yaw_error_deg: float
     reached: bool
     guard_result: LookaheadGuardResult | None = None
+    velocity_schedule_result: object | None = None
 
 
 @dataclass(frozen=True)

@@ -7,6 +7,12 @@ from .math_utils import clamp, shortest_angle_delta_deg
 from .models import ControllerStep, RouteState, TwistCommand
 from .path_curves import polyline_lookahead_target, pure_pursuit_curve_command
 from .path_progress import target_state, waypoint_reached
+from .velocity_scheduler import (
+    SPEED_PROFILE_CURVATURE_AWARE,
+    SPEED_PROFILE_FIXED,
+    PurePursuitVelocityScheduler,
+    pure_pursuit_geometry,
+)
 
 
 class PathController(Protocol):
@@ -139,6 +145,7 @@ class PurePursuitController:
     def __init__(self, args, lookahead_guard=None):
         self.args = args
         self.lookahead_guard = lookahead_guard
+        self.velocity_scheduler = PurePursuitVelocityScheduler.from_args(args)
 
     def compute(self, pose, route_state):
         final_goal = route_state.final_goal()
@@ -226,21 +233,37 @@ class PurePursuitController:
                 )
             if guard_result.selected_target_distance_m is not None:
                 command_lookahead_m = guard_result.selected_target_distance_m
-        linear_x, angular_z, alpha_rad = pure_pursuit_curve_command(
-            pose,
-            target_point,
-            command_lookahead_m,
-            self.args.linear_speed,
-            self.args.max_angular_speed,
+        speed_profile = getattr(
+            self.args,
+            "pure_pursuit_speed_profile",
+            SPEED_PROFILE_CURVATURE_AWARE,
         )
+        velocity_schedule_result = None
+        if speed_profile == SPEED_PROFILE_FIXED:
+            linear_x, angular_z, alpha_rad = pure_pursuit_curve_command(
+                pose,
+                target_point,
+                command_lookahead_m,
+                self.args.linear_speed,
+                self.args.max_angular_speed,
+            )
+            mode = "forward"
+        else:
+            geometry = pure_pursuit_geometry(pose, target_point, command_lookahead_m)
+            velocity_schedule_result = self.velocity_scheduler.schedule(geometry)
+            linear_x = velocity_schedule_result.command.linear_x
+            angular_z = velocity_schedule_result.command.angular_z
+            alpha_rad = geometry.alpha_rad
+            mode = velocity_schedule_result.mode
         return ControllerStep(
             TwistCommand(linear_x, angular_z),
-            "forward",
+            mode,
             target_point,
             distance_to_goal,
             math.degrees(alpha_rad),
             False,
             guard_result,
+            velocity_schedule_result,
         )
 
 
