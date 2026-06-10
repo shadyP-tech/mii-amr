@@ -79,11 +79,14 @@ from waypoint_following.models import (  # noqa: E402
     Waypoint,
 )
 from waypoint_following.path_curves import (  # noqa: E402
+    ROUTE_HEADING_LOOKAHEAD_M,
+    RouteHeading,
     RouteProjection,
     lookahead_target_from_route_anchor,
     polyline_lookahead_target,
     project_point_to_route,
     pure_pursuit_curve_command,
+    route_heading_from_projection,
     route_points_from_projection,
     select_curve_lookahead_target,
 )
@@ -186,7 +189,9 @@ DEFAULT_PURE_PURSUIT_MAX_LATERAL_ACCEL_MPS2 = 0.04
 DEFAULT_PURE_PURSUIT_TURN_SPEED_MARGIN = 0.85
 DEFAULT_PURE_PURSUIT_ROTATE_START_HEADING_ERROR_DEG = 75.0
 DEFAULT_PURE_PURSUIT_ROTATE_STOP_HEADING_ERROR_DEG = 35.0
-DEFAULT_PURE_PURSUIT_MAX_TRACK_ANGULAR_SPEED_RADPS = 0.12
+DEFAULT_PURE_PURSUIT_ROUTE_HEADING_ROTATE_START_DEG = 75.0
+DEFAULT_PURE_PURSUIT_ROUTE_HEADING_ROTATE_STOP_DEG = 30.0
+DEFAULT_PURE_PURSUIT_MAX_TRACK_ANGULAR_SPEED_RADPS = 0.09
 DEFAULT_PURE_PURSUIT_HEADING_DEADBAND_DEG = 4.0
 DEFAULT_PURE_PURSUIT_LATERAL_DEADBAND_M = 0.03
 DEFAULT_PURE_PURSUIT_CURVATURE_LIMIT_START_HEADING_ERROR_DEG = 12.0
@@ -524,7 +529,13 @@ def notes_with_velocity_scheduler_metadata(notes, args):
         "pure_pursuit_rotate_start_heading_error_deg="
         f"{args.pure_pursuit_rotate_start_heading_error_deg:.3f};"
         "pure_pursuit_rotate_stop_heading_error_deg="
-        f"{args.pure_pursuit_rotate_stop_heading_error_deg:.3f}"
+        f"{args.pure_pursuit_rotate_stop_heading_error_deg:.3f};"
+        "pure_pursuit_route_heading_lookahead_m="
+        f"{ROUTE_HEADING_LOOKAHEAD_M:.3f};"
+        "pure_pursuit_route_heading_rotate_start_deg="
+        f"{args.pure_pursuit_route_heading_rotate_start_deg:.3f};"
+        "pure_pursuit_route_heading_rotate_stop_deg="
+        f"{args.pure_pursuit_route_heading_rotate_stop_deg:.3f}"
     )
 
 
@@ -556,7 +567,15 @@ def notes_with_route_projection_metadata(notes, args, node):
         "pure_pursuit_projection_lock_required_samples="
         f"{PROJECTION_LOCK_REQUIRED_SAMPLES};"
         "pure_pursuit_projection_lock_progress_tolerance_m="
-        f"{PROJECTION_LOCK_PROGRESS_TOLERANCE_M:.3f}"
+        f"{PROJECTION_LOCK_PROGRESS_TOLERANCE_M:.3f};"
+        "pure_pursuit_route_heading_source="
+        f"{getattr(node, 'last_route_heading_source', '')};"
+        "pure_pursuit_last_route_heading_error_deg="
+        f"{format_optional_m(getattr(node, 'last_route_heading_error_deg', None))};"
+        "pure_pursuit_last_rotate_reason="
+        f"{getattr(node, 'last_pure_pursuit_rotate_reason', '')};"
+        "pure_pursuit_last_rotate_source="
+        f"{getattr(node, 'last_pure_pursuit_rotate_source', '')}"
     )
 
 
@@ -982,6 +1001,10 @@ class WaypointFollower(Node):
         self.cross_track_error_sum_m = 0.0
         self.cross_track_error_count = 0
         self.max_route_heading_error_deg = 0.0
+        self.last_route_heading_source = ""
+        self.last_route_heading_error_deg = None
+        self.last_pure_pursuit_rotate_reason = ""
+        self.last_pure_pursuit_rotate_source = ""
         self.max_projection_backward_delta_m = 0.0
         self.last_projection_acquisition_status = ""
         self.last_projection_lock_sample_count = 0
@@ -1018,6 +1041,12 @@ class WaypointFollower(Node):
                 f"{PROJECTION_LOCK_REQUIRED_SAMPLES}, "
                 "projection_lock_progress_tolerance="
                 f"{PROJECTION_LOCK_PROGRESS_TOLERANCE_M:.3f}, "
+                "route_heading_lookahead="
+                f"{ROUTE_HEADING_LOOKAHEAD_M:.3f}, "
+                "route_heading_rotate_start="
+                f"{args.pure_pursuit_route_heading_rotate_start_deg:.1f} deg, "
+                "route_heading_rotate_stop="
+                f"{args.pure_pursuit_route_heading_rotate_stop_deg:.1f} deg, "
                 f"max_lateral_accel={args.pure_pursuit_max_lateral_accel_mps2:.3f}, "
                 f"turn_speed_margin={args.pure_pursuit_turn_speed_margin:.3f}, "
                 f"heading_deadband={args.pure_pursuit_heading_deadband_deg:.1f} deg, "
@@ -1197,9 +1226,34 @@ class WaypointFollower(Node):
         self.max_cross_track_error_m = max(self.max_cross_track_error_m, error_m)
         self.cross_track_error_sum_m += error_m
         self.cross_track_error_count += 1
+        route_heading = getattr(step, "route_heading_result", None)
+        route_heading_error = (
+            getattr(route_heading, "heading_error_deg", None)
+            if route_heading is not None
+            else None
+        )
         self.max_route_heading_error_deg = max(
             self.max_route_heading_error_deg,
-            abs(float(projection.heading_error_to_route_deg)),
+            abs(
+                float(
+                    route_heading_error
+                    if route_heading_error is not None
+                    else projection.heading_error_to_route_deg
+                )
+            ),
+        )
+        if route_heading is not None:
+            self.last_route_heading_source = getattr(route_heading, "source", "")
+            self.last_route_heading_error_deg = route_heading_error
+        self.last_pure_pursuit_rotate_reason = getattr(
+            step,
+            "pure_pursuit_rotate_reason",
+            "",
+        )
+        self.last_pure_pursuit_rotate_source = getattr(
+            step,
+            "pure_pursuit_rotate_source",
+            "",
         )
         self.max_projection_backward_delta_m = max(
             self.max_projection_backward_delta_m,
@@ -1249,6 +1303,7 @@ class WaypointFollower(Node):
             return
         self.last_route_projection_status = status_key
         self.last_route_projection_log_sec = now_sec
+        route_heading = getattr(step, "route_heading_result", None)
         message = (
             "Pure-pursuit route projection: "
             f"status={status}, "
@@ -1267,6 +1322,16 @@ class WaypointFollower(Node):
             f"signed_cross_track_error_m={projection.signed_cross_track_error_m:.3f}, "
             f"route_heading_deg={projection.route_heading_deg:.1f}, "
             f"heading_error_to_route_deg={projection.heading_error_to_route_deg:.1f}, "
+            "route_heading_source="
+            f"{getattr(route_heading, 'source', 'unavailable') if route_heading is not None else 'unavailable'}, "
+            "smoothed_route_heading_deg="
+            f"{format_optional_m(getattr(route_heading, 'heading_deg', None) if route_heading is not None else None)}, "
+            "smoothed_route_heading_error_deg="
+            f"{format_optional_m(getattr(route_heading, 'heading_error_deg', None) if route_heading is not None else None)}, "
+            "rotate_reason="
+            f"{getattr(step, 'pure_pursuit_rotate_reason', '')}, "
+            "rotate_source="
+            f"{getattr(step, 'pure_pursuit_rotate_source', '')}, "
             f"target={step.target}, "
             f"track_angular_cap={self.args.pure_pursuit_max_track_angular_speed_radps:.3f}, "
             f"rotate_angular_cap={self.args.pure_pursuit_max_rotate_angular_speed_radps:.3f}"
@@ -2867,6 +2932,18 @@ def print_dry_run(
             f"{PROJECTION_LOCK_PROGRESS_TOLERANCE_M:.3f}"
         )
         print(
+            "pure_pursuit_route_heading_lookahead_m="
+            f"{ROUTE_HEADING_LOOKAHEAD_M:.3f}"
+        )
+        print(
+            "pure_pursuit_route_heading_rotate_start_deg="
+            f"{args.pure_pursuit_route_heading_rotate_start_deg:.3f}"
+        )
+        print(
+            "pure_pursuit_route_heading_rotate_stop_deg="
+            f"{args.pure_pursuit_route_heading_rotate_stop_deg:.3f}"
+        )
+        print(
             "pure_pursuit_max_lateral_accel_mps2="
             f"{args.pure_pursuit_max_lateral_accel_mps2:.3f}"
         )
@@ -3075,6 +3152,16 @@ def parse_args(argv):
     parser.add_argument(
         "--pure-pursuit-rotate-stop-heading-error-deg",
         default=DEFAULT_PURE_PURSUIT_ROTATE_STOP_HEADING_ERROR_DEG,
+        type=float,
+    )
+    parser.add_argument(
+        "--pure-pursuit-route-heading-rotate-start-deg",
+        default=DEFAULT_PURE_PURSUIT_ROUTE_HEADING_ROTATE_START_DEG,
+        type=float,
+    )
+    parser.add_argument(
+        "--pure-pursuit-route-heading-rotate-stop-deg",
+        default=DEFAULT_PURE_PURSUIT_ROUTE_HEADING_ROTATE_STOP_DEG,
         type=float,
     )
     parser.add_argument(
@@ -3360,6 +3447,8 @@ def validate_args(parser, args):
         "pure_pursuit_max_lateral_accel_mps2",
         "pure_pursuit_rotate_start_heading_error_deg",
         "pure_pursuit_rotate_stop_heading_error_deg",
+        "pure_pursuit_route_heading_rotate_start_deg",
+        "pure_pursuit_route_heading_rotate_stop_deg",
         "pure_pursuit_max_track_angular_speed_radps",
         "pure_pursuit_max_rotate_angular_speed_radps",
         "pure_pursuit_cross_track_warning_m",
@@ -3506,6 +3595,14 @@ def validate_args(parser, args):
         parser.error(
             "--pure-pursuit-rotate-stop-heading-error-deg must be < "
             "--pure-pursuit-rotate-start-heading-error-deg"
+        )
+    if (
+        args.pure_pursuit_route_heading_rotate_stop_deg
+        >= args.pure_pursuit_route_heading_rotate_start_deg
+    ):
+        parser.error(
+            "--pure-pursuit-route-heading-rotate-stop-deg must be < "
+            "--pure-pursuit-route-heading-rotate-start-deg"
         )
     if args.pure_pursuit_min_smoothed_linear_speed_mps > args.linear_speed:
         parser.error(

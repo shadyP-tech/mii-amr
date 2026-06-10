@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from .math_utils import clamp, distance_2d, normalize_angle_rad, shortest_angle_delta_deg
 
 
+ROUTE_HEADING_LOOKAHEAD_M = 0.16
+
+
 @dataclass(frozen=True)
 class RouteProjection:
     projected_point: tuple[float, float]
@@ -21,6 +24,15 @@ class RouteProjection:
     route_progress_delta_m: float | None = None
     route_progress_backward_delta_m: float = 0.0
     route_progress_forward_delta_m: float = 0.0
+
+
+@dataclass(frozen=True)
+class RouteHeading:
+    heading_deg: float | None
+    heading_error_deg: float | None
+    source: str
+    target_point: tuple[float, float] | None = None
+    lookahead_m: float = 0.0
 
 
 def truncate_polyline_by_distance(points, max_distance_m):
@@ -120,6 +132,72 @@ def route_point_at_progress(points, cumulative, progress_m):
                 ratio,
             )
     return points[-1][0], points[-1][1], max(0, len(points) - 2), 1.0
+
+
+def _valid_segment_heading(route, start_index):
+    if len(route) < 2:
+        return None
+    start_index = max(0, min(int(start_index), len(route) - 2))
+    for index in range(start_index, len(route) - 1):
+        start = route[index]
+        end = route[index + 1]
+        if distance_2d(start, end) > 1e-9:
+            return math.degrees(math.atan2(end[1] - start[1], end[0] - start[0]))
+    for index in range(start_index - 1, -1, -1):
+        start = route[index]
+        end = route[index + 1]
+        if distance_2d(start, end) > 1e-9:
+            return math.degrees(math.atan2(end[1] - start[1], end[0] - start[0]))
+    return None
+
+
+def route_heading_from_projection(
+    points,
+    projection,
+    current_yaw_deg,
+    heading_lookahead_m=ROUTE_HEADING_LOOKAHEAD_M,
+):
+    route = [(float(x), float(y)) for x, y in points]
+    if len(route) < 2:
+        return RouteHeading(None, None, "unavailable")
+    cumulative = route_cumulative_distances(route)
+    if not cumulative or cumulative[-1] <= 1e-9:
+        return RouteHeading(None, None, "unavailable")
+
+    heading_lookahead = max(0.0, float(heading_lookahead_m))
+    projection_point = (
+        float(projection.projected_point[0]),
+        float(projection.projected_point[1]),
+    )
+    if projection.remaining_route_m >= heading_lookahead and heading_lookahead > 1e-9:
+        ahead_x, ahead_y, _index, _ratio = route_point_at_progress(
+            route,
+            cumulative,
+            projection.route_progress_m + heading_lookahead,
+        )
+        target = (ahead_x, ahead_y)
+        if distance_2d(projection_point, target) > 1e-9:
+            heading_deg = math.degrees(
+                math.atan2(target[1] - projection_point[1], target[0] - projection_point[0])
+            )
+            return RouteHeading(
+                heading_deg,
+                shortest_angle_delta_deg(float(current_yaw_deg), heading_deg),
+                "lookahead",
+                target,
+                heading_lookahead,
+            )
+
+    heading_deg = _valid_segment_heading(route, projection.segment_index)
+    if heading_deg is None:
+        return RouteHeading(None, None, "unavailable")
+    return RouteHeading(
+        heading_deg,
+        shortest_angle_delta_deg(float(current_yaw_deg), heading_deg),
+        "local_segment",
+        None,
+        0.0,
+    )
 
 
 def project_point_to_route(

@@ -85,6 +85,9 @@ class ControllerStep:
     velocity_schedule_result: object | None = None
     route_projection_result: object | None = None
     pure_pursuit_status: str = ""
+    route_heading_result: object | None = None
+    pure_pursuit_rotate_reason: str = ""
+    pure_pursuit_rotate_source: str = ""
 
 
 @dataclass(frozen=True)

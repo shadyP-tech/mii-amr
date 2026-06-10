@@ -6,9 +6,11 @@ from typing import Protocol
 from .math_utils import clamp, shortest_angle_delta_deg
 from .models import ControllerStep, RouteState, TwistCommand
 from .path_curves import (
+    ROUTE_HEADING_LOOKAHEAD_M,
     lookahead_target_from_route_anchor,
     project_point_to_route,
     pure_pursuit_curve_command,
+    route_heading_from_projection,
     route_points_from_projection,
 )
 from .path_progress import target_state, waypoint_reached
@@ -273,20 +275,33 @@ class PurePursuitController:
         )
         command_lookahead_m = max(0.01, min(lookahead_m, projection.remaining_route_m))
         geometry = pure_pursuit_geometry(pose, target_point, command_lookahead_m)
+        route_heading = route_heading_from_projection(
+            route_points,
+            projection,
+            pose.yaw_deg,
+            ROUTE_HEADING_LOOKAHEAD_M,
+        )
         alpha_rad = self._stable_alpha_for_rotate(geometry.alpha_rad)
         alpha_deg = math.degrees(alpha_rad)
-        rotate_mode = should_rotate(
-            self.mode,
-            alpha_deg,
-            self.args.pure_pursuit_rotate_start_heading_error_deg,
-            self.args.pure_pursuit_rotate_stop_heading_error_deg,
+        rotate_mode, rotate_reason, rotate_source, rotate_error_deg = (
+            self._route_heading_rotate_gate(
+                alpha_deg,
+                route_heading,
+                distance_to_goal,
+                goal_tolerance_m,
+            )
+        )
+        rotate_error_rad = (
+            alpha_rad
+            if rotate_source == "alpha"
+            else math.radians(rotate_error_deg)
         )
         if rotate_mode:
             if self.mode != "rotate":
                 self.rotate_gate_entries += 1
             self.mode = "rotate"
             angular_z = clamp(
-                alpha_rad * self.args.yaw_gain,
+                rotate_error_rad * self.args.yaw_gain,
                 -abs(self.args.pure_pursuit_max_rotate_angular_speed_radps),
                 abs(self.args.pure_pursuit_max_rotate_angular_speed_radps),
             )
@@ -295,10 +310,13 @@ class PurePursuitController:
                 "rotate",
                 target_point,
                 distance_to_goal,
-                alpha_deg,
+                rotate_error_deg,
                 False,
                 route_projection_result=projection,
                 pure_pursuit_status="rotate_gate",
+                route_heading_result=route_heading,
+                pure_pursuit_rotate_reason=rotate_reason,
+                pure_pursuit_rotate_source=rotate_source,
             )
         self.mode = "forward"
         guard_result = None
@@ -329,6 +347,7 @@ class PurePursuitController:
                     shortest_angle_delta_deg(pose.yaw_deg, target_heading_deg),
                     False,
                     guard_result,
+                    route_heading_result=route_heading,
                 )
             if guard_result.selected_target_distance_m is not None:
                 command_lookahead_m = guard_result.selected_target_distance_m
@@ -370,6 +389,7 @@ class PurePursuitController:
             velocity_schedule_result,
             projection,
             "forward",
+            route_heading,
         )
 
     def _stable_alpha_for_rotate(self, alpha_rad):
@@ -401,6 +421,45 @@ class PurePursuitController:
             self.projection_lock_sample_count = 0
         if self.projection_lock_sample_count >= PROJECTION_LOCK_REQUIRED_SAMPLES:
             self.projection_locked = True
+
+    def _route_heading_rotate_gate(
+        self,
+        alpha_deg,
+        route_heading,
+        distance_to_goal_m,
+        goal_tolerance_m,
+    ):
+        route_error = route_heading.heading_error_deg
+        route_gate_available = (
+            route_error is not None
+            and distance_to_goal_m > goal_tolerance_m
+        )
+        alpha_limit = (
+            self.args.pure_pursuit_rotate_stop_heading_error_deg
+            if self.mode == "rotate"
+            else self.args.pure_pursuit_rotate_start_heading_error_deg
+        )
+        route_limit = (
+            self.args.pure_pursuit_route_heading_rotate_stop_deg
+            if self.mode == "rotate"
+            else self.args.pure_pursuit_route_heading_rotate_start_deg
+        )
+        alpha_active = abs(alpha_deg) > alpha_limit
+        route_active = route_gate_available and abs(route_error) > route_limit
+        if not (alpha_active or route_active):
+            return False, "", "alpha", alpha_deg
+        if alpha_active and route_active:
+            reason = "both"
+        elif route_active:
+            reason = "route_heading"
+        else:
+            reason = "alpha"
+        if (
+            route_gate_available
+            and abs(route_error) > self.args.pure_pursuit_route_heading_rotate_stop_deg
+        ):
+            return True, reason, "route_heading", route_error
+        return True, reason, "alpha", alpha_deg
 
 
 def build_path_controller(args, lookahead_guard=None) -> PathController:
