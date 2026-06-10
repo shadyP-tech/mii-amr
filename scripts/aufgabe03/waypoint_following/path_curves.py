@@ -17,6 +17,10 @@ class RouteProjection:
     cross_track_error_m: float
     signed_cross_track_error_m: float
     remaining_route_m: float
+    projection_status: str = "locked"
+    route_progress_delta_m: float | None = None
+    route_progress_backward_delta_m: float = 0.0
+    route_progress_forward_delta_m: float = 0.0
 
 
 def truncate_polyline_by_distance(points, max_distance_m):
@@ -125,6 +129,8 @@ def project_point_to_route(
     previous_progress_m=None,
     max_forward_jump_m=None,
     backward_tolerance_m=0.03,
+    allow_backward=False,
+    projection_status="locked",
 ):
     route = [(float(x), float(y)) for x, y in points]
     if len(route) < 2:
@@ -158,18 +164,28 @@ def project_point_to_route(
         raise RuntimeError("route_projection_forward_jump")
 
     distance_m, progress_m, segment_index, ratio, projected = best
+    route_progress_delta_m = None
+    route_progress_backward_delta_m = 0.0
+    route_progress_forward_delta_m = 0.0
     if previous_progress_m is not None and progress_m < float(previous_progress_m):
         backward_m = float(previous_progress_m) - progress_m
-        if backward_m > backward_tolerance_m:
+        route_progress_delta_m = progress_m - float(previous_progress_m)
+        route_progress_backward_delta_m = backward_m
+        if not allow_backward and backward_m > backward_tolerance_m:
             raise RuntimeError("route_projection_moved_backward")
-        x, y, segment_index, ratio = route_point_at_progress(
-            route,
-            cumulative,
-            previous_progress_m,
-        )
-        projected = (x, y)
-        progress_m = float(previous_progress_m)
-        distance_m = distance_2d(current, projected)
+        if not allow_backward:
+            x, y, segment_index, ratio = route_point_at_progress(
+                route,
+                cumulative,
+                previous_progress_m,
+            )
+            projected = (x, y)
+            progress_m = float(previous_progress_m)
+            distance_m = distance_2d(current, projected)
+            route_progress_delta_m = 0.0
+    elif previous_progress_m is not None:
+        route_progress_delta_m = progress_m - float(previous_progress_m)
+        route_progress_forward_delta_m = max(0.0, route_progress_delta_m)
 
     start = route[segment_index]
     end = route[segment_index + 1]
@@ -191,6 +207,10 @@ def project_point_to_route(
         cross_track_error_m=distance_m,
         signed_cross_track_error_m=signed_error,
         remaining_route_m=max(0.0, cumulative[-1] - progress_m),
+        projection_status=projection_status,
+        route_progress_delta_m=route_progress_delta_m,
+        route_progress_backward_delta_m=route_progress_backward_delta_m,
+        route_progress_forward_delta_m=route_progress_forward_delta_m,
     )
 
 

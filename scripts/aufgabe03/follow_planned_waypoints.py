@@ -52,6 +52,8 @@ from waypoint_following.command_smoothing import (  # noqa: E402
 )
 from waypoint_following.controllers import (  # noqa: E402
     PathController,
+    PROJECTION_LOCK_PROGRESS_TOLERANCE_M,
+    PROJECTION_LOCK_REQUIRED_SAMPLES,
     PurePursuitController,
     StopGoController,
     build_path_controller,
@@ -417,6 +419,12 @@ def reset_command_smoother(node):
         node.last_smoothed_motion_mode = None
 
 
+def reset_route_projection_controller(controller):
+    reset = getattr(controller, "reset_route_projection_state", None)
+    if reset is not None:
+        reset()
+
+
 def smoothing_dt_sec(node, now_sec):
     args = node.args
     default_dt = 1.0 / args.control_rate_hz
@@ -538,7 +546,17 @@ def notes_with_route_projection_metadata(notes, args, node):
         "pure_pursuit_max_route_heading_error_deg="
         f"{getattr(node, 'max_route_heading_error_deg', 0.0):.3f};"
         "pure_pursuit_rotate_gate_entries="
-        f"{getattr(node, 'pure_pursuit_rotate_gate_entries', 0)}"
+        f"{getattr(node, 'pure_pursuit_rotate_gate_entries', 0)};"
+        "pure_pursuit_projection_status="
+        f"{getattr(node, 'last_projection_acquisition_status', '')};"
+        "pure_pursuit_projection_lock_samples="
+        f"{getattr(node, 'last_projection_lock_sample_count', 0)};"
+        "pure_pursuit_max_projection_backward_delta_m="
+        f"{getattr(node, 'max_projection_backward_delta_m', 0.0):.3f};"
+        "pure_pursuit_projection_lock_required_samples="
+        f"{PROJECTION_LOCK_REQUIRED_SAMPLES};"
+        "pure_pursuit_projection_lock_progress_tolerance_m="
+        f"{PROJECTION_LOCK_PROGRESS_TOLERANCE_M:.3f}"
     )
 
 
@@ -964,6 +982,10 @@ class WaypointFollower(Node):
         self.cross_track_error_sum_m = 0.0
         self.cross_track_error_count = 0
         self.max_route_heading_error_deg = 0.0
+        self.max_projection_backward_delta_m = 0.0
+        self.last_projection_acquisition_status = ""
+        self.last_projection_lock_sample_count = 0
+        self._current_path_controller = None
         self.last_replan_tracking_points = None
         self.last_replan_tracking_source = "waypoints"
         self.last_replan_tracking_validation = None
@@ -992,6 +1014,10 @@ class WaypointFollower(Node):
                 f"rotate_angular_cap={args.pure_pursuit_max_rotate_angular_speed_radps:.3f}, "
                 f"cross_track_warning={args.pure_pursuit_cross_track_warning_m:.3f}, "
                 f"cross_track_max={args.pure_pursuit_max_cross_track_error_m:.3f}, "
+                "projection_lock_samples="
+                f"{PROJECTION_LOCK_REQUIRED_SAMPLES}, "
+                "projection_lock_progress_tolerance="
+                f"{PROJECTION_LOCK_PROGRESS_TOLERANCE_M:.3f}, "
                 f"max_lateral_accel={args.pure_pursuit_max_lateral_accel_mps2:.3f}, "
                 f"turn_speed_margin={args.pure_pursuit_turn_speed_margin:.3f}, "
                 f"heading_deadband={args.pure_pursuit_heading_deadband_deg:.1f} deg, "
@@ -1175,6 +1201,25 @@ class WaypointFollower(Node):
             self.max_route_heading_error_deg,
             abs(float(projection.heading_error_to_route_deg)),
         )
+        self.max_projection_backward_delta_m = max(
+            self.max_projection_backward_delta_m,
+            float(getattr(projection, "route_progress_backward_delta_m", 0.0)),
+        )
+        self.last_projection_acquisition_status = getattr(
+            projection,
+            "projection_status",
+            "",
+        )
+        controller_lock_samples = getattr(
+            getattr(self, "_current_path_controller", None),
+            "projection_lock_sample_count",
+            None,
+        )
+        self.last_projection_lock_sample_count = (
+            controller_lock_samples
+            if controller_lock_samples is not None
+            else self.last_projection_lock_sample_count
+        )
         status = getattr(step, "pure_pursuit_status", "") or step.mode
         if status == "rotate_gate" and self.last_recorded_pure_pursuit_status != status:
             self.pure_pursuit_rotate_gate_entries += 1
@@ -1193,7 +1238,8 @@ class WaypointFollower(Node):
             abs(float(projection.cross_track_error_m))
             >= self.args.pure_pursuit_cross_track_warning_m
         )
-        status_key = f"{status}:{warning}"
+        projection_status = getattr(projection, "projection_status", "locked")
+        status_key = f"{status}:{warning}:{projection_status}"
         status_changed = status_key != self.last_route_projection_status
         log_due = (
             self.last_route_projection_log_sec is None
@@ -1207,6 +1253,17 @@ class WaypointFollower(Node):
         log(
             "Pure-pursuit route projection: "
             f"status={status}, "
+            "projection_status="
+            f"{getattr(projection, 'projection_status', 'locked')}, "
+            "projection_lock_samples="
+            f"{getattr(getattr(self, '_current_path_controller', None), 'projection_lock_sample_count', 0)}, "
+            f"route_progress_m={projection.route_progress_m:.3f}, "
+            "route_progress_delta_m="
+            f"{format_optional_m(getattr(projection, 'route_progress_delta_m', None))}, "
+            "route_progress_backward_delta_m="
+            f"{getattr(projection, 'route_progress_backward_delta_m', 0.0):.3f}, "
+            "route_progress_forward_delta_m="
+            f"{getattr(projection, 'route_progress_forward_delta_m', 0.0):.3f}, "
             f"cross_track_error_m={projection.cross_track_error_m:.3f}, "
             f"signed_cross_track_error_m={projection.signed_cross_track_error_m:.3f}, "
             f"route_heading_deg={projection.route_heading_deg:.1f}, "
@@ -2227,6 +2284,7 @@ class WaypointFollower(Node):
             self.args,
             lookahead_guard=getattr(self, "lookahead_guard", None),
         )
+        self._current_path_controller = controller
         replan_manager = getattr(self, "replan_manager", ReplanManager(self))
         publish_rviz_route_if_available(self, waypoints, current_pose=start_pose)
         publish_rviz_obstacles_if_available(self)
@@ -2263,6 +2321,7 @@ class WaypointFollower(Node):
                 self.args,
                 lookahead_guard=getattr(self, "lookahead_guard", None),
             )
+            self._current_path_controller = controller
             publish_rviz_route_if_available(self, waypoints, current_pose=start_pose)
             if self.args.lidar_replan_artifact_only:
                 self.stop_repeatedly()
@@ -2341,6 +2400,7 @@ class WaypointFollower(Node):
                     self.last_scan_block_budget_repair_signature = None
                     self.last_lookahead_guard_block_signature = None
                     reset_command_smoother(self)
+                    reset_route_projection_controller(controller)
                     self.stop_repeatedly()
                     self.spin_for(self.args.settle_sec)
                     if not continuous_tracking:
@@ -2368,6 +2428,7 @@ class WaypointFollower(Node):
 
                 if step.mode == "off_route":
                     reset_command_smoother(self)
+                    reset_route_projection_controller(controller)
                     self.stop_repeatedly()
                     raise RuntimeError("pure_pursuit_off_tracking_route")
 
@@ -2379,6 +2440,7 @@ class WaypointFollower(Node):
                             f"blocked_cells={step.guard_result.blocked_cell_count}"
                         )
                     reset_command_smoother(self)
+                    reset_route_projection_controller(controller)
                     self.stop_repeatedly()
                     last_scan_safety = self.check_scan_or_raise("forward")
                     self.last_scan_safety = last_scan_safety
@@ -2450,6 +2512,7 @@ class WaypointFollower(Node):
                         self.args,
                         lookahead_guard=getattr(self, "lookahead_guard", None),
                     )
+                    self._current_path_controller = controller
                     replanned_current = True
                     break
 
@@ -2459,6 +2522,7 @@ class WaypointFollower(Node):
                     self.last_scan_block_budget_repair_signature = None
                 except BlockedByScanError as exc:
                     reset_command_smoother(self)
+                    reset_route_projection_controller(controller)
                     if self.args.enable_lidar_map_replan:
                         remaining = route_state.remaining()
                         replanned = replan_manager.replan_after_blockage(
@@ -2507,6 +2571,7 @@ class WaypointFollower(Node):
                             self.args,
                             lookahead_guard=getattr(self, "lookahead_guard", None),
                         )
+                        self._current_path_controller = controller
                         replanned_current = True
                         break
                     raise BlockedByScanError(exc.scan_safety, waypoint) from exc
@@ -2519,6 +2584,7 @@ class WaypointFollower(Node):
                     blocked_cells = replan_manager.corridor_blocked_cells(pose, remaining)
                     if blocked_cells and not self.suppress_repeated_known_corridor_repair(remaining):
                         publish_rviz_obstacles_if_available(self, blocked_cells)
+                        reset_route_projection_controller(controller)
                         self.stop_repeatedly()
                         replanned = replan_manager.replan_after_blockage(
                             pose,
@@ -2566,6 +2632,7 @@ class WaypointFollower(Node):
                             self.args,
                             lookahead_guard=getattr(self, "lookahead_guard", None),
                         )
+                        self._current_path_controller = controller
                         self.remember_known_corridor_repair(waypoints)
                         replanned_current = True
                         break
@@ -2787,6 +2854,14 @@ def print_dry_run(
         print(
             "pure_pursuit_max_cross_track_error_m="
             f"{args.pure_pursuit_max_cross_track_error_m:.3f}"
+        )
+        print(
+            "pure_pursuit_projection_lock_required_samples="
+            f"{PROJECTION_LOCK_REQUIRED_SAMPLES}"
+        )
+        print(
+            "pure_pursuit_projection_lock_progress_tolerance_m="
+            f"{PROJECTION_LOCK_PROGRESS_TOLERANCE_M:.3f}"
         )
         print(
             "pure_pursuit_max_lateral_accel_mps2="

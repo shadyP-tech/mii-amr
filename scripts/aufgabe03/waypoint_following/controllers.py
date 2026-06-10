@@ -20,6 +20,10 @@ from .velocity_scheduler import (
 )
 
 
+PROJECTION_LOCK_REQUIRED_SAMPLES = 3
+PROJECTION_LOCK_PROGRESS_TOLERANCE_M = 0.03
+
+
 class PathController(Protocol):
     def compute(self, pose, route_state: RouteState) -> ControllerStep:
         ...
@@ -154,8 +158,18 @@ class PurePursuitController:
         self.mode = "forward"
         self.last_projection_segment_index = None
         self.last_route_progress_m = None
+        self.projection_locked = False
+        self.projection_lock_sample_count = 0
+        self.max_projection_backward_delta_m = 0.0
         self.last_rotate_sign = 1.0
         self.rotate_gate_entries = 0
+
+    def reset_route_projection_state(self):
+        self.last_projection_segment_index = None
+        self.last_route_progress_m = None
+        self.projection_locked = False
+        self.projection_lock_sample_count = 0
+        self.max_projection_backward_delta_m = 0.0
 
     def compute(self, pose, route_state):
         final_goal = route_state.final_goal()
@@ -223,9 +237,14 @@ class PurePursuitController:
             previous_progress_m=self.last_route_progress_m,
             max_forward_jump_m=max(2.0 * lookahead_m, 0.35),
             backward_tolerance_m=0.03,
+            allow_backward=not self.projection_locked,
+            projection_status="locked" if self.projection_locked else "acquiring",
+        )
+        self.max_projection_backward_delta_m = max(
+            self.max_projection_backward_delta_m,
+            projection.route_progress_backward_delta_m,
         )
         self.last_projection_segment_index = projection.segment_index
-        self.last_route_progress_m = projection.route_progress_m
         route_state.tracking_progress_index = max(
             route_state.tracking_progress_index,
             projection.segment_index,
@@ -244,6 +263,8 @@ class PurePursuitController:
                 route_projection_result=projection,
                 pure_pursuit_status="off_route",
             )
+        self.last_route_progress_m = projection.route_progress_m
+        self._update_projection_lock(projection)
 
         path_points = route_points_from_projection(route_points, projection)
         target_point = lookahead_target_from_route_anchor(
@@ -293,6 +314,7 @@ class PurePursuitController:
                 distance_to_goal_m=distance_to_goal,
             )
             if not guard_result.safe:
+                self.reset_route_projection_state()
                 target_heading_deg = math.degrees(
                     math.atan2(
                         target_point[1] - pose.y,
@@ -356,6 +378,29 @@ class PurePursuitController:
         if abs(alpha_rad) > 1e-9:
             self.last_rotate_sign = 1.0 if alpha_rad > 0.0 else -1.0
         return alpha_rad
+
+    def _update_projection_lock(self, projection):
+        if self.projection_locked:
+            self.projection_lock_sample_count = max(
+                self.projection_lock_sample_count,
+                PROJECTION_LOCK_REQUIRED_SAMPLES,
+            )
+            return
+        progress_delta = projection.route_progress_delta_m
+        stable_progress = (
+            progress_delta is None
+            or abs(progress_delta) <= PROJECTION_LOCK_PROGRESS_TOLERANCE_M
+        )
+        below_warning = (
+            projection.cross_track_error_m
+            <= getattr(self.args, "pure_pursuit_cross_track_warning_m", 0.15)
+        )
+        if below_warning or stable_progress:
+            self.projection_lock_sample_count += 1
+        else:
+            self.projection_lock_sample_count = 0
+        if self.projection_lock_sample_count >= PROJECTION_LOCK_REQUIRED_SAMPLES:
+            self.projection_locked = True
 
 
 def build_path_controller(args, lookahead_guard=None) -> PathController:
