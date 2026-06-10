@@ -55,9 +55,11 @@ from waypoint_following.controllers import (  # noqa: E402
     FORWARD_CONTROL_ROUTE_DAMPED,
     FORWARD_CONTROL_TARGET_BEARING,
     POST_ROTATE_BRANCH_END_TOLERANCE_M,
+    POST_ROTATE_BRANCH_END_LATERAL_TOLERANCE_M,
     POST_ROTATE_BRANCH_HEADING_TOLERANCE_DEG,
     POST_ROTATE_BRANCH_MIN_RELEASE_PROGRESS_M,
     POST_ROTATE_BRANCH_RELEASE_STABLE_SAMPLES,
+    POST_ROTATE_ZERO_LINEAR_EPS_MPS,
     ROTATE_ANCHOR_ROUTE_HEADING_EXIT_SAMPLES,
     PathController,
     PROJECTION_LOCK_PROGRESS_TOLERANCE_M,
@@ -640,7 +642,13 @@ def notes_with_route_projection_metadata(notes, args, node):
         "pure_pursuit_post_rotate_branch_target_clip_count="
         f"{getattr(node, 'post_rotate_branch_target_clip_count', 0)};"
         "pure_pursuit_post_rotate_branch_heading_break_handoff_count="
-        f"{getattr(node, 'post_rotate_branch_heading_break_handoff_count', 0)}"
+        f"{getattr(node, 'post_rotate_branch_heading_break_handoff_count', 0)};"
+        "pure_pursuit_post_rotate_branch_physical_handoff_count="
+        f"{getattr(node, 'post_rotate_branch_physical_handoff_count', 0)};"
+        "pure_pursuit_post_rotate_branch_end_lateral_tolerance_m="
+        f"{POST_ROTATE_BRANCH_END_LATERAL_TOLERANCE_M:.3f};"
+        "pure_pursuit_post_rotate_zero_linear_eps_mps="
+        f"{POST_ROTATE_ZERO_LINEAR_EPS_MPS:.3f}"
     )
 
 
@@ -1082,6 +1090,7 @@ class WaypointFollower(Node):
         self.post_rotate_branch_max_heading_error_deg = 0.0
         self.post_rotate_branch_target_clip_count = 0
         self.post_rotate_branch_heading_break_handoff_count = 0
+        self.post_rotate_branch_physical_handoff_count = 0
         self.last_projection_acquisition_status = ""
         self.last_projection_lock_sample_count = 0
         self._current_path_controller = None
@@ -1427,6 +1436,15 @@ class WaypointFollower(Node):
             self.post_rotate_branch_heading_break_handoff_count = (
                 controller_branch_handoff_count
             )
+        controller_branch_physical_handoff_count = getattr(
+            controller,
+            "post_rotate_branch_physical_handoff_count",
+            None,
+        )
+        if controller_branch_physical_handoff_count is not None:
+            self.post_rotate_branch_physical_handoff_count = (
+                controller_branch_physical_handoff_count
+            )
         self.last_projection_acquisition_status = getattr(
             projection,
             "projection_status",
@@ -1535,6 +1553,14 @@ class WaypointFollower(Node):
             f"{format_optional_m(getattr(projection, 'heading_break_delta_deg', None))}, "
             "next_heading_error_deg="
             f"{format_optional_m(getattr(projection, 'next_heading_error_deg', None))}, "
+            "branch_end_along_past_m="
+            f"{format_optional_m(getattr(projection, 'branch_end_along_past_m', None))}, "
+            "branch_end_lateral_error_m="
+            f"{format_optional_m(getattr(projection, 'branch_end_lateral_error_m', None))}, "
+            "branch_end_handoff_reason="
+            f"{getattr(projection, 'branch_end_handoff_reason', '')}, "
+            "branch_end_handoff_lateral_tolerance_m="
+            f"{format_optional_m(getattr(projection, 'branch_end_handoff_lateral_tolerance_m', None))}, "
             f"cross_track_error_m={projection.cross_track_error_m:.3f}, "
             f"signed_cross_track_error_m={projection.signed_cross_track_error_m:.3f}, "
             f"route_heading_deg={projection.route_heading_deg:.1f}, "

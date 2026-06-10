@@ -49,6 +49,10 @@ class RouteProjection:
     branch_compatible_target_progress_m: float | None = None
     heading_break_delta_deg: float | None = None
     next_heading_error_deg: float | None = None
+    branch_end_along_past_m: float | None = None
+    branch_end_lateral_error_m: float | None = None
+    branch_end_handoff_reason: str = ""
+    branch_end_handoff_lateral_tolerance_m: float | None = None
 
 
 @dataclass(frozen=True)

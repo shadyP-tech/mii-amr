@@ -40,6 +40,8 @@ POST_ROTATE_BRANCH_HEADING_TOLERANCE_DEG = 60.0
 POST_ROTATE_BRANCH_RELEASE_STABLE_SAMPLES = 2
 POST_ROTATE_BRANCH_MIN_RELEASE_PROGRESS_M = 0.18
 POST_ROTATE_BRANCH_END_TOLERANCE_M = 0.03
+POST_ROTATE_BRANCH_END_LATERAL_TOLERANCE_M = 0.08
+POST_ROTATE_ZERO_LINEAR_EPS_MPS = 0.003
 ANGULAR_FEASIBILITY_STOP_EPS_MPS = 0.003
 FORWARD_CONTROL_TARGET_BEARING = "target-bearing"
 FORWARD_CONTROL_ROUTE_DAMPED = "route-damped"
@@ -78,6 +80,16 @@ class PostRotateBranchLock:
     rotate_anchor_aligned_sample_count: int = 0
     rotate_anchor_handoff_reason: str = ""
     suppress_alpha_rotate: bool = False
+
+
+@dataclass(frozen=True)
+class BranchFrameEndCheck:
+    along_past_m: float
+    lateral_error_m: float
+    lateral_tolerance_m: float
+    yaw_error_deg: float
+    hard_cross_track_exceeded: bool
+    handoff_allowed: bool
 
 
 @dataclass(frozen=True)
@@ -249,6 +261,7 @@ class PurePursuitController:
         self.post_rotate_branch_max_heading_error_deg = 0.0
         self.post_rotate_branch_target_clip_count = 0
         self.post_rotate_branch_heading_break_handoff_count = 0
+        self.post_rotate_branch_physical_handoff_count = 0
         self.last_rotate_sign = 1.0
         self.rotate_gate_entries = 0
 
@@ -272,6 +285,7 @@ class PurePursuitController:
         self.post_rotate_branch_max_heading_error_deg = 0.0
         self.post_rotate_branch_target_clip_count = 0
         self.post_rotate_branch_heading_break_handoff_count = 0
+        self.post_rotate_branch_physical_handoff_count = 0
 
     def compute(self, pose, route_state):
         final_goal = route_state.final_goal()
@@ -832,6 +846,42 @@ class PurePursuitController:
             heading_break_delta_deg=branch_path.heading_break_delta_deg,
             next_heading_error_deg=branch_path.next_heading_error_deg,
         )
+        branch_end_check = None
+        if branch_path.heading_break and branch_path.next_heading_deg is not None:
+            branch_end_check = self._branch_frame_end_check(
+                pose,
+                branch_path,
+                lock,
+            )
+            projection = self._with_branch_frame_end_metadata(
+                projection,
+                branch_end_check,
+            )
+            if branch_end_check.hard_cross_track_exceeded:
+                self.post_rotate_branch_lock = None
+                return ControllerStep(
+                    TwistCommand(0.0, 0.0),
+                    "off_route",
+                    projection.projected_point,
+                    distance_to_goal,
+                    projection.heading_error_to_route_deg,
+                    False,
+                    route_projection_result=projection,
+                    pure_pursuit_status="off_route",
+                )
+            if branch_end_check.handoff_allowed:
+                self.post_rotate_branch_physical_handoff_count += 1
+                projection = self._with_branch_frame_end_metadata(
+                    projection,
+                    branch_end_check,
+                    "physical_branch_end",
+                )
+                return self._branch_heading_break_rotate_step(
+                    pose,
+                    projection,
+                    branch_path,
+                    distance_to_goal,
+                )
         branch_end_delta_m = branch_path.branch_end_progress_m - projection.route_progress_m
         selected_branch_error = getattr(
             projection,
@@ -960,6 +1010,47 @@ class PurePursuitController:
                 geometry,
             )
         )
+        if (
+            branch_path.branch_target_clipped_to_heading_break
+            and alpha_rotate_suppressed
+            and forward_control_result is not None
+            and abs(float(forward_control_result.linear_after_feasibility_mps))
+            <= POST_ROTATE_ZERO_LINEAR_EPS_MPS
+        ):
+            branch_end_check = self._branch_frame_end_check(
+                pose,
+                branch_path,
+                lock,
+            )
+            projection = self._with_branch_frame_end_metadata(
+                projection,
+                branch_end_check,
+            )
+            if branch_end_check.hard_cross_track_exceeded:
+                self.post_rotate_branch_lock = None
+                return ControllerStep(
+                    TwistCommand(0.0, 0.0),
+                    "off_route",
+                    projection.projected_point,
+                    distance_to_goal,
+                    projection.heading_error_to_route_deg,
+                    False,
+                    route_projection_result=projection,
+                    pure_pursuit_status="off_route",
+                )
+            if branch_end_check.handoff_allowed:
+                self.post_rotate_branch_physical_handoff_count += 1
+                projection = self._with_branch_frame_end_metadata(
+                    projection,
+                    branch_end_check,
+                    "physical_branch_end_zero_linear",
+                )
+                return self._branch_heading_break_rotate_step(
+                    pose,
+                    projection,
+                    branch_path,
+                    distance_to_goal,
+                )
         self._accept_projection(projection, route_state)
         if lock.stable_count >= POST_ROTATE_BRANCH_RELEASE_STABLE_SAMPLES:
             self.post_rotate_branch_lock = None
@@ -976,6 +1067,60 @@ class PurePursuitController:
             "forward",
             route_heading,
             forward_control_result=forward_control_result,
+        )
+
+    def _branch_frame_end_check(self, pose, branch_path, lock):
+        heading_rad = float(lock.preferred_heading_rad)
+        branch_dir_x = math.cos(heading_rad)
+        branch_dir_y = math.sin(heading_rad)
+        delta_x = float(pose.x) - float(branch_path.branch_end_point[0])
+        delta_y = float(pose.y) - float(branch_path.branch_end_point[1])
+        along_past_m = delta_x * branch_dir_x + delta_y * branch_dir_y
+        lateral_error_m = abs(branch_dir_x * delta_y - branch_dir_y * delta_x)
+        hard_cross_track_m = abs(
+            float(getattr(self.args, "pure_pursuit_max_cross_track_error_m", 0.25))
+        )
+        lateral_tolerance_m = min(
+            POST_ROTATE_BRANCH_END_LATERAL_TOLERANCE_M,
+            hard_cross_track_m,
+        )
+        preferred_heading_deg = math.degrees(heading_rad)
+        yaw_error_deg = shortest_angle_delta_deg(
+            float(pose.yaw_deg),
+            preferred_heading_deg,
+        )
+        hard_cross_track_exceeded = lateral_error_m > hard_cross_track_m
+        handoff_allowed = (
+            branch_path.heading_break
+            and branch_path.next_heading_deg is not None
+            and along_past_m >= -POST_ROTATE_BRANCH_END_TOLERANCE_M
+            and lateral_error_m <= lateral_tolerance_m
+            and abs(yaw_error_deg) <= POST_ROTATE_BRANCH_HEADING_TOLERANCE_DEG
+            and not hard_cross_track_exceeded
+        )
+        return BranchFrameEndCheck(
+            along_past_m,
+            lateral_error_m,
+            lateral_tolerance_m,
+            yaw_error_deg,
+            hard_cross_track_exceeded,
+            handoff_allowed,
+        )
+
+    @staticmethod
+    def _with_branch_frame_end_metadata(
+        projection,
+        branch_end_check,
+        handoff_reason="",
+    ):
+        return replace(
+            projection,
+            branch_end_along_past_m=branch_end_check.along_past_m,
+            branch_end_lateral_error_m=branch_end_check.lateral_error_m,
+            branch_end_handoff_reason=handoff_reason,
+            branch_end_handoff_lateral_tolerance_m=(
+                branch_end_check.lateral_tolerance_m
+            ),
         )
 
     def _branch_heading_break_handoff_from_lock(
