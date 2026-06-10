@@ -37,6 +37,7 @@ ROTATE_ANCHOR_ROUTE_HEADING_EXIT_SAMPLES = 3
 POST_ROTATE_BRANCH_HEADING_TOLERANCE_DEG = 60.0
 POST_ROTATE_BRANCH_RELEASE_STABLE_SAMPLES = 2
 POST_ROTATE_BRANCH_MIN_RELEASE_PROGRESS_M = 0.18
+ANGULAR_FEASIBILITY_STOP_EPS_MPS = 0.003
 FORWARD_CONTROL_TARGET_BEARING = "target-bearing"
 FORWARD_CONTROL_ROUTE_DAMPED = "route-damped"
 FORWARD_CONTROL_MODES = (
@@ -88,6 +89,10 @@ class ForwardControlResult:
     speed_taper_error_deg: float
     raw_angular_z: float
     command_angular_z: float
+    angular_feasibility_limited: bool = False
+    angular_feasibility_scale: float = 1.0
+    linear_before_feasibility_mps: float = 0.0
+    linear_after_feasibility_mps: float = 0.0
 
 
 class PathController(Protocol):
@@ -981,6 +986,10 @@ class PurePursuitController:
                 math.degrees(abs(alpha_rad)),
                 angular_z,
                 angular_z,
+                False,
+                1.0,
+                linear_x,
+                linear_x,
             )
 
         if (
@@ -1007,6 +1016,10 @@ class PurePursuitController:
                 math.degrees(abs(alpha_rad)),
                 angular_z,
                 angular_z,
+                False,
+                1.0,
+                linear_x,
+                linear_x,
             )
 
         return self._route_damped_fixed_forward_command(
@@ -1048,11 +1061,17 @@ class PurePursuitController:
         )
         linear_x = self._fixed_linear_speed_for_error(speed_taper_error_rad)
         raw_angular_z = blended_error_rad * self.args.yaw_gain
+        linear_before_feasibility_mps = linear_x
         angular_z = clamp(
             raw_angular_z,
             -abs(self.args.pure_pursuit_max_track_angular_speed_radps),
             abs(self.args.pure_pursuit_max_track_angular_speed_radps),
         )
+        (
+            linear_x,
+            angular_feasibility_limited,
+            angular_feasibility_scale,
+        ) = self._apply_angular_feasibility_limit(linear_x, raw_angular_z)
         return linear_x, angular_z, blended_error_rad, ForwardControlResult(
             FORWARD_CONTROL_ROUTE_DAMPED,
             "",
@@ -1064,7 +1083,29 @@ class PurePursuitController:
             math.degrees(speed_taper_error_rad),
             raw_angular_z,
             angular_z,
+            angular_feasibility_limited,
+            angular_feasibility_scale,
+            linear_before_feasibility_mps,
+            linear_x,
         )
+
+    def _apply_angular_feasibility_limit(self, linear_x, raw_angular_z):
+        if (
+            getattr(self.args, "pure_pursuit_angular_feasibility_speed_limit", "on")
+            != "on"
+        ):
+            return linear_x, False, 1.0
+        track_cap = abs(float(self.args.pure_pursuit_max_track_angular_speed_radps))
+        raw_abs = abs(float(raw_angular_z))
+        if raw_abs <= track_cap or raw_abs <= 1e-12:
+            return linear_x, False, 1.0
+        margin = float(self.args.pure_pursuit_angular_feasibility_margin)
+        scale = clamp(track_cap * margin / raw_abs, 0.0, 1.0)
+        limited_linear = min(float(linear_x), float(linear_x) * scale)
+        limited_linear = max(0.0, limited_linear)
+        if limited_linear < ANGULAR_FEASIBILITY_STOP_EPS_MPS:
+            limited_linear = 0.0
+        return limited_linear, True, scale
 
     @staticmethod
     def _circular_blend_error(alpha_rad, route_error_rad, blend):

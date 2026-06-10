@@ -200,6 +200,8 @@ DEFAULT_PURE_PURSUIT_ROUTE_HEADING_BLEND = 0.45
 DEFAULT_PURE_PURSUIT_CROSS_TRACK_GAIN = 0.4
 DEFAULT_PURE_PURSUIT_CROSS_TRACK_SPEED_FLOOR_MPS = 0.04
 DEFAULT_PURE_PURSUIT_MAX_CROSS_TRACK_CORRECTION_DEG = 15.0
+DEFAULT_PURE_PURSUIT_ANGULAR_FEASIBILITY_SPEED_LIMIT = "on"
+DEFAULT_PURE_PURSUIT_ANGULAR_FEASIBILITY_MARGIN = 0.85
 DEFAULT_PURE_PURSUIT_MAX_LATERAL_ACCEL_MPS2 = 0.04
 DEFAULT_PURE_PURSUIT_TURN_SPEED_MARGIN = 0.85
 DEFAULT_PURE_PURSUIT_ROTATE_START_HEADING_ERROR_DEG = 75.0
@@ -526,6 +528,10 @@ def notes_with_velocity_scheduler_metadata(notes, args):
         f"{args.pure_pursuit_cross_track_speed_floor_mps:.3f};"
         "pure_pursuit_max_cross_track_correction_deg="
         f"{args.pure_pursuit_max_cross_track_correction_deg:.3f};"
+        "pure_pursuit_angular_feasibility_speed_limit="
+        f"{args.pure_pursuit_angular_feasibility_speed_limit};"
+        "pure_pursuit_angular_feasibility_margin="
+        f"{args.pure_pursuit_angular_feasibility_margin:.3f};"
         "pure_pursuit_default_linear_speed_resolved_mps="
         f"{args.linear_speed:.3f};"
         "pure_pursuit_default_max_angular_speed_resolved_radps="
@@ -1098,6 +1104,10 @@ class WaypointFollower(Node):
                 f"{args.pure_pursuit_cross_track_speed_floor_mps:.3f}, "
                 "max_cross_track_correction="
                 f"{args.pure_pursuit_max_cross_track_correction_deg:.1f} deg, "
+                "angular_feasibility_speed_limit="
+                f"{args.pure_pursuit_angular_feasibility_speed_limit}, "
+                "angular_feasibility_margin="
+                f"{args.pure_pursuit_angular_feasibility_margin:.3f}, "
                 f"resolved_linear_speed={args.linear_speed:.3f}, "
                 f"resolved_max_angular_speed={args.max_angular_speed:.3f}, "
                 f"track_angular_cap={args.pure_pursuit_max_track_angular_speed_radps:.3f}, "
@@ -1515,6 +1525,14 @@ class WaypointFollower(Node):
             f"{format_optional_m(getattr(forward_control, 'raw_angular_z', None) if forward_control is not None else None)}, "
             "command_angular_z="
             f"{format_optional_m(getattr(forward_control, 'command_angular_z', None) if forward_control is not None else None)}, "
+            "angular_feasibility_limited="
+            f"{getattr(forward_control, 'angular_feasibility_limited', False) if forward_control is not None else False}, "
+            "angular_feasibility_scale="
+            f"{format_optional_m(getattr(forward_control, 'angular_feasibility_scale', None) if forward_control is not None else None)}, "
+            "linear_before_feasibility_mps="
+            f"{format_optional_m(getattr(forward_control, 'linear_before_feasibility_mps', None) if forward_control is not None else None)}, "
+            "linear_after_feasibility_mps="
+            f"{format_optional_m(getattr(forward_control, 'linear_after_feasibility_mps', None) if forward_control is not None else None)}, "
             "rotate_reason="
             f"{getattr(step, 'pure_pursuit_rotate_reason', '')}, "
             "rotate_source="
@@ -3103,6 +3121,14 @@ def print_dry_run(
             f"{args.pure_pursuit_max_cross_track_correction_deg:.3f}"
         )
         print(
+            "pure_pursuit_angular_feasibility_speed_limit="
+            f"{args.pure_pursuit_angular_feasibility_speed_limit}"
+        )
+        print(
+            "pure_pursuit_angular_feasibility_margin="
+            f"{args.pure_pursuit_angular_feasibility_margin:.3f}"
+        )
+        print(
             "pure_pursuit_default_linear_speed_resolved_mps="
             f"{args.linear_speed:.3f}"
         )
@@ -3357,6 +3383,16 @@ def parse_args(argv):
     parser.add_argument(
         "--pure-pursuit-max-cross-track-correction-deg",
         default=DEFAULT_PURE_PURSUIT_MAX_CROSS_TRACK_CORRECTION_DEG,
+        type=float,
+    )
+    parser.add_argument(
+        "--pure-pursuit-angular-feasibility-speed-limit",
+        default=DEFAULT_PURE_PURSUIT_ANGULAR_FEASIBILITY_SPEED_LIMIT,
+        choices=["on", "off"],
+    )
+    parser.add_argument(
+        "--pure-pursuit-angular-feasibility-margin",
+        default=DEFAULT_PURE_PURSUIT_ANGULAR_FEASIBILITY_MARGIN,
         type=float,
     )
     parser.add_argument(
@@ -3699,6 +3735,7 @@ def validate_args(parser, args):
         "pure_pursuit_cross_track_speed_floor_mps",
         "pure_pursuit_cross_track_warning_m",
         "pure_pursuit_max_cross_track_error_m",
+        "pure_pursuit_angular_feasibility_margin",
         "tracking_endpoint_tolerance_m",
         "tracking_start_tolerance_m",
         "tracking_max_segment_m",
@@ -3815,6 +3852,8 @@ def validate_args(parser, args):
         parser.error("--pure-pursuit-route-heading-blend must be between 0 and 1")
     if args.pure_pursuit_max_cross_track_correction_deg > 90.0:
         parser.error("--pure-pursuit-max-cross-track-correction-deg must be <= 90")
+    if args.pure_pursuit_angular_feasibility_margin > 1.0:
+        parser.error("--pure-pursuit-angular-feasibility-margin must be <= 1")
     if (
         args.controller == "pure-pursuit"
         and args.pure_pursuit_forward_control == FORWARD_CONTROL_ROUTE_DAMPED
