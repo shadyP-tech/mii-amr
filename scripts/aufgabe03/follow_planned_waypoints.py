@@ -102,6 +102,7 @@ from waypoint_following.path_curves import (  # noqa: E402
     project_point_to_route_branch_window,
     project_point_to_route_progress_window,
     pure_pursuit_curve_command,
+    route_cumulative_distances,
     route_heading_at_progress,
     route_heading_from_projection,
     route_points_from_projection,
@@ -295,6 +296,7 @@ POST_REPLAN_ESCAPE_STRAIGHT_UNTIL_PROGRESS_M = 0.010
 POST_REPLAN_ESCAPE_NO_MOTION_EPS_M = 0.003
 POST_REPLAN_ESCAPE_NO_MOTION_TIMEOUT_ODOM_SEC = 1.5
 POST_REPLAN_ESCAPE_NO_MOTION_TIMEOUT_MAP_SEC = 3.0
+POST_REPLAN_ACTIVATION_MIN_TARGET_FLOOR_M = 0.08
 POST_REPLAN_RECOVERY_ALIGN = "align"
 POST_REPLAN_RECOVERY_CLEARANCE_SEARCH = "clearance_search"
 POST_REPLAN_RECOVERY_WAIT_CLEAR = "wait_clear"
@@ -369,6 +371,21 @@ class PostReplanAlignmentHeading:
     source: str
     projection_segment_index: int | None = None
     projection_segment_ratio: float | None = None
+
+
+@dataclass(frozen=True)
+class PostReplanActivationRoute:
+    waypoints: list[Waypoint]
+    tracking_points: list[Waypoint] | None
+    tracking_source: str
+    tracking_validation: TrackingPathValidation | None
+    status: str
+    goal_reached: bool
+    min_target_distance_m: float
+    pruned_sparse_count: int
+    pruned_dense_count: int
+    projection_progress_m: float | None
+    first_target_distance_m: float | None
 
 
 def run_local_map_has_confirmed_obstacles(run_local_map):
@@ -898,6 +915,16 @@ def notes_with_post_replan_recovery_metadata(notes, args, node):
         if recovery is not None
         else getattr(node, "last_post_replan_clearance_search_direction_source", "")
     )
+    activation_projection_progress = getattr(
+        node,
+        "last_post_replan_activation_projection_progress_m",
+        None,
+    )
+    activation_first_target_distance = getattr(
+        node,
+        "last_post_replan_activation_first_target_distance_m",
+        None,
+    )
     return (
         f"{notes};post_replan_recovery={args.post_replan_recovery};"
         "post_replan_recovery_activations="
@@ -972,6 +999,18 @@ def notes_with_post_replan_recovery_metadata(notes, args, node):
         f"{clearance_result};"
         "post_replan_clearance_search_direction_source="
         f"{clearance_direction_source};"
+        "post_replan_activation_min_target_distance_m="
+        f"{getattr(node, 'last_post_replan_activation_min_target_distance_m', 0.0):.3f};"
+        "post_replan_activation_pruned_sparse_count="
+        f"{getattr(node, 'last_post_replan_activation_pruned_sparse_count', 0)};"
+        "post_replan_activation_pruned_dense_count="
+        f"{getattr(node, 'last_post_replan_activation_pruned_dense_count', 0)};"
+        "post_replan_activation_projection_progress_m="
+        f"{format_optional_m(activation_projection_progress)};"
+        "post_replan_activation_first_target_distance_m="
+        f"{format_optional_m(activation_first_target_distance)};"
+        "post_replan_activation_status="
+        f"{getattr(node, 'last_post_replan_activation_status', '')};"
         "post_replan_recovery_align_heading_error_deg="
         f"{args.post_replan_align_heading_error_deg:.3f}"
     )
@@ -1400,6 +1439,12 @@ class WaypointFollower(Node):
         self.last_post_replan_clearance_search_best_min_m = None
         self.last_post_replan_clearance_search_result = ""
         self.last_post_replan_clearance_search_direction_source = ""
+        self.last_post_replan_activation_min_target_distance_m = 0.0
+        self.last_post_replan_activation_pruned_sparse_count = 0
+        self.last_post_replan_activation_pruned_dense_count = 0
+        self.last_post_replan_activation_projection_progress_m = None
+        self.last_post_replan_activation_first_target_distance_m = None
+        self.last_post_replan_activation_status = ""
         self.last_post_replan_recovery_log_sec = None
         self.command_smoother = build_command_smoother(args)
         self.last_smoothed_command_time_sec = None
@@ -3391,6 +3436,319 @@ class WaypointFollower(Node):
         index = self.first_motion_waypoint_index(replanned, current_pose)
         return replanned[index:]
 
+    def post_replan_activation_min_target_distance_m(self):
+        return max(
+            float(self.args.goal_tolerance_m),
+            0.5
+            * float(getattr(self.args, "path_lookahead_m", DEFAULT_PATH_LOOKAHEAD_M)),
+            float(getattr(self.args, "post_replan_escape_distance_m", 0.0)),
+            POST_REPLAN_ACTIVATION_MIN_TARGET_FLOOR_M,
+        )
+
+    @staticmethod
+    def _waypoint_xy(point):
+        return (
+            float(point.x if hasattr(point, "x") else point[0]),
+            float(point.y if hasattr(point, "y") else point[1]),
+        )
+
+    @staticmethod
+    def _projection_on_xy_segment(point, segment_start, segment_end):
+        dx = segment_end[0] - segment_start[0]
+        dy = segment_end[1] - segment_start[1]
+        length_sq = dx * dx + dy * dy
+        if length_sq <= 1e-12:
+            return (
+                math.hypot(point[0] - segment_start[0], point[1] - segment_start[1]),
+                0.0,
+            )
+        ratio = (
+            (point[0] - segment_start[0]) * dx
+            + (point[1] - segment_start[1]) * dy
+        ) / length_sq
+        ratio = clamp(ratio, 0.0, 1.0)
+        closest = (
+            segment_start[0] + ratio * dx,
+            segment_start[1] + ratio * dy,
+        )
+        return math.hypot(point[0] - closest[0], point[1] - closest[1]), ratio
+
+    @staticmethod
+    def _waypoint_progress_on_route(route_points, cumulative, waypoint, min_progress_m=None):
+        if len(route_points) < 2 or not cumulative or cumulative[-1] <= 1e-9:
+            return None
+        point = WaypointFollower._waypoint_xy(waypoint)
+        best = None
+        progress_floor = None if min_progress_m is None else float(min_progress_m)
+        for index in range(len(route_points) - 1):
+            start_progress = cumulative[index]
+            end_progress = cumulative[index + 1]
+            segment_length = end_progress - start_progress
+            if segment_length <= 1e-9:
+                continue
+            distance_m, ratio = WaypointFollower._projection_on_xy_segment(
+                point,
+                route_points[index],
+                route_points[index + 1],
+            )
+            progress_m = start_progress + ratio * segment_length
+            if progress_floor is not None and progress_m + 0.03 < progress_floor:
+                continue
+            candidate = (distance_m, progress_m, index)
+            if best is None or candidate < best:
+                best = candidate
+        if best is None and progress_floor is not None:
+            return WaypointFollower._waypoint_progress_on_route(
+                route_points,
+                cumulative,
+                waypoint,
+                min_progress_m=None,
+            )
+        return None if best is None else best[1]
+
+    @staticmethod
+    def _activation_tracking_validation(validation, tracking_source, point_count):
+        if validation is None:
+            return TrackingPathValidation(
+                source=tracking_source,
+                point_count=point_count,
+                validation_status="activation_pruned",
+            )
+        return TrackingPathValidation(
+            source=validation.source,
+            point_count=point_count,
+            endpoint_error_m=validation.endpoint_error_m,
+            start_error_m=validation.start_error_m,
+            start_projection_error_m=validation.start_projection_error_m,
+            validation_status=validation.validation_status,
+            warnings=validation.warnings,
+        )
+
+    def _record_post_replan_activation_route(self, activation):
+        self.last_post_replan_activation_min_target_distance_m = (
+            activation.min_target_distance_m
+        )
+        self.last_post_replan_activation_pruned_sparse_count = (
+            activation.pruned_sparse_count
+        )
+        self.last_post_replan_activation_pruned_dense_count = (
+            activation.pruned_dense_count
+        )
+        self.last_post_replan_activation_projection_progress_m = (
+            activation.projection_progress_m
+        )
+        self.last_post_replan_activation_first_target_distance_m = (
+            activation.first_target_distance_m
+        )
+        self.last_post_replan_activation_status = activation.status
+
+    def prepare_scan_replan_route_activation(
+        self,
+        replanned,
+        current_pose,
+        goal_waypoint,
+    ):
+        replanned = list(replanned)
+        min_target_distance_m = (
+            WaypointFollower.post_replan_activation_min_target_distance_m(self)
+        )
+        tracking_points = getattr(self, "last_replan_tracking_points", None)
+        tracking_source = getattr(self, "last_replan_tracking_source", "waypoints")
+        tracking_validation = getattr(self, "last_replan_tracking_validation", None)
+        projection_progress_m = None
+        pruned_dense_count = 0
+        pruned_sparse_count = 0
+        pruned_tracking_points = tracking_points
+        status = "unchanged"
+
+        dense_points = []
+        if tracking_points is not None:
+            dense_points = [
+                WaypointFollower._waypoint_xy(point)
+                for point in tracking_points
+            ]
+
+        if len(dense_points) >= 2:
+            projection = project_point_to_route(
+                dense_points,
+                current_pose,
+                allow_backward=True,
+                projection_status="post_replan_activation",
+            )
+            projection_progress_m = projection.route_progress_m
+            cumulative = route_cumulative_distances(dense_points)
+            target_progress_m = min(
+                cumulative[-1],
+                projection.route_progress_m + min_target_distance_m,
+            )
+            projected = projection.projected_point
+            pruned_tracking_points = [
+                Waypoint(-1, float(projected[0]), float(projected[1])),
+            ]
+            first_kept_index = None
+            for index, point in enumerate(tracking_points):
+                progress_m = cumulative[index]
+                if (
+                    progress_m <= projection.route_progress_m + 1e-9
+                    or progress_m < target_progress_m - 1e-9
+                ):
+                    continue
+                if (
+                    math.hypot(point.x - projected[0], point.y - projected[1])
+                    <= PATH_SEGMENT_EPS_M
+                ):
+                    continue
+                first_kept_index = index
+                break
+            if first_kept_index is not None:
+                pruned_tracking_points.extend(tracking_points[first_kept_index:])
+                pruned_dense_count = first_kept_index
+            else:
+                pruned_dense_count = len(tracking_points)
+            tracking_validation = WaypointFollower._activation_tracking_validation(
+                tracking_validation,
+                tracking_source,
+                len(pruned_tracking_points),
+            )
+            pruned_waypoints = []
+            previous_progress_m = projection.route_progress_m
+            for waypoint in replanned:
+                progress_m = WaypointFollower._waypoint_progress_on_route(
+                    dense_points,
+                    cumulative,
+                    waypoint,
+                    min_progress_m=previous_progress_m,
+                )
+                if progress_m is None:
+                    distance_m = math.hypot(
+                        waypoint.x - current_pose.x,
+                        waypoint.y - current_pose.y,
+                    )
+                    if distance_m < min_target_distance_m - 1e-9:
+                        pruned_sparse_count += 1
+                        continue
+                    pruned_waypoints.append(waypoint)
+                    continue
+                previous_progress_m = max(previous_progress_m, progress_m)
+                if (
+                    progress_m - projection.route_progress_m
+                    < min_target_distance_m - 1e-9
+                ):
+                    pruned_sparse_count += 1
+                    continue
+                pruned_waypoints.append(waypoint)
+            status = "dense_progress_pruned"
+        else:
+            pruned_waypoints = []
+            for waypoint in replanned:
+                distance_m = math.hypot(
+                    waypoint.x - current_pose.x,
+                    waypoint.y - current_pose.y,
+                )
+                if distance_m < min_target_distance_m - 1e-9:
+                    pruned_sparse_count += 1
+                    continue
+                pruned_waypoints.append(waypoint)
+            status = "sparse_distance_pruned"
+
+        escape_distance_m = float(
+            getattr(self.args, "post_replan_escape_distance_m", 0.0)
+        )
+        while pruned_waypoints:
+            first_distance_m = math.hypot(
+                pruned_waypoints[0].x - current_pose.x,
+                pruned_waypoints[0].y - current_pose.y,
+            )
+            if first_distance_m + 1e-9 >= escape_distance_m:
+                break
+            pruned_waypoints = pruned_waypoints[1:]
+            pruned_sparse_count += 1
+
+        if (
+            pruned_tracking_points is not None
+            and len(pruned_tracking_points) < 2
+            and pruned_waypoints
+        ):
+            first = pruned_waypoints[0]
+            anchor = pruned_tracking_points[0]
+            if math.hypot(first.x - anchor.x, first.y - anchor.y) > PATH_SEGMENT_EPS_M:
+                pruned_tracking_points = list(pruned_tracking_points) + [first]
+                tracking_validation = WaypointFollower._activation_tracking_validation(
+                    tracking_validation,
+                    tracking_source,
+                    len(pruned_tracking_points),
+                )
+
+        first_target_distance_m = (
+            None
+            if not pruned_waypoints
+            else math.hypot(
+                pruned_waypoints[0].x - current_pose.x,
+                pruned_waypoints[0].y - current_pose.y,
+            )
+        )
+        if not pruned_waypoints:
+            goal_distance_m = (
+                math.inf
+                if goal_waypoint is None
+                else math.hypot(
+                    goal_waypoint.x - current_pose.x,
+                    goal_waypoint.y - current_pose.y,
+                )
+            )
+            goal_reached = goal_distance_m <= self.args.goal_tolerance_m
+            status = "goal_reached" if goal_reached else "no_meaningful_target"
+            activation = PostReplanActivationRoute(
+                waypoints=[],
+                tracking_points=pruned_tracking_points,
+                tracking_source=tracking_source,
+                tracking_validation=tracking_validation,
+                status=status,
+                goal_reached=goal_reached,
+                min_target_distance_m=min_target_distance_m,
+                pruned_sparse_count=pruned_sparse_count,
+                pruned_dense_count=pruned_dense_count,
+                projection_progress_m=projection_progress_m,
+                first_target_distance_m=None,
+            )
+            WaypointFollower._record_post_replan_activation_route(self, activation)
+            if self.args.verbose:
+                self.get_logger().info(
+                    "Post-replan route activation pruning: "
+                    f"status={status}, min_target_distance_m={min_target_distance_m:.3f}, "
+                    f"pruned_sparse={pruned_sparse_count}, pruned_dense={pruned_dense_count}, "
+                    "projection_progress_m="
+                    f"{format_optional_m(projection_progress_m)}, "
+                    "first_target_distance_m=n/a"
+                )
+            return activation
+
+        activation = PostReplanActivationRoute(
+            waypoints=pruned_waypoints,
+            tracking_points=pruned_tracking_points,
+            tracking_source=tracking_source,
+            tracking_validation=tracking_validation,
+            status=status,
+            goal_reached=False,
+            min_target_distance_m=min_target_distance_m,
+            pruned_sparse_count=pruned_sparse_count,
+            pruned_dense_count=pruned_dense_count,
+            projection_progress_m=projection_progress_m,
+            first_target_distance_m=first_target_distance_m,
+        )
+        WaypointFollower._record_post_replan_activation_route(self, activation)
+        if self.args.verbose:
+            self.get_logger().info(
+                "Post-replan route activation pruning: "
+                f"status={status}, min_target_distance_m={min_target_distance_m:.3f}, "
+                f"pruned_sparse={pruned_sparse_count}, pruned_dense={pruned_dense_count}, "
+                "projection_progress_m="
+                f"{format_optional_m(projection_progress_m)}, "
+                "first_target_distance_m="
+                f"{format_optional_m(first_target_distance_m)}"
+            )
+        return activation
+
     def route_signature(self, waypoints):
         waypoints = list(waypoints)
         if not waypoints:
@@ -3953,6 +4311,18 @@ class WaypointFollower(Node):
             self.last_post_replan_clearance_search_result = ""
         if not hasattr(self, "last_post_replan_clearance_search_direction_source"):
             self.last_post_replan_clearance_search_direction_source = ""
+        if not hasattr(self, "last_post_replan_activation_min_target_distance_m"):
+            self.last_post_replan_activation_min_target_distance_m = 0.0
+        if not hasattr(self, "last_post_replan_activation_pruned_sparse_count"):
+            self.last_post_replan_activation_pruned_sparse_count = 0
+        if not hasattr(self, "last_post_replan_activation_pruned_dense_count"):
+            self.last_post_replan_activation_pruned_dense_count = 0
+        if not hasattr(self, "last_post_replan_activation_projection_progress_m"):
+            self.last_post_replan_activation_projection_progress_m = None
+        if not hasattr(self, "last_post_replan_activation_first_target_distance_m"):
+            self.last_post_replan_activation_first_target_distance_m = None
+        if not hasattr(self, "last_post_replan_activation_status"):
+            self.last_post_replan_activation_status = ""
         if not hasattr(self, "last_post_replan_recovery_log_sec"):
             self.last_post_replan_recovery_log_sec = None
         reset_command_smoother(self)
@@ -4291,24 +4661,34 @@ class WaypointFollower(Node):
                                 "base_frame_used": self.base_frame_used,
                                 "status": "replan_artifact_only_complete",
                             }
-                        waypoints = self.prune_replanned_waypoints_for_progress(replanned, pose)
+                        activation_route = (
+                            WaypointFollower.prepare_scan_replan_route_activation(
+                                self,
+                                replanned,
+                                pose,
+                                route_state.final_goal(),
+                            )
+                        )
+                        if activation_route.goal_reached:
+                            route_state.mark_complete()
+                            reached_count = len(route_state.waypoints)
+                            self.reached_count = reached_count
+                            WaypointFollower.reset_post_replan_recovery(
+                                self,
+                                "goal_reached_after_replan_activation",
+                            )
+                            reset_command_smoother(self)
+                            self.stop_repeatedly()
+                            reached_current = True
+                            break
+                        if not activation_route.waypoints:
+                            raise RuntimeError("post_replan_no_meaningful_target")
+                        waypoints = activation_route.waypoints
                         route_state.replace_route(
                             waypoints,
-                            tracking_points=getattr(
-                                self,
-                                "last_replan_tracking_points",
-                                None,
-                            ),
-                            tracking_source=getattr(
-                                self,
-                                "last_replan_tracking_source",
-                                "waypoints",
-                            ),
-                            tracking_validation=getattr(
-                                self,
-                                "last_replan_tracking_validation",
-                                None,
-                            ),
+                            tracking_points=activation_route.tracking_points,
+                            tracking_source=activation_route.tracking_source,
+                            tracking_validation=activation_route.tracking_validation,
                         )
                         self.active_route_generation_id += 1
                         reset_command_smoother(self)
