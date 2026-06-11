@@ -287,6 +287,10 @@ POST_REPLAN_CLEARANCE_MAX_YAW_DEG = 12.0
 POST_REPLAN_CLEARANCE_IMPROVEMENT_M = 0.03
 POST_REPLAN_CLEARANCE_MAX_ANGULAR_RADPS = 0.12
 POST_REPLAN_CLEARANCE_SIDE_DIFF_M = 0.03
+POST_REPLAN_ESCAPE_COMPLETION_TOLERANCE_M = 0.005
+POST_REPLAN_ESCAPE_TIMEOUT_MARGIN_SEC = 0.75
+POST_REPLAN_ESCAPE_MIN_TIMEOUT_SEC = 2.0
+POST_REPLAN_ESCAPE_ANGULAR_HINT_CAP_RADPS = 0.05
 POST_REPLAN_RECOVERY_ALIGN = "align"
 POST_REPLAN_RECOVERY_CLEARANCE_SEARCH = "clearance_search"
 POST_REPLAN_RECOVERY_WAIT_CLEAR = "wait_clear"
@@ -315,6 +319,9 @@ class PostReplanRecoveryState:
     clear_scan_count: int = 0
     last_counted_scan_identity: tuple[float | None, float | None] | None = None
     escape_start_pose: Pose2D | None = None
+    escape_start_time_sec: float | None = None
+    last_escape_timeout_sec: float | None = None
+    last_escape_elapsed_sec: float | None = None
     last_scan_reason: str = ""
     last_heading_error_deg: float | None = None
     last_alignment_heading_deg: float | None = None
@@ -790,6 +797,16 @@ def notes_with_post_replan_recovery_metadata(notes, args, node):
             "",
         )
     )
+    last_escape_elapsed = (
+        getattr(recovery, "last_escape_elapsed_sec", None)
+        if recovery is not None
+        else getattr(node, "last_post_replan_recovery_escape_elapsed_sec", None)
+    )
+    last_escape_timeout = (
+        getattr(recovery, "last_escape_timeout_sec", None)
+        if recovery is not None
+        else getattr(node, "last_post_replan_recovery_escape_timeout_sec", None)
+    )
     clearance_attempted = (
         getattr(recovery, "clearance_search_attempted", False)
         if recovery is not None
@@ -861,6 +878,14 @@ def notes_with_post_replan_recovery_metadata(notes, args, node):
         f"{last_alignment_source};"
         "post_replan_recovery_escape_linear_speed_mps="
         f"{args.post_replan_escape_linear_speed_mps:.3f};"
+        "post_replan_escape_completion_tolerance_m="
+        f"{POST_REPLAN_ESCAPE_COMPLETION_TOLERANCE_M:.3f};"
+        "post_replan_recovery_last_escape_elapsed_sec="
+        f"{format_optional_m(last_escape_elapsed)};"
+        "post_replan_recovery_last_escape_timeout_sec="
+        f"{format_optional_m(last_escape_timeout)};"
+        "post_replan_escape_angular_hint_cap_radps="
+        f"{POST_REPLAN_ESCAPE_ANGULAR_HINT_CAP_RADPS:.3f};"
         "post_replan_recovery_last_escape_command_linear_mps="
         f"{last_escape_command_linear:.3f};"
         "post_replan_recovery_last_escape_command_angular_radps="
@@ -1290,6 +1315,8 @@ class WaypointFollower(Node):
         self.last_post_replan_recovery_clear_count = 0
         self.max_post_replan_recovery_clear_count = 0
         self.last_post_replan_recovery_escape_distance_m = 0.0
+        self.last_post_replan_recovery_escape_elapsed_sec = None
+        self.last_post_replan_recovery_escape_timeout_sec = None
         self.last_post_replan_recovery_heading_error_deg = None
         self.last_post_replan_recovery_alignment_heading_deg = None
         self.last_post_replan_recovery_alignment_heading_source = ""
@@ -2185,6 +2212,12 @@ class WaypointFollower(Node):
             self.last_post_replan_recovery_escape_distance_m = (
                 recovery.last_escape_distance_m
             )
+            self.last_post_replan_recovery_escape_elapsed_sec = (
+                recovery.last_escape_elapsed_sec
+            )
+            self.last_post_replan_recovery_escape_timeout_sec = (
+                recovery.last_escape_timeout_sec
+            )
             self.last_post_replan_recovery_heading_error_deg = (
                 recovery.last_heading_error_deg
             )
@@ -2364,6 +2397,8 @@ class WaypointFollower(Node):
         self.last_post_replan_recovery_phase = POST_REPLAN_RECOVERY_ALIGN
         self.last_post_replan_recovery_clear_count = 0
         self.last_post_replan_recovery_escape_distance_m = 0.0
+        self.last_post_replan_recovery_escape_elapsed_sec = None
+        self.last_post_replan_recovery_escape_timeout_sec = None
         reset_command_smoother(self)
         self.publish_velocity(0.0, 0.0)
 
@@ -2378,6 +2413,30 @@ class WaypointFollower(Node):
 
     def post_replan_recovery_timed_out(self, recovery, now_sec):
         return now_sec - recovery.activation_time_sec > self.args.post_replan_timeout_sec
+
+    def post_replan_escape_timeout_sec(self):
+        speed_mps = max(0.0, float(self.args.post_replan_escape_linear_speed_mps))
+        distance_m = max(0.0, float(self.args.post_replan_escape_distance_m))
+        if speed_mps <= 0.0:
+            return POST_REPLAN_ESCAPE_MIN_TIMEOUT_SEC
+        return max(
+            POST_REPLAN_ESCAPE_MIN_TIMEOUT_SEC,
+            distance_m / speed_mps + POST_REPLAN_ESCAPE_TIMEOUT_MARGIN_SEC,
+        )
+
+    def post_replan_escape_timed_out(self, recovery, now_sec):
+        escape_start_sec = recovery.escape_start_time_sec
+        if escape_start_sec is None:
+            escape_start_sec = recovery.activation_time_sec
+        escape_timeout_sec = WaypointFollower.post_replan_escape_timeout_sec(self)
+        recovery.last_escape_timeout_sec = escape_timeout_sec
+        recovery.last_escape_elapsed_sec = max(0.0, now_sec - escape_start_sec)
+        total_deadline_sec = (
+            recovery.activation_time_sec + self.args.post_replan_timeout_sec
+        )
+        escape_deadline_sec = escape_start_sec + escape_timeout_sec
+        effective_deadline_sec = max(total_deadline_sec, escape_deadline_sec)
+        return now_sec > effective_deadline_sec
 
     def wait_one_control_cycle(self):
         rclpy.spin_once(self, timeout_sec=1.0 / self.args.control_rate_hz)
@@ -2416,12 +2475,20 @@ class WaypointFollower(Node):
             f"{format_optional_m(heading_error_deg)}, "
             f"clear_scan_count={recovery.clear_scan_count}, "
             f"escape_distance_m={recovery.last_escape_distance_m:.3f}, "
+            "escape_elapsed_sec="
+            f"{format_optional_m(recovery.last_escape_elapsed_sec)}, "
+            "escape_timeout_sec="
+            f"{format_optional_m(recovery.last_escape_timeout_sec)}, "
+            "escape_completion_tolerance_m="
+            f"{POST_REPLAN_ESCAPE_COMPLETION_TOLERANCE_M:.3f}, "
             "escape_command_linear_mps="
             f"{recovery.last_escape_command_linear_mps:.3f}, "
             "escape_command_angular_radps="
             f"{recovery.last_escape_command_angular_radps:.3f}, "
             "escape_angular_hint_source="
             f"{recovery.last_escape_angular_hint_source}, "
+            "escape_angular_hint_cap_radps="
+            f"{POST_REPLAN_ESCAPE_ANGULAR_HINT_CAP_RADPS:.3f}, "
             "clearance_search_attempted="
             f"{recovery.clearance_search_attempted}, "
             "clearance_search_direction="
@@ -2456,11 +2523,15 @@ class WaypointFollower(Node):
             return 0.0, "nonfinite"
         if not math.isfinite(angular_z):
             return 0.0, "nonfinite"
+        angular_cap = min(
+            self.args.pure_pursuit_max_track_angular_speed_radps,
+            POST_REPLAN_ESCAPE_ANGULAR_HINT_CAP_RADPS,
+        )
         return (
             clamp(
                 angular_z,
-                -self.args.pure_pursuit_max_track_angular_speed_radps,
-                self.args.pure_pursuit_max_track_angular_speed_radps,
+                -angular_cap,
+                angular_cap,
             ),
             "controller",
         )
@@ -2810,7 +2881,12 @@ class WaypointFollower(Node):
             if recovery.clear_scan_count >= self.args.post_replan_clear_scan_samples:
                 recovery.phase = POST_REPLAN_RECOVERY_ESCAPE
                 recovery.escape_start_pose = pose
+                recovery.escape_start_time_sec = now_sec
                 recovery.last_escape_distance_m = 0.0
+                recovery.last_escape_elapsed_sec = 0.0
+                recovery.last_escape_timeout_sec = (
+                    WaypointFollower.post_replan_escape_timeout_sec(self)
+                )
                 reset_command_smoother(self)
             self.publish_velocity(0.0, 0.0)
             self.wait_one_control_cycle()
@@ -2836,11 +2912,28 @@ class WaypointFollower(Node):
                     "post_replan_escape_blocked",
                 )
                 raise RuntimeError("post_replan_escape_blocked")
-            if WaypointFollower.post_replan_recovery_timed_out(
+            start_pose = recovery.escape_start_pose or pose
+            escape_distance_m = math.hypot(
+                pose.x - start_pose.x,
+                pose.y - start_pose.y,
+            )
+            recovery.last_escape_distance_m = escape_distance_m
+            self.last_post_replan_recovery_escape_distance_m = escape_distance_m
+            escape_timed_out = WaypointFollower.post_replan_escape_timed_out(
                 self,
                 recovery,
                 now_sec,
+            )
+            self.maybe_log_post_replan_recovery(safety, recovery.last_heading_error_deg)
+            if (
+                escape_distance_m + POST_REPLAN_ESCAPE_COMPLETION_TOLERANCE_M
+                >= self.args.post_replan_escape_distance_m
             ):
+                recovery.phase = POST_REPLAN_RECOVERY_DONE
+                WaypointFollower.reset_post_replan_recovery(self, "done")
+                reset_command_smoother(self)
+                return False
+            if escape_timed_out:
                 reason = WaypointFollower.post_replan_recovery_timeout_reason(
                     self,
                     recovery,
@@ -2849,19 +2942,6 @@ class WaypointFollower(Node):
                 self.publish_velocity(0.0, 0.0)
                 WaypointFollower.reset_post_replan_recovery(self, reason)
                 raise RuntimeError(reason)
-            start_pose = recovery.escape_start_pose or pose
-            escape_distance_m = math.hypot(
-                pose.x - start_pose.x,
-                pose.y - start_pose.y,
-            )
-            recovery.last_escape_distance_m = escape_distance_m
-            self.last_post_replan_recovery_escape_distance_m = escape_distance_m
-            self.maybe_log_post_replan_recovery(safety, recovery.last_heading_error_deg)
-            if escape_distance_m >= self.args.post_replan_escape_distance_m:
-                recovery.phase = POST_REPLAN_RECOVERY_DONE
-                WaypointFollower.reset_post_replan_recovery(self, "done")
-                reset_command_smoother(self)
-                return False
             try:
                 angular_z, angular_hint_source = (
                     WaypointFollower.post_replan_escape_angular_hint(self, step)
@@ -3615,6 +3695,10 @@ class WaypointFollower(Node):
             self.max_post_replan_recovery_clear_count = 0
         if not hasattr(self, "last_post_replan_recovery_escape_distance_m"):
             self.last_post_replan_recovery_escape_distance_m = 0.0
+        if not hasattr(self, "last_post_replan_recovery_escape_elapsed_sec"):
+            self.last_post_replan_recovery_escape_elapsed_sec = None
+        if not hasattr(self, "last_post_replan_recovery_escape_timeout_sec"):
+            self.last_post_replan_recovery_escape_timeout_sec = None
         if not hasattr(self, "last_post_replan_recovery_heading_error_deg"):
             self.last_post_replan_recovery_heading_error_deg = None
         if not hasattr(self, "last_post_replan_recovery_alignment_heading_deg"):
@@ -4482,6 +4566,22 @@ def print_dry_run(
             print(
                 "  post-replan escape speed: "
                 f"{args.post_replan_escape_linear_speed_mps:.3f} m/s"
+            )
+            print(
+                "  post-replan escape completion tolerance: "
+                f"{POST_REPLAN_ESCAPE_COMPLETION_TOLERANCE_M:.3f} m"
+            )
+            print(
+                "  post-replan escape timeout margin: "
+                f"{POST_REPLAN_ESCAPE_TIMEOUT_MARGIN_SEC:.3f} sec"
+            )
+            print(
+                "  post-replan escape minimum timeout: "
+                f"{POST_REPLAN_ESCAPE_MIN_TIMEOUT_SEC:.3f} sec"
+            )
+            print(
+                "  post-replan escape angular hint cap: "
+                f"{POST_REPLAN_ESCAPE_ANGULAR_HINT_CAP_RADPS:.3f} rad/s"
             )
             print(
                 "  post-replan align heading error: "
