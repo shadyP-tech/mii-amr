@@ -283,7 +283,12 @@ DEFAULT_POST_REPLAN_ESCAPE_LINEAR_SPEED_MPS = 0.02
 DEFAULT_POST_REPLAN_ALIGN_HEADING_ERROR_DEG = 25.0
 POST_REPLAN_MIN_ROUTE_SEGMENT_M = 0.05
 POST_REPLAN_ROUTE_HEADING_LOOKAHEAD_M = 0.12
+POST_REPLAN_CLEARANCE_MAX_YAW_DEG = 12.0
+POST_REPLAN_CLEARANCE_IMPROVEMENT_M = 0.03
+POST_REPLAN_CLEARANCE_MAX_ANGULAR_RADPS = 0.12
+POST_REPLAN_CLEARANCE_SIDE_DIFF_M = 0.03
 POST_REPLAN_RECOVERY_ALIGN = "align"
+POST_REPLAN_RECOVERY_CLEARANCE_SEARCH = "clearance_search"
 POST_REPLAN_RECOVERY_WAIT_CLEAR = "wait_clear"
 POST_REPLAN_RECOVERY_ESCAPE = "escape"
 POST_REPLAN_RECOVERY_DONE = "done"
@@ -320,6 +325,17 @@ class PostReplanRecoveryState:
     last_escape_command_linear_mps: float = 0.0
     last_escape_command_angular_radps: float = 0.0
     last_escape_angular_hint_source: str = ""
+    clearance_search_attempted: bool = False
+    clearance_search_direction: float = 0.0
+    clearance_search_start_yaw_deg: float | None = None
+    clearance_search_baseline_p05_m: float | None = None
+    clearance_search_best_p05_m: float | None = None
+    clearance_search_baseline_min_m: float | None = None
+    clearance_search_best_min_m: float | None = None
+    clearance_search_last_scan_identity: tuple[float | None, float | None] | None = None
+    clearance_search_yaw_delta_deg: float = 0.0
+    clearance_search_result: str = ""
+    clearance_search_direction_source: str = ""
     final_status: str = "active"
 
 
@@ -774,6 +790,51 @@ def notes_with_post_replan_recovery_metadata(notes, args, node):
             "",
         )
     )
+    clearance_attempted = (
+        getattr(recovery, "clearance_search_attempted", False)
+        if recovery is not None
+        else getattr(node, "last_post_replan_clearance_search_attempted", False)
+    )
+    clearance_direction = (
+        getattr(recovery, "clearance_search_direction", 0.0)
+        if recovery is not None
+        else getattr(node, "last_post_replan_clearance_search_direction", 0.0)
+    )
+    clearance_yaw_delta = (
+        getattr(recovery, "clearance_search_yaw_delta_deg", 0.0)
+        if recovery is not None
+        else getattr(node, "last_post_replan_clearance_search_yaw_delta_deg", 0.0)
+    )
+    clearance_baseline_p05 = (
+        getattr(recovery, "clearance_search_baseline_p05_m", None)
+        if recovery is not None
+        else getattr(node, "last_post_replan_clearance_search_baseline_p05_m", None)
+    )
+    clearance_best_p05 = (
+        getattr(recovery, "clearance_search_best_p05_m", None)
+        if recovery is not None
+        else getattr(node, "last_post_replan_clearance_search_best_p05_m", None)
+    )
+    clearance_baseline_min = (
+        getattr(recovery, "clearance_search_baseline_min_m", None)
+        if recovery is not None
+        else getattr(node, "last_post_replan_clearance_search_baseline_min_m", None)
+    )
+    clearance_best_min = (
+        getattr(recovery, "clearance_search_best_min_m", None)
+        if recovery is not None
+        else getattr(node, "last_post_replan_clearance_search_best_min_m", None)
+    )
+    clearance_result = (
+        getattr(recovery, "clearance_search_result", "")
+        if recovery is not None
+        else getattr(node, "last_post_replan_clearance_search_result", "")
+    )
+    clearance_direction_source = (
+        getattr(recovery, "clearance_search_direction_source", "")
+        if recovery is not None
+        else getattr(node, "last_post_replan_clearance_search_direction_source", "")
+    )
     return (
         f"{notes};post_replan_recovery={args.post_replan_recovery};"
         "post_replan_recovery_activations="
@@ -806,6 +867,24 @@ def notes_with_post_replan_recovery_metadata(notes, args, node):
         f"{last_escape_command_angular:.3f};"
         "post_replan_recovery_last_escape_angular_hint_source="
         f"{last_escape_angular_hint_source};"
+        "post_replan_clearance_search_attempted="
+        f"{clearance_attempted};"
+        "post_replan_clearance_search_direction="
+        f"{clearance_direction:.1f};"
+        "post_replan_clearance_search_yaw_delta_deg="
+        f"{clearance_yaw_delta:.3f};"
+        "post_replan_clearance_search_baseline_p05_m="
+        f"{format_optional_m(clearance_baseline_p05)};"
+        "post_replan_clearance_search_best_p05_m="
+        f"{format_optional_m(clearance_best_p05)};"
+        "post_replan_clearance_search_baseline_min_m="
+        f"{format_optional_m(clearance_baseline_min)};"
+        "post_replan_clearance_search_best_min_m="
+        f"{format_optional_m(clearance_best_min)};"
+        "post_replan_clearance_search_result="
+        f"{clearance_result};"
+        "post_replan_clearance_search_direction_source="
+        f"{clearance_direction_source};"
         "post_replan_recovery_align_heading_error_deg="
         f"{args.post_replan_align_heading_error_deg:.3f}"
     )
@@ -1219,6 +1298,15 @@ class WaypointFollower(Node):
         self.last_post_replan_recovery_escape_command_linear_mps = 0.0
         self.last_post_replan_recovery_escape_command_angular_radps = 0.0
         self.last_post_replan_recovery_escape_angular_hint_source = ""
+        self.last_post_replan_clearance_search_attempted = False
+        self.last_post_replan_clearance_search_direction = 0.0
+        self.last_post_replan_clearance_search_yaw_delta_deg = 0.0
+        self.last_post_replan_clearance_search_baseline_p05_m = None
+        self.last_post_replan_clearance_search_best_p05_m = None
+        self.last_post_replan_clearance_search_baseline_min_m = None
+        self.last_post_replan_clearance_search_best_min_m = None
+        self.last_post_replan_clearance_search_result = ""
+        self.last_post_replan_clearance_search_direction_source = ""
         self.last_post_replan_recovery_log_sec = None
         self.command_smoother = build_command_smoother(args)
         self.last_smoothed_command_time_sec = None
@@ -2121,6 +2209,33 @@ class WaypointFollower(Node):
             self.last_post_replan_recovery_escape_angular_hint_source = (
                 recovery.last_escape_angular_hint_source
             )
+            self.last_post_replan_clearance_search_attempted = (
+                recovery.clearance_search_attempted
+            )
+            self.last_post_replan_clearance_search_direction = (
+                recovery.clearance_search_direction
+            )
+            self.last_post_replan_clearance_search_yaw_delta_deg = (
+                recovery.clearance_search_yaw_delta_deg
+            )
+            self.last_post_replan_clearance_search_baseline_p05_m = (
+                recovery.clearance_search_baseline_p05_m
+            )
+            self.last_post_replan_clearance_search_best_p05_m = (
+                recovery.clearance_search_best_p05_m
+            )
+            self.last_post_replan_clearance_search_baseline_min_m = (
+                recovery.clearance_search_baseline_min_m
+            )
+            self.last_post_replan_clearance_search_best_min_m = (
+                recovery.clearance_search_best_min_m
+            )
+            self.last_post_replan_clearance_search_result = (
+                recovery.clearance_search_result
+            )
+            self.last_post_replan_clearance_search_direction_source = (
+                recovery.clearance_search_direction_source
+            )
         if status:
             self.last_post_replan_recovery_status = status
         self.post_replan_recovery = None
@@ -2255,6 +2370,8 @@ class WaypointFollower(Node):
     def post_replan_recovery_timeout_reason(self, recovery):
         if recovery.phase == POST_REPLAN_RECOVERY_ALIGN:
             return "post_replan_align_timeout"
+        if recovery.phase == POST_REPLAN_RECOVERY_CLEARANCE_SEARCH:
+            return "post_replan_clearance_search_failed"
         if recovery.phase == POST_REPLAN_RECOVERY_ESCAPE:
             return "post_replan_escape_timeout"
         return "post_replan_scan_still_blocked"
@@ -2304,7 +2421,25 @@ class WaypointFollower(Node):
             "escape_command_angular_radps="
             f"{recovery.last_escape_command_angular_radps:.3f}, "
             "escape_angular_hint_source="
-            f"{recovery.last_escape_angular_hint_source}"
+            f"{recovery.last_escape_angular_hint_source}, "
+            "clearance_search_attempted="
+            f"{recovery.clearance_search_attempted}, "
+            "clearance_search_direction="
+            f"{recovery.clearance_search_direction:.1f}, "
+            "clearance_search_direction_source="
+            f"{recovery.clearance_search_direction_source}, "
+            "clearance_search_yaw_delta_deg="
+            f"{recovery.clearance_search_yaw_delta_deg:.3f}, "
+            "clearance_search_baseline_p05_m="
+            f"{format_optional_m(recovery.clearance_search_baseline_p05_m)}, "
+            "clearance_search_best_p05_m="
+            f"{format_optional_m(recovery.clearance_search_best_p05_m)}, "
+            "clearance_search_baseline_min_m="
+            f"{format_optional_m(recovery.clearance_search_baseline_min_m)}, "
+            "clearance_search_best_min_m="
+            f"{format_optional_m(recovery.clearance_search_best_min_m)}, "
+            "clearance_search_result="
+            f"{recovery.clearance_search_result}"
         )
 
     def post_replan_escape_angular_hint(self, step):
@@ -2329,6 +2464,85 @@ class WaypointFollower(Node):
             ),
             "controller",
         )
+
+    def post_replan_forward_side_p05(self):
+        scan = getattr(self, "last_scan", None)
+        if scan is None:
+            return None, None
+        half_angle_rad = math.radians(self.args.scan_half_angle_deg)
+        left_ranges = []
+        right_ranges = []
+        for index, raw_range in enumerate(scan.ranges):
+            if not math.isfinite(raw_range):
+                continue
+            if raw_range < scan.range_min or raw_range > scan.range_max:
+                continue
+            angle = normalize_angle_rad(scan.angle_min + index * scan.angle_increment)
+            if abs(angle) > half_angle_rad:
+                continue
+            if angle > 0.0:
+                left_ranges.append(float(raw_range))
+            elif angle < 0.0:
+                right_ranges.append(float(raw_range))
+        left_p05 = percentile(left_ranges, 5.0) if left_ranges else None
+        right_p05 = percentile(right_ranges, 5.0) if right_ranges else None
+        return left_p05, right_p05
+
+    def post_replan_clearance_search_direction(self, heading_error_deg):
+        left_p05, right_p05 = WaypointFollower.post_replan_forward_side_p05(self)
+        if left_p05 is not None and right_p05 is not None:
+            if left_p05 + POST_REPLAN_CLEARANCE_SIDE_DIFF_M < right_p05:
+                return -1.0, "left_obstacle"
+            if right_p05 + POST_REPLAN_CLEARANCE_SIDE_DIFF_M < left_p05:
+                return 1.0, "right_obstacle"
+        if heading_error_deg is not None and abs(heading_error_deg) > 1e-6:
+            return (1.0 if heading_error_deg > 0.0 else -1.0), "route_heading"
+        return 1.0, "deterministic_left"
+
+    def start_post_replan_clearance_search(self, recovery, pose, safety, heading_error_deg):
+        direction, direction_source = WaypointFollower.post_replan_clearance_search_direction(
+            self,
+            heading_error_deg,
+        )
+        recovery.phase = POST_REPLAN_RECOVERY_CLEARANCE_SEARCH
+        recovery.clear_scan_count = 0
+        recovery.clearance_search_attempted = True
+        recovery.clearance_search_direction = direction
+        recovery.clearance_search_direction_source = direction_source
+        recovery.clearance_search_start_yaw_deg = pose.yaw_deg
+        recovery.clearance_search_baseline_p05_m = safety.percentile_5_m
+        recovery.clearance_search_best_p05_m = safety.percentile_5_m
+        recovery.clearance_search_baseline_min_m = safety.min_range_m
+        recovery.clearance_search_best_min_m = safety.min_range_m
+        recovery.clearance_search_last_scan_identity = self.current_scan_identity()
+        recovery.clearance_search_yaw_delta_deg = 0.0
+        recovery.clearance_search_result = "active"
+        reset_command_smoother(self)
+
+    def post_replan_clearance_scan_is_new(self, recovery):
+        return (
+            WaypointFollower.scan_is_fresh_for_post_replan_recovery(self, recovery)
+            and recovery.clearance_search_last_scan_identity != self.current_scan_identity()
+        )
+
+    def enter_post_replan_wait_clear(self, recovery, reason):
+        recovery.phase = POST_REPLAN_RECOVERY_WAIT_CLEAR
+        recovery.clear_scan_count = 0
+        recovery.clearance_search_result = reason
+        reset_command_smoother(self)
+        self.publish_velocity(0.0, 0.0)
+        self.wait_one_control_cycle()
+        return True
+
+    def fail_post_replan_clearance_search(self, recovery, reason):
+        recovery.clearance_search_result = reason
+        reset_command_smoother(self)
+        self.publish_velocity(0.0, 0.0)
+        WaypointFollower.reset_post_replan_recovery(
+            self,
+            "post_replan_clearance_search_failed",
+        )
+        raise RuntimeError("post_replan_clearance_search_failed")
 
     def handle_post_replan_recovery(self, step, pose, now_sec, route_state=None):
         recovery = getattr(self, "post_replan_recovery", None)
@@ -2421,10 +2635,118 @@ class WaypointFollower(Node):
                 self.publish_velocity(0.0, angular_z)
                 self.wait_one_control_cycle()
                 return True
+            forward_safety = self.evaluate_current_scan_safety("forward")
+            recovery.last_scan_reason = forward_safety.reason
+            if forward_safety.reason == "hard_stop":
+                WaypointFollower.reset_post_replan_recovery(self, "hard_stop")
+                raise BlockedByScanError(forward_safety)
+            if (
+                forward_safety.reason == "soft_stop"
+                and not recovery.clearance_search_attempted
+            ):
+                WaypointFollower.start_post_replan_clearance_search(
+                    self,
+                    recovery,
+                    pose,
+                    forward_safety,
+                    heading_error_deg,
+                )
+                self.maybe_log_post_replan_recovery(forward_safety, heading_error_deg)
+                self.publish_velocity(0.0, 0.0)
+                self.wait_one_control_cycle()
+                return True
             recovery.phase = POST_REPLAN_RECOVERY_WAIT_CLEAR
             recovery.clear_scan_count = 0
             reset_command_smoother(self)
             self.publish_velocity(0.0, 0.0)
+            self.wait_one_control_cycle()
+            return True
+
+        if recovery.phase == POST_REPLAN_RECOVERY_CLEARANCE_SEARCH:
+            rotate_safety = self.evaluate_current_scan_safety("rotate")
+            recovery.last_scan_reason = rotate_safety.reason
+            if not rotate_safety.safe:
+                reset_command_smoother(self)
+                self.publish_velocity(0.0, 0.0)
+                WaypointFollower.reset_post_replan_recovery(self, rotate_safety.reason)
+                raise BlockedByScanError(rotate_safety)
+            if WaypointFollower.post_replan_recovery_timed_out(
+                self,
+                recovery,
+                now_sec,
+            ):
+                WaypointFollower.fail_post_replan_clearance_search(
+                    self,
+                    recovery,
+                    "timeout",
+                )
+            forward_safety = self.evaluate_current_scan_safety("forward")
+            recovery.last_scan_reason = forward_safety.reason
+            if forward_safety.reason == "hard_stop":
+                reset_command_smoother(self)
+                self.publish_velocity(0.0, 0.0)
+                WaypointFollower.reset_post_replan_recovery(self, "hard_stop")
+                raise BlockedByScanError(forward_safety)
+            if WaypointFollower.post_replan_clearance_scan_is_new(self, recovery):
+                recovery.clearance_search_last_scan_identity = self.current_scan_identity()
+                if forward_safety.percentile_5_m is not None:
+                    if recovery.clearance_search_best_p05_m is None:
+                        recovery.clearance_search_best_p05_m = forward_safety.percentile_5_m
+                    else:
+                        recovery.clearance_search_best_p05_m = max(
+                            recovery.clearance_search_best_p05_m,
+                            forward_safety.percentile_5_m,
+                        )
+                if forward_safety.min_range_m is not None:
+                    if recovery.clearance_search_best_min_m is None:
+                        recovery.clearance_search_best_min_m = forward_safety.min_range_m
+                    else:
+                        recovery.clearance_search_best_min_m = max(
+                            recovery.clearance_search_best_min_m,
+                            forward_safety.min_range_m,
+                        )
+                baseline_p05 = recovery.clearance_search_baseline_p05_m
+                if forward_safety.reason == "clear":
+                    return WaypointFollower.enter_post_replan_wait_clear(
+                        self,
+                        recovery,
+                        "clear",
+                    )
+                if (
+                    baseline_p05 is not None
+                    and forward_safety.percentile_5_m is not None
+                    and forward_safety.percentile_5_m
+                    >= baseline_p05 + POST_REPLAN_CLEARANCE_IMPROVEMENT_M - 1e-9
+                ):
+                    return WaypointFollower.enter_post_replan_wait_clear(
+                        self,
+                        recovery,
+                        "p05_improved",
+                    )
+            start_yaw = (
+                pose.yaw_deg
+                if recovery.clearance_search_start_yaw_deg is None
+                else recovery.clearance_search_start_yaw_deg
+            )
+            recovery.clearance_search_yaw_delta_deg = abs(
+                shortest_angle_delta_deg(start_yaw, pose.yaw_deg)
+            )
+            self.maybe_log_post_replan_recovery(
+                forward_safety,
+                recovery.last_heading_error_deg,
+            )
+            if recovery.clearance_search_yaw_delta_deg >= POST_REPLAN_CLEARANCE_MAX_YAW_DEG:
+                WaypointFollower.fail_post_replan_clearance_search(
+                    self,
+                    recovery,
+                    "yaw_limit",
+                )
+            angular_limit = min(
+                self.args.pure_pursuit_max_rotate_angular_speed_radps,
+                POST_REPLAN_CLEARANCE_MAX_ANGULAR_RADPS,
+            )
+            angular_z = recovery.clearance_search_direction * angular_limit
+            self.publish_velocity(0.0, angular_z)
             self.wait_one_control_cycle()
             return True
 
@@ -2450,6 +2772,25 @@ class WaypointFollower(Node):
                 raise RuntimeError(reason)
             if not safety.safe:
                 recovery.clear_scan_count = 0
+                if (
+                    safety.reason == "soft_stop"
+                    and not recovery.clearance_search_attempted
+                    and WaypointFollower.scan_is_fresh_for_post_replan_recovery(
+                        self,
+                        recovery,
+                    )
+                ):
+                    WaypointFollower.start_post_replan_clearance_search(
+                        self,
+                        recovery,
+                        pose,
+                        safety,
+                        recovery.last_heading_error_deg,
+                    )
+                    self.maybe_log_post_replan_recovery(
+                        safety,
+                        recovery.last_heading_error_deg,
+                    )
                 self.publish_velocity(0.0, 0.0)
                 self.wait_one_control_cycle()
                 return True
@@ -3290,6 +3631,24 @@ class WaypointFollower(Node):
             self.last_post_replan_recovery_escape_command_angular_radps = 0.0
         if not hasattr(self, "last_post_replan_recovery_escape_angular_hint_source"):
             self.last_post_replan_recovery_escape_angular_hint_source = ""
+        if not hasattr(self, "last_post_replan_clearance_search_attempted"):
+            self.last_post_replan_clearance_search_attempted = False
+        if not hasattr(self, "last_post_replan_clearance_search_direction"):
+            self.last_post_replan_clearance_search_direction = 0.0
+        if not hasattr(self, "last_post_replan_clearance_search_yaw_delta_deg"):
+            self.last_post_replan_clearance_search_yaw_delta_deg = 0.0
+        if not hasattr(self, "last_post_replan_clearance_search_baseline_p05_m"):
+            self.last_post_replan_clearance_search_baseline_p05_m = None
+        if not hasattr(self, "last_post_replan_clearance_search_best_p05_m"):
+            self.last_post_replan_clearance_search_best_p05_m = None
+        if not hasattr(self, "last_post_replan_clearance_search_baseline_min_m"):
+            self.last_post_replan_clearance_search_baseline_min_m = None
+        if not hasattr(self, "last_post_replan_clearance_search_best_min_m"):
+            self.last_post_replan_clearance_search_best_min_m = None
+        if not hasattr(self, "last_post_replan_clearance_search_result"):
+            self.last_post_replan_clearance_search_result = ""
+        if not hasattr(self, "last_post_replan_clearance_search_direction_source"):
+            self.last_post_replan_clearance_search_direction_source = ""
         if not hasattr(self, "last_post_replan_recovery_log_sec"):
             self.last_post_replan_recovery_log_sec = None
         reset_command_smoother(self)
