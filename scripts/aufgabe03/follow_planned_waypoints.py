@@ -317,6 +317,9 @@ class PostReplanRecoveryState:
     last_alignment_projection_segment_index: int | None = None
     last_alignment_projection_segment_ratio: float | None = None
     last_escape_distance_m: float = 0.0
+    last_escape_command_linear_mps: float = 0.0
+    last_escape_command_angular_radps: float = 0.0
+    last_escape_angular_hint_source: str = ""
     final_status: str = "active"
 
 
@@ -748,6 +751,29 @@ def notes_with_post_replan_recovery_metadata(notes, args, node):
             "",
         )
     )
+    last_escape_command_linear = (
+        getattr(recovery, "last_escape_command_linear_mps", 0.0)
+        if recovery is not None
+        else getattr(node, "last_post_replan_recovery_escape_command_linear_mps", 0.0)
+    )
+    last_escape_command_angular = (
+        getattr(recovery, "last_escape_command_angular_radps", 0.0)
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_recovery_escape_command_angular_radps",
+            0.0,
+        )
+    )
+    last_escape_angular_hint_source = (
+        getattr(recovery, "last_escape_angular_hint_source", "")
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_recovery_escape_angular_hint_source",
+            "",
+        )
+    )
     return (
         f"{notes};post_replan_recovery={args.post_replan_recovery};"
         "post_replan_recovery_activations="
@@ -774,6 +800,12 @@ def notes_with_post_replan_recovery_metadata(notes, args, node):
         f"{last_alignment_source};"
         "post_replan_recovery_escape_linear_speed_mps="
         f"{args.post_replan_escape_linear_speed_mps:.3f};"
+        "post_replan_recovery_last_escape_command_linear_mps="
+        f"{last_escape_command_linear:.3f};"
+        "post_replan_recovery_last_escape_command_angular_radps="
+        f"{last_escape_command_angular:.3f};"
+        "post_replan_recovery_last_escape_angular_hint_source="
+        f"{last_escape_angular_hint_source};"
         "post_replan_recovery_align_heading_error_deg="
         f"{args.post_replan_align_heading_error_deg:.3f}"
     )
@@ -1184,6 +1216,9 @@ class WaypointFollower(Node):
         self.last_post_replan_recovery_alignment_heading_source = ""
         self.last_post_replan_recovery_alignment_segment_index = None
         self.last_post_replan_recovery_alignment_segment_ratio = None
+        self.last_post_replan_recovery_escape_command_linear_mps = 0.0
+        self.last_post_replan_recovery_escape_command_angular_radps = 0.0
+        self.last_post_replan_recovery_escape_angular_hint_source = ""
         self.last_post_replan_recovery_log_sec = None
         self.command_smoother = build_command_smoother(args)
         self.last_smoothed_command_time_sec = None
@@ -2077,6 +2112,15 @@ class WaypointFollower(Node):
             self.last_post_replan_recovery_alignment_segment_ratio = (
                 recovery.last_alignment_projection_segment_ratio
             )
+            self.last_post_replan_recovery_escape_command_linear_mps = (
+                recovery.last_escape_command_linear_mps
+            )
+            self.last_post_replan_recovery_escape_command_angular_radps = (
+                recovery.last_escape_command_angular_radps
+            )
+            self.last_post_replan_recovery_escape_angular_hint_source = (
+                recovery.last_escape_angular_hint_source
+            )
         if status:
             self.last_post_replan_recovery_status = status
         self.post_replan_recovery = None
@@ -2254,7 +2298,36 @@ class WaypointFollower(Node):
             "heading_error_deg="
             f"{format_optional_m(heading_error_deg)}, "
             f"clear_scan_count={recovery.clear_scan_count}, "
-            f"escape_distance_m={recovery.last_escape_distance_m:.3f}"
+            f"escape_distance_m={recovery.last_escape_distance_m:.3f}, "
+            "escape_command_linear_mps="
+            f"{recovery.last_escape_command_linear_mps:.3f}, "
+            "escape_command_angular_radps="
+            f"{recovery.last_escape_command_angular_radps:.3f}, "
+            "escape_angular_hint_source="
+            f"{recovery.last_escape_angular_hint_source}"
+        )
+
+    def post_replan_escape_angular_hint(self, step):
+        if step is None or getattr(step, "command", None) is None:
+            return 0.0, "unavailable"
+        mode = getattr(step, "mode", "")
+        if mode == "blocked":
+            raise RuntimeError("post_replan_escape_controller_blocked")
+        if mode == "off_route":
+            raise RuntimeError("post_replan_escape_off_route")
+        try:
+            angular_z = float(getattr(step.command, "angular_z", 0.0))
+        except (TypeError, ValueError):
+            return 0.0, "nonfinite"
+        if not math.isfinite(angular_z):
+            return 0.0, "nonfinite"
+        return (
+            clamp(
+                angular_z,
+                -self.args.pure_pursuit_max_track_angular_speed_radps,
+                self.args.pure_pursuit_max_track_angular_speed_radps,
+            ),
+            "controller",
         )
 
     def handle_post_replan_recovery(self, step, pose, now_sec, route_state=None):
@@ -2403,9 +2476,15 @@ class WaypointFollower(Node):
             return True
 
         if recovery.phase == POST_REPLAN_RECOVERY_ESCAPE:
+            if step is not None and getattr(step, "reached", False):
+                reset_command_smoother(self)
+                WaypointFollower.reset_post_replan_recovery(self, "reached")
+                return False
             safety = self.evaluate_current_scan_safety("forward")
             recovery.last_scan_reason = safety.reason
             if safety.reason == "hard_stop":
+                reset_command_smoother(self)
+                self.publish_velocity(0.0, 0.0)
                 WaypointFollower.reset_post_replan_recovery(self, "hard_stop")
                 raise BlockedByScanError(safety)
             if not safety.safe:
@@ -2442,17 +2521,22 @@ class WaypointFollower(Node):
                 WaypointFollower.reset_post_replan_recovery(self, "done")
                 reset_command_smoother(self)
                 return False
-            linear_x = min(
-                max(0.0, step.command.linear_x),
-                self.args.post_replan_escape_linear_speed_mps,
-            )
-            angular_z = clamp(
-                step.command.angular_z,
-                -self.args.pure_pursuit_max_track_angular_speed_radps,
-                self.args.pure_pursuit_max_track_angular_speed_radps,
-            )
+            try:
+                angular_z, angular_hint_source = (
+                    WaypointFollower.post_replan_escape_angular_hint(self, step)
+                )
+            except RuntimeError as exc:
+                reason = str(exc)
+                reset_command_smoother(self)
+                self.publish_velocity(0.0, 0.0)
+                WaypointFollower.reset_post_replan_recovery(self, reason)
+                raise
+            linear_x = max(0.0, self.args.post_replan_escape_linear_speed_mps)
+            recovery.last_escape_command_linear_mps = linear_x
+            recovery.last_escape_command_angular_radps = angular_z
+            recovery.last_escape_angular_hint_source = angular_hint_source
             self.record_motion_sample(
-                step.yaw_error_deg,
+                getattr(step, "yaw_error_deg", 0.0) if step is not None else 0.0,
                 linear_x,
                 angular_z,
                 1.0 / self.args.control_rate_hz,
@@ -3200,6 +3284,12 @@ class WaypointFollower(Node):
             self.last_post_replan_recovery_alignment_segment_index = None
         if not hasattr(self, "last_post_replan_recovery_alignment_segment_ratio"):
             self.last_post_replan_recovery_alignment_segment_ratio = None
+        if not hasattr(self, "last_post_replan_recovery_escape_command_linear_mps"):
+            self.last_post_replan_recovery_escape_command_linear_mps = 0.0
+        if not hasattr(self, "last_post_replan_recovery_escape_command_angular_radps"):
+            self.last_post_replan_recovery_escape_command_angular_radps = 0.0
+        if not hasattr(self, "last_post_replan_recovery_escape_angular_hint_source"):
+            self.last_post_replan_recovery_escape_angular_hint_source = ""
         if not hasattr(self, "last_post_replan_recovery_log_sec"):
             self.last_post_replan_recovery_log_sec = None
         reset_command_smoother(self)
@@ -3343,6 +3433,20 @@ class WaypointFollower(Node):
                         f"{format_optional_m(step.guard_result.selected_target_distance_m)}, "
                         f"blocked_cells={step.guard_result.blocked_cell_count}"
                     )
+
+                recovery = getattr(self, "post_replan_recovery", None)
+                if (
+                    recovery is not None
+                    and recovery.phase == POST_REPLAN_RECOVERY_ESCAPE
+                    and WaypointFollower.handle_post_replan_recovery(
+                        self,
+                        step,
+                        pose,
+                        time.time(),
+                        route_state,
+                    )
+                ):
+                    continue
 
                 if step.reached:
                     if continuous_tracking:
