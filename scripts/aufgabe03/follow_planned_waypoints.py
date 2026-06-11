@@ -312,8 +312,20 @@ class PostReplanRecoveryState:
     escape_start_pose: Pose2D | None = None
     last_scan_reason: str = ""
     last_heading_error_deg: float | None = None
+    last_alignment_heading_deg: float | None = None
+    last_alignment_heading_source: str = ""
+    last_alignment_projection_segment_index: int | None = None
+    last_alignment_projection_segment_ratio: float | None = None
     last_escape_distance_m: float = 0.0
     final_status: str = "active"
+
+
+@dataclass(frozen=True)
+class PostReplanAlignmentHeading:
+    heading_deg: float
+    source: str
+    projection_segment_index: int | None = None
+    projection_segment_ratio: float | None = None
 
 
 def run_local_map_has_confirmed_obstacles(run_local_map):
@@ -713,6 +725,29 @@ def notes_with_post_replan_recovery_metadata(notes, args, node):
     if not getattr(args, "enable_lidar_map_replan", False):
         return notes
     recovery = getattr(node, "post_replan_recovery", None)
+    last_heading_error = (
+        getattr(recovery, "last_heading_error_deg", None)
+        if recovery is not None
+        else getattr(node, "last_post_replan_recovery_heading_error_deg", None)
+    )
+    last_alignment_heading = (
+        getattr(recovery, "last_alignment_heading_deg", None)
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_recovery_alignment_heading_deg",
+            None,
+        )
+    )
+    last_alignment_source = (
+        getattr(recovery, "last_alignment_heading_source", "")
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_recovery_alignment_heading_source",
+            "",
+        )
+    )
     return (
         f"{notes};post_replan_recovery={args.post_replan_recovery};"
         "post_replan_recovery_activations="
@@ -731,6 +766,12 @@ def notes_with_post_replan_recovery_metadata(notes, args, node):
         f"{args.post_replan_escape_distance_m:.3f};"
         "post_replan_recovery_last_escape_distance_m="
         f"{getattr(node, 'last_post_replan_recovery_escape_distance_m', 0.0):.3f};"
+        "post_replan_recovery_last_heading_error_deg="
+        f"{format_optional_m(last_heading_error)};"
+        "post_replan_recovery_last_alignment_heading_deg="
+        f"{format_optional_m(last_alignment_heading)};"
+        "post_replan_recovery_last_alignment_heading_source="
+        f"{last_alignment_source};"
         "post_replan_recovery_escape_linear_speed_mps="
         f"{args.post_replan_escape_linear_speed_mps:.3f};"
         "post_replan_recovery_align_heading_error_deg="
@@ -1138,6 +1179,11 @@ class WaypointFollower(Node):
         self.last_post_replan_recovery_clear_count = 0
         self.max_post_replan_recovery_clear_count = 0
         self.last_post_replan_recovery_escape_distance_m = 0.0
+        self.last_post_replan_recovery_heading_error_deg = None
+        self.last_post_replan_recovery_alignment_heading_deg = None
+        self.last_post_replan_recovery_alignment_heading_source = ""
+        self.last_post_replan_recovery_alignment_segment_index = None
+        self.last_post_replan_recovery_alignment_segment_ratio = None
         self.last_post_replan_recovery_log_sec = None
         self.command_smoother = build_command_smoother(args)
         self.last_smoothed_command_time_sec = None
@@ -2016,65 +2062,124 @@ class WaypointFollower(Node):
             self.last_post_replan_recovery_escape_distance_m = (
                 recovery.last_escape_distance_m
             )
+            self.last_post_replan_recovery_heading_error_deg = (
+                recovery.last_heading_error_deg
+            )
+            self.last_post_replan_recovery_alignment_heading_deg = (
+                recovery.last_alignment_heading_deg
+            )
+            self.last_post_replan_recovery_alignment_heading_source = (
+                recovery.last_alignment_heading_source
+            )
+            self.last_post_replan_recovery_alignment_segment_index = (
+                recovery.last_alignment_projection_segment_index
+            )
+            self.last_post_replan_recovery_alignment_segment_ratio = (
+                recovery.last_alignment_projection_segment_ratio
+            )
         if status:
             self.last_post_replan_recovery_status = status
         self.post_replan_recovery = None
         self.last_post_replan_recovery_log_sec = None
 
-    def route_heading_for_post_replan_recovery(self, pose, route_state):
+    def post_replan_recovery_route_points(self, route_state):
         points = route_state.remaining_tracking_points()
         if len(points) < 2:
             points = route_state.remaining()
-        if not points:
-            return None
+        return [
+            (
+                float(point.x if hasattr(point, "x") else point[0]),
+                float(point.y if hasattr(point, "y") else point[1]),
+            )
+            for point in points
+        ]
 
-        last_x = pose.x
-        last_y = pose.y
-        accumulated_m = 0.0
-        fallback_heading = None
-        for waypoint in points:
-            dx = waypoint.x - last_x
-            dy = waypoint.y - last_y
-            segment_m = math.hypot(dx, dy)
-            if segment_m < PATH_SEGMENT_EPS_M:
-                last_x = waypoint.x
-                last_y = waypoint.y
+    def local_post_replan_alignment_heading(self, route_points, segment_index):
+        if len(route_points) < 2 or segment_index is None:
+            return None
+        segment_index = max(0, min(int(segment_index), len(route_points) - 2))
+        candidates = []
+        for offset in range(0, 3):
+            if offset == 0:
+                candidates.append(segment_index)
                 continue
-            if segment_m >= POST_REPLAN_MIN_ROUTE_SEGMENT_M and fallback_heading is None:
-                fallback_heading = math.degrees(math.atan2(dy, dx))
-            if accumulated_m + segment_m >= POST_REPLAN_ROUTE_HEADING_LOOKAHEAD_M:
-                ratio = (
-                    (POST_REPLAN_ROUTE_HEADING_LOOKAHEAD_M - accumulated_m)
-                    / segment_m
+            candidates.extend([segment_index + offset, segment_index - offset])
+        seen = set()
+        for index in candidates:
+            if index in seen or index < 0 or index >= len(route_points) - 1:
+                continue
+            seen.add(index)
+            start = route_points[index]
+            end = route_points[index + 1]
+            dx = end[0] - start[0]
+            dy = end[1] - start[1]
+            if math.hypot(dx, dy) >= POST_REPLAN_MIN_ROUTE_SEGMENT_M:
+                return PostReplanAlignmentHeading(
+                    math.degrees(math.atan2(dy, dx)),
+                    "local_projection_fallback",
+                    index,
+                    0.0,
                 )
-                target_x = last_x + dx * clamp(ratio, 0.0, 1.0)
-                target_y = last_y + dy * clamp(ratio, 0.0, 1.0)
-                heading_dx = target_x - pose.x
-                heading_dy = target_y - pose.y
-                if math.hypot(heading_dx, heading_dy) >= PATH_SEGMENT_EPS_M:
-                    return math.degrees(math.atan2(heading_dy, heading_dx))
-                return math.degrees(math.atan2(dy, dx))
-            accumulated_m += segment_m
-            last_x = waypoint.x
-            last_y = waypoint.y
-        return fallback_heading
+        return None
+
+    def post_replan_alignment_heading(self, pose, route_state):
+        route_points = WaypointFollower.post_replan_recovery_route_points(
+            self,
+            route_state,
+        )
+        if len(route_points) < 2:
+            return None
+        try:
+            projection = project_point_to_route(
+                route_points,
+                pose,
+                allow_backward=True,
+                projection_status="post_replan_recovery_align",
+            )
+        except RuntimeError:
+            return None
+        route_heading = route_heading_from_projection(
+            route_points,
+            projection,
+            pose.yaw_deg,
+            heading_lookahead_m=POST_REPLAN_ROUTE_HEADING_LOOKAHEAD_M,
+        )
+        if route_heading.heading_deg is not None:
+            return PostReplanAlignmentHeading(
+                float(route_heading.heading_deg),
+                f"route_projection_{route_heading.source}",
+                projection.segment_index,
+                projection.segment_ratio,
+            )
+        return WaypointFollower.local_post_replan_alignment_heading(
+            self,
+            route_points,
+            projection.segment_index,
+        )
+
+    def route_heading_for_post_replan_recovery(self, pose, route_state):
+        alignment = WaypointFollower.post_replan_alignment_heading(
+            self,
+            pose,
+            route_state,
+        )
+        return None if alignment is None else alignment.heading_deg
 
     def activate_post_replan_recovery(self, pose, route_state):
         if not post_replan_recovery_active_for_args(self.args):
             WaypointFollower.reset_post_replan_recovery(self, "disabled")
             return
-        heading_deg = WaypointFollower.route_heading_for_post_replan_recovery(
+        alignment = WaypointFollower.post_replan_alignment_heading(
             self,
             pose,
             route_state,
         )
-        if heading_deg is None:
-            WaypointFollower.reset_post_replan_recovery(self, "no_route_heading")
-            self.get_logger().warn(
-                "Post-replan recovery skipped because no valid replanned route "
-                "heading was available."
+        if alignment is None:
+            WaypointFollower.reset_post_replan_recovery(
+                self,
+                "post_replan_alignment_unavailable",
             )
-            return
+            raise RuntimeError("post_replan_alignment_unavailable")
         self.post_replan_recovery = PostReplanRecoveryState(
             route_generation_id=self.active_route_generation_id,
             activation_pose=pose,
@@ -2085,7 +2190,15 @@ class WaypointFollower(Node):
                 else None
             ),
             activation_scan_received_sec=getattr(self, "last_scan_received_sec", None),
-            route_heading_deg=heading_deg,
+            route_heading_deg=alignment.heading_deg,
+            last_alignment_heading_deg=alignment.heading_deg,
+            last_alignment_heading_source=alignment.source,
+            last_alignment_projection_segment_index=(
+                alignment.projection_segment_index
+            ),
+            last_alignment_projection_segment_ratio=(
+                alignment.projection_segment_ratio
+            ),
         )
         self.post_replan_recovery_activations += 1
         self.last_post_replan_recovery_status = "active"
@@ -2096,6 +2209,8 @@ class WaypointFollower(Node):
         self.publish_velocity(0.0, 0.0)
 
     def post_replan_recovery_timeout_reason(self, recovery):
+        if recovery.phase == POST_REPLAN_RECOVERY_ALIGN:
+            return "post_replan_align_timeout"
         if recovery.phase == POST_REPLAN_RECOVERY_ESCAPE:
             return "post_replan_escape_timeout"
         return "post_replan_scan_still_blocked"
@@ -2128,13 +2243,21 @@ class WaypointFollower(Node):
             f"phase={recovery.phase}, "
             f"scan_reason={getattr(safety, 'reason', '') if safety else ''}, "
             f"scan_identity={self.current_scan_identity()}, "
+            "alignment_heading_deg="
+            f"{format_optional_m(recovery.last_alignment_heading_deg)}, "
+            "alignment_heading_source="
+            f"{recovery.last_alignment_heading_source}, "
+            "projection_segment_index="
+            f"{recovery.last_alignment_projection_segment_index}, "
+            "projection_segment_ratio="
+            f"{format_optional_m(recovery.last_alignment_projection_segment_ratio)}, "
             "heading_error_deg="
             f"{format_optional_m(heading_error_deg)}, "
             f"clear_scan_count={recovery.clear_scan_count}, "
             f"escape_distance_m={recovery.last_escape_distance_m:.3f}"
         )
 
-    def handle_post_replan_recovery(self, step, pose, now_sec):
+    def handle_post_replan_recovery(self, step, pose, now_sec, route_state=None):
         recovery = getattr(self, "post_replan_recovery", None)
         if recovery is None:
             return False
@@ -2144,33 +2267,78 @@ class WaypointFollower(Node):
                 "route_generation_changed",
             )
             return False
-        if WaypointFollower.post_replan_recovery_timed_out(self, recovery, now_sec):
-            reason = WaypointFollower.post_replan_recovery_timeout_reason(
-                self,
-                recovery,
-            )
-            reset_command_smoother(self)
-            self.publish_velocity(0.0, 0.0)
-            WaypointFollower.reset_post_replan_recovery(self, reason)
-            raise RuntimeError(reason)
 
         if recovery.phase == POST_REPLAN_RECOVERY_ALIGN:
             safety = self.evaluate_current_scan_safety("rotate")
-            heading_error_deg = shortest_angle_delta_deg(
-                pose.yaw_deg,
-                recovery.route_heading_deg,
-            )
             recovery.last_scan_reason = safety.reason
-            recovery.last_heading_error_deg = heading_error_deg
-            self.maybe_log_post_replan_recovery(safety, heading_error_deg)
             if safety.reason == "hard_stop":
                 WaypointFollower.reset_post_replan_recovery(self, "hard_stop")
                 raise BlockedByScanError(safety)
             if not safety.safe:
                 recovery.clear_scan_count = 0
+                self.maybe_log_post_replan_recovery(
+                    safety,
+                    recovery.last_heading_error_deg,
+                )
+                if WaypointFollower.post_replan_recovery_timed_out(
+                    self,
+                    recovery,
+                    now_sec,
+                ):
+                    reason = WaypointFollower.post_replan_recovery_timeout_reason(
+                        self,
+                        recovery,
+                    )
+                    reset_command_smoother(self)
+                    self.publish_velocity(0.0, 0.0)
+                    WaypointFollower.reset_post_replan_recovery(self, reason)
+                    raise RuntimeError(reason)
                 self.publish_velocity(0.0, 0.0)
                 self.wait_one_control_cycle()
                 return True
+            alignment = (
+                WaypointFollower.post_replan_alignment_heading(
+                    self,
+                    pose,
+                    route_state,
+                )
+                if route_state is not None
+                else None
+            )
+            if alignment is None:
+                reason = "post_replan_alignment_unavailable"
+                reset_command_smoother(self)
+                self.publish_velocity(0.0, 0.0)
+                WaypointFollower.reset_post_replan_recovery(self, reason)
+                raise RuntimeError(reason)
+            recovery.route_heading_deg = alignment.heading_deg
+            recovery.last_alignment_heading_deg = alignment.heading_deg
+            recovery.last_alignment_heading_source = alignment.source
+            recovery.last_alignment_projection_segment_index = (
+                alignment.projection_segment_index
+            )
+            recovery.last_alignment_projection_segment_ratio = (
+                alignment.projection_segment_ratio
+            )
+            heading_error_deg = shortest_angle_delta_deg(
+                pose.yaw_deg,
+                alignment.heading_deg,
+            )
+            recovery.last_heading_error_deg = heading_error_deg
+            self.maybe_log_post_replan_recovery(safety, heading_error_deg)
+            if WaypointFollower.post_replan_recovery_timed_out(
+                self,
+                recovery,
+                now_sec,
+            ):
+                reason = WaypointFollower.post_replan_recovery_timeout_reason(
+                    self,
+                    recovery,
+                )
+                reset_command_smoother(self)
+                self.publish_velocity(0.0, 0.0)
+                WaypointFollower.reset_post_replan_recovery(self, reason)
+                raise RuntimeError(reason)
             if abs(heading_error_deg) > self.args.post_replan_align_heading_error_deg:
                 angular_z = clamp(
                     math.radians(heading_error_deg) * self.args.yaw_gain,
@@ -2194,6 +2362,19 @@ class WaypointFollower(Node):
             if safety.reason == "hard_stop":
                 WaypointFollower.reset_post_replan_recovery(self, "hard_stop")
                 raise BlockedByScanError(safety)
+            if WaypointFollower.post_replan_recovery_timed_out(
+                self,
+                recovery,
+                now_sec,
+            ):
+                reason = WaypointFollower.post_replan_recovery_timeout_reason(
+                    self,
+                    recovery,
+                )
+                reset_command_smoother(self)
+                self.publish_velocity(0.0, 0.0)
+                WaypointFollower.reset_post_replan_recovery(self, reason)
+                raise RuntimeError(reason)
             if not safety.safe:
                 recovery.clear_scan_count = 0
                 self.publish_velocity(0.0, 0.0)
@@ -2235,6 +2416,19 @@ class WaypointFollower(Node):
                     "post_replan_escape_blocked",
                 )
                 raise RuntimeError("post_replan_escape_blocked")
+            if WaypointFollower.post_replan_recovery_timed_out(
+                self,
+                recovery,
+                now_sec,
+            ):
+                reason = WaypointFollower.post_replan_recovery_timeout_reason(
+                    self,
+                    recovery,
+                )
+                reset_command_smoother(self)
+                self.publish_velocity(0.0, 0.0)
+                WaypointFollower.reset_post_replan_recovery(self, reason)
+                raise RuntimeError(reason)
             start_pose = recovery.escape_start_pose or pose
             escape_distance_m = math.hypot(
                 pose.x - start_pose.x,
@@ -2996,6 +3190,16 @@ class WaypointFollower(Node):
             self.max_post_replan_recovery_clear_count = 0
         if not hasattr(self, "last_post_replan_recovery_escape_distance_m"):
             self.last_post_replan_recovery_escape_distance_m = 0.0
+        if not hasattr(self, "last_post_replan_recovery_heading_error_deg"):
+            self.last_post_replan_recovery_heading_error_deg = None
+        if not hasattr(self, "last_post_replan_recovery_alignment_heading_deg"):
+            self.last_post_replan_recovery_alignment_heading_deg = None
+        if not hasattr(self, "last_post_replan_recovery_alignment_heading_source"):
+            self.last_post_replan_recovery_alignment_heading_source = ""
+        if not hasattr(self, "last_post_replan_recovery_alignment_segment_index"):
+            self.last_post_replan_recovery_alignment_segment_index = None
+        if not hasattr(self, "last_post_replan_recovery_alignment_segment_ratio"):
+            self.last_post_replan_recovery_alignment_segment_ratio = None
         if not hasattr(self, "last_post_replan_recovery_log_sec"):
             self.last_post_replan_recovery_log_sec = None
         reset_command_smoother(self)
@@ -3099,6 +3303,23 @@ class WaypointFollower(Node):
                 final_pose = pose
                 self.final_pose = final_pose
                 self.last_amcl_health = amcl_health
+                recovery = getattr(self, "post_replan_recovery", None)
+                if (
+                    recovery is not None
+                    and recovery.phase
+                    in (
+                        POST_REPLAN_RECOVERY_ALIGN,
+                        POST_REPLAN_RECOVERY_WAIT_CLEAR,
+                    )
+                    and WaypointFollower.handle_post_replan_recovery(
+                        self,
+                        None,
+                        pose,
+                        time.time(),
+                        route_state,
+                    )
+                ):
+                    continue
                 step = controller.compute(pose, route_state)
                 self.last_lookahead_guard_result = step.guard_result
                 if hasattr(self, "record_route_projection_result"):
@@ -3271,6 +3492,7 @@ class WaypointFollower(Node):
                     step,
                     pose,
                     time.time(),
+                    route_state,
                 ):
                     continue
 
