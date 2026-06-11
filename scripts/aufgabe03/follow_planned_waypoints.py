@@ -296,6 +296,11 @@ POST_REPLAN_RECOVERY_CLEARANCE_SEARCH = "clearance_search"
 POST_REPLAN_RECOVERY_WAIT_CLEAR = "wait_clear"
 POST_REPLAN_RECOVERY_ESCAPE = "escape"
 POST_REPLAN_RECOVERY_DONE = "done"
+POST_REPLAN_PRE_CONTROLLER_RECOVERY_PHASES = (
+    POST_REPLAN_RECOVERY_ALIGN,
+    POST_REPLAN_RECOVERY_WAIT_CLEAR,
+    POST_REPLAN_RECOVERY_CLEARANCE_SEARCH,
+)
 
 INITIAL_RUN_LOCAL_MAP_NONFATAL_REASONS = {
     lidar_obstacle_map.RUN_LOCAL_FAILURE_TOO_FEW_SCAN_POINTS,
@@ -3840,10 +3845,7 @@ class WaypointFollower(Node):
                 if (
                     recovery is not None
                     and recovery.phase
-                    in (
-                        POST_REPLAN_RECOVERY_ALIGN,
-                        POST_REPLAN_RECOVERY_WAIT_CLEAR,
-                    )
+                    in POST_REPLAN_PRE_CONTROLLER_RECOVERY_PHASES
                     and WaypointFollower.handle_post_replan_recovery(
                         self,
                         None,
