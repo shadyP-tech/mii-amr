@@ -3556,13 +3556,15 @@ class WaypointFollower(Node):
         )
         self.last_post_replan_activation_status = activation.status
 
-    def prepare_scan_replan_route_activation(
+    def prepare_run_local_route_activation(
         self,
         replanned,
         current_pose,
         goal_waypoint,
+        trigger,
     ):
         replanned = list(replanned)
+        trigger = str(trigger)
         min_target_distance_m = (
             WaypointFollower.post_replan_activation_min_target_distance_m(self)
         )
@@ -3665,6 +3667,9 @@ class WaypointFollower(Node):
                 pruned_waypoints.append(waypoint)
             status = "sparse_distance_pruned"
 
+        if pruned_sparse_count == 0 and pruned_dense_count == 0:
+            status = "no_prune_needed"
+
         escape_distance_m = float(
             getattr(self.args, "post_replan_escape_distance_m", 0.0)
         )
@@ -3712,6 +3717,7 @@ class WaypointFollower(Node):
             )
             goal_reached = goal_distance_m <= self.args.goal_tolerance_m
             status = "goal_reached" if goal_reached else "no_meaningful_target"
+            status = f"{trigger}_{status}"
             activation = PostReplanActivationRoute(
                 waypoints=[],
                 tracking_points=pruned_tracking_points,
@@ -3734,9 +3740,10 @@ class WaypointFollower(Node):
                     "projection_progress_m="
                     f"{format_optional_m(projection_progress_m)}, "
                     "first_target_distance_m=n/a"
-                )
+            )
             return activation
 
+        status = f"{trigger}_{status}"
         activation = PostReplanActivationRoute(
             waypoints=pruned_waypoints,
             tracking_points=pruned_tracking_points,
@@ -4674,11 +4681,12 @@ class WaypointFollower(Node):
                                 "status": "replan_artifact_only_complete",
                             }
                         activation_route = (
-                            WaypointFollower.prepare_scan_replan_route_activation(
+                            WaypointFollower.prepare_run_local_route_activation(
                                 self,
                                 replanned,
                                 pose,
                                 route_state.final_goal(),
+                                REPLAN_TRIGGER_SCAN_BLOCKAGE,
                             )
                         )
                         if activation_route.goal_reached:
@@ -4750,24 +4758,35 @@ class WaypointFollower(Node):
                                 "base_frame_used": self.base_frame_used,
                                 "status": "replan_artifact_only_complete",
                             }
-                        waypoints = self.prune_replanned_waypoints_for_progress(replanned, pose)
+                        activation_route = (
+                            WaypointFollower.prepare_run_local_route_activation(
+                                self,
+                                replanned,
+                                pose,
+                                route_state.final_goal(),
+                                REPLAN_TRIGGER_KNOWN_CORRIDOR,
+                            )
+                        )
+                        if activation_route.goal_reached:
+                            route_state.mark_complete()
+                            reached_count = len(route_state.waypoints)
+                            self.reached_count = reached_count
+                            WaypointFollower.reset_post_replan_recovery(
+                                self,
+                                "goal_reached_after_known_corridor_activation",
+                            )
+                            reset_command_smoother(self)
+                            self.stop_repeatedly()
+                            reached_current = True
+                            break
+                        if not activation_route.waypoints:
+                            raise RuntimeError("known_corridor_no_meaningful_target")
+                        waypoints = activation_route.waypoints
                         route_state.replace_route(
                             waypoints,
-                            tracking_points=getattr(
-                                self,
-                                "last_replan_tracking_points",
-                                None,
-                            ),
-                            tracking_source=getattr(
-                                self,
-                                "last_replan_tracking_source",
-                                "waypoints",
-                            ),
-                            tracking_validation=getattr(
-                                self,
-                                "last_replan_tracking_validation",
-                                None,
-                            ),
+                            tracking_points=activation_route.tracking_points,
+                            tracking_source=activation_route.tracking_source,
+                            tracking_validation=activation_route.tracking_validation,
                         )
                         self.active_route_generation_id += 1
                         WaypointFollower.reset_post_replan_recovery(
