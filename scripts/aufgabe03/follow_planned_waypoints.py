@@ -10,6 +10,7 @@ import argparse
 import math
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -273,6 +274,19 @@ DEFAULT_RUN_LOCAL_MAP_SPARSE_RETRY_FORWARD_HALF_WIDTH_M = 0.40
 DEFAULT_RUN_LOCAL_MAP_SPARSE_RETRY_ANGLE_WINDOW_DEG = 75.0
 DEFAULT_RUN_LOCAL_MAP_SPARSE_RETRY_FORWARD_DISTANCE_M = 1.00
 DEFAULT_RUN_LOCAL_MAP_PRUNE_BEHIND_DISTANCE_M = 0.20
+DEFAULT_POST_REPLAN_RECOVERY = "on"
+POST_REPLAN_RECOVERY_MODES = ("on", "off")
+DEFAULT_POST_REPLAN_CLEAR_SCAN_SAMPLES = 2
+DEFAULT_POST_REPLAN_TIMEOUT_SEC = 4.0
+DEFAULT_POST_REPLAN_ESCAPE_DISTANCE_M = 0.12
+DEFAULT_POST_REPLAN_ESCAPE_LINEAR_SPEED_MPS = 0.02
+DEFAULT_POST_REPLAN_ALIGN_HEADING_ERROR_DEG = 25.0
+POST_REPLAN_MIN_ROUTE_SEGMENT_M = 0.05
+POST_REPLAN_ROUTE_HEADING_LOOKAHEAD_M = 0.12
+POST_REPLAN_RECOVERY_ALIGN = "align"
+POST_REPLAN_RECOVERY_WAIT_CLEAR = "wait_clear"
+POST_REPLAN_RECOVERY_ESCAPE = "escape"
+POST_REPLAN_RECOVERY_DONE = "done"
 
 INITIAL_RUN_LOCAL_MAP_NONFATAL_REASONS = {
     lidar_obstacle_map.RUN_LOCAL_FAILURE_TOO_FEW_SCAN_POINTS,
@@ -282,6 +296,24 @@ INITIAL_RUN_LOCAL_MAP_NONFATAL_REASONS = {
 REPLAN_TRIGGER_SCAN_BLOCKAGE = "scan_blockage"
 REPLAN_TRIGGER_KNOWN_CORRIDOR = "known_corridor"
 REPLAN_TRIGGER_LOOKAHEAD_GUARD = "lookahead_guard"
+
+
+@dataclass
+class PostReplanRecoveryState:
+    route_generation_id: int
+    activation_pose: Pose2D
+    activation_time_sec: float
+    activation_scan_stamp_sec: float | None
+    activation_scan_received_sec: float | None
+    route_heading_deg: float
+    phase: str = POST_REPLAN_RECOVERY_ALIGN
+    clear_scan_count: int = 0
+    last_counted_scan_identity: tuple[float | None, float | None] | None = None
+    escape_start_pose: Pose2D | None = None
+    last_scan_reason: str = ""
+    last_heading_error_deg: float | None = None
+    last_escape_distance_m: float = 0.0
+    final_status: str = "active"
 
 
 def run_local_map_has_confirmed_obstacles(run_local_map):
@@ -666,6 +698,43 @@ def notes_with_guard_metadata(notes, args, guard_result):
         "lookahead_guard_selected_distance_m="
         f"{format_optional_m(guard_result.selected_target_distance_m)};"
         f"lookahead_guard_blocked_cell_count={guard_result.blocked_cell_count}"
+    )
+
+
+def post_replan_recovery_active_for_args(args):
+    return (
+        getattr(args, "controller", DEFAULT_CONTROLLER) == "pure-pursuit"
+        and getattr(args, "enable_lidar_map_replan", False)
+        and getattr(args, "post_replan_recovery", DEFAULT_POST_REPLAN_RECOVERY) == "on"
+    )
+
+
+def notes_with_post_replan_recovery_metadata(notes, args, node):
+    if not getattr(args, "enable_lidar_map_replan", False):
+        return notes
+    recovery = getattr(node, "post_replan_recovery", None)
+    return (
+        f"{notes};post_replan_recovery={args.post_replan_recovery};"
+        "post_replan_recovery_activations="
+        f"{getattr(node, 'post_replan_recovery_activations', 0)};"
+        "post_replan_recovery_last_status="
+        f"{getattr(node, 'last_post_replan_recovery_status', '')};"
+        "post_replan_recovery_last_phase="
+        f"{getattr(node, 'last_post_replan_recovery_phase', '')};"
+        "post_replan_recovery_clear_scan_count="
+        f"{getattr(recovery, 'clear_scan_count', 0) if recovery is not None else getattr(node, 'last_post_replan_recovery_clear_count', 0)};"
+        "post_replan_recovery_max_clear_scan_count="
+        f"{getattr(node, 'max_post_replan_recovery_clear_count', 0)};"
+        "post_replan_recovery_timeout_sec="
+        f"{args.post_replan_timeout_sec:.3f};"
+        "post_replan_recovery_escape_distance_m="
+        f"{args.post_replan_escape_distance_m:.3f};"
+        "post_replan_recovery_last_escape_distance_m="
+        f"{getattr(node, 'last_post_replan_recovery_escape_distance_m', 0.0):.3f};"
+        "post_replan_recovery_escape_linear_speed_mps="
+        f"{args.post_replan_escape_linear_speed_mps:.3f};"
+        "post_replan_recovery_align_heading_error_deg="
+        f"{args.post_replan_align_heading_error_deg:.3f}"
     )
 
 
@@ -1061,6 +1130,15 @@ class WaypointFollower(Node):
         self.last_scan_block_budget_repair_signature = None
         self.last_lookahead_guard_block_signature = None
         self.last_lookahead_guard_result = None
+        self.active_route_generation_id = 0
+        self.post_replan_recovery = None
+        self.post_replan_recovery_activations = 0
+        self.last_post_replan_recovery_status = ""
+        self.last_post_replan_recovery_phase = ""
+        self.last_post_replan_recovery_clear_count = 0
+        self.max_post_replan_recovery_clear_count = 0
+        self.last_post_replan_recovery_escape_distance_m = 0.0
+        self.last_post_replan_recovery_log_sec = None
         self.command_smoother = build_command_smoother(args)
         self.last_smoothed_command_time_sec = None
         self.last_smoothed_motion_mode = None
@@ -1170,6 +1248,16 @@ class WaypointFollower(Node):
                 f"angular_decel={args.pure_pursuit_max_angular_decel_radps2:.3f}, "
                 f"final_decel_distance={args.pure_pursuit_final_decel_distance_m:.3f}, "
                 "dt_clamp=[0, 2/control_rate_hz]"
+            )
+        if args.enable_lidar_map_replan and args.verbose:
+            self.get_logger().info(
+                "Post-replan recovery: "
+                f"mode={args.post_replan_recovery}, "
+                f"clear_scan_samples={args.post_replan_clear_scan_samples}, "
+                f"timeout={args.post_replan_timeout_sec:.3f}, "
+                f"escape_distance={args.post_replan_escape_distance_m:.3f}, "
+                f"escape_linear_speed={args.post_replan_escape_linear_speed_mps:.3f}, "
+                f"align_heading_error={args.post_replan_align_heading_error_deg:.1f} deg"
             )
 
         self.pub = self.create_publisher(Twist, "/cmd_vel", 10)
@@ -1871,7 +1959,15 @@ class WaypointFollower(Node):
     def check_scan_or_raise(self, mode):
         if self.last_scan is None:
             raise RuntimeError("No /scan sample is available.")
-        safety = evaluate_scan_safety(
+        safety = self.evaluate_current_scan_safety(mode)
+        if not safety.safe:
+            raise BlockedByScanError(safety)
+        return safety
+
+    def evaluate_current_scan_safety(self, mode):
+        if self.last_scan is None:
+            raise RuntimeError("No /scan sample is available.")
+        return evaluate_scan_safety(
             self.last_scan.ranges,
             self.last_scan.angle_min,
             self.last_scan.angle_increment,
@@ -1883,9 +1979,296 @@ class WaypointFollower(Node):
             self.args.min_scan_range_m,
             self.args.rotation_stop_range_m,
         )
-        if not safety.safe:
-            raise BlockedByScanError(safety)
-        return safety
+
+    def current_scan_identity(self):
+        return (
+            replan_runtime.scan_stamp_sec(self.last_scan)
+            if self.last_scan is not None
+            else None,
+            self.last_scan_received_sec,
+        )
+
+    def scan_is_fresh_for_post_replan_recovery(self, recovery):
+        stamp_sec, received_sec = self.current_scan_identity()
+        activation_stamp = recovery.activation_scan_stamp_sec
+        activation_received = recovery.activation_scan_received_sec
+        epsilon = 1e-6
+        if stamp_sec is not None and activation_stamp is not None:
+            return stamp_sec > activation_stamp + epsilon
+        if stamp_sec is not None and activation_stamp is None:
+            return True
+        if received_sec is not None and activation_received is not None:
+            return received_sec > activation_received + epsilon
+        return False
+
+    def scan_already_counted_for_post_replan_recovery(self, recovery):
+        return recovery.last_counted_scan_identity == self.current_scan_identity()
+
+    def reset_post_replan_recovery(self, status=""):
+        recovery = getattr(self, "post_replan_recovery", None)
+        if recovery is not None:
+            self.last_post_replan_recovery_phase = recovery.phase
+            self.last_post_replan_recovery_clear_count = recovery.clear_scan_count
+            self.max_post_replan_recovery_clear_count = max(
+                self.max_post_replan_recovery_clear_count,
+                recovery.clear_scan_count,
+            )
+            self.last_post_replan_recovery_escape_distance_m = (
+                recovery.last_escape_distance_m
+            )
+        if status:
+            self.last_post_replan_recovery_status = status
+        self.post_replan_recovery = None
+        self.last_post_replan_recovery_log_sec = None
+
+    def route_heading_for_post_replan_recovery(self, pose, route_state):
+        points = route_state.remaining_tracking_points()
+        if len(points) < 2:
+            points = route_state.remaining()
+        if not points:
+            return None
+
+        last_x = pose.x
+        last_y = pose.y
+        accumulated_m = 0.0
+        fallback_heading = None
+        for waypoint in points:
+            dx = waypoint.x - last_x
+            dy = waypoint.y - last_y
+            segment_m = math.hypot(dx, dy)
+            if segment_m < PATH_SEGMENT_EPS_M:
+                last_x = waypoint.x
+                last_y = waypoint.y
+                continue
+            if segment_m >= POST_REPLAN_MIN_ROUTE_SEGMENT_M and fallback_heading is None:
+                fallback_heading = math.degrees(math.atan2(dy, dx))
+            if accumulated_m + segment_m >= POST_REPLAN_ROUTE_HEADING_LOOKAHEAD_M:
+                ratio = (
+                    (POST_REPLAN_ROUTE_HEADING_LOOKAHEAD_M - accumulated_m)
+                    / segment_m
+                )
+                target_x = last_x + dx * clamp(ratio, 0.0, 1.0)
+                target_y = last_y + dy * clamp(ratio, 0.0, 1.0)
+                heading_dx = target_x - pose.x
+                heading_dy = target_y - pose.y
+                if math.hypot(heading_dx, heading_dy) >= PATH_SEGMENT_EPS_M:
+                    return math.degrees(math.atan2(heading_dy, heading_dx))
+                return math.degrees(math.atan2(dy, dx))
+            accumulated_m += segment_m
+            last_x = waypoint.x
+            last_y = waypoint.y
+        return fallback_heading
+
+    def activate_post_replan_recovery(self, pose, route_state):
+        if not post_replan_recovery_active_for_args(self.args):
+            WaypointFollower.reset_post_replan_recovery(self, "disabled")
+            return
+        heading_deg = WaypointFollower.route_heading_for_post_replan_recovery(
+            self,
+            pose,
+            route_state,
+        )
+        if heading_deg is None:
+            WaypointFollower.reset_post_replan_recovery(self, "no_route_heading")
+            self.get_logger().warn(
+                "Post-replan recovery skipped because no valid replanned route "
+                "heading was available."
+            )
+            return
+        self.post_replan_recovery = PostReplanRecoveryState(
+            route_generation_id=self.active_route_generation_id,
+            activation_pose=pose,
+            activation_time_sec=time.time(),
+            activation_scan_stamp_sec=(
+                replan_runtime.scan_stamp_sec(getattr(self, "last_scan", None))
+                if getattr(self, "last_scan", None) is not None
+                else None
+            ),
+            activation_scan_received_sec=getattr(self, "last_scan_received_sec", None),
+            route_heading_deg=heading_deg,
+        )
+        self.post_replan_recovery_activations += 1
+        self.last_post_replan_recovery_status = "active"
+        self.last_post_replan_recovery_phase = POST_REPLAN_RECOVERY_ALIGN
+        self.last_post_replan_recovery_clear_count = 0
+        self.last_post_replan_recovery_escape_distance_m = 0.0
+        reset_command_smoother(self)
+        self.publish_velocity(0.0, 0.0)
+
+    def post_replan_recovery_timeout_reason(self, recovery):
+        if recovery.phase == POST_REPLAN_RECOVERY_ESCAPE:
+            return "post_replan_escape_timeout"
+        return "post_replan_scan_still_blocked"
+
+    def post_replan_recovery_timed_out(self, recovery, now_sec):
+        return now_sec - recovery.activation_time_sec > self.args.post_replan_timeout_sec
+
+    def wait_one_control_cycle(self):
+        rclpy.spin_once(self, timeout_sec=1.0 / self.args.control_rate_hz)
+        time.sleep(1.0 / self.args.control_rate_hz)
+
+    def maybe_log_post_replan_recovery(self, safety=None, heading_error_deg=None):
+        if not self.args.verbose:
+            return
+        recovery = getattr(self, "post_replan_recovery", None)
+        if recovery is None:
+            return
+        now_sec = time.time()
+        phase_changed = recovery.phase != self.last_post_replan_recovery_phase
+        log_due = (
+            self.last_post_replan_recovery_log_sec is None
+            or now_sec - self.last_post_replan_recovery_log_sec >= 1.0
+        )
+        if not phase_changed and not log_due:
+            return
+        self.last_post_replan_recovery_phase = recovery.phase
+        self.last_post_replan_recovery_log_sec = now_sec
+        self.get_logger().info(
+            "Post-replan recovery: "
+            f"phase={recovery.phase}, "
+            f"scan_reason={getattr(safety, 'reason', '') if safety else ''}, "
+            f"scan_identity={self.current_scan_identity()}, "
+            "heading_error_deg="
+            f"{format_optional_m(heading_error_deg)}, "
+            f"clear_scan_count={recovery.clear_scan_count}, "
+            f"escape_distance_m={recovery.last_escape_distance_m:.3f}"
+        )
+
+    def handle_post_replan_recovery(self, step, pose, now_sec):
+        recovery = getattr(self, "post_replan_recovery", None)
+        if recovery is None:
+            return False
+        if recovery.route_generation_id != self.active_route_generation_id:
+            WaypointFollower.reset_post_replan_recovery(
+                self,
+                "route_generation_changed",
+            )
+            return False
+        if WaypointFollower.post_replan_recovery_timed_out(self, recovery, now_sec):
+            reason = WaypointFollower.post_replan_recovery_timeout_reason(
+                self,
+                recovery,
+            )
+            reset_command_smoother(self)
+            self.publish_velocity(0.0, 0.0)
+            WaypointFollower.reset_post_replan_recovery(self, reason)
+            raise RuntimeError(reason)
+
+        if recovery.phase == POST_REPLAN_RECOVERY_ALIGN:
+            safety = self.evaluate_current_scan_safety("rotate")
+            heading_error_deg = shortest_angle_delta_deg(
+                pose.yaw_deg,
+                recovery.route_heading_deg,
+            )
+            recovery.last_scan_reason = safety.reason
+            recovery.last_heading_error_deg = heading_error_deg
+            self.maybe_log_post_replan_recovery(safety, heading_error_deg)
+            if safety.reason == "hard_stop":
+                WaypointFollower.reset_post_replan_recovery(self, "hard_stop")
+                raise BlockedByScanError(safety)
+            if not safety.safe:
+                recovery.clear_scan_count = 0
+                self.publish_velocity(0.0, 0.0)
+                self.wait_one_control_cycle()
+                return True
+            if abs(heading_error_deg) > self.args.post_replan_align_heading_error_deg:
+                angular_z = clamp(
+                    math.radians(heading_error_deg) * self.args.yaw_gain,
+                    -self.args.pure_pursuit_max_rotate_angular_speed_radps,
+                    self.args.pure_pursuit_max_rotate_angular_speed_radps,
+                )
+                self.publish_velocity(0.0, angular_z)
+                self.wait_one_control_cycle()
+                return True
+            recovery.phase = POST_REPLAN_RECOVERY_WAIT_CLEAR
+            recovery.clear_scan_count = 0
+            reset_command_smoother(self)
+            self.publish_velocity(0.0, 0.0)
+            self.wait_one_control_cycle()
+            return True
+
+        if recovery.phase == POST_REPLAN_RECOVERY_WAIT_CLEAR:
+            safety = self.evaluate_current_scan_safety("forward")
+            recovery.last_scan_reason = safety.reason
+            self.maybe_log_post_replan_recovery(safety, recovery.last_heading_error_deg)
+            if safety.reason == "hard_stop":
+                WaypointFollower.reset_post_replan_recovery(self, "hard_stop")
+                raise BlockedByScanError(safety)
+            if not safety.safe:
+                recovery.clear_scan_count = 0
+                self.publish_velocity(0.0, 0.0)
+                self.wait_one_control_cycle()
+                return True
+            if (
+                WaypointFollower.scan_is_fresh_for_post_replan_recovery(self, recovery)
+                and not WaypointFollower.scan_already_counted_for_post_replan_recovery(
+                    self,
+                    recovery,
+                )
+            ):
+                recovery.clear_scan_count += 1
+                recovery.last_counted_scan_identity = self.current_scan_identity()
+                self.max_post_replan_recovery_clear_count = max(
+                    self.max_post_replan_recovery_clear_count,
+                    recovery.clear_scan_count,
+                )
+            if recovery.clear_scan_count >= self.args.post_replan_clear_scan_samples:
+                recovery.phase = POST_REPLAN_RECOVERY_ESCAPE
+                recovery.escape_start_pose = pose
+                recovery.last_escape_distance_m = 0.0
+                reset_command_smoother(self)
+            self.publish_velocity(0.0, 0.0)
+            self.wait_one_control_cycle()
+            return True
+
+        if recovery.phase == POST_REPLAN_RECOVERY_ESCAPE:
+            safety = self.evaluate_current_scan_safety("forward")
+            recovery.last_scan_reason = safety.reason
+            if safety.reason == "hard_stop":
+                WaypointFollower.reset_post_replan_recovery(self, "hard_stop")
+                raise BlockedByScanError(safety)
+            if not safety.safe:
+                reset_command_smoother(self)
+                self.publish_velocity(0.0, 0.0)
+                WaypointFollower.reset_post_replan_recovery(
+                    self,
+                    "post_replan_escape_blocked",
+                )
+                raise RuntimeError("post_replan_escape_blocked")
+            start_pose = recovery.escape_start_pose or pose
+            escape_distance_m = math.hypot(
+                pose.x - start_pose.x,
+                pose.y - start_pose.y,
+            )
+            recovery.last_escape_distance_m = escape_distance_m
+            self.last_post_replan_recovery_escape_distance_m = escape_distance_m
+            self.maybe_log_post_replan_recovery(safety, recovery.last_heading_error_deg)
+            if escape_distance_m >= self.args.post_replan_escape_distance_m:
+                recovery.phase = POST_REPLAN_RECOVERY_DONE
+                WaypointFollower.reset_post_replan_recovery(self, "done")
+                reset_command_smoother(self)
+                return False
+            linear_x = min(
+                max(0.0, step.command.linear_x),
+                self.args.post_replan_escape_linear_speed_mps,
+            )
+            angular_z = clamp(
+                step.command.angular_z,
+                -self.args.pure_pursuit_max_track_angular_speed_radps,
+                self.args.pure_pursuit_max_track_angular_speed_radps,
+            )
+            self.record_motion_sample(
+                step.yaw_error_deg,
+                linear_x,
+                angular_z,
+                1.0 / self.args.control_rate_hz,
+            )
+            self.publish_velocity(linear_x, angular_z)
+            self.wait_one_control_cycle()
+            return True
+
+        WaypointFollower.reset_post_replan_recovery(self, "unknown_phase")
+        return False
 
     def update_replan_diagnostics(self, result, count_replan=True):
         diag = result.diagnostics
@@ -2597,6 +2980,24 @@ class WaypointFollower(Node):
             self.command_smoother = build_command_smoother(self.args)
         if not hasattr(self, "last_smoothed_command_time_sec"):
             self.last_smoothed_command_time_sec = None
+        if not hasattr(self, "active_route_generation_id"):
+            self.active_route_generation_id = 0
+        if not hasattr(self, "post_replan_recovery"):
+            self.post_replan_recovery = None
+        if not hasattr(self, "post_replan_recovery_activations"):
+            self.post_replan_recovery_activations = 0
+        if not hasattr(self, "last_post_replan_recovery_status"):
+            self.last_post_replan_recovery_status = ""
+        if not hasattr(self, "last_post_replan_recovery_phase"):
+            self.last_post_replan_recovery_phase = ""
+        if not hasattr(self, "last_post_replan_recovery_clear_count"):
+            self.last_post_replan_recovery_clear_count = 0
+        if not hasattr(self, "max_post_replan_recovery_clear_count"):
+            self.max_post_replan_recovery_clear_count = 0
+        if not hasattr(self, "last_post_replan_recovery_escape_distance_m"):
+            self.last_post_replan_recovery_escape_distance_m = 0.0
+        if not hasattr(self, "last_post_replan_recovery_log_sec"):
+            self.last_post_replan_recovery_log_sec = None
         reset_command_smoother(self)
 
         waypoints = list(waypoints)
@@ -2655,6 +3056,8 @@ class WaypointFollower(Node):
                 tracking_source=replacement_tracking_source,
                 tracking_validation=replacement_tracking_validation,
             )
+            self.active_route_generation_id += 1
+            WaypointFollower.reset_post_replan_recovery(self, "route_replaced")
             reset_command_smoother(self)
             controller = build_path_controller(
                 self.args,
@@ -2738,6 +3141,7 @@ class WaypointFollower(Node):
                     self.suppressed_known_corridor_signature = None
                     self.last_scan_block_budget_repair_signature = None
                     self.last_lookahead_guard_block_signature = None
+                    WaypointFollower.reset_post_replan_recovery(self, "reached")
                     reset_command_smoother(self)
                     reset_route_projection_controller(controller)
                     self.stop_repeatedly()
@@ -2766,6 +3170,7 @@ class WaypointFollower(Node):
                     raise WaypointTimeoutError(waypoint)
 
                 if step.mode == "off_route":
+                    WaypointFollower.reset_post_replan_recovery(self, "off_route")
                     reset_command_smoother(self)
                     reset_route_projection_controller(controller)
                     self.stop_repeatedly()
@@ -2780,6 +3185,10 @@ class WaypointFollower(Node):
                         )
                     reset_command_smoother(self)
                     reset_route_projection_controller(controller)
+                    WaypointFollower.reset_post_replan_recovery(
+                        self,
+                        "lookahead_blocked",
+                    )
                     self.stop_repeatedly()
                     last_scan_safety = self.check_scan_or_raise("forward")
                     self.last_scan_safety = last_scan_safety
@@ -2846,6 +3255,8 @@ class WaypointFollower(Node):
                             None,
                         ),
                     )
+                    self.active_route_generation_id += 1
+                    WaypointFollower.reset_post_replan_recovery(self, "route_replaced")
                     reset_command_smoother(self)
                     controller = build_path_controller(
                         self.args,
@@ -2854,6 +3265,14 @@ class WaypointFollower(Node):
                     self._current_path_controller = controller
                     replanned_current = True
                     break
+
+                if WaypointFollower.handle_post_replan_recovery(
+                    self,
+                    step,
+                    pose,
+                    time.time(),
+                ):
+                    continue
 
                 try:
                     last_scan_safety = self.check_scan_or_raise(step.mode)
@@ -2905,12 +3324,18 @@ class WaypointFollower(Node):
                                 None,
                             ),
                         )
+                        self.active_route_generation_id += 1
                         reset_command_smoother(self)
                         controller = build_path_controller(
                             self.args,
                             lookahead_guard=getattr(self, "lookahead_guard", None),
                         )
                         self._current_path_controller = controller
+                        WaypointFollower.activate_post_replan_recovery(
+                            self,
+                            pose,
+                            route_state,
+                        )
                         replanned_current = True
                         break
                     raise BlockedByScanError(exc.scan_safety, waypoint) from exc
@@ -2965,6 +3390,11 @@ class WaypointFollower(Node):
                                 "last_replan_tracking_validation",
                                 None,
                             ),
+                        )
+                        self.active_route_generation_id += 1
+                        WaypointFollower.reset_post_replan_recovery(
+                            self,
+                            "route_replaced",
                         )
                         reset_command_smoother(self)
                         controller = build_path_controller(
@@ -3359,6 +3789,19 @@ def print_dry_run(
         print(f"  inflation radius: {args.run_local_map_inflation_radius_m:.3f} m")
         print(f"  sparse retry count: {args.run_local_map_sparse_retry_count}")
         print(f"  prune behind distance: {args.run_local_map_prune_behind_distance_m:.3f} m")
+        print(f"  post-replan recovery: {args.post_replan_recovery}")
+        if args.post_replan_recovery == "on":
+            print(f"  post-replan clear scans: {args.post_replan_clear_scan_samples}")
+            print(f"  post-replan timeout: {args.post_replan_timeout_sec:.3f} sec")
+            print(f"  post-replan escape distance: {args.post_replan_escape_distance_m:.3f} m")
+            print(
+                "  post-replan escape speed: "
+                f"{args.post_replan_escape_linear_speed_mps:.3f} m/s"
+            )
+            print(
+                "  post-replan align heading error: "
+                f"{args.post_replan_align_heading_error_deg:.1f} deg"
+            )
     if args.start_selection == "path-progress":
         print(
             "Runtime route selection uses live TF after startup; "
@@ -3736,6 +4179,36 @@ def parse_args(argv):
         default=DEFAULT_RUN_LOCAL_MAP_PRUNE_BEHIND_DISTANCE_M,
         type=float,
     )
+    parser.add_argument(
+        "--post-replan-recovery",
+        default=DEFAULT_POST_REPLAN_RECOVERY,
+        choices=POST_REPLAN_RECOVERY_MODES,
+    )
+    parser.add_argument(
+        "--post-replan-clear-scan-samples",
+        default=DEFAULT_POST_REPLAN_CLEAR_SCAN_SAMPLES,
+        type=int,
+    )
+    parser.add_argument(
+        "--post-replan-timeout-sec",
+        default=DEFAULT_POST_REPLAN_TIMEOUT_SEC,
+        type=float,
+    )
+    parser.add_argument(
+        "--post-replan-escape-distance-m",
+        default=DEFAULT_POST_REPLAN_ESCAPE_DISTANCE_M,
+        type=float,
+    )
+    parser.add_argument(
+        "--post-replan-escape-linear-speed-mps",
+        default=DEFAULT_POST_REPLAN_ESCAPE_LINEAR_SPEED_MPS,
+        type=float,
+    )
+    parser.add_argument(
+        "--post-replan-align-heading-error-deg",
+        default=DEFAULT_POST_REPLAN_ALIGN_HEADING_ERROR_DEG,
+        type=float,
+    )
     parser.add_argument("--run-local-map-artifact-prefix")
     parser.add_argument("--wait-before-follow", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -3846,6 +4319,10 @@ def validate_args(parser, args):
         "run_local_map_sparse_retry_angle_window_deg",
         "run_local_map_sparse_retry_forward_distance_m",
         "run_local_map_prune_behind_distance_m",
+        "post_replan_timeout_sec",
+        "post_replan_escape_distance_m",
+        "post_replan_escape_linear_speed_mps",
+        "post_replan_align_heading_error_deg",
     ]
     for field in positive_fields:
         if getattr(args, field) <= 0.0:
@@ -3892,6 +4369,12 @@ def validate_args(parser, args):
         parser.error("--run-local-map-sparse-retry-count must be >= 0")
     if args.run_local_map_sparse_retry_angle_window_deg > 90.0:
         parser.error("--run-local-map-sparse-retry-angle-window-deg must be <= 90")
+    if args.post_replan_clear_scan_samples < 1:
+        parser.error("--post-replan-clear-scan-samples must be >= 1")
+    if args.post_replan_escape_linear_speed_mps > args.linear_speed:
+        parser.error(
+            "--post-replan-escape-linear-speed-mps must be <= --linear-speed"
+        )
     if args.obstacle_min_cluster_size < 1:
         parser.error("--obstacle-min-cluster-size must be >= 1")
     if args.pure_pursuit_lookahead_guard_static_inflation_radius_m < 0.0:
@@ -4085,6 +4568,7 @@ def main(argv=None):
             notes = notes_with_velocity_scheduler_metadata(notes, args)
             notes = notes_with_smoothing_metadata(notes, args)
             notes = notes_with_route_projection_metadata(notes, args, node)
+            notes = notes_with_post_replan_recovery_metadata(notes, args, node)
             node.diagnostics.final_status_reason = "wait_before_follow_cancelled"
             print("Waypoint following cancelled before custom follower start.")
             return_code = 130
@@ -4111,6 +4595,7 @@ def main(argv=None):
                 args,
                 getattr(node, "last_lookahead_guard_result", None),
             )
+            notes = notes_with_post_replan_recovery_metadata(notes, args, node)
             node.diagnostics.final_status_reason = status
             return_code = 0
 
@@ -4125,6 +4610,7 @@ def main(argv=None):
             args,
             getattr(node, "last_lookahead_guard_result", None),
         )
+        notes = notes_with_post_replan_recovery_metadata(notes, args, node)
         node.diagnostics.final_status_reason = "keyboard_interrupt"
         print("Interrupted. Sending stop command...")
         return_code = 130
@@ -4140,6 +4626,7 @@ def main(argv=None):
             args,
             getattr(node, "last_lookahead_guard_result", None),
         )
+        notes = notes_with_post_replan_recovery_metadata(notes, args, node)
         node.diagnostics.final_status_reason = str(exc)
         reached_count = node.reached_count
         start_pose = node.start_pose
@@ -4161,6 +4648,7 @@ def main(argv=None):
             args,
             getattr(node, "last_lookahead_guard_result", None),
         )
+        notes = notes_with_post_replan_recovery_metadata(notes, args, node)
         node.diagnostics.final_status_reason = str(exc)
         reached_count = node.reached_count
         start_pose = node.start_pose
@@ -4182,6 +4670,7 @@ def main(argv=None):
             args,
             getattr(node, "last_lookahead_guard_result", None),
         )
+        notes = notes_with_post_replan_recovery_metadata(notes, args, node)
         node.diagnostics.final_status_reason = str(exc)
         reached_count = node.reached_count
         start_pose = node.start_pose
