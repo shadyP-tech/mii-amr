@@ -294,8 +294,8 @@ POST_REPLAN_ESCAPE_MIN_TIMEOUT_SEC = 4.0
 POST_REPLAN_ESCAPE_ANGULAR_HINT_CAP_RADPS = 0.05
 POST_REPLAN_ESCAPE_STRAIGHT_UNTIL_PROGRESS_M = 0.010
 POST_REPLAN_ESCAPE_NO_MOTION_EPS_M = 0.003
-POST_REPLAN_ESCAPE_NO_MOTION_TIMEOUT_ODOM_SEC = 1.5
-POST_REPLAN_ESCAPE_NO_MOTION_TIMEOUT_MAP_SEC = 3.0
+POST_REPLAN_ESCAPE_NO_MOTION_TIMEOUT_ODOM_SEC = 3.0
+POST_REPLAN_ESCAPE_NO_MOTION_TIMEOUT_MAP_SEC = 4.0
 POST_REPLAN_ACTIVATION_MIN_TARGET_FLOOR_M = 0.08
 POST_REPLAN_RECOVERY_ALIGN = "align"
 POST_REPLAN_RECOVERY_CLEARANCE_SEARCH = "clearance_search"
@@ -307,6 +307,19 @@ POST_REPLAN_PRE_CONTROLLER_RECOVERY_PHASES = (
     POST_REPLAN_RECOVERY_WAIT_CLEAR,
     POST_REPLAN_RECOVERY_CLEARANCE_SEARCH,
 )
+
+
+def post_replan_recovery_should_preempt_controller(recovery):
+    if recovery is None:
+        return False
+    phase = getattr(recovery, "phase", "")
+    if phase in POST_REPLAN_PRE_CONTROLLER_RECOVERY_PHASES:
+        return True
+    return (
+        phase == POST_REPLAN_RECOVERY_ESCAPE
+        and getattr(recovery, "best_escape_distance_m", 0.0)
+        < POST_REPLAN_ESCAPE_STRAIGHT_UNTIL_PROGRESS_M
+    )
 
 INITIAL_RUN_LOCAL_MAP_NONFATAL_REASONS = {
     lidar_obstacle_map.RUN_LOCAL_FAILURE_TOO_FEW_SCAN_POINTS,
@@ -3172,20 +3185,21 @@ class WaypointFollower(Node):
                 WaypointFollower.reset_post_replan_recovery(self, "done")
                 reset_command_smoother(self)
                 return False
-            try:
-                angular_z, angular_hint_source = (
-                    WaypointFollower.post_replan_escape_angular_hint(self, step)
-                )
-            except RuntimeError as exc:
-                reason = str(exc)
-                reset_command_smoother(self)
-                self.publish_velocity(0.0, 0.0)
-                WaypointFollower.reset_post_replan_recovery(self, reason)
-                raise
             linear_x = max(0.0, self.args.post_replan_escape_linear_speed_mps)
             if recovery.escape_straight_until_progress_active:
                 angular_z = 0.0
                 angular_hint_source = "straight_until_progress"
+            else:
+                try:
+                    angular_z, angular_hint_source = (
+                        WaypointFollower.post_replan_escape_angular_hint(self, step)
+                    )
+                except RuntimeError as exc:
+                    reason = str(exc)
+                    reset_command_smoother(self)
+                    self.publish_velocity(0.0, 0.0)
+                    WaypointFollower.reset_post_replan_recovery(self, reason)
+                    raise
             recovery.last_escape_command_linear_mps = linear_x
             recovery.last_escape_command_angular_radps = angular_z
             recovery.last_escape_angular_hint_source = angular_hint_source
@@ -4428,9 +4442,7 @@ class WaypointFollower(Node):
                 self.last_amcl_health = amcl_health
                 recovery = getattr(self, "post_replan_recovery", None)
                 if (
-                    recovery is not None
-                    and recovery.phase
-                    in POST_REPLAN_PRE_CONTROLLER_RECOVERY_PHASES
+                    post_replan_recovery_should_preempt_controller(recovery)
                     and WaypointFollower.handle_post_replan_recovery(
                         self,
                         None,
