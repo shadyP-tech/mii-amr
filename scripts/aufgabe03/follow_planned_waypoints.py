@@ -289,8 +289,12 @@ POST_REPLAN_CLEARANCE_MAX_ANGULAR_RADPS = 0.12
 POST_REPLAN_CLEARANCE_SIDE_DIFF_M = 0.03
 POST_REPLAN_ESCAPE_COMPLETION_TOLERANCE_M = 0.005
 POST_REPLAN_ESCAPE_TIMEOUT_MARGIN_SEC = 0.75
-POST_REPLAN_ESCAPE_MIN_TIMEOUT_SEC = 2.0
+POST_REPLAN_ESCAPE_MIN_TIMEOUT_SEC = 4.0
 POST_REPLAN_ESCAPE_ANGULAR_HINT_CAP_RADPS = 0.05
+POST_REPLAN_ESCAPE_STRAIGHT_UNTIL_PROGRESS_M = 0.010
+POST_REPLAN_ESCAPE_NO_MOTION_EPS_M = 0.003
+POST_REPLAN_ESCAPE_NO_MOTION_TIMEOUT_ODOM_SEC = 1.5
+POST_REPLAN_ESCAPE_NO_MOTION_TIMEOUT_MAP_SEC = 3.0
 POST_REPLAN_RECOVERY_ALIGN = "align"
 POST_REPLAN_RECOVERY_CLEARANCE_SEARCH = "clearance_search"
 POST_REPLAN_RECOVERY_WAIT_CLEAR = "wait_clear"
@@ -324,6 +328,7 @@ class PostReplanRecoveryState:
     clear_scan_count: int = 0
     last_counted_scan_identity: tuple[float | None, float | None] | None = None
     escape_start_pose: Pose2D | None = None
+    escape_start_odom_pose: Pose2D | None = None
     escape_start_time_sec: float | None = None
     last_escape_timeout_sec: float | None = None
     last_escape_elapsed_sec: float | None = None
@@ -334,6 +339,13 @@ class PostReplanRecoveryState:
     last_alignment_projection_segment_index: int | None = None
     last_alignment_projection_segment_ratio: float | None = None
     last_escape_distance_m: float = 0.0
+    best_escape_distance_m: float = 0.0
+    last_progress_distance_m: float = 0.0
+    last_progress_time_sec: float | None = None
+    first_escape_command_time_sec: float | None = None
+    last_escape_distance_source: str = ""
+    last_escape_no_motion_elapsed_sec: float | None = None
+    escape_straight_until_progress_active: bool = False
     last_escape_command_linear_mps: float = 0.0
     last_escape_command_angular_radps: float = 0.0
     last_escape_angular_hint_source: str = ""
@@ -812,6 +824,35 @@ def notes_with_post_replan_recovery_metadata(notes, args, node):
         if recovery is not None
         else getattr(node, "last_post_replan_recovery_escape_timeout_sec", None)
     )
+    last_escape_distance = (
+        getattr(recovery, "last_escape_distance_m", 0.0)
+        if recovery is not None
+        else getattr(node, "last_post_replan_recovery_escape_distance_m", 0.0)
+    )
+    last_escape_source = (
+        getattr(recovery, "last_escape_distance_source", "")
+        if recovery is not None
+        else getattr(node, "last_post_replan_recovery_escape_distance_source", "")
+    )
+    best_escape_distance = (
+        getattr(recovery, "best_escape_distance_m", 0.0)
+        if recovery is not None
+        else getattr(node, "last_post_replan_recovery_best_escape_distance_m", 0.0)
+    )
+    no_motion_elapsed = (
+        getattr(recovery, "last_escape_no_motion_elapsed_sec", None)
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_recovery_escape_no_motion_elapsed_sec",
+            None,
+        )
+    )
+    straight_active = (
+        getattr(recovery, "escape_straight_until_progress_active", False)
+        if recovery is not None
+        else getattr(node, "last_post_replan_recovery_escape_straight_active", False)
+    )
     clearance_attempted = (
         getattr(recovery, "clearance_search_attempted", False)
         if recovery is not None
@@ -874,7 +915,11 @@ def notes_with_post_replan_recovery_metadata(notes, args, node):
         "post_replan_recovery_escape_distance_m="
         f"{args.post_replan_escape_distance_m:.3f};"
         "post_replan_recovery_last_escape_distance_m="
-        f"{getattr(node, 'last_post_replan_recovery_escape_distance_m', 0.0):.3f};"
+        f"{last_escape_distance:.3f};"
+        "post_replan_recovery_best_escape_distance_m="
+        f"{best_escape_distance:.3f};"
+        "post_replan_recovery_escape_distance_source="
+        f"{last_escape_source};"
         "post_replan_recovery_last_heading_error_deg="
         f"{format_optional_m(last_heading_error)};"
         "post_replan_recovery_last_alignment_heading_deg="
@@ -891,6 +936,18 @@ def notes_with_post_replan_recovery_metadata(notes, args, node):
         f"{format_optional_m(last_escape_timeout)};"
         "post_replan_escape_angular_hint_cap_radps="
         f"{POST_REPLAN_ESCAPE_ANGULAR_HINT_CAP_RADPS:.3f};"
+        "post_replan_escape_straight_until_progress_m="
+        f"{POST_REPLAN_ESCAPE_STRAIGHT_UNTIL_PROGRESS_M:.3f};"
+        "post_replan_escape_straight_until_progress_active="
+        f"{straight_active};"
+        "post_replan_escape_no_motion_eps_m="
+        f"{POST_REPLAN_ESCAPE_NO_MOTION_EPS_M:.3f};"
+        "post_replan_escape_no_motion_timeout_odom_sec="
+        f"{POST_REPLAN_ESCAPE_NO_MOTION_TIMEOUT_ODOM_SEC:.3f};"
+        "post_replan_escape_no_motion_timeout_map_sec="
+        f"{POST_REPLAN_ESCAPE_NO_MOTION_TIMEOUT_MAP_SEC:.3f};"
+        "post_replan_escape_no_motion_elapsed_sec="
+        f"{format_optional_m(no_motion_elapsed)};"
         "post_replan_recovery_last_escape_command_linear_mps="
         f"{last_escape_command_linear:.3f};"
         "post_replan_recovery_last_escape_command_angular_radps="
@@ -1320,6 +1377,10 @@ class WaypointFollower(Node):
         self.last_post_replan_recovery_clear_count = 0
         self.max_post_replan_recovery_clear_count = 0
         self.last_post_replan_recovery_escape_distance_m = 0.0
+        self.last_post_replan_recovery_best_escape_distance_m = 0.0
+        self.last_post_replan_recovery_escape_distance_source = ""
+        self.last_post_replan_recovery_escape_no_motion_elapsed_sec = None
+        self.last_post_replan_recovery_escape_straight_active = False
         self.last_post_replan_recovery_escape_elapsed_sec = None
         self.last_post_replan_recovery_escape_timeout_sec = None
         self.last_post_replan_recovery_heading_error_deg = None
@@ -1994,6 +2055,28 @@ class WaypointFollower(Node):
                 errors.append(f"split {self.args.map_frame}->{odom_frame}->{frame}: {exc}")
         raise RuntimeError("Could not lookup TF pose: " + "; ".join(errors))
 
+    def lookup_odom_pose(self):
+        errors = []
+        odom_frame = getattr(self.args, "odom_frame", DEFAULT_ODOM_FRAME)
+        lookup_time = Time() if callable(Time) else None
+        for frame in ordered_base_frames(self.args.base_frame, self.args.fallback_base_frame):
+            try:
+                transform = self.tf_buffer.lookup_transform(
+                    odom_frame,
+                    frame,
+                    lookup_time,
+                )
+                return transform_to_pose2d(transform, frame)
+            except Exception as exc:
+                errors.append(f"{odom_frame}->{frame}: {exc}")
+        raise RuntimeError("Could not lookup odom TF pose: " + "; ".join(errors))
+
+    def try_lookup_odom_pose(self):
+        try:
+            return WaypointFollower.lookup_odom_pose(self)
+        except Exception:
+            return None
+
     def update_tf_tracking(self, pose):
         if pose.stamp_sec is None:
             return None
@@ -2217,6 +2300,18 @@ class WaypointFollower(Node):
             self.last_post_replan_recovery_escape_distance_m = (
                 recovery.last_escape_distance_m
             )
+            self.last_post_replan_recovery_best_escape_distance_m = (
+                recovery.best_escape_distance_m
+            )
+            self.last_post_replan_recovery_escape_distance_source = (
+                recovery.last_escape_distance_source
+            )
+            self.last_post_replan_recovery_escape_no_motion_elapsed_sec = (
+                recovery.last_escape_no_motion_elapsed_sec
+            )
+            self.last_post_replan_recovery_escape_straight_active = (
+                recovery.escape_straight_until_progress_active
+            )
             self.last_post_replan_recovery_escape_elapsed_sec = (
                 recovery.last_escape_elapsed_sec
             )
@@ -2402,6 +2497,10 @@ class WaypointFollower(Node):
         self.last_post_replan_recovery_phase = POST_REPLAN_RECOVERY_ALIGN
         self.last_post_replan_recovery_clear_count = 0
         self.last_post_replan_recovery_escape_distance_m = 0.0
+        self.last_post_replan_recovery_best_escape_distance_m = 0.0
+        self.last_post_replan_recovery_escape_distance_source = ""
+        self.last_post_replan_recovery_escape_no_motion_elapsed_sec = None
+        self.last_post_replan_recovery_escape_straight_active = False
         self.last_post_replan_recovery_escape_elapsed_sec = None
         self.last_post_replan_recovery_escape_timeout_sec = None
         reset_command_smoother(self)
@@ -2443,6 +2542,61 @@ class WaypointFollower(Node):
         effective_deadline_sec = max(total_deadline_sec, escape_deadline_sec)
         return now_sec > effective_deadline_sec
 
+    def post_replan_escape_measurement(self, recovery, pose):
+        odom_pose = WaypointFollower.try_lookup_odom_pose(self)
+        if recovery.escape_start_odom_pose is not None and odom_pose is not None:
+            return (
+                math.hypot(
+                    odom_pose.x - recovery.escape_start_odom_pose.x,
+                    odom_pose.y - recovery.escape_start_odom_pose.y,
+                ),
+                "odom",
+            )
+        start_pose = recovery.escape_start_pose or pose
+        return (
+            math.hypot(
+                pose.x - start_pose.x,
+                pose.y - start_pose.y,
+            ),
+            "map_fallback",
+        )
+
+    def update_post_replan_escape_progress(self, recovery, distance_m, source, now_sec):
+        recovery.last_escape_distance_m = distance_m
+        recovery.last_escape_distance_source = source
+        recovery.best_escape_distance_m = max(
+            recovery.best_escape_distance_m,
+            distance_m,
+        )
+        if recovery.first_escape_command_time_sec is None:
+            recovery.last_escape_no_motion_elapsed_sec = None
+            return
+        if recovery.last_progress_time_sec is None:
+            recovery.last_progress_time_sec = recovery.first_escape_command_time_sec
+            recovery.last_progress_distance_m = recovery.best_escape_distance_m
+        if (
+            recovery.best_escape_distance_m - recovery.last_progress_distance_m
+            >= POST_REPLAN_ESCAPE_NO_MOTION_EPS_M
+        ):
+            recovery.last_progress_distance_m = recovery.best_escape_distance_m
+            recovery.last_progress_time_sec = now_sec
+        recovery.last_escape_no_motion_elapsed_sec = max(
+            0.0,
+            now_sec - recovery.last_progress_time_sec,
+        )
+
+    def post_replan_escape_no_motion_timed_out(self, recovery, linear_x):
+        if linear_x <= 0.0 or recovery.first_escape_command_time_sec is None:
+            return False
+        if recovery.last_escape_no_motion_elapsed_sec is None:
+            return False
+        timeout_sec = (
+            POST_REPLAN_ESCAPE_NO_MOTION_TIMEOUT_ODOM_SEC
+            if recovery.last_escape_distance_source == "odom"
+            else POST_REPLAN_ESCAPE_NO_MOTION_TIMEOUT_MAP_SEC
+        )
+        return recovery.last_escape_no_motion_elapsed_sec >= timeout_sec
+
     def wait_one_control_cycle(self):
         rclpy.spin_once(self, timeout_sec=1.0 / self.args.control_rate_hz)
         time.sleep(1.0 / self.args.control_rate_hz)
@@ -2480,6 +2634,9 @@ class WaypointFollower(Node):
             f"{format_optional_m(heading_error_deg)}, "
             f"clear_scan_count={recovery.clear_scan_count}, "
             f"escape_distance_m={recovery.last_escape_distance_m:.3f}, "
+            f"best_escape_distance_m={recovery.best_escape_distance_m:.3f}, "
+            "escape_distance_source="
+            f"{recovery.last_escape_distance_source}, "
             "escape_elapsed_sec="
             f"{format_optional_m(recovery.last_escape_elapsed_sec)}, "
             "escape_timeout_sec="
@@ -2494,6 +2651,10 @@ class WaypointFollower(Node):
             f"{recovery.last_escape_angular_hint_source}, "
             "escape_angular_hint_cap_radps="
             f"{POST_REPLAN_ESCAPE_ANGULAR_HINT_CAP_RADPS:.3f}, "
+            "escape_straight_until_progress_active="
+            f"{recovery.escape_straight_until_progress_active}, "
+            "escape_no_motion_elapsed_sec="
+            f"{format_optional_m(recovery.last_escape_no_motion_elapsed_sec)}, "
             "clearance_search_attempted="
             f"{recovery.clearance_search_attempted}, "
             "clearance_search_direction="
@@ -2886,8 +3047,22 @@ class WaypointFollower(Node):
             if recovery.clear_scan_count >= self.args.post_replan_clear_scan_samples:
                 recovery.phase = POST_REPLAN_RECOVERY_ESCAPE
                 recovery.escape_start_pose = pose
+                recovery.escape_start_odom_pose = WaypointFollower.try_lookup_odom_pose(
+                    self,
+                )
                 recovery.escape_start_time_sec = now_sec
                 recovery.last_escape_distance_m = 0.0
+                recovery.best_escape_distance_m = 0.0
+                recovery.last_progress_distance_m = 0.0
+                recovery.last_progress_time_sec = None
+                recovery.first_escape_command_time_sec = None
+                recovery.last_escape_distance_source = (
+                    "odom"
+                    if recovery.escape_start_odom_pose is not None
+                    else "map_fallback"
+                )
+                recovery.last_escape_no_motion_elapsed_sec = None
+                recovery.escape_straight_until_progress_active = True
                 recovery.last_escape_elapsed_sec = 0.0
                 recovery.last_escape_timeout_sec = (
                     WaypointFollower.post_replan_escape_timeout_sec(self)
@@ -2917,13 +3092,27 @@ class WaypointFollower(Node):
                     "post_replan_escape_blocked",
                 )
                 raise RuntimeError("post_replan_escape_blocked")
-            start_pose = recovery.escape_start_pose or pose
-            escape_distance_m = math.hypot(
-                pose.x - start_pose.x,
-                pose.y - start_pose.y,
+            escape_distance_m, escape_source = (
+                WaypointFollower.post_replan_escape_measurement(
+                    self,
+                    recovery,
+                    pose,
+                )
             )
-            recovery.last_escape_distance_m = escape_distance_m
-            self.last_post_replan_recovery_escape_distance_m = escape_distance_m
+            WaypointFollower.update_post_replan_escape_progress(
+                self,
+                recovery,
+                escape_distance_m,
+                escape_source,
+                now_sec,
+            )
+            self.last_post_replan_recovery_escape_distance_m = (
+                recovery.last_escape_distance_m
+            )
+            recovery.escape_straight_until_progress_active = (
+                recovery.best_escape_distance_m
+                < POST_REPLAN_ESCAPE_STRAIGHT_UNTIL_PROGRESS_M
+            )
             escape_timed_out = WaypointFollower.post_replan_escape_timed_out(
                 self,
                 recovery,
@@ -2931,22 +3120,13 @@ class WaypointFollower(Node):
             )
             self.maybe_log_post_replan_recovery(safety, recovery.last_heading_error_deg)
             if (
-                escape_distance_m + POST_REPLAN_ESCAPE_COMPLETION_TOLERANCE_M
+                recovery.best_escape_distance_m + POST_REPLAN_ESCAPE_COMPLETION_TOLERANCE_M
                 >= self.args.post_replan_escape_distance_m
             ):
                 recovery.phase = POST_REPLAN_RECOVERY_DONE
                 WaypointFollower.reset_post_replan_recovery(self, "done")
                 reset_command_smoother(self)
                 return False
-            if escape_timed_out:
-                reason = WaypointFollower.post_replan_recovery_timeout_reason(
-                    self,
-                    recovery,
-                )
-                reset_command_smoother(self)
-                self.publish_velocity(0.0, 0.0)
-                WaypointFollower.reset_post_replan_recovery(self, reason)
-                raise RuntimeError(reason)
             try:
                 angular_z, angular_hint_source = (
                     WaypointFollower.post_replan_escape_angular_hint(self, step)
@@ -2958,9 +3138,31 @@ class WaypointFollower(Node):
                 WaypointFollower.reset_post_replan_recovery(self, reason)
                 raise
             linear_x = max(0.0, self.args.post_replan_escape_linear_speed_mps)
+            if recovery.escape_straight_until_progress_active:
+                angular_z = 0.0
+                angular_hint_source = "straight_until_progress"
             recovery.last_escape_command_linear_mps = linear_x
             recovery.last_escape_command_angular_radps = angular_z
             recovery.last_escape_angular_hint_source = angular_hint_source
+            if WaypointFollower.post_replan_escape_no_motion_timed_out(
+                self,
+                recovery,
+                linear_x,
+            ):
+                reason = "post_replan_escape_no_motion"
+                reset_command_smoother(self)
+                self.publish_velocity(0.0, 0.0)
+                WaypointFollower.reset_post_replan_recovery(self, reason)
+                raise RuntimeError(reason)
+            if escape_timed_out:
+                reason = WaypointFollower.post_replan_recovery_timeout_reason(
+                    self,
+                    recovery,
+                )
+                reset_command_smoother(self)
+                self.publish_velocity(0.0, 0.0)
+                WaypointFollower.reset_post_replan_recovery(self, reason)
+                raise RuntimeError(reason)
             self.record_motion_sample(
                 getattr(step, "yaw_error_deg", 0.0) if step is not None else 0.0,
                 linear_x,
@@ -2968,6 +3170,11 @@ class WaypointFollower(Node):
                 1.0 / self.args.control_rate_hz,
             )
             self.publish_velocity(linear_x, angular_z)
+            if recovery.first_escape_command_time_sec is None:
+                recovery.first_escape_command_time_sec = now_sec
+                recovery.last_progress_time_sec = now_sec
+                recovery.last_progress_distance_m = recovery.best_escape_distance_m
+                recovery.last_escape_no_motion_elapsed_sec = 0.0
             self.wait_one_control_cycle()
             return True
 
@@ -3700,6 +3907,14 @@ class WaypointFollower(Node):
             self.max_post_replan_recovery_clear_count = 0
         if not hasattr(self, "last_post_replan_recovery_escape_distance_m"):
             self.last_post_replan_recovery_escape_distance_m = 0.0
+        if not hasattr(self, "last_post_replan_recovery_best_escape_distance_m"):
+            self.last_post_replan_recovery_best_escape_distance_m = 0.0
+        if not hasattr(self, "last_post_replan_recovery_escape_distance_source"):
+            self.last_post_replan_recovery_escape_distance_source = ""
+        if not hasattr(self, "last_post_replan_recovery_escape_no_motion_elapsed_sec"):
+            self.last_post_replan_recovery_escape_no_motion_elapsed_sec = None
+        if not hasattr(self, "last_post_replan_recovery_escape_straight_active"):
+            self.last_post_replan_recovery_escape_straight_active = False
         if not hasattr(self, "last_post_replan_recovery_escape_elapsed_sec"):
             self.last_post_replan_recovery_escape_elapsed_sec = None
         if not hasattr(self, "last_post_replan_recovery_escape_timeout_sec"):
@@ -4584,6 +4799,19 @@ def print_dry_run(
             print(
                 "  post-replan escape angular hint cap: "
                 f"{POST_REPLAN_ESCAPE_ANGULAR_HINT_CAP_RADPS:.3f} rad/s"
+            )
+            print(
+                "  post-replan escape straight-until-progress: "
+                f"{POST_REPLAN_ESCAPE_STRAIGHT_UNTIL_PROGRESS_M:.3f} m"
+            )
+            print(
+                "  post-replan escape no-motion epsilon: "
+                f"{POST_REPLAN_ESCAPE_NO_MOTION_EPS_M:.3f} m"
+            )
+            print(
+                "  post-replan escape no-motion timeouts: "
+                f"odom={POST_REPLAN_ESCAPE_NO_MOTION_TIMEOUT_ODOM_SEC:.3f} sec, "
+                f"map={POST_REPLAN_ESCAPE_NO_MOTION_TIMEOUT_MAP_SEC:.3f} sec"
             )
             print(
                 "  post-replan align heading error: "
