@@ -101,6 +101,11 @@ CSV_HEADER = BASE_CSV_HEADER + [
     "run_local_pruned_raw_cells",
     "run_local_pruned_inflated_cells",
     "run_local_cell_source_counts",
+    "path_profile_status",
+    "path_profile_speed_cap_mps",
+    "path_profile_lookahead_m",
+    "path_profile_distance_to_heading_break_m",
+    "path_profile_heading_break_delta_deg",
 ]
 
 
@@ -168,6 +173,11 @@ class RuntimeDiagnostics:
     run_local_pruned_raw_cells: int = 0
     run_local_pruned_inflated_cells: int = 0
     run_local_cell_source_counts: dict[str, int] | str = ""
+    path_profile_status: str = ""
+    path_profile_speed_cap_mps: float | None = None
+    path_profile_lookahead_m: float | None = None
+    path_profile_distance_to_heading_break_m: float | None = None
+    path_profile_heading_break_delta_deg: float | None = None
 
     @property
     def mean_abs_yaw_error_deg(self):
@@ -304,6 +314,11 @@ def build_log_row(
         diagnostics.run_local_pruned_raw_cells,
         diagnostics.run_local_pruned_inflated_cells,
         diagnostics.run_local_cell_source_counts,
+        diagnostics.path_profile_status,
+        optional(diagnostics.path_profile_speed_cap_mps),
+        optional(diagnostics.path_profile_lookahead_m),
+        optional(diagnostics.path_profile_distance_to_heading_break_m),
+        optional(diagnostics.path_profile_heading_break_delta_deg),
     ]
 
 

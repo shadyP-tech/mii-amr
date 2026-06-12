@@ -132,6 +132,14 @@ def print_dry_run(
         print(f"pure_pursuit_speed_profile={args.pure_pursuit_speed_profile}")
         print(f"pure_pursuit_forward_control={args.pure_pursuit_forward_control}")
         print(
+            "pure_pursuit_path_profile_scheduling="
+            f"{args.pure_pursuit_path_profile_scheduling}"
+        )
+        print(
+            "pure_pursuit_path_profile_straight_speed_mps="
+            f"{args.pure_pursuit_path_profile_straight_speed_mps:.3f}"
+        )
+        print(
             "pure_pursuit_route_heading_blend="
             f"{args.pure_pursuit_route_heading_blend:.3f}"
         )
@@ -439,6 +447,8 @@ def parse_args(argv, *, context):
     DEFAULT_PURE_PURSUIT_MAX_LINEAR_DECEL_MPS2 = context['DEFAULT_PURE_PURSUIT_MAX_LINEAR_DECEL_MPS2']
     DEFAULT_PURE_PURSUIT_MAX_TRACK_ANGULAR_SPEED_RADPS = context['DEFAULT_PURE_PURSUIT_MAX_TRACK_ANGULAR_SPEED_RADPS']
     DEFAULT_PURE_PURSUIT_MIN_GUARDED_LOOKAHEAD_M = context['DEFAULT_PURE_PURSUIT_MIN_GUARDED_LOOKAHEAD_M']
+    DEFAULT_PURE_PURSUIT_PATH_PROFILE_SCHEDULING = context['DEFAULT_PURE_PURSUIT_PATH_PROFILE_SCHEDULING']
+    DEFAULT_PURE_PURSUIT_PATH_PROFILE_STRAIGHT_SPEED_MPS = context['DEFAULT_PURE_PURSUIT_PATH_PROFILE_STRAIGHT_SPEED_MPS']
     DEFAULT_PURE_PURSUIT_ROTATE_START_HEADING_ERROR_DEG = context['DEFAULT_PURE_PURSUIT_ROTATE_START_HEADING_ERROR_DEG']
     DEFAULT_PURE_PURSUIT_ROTATE_STOP_HEADING_ERROR_DEG = context['DEFAULT_PURE_PURSUIT_ROTATE_STOP_HEADING_ERROR_DEG']
     DEFAULT_PURE_PURSUIT_ROUTE_HEADING_BLEND = context['DEFAULT_PURE_PURSUIT_ROUTE_HEADING_BLEND']
@@ -488,6 +498,7 @@ def parse_args(argv, *, context):
     DEFAULT_YAW_GAIN = context['DEFAULT_YAW_GAIN']
     FORWARD_CONTROL_MODES = context['FORWARD_CONTROL_MODES']
     LOOKAHEAD_GUARD_MODES = context['LOOKAHEAD_GUARD_MODES']
+    PATH_PROFILE_SCHEDULING_MODES = context['PATH_PROFILE_SCHEDULING_MODES']
     POST_REPLAN_RECOVERY_MODES = context['POST_REPLAN_RECOVERY_MODES']
     Path = context['Path']
     SPEED_PROFILE_MODES = context['SPEED_PROFILE_MODES']
@@ -554,6 +565,16 @@ def parse_args(argv, *, context):
         "--pure-pursuit-forward-control",
         default=DEFAULT_PURE_PURSUIT_FORWARD_CONTROL,
         choices=FORWARD_CONTROL_MODES,
+    )
+    parser.add_argument(
+        "--pure-pursuit-path-profile-scheduling",
+        default=DEFAULT_PURE_PURSUIT_PATH_PROFILE_SCHEDULING,
+        choices=PATH_PROFILE_SCHEDULING_MODES,
+    )
+    parser.add_argument(
+        "--pure-pursuit-path-profile-straight-speed-mps",
+        default=DEFAULT_PURE_PURSUIT_PATH_PROFILE_STRAIGHT_SPEED_MPS,
+        type=float,
     )
     parser.add_argument(
         "--pure-pursuit-route-heading-blend",
@@ -951,6 +972,7 @@ def validate_args(parser, args, *, context):
         "pure_pursuit_rotate_stop_heading_error_deg",
         "pure_pursuit_route_heading_rotate_start_deg",
         "pure_pursuit_route_heading_rotate_stop_deg",
+        "pure_pursuit_path_profile_straight_speed_mps",
         "pure_pursuit_max_track_angular_speed_radps",
         "pure_pursuit_max_rotate_angular_speed_radps",
         "pure_pursuit_cross_track_speed_floor_mps",

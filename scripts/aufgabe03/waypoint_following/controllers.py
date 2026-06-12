@@ -49,6 +49,36 @@ FORWARD_CONTROL_MODES = (
     FORWARD_CONTROL_TARGET_BEARING,
     FORWARD_CONTROL_ROUTE_DAMPED,
 )
+PATH_PROFILE_SCHEDULING_OFF = "off"
+PATH_PROFILE_SCHEDULING_ON = "on"
+PATH_PROFILE_SCHEDULING_MODES = (
+    PATH_PROFILE_SCHEDULING_OFF,
+    PATH_PROFILE_SCHEDULING_ON,
+)
+PATH_PROFILE_STATUS_OFF = "off"
+PATH_PROFILE_STATUS_BASE = "base"
+PATH_PROFILE_STATUS_STRAIGHT_FAST = "straight_fast"
+PATH_PROFILE_STATUS_APPROACH_BEND = "approach_bend"
+PATH_PROFILE_STATUS_SHORT_SEGMENT = "short_segment"
+PATH_PROFILE_STATUS_FORCE_ROTATE_PENDING = "force_rotate_pending"
+PATH_PROFILE_STATUS_FORCE_ROTATE_HANDOFF = "force_rotate_handoff"
+PATH_PROFILE_HEADING_BREAK_DEG = 20.0
+PATH_PROFILE_FORCE_ROTATE_DEG = 120.0
+PATH_PROFILE_SLOWDOWN_WINDOW_M = 0.30
+PATH_PROFILE_SHORT_SEGMENT_M = 0.25
+PATH_PROFILE_BEND_SPEED_CAP_MPS = 0.035
+PATH_PROFILE_SHORT_SPEED_CAP_MPS = 0.030
+PATH_PROFILE_STRAIGHT_LOOKAHEAD_M = 0.24
+PATH_PROFILE_BEND_LOOKAHEAD_M = 0.14
+PATH_PROFILE_FORCE_ROTATE_HANDOFF_M = 0.06
+PATH_PROFILE_STRAIGHT_ENTER_SAMPLES = 3
+PATH_PROFILE_STRAIGHT_ENTER_HEADING_ERROR_DEG = 6.0
+PATH_PROFILE_STRAIGHT_ENTER_CROSS_TRACK_M = 0.025
+PATH_PROFILE_STRAIGHT_ENTER_BREAK_DISTANCE_M = 0.50
+PATH_PROFILE_STRAIGHT_EXIT_HEADING_ERROR_DEG = 10.0
+PATH_PROFILE_STRAIGHT_EXIT_CROSS_TRACK_M = 0.04
+PATH_PROFILE_STRAIGHT_EXIT_BREAK_DISTANCE_M = 0.35
+PATH_PROFILE_MIN_BREAK_RUN_M = 0.075
 
 
 @dataclass
@@ -108,6 +138,40 @@ class ForwardControlResult:
     angular_feasibility_scale: float = 1.0
     linear_before_feasibility_mps: float = 0.0
     linear_after_feasibility_mps: float = 0.0
+
+
+@dataclass(frozen=True)
+class PathProfileScheduleResult:
+    status: str
+    speed_cap_mps: float
+    lookahead_m: float
+    distance_to_heading_break_m: float | None = None
+    heading_break_delta_deg: float | None = None
+    branch_end_progress_m: float | None = None
+    branch_end_point: tuple[float, float] | None = None
+    next_heading_deg: float | None = None
+    straight_stable_count: int = 0
+
+
+@dataclass(frozen=True)
+class PathProfileHeadingRun:
+    start_progress_m: float
+    end_progress_m: float
+    heading_deg: float
+
+    @property
+    def length_m(self):
+        return max(0.0, self.end_progress_m - self.start_progress_m)
+
+
+@dataclass(frozen=True)
+class PathProfileRouteAhead:
+    distance_to_heading_break_m: float | None
+    heading_break_delta_deg: float | None
+    branch_end_progress_m: float | None
+    branch_end_point: tuple[float, float] | None
+    next_heading_deg: float | None
+    compatible_length_m: float
 
 
 class PathController(Protocol):
@@ -264,6 +328,8 @@ class PurePursuitController:
         self.post_rotate_branch_physical_handoff_count = 0
         self.last_rotate_sign = 1.0
         self.rotate_gate_entries = 0
+        self.path_profile_straight_stable_count = 0
+        self.path_profile_last_status = PATH_PROFILE_STATUS_OFF
 
     def reset_route_projection_state(self):
         self.last_projection_segment_index = None
@@ -286,6 +352,291 @@ class PurePursuitController:
         self.post_rotate_branch_target_clip_count = 0
         self.post_rotate_branch_heading_break_handoff_count = 0
         self.post_rotate_branch_physical_handoff_count = 0
+        self._reset_path_profile_state()
+
+    def _reset_path_profile_state(self):
+        self.path_profile_straight_stable_count = 0
+        self.path_profile_last_status = (
+            PATH_PROFILE_STATUS_OFF
+            if not self._path_profile_enabled()
+            else PATH_PROFILE_STATUS_BASE
+        )
+
+    def _path_profile_enabled(self):
+        return (
+            getattr(
+                self.args,
+                "pure_pursuit_path_profile_scheduling",
+                PATH_PROFILE_SCHEDULING_OFF,
+            )
+            == PATH_PROFILE_SCHEDULING_ON
+        )
+
+    def _path_profile_base_result(self, lookahead_m):
+        return PathProfileScheduleResult(
+            PATH_PROFILE_STATUS_OFF
+            if not self._path_profile_enabled()
+            else PATH_PROFILE_STATUS_BASE,
+            abs(float(self.args.linear_speed)),
+            max(0.0, float(lookahead_m)),
+            straight_stable_count=int(self.path_profile_straight_stable_count),
+        )
+
+    @staticmethod
+    def _path_profile_heading_runs(route_points, projection):
+        route = [(float(x), float(y)) for x, y in route_points]
+        if len(route) < 2:
+            return []
+        cumulative = route_cumulative_distances(route)
+        if not cumulative or cumulative[-1] <= 1e-9:
+            return []
+        start_progress_m = clamp(
+            float(projection.route_progress_m),
+            0.0,
+            cumulative[-1],
+        )
+        runs = []
+        for index in range(len(route) - 1):
+            segment_start_m = cumulative[index]
+            segment_end_m = cumulative[index + 1]
+            local_start_m = max(segment_start_m, start_progress_m)
+            if segment_end_m <= local_start_m + 1e-9:
+                continue
+            start = route[index]
+            end = route[index + 1]
+            dx = end[0] - start[0]
+            dy = end[1] - start[1]
+            if math.hypot(dx, dy) <= 1e-9:
+                continue
+            heading_deg = math.degrees(math.atan2(dy, dx))
+            if (
+                runs
+                and abs(
+                    shortest_angle_delta_deg(
+                        runs[-1].heading_deg,
+                        heading_deg,
+                    )
+                )
+                <= 1e-6
+            ):
+                previous = runs[-1]
+                runs[-1] = PathProfileHeadingRun(
+                    previous.start_progress_m,
+                    segment_end_m,
+                    previous.heading_deg,
+                )
+            else:
+                runs.append(
+                    PathProfileHeadingRun(
+                        local_start_m,
+                        segment_end_m,
+                        heading_deg,
+                    )
+                )
+        return runs
+
+    def _path_profile_route_ahead(self, route_points, projection):
+        runs = self._path_profile_heading_runs(route_points, projection)
+        if not runs:
+            return PathProfileRouteAhead(
+                None,
+                None,
+                None,
+                None,
+                None,
+                max(0.0, float(projection.remaining_route_m)),
+            )
+        current_heading = runs[0].heading_deg
+        compatible_end_m = runs[0].end_progress_m
+        for run in runs[1:]:
+            heading_delta = abs(
+                shortest_angle_delta_deg(current_heading, run.heading_deg)
+            )
+            if (
+                heading_delta >= PATH_PROFILE_HEADING_BREAK_DEG
+                and run.length_m >= PATH_PROFILE_MIN_BREAK_RUN_M
+            ):
+                break_progress_m = run.start_progress_m
+                route = [(float(x), float(y)) for x, y in route_points]
+                cumulative = route_cumulative_distances(route)
+                break_x, break_y, _index, _ratio = route_point_at_progress(
+                    route,
+                    cumulative,
+                    break_progress_m,
+                )
+                distance_to_break_m = max(
+                    0.0,
+                    break_progress_m - float(projection.route_progress_m),
+                )
+                return PathProfileRouteAhead(
+                    distance_to_break_m,
+                    heading_delta,
+                    break_progress_m,
+                    (break_x, break_y),
+                    run.heading_deg,
+                    max(0.0, distance_to_break_m),
+                )
+            compatible_end_m = run.end_progress_m
+        return PathProfileRouteAhead(
+            None,
+            None,
+            None,
+            None,
+            None,
+            max(0.0, compatible_end_m - float(projection.route_progress_m)),
+        )
+
+    @staticmethod
+    def _finite_or_inf(value):
+        return math.inf if value is None else float(value)
+
+    def _path_profile_schedule(
+        self,
+        route_points,
+        projection,
+        base_lookahead_m,
+    ):
+        if not self._path_profile_enabled():
+            return self._path_profile_base_result(base_lookahead_m)
+
+        ahead = self._path_profile_route_ahead(route_points, projection)
+        base_speed = abs(float(self.args.linear_speed))
+        base_lookahead = max(0.0, float(base_lookahead_m))
+        min_profile_lookahead = max(
+            0.01,
+            PATH_PROFILE_BEND_LOOKAHEAD_M,
+            float(getattr(self.args, "pure_pursuit_min_guarded_lookahead_m", 0.0)),
+        )
+        distance_to_break = ahead.distance_to_heading_break_m
+        break_delta = ahead.heading_break_delta_deg
+        break_distance_for_tests = self._finite_or_inf(distance_to_break)
+        route_heading_error = abs(float(projection.heading_error_to_route_deg))
+        cross_track_error = abs(float(projection.cross_track_error_m))
+        previous_status = self.path_profile_last_status
+        status = PATH_PROFILE_STATUS_BASE
+        speed_cap = base_speed
+        lookahead_cap = base_lookahead
+
+        if (
+            break_delta is not None
+            and break_delta >= PATH_PROFILE_FORCE_ROTATE_DEG
+            and distance_to_break is not None
+        ):
+            if distance_to_break <= PATH_PROFILE_FORCE_ROTATE_HANDOFF_M:
+                status = PATH_PROFILE_STATUS_FORCE_ROTATE_HANDOFF
+            else:
+                status = PATH_PROFILE_STATUS_FORCE_ROTATE_PENDING
+            self.path_profile_straight_stable_count = 0
+            speed_cap = min(base_speed, PATH_PROFILE_SHORT_SPEED_CAP_MPS)
+            lookahead_cap = min(min_profile_lookahead, distance_to_break)
+        elif (
+            distance_to_break is not None
+            and distance_to_break < PATH_PROFILE_SHORT_SEGMENT_M
+        ):
+            status = PATH_PROFILE_STATUS_SHORT_SEGMENT
+            self.path_profile_straight_stable_count = 0
+            speed_cap = min(base_speed, PATH_PROFILE_SHORT_SPEED_CAP_MPS)
+            lookahead_cap = min(min_profile_lookahead, distance_to_break)
+        elif (
+            break_delta is not None
+            and break_delta >= PATH_PROFILE_HEADING_BREAK_DEG
+            and distance_to_break is not None
+            and distance_to_break <= PATH_PROFILE_SLOWDOWN_WINDOW_M
+        ):
+            status = PATH_PROFILE_STATUS_APPROACH_BEND
+            self.path_profile_straight_stable_count = 0
+            speed_cap = min(base_speed, PATH_PROFILE_BEND_SPEED_CAP_MPS)
+            lookahead_cap = min(min_profile_lookahead, distance_to_break)
+        else:
+            exit_straight = (
+                route_heading_error > PATH_PROFILE_STRAIGHT_EXIT_HEADING_ERROR_DEG
+                or cross_track_error > PATH_PROFILE_STRAIGHT_EXIT_CROSS_TRACK_M
+                or break_distance_for_tests
+                < PATH_PROFILE_STRAIGHT_EXIT_BREAK_DISTANCE_M
+            )
+            enter_straight = (
+                route_heading_error
+                <= PATH_PROFILE_STRAIGHT_ENTER_HEADING_ERROR_DEG
+                and cross_track_error <= PATH_PROFILE_STRAIGHT_ENTER_CROSS_TRACK_M
+                and break_distance_for_tests
+                >= PATH_PROFILE_STRAIGHT_ENTER_BREAK_DISTANCE_M
+            )
+            if previous_status == PATH_PROFILE_STATUS_STRAIGHT_FAST and not exit_straight:
+                status = PATH_PROFILE_STATUS_STRAIGHT_FAST
+                self.path_profile_straight_stable_count = max(
+                    PATH_PROFILE_STRAIGHT_ENTER_SAMPLES,
+                    self.path_profile_straight_stable_count,
+                )
+            elif enter_straight:
+                self.path_profile_straight_stable_count += 1
+                if (
+                    self.path_profile_straight_stable_count
+                    >= PATH_PROFILE_STRAIGHT_ENTER_SAMPLES
+                ):
+                    status = PATH_PROFILE_STATUS_STRAIGHT_FAST
+            else:
+                self.path_profile_straight_stable_count = 0
+
+            if status == PATH_PROFILE_STATUS_STRAIGHT_FAST:
+                speed_cap = abs(
+                    float(self.args.pure_pursuit_path_profile_straight_speed_mps)
+                )
+                lookahead_cap = min(
+                    PATH_PROFILE_STRAIGHT_LOOKAHEAD_M,
+                    max(base_lookahead, 0.0),
+                )
+            else:
+                speed_cap = base_speed
+                lookahead_cap = base_lookahead
+
+        if distance_to_break is not None:
+            lookahead_cap = min(lookahead_cap, max(0.0, distance_to_break))
+        lookahead_cap = min(lookahead_cap, max(0.0, float(projection.remaining_route_m)))
+        self.path_profile_last_status = status
+        return PathProfileScheduleResult(
+            status,
+            max(0.0, float(speed_cap)),
+            max(0.0, float(lookahead_cap)),
+            distance_to_break,
+            break_delta,
+            ahead.branch_end_progress_m,
+            ahead.branch_end_point,
+            ahead.next_heading_deg,
+            straight_stable_count=int(self.path_profile_straight_stable_count),
+        )
+
+    def _target_from_path_profile(
+        self,
+        route_points,
+        projection,
+        path_profile_result,
+    ):
+        if (
+            path_profile_result.branch_end_point is not None
+            and path_profile_result.distance_to_heading_break_m is not None
+            and path_profile_result.lookahead_m
+            >= path_profile_result.distance_to_heading_break_m - 1e-9
+        ):
+            return path_profile_result.branch_end_point
+        path_points = route_points_from_projection(route_points, projection)
+        return lookahead_target_from_route_anchor(
+            path_points,
+            min(
+                max(0.0, path_profile_result.lookahead_m),
+                max(0.0, projection.remaining_route_m),
+            ),
+        )
+
+    @staticmethod
+    def _lookahead_for_target(projection, target_point, fallback_m):
+        projected = projection.projected_point
+        distance_to_target = math.hypot(
+            float(target_point[0]) - float(projected[0]),
+            float(target_point[1]) - float(projected[1]),
+        )
+        if distance_to_target > 1e-9:
+            return max(0.01, distance_to_target)
+        return max(0.01, min(float(fallback_m), float(projection.remaining_route_m)))
 
     def compute(self, pose, route_state):
         final_goal = route_state.final_goal()
@@ -429,19 +780,42 @@ class PurePursuitController:
             )
         self._accept_projection(projection, route_state)
 
-        path_points = route_points_from_projection(route_points, projection)
-        target_point = lookahead_target_from_route_anchor(
-            path_points,
-            min(lookahead_m, max(0.0, projection.remaining_route_m)),
+        path_profile_result = self._path_profile_schedule(
+            route_points,
+            projection,
+            lookahead_m,
         )
-        command_lookahead_m = max(0.01, min(lookahead_m, projection.remaining_route_m))
+        target_point = self._target_from_path_profile(
+            route_points,
+            projection,
+            path_profile_result,
+        )
+        command_lookahead_m = self._lookahead_for_target(
+            projection,
+            target_point,
+            path_profile_result.lookahead_m,
+        )
+        path_points = route_points_from_projection(route_points, projection)
         geometry = pure_pursuit_geometry(pose, target_point, command_lookahead_m)
+        heading_lookahead_m = ROUTE_HEADING_LOOKAHEAD_M
+        if path_profile_result.distance_to_heading_break_m is not None:
+            heading_lookahead_m = min(
+                heading_lookahead_m,
+                max(0.0, path_profile_result.distance_to_heading_break_m),
+            )
         route_heading = route_heading_from_projection(
             route_points,
             projection,
             pose.yaw_deg,
-            ROUTE_HEADING_LOOKAHEAD_M,
+            heading_lookahead_m,
         )
+        if path_profile_result.status == PATH_PROFILE_STATUS_FORCE_ROTATE_HANDOFF:
+            return self._path_profile_force_rotate_step(
+                pose,
+                projection,
+                path_profile_result,
+                distance_to_goal,
+            )
         alpha_rad = self._stable_alpha_for_rotate(geometry.alpha_rad)
         alpha_deg = math.degrees(alpha_rad)
         rotate_mode, rotate_reason, rotate_source, rotate_error_deg = (
@@ -488,6 +862,7 @@ class PurePursuitController:
                 route_heading_result=route_heading,
                 pure_pursuit_rotate_reason=rotate_reason,
                 pure_pursuit_rotate_source=rotate_source,
+                path_profile_result=path_profile_result,
             )
         self.mode = "forward"
         guard_result = None
@@ -497,7 +872,7 @@ class PurePursuitController:
                 path_points,
                 current_point,
                 target_point,
-                lookahead_m,
+                max(0.0, path_profile_result.lookahead_m),
                 getattr(self.args, "pure_pursuit_min_guarded_lookahead_m", 0.12),
                 final_goal=final_goal,
                 distance_to_goal_m=distance_to_goal,
@@ -519,6 +894,7 @@ class PurePursuitController:
                     False,
                     guard_result,
                     route_heading_result=route_heading,
+                    path_profile_result=path_profile_result,
                 )
             if guard_result.selected_target_distance_m is not None:
                 command_lookahead_m = guard_result.selected_target_distance_m
@@ -544,18 +920,22 @@ class PurePursuitController:
                 projection,
                 geometry,
                 allow_route_damped=True,
+                speed_cap_mps=path_profile_result.speed_cap_mps,
             )
             mode = "forward"
         else:
             velocity_schedule_result = self.velocity_scheduler.schedule(
                 geometry,
                 allow_rotate=False,
+                linear_speed_cap_mps=path_profile_result.speed_cap_mps,
             )
             linear_x = velocity_schedule_result.command.linear_x
             angular_z = velocity_schedule_result.command.angular_z
             alpha_rad = geometry.alpha_rad
             mode = velocity_schedule_result.mode
             forward_control_result = None
+        if abs(linear_x) <= 1e-12 and abs(angular_z) <= 1e-12:
+            self._reset_path_profile_state()
         return ControllerStep(
             TwistCommand(linear_x, angular_z),
             mode,
@@ -569,6 +949,7 @@ class PurePursuitController:
             "forward",
             route_heading,
             forward_control_result=forward_control_result,
+            path_profile_result=path_profile_result,
         )
 
     def _compute_with_rotate_anchor(
@@ -909,20 +1290,32 @@ class PurePursuitController:
             )
 
         path_points = branch_path.path_points
+        path_profile_result = self._path_profile_schedule(
+            route_points,
+            projection,
+            min(lookahead_m, max(0.0, branch_path.compatible_length_m)),
+        )
         target_point = lookahead_target_from_route_anchor(
             path_points,
-            min(lookahead_m, max(0.0, branch_path.compatible_length_m)),
+            min(
+                path_profile_result.lookahead_m,
+                max(0.0, branch_path.compatible_length_m),
+            ),
         )
         command_lookahead_m = max(
             0.01,
-            min(lookahead_m, branch_path.compatible_length_m),
+            min(path_profile_result.lookahead_m, branch_path.compatible_length_m),
         )
         geometry = pure_pursuit_geometry(pose, target_point, command_lookahead_m)
+        heading_lookahead_m = min(
+            ROUTE_HEADING_LOOKAHEAD_M,
+            max(0.0, branch_path.compatible_length_m),
+        )
         route_heading = route_heading_from_projection(
             route_points,
             projection,
             pose.yaw_deg,
-            ROUTE_HEADING_LOOKAHEAD_M,
+            heading_lookahead_m,
         )
         alpha_rad = self._stable_alpha_for_rotate(geometry.alpha_rad)
         alpha_deg = math.degrees(alpha_rad)
@@ -964,6 +1357,7 @@ class PurePursuitController:
                 route_heading_result=route_heading,
                 pure_pursuit_rotate_reason=rotate_reason,
                 pure_pursuit_rotate_source=rotate_source,
+                path_profile_result=path_profile_result,
             )
 
         self.mode = "forward"
@@ -974,7 +1368,7 @@ class PurePursuitController:
                 path_points,
                 current_point,
                 target_point,
-                lookahead_m,
+                max(0.0, path_profile_result.lookahead_m),
                 getattr(self.args, "pure_pursuit_min_guarded_lookahead_m", 0.12),
                 final_goal=final_goal,
                 distance_to_goal_m=distance_to_goal,
@@ -996,6 +1390,7 @@ class PurePursuitController:
                     False,
                     guard_result,
                     route_heading_result=route_heading,
+                    path_profile_result=path_profile_result,
                 )
             if guard_result.selected_target_distance_m is not None:
                 command_lookahead_m = guard_result.selected_target_distance_m
@@ -1008,8 +1403,14 @@ class PurePursuitController:
                 target_point,
                 command_lookahead_m,
                 geometry,
+                route_heading=route_heading,
+                projection=projection,
+                allow_route_damped=True,
+                speed_cap_mps=path_profile_result.speed_cap_mps,
             )
         )
+        if abs(linear_x) <= 1e-12 and abs(angular_z) <= 1e-12:
+            self._reset_path_profile_state()
         if (
             branch_path.branch_target_clipped_to_heading_break
             and alpha_rotate_suppressed
@@ -1067,6 +1468,7 @@ class PurePursuitController:
             "forward",
             route_heading,
             forward_control_result=forward_control_result,
+            path_profile_result=path_profile_result,
         )
 
     def _branch_frame_end_check(self, pose, branch_path, lock):
@@ -1286,6 +1688,62 @@ class PurePursuitController:
             pure_pursuit_rotate_source="route_heading",
         )
 
+    def _path_profile_force_rotate_step(
+        self,
+        pose,
+        projection,
+        path_profile_result,
+        distance_to_goal,
+    ):
+        if (
+            path_profile_result.branch_end_point is None
+            or path_profile_result.next_heading_deg is None
+        ):
+            return ControllerStep(
+                TwistCommand(0.0, 0.0),
+                "blocked",
+                projection.projected_point,
+                distance_to_goal,
+                projection.heading_error_to_route_deg,
+                False,
+                route_projection_result=projection,
+                pure_pursuit_status="path_profile_force_rotate_unavailable",
+                path_profile_result=path_profile_result,
+            )
+        self.mode = "rotate"
+        self._reset_path_profile_state()
+        next_heading_error_deg = shortest_angle_delta_deg(
+            float(pose.yaw_deg),
+            float(path_profile_result.next_heading_deg),
+        )
+        route_heading = RouteHeading(
+            float(path_profile_result.next_heading_deg),
+            next_heading_error_deg,
+            "path_profile_heading_break",
+            path_profile_result.branch_end_point,
+            0.0,
+        )
+        self._activate_rotate_anchor(projection, route_heading)
+        angular_z = clamp(
+            math.radians(next_heading_error_deg) * self.args.yaw_gain,
+            -abs(self.args.pure_pursuit_max_rotate_angular_speed_radps),
+            abs(self.args.pure_pursuit_max_rotate_angular_speed_radps),
+        )
+        return ControllerStep(
+            TwistCommand(0.0, angular_z),
+            "rotate",
+            path_profile_result.branch_end_point,
+            distance_to_goal,
+            next_heading_error_deg,
+            False,
+            route_projection_result=projection,
+            pure_pursuit_status="rotate_gate",
+            route_heading_result=route_heading,
+            pure_pursuit_rotate_reason="branch_heading_break",
+            pure_pursuit_rotate_source="route_heading",
+            path_profile_result=path_profile_result,
+        )
+
     def _forward_command_from_geometry(
         self,
         pose,
@@ -1295,6 +1753,7 @@ class PurePursuitController:
         route_heading=None,
         projection=None,
         allow_route_damped=False,
+        speed_cap_mps=None,
     ):
         speed_profile = getattr(
             self.args,
@@ -1313,6 +1772,7 @@ class PurePursuitController:
                     projection,
                     geometry,
                     allow_route_damped=allow_route_damped,
+                    speed_cap_mps=speed_cap_mps,
                 )
             )
             mode = "forward"
@@ -1320,6 +1780,7 @@ class PurePursuitController:
             velocity_schedule_result = self.velocity_scheduler.schedule(
                 geometry,
                 allow_rotate=False,
+                linear_speed_cap_mps=speed_cap_mps,
             )
             linear_x = velocity_schedule_result.command.linear_x
             angular_z = velocity_schedule_result.command.angular_z
@@ -1336,7 +1797,15 @@ class PurePursuitController:
         projection,
         geometry,
         allow_route_damped,
+        speed_cap_mps=None,
     ):
+        speed_cap = abs(
+            float(
+                self.args.linear_speed
+                if speed_cap_mps is None
+                else speed_cap_mps
+            )
+        )
         forward_control = getattr(
             self.args,
             "pure_pursuit_forward_control",
@@ -1347,7 +1816,7 @@ class PurePursuitController:
                 pose,
                 target_point,
                 command_lookahead_m,
-                self.args.linear_speed,
+                speed_cap,
                 self.args.pure_pursuit_max_track_angular_speed_radps,
                 self.args.pure_pursuit_rotate_start_heading_error_deg,
             )
@@ -1377,7 +1846,7 @@ class PurePursuitController:
                 pose,
                 target_point,
                 command_lookahead_m,
-                self.args.linear_speed,
+                speed_cap,
                 self.args.pure_pursuit_max_track_angular_speed_radps,
                 self.args.pure_pursuit_rotate_start_heading_error_deg,
             )
@@ -1402,15 +1871,29 @@ class PurePursuitController:
             geometry,
             route_heading,
             projection,
+            speed_cap_mps=speed_cap,
         )
 
-    def _route_damped_fixed_forward_command(self, geometry, route_heading, projection):
+    def _route_damped_fixed_forward_command(
+        self,
+        geometry,
+        route_heading,
+        projection,
+        speed_cap_mps=None,
+    ):
         alpha_rad = geometry.alpha_rad
         alpha_deg = math.degrees(alpha_rad)
         route_heading_error_deg = float(route_heading.heading_error_deg)
         signed_cross_track_error_m = float(projection.signed_cross_track_error_m)
+        speed_cap = abs(
+            float(
+                self.args.linear_speed
+                if speed_cap_mps is None
+                else speed_cap_mps
+            )
+        )
         cte_speed_ref = max(
-            abs(float(self.args.linear_speed)),
+            speed_cap,
             float(self.args.pure_pursuit_cross_track_speed_floor_mps),
         )
         cte_correction_rad = -math.atan2(
@@ -1435,7 +1918,10 @@ class PurePursuitController:
             abs(blended_error_rad),
             abs(math.radians(route_heading_error_deg)),
         )
-        linear_x = self._fixed_linear_speed_for_error(speed_taper_error_rad)
+        linear_x = self._fixed_linear_speed_for_error(
+            speed_taper_error_rad,
+            speed_cap,
+        )
         raw_angular_z = blended_error_rad * self.args.yaw_gain
         linear_before_feasibility_mps = linear_x
         angular_z = clamp(
@@ -1492,7 +1978,14 @@ class PurePursuitController:
             return normalize_angle_rad(route_error_rad)
         return normalize_angle_rad(math.atan2(y, x))
 
-    def _fixed_linear_speed_for_error(self, error_rad):
+    def _fixed_linear_speed_for_error(self, error_rad, speed_cap_mps=None):
+        speed_cap = abs(
+            float(
+                self.args.linear_speed
+                if speed_cap_mps is None
+                else speed_cap_mps
+            )
+        )
         rotate_start_rad = max(
             1e-6,
             math.radians(abs(self.args.pure_pursuit_rotate_start_heading_error_deg)),
@@ -1507,7 +2000,7 @@ class PurePursuitController:
             0.0,
             1.0,
         )
-        return abs(float(self.args.linear_speed)) * linear_scale
+        return speed_cap * linear_scale
 
     def _accept_projection(self, projection, route_state):
         self.last_projection_segment_index = projection.segment_index
@@ -1522,6 +2015,7 @@ class PurePursuitController:
     def _activate_rotate_anchor(self, projection, route_heading):
         if self.rotate_projection_anchor is not None:
             return
+        self._reset_path_profile_state()
         heading_deg = (
             route_heading.heading_deg
             if route_heading is not None and route_heading.heading_deg is not None

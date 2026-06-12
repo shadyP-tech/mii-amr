@@ -271,6 +271,10 @@ def notes_with_velocity_scheduler_metadata(notes, args, context):
         f"{args.pure_pursuit_speed_profile};"
         "pure_pursuit_forward_control="
         f"{args.pure_pursuit_forward_control};"
+        "pure_pursuit_path_profile_scheduling="
+        f"{args.pure_pursuit_path_profile_scheduling};"
+        "pure_pursuit_path_profile_straight_speed_mps="
+        f"{args.pure_pursuit_path_profile_straight_speed_mps:.3f};"
         "pure_pursuit_route_heading_blend="
         f"{args.pure_pursuit_route_heading_blend:.3f};"
         "pure_pursuit_cross_track_gain="
@@ -471,6 +475,35 @@ def maybe_log_velocity_scheduler_result(self, result, now_sec, context):
 
 
 def record_route_projection_result(self, step, context):
+    profile = getattr(step, "path_profile_result", None)
+    if profile is not None:
+        self.diagnostics.path_profile_status = getattr(profile, "status", "")
+        self.diagnostics.path_profile_speed_cap_mps = getattr(
+            profile,
+            "speed_cap_mps",
+            None,
+        )
+        self.diagnostics.path_profile_lookahead_m = getattr(
+            profile,
+            "lookahead_m",
+            None,
+        )
+        self.diagnostics.path_profile_distance_to_heading_break_m = getattr(
+            profile,
+            "distance_to_heading_break_m",
+            None,
+        )
+        self.diagnostics.path_profile_heading_break_delta_deg = getattr(
+            profile,
+            "heading_break_delta_deg",
+            None,
+        )
+    else:
+        self.diagnostics.path_profile_status = ""
+        self.diagnostics.path_profile_speed_cap_mps = None
+        self.diagnostics.path_profile_lookahead_m = None
+        self.diagnostics.path_profile_distance_to_heading_break_m = None
+        self.diagnostics.path_profile_heading_break_delta_deg = None
     projection = getattr(step, "route_projection_result", None)
     if projection is None:
         return
@@ -645,9 +678,20 @@ def maybe_log_route_projection_result(self, step, now_sec, context):
     self.last_route_projection_log_sec = now_sec
     route_heading = getattr(step, "route_heading_result", None)
     forward_control = getattr(step, "forward_control_result", None)
+    path_profile = getattr(step, "path_profile_result", None)
     message = (
         "Pure-pursuit route projection: "
         f"status={status}, "
+        "path_profile_status="
+        f"{getattr(path_profile, 'status', '') if path_profile is not None else ''}, "
+        "path_profile_speed_cap_mps="
+        f"{format_optional_m(getattr(path_profile, 'speed_cap_mps', None) if path_profile is not None else None)}, "
+        "path_profile_lookahead_m="
+        f"{format_optional_m(getattr(path_profile, 'lookahead_m', None) if path_profile is not None else None)}, "
+        "path_profile_distance_to_heading_break_m="
+        f"{format_optional_m(getattr(path_profile, 'distance_to_heading_break_m', None) if path_profile is not None else None)}, "
+        "path_profile_heading_break_delta_deg="
+        f"{format_optional_m(getattr(path_profile, 'heading_break_delta_deg', None) if path_profile is not None else None)}, "
         "projection_status="
         f"{getattr(projection, 'projection_status', 'locked')}, "
         "projection_lock_samples="

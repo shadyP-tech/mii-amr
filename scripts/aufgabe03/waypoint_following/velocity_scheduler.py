@@ -154,9 +154,13 @@ class PurePursuitVelocityScheduler:
     def reset(self):
         self.mode = "forward"
 
-    def schedule(self, geometry, allow_rotate=True):
+    def schedule(self, geometry, allow_rotate=True, linear_speed_cap_mps=None):
         alpha_deg = math.degrees(geometry.alpha_rad)
-        raw_linear = abs(self.config.linear_speed_mps)
+        raw_linear = abs(
+            self.config.linear_speed_mps
+            if linear_speed_cap_mps is None
+            else float(linear_speed_cap_mps)
+        )
         curvature = float(geometry.curvature_1pm)
         lateral_error_m = geometry.lookahead_m * math.sin(geometry.alpha_rad)
         raw_angular_z = raw_linear * curvature
