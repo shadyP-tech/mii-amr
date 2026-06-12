@@ -266,6 +266,14 @@ def notes_with_velocity_scheduler_metadata(notes, args, context):
     if getattr(args, "controller", context.default_controller) != "pure-pursuit":
         return notes
     ROUTE_HEADING_LOOKAHEAD_M = context.route_heading_lookahead_m
+    short_effective_cap_mps = min(
+        abs(float(args.linear_speed)),
+        abs(float(args.pure_pursuit_path_profile_short_speed_cap_mps)),
+    )
+    bend_effective_cap_mps = min(
+        abs(float(args.linear_speed)),
+        abs(float(args.pure_pursuit_path_profile_bend_speed_cap_mps)),
+    )
     return (
         f"{notes};pure_pursuit_speed_profile="
         f"{args.pure_pursuit_speed_profile};"
@@ -275,6 +283,14 @@ def notes_with_velocity_scheduler_metadata(notes, args, context):
         f"{args.pure_pursuit_path_profile_scheduling};"
         "pure_pursuit_path_profile_straight_speed_mps="
         f"{args.pure_pursuit_path_profile_straight_speed_mps:.3f};"
+        "pure_pursuit_path_profile_short_speed_cap_mps="
+        f"{args.pure_pursuit_path_profile_short_speed_cap_mps:.3f};"
+        "pure_pursuit_path_profile_short_effective_speed_cap_mps="
+        f"{short_effective_cap_mps:.3f};"
+        "pure_pursuit_path_profile_bend_speed_cap_mps="
+        f"{args.pure_pursuit_path_profile_bend_speed_cap_mps:.3f};"
+        "pure_pursuit_path_profile_bend_effective_speed_cap_mps="
+        f"{bend_effective_cap_mps:.3f};"
         "pure_pursuit_route_heading_blend="
         f"{args.pure_pursuit_route_heading_blend:.3f};"
         "pure_pursuit_cross_track_gain="

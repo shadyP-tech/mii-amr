@@ -40,6 +40,9 @@ def node_setup_context(facade):
         post_rotate_branch_release_stable_samples=facade[
             "POST_ROTATE_BRANCH_RELEASE_STABLE_SAMPLES"
         ],
+        post_replan_route_clearance_preview_distance_m=facade[
+            "post_replan_route_clearance_preview_distance_m"
+        ],
     )
 
 

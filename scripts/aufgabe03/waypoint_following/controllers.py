@@ -67,9 +67,9 @@ PATH_PROFILE_FORCE_ROTATE_DEG = 120.0
 PATH_PROFILE_SLOWDOWN_WINDOW_M = 0.30
 PATH_PROFILE_SHORT_SEGMENT_M = 0.25
 PATH_PROFILE_BEND_SPEED_CAP_MPS = 0.035
-PATH_PROFILE_SHORT_SPEED_CAP_MPS = 0.030
+PATH_PROFILE_SHORT_SPEED_CAP_MPS = 0.040
 PATH_PROFILE_STRAIGHT_LOOKAHEAD_M = 0.24
-PATH_PROFILE_BEND_LOOKAHEAD_M = 0.14
+PATH_PROFILE_BEND_LOOKAHEAD_M = 0.16
 PATH_PROFILE_FORCE_ROTATE_HANDOFF_M = 0.06
 PATH_PROFILE_STRAIGHT_ENTER_SAMPLES = 3
 PATH_PROFILE_STRAIGHT_ENTER_HEADING_ERROR_DEG = 6.0
@@ -490,6 +490,12 @@ class PurePursuitController:
     def _finite_or_inf(value):
         return math.inf if value is None else float(value)
 
+    def _path_profile_effective_speed_cap(self, configured_cap_mps):
+        return min(
+            abs(float(self.args.linear_speed)),
+            abs(float(configured_cap_mps)),
+        )
+
     def _path_profile_schedule(
         self,
         route_points,
@@ -527,7 +533,13 @@ class PurePursuitController:
             else:
                 status = PATH_PROFILE_STATUS_FORCE_ROTATE_PENDING
             self.path_profile_straight_stable_count = 0
-            speed_cap = min(base_speed, PATH_PROFILE_SHORT_SPEED_CAP_MPS)
+            speed_cap = self._path_profile_effective_speed_cap(
+                getattr(
+                    self.args,
+                    "pure_pursuit_path_profile_short_speed_cap_mps",
+                    PATH_PROFILE_SHORT_SPEED_CAP_MPS,
+                )
+            )
             lookahead_cap = min(min_profile_lookahead, distance_to_break)
         elif (
             distance_to_break is not None
@@ -535,7 +547,13 @@ class PurePursuitController:
         ):
             status = PATH_PROFILE_STATUS_SHORT_SEGMENT
             self.path_profile_straight_stable_count = 0
-            speed_cap = min(base_speed, PATH_PROFILE_SHORT_SPEED_CAP_MPS)
+            speed_cap = self._path_profile_effective_speed_cap(
+                getattr(
+                    self.args,
+                    "pure_pursuit_path_profile_short_speed_cap_mps",
+                    PATH_PROFILE_SHORT_SPEED_CAP_MPS,
+                )
+            )
             lookahead_cap = min(min_profile_lookahead, distance_to_break)
         elif (
             break_delta is not None
@@ -545,7 +563,13 @@ class PurePursuitController:
         ):
             status = PATH_PROFILE_STATUS_APPROACH_BEND
             self.path_profile_straight_stable_count = 0
-            speed_cap = min(base_speed, PATH_PROFILE_BEND_SPEED_CAP_MPS)
+            speed_cap = self._path_profile_effective_speed_cap(
+                getattr(
+                    self.args,
+                    "pure_pursuit_path_profile_bend_speed_cap_mps",
+                    PATH_PROFILE_BEND_SPEED_CAP_MPS,
+                )
+            )
             lookahead_cap = min(min_profile_lookahead, distance_to_break)
         else:
             exit_straight = (

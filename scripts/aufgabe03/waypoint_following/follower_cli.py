@@ -71,6 +71,9 @@ def print_dry_run(
     ROTATE_ANCHOR_ROUTE_HEADING_EXIT_SAMPLES = context['ROTATE_ANCHOR_ROUTE_HEADING_EXIT_SAMPLES']
     ROUTE_HEADING_LOOKAHEAD_M = context['ROUTE_HEADING_LOOKAHEAD_M']
     format_optional_m = context['format_optional_m']
+    post_replan_route_clearance_preview_distance_m = context[
+        'post_replan_route_clearance_preview_distance_m'
+    ]
     print("Waypoint follower dry run")
     print(f"Waypoint CSV: {args.waypoints}")
     print(f"Raw waypoints: {len(raw_waypoints)}")
@@ -138,6 +141,30 @@ def print_dry_run(
         print(
             "pure_pursuit_path_profile_straight_speed_mps="
             f"{args.pure_pursuit_path_profile_straight_speed_mps:.3f}"
+        )
+        short_effective_cap_mps = min(
+            abs(float(args.linear_speed)),
+            abs(float(args.pure_pursuit_path_profile_short_speed_cap_mps)),
+        )
+        bend_effective_cap_mps = min(
+            abs(float(args.linear_speed)),
+            abs(float(args.pure_pursuit_path_profile_bend_speed_cap_mps)),
+        )
+        print(
+            "pure_pursuit_path_profile_short_speed_cap_mps="
+            f"{args.pure_pursuit_path_profile_short_speed_cap_mps:.3f}"
+        )
+        print(
+            "pure_pursuit_path_profile_short_effective_speed_cap_mps="
+            f"{short_effective_cap_mps:.3f}"
+        )
+        print(
+            "pure_pursuit_path_profile_bend_speed_cap_mps="
+            f"{args.pure_pursuit_path_profile_bend_speed_cap_mps:.3f}"
+        )
+        print(
+            "pure_pursuit_path_profile_bend_effective_speed_cap_mps="
+            f"{bend_effective_cap_mps:.3f}"
         )
         print(
             "pure_pursuit_route_heading_blend="
@@ -370,6 +397,17 @@ def print_dry_run(
                 "  post-replan align heading error: "
                 f"{args.post_replan_align_heading_error_deg:.1f} deg"
             )
+            print(
+                "  post-replan clearance mode: "
+                f"{args.post_replan_clearance_mode}"
+            )
+            print(
+                "  post-replan route clearance preview distance: "
+                f"{args.post_replan_route_clearance_preview_distance_m:.3f} m "
+                "configured, "
+                f"{post_replan_route_clearance_preview_distance_m(args):.3f} m "
+                "effective"
+            )
     if args.start_selection == "path-progress":
         print(
             "Runtime route selection uses live TF after startup; "
@@ -420,6 +458,8 @@ def parse_args(argv, *, context):
     DEFAULT_POST_REPLAN_CLEAR_SCAN_SAMPLES = context['DEFAULT_POST_REPLAN_CLEAR_SCAN_SAMPLES']
     DEFAULT_POST_REPLAN_ESCAPE_DISTANCE_M = context['DEFAULT_POST_REPLAN_ESCAPE_DISTANCE_M']
     DEFAULT_POST_REPLAN_ESCAPE_LINEAR_SPEED_MPS = context['DEFAULT_POST_REPLAN_ESCAPE_LINEAR_SPEED_MPS']
+    DEFAULT_POST_REPLAN_CLEARANCE_MODE = context['DEFAULT_POST_REPLAN_CLEARANCE_MODE']
+    DEFAULT_POST_REPLAN_ROUTE_CLEARANCE_PREVIEW_DISTANCE_M = context['DEFAULT_POST_REPLAN_ROUTE_CLEARANCE_PREVIEW_DISTANCE_M']
     DEFAULT_POST_REPLAN_RECOVERY = context['DEFAULT_POST_REPLAN_RECOVERY']
     DEFAULT_POST_REPLAN_TIMEOUT_SEC = context['DEFAULT_POST_REPLAN_TIMEOUT_SEC']
     DEFAULT_PURE_PURSUIT_ANGULAR_FEASIBILITY_MARGIN = context['DEFAULT_PURE_PURSUIT_ANGULAR_FEASIBILITY_MARGIN']
@@ -447,7 +487,9 @@ def parse_args(argv, *, context):
     DEFAULT_PURE_PURSUIT_MAX_LINEAR_DECEL_MPS2 = context['DEFAULT_PURE_PURSUIT_MAX_LINEAR_DECEL_MPS2']
     DEFAULT_PURE_PURSUIT_MAX_TRACK_ANGULAR_SPEED_RADPS = context['DEFAULT_PURE_PURSUIT_MAX_TRACK_ANGULAR_SPEED_RADPS']
     DEFAULT_PURE_PURSUIT_MIN_GUARDED_LOOKAHEAD_M = context['DEFAULT_PURE_PURSUIT_MIN_GUARDED_LOOKAHEAD_M']
+    DEFAULT_PURE_PURSUIT_PATH_PROFILE_BEND_SPEED_CAP_MPS = context['DEFAULT_PURE_PURSUIT_PATH_PROFILE_BEND_SPEED_CAP_MPS']
     DEFAULT_PURE_PURSUIT_PATH_PROFILE_SCHEDULING = context['DEFAULT_PURE_PURSUIT_PATH_PROFILE_SCHEDULING']
+    DEFAULT_PURE_PURSUIT_PATH_PROFILE_SHORT_SPEED_CAP_MPS = context['DEFAULT_PURE_PURSUIT_PATH_PROFILE_SHORT_SPEED_CAP_MPS']
     DEFAULT_PURE_PURSUIT_PATH_PROFILE_STRAIGHT_SPEED_MPS = context['DEFAULT_PURE_PURSUIT_PATH_PROFILE_STRAIGHT_SPEED_MPS']
     DEFAULT_PURE_PURSUIT_ROTATE_START_HEADING_ERROR_DEG = context['DEFAULT_PURE_PURSUIT_ROTATE_START_HEADING_ERROR_DEG']
     DEFAULT_PURE_PURSUIT_ROTATE_STOP_HEADING_ERROR_DEG = context['DEFAULT_PURE_PURSUIT_ROTATE_STOP_HEADING_ERROR_DEG']
@@ -500,6 +542,7 @@ def parse_args(argv, *, context):
     LOOKAHEAD_GUARD_MODES = context['LOOKAHEAD_GUARD_MODES']
     PATH_PROFILE_SCHEDULING_MODES = context['PATH_PROFILE_SCHEDULING_MODES']
     POST_REPLAN_RECOVERY_MODES = context['POST_REPLAN_RECOVERY_MODES']
+    POST_REPLAN_CLEARANCE_MODES = context['POST_REPLAN_CLEARANCE_MODES']
     Path = context['Path']
     SPEED_PROFILE_MODES = context['SPEED_PROFILE_MODES']
     argparse = context['argparse']
@@ -574,6 +617,16 @@ def parse_args(argv, *, context):
     parser.add_argument(
         "--pure-pursuit-path-profile-straight-speed-mps",
         default=DEFAULT_PURE_PURSUIT_PATH_PROFILE_STRAIGHT_SPEED_MPS,
+        type=float,
+    )
+    parser.add_argument(
+        "--pure-pursuit-path-profile-short-speed-cap-mps",
+        default=DEFAULT_PURE_PURSUIT_PATH_PROFILE_SHORT_SPEED_CAP_MPS,
+        type=float,
+    )
+    parser.add_argument(
+        "--pure-pursuit-path-profile-bend-speed-cap-mps",
+        default=DEFAULT_PURE_PURSUIT_PATH_PROFILE_BEND_SPEED_CAP_MPS,
         type=float,
     )
     parser.add_argument(
@@ -911,6 +964,16 @@ def parse_args(argv, *, context):
         default=DEFAULT_POST_REPLAN_ALIGN_HEADING_ERROR_DEG,
         type=float,
     )
+    parser.add_argument(
+        "--post-replan-clearance-mode",
+        default=DEFAULT_POST_REPLAN_CLEARANCE_MODE,
+        choices=POST_REPLAN_CLEARANCE_MODES,
+    )
+    parser.add_argument(
+        "--post-replan-route-clearance-preview-distance-m",
+        default=DEFAULT_POST_REPLAN_ROUTE_CLEARANCE_PREVIEW_DISTANCE_M,
+        type=float,
+    )
     parser.add_argument("--run-local-map-artifact-prefix")
     parser.add_argument("--wait-before-follow", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -973,6 +1036,8 @@ def validate_args(parser, args, *, context):
         "pure_pursuit_route_heading_rotate_start_deg",
         "pure_pursuit_route_heading_rotate_stop_deg",
         "pure_pursuit_path_profile_straight_speed_mps",
+        "pure_pursuit_path_profile_short_speed_cap_mps",
+        "pure_pursuit_path_profile_bend_speed_cap_mps",
         "pure_pursuit_max_track_angular_speed_radps",
         "pure_pursuit_max_rotate_angular_speed_radps",
         "pure_pursuit_cross_track_speed_floor_mps",
@@ -1097,6 +1162,7 @@ def validate_args(parser, args, *, context):
         "pure_pursuit_lateral_deadband_m",
         "pure_pursuit_cross_track_gain",
         "pure_pursuit_max_cross_track_correction_deg",
+        "post_replan_route_clearance_preview_distance_m",
     ]
     for field in non_negative_fields:
         if getattr(args, field) < 0.0:

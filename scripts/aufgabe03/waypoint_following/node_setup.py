@@ -15,6 +15,7 @@ class NodeSetupContext:
     route_heading_lookahead_m: float
     post_rotate_branch_heading_tolerance_deg: float
     post_rotate_branch_release_stable_samples: int
+    post_replan_route_clearance_preview_distance_m: Callable[..., float]
 
 
 def initialize_runtime_state(node, args, context):
@@ -72,6 +73,11 @@ def initialize_runtime_state(node, args, context):
     node.last_post_replan_clearance_search_best_min_m = None
     node.last_post_replan_clearance_search_result = ""
     node.last_post_replan_clearance_search_direction_source = ""
+    node.last_post_replan_route_clearance_reason = ""
+    node.last_post_replan_route_corridor_min_distance_m = None
+    node.last_post_replan_route_corridor_blocked_count = 0
+    node.last_post_replan_route_clear_side_obstacle_count = 0
+    node.last_post_replan_route_corridor_preview_distance_m = 0.0
     node.last_post_replan_activation_min_target_distance_m = 0.0
     node.last_post_replan_activation_pruned_sparse_count = 0
     node.last_post_replan_activation_pruned_dense_count = 0
@@ -134,6 +140,14 @@ def log_startup_configuration(node, args, context):
             f"static_blocked_cells={len(node.lookahead_guard.static_blocked_cells)}"
         )
     if args.controller == "pure-pursuit" and args.verbose:
+        short_effective_cap_mps = min(
+            abs(float(args.linear_speed)),
+            abs(float(args.pure_pursuit_path_profile_short_speed_cap_mps)),
+        )
+        bend_effective_cap_mps = min(
+            abs(float(args.linear_speed)),
+            abs(float(args.pure_pursuit_path_profile_bend_speed_cap_mps)),
+        )
         node.get_logger().info(
             "Pure-pursuit speed profile: "
             f"profile={args.pure_pursuit_speed_profile}, "
@@ -142,6 +156,14 @@ def log_startup_configuration(node, args, context):
             f"{args.pure_pursuit_path_profile_scheduling}, "
             "path_profile_straight_speed="
             f"{args.pure_pursuit_path_profile_straight_speed_mps:.3f}, "
+            "path_profile_short_speed_cap="
+            f"{args.pure_pursuit_path_profile_short_speed_cap_mps:.3f}, "
+            "path_profile_short_effective_speed_cap="
+            f"{short_effective_cap_mps:.3f}, "
+            "path_profile_bend_speed_cap="
+            f"{args.pure_pursuit_path_profile_bend_speed_cap_mps:.3f}, "
+            "path_profile_bend_effective_speed_cap="
+            f"{bend_effective_cap_mps:.3f}, "
             f"route_heading_blend={args.pure_pursuit_route_heading_blend:.3f}, "
             f"cross_track_gain={args.pure_pursuit_cross_track_gain:.3f}, "
             "cross_track_speed_floor="
@@ -197,10 +219,18 @@ def log_startup_configuration(node, args, context):
             "dt_clamp=[0, 2/control_rate_hz]"
         )
     if args.enable_lidar_map_replan and args.verbose:
+        route_clearance_preview = (
+            context.post_replan_route_clearance_preview_distance_m(args)
+        )
         node.get_logger().info(
             "Post-replan recovery: "
             f"mode={args.post_replan_recovery}, "
             f"clear_scan_samples={args.post_replan_clear_scan_samples}, "
+            f"clearance_mode={args.post_replan_clearance_mode}, "
+            "route_clearance_preview_distance_configured="
+            f"{args.post_replan_route_clearance_preview_distance_m:.3f}, "
+            "route_clearance_preview_distance_effective="
+            f"{route_clearance_preview:.3f}, "
             f"timeout={args.post_replan_timeout_sec:.3f}, "
             f"escape_distance={args.post_replan_escape_distance_m:.3f}, "
             f"escape_linear_speed={args.post_replan_escape_linear_speed_mps:.3f}, "

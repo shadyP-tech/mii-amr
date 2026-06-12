@@ -12,13 +12,31 @@ from .math_utils import (
     quaternion_to_yaw_deg,
     shortest_angle_delta_deg,
 )
-from .models import Pose2D
-from .path_curves import project_point_to_route, route_heading_from_projection
+from .models import Pose2D, ScanSafety
+from .path_curves import (
+    project_point_to_route,
+    route_heading_from_projection,
+    route_points_from_projection,
+    truncate_polyline_by_distance,
+)
 from .scan_safety import percentile
 
 
 DEFAULT_POST_REPLAN_RECOVERY = "on"
 POST_REPLAN_RECOVERY_MODES = ("on", "off")
+POST_REPLAN_CLEARANCE_CONE = "cone"
+POST_REPLAN_CLEARANCE_ROUTE_AWARE = "route-aware"
+POST_REPLAN_CLEARANCE_MODES = (
+    POST_REPLAN_CLEARANCE_CONE,
+    POST_REPLAN_CLEARANCE_ROUTE_AWARE,
+)
+DEFAULT_POST_REPLAN_CLEARANCE_MODE = POST_REPLAN_CLEARANCE_CONE
+DEFAULT_POST_REPLAN_ROUTE_CLEARANCE_PREVIEW_DISTANCE_M = 0.0
+POST_REPLAN_ROUTE_CLEARANCE_MIN_PREVIEW_M = 0.25
+POST_REPLAN_ROUTE_CLEARANCE_MAX_AUTO_PREVIEW_M = 0.60
+POST_REPLAN_ROUTE_CLEARANCE_REASON_BLOCKED = "route_corridor_blocked"
+POST_REPLAN_ROUTE_CLEARANCE_REASON_SIDE_OBSTACLE = "route_clear_side_obstacle"
+POST_REPLAN_ROUTE_CLEARANCE_REASON_UNAVAILABLE = "route_clearance_unavailable"
 DEFAULT_POST_REPLAN_CLEAR_SCAN_SAMPLES = 2
 DEFAULT_POST_REPLAN_TIMEOUT_SEC = 4.0
 DEFAULT_POST_REPLAN_ESCAPE_DISTANCE_M = 0.12
@@ -95,6 +113,11 @@ class PostReplanRecoveryState:
     clearance_search_yaw_delta_deg: float = 0.0
     clearance_search_result: str = ""
     clearance_search_direction_source: str = ""
+    route_clearance_reason: str = ""
+    route_corridor_min_distance_m: float | None = None
+    route_corridor_blocked_count: int = 0
+    route_clear_side_obstacle_count: int = 0
+    route_corridor_preview_distance_m: float = 0.0
     final_status: str = "active"
 
 
@@ -104,6 +127,19 @@ class PostReplanAlignmentHeading:
     source: str
     projection_segment_index: int | None = None
     projection_segment_ratio: float | None = None
+
+
+@dataclass(frozen=True)
+class PostReplanRouteClearance:
+    safe: bool
+    reason: str
+    preview_distance_m: float
+    corridor_radius_m: float
+    valid_scan_points: int
+    blocked_count: int
+    side_obstacle_count: int
+    min_corridor_distance_m: float | None
+    min_scan_range_m: float | None
 
 
 def _format_optional_m(value):
@@ -337,8 +373,45 @@ def notes_with_post_replan_recovery_metadata(notes, args, node):
         "last_post_replan_activation_first_target_distance_m",
         None,
     )
+    route_clearance_reason = (
+        getattr(recovery, "route_clearance_reason", "")
+        if recovery is not None
+        else getattr(node, "last_post_replan_route_clearance_reason", "")
+    )
+    route_corridor_min_distance = (
+        getattr(recovery, "route_corridor_min_distance_m", None)
+        if recovery is not None
+        else getattr(node, "last_post_replan_route_corridor_min_distance_m", None)
+    )
+    route_corridor_blocked_count = (
+        getattr(recovery, "route_corridor_blocked_count", 0)
+        if recovery is not None
+        else getattr(node, "last_post_replan_route_corridor_blocked_count", 0)
+    )
+    route_clear_side_obstacle_count = (
+        getattr(recovery, "route_clear_side_obstacle_count", 0)
+        if recovery is not None
+        else getattr(node, "last_post_replan_route_clear_side_obstacle_count", 0)
+    )
+    route_corridor_preview_distance = (
+        getattr(recovery, "route_corridor_preview_distance_m", 0.0)
+        if recovery is not None
+        else getattr(node, "last_post_replan_route_corridor_preview_distance_m", 0.0)
+    )
     return (
         f"{notes};post_replan_recovery={args.post_replan_recovery};"
+        "post_replan_clearance_mode="
+        f"{getattr(args, 'post_replan_clearance_mode', DEFAULT_POST_REPLAN_CLEARANCE_MODE)};"
+        "post_replan_route_clearance_reason="
+        f"{route_clearance_reason};"
+        "route_corridor_min_distance_m="
+        f"{_format_optional_m(route_corridor_min_distance)};"
+        "route_corridor_blocked_count="
+        f"{route_corridor_blocked_count};"
+        "route_clear_side_obstacle_count="
+        f"{route_clear_side_obstacle_count};"
+        "route_corridor_preview_distance_m="
+        f"{route_corridor_preview_distance:.3f};"
         "post_replan_recovery_activations="
         f"{getattr(node, 'post_replan_recovery_activations', 0)};"
         "post_replan_recovery_last_status="
@@ -532,6 +605,21 @@ def reset_post_replan_recovery(node, status=""):
         node.last_post_replan_clearance_search_direction_source = (
             recovery.clearance_search_direction_source
         )
+        node.last_post_replan_route_clearance_reason = (
+            recovery.route_clearance_reason
+        )
+        node.last_post_replan_route_corridor_min_distance_m = (
+            recovery.route_corridor_min_distance_m
+        )
+        node.last_post_replan_route_corridor_blocked_count = (
+            recovery.route_corridor_blocked_count
+        )
+        node.last_post_replan_route_clear_side_obstacle_count = (
+            recovery.route_clear_side_obstacle_count
+        )
+        node.last_post_replan_route_corridor_preview_distance_m = (
+            recovery.route_corridor_preview_distance_m
+        )
     if status:
         node.last_post_replan_recovery_status = status
     node.post_replan_recovery = None
@@ -548,6 +636,322 @@ def post_replan_recovery_route_points(node, route_state):
         )
         for point in points
     ]
+
+
+def post_replan_route_clearance_preview_distance_m(args):
+    configured = float(
+        getattr(
+            args,
+            "post_replan_route_clearance_preview_distance_m",
+            DEFAULT_POST_REPLAN_ROUTE_CLEARANCE_PREVIEW_DISTANCE_M,
+        )
+    )
+    if configured > 0.0:
+        return configured
+    auto_distance = max(
+        POST_REPLAN_ROUTE_CLEARANCE_MIN_PREVIEW_M,
+        float(getattr(args, "min_scan_range_m", 0.0)),
+        float(getattr(args, "post_replan_escape_distance_m", 0.0)),
+    )
+    return min(POST_REPLAN_ROUTE_CLEARANCE_MAX_AUTO_PREVIEW_M, auto_distance)
+
+
+def _map_point_to_base(point, pose):
+    dx = float(point[0]) - float(pose.x)
+    dy = float(point[1]) - float(pose.y)
+    yaw = math.radians(float(pose.yaw_deg))
+    cos_yaw = math.cos(yaw)
+    sin_yaw = math.sin(yaw)
+    return (
+        cos_yaw * dx + sin_yaw * dy,
+        -sin_yaw * dx + cos_yaw * dy,
+    )
+
+
+def post_replan_route_preview_base_points(node, pose, route_state):
+    if route_state is None or pose is None:
+        return ()
+    route_points = post_replan_recovery_route_points(node, route_state)
+    if len(route_points) < 2:
+        return ()
+    try:
+        projection = project_point_to_route(
+            route_points,
+            pose,
+            allow_backward=True,
+            projection_status="post_replan_route_clearance",
+        )
+        preview_points = route_points_from_projection(route_points, projection)
+        preview_points = truncate_polyline_by_distance(
+            preview_points,
+            post_replan_route_clearance_preview_distance_m(node.args),
+        )
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return ()
+    if len(preview_points) < 2:
+        return ()
+    try:
+        return tuple(_map_point_to_base(point, pose) for point in preview_points)
+    except (AttributeError, TypeError, ValueError):
+        return ()
+
+
+def _valid_scan_base_points(scan):
+    if scan is None:
+        return ()
+    try:
+        ranges = tuple(getattr(scan, "ranges", ()))
+        angle_min = float(scan.angle_min)
+        angle_increment = float(scan.angle_increment)
+        range_min = float(scan.range_min)
+        range_max = float(scan.range_max)
+    except (AttributeError, TypeError, ValueError):
+        return ()
+    points = []
+    for index, raw_range in enumerate(ranges):
+        try:
+            range_m = float(raw_range)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(range_m):
+            continue
+        if range_m < range_min or range_m > range_max:
+            continue
+        angle = angle_min + index * angle_increment
+        points.append((
+            range_m * math.cos(angle),
+            range_m * math.sin(angle),
+            range_m,
+            normalize_angle_rad(angle),
+        ))
+    return tuple(points)
+
+
+def _point_segment_projection_distance_m(point, start, end):
+    px, py = point
+    sx, sy = start
+    ex, ey = end
+    dx = ex - sx
+    dy = ey - sy
+    length_sq = dx * dx + dy * dy
+    if length_sq <= 1e-12:
+        return None
+    ratio = ((px - sx) * dx + (py - sy) * dy) / length_sq
+    if ratio < -1e-9 or ratio > 1.0 + 1e-9:
+        return None
+    ratio = clamp(ratio, 0.0, 1.0)
+    closest = (sx + ratio * dx, sy + ratio * dy)
+    return math.hypot(px - closest[0], py - closest[1])
+
+
+def _point_preview_distance_m(point, preview_points):
+    best_distance = None
+    for index in range(len(preview_points) - 1):
+        distance = _point_segment_projection_distance_m(
+            point,
+            preview_points[index],
+            preview_points[index + 1],
+        )
+        if distance is None:
+            continue
+        if best_distance is None or distance < best_distance:
+            best_distance = distance
+    return best_distance
+
+
+def evaluate_post_replan_route_clearance(node, pose, route_state):
+    preview_distance = post_replan_route_clearance_preview_distance_m(node.args)
+    corridor_radius = (
+        float(getattr(node.args, "robot_footprint_radius_m", 0.0))
+        + float(getattr(node.args, "run_local_map_clearance_margin_m", 0.0))
+    )
+    if corridor_radius <= 0.0:
+        return PostReplanRouteClearance(
+            False,
+            POST_REPLAN_ROUTE_CLEARANCE_REASON_UNAVAILABLE,
+            preview_distance,
+            corridor_radius,
+            0,
+            0,
+            0,
+            None,
+            None,
+        )
+    preview_points = post_replan_route_preview_base_points(node, pose, route_state)
+    if len(preview_points) < 2:
+        return PostReplanRouteClearance(
+            False,
+            POST_REPLAN_ROUTE_CLEARANCE_REASON_UNAVAILABLE,
+            preview_distance,
+            corridor_radius,
+            0,
+            0,
+            0,
+            None,
+            None,
+        )
+    scan_points = _valid_scan_base_points(getattr(node, "last_scan", None))
+    if not scan_points:
+        return PostReplanRouteClearance(
+            False,
+            POST_REPLAN_ROUTE_CLEARANCE_REASON_UNAVAILABLE,
+            preview_distance,
+            corridor_radius,
+            0,
+            0,
+            0,
+            None,
+            None,
+        )
+
+    min_distance = None
+    min_range = None
+    blocked_count = 0
+    side_obstacle_count = 0
+    half_angle_rad = math.radians(float(node.args.scan_half_angle_deg))
+    min_scan_range_m = float(node.args.min_scan_range_m)
+    for x, y, range_m, angle in scan_points:
+        distance = _point_preview_distance_m((x, y), preview_points)
+        blocked = distance is not None and distance <= corridor_radius + 1e-9
+        if distance is not None:
+            min_distance = (
+                distance
+                if min_distance is None
+                else min(min_distance, distance)
+            )
+        if min_range is None or range_m < min_range:
+            min_range = range_m
+        if blocked:
+            blocked_count += 1
+        elif abs(angle) <= half_angle_rad and range_m < min_scan_range_m:
+            side_obstacle_count += 1
+
+    if blocked_count > 0:
+        reason = POST_REPLAN_ROUTE_CLEARANCE_REASON_BLOCKED
+    else:
+        reason = POST_REPLAN_ROUTE_CLEARANCE_REASON_SIDE_OBSTACLE
+    return PostReplanRouteClearance(
+        blocked_count == 0,
+        reason,
+        preview_distance,
+        corridor_radius,
+        len(scan_points),
+        blocked_count,
+        side_obstacle_count,
+        min_distance,
+        min_range,
+    )
+
+
+def _record_route_clearance_result(node, recovery, result):
+    node.last_post_replan_route_clearance_reason = result.reason
+    node.last_post_replan_route_corridor_min_distance_m = (
+        result.min_corridor_distance_m
+    )
+    node.last_post_replan_route_corridor_blocked_count = result.blocked_count
+    node.last_post_replan_route_clear_side_obstacle_count = (
+        result.side_obstacle_count
+    )
+    node.last_post_replan_route_corridor_preview_distance_m = (
+        result.preview_distance_m
+    )
+    if recovery is not None:
+        recovery.route_clearance_reason = result.reason
+        recovery.route_corridor_min_distance_m = result.min_corridor_distance_m
+        recovery.route_corridor_blocked_count = result.blocked_count
+        recovery.route_clear_side_obstacle_count = result.side_obstacle_count
+        recovery.route_corridor_preview_distance_m = result.preview_distance_m
+
+
+def post_replan_forward_clearance_safety(node, pose, route_state, cone_safety=None):
+    cone_safety = cone_safety or node.evaluate_current_scan_safety("forward")
+    recovery = getattr(node, "post_replan_recovery", None)
+    mode = getattr(
+        node.args,
+        "post_replan_clearance_mode",
+        DEFAULT_POST_REPLAN_CLEARANCE_MODE,
+    )
+    if mode != POST_REPLAN_CLEARANCE_ROUTE_AWARE:
+        preview_distance = post_replan_route_clearance_preview_distance_m(node.args)
+        _record_route_clearance_result(
+            node,
+            recovery,
+            PostReplanRouteClearance(
+                cone_safety.safe,
+                cone_safety.reason,
+                preview_distance,
+                0.0,
+                cone_safety.valid_count,
+                0,
+                0,
+                None,
+                cone_safety.min_range_m,
+            ),
+        )
+        return cone_safety
+
+    if cone_safety.reason == "hard_stop":
+        preview_distance = post_replan_route_clearance_preview_distance_m(node.args)
+        _record_route_clearance_result(
+            node,
+            recovery,
+            PostReplanRouteClearance(
+                False,
+                "hard_stop",
+                preview_distance,
+                0.0,
+                cone_safety.valid_count,
+                0,
+                0,
+                None,
+                cone_safety.min_range_m,
+            ),
+        )
+        return cone_safety
+
+    route_clearance = evaluate_post_replan_route_clearance(
+        node,
+        pose,
+        route_state,
+    )
+    _record_route_clearance_result(node, recovery, route_clearance)
+    if route_clearance.reason == POST_REPLAN_ROUTE_CLEARANCE_REASON_UNAVAILABLE:
+        return cone_safety
+    if route_clearance.blocked_count > 0:
+        return ScanSafety(
+            False,
+            POST_REPLAN_ROUTE_CLEARANCE_REASON_BLOCKED,
+            route_clearance.valid_scan_points,
+            route_clearance.min_scan_range_m,
+            cone_safety.percentile_5_m,
+        )
+    if cone_safety.safe:
+        _record_route_clearance_result(
+            node,
+            recovery,
+            PostReplanRouteClearance(
+                True,
+                cone_safety.reason,
+                route_clearance.preview_distance_m,
+                route_clearance.corridor_radius_m,
+                route_clearance.valid_scan_points,
+                0,
+                route_clearance.side_obstacle_count,
+                route_clearance.min_corridor_distance_m,
+                route_clearance.min_scan_range_m,
+            ),
+        )
+        return cone_safety
+    if cone_safety.reason == "soft_stop":
+        return ScanSafety(
+            True,
+            POST_REPLAN_ROUTE_CLEARANCE_REASON_SIDE_OBSTACLE,
+            route_clearance.valid_scan_points,
+            cone_safety.min_range_m,
+            cone_safety.percentile_5_m,
+        )
+    return cone_safety
+
 
 def local_post_replan_alignment_heading(node, route_points, segment_index):
     if len(route_points) < 2 or segment_index is None:
@@ -666,6 +1070,11 @@ def activate_post_replan_recovery(node, pose, route_state):
     node.last_post_replan_recovery_escape_straight_active = False
     node.last_post_replan_recovery_escape_elapsed_sec = None
     node.last_post_replan_recovery_escape_timeout_sec = None
+    node.last_post_replan_route_clearance_reason = ""
+    node.last_post_replan_route_corridor_min_distance_m = None
+    node.last_post_replan_route_corridor_blocked_count = 0
+    node.last_post_replan_route_clear_side_obstacle_count = 0
+    node.last_post_replan_route_corridor_preview_distance_m = 0.0
     _reset_command_smoother(node)
     node.publish_velocity(0.0, 0.0)
 
@@ -831,7 +1240,17 @@ def maybe_log_post_replan_recovery(node, safety=None, heading_error_deg=None):
         "clearance_search_best_min_m="
         f"{_format_optional_m(recovery.clearance_search_best_min_m)}, "
         "clearance_search_result="
-        f"{recovery.clearance_search_result}"
+        f"{recovery.clearance_search_result}, "
+        "route_clearance_reason="
+        f"{recovery.route_clearance_reason}, "
+        "route_corridor_min_distance_m="
+        f"{_format_optional_m(recovery.route_corridor_min_distance_m)}, "
+        "route_corridor_blocked_count="
+        f"{recovery.route_corridor_blocked_count}, "
+        "route_clear_side_obstacle_count="
+        f"{recovery.route_clear_side_obstacle_count}, "
+        "route_corridor_preview_distance_m="
+        f"{recovery.route_corridor_preview_distance_m:.3f}"
     )
 
 def post_replan_escape_angular_hint(node, step):
@@ -1038,7 +1457,11 @@ def handle_post_replan_recovery(
             node.publish_velocity(0.0, angular_z)
             node.wait_one_control_cycle()
             return True
-        forward_safety = node.evaluate_current_scan_safety("forward")
+        forward_safety = post_replan_forward_clearance_safety(
+            node,
+            pose,
+            route_state,
+        )
         recovery.last_scan_reason = forward_safety.reason
         if forward_safety.reason == "hard_stop":
             reset_post_replan_recovery(node, "hard_stop")
@@ -1083,7 +1506,11 @@ def handle_post_replan_recovery(
                 recovery,
                 "timeout",
             )
-        forward_safety = node.evaluate_current_scan_safety("forward")
+        forward_safety = post_replan_forward_clearance_safety(
+            node,
+            pose,
+            route_state,
+        )
         recovery.last_scan_reason = forward_safety.reason
         if forward_safety.reason == "hard_stop":
             _reset_command_smoother(node)
@@ -1109,11 +1536,11 @@ def handle_post_replan_recovery(
                         forward_safety.min_range_m,
                     )
             baseline_p05 = recovery.clearance_search_baseline_p05_m
-            if forward_safety.reason == "clear":
+            if forward_safety.safe:
                 return enter_post_replan_wait_clear(
                     node,
                     recovery,
-                    "clear",
+                    forward_safety.reason,
                 )
             if (
                 baseline_p05 is not None
@@ -1154,7 +1581,11 @@ def handle_post_replan_recovery(
         return True
 
     if recovery.phase == POST_REPLAN_RECOVERY_WAIT_CLEAR:
-        safety = node.evaluate_current_scan_safety("forward")
+        safety = post_replan_forward_clearance_safety(
+            node,
+            pose,
+            route_state,
+        )
         recovery.last_scan_reason = safety.reason
         node.maybe_log_post_replan_recovery(safety, recovery.last_heading_error_deg)
         if safety.reason == "hard_stop":
@@ -1243,7 +1674,11 @@ def handle_post_replan_recovery(
             _reset_command_smoother(node)
             reset_post_replan_recovery(node, "reached")
             return False
-        safety = node.evaluate_current_scan_safety("forward")
+        safety = post_replan_forward_clearance_safety(
+            node,
+            pose,
+            route_state,
+        )
         recovery.last_scan_reason = safety.reason
         if safety.reason == "hard_stop":
             _reset_command_smoother(node)
@@ -1347,4 +1782,3 @@ def handle_post_replan_recovery(
 
     reset_post_replan_recovery(node, "unknown_phase")
     return False
-
