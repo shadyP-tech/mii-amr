@@ -41,6 +41,15 @@ DEFAULT_POST_REPLAN_CLEAR_SCAN_SAMPLES = 2
 DEFAULT_POST_REPLAN_TIMEOUT_SEC = 4.0
 DEFAULT_POST_REPLAN_ESCAPE_DISTANCE_M = 0.12
 DEFAULT_POST_REPLAN_ESCAPE_LINEAR_SPEED_MPS = 0.02
+POST_REPLAN_ESCAPE_STEERING_AUTO = "auto"
+POST_REPLAN_ESCAPE_STEERING_ROUTE_HINT = "route-hint"
+POST_REPLAN_ESCAPE_STEERING_STRAIGHT_UNTIL_PROGRESS = "straight-until-progress"
+POST_REPLAN_ESCAPE_STEERING_MODES = (
+    POST_REPLAN_ESCAPE_STEERING_AUTO,
+    POST_REPLAN_ESCAPE_STEERING_ROUTE_HINT,
+    POST_REPLAN_ESCAPE_STEERING_STRAIGHT_UNTIL_PROGRESS,
+)
+DEFAULT_POST_REPLAN_ESCAPE_STEERING_MODE = POST_REPLAN_ESCAPE_STEERING_AUTO
 DEFAULT_POST_REPLAN_ALIGN_HEADING_ERROR_DEG = 25.0
 POST_REPLAN_MIN_ROUTE_SEGMENT_M = 0.05
 POST_REPLAN_ROUTE_HEADING_LOOKAHEAD_M = 0.12
@@ -102,6 +111,12 @@ class PostReplanRecoveryState:
     last_escape_command_linear_mps: float = 0.0
     last_escape_command_angular_radps: float = 0.0
     last_escape_angular_hint_source: str = ""
+    last_escape_steering_mode_resolved: str = ""
+    last_escape_odom_distance_m: float | None = None
+    last_escape_map_distance_m: float | None = None
+    last_escape_odom_stamp_delta_sec: float | None = None
+    last_escape_progress_source: str = ""
+    last_escape_no_motion_reason: str = ""
     clearance_search_attempted: bool = False
     clearance_search_direction: float = 0.0
     clearance_search_start_yaw_deg: float | None = None
@@ -140,6 +155,15 @@ class PostReplanRouteClearance:
     side_obstacle_count: int
     min_corridor_distance_m: float | None
     min_scan_range_m: float | None
+
+
+@dataclass(frozen=True)
+class PostReplanEscapeMeasurement:
+    progress_distance_m: float
+    progress_source: str
+    odom_distance_m: float | None
+    map_distance_m: float | None
+    odom_stamp_delta_sec: float | None
 
 
 def _format_optional_m(value):
@@ -210,12 +234,41 @@ def try_lookup_odom_pose(node):
         return None
 
 
-def post_replan_recovery_should_preempt_controller(recovery):
+def resolve_post_replan_escape_steering_mode(args):
+    configured = getattr(
+        args,
+        "post_replan_escape_steering_mode",
+        DEFAULT_POST_REPLAN_ESCAPE_STEERING_MODE,
+    )
+    if configured == POST_REPLAN_ESCAPE_STEERING_ROUTE_HINT:
+        return POST_REPLAN_ESCAPE_STEERING_ROUTE_HINT
+    if configured == POST_REPLAN_ESCAPE_STEERING_STRAIGHT_UNTIL_PROGRESS:
+        return POST_REPLAN_ESCAPE_STEERING_STRAIGHT_UNTIL_PROGRESS
+    if (
+        getattr(
+            args,
+            "post_replan_clearance_mode",
+            DEFAULT_POST_REPLAN_CLEARANCE_MODE,
+        )
+        == POST_REPLAN_CLEARANCE_ROUTE_AWARE
+    ):
+        return POST_REPLAN_ESCAPE_STEERING_ROUTE_HINT
+    return POST_REPLAN_ESCAPE_STEERING_STRAIGHT_UNTIL_PROGRESS
+
+
+def post_replan_recovery_should_preempt_controller(recovery, args=None):
     if recovery is None:
         return False
     phase = getattr(recovery, "phase", "")
     if phase in POST_REPLAN_PRE_CONTROLLER_RECOVERY_PHASES:
         return True
+    if (
+        phase == POST_REPLAN_RECOVERY_ESCAPE
+        and args is not None
+        and resolve_post_replan_escape_steering_mode(args)
+        == POST_REPLAN_ESCAPE_STEERING_ROUTE_HINT
+    ):
+        return False
     return (
         phase == POST_REPLAN_RECOVERY_ESCAPE
         and getattr(recovery, "best_escape_distance_m", 0.0)
@@ -311,6 +364,67 @@ def notes_with_post_replan_recovery_metadata(notes, args, node):
             node,
             "last_post_replan_recovery_escape_no_motion_elapsed_sec",
             None,
+        )
+    )
+    steering_mode_configured = getattr(
+        args,
+        "post_replan_escape_steering_mode",
+        DEFAULT_POST_REPLAN_ESCAPE_STEERING_MODE,
+    )
+    steering_mode_resolved = (
+        getattr(recovery, "last_escape_steering_mode_resolved", "")
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_recovery_escape_steering_mode_resolved",
+            "",
+        )
+    )
+    if not steering_mode_resolved:
+        steering_mode_resolved = resolve_post_replan_escape_steering_mode(args)
+    escape_odom_distance = (
+        getattr(recovery, "last_escape_odom_distance_m", None)
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_recovery_escape_odom_distance_m",
+            None,
+        )
+    )
+    escape_map_distance = (
+        getattr(recovery, "last_escape_map_distance_m", None)
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_recovery_escape_map_distance_m",
+            None,
+        )
+    )
+    escape_odom_stamp_delta = (
+        getattr(recovery, "last_escape_odom_stamp_delta_sec", None)
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_recovery_escape_odom_stamp_delta_sec",
+            None,
+        )
+    )
+    escape_progress_source = (
+        getattr(recovery, "last_escape_progress_source", "")
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_recovery_escape_progress_source",
+            "",
+        )
+    )
+    escape_no_motion_reason = (
+        getattr(recovery, "last_escape_no_motion_reason", "")
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_recovery_escape_no_motion_reason",
+            "",
         )
     )
     straight_active = (
@@ -432,6 +546,20 @@ def notes_with_post_replan_recovery_metadata(notes, args, node):
         f"{best_escape_distance:.3f};"
         "post_replan_recovery_escape_distance_source="
         f"{last_escape_source};"
+        "post_replan_escape_steering_mode_configured="
+        f"{steering_mode_configured};"
+        "post_replan_escape_steering_mode_resolved="
+        f"{steering_mode_resolved};"
+        "post_replan_escape_odom_distance_m="
+        f"{_format_optional_m(escape_odom_distance)};"
+        "post_replan_escape_map_distance_m="
+        f"{_format_optional_m(escape_map_distance)};"
+        "post_replan_escape_odom_stamp_delta_sec="
+        f"{_format_optional_m(escape_odom_stamp_delta)};"
+        "post_replan_escape_progress_source="
+        f"{escape_progress_source};"
+        "post_replan_escape_no_motion_reason="
+        f"{escape_no_motion_reason};"
         "post_replan_recovery_last_heading_error_deg="
         f"{_format_optional_m(last_heading_error)};"
         "post_replan_recovery_last_alignment_heading_deg="
@@ -577,6 +705,24 @@ def reset_post_replan_recovery(node, status=""):
         )
         node.last_post_replan_recovery_escape_angular_hint_source = (
             recovery.last_escape_angular_hint_source
+        )
+        node.last_post_replan_recovery_escape_steering_mode_resolved = (
+            recovery.last_escape_steering_mode_resolved
+        )
+        node.last_post_replan_recovery_escape_odom_distance_m = (
+            recovery.last_escape_odom_distance_m
+        )
+        node.last_post_replan_recovery_escape_map_distance_m = (
+            recovery.last_escape_map_distance_m
+        )
+        node.last_post_replan_recovery_escape_odom_stamp_delta_sec = (
+            recovery.last_escape_odom_stamp_delta_sec
+        )
+        node.last_post_replan_recovery_escape_progress_source = (
+            recovery.last_escape_progress_source
+        )
+        node.last_post_replan_recovery_escape_no_motion_reason = (
+            recovery.last_escape_no_motion_reason
         )
         node.last_post_replan_clearance_search_attempted = (
             recovery.clearance_search_attempted
@@ -1070,6 +1216,12 @@ def activate_post_replan_recovery(node, pose, route_state):
     node.last_post_replan_recovery_escape_straight_active = False
     node.last_post_replan_recovery_escape_elapsed_sec = None
     node.last_post_replan_recovery_escape_timeout_sec = None
+    node.last_post_replan_recovery_escape_steering_mode_resolved = ""
+    node.last_post_replan_recovery_escape_odom_distance_m = None
+    node.last_post_replan_recovery_escape_map_distance_m = None
+    node.last_post_replan_recovery_escape_odom_stamp_delta_sec = None
+    node.last_post_replan_recovery_escape_progress_source = ""
+    node.last_post_replan_recovery_escape_no_motion_reason = ""
     node.last_post_replan_route_clearance_reason = ""
     node.last_post_replan_route_corridor_min_distance_m = None
     node.last_post_replan_route_corridor_blocked_count = 0
@@ -1116,29 +1268,53 @@ def post_replan_escape_timed_out(node, recovery, now_sec):
 
 def post_replan_escape_measurement(node, recovery, pose):
     odom_pose = try_lookup_odom_pose(node)
+    odom_distance = None
+    odom_stamp_delta = None
     if recovery.escape_start_odom_pose is not None and odom_pose is not None:
-        return (
-            math.hypot(
-                odom_pose.x - recovery.escape_start_odom_pose.x,
-                odom_pose.y - recovery.escape_start_odom_pose.y,
-            ),
-            "odom",
+        odom_distance = math.hypot(
+            odom_pose.x - recovery.escape_start_odom_pose.x,
+            odom_pose.y - recovery.escape_start_odom_pose.y,
         )
+        if (
+            odom_pose.stamp_sec is not None
+            and recovery.escape_start_odom_pose.stamp_sec is not None
+        ):
+            odom_stamp_delta = (
+                odom_pose.stamp_sec - recovery.escape_start_odom_pose.stamp_sec
+            )
     start_pose = recovery.escape_start_pose or pose
-    return (
-        math.hypot(
+    map_distance = None
+    if start_pose is not None and pose is not None:
+        map_distance = math.hypot(
             pose.x - start_pose.x,
             pose.y - start_pose.y,
-        ),
-        "map_fallback",
+        )
+    if odom_distance is not None:
+        return PostReplanEscapeMeasurement(
+            odom_distance,
+            "odom",
+            odom_distance,
+            map_distance,
+            odom_stamp_delta,
+        )
+    return PostReplanEscapeMeasurement(
+        0.0,
+        "unavailable",
+        None,
+        map_distance,
+        odom_stamp_delta,
     )
 
-def update_post_replan_escape_progress(node, recovery, distance_m, source, now_sec):
-    recovery.last_escape_distance_m = distance_m
-    recovery.last_escape_distance_source = source
+def update_post_replan_escape_progress(node, recovery, measurement, now_sec):
+    recovery.last_escape_distance_m = measurement.progress_distance_m
+    recovery.last_escape_distance_source = measurement.progress_source
+    recovery.last_escape_odom_distance_m = measurement.odom_distance_m
+    recovery.last_escape_map_distance_m = measurement.map_distance_m
+    recovery.last_escape_odom_stamp_delta_sec = measurement.odom_stamp_delta_sec
+    recovery.last_escape_progress_source = measurement.progress_source
     recovery.best_escape_distance_m = max(
         recovery.best_escape_distance_m,
-        distance_m,
+        measurement.progress_distance_m,
     )
     if recovery.first_escape_command_time_sec is None:
         recovery.last_escape_no_motion_elapsed_sec = None
@@ -1157,11 +1333,39 @@ def update_post_replan_escape_progress(node, recovery, distance_m, source, now_s
         now_sec - recovery.last_progress_time_sec,
     )
 
+def post_replan_escape_no_motion_reason(recovery):
+    odom_distance = recovery.last_escape_odom_distance_m
+    map_distance = recovery.last_escape_map_distance_m
+    stamp_delta = recovery.last_escape_odom_stamp_delta_sec
+    map_moved = (
+        map_distance is not None
+        and map_distance >= POST_REPLAN_ESCAPE_NO_MOTION_EPS_M
+    )
+    odom_moved = (
+        odom_distance is not None
+        and odom_distance >= POST_REPLAN_ESCAPE_NO_MOTION_EPS_M
+    )
+    if odom_moved:
+        return ""
+    if odom_distance is None and map_distance is None:
+        return "progress_unavailable"
+    if stamp_delta is None or stamp_delta <= 1e-6:
+        return "odom_static_map_moved" if map_moved else "odom_stale"
+    if map_moved:
+        return "odom_static_map_moved"
+    return "cmd_vel_no_odom_motion"
+
+
 def post_replan_escape_no_motion_timed_out(node, recovery, linear_x):
     if linear_x <= 0.0 or recovery.first_escape_command_time_sec is None:
+        recovery.last_escape_no_motion_reason = ""
         return False
     if recovery.last_escape_no_motion_elapsed_sec is None:
+        recovery.last_escape_no_motion_reason = ""
         return False
+    recovery.last_escape_no_motion_reason = post_replan_escape_no_motion_reason(
+        recovery,
+    )
     timeout_sec = (
         POST_REPLAN_ESCAPE_NO_MOTION_TIMEOUT_ODOM_SEC
         if recovery.last_escape_distance_source == "odom"
@@ -1205,6 +1409,18 @@ def maybe_log_post_replan_recovery(node, safety=None, heading_error_deg=None):
         f"best_escape_distance_m={recovery.best_escape_distance_m:.3f}, "
         "escape_distance_source="
         f"{recovery.last_escape_distance_source}, "
+        "escape_steering_mode_resolved="
+        f"{recovery.last_escape_steering_mode_resolved}, "
+        "escape_odom_distance_m="
+        f"{_format_optional_m(recovery.last_escape_odom_distance_m)}, "
+        "escape_map_distance_m="
+        f"{_format_optional_m(recovery.last_escape_map_distance_m)}, "
+        "escape_odom_stamp_delta_sec="
+        f"{_format_optional_m(recovery.last_escape_odom_stamp_delta_sec)}, "
+        "escape_progress_source="
+        f"{recovery.last_escape_progress_source}, "
+        "escape_no_motion_reason="
+        f"{recovery.last_escape_no_motion_reason}, "
         "escape_elapsed_sec="
         f"{_format_optional_m(recovery.last_escape_elapsed_sec)}, "
         "escape_timeout_sec="
@@ -1255,7 +1471,7 @@ def maybe_log_post_replan_recovery(node, safety=None, heading_error_deg=None):
 
 def post_replan_escape_angular_hint(node, step):
     if step is None or getattr(step, "command", None) is None:
-        return 0.0, "unavailable"
+        return 0.0, "route_hint_unavailable"
     mode = getattr(step, "mode", "")
     if mode == "blocked":
         raise RuntimeError("post_replan_escape_controller_blocked")
@@ -1656,10 +1872,21 @@ def handle_post_replan_recovery(
             recovery.last_escape_distance_source = (
                 "odom"
                 if recovery.escape_start_odom_pose is not None
-                else "map_fallback"
+                else "unavailable"
             )
             recovery.last_escape_no_motion_elapsed_sec = None
-            recovery.escape_straight_until_progress_active = True
+            recovery.last_escape_steering_mode_resolved = (
+                resolve_post_replan_escape_steering_mode(node.args)
+            )
+            recovery.last_escape_odom_distance_m = None
+            recovery.last_escape_map_distance_m = None
+            recovery.last_escape_odom_stamp_delta_sec = None
+            recovery.last_escape_progress_source = recovery.last_escape_distance_source
+            recovery.last_escape_no_motion_reason = ""
+            recovery.escape_straight_until_progress_active = (
+                recovery.last_escape_steering_mode_resolved
+                == POST_REPLAN_ESCAPE_STEERING_STRAIGHT_UNTIL_PROGRESS
+            )
             recovery.last_escape_elapsed_sec = 0.0
             recovery.last_escape_timeout_sec = (
                 post_replan_escape_timeout_sec(node)
@@ -1693,25 +1920,26 @@ def handle_post_replan_recovery(
                 "post_replan_escape_blocked",
             )
             raise RuntimeError("post_replan_escape_blocked")
-        escape_distance_m, escape_source = (
-            post_replan_escape_measurement(
-                node,
-                recovery,
-                pose,
-            )
+        escape_measurement = post_replan_escape_measurement(
+            node,
+            recovery,
+            pose,
         )
         update_post_replan_escape_progress(
             node,
             recovery,
-            escape_distance_m,
-            escape_source,
+            escape_measurement,
             now_sec,
         )
         node.last_post_replan_recovery_escape_distance_m = (
             recovery.last_escape_distance_m
         )
+        resolved_steering = resolve_post_replan_escape_steering_mode(node.args)
+        recovery.last_escape_steering_mode_resolved = resolved_steering
         recovery.escape_straight_until_progress_active = (
-            recovery.best_escape_distance_m
+            resolved_steering
+            == POST_REPLAN_ESCAPE_STEERING_STRAIGHT_UNTIL_PROGRESS
+            and recovery.best_escape_distance_m
             < POST_REPLAN_ESCAPE_STRAIGHT_UNTIL_PROGRESS_M
         )
         escape_timed_out = post_replan_escape_timed_out(
@@ -1719,7 +1947,6 @@ def handle_post_replan_recovery(
             recovery,
             now_sec,
         )
-        node.maybe_log_post_replan_recovery(safety, recovery.last_heading_error_deg)
         if (
             recovery.best_escape_distance_m + POST_REPLAN_ESCAPE_COMPLETION_TOLERANCE_M
             >= node.args.post_replan_escape_distance_m
@@ -1729,7 +1956,18 @@ def handle_post_replan_recovery(
             _reset_command_smoother(node)
             return False
         linear_x = max(0.0, node.args.post_replan_escape_linear_speed_mps)
-        if recovery.escape_straight_until_progress_active:
+        if resolved_steering == POST_REPLAN_ESCAPE_STEERING_ROUTE_HINT:
+            try:
+                angular_z, angular_hint_source = (
+                    post_replan_escape_angular_hint(node, step)
+                )
+            except RuntimeError as exc:
+                reason = str(exc)
+                _reset_command_smoother(node)
+                node.publish_velocity(0.0, 0.0)
+                reset_post_replan_recovery(node, reason)
+                raise
+        elif recovery.escape_straight_until_progress_active:
             angular_z = 0.0
             angular_hint_source = "straight_until_progress"
         else:
@@ -1746,11 +1984,13 @@ def handle_post_replan_recovery(
         recovery.last_escape_command_linear_mps = linear_x
         recovery.last_escape_command_angular_radps = angular_z
         recovery.last_escape_angular_hint_source = angular_hint_source
-        if post_replan_escape_no_motion_timed_out(
+        no_motion_timed_out = post_replan_escape_no_motion_timed_out(
             node,
             recovery,
             linear_x,
-        ):
+        )
+        node.maybe_log_post_replan_recovery(safety, recovery.last_heading_error_deg)
+        if no_motion_timed_out:
             reason = "post_replan_escape_no_motion"
             _reset_command_smoother(node)
             node.publish_velocity(0.0, 0.0)

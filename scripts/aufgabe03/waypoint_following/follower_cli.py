@@ -74,6 +74,9 @@ def print_dry_run(
     post_replan_route_clearance_preview_distance_m = context[
         'post_replan_route_clearance_preview_distance_m'
     ]
+    resolve_post_replan_escape_steering_mode = context[
+        'resolve_post_replan_escape_steering_mode'
+    ]
     print("Waypoint follower dry run")
     print(f"Waypoint CSV: {args.waypoints}")
     print(f"Raw waypoints: {len(raw_waypoints)}")
@@ -369,6 +372,11 @@ def print_dry_run(
                 f"{args.post_replan_escape_linear_speed_mps:.3f} m/s"
             )
             print(
+                "  post-replan escape steering mode: "
+                f"{args.post_replan_escape_steering_mode} configured, "
+                f"{resolve_post_replan_escape_steering_mode(args)} resolved"
+            )
+            print(
                 "  post-replan escape completion tolerance: "
                 f"{POST_REPLAN_ESCAPE_COMPLETION_TOLERANCE_M:.3f} m"
             )
@@ -462,6 +470,7 @@ def parse_args(argv, *, context):
     DEFAULT_POST_REPLAN_CLEAR_SCAN_SAMPLES = context['DEFAULT_POST_REPLAN_CLEAR_SCAN_SAMPLES']
     DEFAULT_POST_REPLAN_ESCAPE_DISTANCE_M = context['DEFAULT_POST_REPLAN_ESCAPE_DISTANCE_M']
     DEFAULT_POST_REPLAN_ESCAPE_LINEAR_SPEED_MPS = context['DEFAULT_POST_REPLAN_ESCAPE_LINEAR_SPEED_MPS']
+    DEFAULT_POST_REPLAN_ESCAPE_STEERING_MODE = context['DEFAULT_POST_REPLAN_ESCAPE_STEERING_MODE']
     DEFAULT_POST_REPLAN_CLEARANCE_MODE = context['DEFAULT_POST_REPLAN_CLEARANCE_MODE']
     DEFAULT_POST_REPLAN_ROUTE_CLEARANCE_PREVIEW_DISTANCE_M = context['DEFAULT_POST_REPLAN_ROUTE_CLEARANCE_PREVIEW_DISTANCE_M']
     DEFAULT_POST_REPLAN_RECOVERY = context['DEFAULT_POST_REPLAN_RECOVERY']
@@ -548,6 +557,7 @@ def parse_args(argv, *, context):
     PATH_PROFILE_SCHEDULING_MODES = context['PATH_PROFILE_SCHEDULING_MODES']
     POST_REPLAN_RECOVERY_MODES = context['POST_REPLAN_RECOVERY_MODES']
     POST_REPLAN_CLEARANCE_MODES = context['POST_REPLAN_CLEARANCE_MODES']
+    POST_REPLAN_ESCAPE_STEERING_MODES = context['POST_REPLAN_ESCAPE_STEERING_MODES']
     Path = context['Path']
     SPEED_PROFILE_MODES = context['SPEED_PROFILE_MODES']
     argparse = context['argparse']
@@ -968,6 +978,11 @@ def parse_args(argv, *, context):
         "--post-replan-escape-linear-speed-mps",
         default=DEFAULT_POST_REPLAN_ESCAPE_LINEAR_SPEED_MPS,
         type=float,
+    )
+    parser.add_argument(
+        "--post-replan-escape-steering-mode",
+        default=DEFAULT_POST_REPLAN_ESCAPE_STEERING_MODE,
+        choices=POST_REPLAN_ESCAPE_STEERING_MODES,
     )
     parser.add_argument(
         "--post-replan-align-heading-error-deg",

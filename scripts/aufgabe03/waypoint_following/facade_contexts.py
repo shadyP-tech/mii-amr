@@ -43,6 +43,9 @@ def node_setup_context(facade):
         post_replan_route_clearance_preview_distance_m=facade[
             "post_replan_route_clearance_preview_distance_m"
         ],
+        resolve_post_replan_escape_steering_mode=facade[
+            "resolve_post_replan_escape_steering_mode"
+        ],
     )
 
 

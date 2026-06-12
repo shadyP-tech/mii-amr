@@ -16,6 +16,7 @@ class NodeSetupContext:
     post_rotate_branch_heading_tolerance_deg: float
     post_rotate_branch_release_stable_samples: int
     post_replan_route_clearance_preview_distance_m: Callable[..., float]
+    resolve_post_replan_escape_steering_mode: Callable[..., str]
 
 
 def initialize_runtime_state(node, args, context):
@@ -64,6 +65,12 @@ def initialize_runtime_state(node, args, context):
     node.last_post_replan_recovery_escape_command_linear_mps = 0.0
     node.last_post_replan_recovery_escape_command_angular_radps = 0.0
     node.last_post_replan_recovery_escape_angular_hint_source = ""
+    node.last_post_replan_recovery_escape_steering_mode_resolved = ""
+    node.last_post_replan_recovery_escape_odom_distance_m = None
+    node.last_post_replan_recovery_escape_map_distance_m = None
+    node.last_post_replan_recovery_escape_odom_stamp_delta_sec = None
+    node.last_post_replan_recovery_escape_progress_source = ""
+    node.last_post_replan_recovery_escape_no_motion_reason = ""
     node.last_post_replan_clearance_search_attempted = False
     node.last_post_replan_clearance_search_direction = 0.0
     node.last_post_replan_clearance_search_yaw_delta_deg = 0.0
@@ -224,11 +231,18 @@ def log_startup_configuration(node, args, context):
         route_clearance_preview = (
             context.post_replan_route_clearance_preview_distance_m(args)
         )
+        escape_steering_mode = context.resolve_post_replan_escape_steering_mode(
+            args,
+        )
         node.get_logger().info(
             "Post-replan recovery: "
             f"mode={args.post_replan_recovery}, "
             f"clear_scan_samples={args.post_replan_clear_scan_samples}, "
             f"clearance_mode={args.post_replan_clearance_mode}, "
+            "escape_steering_mode_configured="
+            f"{args.post_replan_escape_steering_mode}, "
+            "escape_steering_mode_resolved="
+            f"{escape_steering_mode}, "
             "route_clearance_preview_distance_configured="
             f"{args.post_replan_route_clearance_preview_distance_m:.3f}, "
             "route_clearance_preview_distance_effective="

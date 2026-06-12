@@ -60,6 +60,12 @@ def ensure_follow_runtime_state(node, build_command_smoother):
     _setdefault_attr(node, "last_post_replan_recovery_escape_command_linear_mps", 0.0)
     _setdefault_attr(node, "last_post_replan_recovery_escape_command_angular_radps", 0.0)
     _setdefault_attr(node, "last_post_replan_recovery_escape_angular_hint_source", "")
+    _setdefault_attr(node, "last_post_replan_recovery_escape_steering_mode_resolved", "")
+    _setdefault_attr(node, "last_post_replan_recovery_escape_odom_distance_m", None)
+    _setdefault_attr(node, "last_post_replan_recovery_escape_map_distance_m", None)
+    _setdefault_attr(node, "last_post_replan_recovery_escape_odom_stamp_delta_sec", None)
+    _setdefault_attr(node, "last_post_replan_recovery_escape_progress_source", "")
+    _setdefault_attr(node, "last_post_replan_recovery_escape_no_motion_reason", "")
     _setdefault_attr(node, "last_post_replan_clearance_search_attempted", False)
     _setdefault_attr(node, "last_post_replan_clearance_search_direction", 0.0)
     _setdefault_attr(node, "last_post_replan_clearance_search_yaw_delta_deg", 0.0)
@@ -224,7 +230,10 @@ def follow_waypoints(
             self.last_amcl_health = amcl_health
             recovery = getattr(self, "post_replan_recovery", None)
             if (
-                post_replan_recovery_should_preempt_controller(recovery)
+                post_replan_recovery_should_preempt_controller(
+                    recovery,
+                    self.args,
+                )
                 and WaypointFollower.handle_post_replan_recovery(
                     self,
                     None,

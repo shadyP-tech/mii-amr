@@ -367,6 +367,15 @@ POST_REPLAN_ESCAPE_NO_MOTION_TIMEOUT_ODOM_SEC = (
 POST_REPLAN_ESCAPE_NO_MOTION_TIMEOUT_MAP_SEC = (
     post_replan_recovery.POST_REPLAN_ESCAPE_NO_MOTION_TIMEOUT_MAP_SEC
 )
+DEFAULT_POST_REPLAN_ESCAPE_STEERING_MODE = (
+    post_replan_recovery.DEFAULT_POST_REPLAN_ESCAPE_STEERING_MODE
+)
+POST_REPLAN_ESCAPE_STEERING_MODES = (
+    post_replan_recovery.POST_REPLAN_ESCAPE_STEERING_MODES
+)
+resolve_post_replan_escape_steering_mode = (
+    post_replan_recovery.resolve_post_replan_escape_steering_mode
+)
 POST_REPLAN_ACTIVATION_MIN_TARGET_FLOOR_M = (
     post_replan_recovery.POST_REPLAN_ACTIVATION_MIN_TARGET_FLOOR_M
 )
@@ -1023,12 +1032,11 @@ class WaypointFollower(Node):
             pose,
         )
 
-    def update_post_replan_escape_progress(self, recovery, distance_m, source, now_sec):
+    def update_post_replan_escape_progress(self, recovery, measurement, now_sec):
         return post_replan_recovery.update_post_replan_escape_progress(
             self,
             recovery,
-            distance_m,
-            source,
+            measurement,
             now_sec,
         )
 
