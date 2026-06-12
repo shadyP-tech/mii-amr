@@ -176,6 +176,20 @@ class RuntimeDiagnostics:
         return self.yaw_error_sum_deg / self.yaw_error_count
 
 
+def record_motion_sample(node, yaw_error_deg, linear_x, angular_z, sample_seconds):
+    abs_error = abs(yaw_error_deg)
+    node.diagnostics.max_abs_yaw_error_deg = max(
+        node.diagnostics.max_abs_yaw_error_deg,
+        abs_error,
+    )
+    node.diagnostics.yaw_error_sum_deg += abs_error
+    node.diagnostics.yaw_error_count += 1
+    if abs(linear_x) <= 1e-9 and abs(angular_z) > 1e-9:
+        node.diagnostics.rotate_seconds += sample_seconds
+    else:
+        node.diagnostics.forward_seconds += sample_seconds
+
+
 def pose_fields(pose):
     if pose is None:
         return ["", "", ""]
@@ -327,4 +341,3 @@ def migrate_csv_header(path, header):
     with path.open("w", newline="") as file:
         writer = csv.writer(file)
         writer.writerows(migrated)
-

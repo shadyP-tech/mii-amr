@@ -1,0 +1,204 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Callable
+
+
+@dataclass(frozen=True)
+class NodeSetupContext:
+    RuntimeDiagnostics: Any
+    ReplanManager: Any
+    build_command_smoother: Callable[..., Any]
+    build_lookahead_guard: Callable[..., Any]
+    projection_lock_required_samples: int
+    projection_lock_progress_tolerance_m: float
+    route_heading_lookahead_m: float
+    post_rotate_branch_heading_tolerance_deg: float
+    post_rotate_branch_release_stable_samples: int
+
+
+def initialize_runtime_state(node, args, context):
+    node.last_scan = None
+    node.last_scan_received_sec = None
+    node.last_amcl = None
+    node.last_amcl_received_sec = None
+    node.base_frame_used = ""
+    node.reached_count = 0
+    node.start_pose = None
+    node.final_pose = None
+    node.last_scan_safety = None
+    node.last_amcl_health = None
+    node.diagnostics = context.RuntimeDiagnostics(
+        max_tf_update_gap_sec=args.max_tf_update_gap_sec,
+    )
+    node.last_tf_stamp_sec = None
+    node.last_tf_stamp_change_local_sec = None
+    node.run_local_map = None
+    node.live_replan_attempt_count = 0
+    node.known_corridor_repair_count = 0
+    node.last_known_corridor_repair_signature = None
+    node.suppressed_known_corridor_signature = None
+    node.last_scan_block_budget_repair_signature = None
+    node.last_lookahead_guard_block_signature = None
+    node.last_lookahead_guard_result = None
+    node.active_route_generation_id = 0
+    node.post_replan_recovery = None
+    node.post_replan_recovery_activations = 0
+    node.last_post_replan_recovery_status = ""
+    node.last_post_replan_recovery_phase = ""
+    node.last_post_replan_recovery_clear_count = 0
+    node.max_post_replan_recovery_clear_count = 0
+    node.last_post_replan_recovery_escape_distance_m = 0.0
+    node.last_post_replan_recovery_best_escape_distance_m = 0.0
+    node.last_post_replan_recovery_escape_distance_source = ""
+    node.last_post_replan_recovery_escape_no_motion_elapsed_sec = None
+    node.last_post_replan_recovery_escape_straight_active = False
+    node.last_post_replan_recovery_escape_elapsed_sec = None
+    node.last_post_replan_recovery_escape_timeout_sec = None
+    node.last_post_replan_recovery_heading_error_deg = None
+    node.last_post_replan_recovery_alignment_heading_deg = None
+    node.last_post_replan_recovery_alignment_heading_source = ""
+    node.last_post_replan_recovery_alignment_segment_index = None
+    node.last_post_replan_recovery_alignment_segment_ratio = None
+    node.last_post_replan_recovery_escape_command_linear_mps = 0.0
+    node.last_post_replan_recovery_escape_command_angular_radps = 0.0
+    node.last_post_replan_recovery_escape_angular_hint_source = ""
+    node.last_post_replan_clearance_search_attempted = False
+    node.last_post_replan_clearance_search_direction = 0.0
+    node.last_post_replan_clearance_search_yaw_delta_deg = 0.0
+    node.last_post_replan_clearance_search_baseline_p05_m = None
+    node.last_post_replan_clearance_search_best_p05_m = None
+    node.last_post_replan_clearance_search_baseline_min_m = None
+    node.last_post_replan_clearance_search_best_min_m = None
+    node.last_post_replan_clearance_search_result = ""
+    node.last_post_replan_clearance_search_direction_source = ""
+    node.last_post_replan_activation_min_target_distance_m = 0.0
+    node.last_post_replan_activation_pruned_sparse_count = 0
+    node.last_post_replan_activation_pruned_dense_count = 0
+    node.last_post_replan_activation_projection_progress_m = None
+    node.last_post_replan_activation_first_target_distance_m = None
+    node.last_post_replan_activation_status = ""
+    node.last_post_replan_recovery_log_sec = None
+    node.command_smoother = context.build_command_smoother(args)
+    node.last_smoothed_command_time_sec = None
+    node.last_smoothed_motion_mode = None
+    node.last_velocity_scheduler_status = None
+    node.last_velocity_scheduler_log_sec = None
+    node.last_route_projection_status = None
+    node.last_route_projection_log_sec = None
+    node.pure_pursuit_rotate_gate_entries = 0
+    node.last_recorded_pure_pursuit_status = None
+    node.max_cross_track_error_m = 0.0
+    node.cross_track_error_sum_m = 0.0
+    node.cross_track_error_count = 0
+    node.max_route_heading_error_deg = 0.0
+    node.last_route_heading_source = ""
+    node.last_route_heading_error_deg = None
+    node.last_pure_pursuit_rotate_reason = ""
+    node.last_pure_pursuit_rotate_source = ""
+    node.max_projection_backward_delta_m = 0.0
+    node.max_rotate_anchor_backward_delta_m = 0.0
+    node.max_rotate_anchor_forward_delta_m = 0.0
+    node.last_rotate_anchor_aligned_samples = 0
+    node.max_rotate_anchor_aligned_samples = 0
+    node.pure_pursuit_rotate_anchor_activations = 0
+    node.post_rotate_branch_lock_activations = 0
+    node.post_rotate_branch_ambiguity_failures = 0
+    node.post_rotate_branch_rejected_wrong_heading_count = 0
+    node.post_rotate_branch_max_heading_error_deg = 0.0
+    node.post_rotate_branch_target_clip_count = 0
+    node.post_rotate_branch_heading_break_handoff_count = 0
+    node.post_rotate_branch_physical_handoff_count = 0
+    node.last_projection_acquisition_status = ""
+    node.last_projection_lock_sample_count = 0
+    node._current_path_controller = None
+    node.last_replan_tracking_points = None
+    node.last_replan_tracking_source = "waypoints"
+    node.last_replan_tracking_validation = None
+    node.rviz_last_blocked_cells = set()
+    node.replan_manager = context.ReplanManager(node)
+    node.lookahead_guard = context.build_lookahead_guard(
+        args,
+        run_local_map_fn=lambda: node.run_local_map,
+    )
+
+
+def log_startup_configuration(node, args, context):
+    if node.lookahead_guard is not None and args.verbose:
+        node.get_logger().info(
+            "Pure-pursuit lookahead guard enabled: "
+            f"mode={args.pure_pursuit_lookahead_guard}, "
+            "unknown_cells=blocked, "
+            "static_inflation_radius_m="
+            f"{args.pure_pursuit_lookahead_guard_static_inflation_radius_m:.3f}, "
+            f"static_blocked_cells={len(node.lookahead_guard.static_blocked_cells)}"
+        )
+    if args.controller == "pure-pursuit" and args.verbose:
+        node.get_logger().info(
+            "Pure-pursuit speed profile: "
+            f"profile={args.pure_pursuit_speed_profile}, "
+            f"forward_control={args.pure_pursuit_forward_control}, "
+            f"route_heading_blend={args.pure_pursuit_route_heading_blend:.3f}, "
+            f"cross_track_gain={args.pure_pursuit_cross_track_gain:.3f}, "
+            "cross_track_speed_floor="
+            f"{args.pure_pursuit_cross_track_speed_floor_mps:.3f}, "
+            "max_cross_track_correction="
+            f"{args.pure_pursuit_max_cross_track_correction_deg:.1f} deg, "
+            "angular_feasibility_speed_limit="
+            f"{args.pure_pursuit_angular_feasibility_speed_limit}, "
+            "angular_feasibility_margin="
+            f"{args.pure_pursuit_angular_feasibility_margin:.3f}, "
+            f"resolved_linear_speed={args.linear_speed:.3f}, "
+            f"resolved_max_angular_speed={args.max_angular_speed:.3f}, "
+            f"track_angular_cap={args.pure_pursuit_max_track_angular_speed_radps:.3f}, "
+            f"rotate_angular_cap={args.pure_pursuit_max_rotate_angular_speed_radps:.3f}, "
+            f"cross_track_warning={args.pure_pursuit_cross_track_warning_m:.3f}, "
+            f"cross_track_max={args.pure_pursuit_max_cross_track_error_m:.3f}, "
+            "projection_lock_samples="
+            f"{context.projection_lock_required_samples}, "
+            "projection_lock_progress_tolerance="
+            f"{context.projection_lock_progress_tolerance_m:.3f}, "
+            "route_heading_lookahead="
+            f"{context.route_heading_lookahead_m:.3f}, "
+            "route_heading_rotate_start="
+            f"{args.pure_pursuit_route_heading_rotate_start_deg:.1f} deg, "
+            "route_heading_rotate_stop="
+            f"{args.pure_pursuit_route_heading_rotate_stop_deg:.1f} deg, "
+            "post_rotate_branch_heading_tolerance="
+            f"{context.post_rotate_branch_heading_tolerance_deg:.1f} deg, "
+            "post_rotate_branch_release_samples="
+            f"{context.post_rotate_branch_release_stable_samples}, "
+            f"max_lateral_accel={args.pure_pursuit_max_lateral_accel_mps2:.3f}, "
+            f"turn_speed_margin={args.pure_pursuit_turn_speed_margin:.3f}, "
+            f"heading_deadband={args.pure_pursuit_heading_deadband_deg:.1f} deg, "
+            f"lateral_deadband={args.pure_pursuit_lateral_deadband_m:.3f} m, "
+            "curvature_limit_start="
+            f"{args.pure_pursuit_curvature_limit_start_heading_error_deg:.1f} deg, "
+            "curvature_limit_full="
+            f"{args.pure_pursuit_curvature_limit_full_heading_error_deg:.1f} deg, "
+            "rotate_start="
+            f"{args.pure_pursuit_rotate_start_heading_error_deg:.1f} deg, "
+            "rotate_stop="
+            f"{args.pure_pursuit_rotate_stop_heading_error_deg:.1f} deg"
+        )
+    if node.command_smoother is not None and args.verbose:
+        node.get_logger().info(
+            "Pure-pursuit command smoothing enabled: "
+            f"mode={args.pure_pursuit_command_smoothing}, "
+            f"linear_accel={args.pure_pursuit_max_linear_accel_mps2:.3f}, "
+            f"linear_decel={args.pure_pursuit_max_linear_decel_mps2:.3f}, "
+            f"angular_accel={args.pure_pursuit_max_angular_accel_radps2:.3f}, "
+            f"angular_decel={args.pure_pursuit_max_angular_decel_radps2:.3f}, "
+            f"final_decel_distance={args.pure_pursuit_final_decel_distance_m:.3f}, "
+            "dt_clamp=[0, 2/control_rate_hz]"
+        )
+    if args.enable_lidar_map_replan and args.verbose:
+        node.get_logger().info(
+            "Post-replan recovery: "
+            f"mode={args.post_replan_recovery}, "
+            f"clear_scan_samples={args.post_replan_clear_scan_samples}, "
+            f"timeout={args.post_replan_timeout_sec:.3f}, "
+            f"escape_distance={args.post_replan_escape_distance_m:.3f}, "
+            f"escape_linear_speed={args.post_replan_escape_linear_speed_mps:.3f}, "
+            f"align_heading_error={args.post_replan_align_heading_error_deg:.1f} deg"
+        )
