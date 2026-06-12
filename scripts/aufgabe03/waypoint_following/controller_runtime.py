@@ -316,6 +316,8 @@ def notes_with_velocity_scheduler_metadata(notes, args, context):
         f"{args.pure_pursuit_cross_track_warning_m:.3f};"
         "pure_pursuit_max_cross_track_error_m="
         f"{args.pure_pursuit_max_cross_track_error_m:.3f};"
+        "pure_pursuit_tracking_progress_tolerance_m="
+        f"{args.pure_pursuit_tracking_progress_tolerance_m:.3f};"
         "pure_pursuit_max_lateral_accel_mps2="
         f"{args.pure_pursuit_max_lateral_accel_mps2:.3f};"
         "pure_pursuit_turn_speed_margin="

@@ -216,6 +216,10 @@ def print_dry_run(
             f"{args.pure_pursuit_max_cross_track_error_m:.3f}"
         )
         print(
+            "pure_pursuit_tracking_progress_tolerance_m="
+            f"{args.pure_pursuit_tracking_progress_tolerance_m:.3f}"
+        )
+        print(
             "pure_pursuit_projection_lock_required_samples="
             f"{PROJECTION_LOCK_REQUIRED_SAMPLES}"
         )
@@ -497,6 +501,7 @@ def parse_args(argv, *, context):
     DEFAULT_PURE_PURSUIT_ROUTE_HEADING_ROTATE_START_DEG = context['DEFAULT_PURE_PURSUIT_ROUTE_HEADING_ROTATE_START_DEG']
     DEFAULT_PURE_PURSUIT_ROUTE_HEADING_ROTATE_STOP_DEG = context['DEFAULT_PURE_PURSUIT_ROUTE_HEADING_ROTATE_STOP_DEG']
     DEFAULT_PURE_PURSUIT_SPEED_PROFILE = context['DEFAULT_PURE_PURSUIT_SPEED_PROFILE']
+    DEFAULT_PURE_PURSUIT_TRACKING_PROGRESS_TOLERANCE_M = context['DEFAULT_PURE_PURSUIT_TRACKING_PROGRESS_TOLERANCE_M']
     DEFAULT_PURE_PURSUIT_TURN_SPEED_MARGIN = context['DEFAULT_PURE_PURSUIT_TURN_SPEED_MARGIN']
     DEFAULT_REPLAN_OUTPUT_DIR = context['DEFAULT_REPLAN_OUTPUT_DIR']
     DEFAULT_REPLAN_TIMEOUT_SEC = context['DEFAULT_REPLAN_TIMEOUT_SEC']
@@ -723,6 +728,11 @@ def parse_args(argv, *, context):
     parser.add_argument(
         "--pure-pursuit-max-cross-track-error-m",
         default=DEFAULT_PURE_PURSUIT_MAX_CROSS_TRACK_ERROR_M,
+        type=float,
+    )
+    parser.add_argument(
+        "--pure-pursuit-tracking-progress-tolerance-m",
+        default=DEFAULT_PURE_PURSUIT_TRACKING_PROGRESS_TOLERANCE_M,
         type=float,
     )
     parser.add_argument("--pure-pursuit-min-curvature-linear-speed-mps", type=float)
@@ -1043,6 +1053,7 @@ def validate_args(parser, args, *, context):
         "pure_pursuit_cross_track_speed_floor_mps",
         "pure_pursuit_cross_track_warning_m",
         "pure_pursuit_max_cross_track_error_m",
+        "pure_pursuit_tracking_progress_tolerance_m",
         "pure_pursuit_angular_feasibility_margin",
         "tracking_endpoint_tolerance_m",
         "tracking_start_tolerance_m",

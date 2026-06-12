@@ -736,9 +736,12 @@ class PurePursuitController:
 
         route_state.advance_tracking_progress(
             pose,
-            max(
-                min(self.args.waypoint_tolerance_m, lookahead_m),
-                getattr(self.args, "pure_pursuit_max_cross_track_error_m", 0.25),
+            float(
+                getattr(
+                    self.args,
+                    "pure_pursuit_tracking_progress_tolerance_m",
+                    0.06,
+                )
             ),
         )
         start_segment = (

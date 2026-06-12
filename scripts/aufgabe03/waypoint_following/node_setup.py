@@ -180,6 +180,8 @@ def log_startup_configuration(node, args, context):
             f"rotate_angular_cap={args.pure_pursuit_max_rotate_angular_speed_radps:.3f}, "
             f"cross_track_warning={args.pure_pursuit_cross_track_warning_m:.3f}, "
             f"cross_track_max={args.pure_pursuit_max_cross_track_error_m:.3f}, "
+            "tracking_progress_tolerance="
+            f"{args.pure_pursuit_tracking_progress_tolerance_m:.3f}, "
             "projection_lock_samples="
             f"{context.projection_lock_required_samples}, "
             "projection_lock_progress_tolerance="
