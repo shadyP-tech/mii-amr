@@ -127,6 +127,7 @@ def ros_node_wiring_context(facade):
         NavPath=facade["NavPath"],
         MarkerArray=facade["MarkerArray"],
         LaserScan=facade["LaserScan"],
+        Odometry=facade["Odometry"],
         PoseWithCovarianceStamped=facade["PoseWithCovarianceStamped"],
         qos_profile_sensor_data=facade["qos_profile_sensor_data"],
         tf2_ros=facade["tf2_ros"],

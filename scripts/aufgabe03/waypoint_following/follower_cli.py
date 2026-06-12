@@ -9,11 +9,11 @@ def require_motion_confirmation(args, waypoints):
     if args.yes:
         return True
 
-    print("\nThis command will publish /cmd_vel to the physical TurtleBot.")
+    print(f"\nThis command will publish {args.cmd_vel_topic} to the physical TurtleBot.")
     print("Safety requirements:")
     print("  - Nav2 localization is running with the saved map")
-    print("  - RViz pose estimate is set and /scan aligns with the map")
-    print("  - no active Nav2 goal/controller is publishing /cmd_vel")
+    print(f"  - RViz pose estimate is set and {args.scan_topic} aligns with the map")
+    print(f"  - no active Nav2 goal/controller is publishing {args.cmd_vel_topic}")
     print("  - clear the path and keep an operator near the robot")
     print("  - keep Ctrl+C and physical stop available")
     print(f"Run ID: {args.run_id}")
@@ -102,6 +102,11 @@ def print_dry_run(
 
     print(f"Map frame: {args.map_frame}")
     print(f"Base frame: {args.base_frame}, fallback: {args.fallback_base_frame}")
+    print(f"cmd_vel topic: {args.cmd_vel_topic}")
+    print(f"scan topic: {args.scan_topic}")
+    print(f"AMCL topic: {args.amcl_topic}")
+    print(f"odom topic: {args.odom_topic}")
+    print(f"max odom age: {args.max_odom_age_sec:.3f} sec")
     print(f"Controller: {args.controller}")
     if tracking_validation is not None:
         print(f"controller={args.controller}")
@@ -431,8 +436,10 @@ def print_dry_run(
 
 def parse_args(argv, *, context):
     COMMAND_SMOOTHING_MODES = context['COMMAND_SMOOTHING_MODES']
+    DEFAULT_AMCL_TOPIC = context['DEFAULT_AMCL_TOPIC']
     DEFAULT_CONTROLLER = context['DEFAULT_CONTROLLER']
     DEFAULT_CONTROL_RATE_HZ = context['DEFAULT_CONTROL_RATE_HZ']
+    DEFAULT_CMD_VEL_TOPIC = context['DEFAULT_CMD_VEL_TOPIC']
     DEFAULT_FORWARD_STOP_HEADING_ERROR_DEG = context['DEFAULT_FORWARD_STOP_HEADING_ERROR_DEG']
     DEFAULT_FORWARD_YAW_DEADBAND_DEG = context['DEFAULT_FORWARD_YAW_DEADBAND_DEG']
     DEFAULT_GOAL_TOLERANCE_M = context['DEFAULT_GOAL_TOLERANCE_M']
@@ -446,6 +453,7 @@ def parse_args(argv, *, context):
     DEFAULT_MAX_AMCL_VAR_YAW = context['DEFAULT_MAX_AMCL_VAR_YAW']
     DEFAULT_MAX_ANGULAR_SPEED_RADPS = context['DEFAULT_MAX_ANGULAR_SPEED_RADPS']
     DEFAULT_MAX_GOAL_SNAP_M = context['DEFAULT_MAX_GOAL_SNAP_M']
+    DEFAULT_MAX_ODOM_AGE_SEC = context['DEFAULT_MAX_ODOM_AGE_SEC']
     DEFAULT_MAX_POSE_AGE_SEC = context['DEFAULT_MAX_POSE_AGE_SEC']
     DEFAULT_MAX_REPLAN_PATH_LENGTH_RATIO = context['DEFAULT_MAX_REPLAN_PATH_LENGTH_RATIO']
     DEFAULT_MAX_REPLAN_SCAN_AGE_SEC = context['DEFAULT_MAX_REPLAN_SCAN_AGE_SEC']
@@ -465,6 +473,7 @@ def parse_args(argv, *, context):
     DEFAULT_OBSTACLE_MIN_CLUSTER_WIDTH_M = context['DEFAULT_OBSTACLE_MIN_CLUSTER_WIDTH_M']
     DEFAULT_OBSTACLE_MIN_RANGE_M = context['DEFAULT_OBSTACLE_MIN_RANGE_M']
     DEFAULT_ODOM_FRAME = context['DEFAULT_ODOM_FRAME']
+    DEFAULT_ODOM_TOPIC = context['DEFAULT_ODOM_TOPIC']
     DEFAULT_PATH_LOOKAHEAD_M = context['DEFAULT_PATH_LOOKAHEAD_M']
     DEFAULT_POST_REPLAN_ALIGN_HEADING_ERROR_DEG = context['DEFAULT_POST_REPLAN_ALIGN_HEADING_ERROR_DEG']
     DEFAULT_POST_REPLAN_CLEAR_SCAN_SAMPLES = context['DEFAULT_POST_REPLAN_CLEAR_SCAN_SAMPLES']
@@ -539,6 +548,7 @@ def parse_args(argv, *, context):
     DEFAULT_RVIZ_OBSTACLE_MARKER_TOPIC = context['DEFAULT_RVIZ_OBSTACLE_MARKER_TOPIC']
     DEFAULT_RVIZ_PATH_TOPIC = context['DEFAULT_RVIZ_PATH_TOPIC']
     DEFAULT_RVIZ_WAYPOINT_MARKER_TOPIC = context['DEFAULT_RVIZ_WAYPOINT_MARKER_TOPIC']
+    DEFAULT_SCAN_TOPIC = context['DEFAULT_SCAN_TOPIC']
     DEFAULT_SCAN_HALF_ANGLE_DEG = context['DEFAULT_SCAN_HALF_ANGLE_DEG']
     DEFAULT_SETTLE_SEC = context['DEFAULT_SETTLE_SEC']
     DEFAULT_STARTUP_TIMEOUT_SEC = context['DEFAULT_STARTUP_TIMEOUT_SEC']
@@ -578,6 +588,10 @@ def parse_args(argv, *, context):
     parser.add_argument("--map-frame", default="map")
     parser.add_argument("--base-frame", default="base_footprint")
     parser.add_argument("--fallback-base-frame", default="base_link")
+    parser.add_argument("--cmd-vel-topic", default=DEFAULT_CMD_VEL_TOPIC)
+    parser.add_argument("--scan-topic", default=DEFAULT_SCAN_TOPIC)
+    parser.add_argument("--amcl-topic", default=DEFAULT_AMCL_TOPIC)
+    parser.add_argument("--odom-topic", default=DEFAULT_ODOM_TOPIC)
     parser.add_argument("--linear-speed", type=float)
     parser.add_argument("--min-linear-speed", default=DEFAULT_MIN_LINEAR_SPEED_MPS, type=float)
     parser.add_argument("--linear-gain", default=DEFAULT_LINEAR_GAIN, type=float)
@@ -814,6 +828,7 @@ def parse_args(argv, *, context):
     parser.add_argument("--max-pose-age-sec", default=DEFAULT_MAX_POSE_AGE_SEC, type=float)
     parser.add_argument("--max-scan-age-sec", default=DEFAULT_MAX_SCAN_AGE_SEC, type=float)
     parser.add_argument("--max-amcl-age-sec", default=DEFAULT_MAX_AMCL_AGE_SEC, type=float)
+    parser.add_argument("--max-odom-age-sec", default=DEFAULT_MAX_ODOM_AGE_SEC, type=float)
     parser.add_argument("--max-amcl-var-x", default=DEFAULT_MAX_AMCL_VAR_X, type=float)
     parser.add_argument("--max-amcl-var-y", default=DEFAULT_MAX_AMCL_VAR_Y, type=float)
     parser.add_argument("--max-amcl-var-yaw", default=DEFAULT_MAX_AMCL_VAR_YAW, type=float)
@@ -1083,6 +1098,7 @@ def validate_args(parser, args, *, context):
         "max_pose_age_sec",
         "max_scan_age_sec",
         "max_amcl_age_sec",
+        "max_odom_age_sec",
         "max_amcl_var_x",
         "max_amcl_var_y",
         "max_amcl_var_yaw",

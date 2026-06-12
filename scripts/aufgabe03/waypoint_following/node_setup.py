@@ -24,6 +24,11 @@ def initialize_runtime_state(node, args, context):
     node.last_scan_received_sec = None
     node.last_amcl = None
     node.last_amcl_received_sec = None
+    node.last_odom = None
+    node.last_odom_pose = None
+    node.last_odom_received_sec = None
+    node.last_odom_frame_id = ""
+    node.last_odom_child_frame_id = ""
     node.base_frame_used = ""
     node.reached_count = 0
     node.start_pose = None
@@ -71,6 +76,16 @@ def initialize_runtime_state(node, args, context):
     node.last_post_replan_recovery_escape_odom_stamp_delta_sec = None
     node.last_post_replan_recovery_escape_progress_source = ""
     node.last_post_replan_recovery_escape_no_motion_reason = ""
+    node.last_post_replan_recovery_escape_odom_source = ""
+    node.last_post_replan_recovery_escape_odom_source_fallback_reason = ""
+    node.last_post_replan_recovery_escape_direct_odom_distance_m = None
+    node.last_post_replan_recovery_escape_tf_odom_distance_m = None
+    node.last_post_replan_recovery_escape_direct_odom_age_sec = None
+    node.last_post_replan_recovery_escape_direct_odom_stamp_delta_sec = None
+    node.last_post_replan_recovery_escape_tf_odom_stamp_delta_sec = None
+    node.last_post_replan_recovery_escape_direct_odom_frame_id = ""
+    node.last_post_replan_recovery_escape_direct_odom_child_frame_id = ""
+    node.last_post_replan_recovery_escape_odom_disagreement = ""
     node.last_post_replan_clearance_search_attempted = False
     node.last_post_replan_clearance_search_direction = 0.0
     node.last_post_replan_clearance_search_yaw_delta_deg = 0.0
@@ -137,6 +152,15 @@ def initialize_runtime_state(node, args, context):
 
 
 def log_startup_configuration(node, args, context):
+    if args.verbose:
+        node.get_logger().info(
+            "Waypoint follower ROS topics: "
+            f"cmd_vel={args.cmd_vel_topic}, "
+            f"scan={args.scan_topic}, "
+            f"amcl={args.amcl_topic}, "
+            f"odom={args.odom_topic}, "
+            f"max_odom_age_sec={args.max_odom_age_sec:.3f}"
+        )
     if node.lookahead_guard is not None and args.verbose:
         node.get_logger().info(
             "Pure-pursuit lookahead guard enabled: "

@@ -91,6 +91,8 @@ class PostReplanRecoveryState:
     last_counted_scan_identity: tuple[float | None, float | None] | None = None
     escape_start_pose: Pose2D | None = None
     escape_start_odom_pose: Pose2D | None = None
+    escape_start_direct_odom_pose: Pose2D | None = None
+    escape_start_tf_odom_pose: Pose2D | None = None
     escape_start_time_sec: float | None = None
     last_escape_timeout_sec: float | None = None
     last_escape_elapsed_sec: float | None = None
@@ -117,6 +119,16 @@ class PostReplanRecoveryState:
     last_escape_odom_stamp_delta_sec: float | None = None
     last_escape_progress_source: str = ""
     last_escape_no_motion_reason: str = ""
+    last_escape_odom_source: str = ""
+    last_escape_odom_source_fallback_reason: str = ""
+    last_escape_direct_odom_distance_m: float | None = None
+    last_escape_tf_odom_distance_m: float | None = None
+    last_escape_direct_odom_age_sec: float | None = None
+    last_escape_direct_odom_stamp_delta_sec: float | None = None
+    last_escape_tf_odom_stamp_delta_sec: float | None = None
+    last_escape_direct_odom_frame_id: str = ""
+    last_escape_direct_odom_child_frame_id: str = ""
+    last_escape_odom_disagreement: str = ""
     clearance_search_attempted: bool = False
     clearance_search_direction: float = 0.0
     clearance_search_start_yaw_deg: float | None = None
@@ -164,6 +176,16 @@ class PostReplanEscapeMeasurement:
     odom_distance_m: float | None
     map_distance_m: float | None
     odom_stamp_delta_sec: float | None
+    odom_source: str = "unavailable"
+    odom_source_fallback_reason: str = "progress_unavailable"
+    direct_odom_distance_m: float | None = None
+    tf_odom_distance_m: float | None = None
+    direct_odom_age_sec: float | None = None
+    direct_odom_stamp_delta_sec: float | None = None
+    tf_odom_stamp_delta_sec: float | None = None
+    direct_odom_frame_id: str = ""
+    direct_odom_child_frame_id: str = ""
+    odom_disagreement: str = ""
 
 
 def _format_optional_m(value):
@@ -232,6 +254,50 @@ def try_lookup_odom_pose(node):
         return _lookup_odom_pose(node)
     except Exception:
         return None
+
+
+def fresh_direct_odom_pose(node, now_sec=None):
+    helper = getattr(node, "fresh_direct_odom_pose", None)
+    if callable(helper):
+        return helper(now_sec=now_sec)
+    pose = getattr(node, "last_odom_pose", None)
+    received_sec = getattr(node, "last_odom_received_sec", None)
+    if pose is None or received_sec is None:
+        return None, None, "direct_odom_start_unavailable"
+    if now_sec is None:
+        now_sec = time.time()
+    age_sec = max(0.0, now_sec - received_sec)
+    if age_sec > float(getattr(node.args, "max_odom_age_sec", 1.0)):
+        return None, age_sec, "direct_odom_stale"
+    return pose, age_sec, "none"
+
+
+def _pose_distance_m(start_pose, current_pose):
+    if start_pose is None or current_pose is None:
+        return None
+    return math.hypot(
+        current_pose.x - start_pose.x,
+        current_pose.y - start_pose.y,
+    )
+
+
+def _pose_stamp_delta_sec(start_pose, current_pose):
+    if start_pose is None or current_pose is None:
+        return None
+    if start_pose.stamp_sec is None or current_pose.stamp_sec is None:
+        return None
+    return current_pose.stamp_sec - start_pose.stamp_sec
+
+
+def _escape_odom_disagreement(direct_distance_m, tf_distance_m):
+    direct_moved = (
+        direct_distance_m is not None
+        and direct_distance_m >= POST_REPLAN_ESCAPE_NO_MOTION_EPS_M
+    )
+    tf_static = tf_distance_m is None or tf_distance_m < POST_REPLAN_ESCAPE_NO_MOTION_EPS_M
+    if direct_moved and tf_static:
+        return "direct_moved_tf_static"
+    return ""
 
 
 def resolve_post_replan_escape_steering_mode(args):
@@ -427,6 +493,92 @@ def notes_with_post_replan_recovery_metadata(notes, args, node):
             "",
         )
     )
+    escape_odom_source = (
+        getattr(recovery, "last_escape_odom_source", "")
+        if recovery is not None
+        else getattr(node, "last_post_replan_recovery_escape_odom_source", "")
+    )
+    escape_odom_source_fallback_reason = (
+        getattr(recovery, "last_escape_odom_source_fallback_reason", "")
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_recovery_escape_odom_source_fallback_reason",
+            "",
+        )
+    )
+    escape_direct_odom_distance = (
+        getattr(recovery, "last_escape_direct_odom_distance_m", None)
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_recovery_escape_direct_odom_distance_m",
+            None,
+        )
+    )
+    escape_tf_odom_distance = (
+        getattr(recovery, "last_escape_tf_odom_distance_m", None)
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_recovery_escape_tf_odom_distance_m",
+            None,
+        )
+    )
+    escape_direct_odom_age = (
+        getattr(recovery, "last_escape_direct_odom_age_sec", None)
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_recovery_escape_direct_odom_age_sec",
+            None,
+        )
+    )
+    escape_direct_odom_stamp_delta = (
+        getattr(recovery, "last_escape_direct_odom_stamp_delta_sec", None)
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_recovery_escape_direct_odom_stamp_delta_sec",
+            None,
+        )
+    )
+    escape_tf_odom_stamp_delta = (
+        getattr(recovery, "last_escape_tf_odom_stamp_delta_sec", None)
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_recovery_escape_tf_odom_stamp_delta_sec",
+            None,
+        )
+    )
+    escape_direct_odom_frame_id = (
+        getattr(recovery, "last_escape_direct_odom_frame_id", "")
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_recovery_escape_direct_odom_frame_id",
+            "",
+        )
+    )
+    escape_direct_odom_child_frame_id = (
+        getattr(recovery, "last_escape_direct_odom_child_frame_id", "")
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_recovery_escape_direct_odom_child_frame_id",
+            "",
+        )
+    )
+    escape_odom_disagreement = (
+        getattr(recovery, "last_escape_odom_disagreement", "")
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_recovery_escape_odom_disagreement",
+            "",
+        )
+    )
     straight_active = (
         getattr(recovery, "escape_straight_until_progress_active", False)
         if recovery is not None
@@ -560,6 +712,26 @@ def notes_with_post_replan_recovery_metadata(notes, args, node):
         f"{escape_progress_source};"
         "post_replan_escape_no_motion_reason="
         f"{escape_no_motion_reason};"
+        "post_replan_escape_odom_source="
+        f"{escape_odom_source};"
+        "post_replan_escape_odom_source_fallback_reason="
+        f"{escape_odom_source_fallback_reason};"
+        "post_replan_escape_direct_odom_distance_m="
+        f"{_format_optional_m(escape_direct_odom_distance)};"
+        "post_replan_escape_tf_odom_distance_m="
+        f"{_format_optional_m(escape_tf_odom_distance)};"
+        "post_replan_escape_direct_odom_age_sec="
+        f"{_format_optional_m(escape_direct_odom_age)};"
+        "post_replan_escape_direct_odom_stamp_delta_sec="
+        f"{_format_optional_m(escape_direct_odom_stamp_delta)};"
+        "post_replan_escape_tf_odom_stamp_delta_sec="
+        f"{_format_optional_m(escape_tf_odom_stamp_delta)};"
+        "post_replan_escape_direct_odom_frame_id="
+        f"{escape_direct_odom_frame_id};"
+        "post_replan_escape_direct_odom_child_frame_id="
+        f"{escape_direct_odom_child_frame_id};"
+        "post_replan_escape_odom_disagreement="
+        f"{escape_odom_disagreement};"
         "post_replan_recovery_last_heading_error_deg="
         f"{_format_optional_m(last_heading_error)};"
         "post_replan_recovery_last_alignment_heading_deg="
@@ -723,6 +895,36 @@ def reset_post_replan_recovery(node, status=""):
         )
         node.last_post_replan_recovery_escape_no_motion_reason = (
             recovery.last_escape_no_motion_reason
+        )
+        node.last_post_replan_recovery_escape_odom_source = (
+            recovery.last_escape_odom_source
+        )
+        node.last_post_replan_recovery_escape_odom_source_fallback_reason = (
+            recovery.last_escape_odom_source_fallback_reason
+        )
+        node.last_post_replan_recovery_escape_direct_odom_distance_m = (
+            recovery.last_escape_direct_odom_distance_m
+        )
+        node.last_post_replan_recovery_escape_tf_odom_distance_m = (
+            recovery.last_escape_tf_odom_distance_m
+        )
+        node.last_post_replan_recovery_escape_direct_odom_age_sec = (
+            recovery.last_escape_direct_odom_age_sec
+        )
+        node.last_post_replan_recovery_escape_direct_odom_stamp_delta_sec = (
+            recovery.last_escape_direct_odom_stamp_delta_sec
+        )
+        node.last_post_replan_recovery_escape_tf_odom_stamp_delta_sec = (
+            recovery.last_escape_tf_odom_stamp_delta_sec
+        )
+        node.last_post_replan_recovery_escape_direct_odom_frame_id = (
+            recovery.last_escape_direct_odom_frame_id
+        )
+        node.last_post_replan_recovery_escape_direct_odom_child_frame_id = (
+            recovery.last_escape_direct_odom_child_frame_id
+        )
+        node.last_post_replan_recovery_escape_odom_disagreement = (
+            recovery.last_escape_odom_disagreement
         )
         node.last_post_replan_clearance_search_attempted = (
             recovery.clearance_search_attempted
@@ -1222,6 +1424,16 @@ def activate_post_replan_recovery(node, pose, route_state):
     node.last_post_replan_recovery_escape_odom_stamp_delta_sec = None
     node.last_post_replan_recovery_escape_progress_source = ""
     node.last_post_replan_recovery_escape_no_motion_reason = ""
+    node.last_post_replan_recovery_escape_odom_source = ""
+    node.last_post_replan_recovery_escape_odom_source_fallback_reason = ""
+    node.last_post_replan_recovery_escape_direct_odom_distance_m = None
+    node.last_post_replan_recovery_escape_tf_odom_distance_m = None
+    node.last_post_replan_recovery_escape_direct_odom_age_sec = None
+    node.last_post_replan_recovery_escape_direct_odom_stamp_delta_sec = None
+    node.last_post_replan_recovery_escape_tf_odom_stamp_delta_sec = None
+    node.last_post_replan_recovery_escape_direct_odom_frame_id = ""
+    node.last_post_replan_recovery_escape_direct_odom_child_frame_id = ""
+    node.last_post_replan_recovery_escape_odom_disagreement = ""
     node.last_post_replan_route_clearance_reason = ""
     node.last_post_replan_route_corridor_min_distance_m = None
     node.last_post_replan_route_corridor_blocked_count = 0
@@ -1266,22 +1478,35 @@ def post_replan_escape_timed_out(node, recovery, now_sec):
     effective_deadline_sec = max(total_deadline_sec, escape_deadline_sec)
     return now_sec > effective_deadline_sec
 
-def post_replan_escape_measurement(node, recovery, pose):
-    odom_pose = try_lookup_odom_pose(node)
-    odom_distance = None
-    odom_stamp_delta = None
-    if recovery.escape_start_odom_pose is not None and odom_pose is not None:
-        odom_distance = math.hypot(
-            odom_pose.x - recovery.escape_start_odom_pose.x,
-            odom_pose.y - recovery.escape_start_odom_pose.y,
+def post_replan_escape_measurement(node, recovery, pose, now_sec=None):
+    direct_pose, direct_age_sec, direct_reason = fresh_direct_odom_pose(
+        node,
+        now_sec=now_sec,
+    )
+    tf_odom_pose = try_lookup_odom_pose(node)
+    direct_start_pose = recovery.escape_start_direct_odom_pose
+    tf_start_pose = recovery.escape_start_tf_odom_pose
+    if tf_start_pose is None:
+        tf_start_pose = recovery.escape_start_odom_pose
+
+    direct_odom_distance = None
+    direct_odom_stamp_delta = None
+    if direct_start_pose is not None and direct_pose is not None:
+        direct_odom_distance = _pose_distance_m(direct_start_pose, direct_pose)
+        direct_odom_stamp_delta = _pose_stamp_delta_sec(
+            direct_start_pose,
+            direct_pose,
         )
-        if (
-            odom_pose.stamp_sec is not None
-            and recovery.escape_start_odom_pose.stamp_sec is not None
-        ):
-            odom_stamp_delta = (
-                odom_pose.stamp_sec - recovery.escape_start_odom_pose.stamp_sec
-            )
+
+    tf_odom_distance = None
+    tf_odom_stamp_delta = None
+    if tf_start_pose is not None and tf_odom_pose is not None:
+        tf_odom_distance = _pose_distance_m(tf_start_pose, tf_odom_pose)
+        tf_odom_stamp_delta = _pose_stamp_delta_sec(
+            tf_start_pose,
+            tf_odom_pose,
+        )
+
     start_pose = recovery.escape_start_pose or pose
     map_distance = None
     if start_pose is not None and pose is not None:
@@ -1289,20 +1514,86 @@ def post_replan_escape_measurement(node, recovery, pose):
             pose.x - start_pose.x,
             pose.y - start_pose.y,
         )
-    if odom_distance is not None:
+
+    direct_failure_reason = "none"
+    if direct_start_pose is None:
+        direct_failure_reason = "direct_odom_start_unavailable"
+    elif direct_pose is None:
+        direct_failure_reason = direct_reason or "progress_unavailable"
+
+    odom_disagreement = _escape_odom_disagreement(
+        direct_odom_distance,
+        tf_odom_distance,
+    )
+    direct_frame_id = getattr(node, "last_odom_frame_id", "")
+    direct_child_frame_id = getattr(node, "last_odom_child_frame_id", "")
+
+    if direct_odom_distance is not None:
         return PostReplanEscapeMeasurement(
-            odom_distance,
-            "odom",
-            odom_distance,
+            direct_odom_distance,
+            "direct_odom",
+            direct_odom_distance,
             map_distance,
-            odom_stamp_delta,
+            direct_odom_stamp_delta,
+            odom_source="direct_odom",
+            odom_source_fallback_reason="none",
+            direct_odom_distance_m=direct_odom_distance,
+            tf_odom_distance_m=tf_odom_distance,
+            direct_odom_age_sec=direct_age_sec,
+            direct_odom_stamp_delta_sec=direct_odom_stamp_delta,
+            tf_odom_stamp_delta_sec=tf_odom_stamp_delta,
+            direct_odom_frame_id=direct_frame_id,
+            direct_odom_child_frame_id=direct_child_frame_id,
+            odom_disagreement=odom_disagreement,
         )
+    if tf_odom_distance is not None:
+        fallback_reason = (
+            direct_failure_reason
+            if direct_failure_reason != "none"
+            else "none"
+        )
+        return PostReplanEscapeMeasurement(
+            tf_odom_distance,
+            "tf_odom",
+            tf_odom_distance,
+            map_distance,
+            tf_odom_stamp_delta,
+            odom_source="tf_odom",
+            odom_source_fallback_reason=fallback_reason,
+            direct_odom_distance_m=direct_odom_distance,
+            tf_odom_distance_m=tf_odom_distance,
+            direct_odom_age_sec=direct_age_sec,
+            direct_odom_stamp_delta_sec=direct_odom_stamp_delta,
+            tf_odom_stamp_delta_sec=tf_odom_stamp_delta,
+            direct_odom_frame_id=direct_frame_id,
+            direct_odom_child_frame_id=direct_child_frame_id,
+            odom_disagreement=odom_disagreement,
+        )
+
+    if direct_start_pose is None and tf_start_pose is None:
+        fallback_reason = "progress_unavailable"
+    elif direct_failure_reason != "none":
+        fallback_reason = direct_failure_reason
+    elif tf_start_pose is None:
+        fallback_reason = "tf_odom_start_unavailable"
+    else:
+        fallback_reason = "progress_unavailable"
     return PostReplanEscapeMeasurement(
         0.0,
         "unavailable",
         None,
         map_distance,
-        odom_stamp_delta,
+        None,
+        odom_source="unavailable",
+        odom_source_fallback_reason=fallback_reason,
+        direct_odom_distance_m=direct_odom_distance,
+        tf_odom_distance_m=tf_odom_distance,
+        direct_odom_age_sec=direct_age_sec,
+        direct_odom_stamp_delta_sec=direct_odom_stamp_delta,
+        tf_odom_stamp_delta_sec=tf_odom_stamp_delta,
+        direct_odom_frame_id=direct_frame_id,
+        direct_odom_child_frame_id=direct_child_frame_id,
+        odom_disagreement=odom_disagreement,
     )
 
 def update_post_replan_escape_progress(node, recovery, measurement, now_sec):
@@ -1312,6 +1603,26 @@ def update_post_replan_escape_progress(node, recovery, measurement, now_sec):
     recovery.last_escape_map_distance_m = measurement.map_distance_m
     recovery.last_escape_odom_stamp_delta_sec = measurement.odom_stamp_delta_sec
     recovery.last_escape_progress_source = measurement.progress_source
+    recovery.last_escape_odom_source = measurement.odom_source
+    recovery.last_escape_odom_source_fallback_reason = (
+        measurement.odom_source_fallback_reason
+    )
+    recovery.last_escape_direct_odom_distance_m = (
+        measurement.direct_odom_distance_m
+    )
+    recovery.last_escape_tf_odom_distance_m = measurement.tf_odom_distance_m
+    recovery.last_escape_direct_odom_age_sec = measurement.direct_odom_age_sec
+    recovery.last_escape_direct_odom_stamp_delta_sec = (
+        measurement.direct_odom_stamp_delta_sec
+    )
+    recovery.last_escape_tf_odom_stamp_delta_sec = (
+        measurement.tf_odom_stamp_delta_sec
+    )
+    recovery.last_escape_direct_odom_frame_id = measurement.direct_odom_frame_id
+    recovery.last_escape_direct_odom_child_frame_id = (
+        measurement.direct_odom_child_frame_id
+    )
+    recovery.last_escape_odom_disagreement = measurement.odom_disagreement
     recovery.best_escape_distance_m = max(
         recovery.best_escape_distance_m,
         measurement.progress_distance_m,
@@ -1368,7 +1679,7 @@ def post_replan_escape_no_motion_timed_out(node, recovery, linear_x):
     )
     timeout_sec = (
         POST_REPLAN_ESCAPE_NO_MOTION_TIMEOUT_ODOM_SEC
-        if recovery.last_escape_distance_source == "odom"
+        if recovery.last_escape_distance_source in ("odom", "direct_odom", "tf_odom")
         else POST_REPLAN_ESCAPE_NO_MOTION_TIMEOUT_MAP_SEC
     )
     return recovery.last_escape_no_motion_elapsed_sec >= timeout_sec
@@ -1421,6 +1732,26 @@ def maybe_log_post_replan_recovery(node, safety=None, heading_error_deg=None):
         f"{recovery.last_escape_progress_source}, "
         "escape_no_motion_reason="
         f"{recovery.last_escape_no_motion_reason}, "
+        "escape_odom_source="
+        f"{recovery.last_escape_odom_source}, "
+        "escape_odom_source_fallback_reason="
+        f"{recovery.last_escape_odom_source_fallback_reason}, "
+        "escape_direct_odom_distance_m="
+        f"{_format_optional_m(recovery.last_escape_direct_odom_distance_m)}, "
+        "escape_tf_odom_distance_m="
+        f"{_format_optional_m(recovery.last_escape_tf_odom_distance_m)}, "
+        "escape_direct_odom_age_sec="
+        f"{_format_optional_m(recovery.last_escape_direct_odom_age_sec)}, "
+        "escape_direct_odom_stamp_delta_sec="
+        f"{_format_optional_m(recovery.last_escape_direct_odom_stamp_delta_sec)}, "
+        "escape_tf_odom_stamp_delta_sec="
+        f"{_format_optional_m(recovery.last_escape_tf_odom_stamp_delta_sec)}, "
+        "escape_direct_odom_frame_id="
+        f"{recovery.last_escape_direct_odom_frame_id}, "
+        "escape_direct_odom_child_frame_id="
+        f"{recovery.last_escape_direct_odom_child_frame_id}, "
+        "escape_odom_disagreement="
+        f"{recovery.last_escape_odom_disagreement}, "
         "escape_elapsed_sec="
         f"{_format_optional_m(recovery.last_escape_elapsed_sec)}, "
         "escape_timeout_sec="
@@ -1860,20 +2191,31 @@ def handle_post_replan_recovery(
         if recovery.clear_scan_count >= node.args.post_replan_clear_scan_samples:
             recovery.phase = POST_REPLAN_RECOVERY_ESCAPE
             recovery.escape_start_pose = pose
-            recovery.escape_start_odom_pose = try_lookup_odom_pose(
-                node,
+            direct_odom_pose, direct_odom_age_sec, direct_odom_reason = (
+                fresh_direct_odom_pose(node, now_sec=now_sec)
             )
+            recovery.escape_start_direct_odom_pose = direct_odom_pose
+            recovery.escape_start_tf_odom_pose = try_lookup_odom_pose(node)
+            recovery.escape_start_odom_pose = recovery.escape_start_tf_odom_pose
             recovery.escape_start_time_sec = now_sec
             recovery.last_escape_distance_m = 0.0
             recovery.best_escape_distance_m = 0.0
             recovery.last_progress_distance_m = 0.0
             recovery.last_progress_time_sec = None
             recovery.first_escape_command_time_sec = None
-            recovery.last_escape_distance_source = (
-                "odom"
-                if recovery.escape_start_odom_pose is not None
-                else "unavailable"
-            )
+            if recovery.escape_start_direct_odom_pose is not None:
+                recovery.last_escape_distance_source = "direct_odom"
+                recovery.last_escape_odom_source_fallback_reason = "none"
+            elif recovery.escape_start_tf_odom_pose is not None:
+                recovery.last_escape_distance_source = "tf_odom"
+                recovery.last_escape_odom_source_fallback_reason = (
+                    direct_odom_reason or "direct_odom_start_unavailable"
+                )
+            else:
+                recovery.last_escape_distance_source = "unavailable"
+                recovery.last_escape_odom_source_fallback_reason = (
+                    "progress_unavailable"
+                )
             recovery.last_escape_no_motion_elapsed_sec = None
             recovery.last_escape_steering_mode_resolved = (
                 resolve_post_replan_escape_steering_mode(node.args)
@@ -1883,6 +2225,23 @@ def handle_post_replan_recovery(
             recovery.last_escape_odom_stamp_delta_sec = None
             recovery.last_escape_progress_source = recovery.last_escape_distance_source
             recovery.last_escape_no_motion_reason = ""
+            recovery.last_escape_odom_source = recovery.last_escape_distance_source
+            recovery.last_escape_direct_odom_distance_m = None
+            recovery.last_escape_tf_odom_distance_m = None
+            recovery.last_escape_direct_odom_age_sec = direct_odom_age_sec
+            recovery.last_escape_direct_odom_stamp_delta_sec = None
+            recovery.last_escape_tf_odom_stamp_delta_sec = None
+            recovery.last_escape_direct_odom_frame_id = getattr(
+                node,
+                "last_odom_frame_id",
+                "",
+            )
+            recovery.last_escape_direct_odom_child_frame_id = getattr(
+                node,
+                "last_odom_child_frame_id",
+                "",
+            )
+            recovery.last_escape_odom_disagreement = ""
             recovery.escape_straight_until_progress_active = (
                 recovery.last_escape_steering_mode_resolved
                 == POST_REPLAN_ESCAPE_STEERING_STRAIGHT_UNTIL_PROGRESS
@@ -1924,6 +2283,7 @@ def handle_post_replan_recovery(
             node,
             recovery,
             pose,
+            now_sec=now_sec,
         )
         update_post_replan_escape_progress(
             node,

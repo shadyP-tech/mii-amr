@@ -136,6 +136,43 @@ def amcl_callback(node, context, msg):
     node.last_amcl_received_sec = time.time()
 
 
+def odom_callback(node, context, msg):
+    node.last_odom = msg
+    node.last_odom_received_sec = time.time()
+    header = getattr(msg, "header", None)
+    pose = msg.pose.pose
+    orientation = pose.orientation
+    frame_id = getattr(header, "frame_id", "")
+    child_frame_id = getattr(msg, "child_frame_id", "")
+    node.last_odom_pose = Pose2D(
+        x=float(pose.position.x),
+        y=float(pose.position.y),
+        yaw_deg=context.quaternion_to_yaw_deg(
+            orientation.x,
+            orientation.y,
+            orientation.z,
+            orientation.w,
+        ),
+        stamp_sec=stamp_to_sec(getattr(header, "stamp", None)),
+        frame_id=child_frame_id or frame_id,
+    )
+    node.last_odom_frame_id = frame_id
+    node.last_odom_child_frame_id = child_frame_id
+
+
+def fresh_direct_odom_pose(node, now_sec=None):
+    pose = getattr(node, "last_odom_pose", None)
+    received_sec = getattr(node, "last_odom_received_sec", None)
+    if pose is None or received_sec is None:
+        return None, None, "direct_odom_start_unavailable"
+    if now_sec is None:
+        now_sec = time.time()
+    age_sec = max(0.0, now_sec - received_sec)
+    if age_sec > float(node.args.max_odom_age_sec):
+        return None, age_sec, "direct_odom_stale"
+    return pose, age_sec, "none"
+
+
 def publish_velocity(node, context, linear_x, angular_z):
     if linear_x != 0.0 or angular_z != 0.0:
         node.last_scan_block_budget_repair_signature = None

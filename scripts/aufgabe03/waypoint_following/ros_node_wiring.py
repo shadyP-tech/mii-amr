@@ -10,6 +10,7 @@ class RosNodeWiringContext:
     NavPath: Any
     MarkerArray: Any
     LaserScan: Any
+    Odometry: Any
     PoseWithCovarianceStamped: Any
     qos_profile_sensor_data: Any
     tf2_ros: Any
@@ -19,7 +20,7 @@ class RosNodeWiringContext:
 
 
 def initialize_ros_interfaces(node, args, context):
-    node.pub = node.create_publisher(context.Twist, "/cmd_vel", 10)
+    node.pub = node.create_publisher(context.Twist, args.cmd_vel_topic, 10)
     node.rviz_path_pub = None
     node.rviz_waypoint_marker_pub = None
     node.rviz_obstacle_marker_pub = None
@@ -54,15 +55,21 @@ def initialize_ros_interfaces(node, args, context):
             )
     node.scan_sub = node.create_subscription(
         context.LaserScan,
-        "/scan",
+        args.scan_topic,
         node.scan_callback,
         context.qos_profile_sensor_data,
     )
     node.amcl_sub = node.create_subscription(
         context.PoseWithCovarianceStamped,
-        "/amcl_pose",
+        args.amcl_topic,
         node.amcl_callback,
         10,
+    )
+    node.odom_sub = node.create_subscription(
+        context.Odometry,
+        args.odom_topic,
+        node.odom_callback,
+        context.qos_profile_sensor_data,
     )
     node.tf_buffer = context.tf2_ros.Buffer()
     node.tf_listener = context.tf2_ros.TransformListener(node.tf_buffer, node)

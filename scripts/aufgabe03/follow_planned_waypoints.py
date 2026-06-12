@@ -19,6 +19,7 @@ try:
     from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
     from rclpy.time import Time
     from geometry_msgs.msg import Point, PoseStamped, PoseWithCovarianceStamped, Twist
+    from nav_msgs.msg import Odometry
     from nav_msgs.msg import Path as NavPath
     from sensor_msgs.msg import LaserScan
     from visualization_msgs.msg import Marker, MarkerArray
@@ -33,6 +34,7 @@ except ImportError:
     Point = None
     PoseStamped = None
     PoseWithCovarianceStamped = object
+    Odometry = object
     NavPath = None
     Twist = None
     LaserScan = object
@@ -192,6 +194,11 @@ from waypoint_following.follower_defaults import (  # noqa: E402
     DEFAULT_RVIZ_PATH_TOPIC,
     DEFAULT_RVIZ_WAYPOINT_MARKER_TOPIC,
     DEFAULT_RVIZ_OBSTACLE_MARKER_TOPIC,
+    DEFAULT_CMD_VEL_TOPIC,
+    DEFAULT_SCAN_TOPIC,
+    DEFAULT_AMCL_TOPIC,
+    DEFAULT_ODOM_TOPIC,
+    DEFAULT_MAX_ODOM_AGE_SEC,
     DEFAULT_LINEAR_SPEED_MPS,
     DEFAULT_PURE_PURSUIT_LINEAR_SPEED_MPS,
     DEFAULT_MIN_LINEAR_SPEED_MPS,
@@ -847,6 +854,15 @@ class WaypointFollower(Node):
     def amcl_callback(self, msg):
         return ros_runtime.amcl_callback(self, _ros_runtime_context(), msg)
 
+    def odom_callback(self, msg):
+        return ros_runtime.odom_callback(self, _ros_runtime_context(), msg)
+
+    def fresh_direct_odom_pose(self, now_sec=None):
+        return ros_runtime.fresh_direct_odom_pose(
+            self,
+            now_sec=now_sec,
+        )
+
     def publish_velocity(self, linear_x, angular_z):
         return ros_runtime.publish_velocity(
             self,
@@ -1025,11 +1041,12 @@ class WaypointFollower(Node):
             now_sec,
         )
 
-    def post_replan_escape_measurement(self, recovery, pose):
+    def post_replan_escape_measurement(self, recovery, pose, now_sec=None):
         return post_replan_recovery.post_replan_escape_measurement(
             self,
             recovery,
             pose,
+            now_sec=now_sec,
         )
 
     def update_post_replan_escape_progress(self, recovery, measurement, now_sec):
