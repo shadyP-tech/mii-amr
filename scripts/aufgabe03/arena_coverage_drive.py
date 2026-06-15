@@ -46,6 +46,8 @@ from arena_shadow_coverage import (
     ShadowCoverageSummary,
     ShadowScanSample,
     heading_error_to_point_deg,
+    is_no_frontier_residual_shadow_plan,
+    is_residual_shadow_plan,
     plan_shadow_coverage_move,
     prune_shadow_samples,
 )
@@ -99,6 +101,9 @@ DEFAULT_SHADOW_PRETURN_HANDOFF_DEADBAND_DEG = 3.0
 DEFAULT_SHADOW_PRETURN_MAX_ANGULAR_RADPS = 0.40
 DEFAULT_SHADOW_PRETURN_MIN_ANGULAR_RADPS = 0.12
 DEFAULT_SHADOW_PRETURN_TIMEOUT_SEC = 6.0
+DEFAULT_SHADOW_RESIDUAL_COMPLETE = True
+DEFAULT_SHADOW_RESIDUAL_COMPLETE_MIN_MOVES = 3
+DEFAULT_SHADOW_RESIDUAL_COMPLETE_MIN_DISTANCE_M = 0.75
 DEFAULT_MAPPER_TOPIC = "/map"
 DEFAULT_MAPPER_TOPIC_TIMEOUT_SEC = 5.0
 
@@ -428,11 +433,20 @@ def shadow_diagnostics_path_for_args(args):
     return Path("results/aufgabe03") / f"{args.run_id}_shadow_coverage.json"
 
 
+def compact_counts(counts):
+    if not counts:
+        return ""
+    return ",".join(
+        f"{key}:{counts[key]}"
+        for key in sorted(counts)
+    )
+
+
 def shadow_notes_summary(diagnostics):
     summary = diagnostics.get("summary", {})
     if not summary:
         return "shadow_mode=experimental"
-    return (
+    text = (
         "shadow_mode=experimental"
         f";shadow_attempts={summary.get('attempts', 0)}"
         f";shadow_moves={summary.get('moves_executed', 0)}"
@@ -440,6 +454,14 @@ def shadow_notes_summary(diagnostics):
         f";shadow_stop={summary.get('stop_reason', '')}"
         f";shadow_fallback={summary.get('fallback_used', False)}"
     )
+    if summary.get("stop_reason") == "shadow_complete_with_unreachable_residuals":
+        residual = diagnostics.get("residual_shadow_completion", {})
+        text += (
+            ";shadow_result=complete_with_unreachable_residuals"
+            ";shadow_residual=true"
+            f";shadow_residual_rejections={compact_counts(residual.get('residual_rejection_counts'))}"
+        )
+    return text
 
 
 def write_shadow_diagnostics(path, diagnostics):
@@ -514,6 +536,10 @@ def validate_motion_config(args, route):
         ):
             if getattr(args, attr) <= 0.0:
                 errors.append(f"{label} must be greater than zero")
+        if args.shadow_residual_complete_min_moves < 1:
+            errors.append("--shadow-residual-complete-min-moves must be >= 1")
+        if args.shadow_residual_complete_min_distance_m < 0.0:
+            errors.append("--shadow-residual-complete-min-distance must be >= 0")
         if args.shadow_max_candidate_path_m is not None and args.shadow_max_candidate_path_m <= 0.0:
             errors.append("--shadow-max-candidate-path must be greater than zero")
         if args.shadow_inflation_radius_m < 0.0:
@@ -1616,6 +1642,188 @@ class ArenaCoverageDrive(Node):
         )
         return plan_shadow_coverage_move(pruned, config, recent_attempts)
 
+    def _completed_translation_count(self, diagnostics):
+        return sum(
+            1
+            for record in diagnostics.get("executions", [])
+            if record.get("stop_reason") == "completed"
+            and record.get("translation_motion_executed", False)
+        )
+
+    def _residual_completion_state(
+        self,
+        args,
+        summary,
+        diagnostics,
+        plan=None,
+        verification_result="",
+    ):
+        status = plan.shadow_status if plan is not None else {}
+        rejection_counts = plan.candidate_rejections if plan is not None else {}
+        completed_translation_count = self._completed_translation_count(diagnostics)
+        eligible = (
+            bool(args.shadow_residual_complete)
+            and summary.moves_executed >= args.shadow_residual_complete_min_moves
+            and summary.total_distance_m
+            >= args.shadow_residual_complete_min_distance_m
+            and completed_translation_count >= 1
+        )
+        state = {
+            "enabled": bool(args.shadow_residual_complete),
+            "eligible": bool(eligible),
+            "min_moves": args.shadow_residual_complete_min_moves,
+            "min_distance_m": args.shadow_residual_complete_min_distance_m,
+            "moves_executed": summary.moves_executed,
+            "total_distance_m": summary.total_distance_m,
+            "completed_translation_count": completed_translation_count,
+            "raw_shadow_unknown_cell_count": (
+                status.get("raw_shadow_unknown_cell_count") if status else None
+            ),
+            "frontier_candidate_count": (
+                status.get("frontier_candidate_count") if status else None
+            ),
+            "moving_frontier_count": (
+                status.get("moving_frontier_count") if status else None
+            ),
+            "residual_rejection_counts": dict(rejection_counts or {}),
+            "verification_result": verification_result,
+        }
+        diagnostics["residual_shadow_completion"] = state
+        return state
+
+    def _complete_with_residual_shadows(
+        self,
+        args,
+        summary,
+        diagnostics,
+        plan,
+        verification_result,
+    ):
+        self._residual_completion_state(
+            args,
+            summary,
+            diagnostics,
+            plan=plan,
+            verification_result=verification_result,
+        )
+        summary = replace(
+            summary,
+            stop_reason="shadow_complete_with_unreachable_residuals",
+            final_phase="complete",
+        )
+        diagnostics["summary"] = summary.to_dict()
+        self.get_logger().info("Completed with unreachable residual local shadows.")
+        return summary
+
+    def _verify_shadow_terminal_plan(
+        self,
+        args,
+        config,
+        diagnostics,
+        summary,
+        recent_attempts,
+        residual_context,
+    ):
+        self.begin_shadow_segment()
+        self._record_shadow_phase(
+            diagnostics,
+            "final_verify_spin",
+            (
+                "shadow_residual_verify_spin"
+                if residual_context
+                else "shadow_exhausted_verify_spin"
+            ),
+        )
+        self.rotate(360.0, args)
+        self.wait_for_fresh_shadow_inputs(args)
+        summary = replace(
+            summary,
+            spin_count=summary.spin_count + 1,
+            final_phase="final_verify_spin",
+        )
+        verify_plan = self._plan_shadow_move(config, recent_attempts)
+        self._record_shadow_phase(
+            diagnostics,
+            "final_verify_plan",
+            verify_plan.reason,
+            plan=verify_plan,
+        )
+        if verify_plan.ok:
+            self._residual_completion_state(
+                args,
+                summary,
+                diagnostics,
+                plan=verify_plan,
+                verification_result="selected",
+            )
+            self._record_shadow_phase(
+                diagnostics,
+                "shadow_mapping",
+                "verification_found_new_shadow",
+                plan=verify_plan,
+            )
+            return summary, False
+
+        if verify_plan.reason in NO_SHADOW_REASONS:
+            if residual_context:
+                return (
+                    self._complete_with_residual_shadows(
+                        args,
+                        summary,
+                        diagnostics,
+                        verify_plan,
+                        "no_shadow_verified",
+                    ),
+                    True,
+                )
+            summary = replace(
+                summary,
+                stop_reason="shadow_complete_verified",
+                final_phase="complete",
+            )
+            diagnostics["summary"] = summary.to_dict()
+            return summary, True
+
+        if (
+            self._residual_completion_state(
+                args,
+                summary,
+                diagnostics,
+                plan=verify_plan,
+                verification_result=(
+                    "no_frontier_candidates_residual"
+                    if is_no_frontier_residual_shadow_plan(verify_plan)
+                    else "residual_verified"
+                ),
+            )["eligible"]
+            and (
+                is_residual_shadow_plan(verify_plan)
+                or is_no_frontier_residual_shadow_plan(verify_plan)
+            )
+        ):
+            return (
+                self._complete_with_residual_shadows(
+                    args,
+                    summary,
+                    diagnostics,
+                    verify_plan,
+                    (
+                        "no_frontier_candidates_residual"
+                        if is_no_frontier_residual_shadow_plan(verify_plan)
+                        else "residual_verified"
+                    ),
+                ),
+                True,
+            )
+
+        summary = replace(
+            summary,
+            stop_reason=f"shadow_final_verify_failed:{verify_plan.reason}",
+            final_phase="failed",
+        )
+        diagnostics["summary"] = summary.to_dict()
+        raise RuntimeError(summary.stop_reason)
+
     def execute_shadow_coverage(self, args, fallback_route):
         config = shadow_config_from_args(args)
         diagnostics = {
@@ -1632,6 +1840,14 @@ class ArenaCoverageDrive(Node):
             "recent_attempts": [],
             "safety_events": [],
             "sample_rejections": self.shadow_sample_rejections,
+            "residual_shadow_completion": {
+                "enabled": bool(args.shadow_residual_complete),
+                "eligible": False,
+                "min_moves": args.shadow_residual_complete_min_moves,
+                "min_distance_m": args.shadow_residual_complete_min_distance_m,
+                "completed_translation_count": 0,
+                "verification_result": "",
+            },
         }
         self.shadow_diagnostics = diagnostics
         summary = ShadowCoverageSummary(final_phase="seed_scan")
@@ -1655,23 +1871,6 @@ class ArenaCoverageDrive(Node):
         shadow_motion_executed = False
 
         while rclpy.ok():
-            if summary.attempts >= args.shadow_max_attempts:
-                summary = replace(
-                    summary,
-                    stop_reason="shadow_motion_attempts_exhausted",
-                    final_phase="failed",
-                )
-                diagnostics["summary"] = summary.to_dict()
-                raise RuntimeError("shadow_motion_attempts_exhausted")
-            if summary.total_distance_m >= args.shadow_max_total_distance_m:
-                summary = replace(
-                    summary,
-                    stop_reason="shadow_total_distance_exhausted",
-                    final_phase="failed",
-                )
-                diagnostics["summary"] = summary.to_dict()
-                raise RuntimeError("shadow_total_distance_exhausted")
-
             self.wait_for_fresh_shadow_inputs(args)
             plan = self._plan_shadow_move(config, recent_attempts)
             self._record_shadow_phase(
@@ -1680,6 +1879,20 @@ class ArenaCoverageDrive(Node):
                 plan.reason,
                 plan=plan,
             )
+            budget_stop_reason = None
+            if summary.attempts >= args.shadow_max_attempts:
+                budget_stop_reason = "shadow_motion_attempts_exhausted"
+            elif summary.total_distance_m >= args.shadow_max_total_distance_m:
+                budget_stop_reason = "shadow_total_distance_exhausted"
+
+            if budget_stop_reason is not None and plan.ok:
+                summary = replace(
+                    summary,
+                    stop_reason=budget_stop_reason,
+                    final_phase="failed",
+                )
+                diagnostics["summary"] = summary.to_dict()
+                raise RuntimeError(budget_stop_reason)
 
             if plan.ok:
                 confirmations = 0
@@ -1852,50 +2065,48 @@ class ArenaCoverageDrive(Node):
                 if confirmations < args.shadow_completion_confirmations:
                     continue
 
-                self.begin_shadow_segment()
-                self._record_shadow_phase(
+                summary, completed = self._verify_shadow_terminal_plan(
+                    args,
+                    config,
                     diagnostics,
-                    "final_verify_spin",
-                    "shadow_exhausted_verify_spin",
-                )
-                self.rotate(360.0, args)
-                self.wait_for_fresh_shadow_inputs(args)
-                summary = replace(
                     summary,
-                    spin_count=summary.spin_count + 1,
-                    final_phase="final_verify_spin",
+                    recent_attempts,
+                    residual_context=False,
                 )
-                verify_plan = self._plan_shadow_move(config, recent_attempts)
-                self._record_shadow_phase(
-                    diagnostics,
-                    "final_verify_plan",
-                    verify_plan.reason,
-                    plan=verify_plan,
-                )
-                if verify_plan.ok:
+                if not completed:
                     confirmations = 0
-                    self._record_shadow_phase(
-                        diagnostics,
-                        "shadow_mapping",
-                        "verification_found_new_shadow",
-                        plan=verify_plan,
-                    )
                     continue
-                if verify_plan.reason in NO_SHADOW_REASONS:
-                    summary = replace(
-                        summary,
-                        stop_reason="shadow_complete_verified",
-                        final_phase="complete",
-                    )
-                    diagnostics["summary"] = summary.to_dict()
-                    return summary
+                return summary
+
+            residual_state = self._residual_completion_state(
+                args,
+                summary,
+                diagnostics,
+                plan=plan,
+                verification_result="candidate_plan_residual",
+            )
+            if is_residual_shadow_plan(plan) and residual_state["eligible"]:
+                summary, completed = self._verify_shadow_terminal_plan(
+                    args,
+                    config,
+                    diagnostics,
+                    summary,
+                    recent_attempts,
+                    residual_context=True,
+                )
+                if not completed:
+                    confirmations = 0
+                    continue
+                return summary
+
+            if budget_stop_reason is not None:
                 summary = replace(
                     summary,
-                    stop_reason=f"shadow_final_verify_failed:{verify_plan.reason}",
+                    stop_reason=budget_stop_reason,
                     final_phase="failed",
                 )
                 diagnostics["summary"] = summary.to_dict()
-                raise RuntimeError(summary.stop_reason)
+                raise RuntimeError(budget_stop_reason)
 
             if not shadow_motion_executed and not args.no_shadow_fallback_route:
                 self._record_shadow_phase(
@@ -1952,6 +2163,12 @@ def print_dry_run(args, route):
         print(f"  - max total distance: {args.shadow_max_total_distance_m:.3f} m")
         print(f"  - sample window: current + previous segment, max {args.shadow_max_samples} samples")
         print(f"  - side stop distance: {args.shadow_side_stop_distance_m:.3f} m")
+        print(
+            "  - residual completion: "
+            f"{'enabled' if args.shadow_residual_complete else 'disabled'}"
+            f" after {args.shadow_residual_complete_min_moves} moves and "
+            f"{args.shadow_residual_complete_min_distance_m:.2f} m"
+        )
         if args.shadow_allow_initial_preturn:
             handoff = (
                 args.shadow_preturn_handoff_heading_error_deg
@@ -2015,6 +2232,10 @@ def require_motion_confirmation(args, route):
         print(f"  - mapper topic check: {args.mapper_topic}")
         print(f"  - max shadow distance: {args.shadow_max_total_distance_m:.3f} m")
         print(f"  - side stop distance: {args.shadow_side_stop_distance_m:.3f} m")
+        print(
+            "  - residual local-shadow completion: "
+            f"{'enabled' if args.shadow_residual_complete else 'disabled'}"
+        )
         print(
             "  - initial heading gate: "
             f"reject >{args.shadow_max_initial_heading_error_deg:.0f} deg; "
@@ -2228,6 +2449,32 @@ def parse_args(argv):
         default=DEFAULT_SHADOW_COMPLETION_CONFIRMATIONS,
         type=int,
         help="Consecutive no-shadow replans before final verification spin.",
+    )
+    parser.add_argument(
+        "--shadow-residual-complete",
+        dest="shadow_residual_complete",
+        action="store_true",
+        default=DEFAULT_SHADOW_RESIDUAL_COMPLETE,
+        help="Complete after useful coverage when only unreachable residual local shadows remain.",
+    )
+    parser.add_argument(
+        "--no-shadow-residual-complete",
+        dest="shadow_residual_complete",
+        action="store_false",
+        help="Disable completion with unreachable residual local shadows.",
+    )
+    parser.add_argument(
+        "--shadow-residual-complete-min-moves",
+        default=DEFAULT_SHADOW_RESIDUAL_COMPLETE_MIN_MOVES,
+        type=int,
+        help="Minimum completed translation moves before residual completion.",
+    )
+    parser.add_argument(
+        "--shadow-residual-complete-min-distance",
+        dest="shadow_residual_complete_min_distance_m",
+        default=DEFAULT_SHADOW_RESIDUAL_COMPLETE_MIN_DISTANCE_M,
+        type=float,
+        help="Minimum completed translation distance before residual completion.",
     )
     parser.add_argument(
         "--shadow-curve-lookahead",

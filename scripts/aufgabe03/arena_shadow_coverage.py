@@ -34,6 +34,14 @@ NO_SHADOW_REASONS = {
     "no_shadow_frontier",
 }
 
+RESIDUAL_SHADOW_REJECTION_REASONS = {
+    "too_close_to_obstacle",
+    "initial_heading_error_too_large",
+    "no_connected_path",
+    "path_too_long",
+    "path_too_many_segments",
+}
+
 
 @dataclass(frozen=True)
 class ShadowCoverageConfig:
@@ -343,11 +351,46 @@ def _shadow_status(grid, candidates, raw_shadow_unknown_count):
         "frontier_state": state,
         "raw_shadow_unknown_cell_count": raw_shadow_unknown_count,
         "shadow_unknown_cell_count": raw_shadow_unknown_count if moving_frontiers else 0,
+        "reachable_shadow_unknown_cell_count": (
+            raw_shadow_unknown_count if moving_frontiers else 0
+        ),
+        "residual_shadow_unknown_cell_count": (
+            raw_shadow_unknown_count
+            if raw_shadow_unknown_count > 0 and not moving_frontiers
+            else 0
+        ),
         "frontier_candidate_count": len(frontier_candidates),
         "accepted_frontier_count": len(accepted_frontiers),
         "moving_frontier_count": len(moving_frontiers),
         "cell_counts": None if grid is None else grid_cell_counts(grid),
     }
+
+
+def is_residual_shadow_plan(plan):
+    if plan is None or plan.reason != "shadow_blocked_or_incomplete":
+        return False
+    status = plan.shadow_status or {}
+    if int(status.get("moving_frontier_count") or 0) != 0:
+        return False
+    if int(status.get("raw_shadow_unknown_cell_count") or 0) <= 0:
+        return False
+    if int(status.get("frontier_candidate_count") or 0) <= 0:
+        return False
+    rejection_reasons = set((plan.candidate_rejections or {}).keys())
+    if not rejection_reasons:
+        return False
+    return rejection_reasons.issubset(RESIDUAL_SHADOW_REJECTION_REASONS)
+
+
+def is_no_frontier_residual_shadow_plan(plan):
+    if plan is None or plan.reason != "shadow_blocked_or_incomplete":
+        return False
+    status = plan.shadow_status or {}
+    return (
+        int(status.get("raw_shadow_unknown_cell_count") or 0) > 0
+        and int(status.get("moving_frontier_count") or 0) == 0
+        and int(status.get("frontier_candidate_count") or 0) == 0
+    )
 
 
 def heading_error_to_point_deg(robot_pose, target_point):
