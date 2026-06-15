@@ -1797,7 +1797,10 @@ class ArenaCoverageDrive(Node):
                 ),
             )["eligible"]
             and (
-                is_residual_shadow_plan(verify_plan)
+                is_residual_shadow_plan(
+                    verify_plan,
+                    allow_no_positive_gain=True,
+                )
                 or is_no_frontier_residual_shadow_plan(verify_plan)
             )
         ):

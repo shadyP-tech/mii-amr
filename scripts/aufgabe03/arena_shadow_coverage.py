@@ -42,6 +42,10 @@ RESIDUAL_SHADOW_REJECTION_REASONS = {
     "path_too_many_segments",
 }
 
+FINAL_VERIFY_RESIDUAL_SHADOW_REJECTION_REASONS = (
+    RESIDUAL_SHADOW_REJECTION_REASONS | {"no_positive_gain"}
+)
+
 
 @dataclass(frozen=True)
 class ShadowCoverageConfig:
@@ -366,7 +370,7 @@ def _shadow_status(grid, candidates, raw_shadow_unknown_count):
     }
 
 
-def is_residual_shadow_plan(plan):
+def is_residual_shadow_plan(plan, allow_no_positive_gain=False):
     if plan is None or plan.reason != "shadow_blocked_or_incomplete":
         return False
     status = plan.shadow_status or {}
@@ -379,7 +383,12 @@ def is_residual_shadow_plan(plan):
     rejection_reasons = set((plan.candidate_rejections or {}).keys())
     if not rejection_reasons:
         return False
-    return rejection_reasons.issubset(RESIDUAL_SHADOW_REJECTION_REASONS)
+    allowed_reasons = (
+        FINAL_VERIFY_RESIDUAL_SHADOW_REJECTION_REASONS
+        if allow_no_positive_gain
+        else RESIDUAL_SHADOW_REJECTION_REASONS
+    )
+    return rejection_reasons.issubset(allowed_reasons)
 
 
 def is_no_frontier_residual_shadow_plan(plan):
