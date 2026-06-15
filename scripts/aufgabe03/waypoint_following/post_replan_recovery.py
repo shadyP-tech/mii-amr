@@ -664,6 +664,21 @@ def notes_with_post_replan_recovery_metadata(notes, args, node):
         if recovery is not None
         else getattr(node, "last_post_replan_route_corridor_preview_distance_m", 0.0)
     )
+    lookahead_budget_repair_count = getattr(
+        node,
+        "lookahead_guard_budget_repair_count",
+        0,
+    )
+    lookahead_budget_repair_signature = getattr(
+        node,
+        "last_lookahead_guard_budget_repair_signature",
+        None,
+    )
+    lookahead_budget_repair_reason = getattr(
+        node,
+        "last_lookahead_guard_budget_repair_reason",
+        "",
+    )
     return (
         f"{notes};post_replan_recovery={args.post_replan_recovery};"
         "post_replan_clearance_mode="
@@ -678,6 +693,12 @@ def notes_with_post_replan_recovery_metadata(notes, args, node):
         f"{route_clear_side_obstacle_count};"
         "route_corridor_preview_distance_m="
         f"{route_corridor_preview_distance:.3f};"
+        "lookahead_guard_budget_repair_count="
+        f"{lookahead_budget_repair_count};"
+        "lookahead_guard_budget_repair_signature="
+        f"{lookahead_budget_repair_signature or ''};"
+        "lookahead_guard_budget_repair_reason="
+        f"{lookahead_budget_repair_reason};"
         "post_replan_recovery_activations="
         f"{getattr(node, 'post_replan_recovery_activations', 0)};"
         "post_replan_recovery_last_status="
@@ -1627,6 +1648,8 @@ def update_post_replan_escape_progress(node, recovery, measurement, now_sec):
         recovery.best_escape_distance_m,
         measurement.progress_distance_m,
     )
+    if measurement.progress_distance_m >= POST_REPLAN_ESCAPE_NO_MOTION_EPS_M:
+        node.last_lookahead_guard_budget_repair_signature = None
     if recovery.first_escape_command_time_sec is None:
         recovery.last_escape_no_motion_elapsed_sec = None
         return

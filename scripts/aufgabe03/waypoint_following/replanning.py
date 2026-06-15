@@ -81,12 +81,19 @@ class ReplanManager:
     def initialize_route(self, current_pose, waypoints):
         return initialize_run_local_route(self.runtime, current_pose, waypoints)
 
-    def replan_after_blockage(self, current_pose, old_remaining_waypoints, trigger):
+    def replan_after_blockage(
+        self,
+        current_pose,
+        old_remaining_waypoints,
+        trigger,
+        guard_signature=None,
+    ):
         return replan_after_blockage(
             self.runtime,
             current_pose,
             old_remaining_waypoints,
             trigger=trigger,
+            guard_signature=guard_signature,
         )
 
     def prune_after_progress(self, current_pose, remaining_waypoints):
@@ -703,6 +710,48 @@ def remember_scan_block_budget_repair(node, current_pose, waypoints):
         )
     node.last_scan_block_budget_repair_signature = signature
 
+def lookahead_budget_repair_signature(
+    node,
+    current_pose,
+    waypoints,
+    guard_signature,
+):
+    return (
+        round(current_pose.x, 2),
+        round(current_pose.y, 2),
+        guard_signature,
+        route_signature(node, waypoints),
+    )
+
+def remember_lookahead_budget_repair(
+    node,
+    current_pose,
+    waypoints,
+    guard_signature,
+):
+    signature = lookahead_budget_repair_signature(
+        node,
+        current_pose,
+        waypoints,
+        guard_signature,
+    )
+    if (
+        signature
+        and signature
+        == getattr(node, "last_lookahead_guard_budget_repair_signature", None)
+    ):
+        raise RuntimeError(
+            "lidar_replan_failed:"
+            "persistent_lookahead_blockage_after_existing_map_repair"
+        )
+    node.last_lookahead_guard_budget_repair_signature = signature
+    node.lookahead_guard_budget_repair_count = (
+        getattr(node, "lookahead_guard_budget_repair_count", 0) + 1
+    )
+    node.last_lookahead_guard_budget_repair_reason = (
+        "existing_map_budget_fallback"
+    )
+
 def validate_replan_result(
     node,
     result,
@@ -1009,6 +1058,7 @@ def replan_after_blockage(
     current_pose,
     old_remaining_waypoints,
     trigger=REPLAN_TRIGGER_SCAN_BLOCKAGE,
+    guard_signature=None,
 ):
     known_corridor_repair_count = getattr(node, "known_corridor_repair_count", 0)
     sequence = node.live_replan_attempt_count + known_corridor_repair_count + 1
@@ -1027,7 +1077,10 @@ def replan_after_blockage(
         return replanned
     if node.live_replan_attempt_count >= node.args.max_replans:
         if (
-            trigger == REPLAN_TRIGGER_SCAN_BLOCKAGE
+            trigger in (
+                REPLAN_TRIGGER_SCAN_BLOCKAGE,
+                REPLAN_TRIGGER_LOOKAHEAD_GUARD,
+            )
             and run_local_map_has_confirmed_obstacles(node.run_local_map)
         ):
             replanned = plan_with_existing_run_local_map(
@@ -1036,16 +1089,28 @@ def replan_after_blockage(
                 old_remaining_waypoints,
                 sequence=sequence,
             )
-            remember_scan_block_budget_repair(
-                node,
-                current_pose,
-                replanned,
-            )
+            if trigger == REPLAN_TRIGGER_SCAN_BLOCKAGE:
+                remember_scan_block_budget_repair(
+                    node,
+                    current_pose,
+                    replanned,
+                )
+                node.get_logger().warn(
+                    "LiDAR replan budget exhausted; repaired route with existing "
+                    "run-local map after scan blockage."
+                )
+            else:
+                remember_lookahead_budget_repair(
+                    node,
+                    current_pose,
+                    replanned,
+                    guard_signature,
+                )
+                node.get_logger().warn(
+                    "LiDAR replan budget exhausted; repaired route with existing "
+                    "run-local map after lookahead guard blockage."
+                )
             node.known_corridor_repair_count = known_corridor_repair_count + 1
-            node.get_logger().warn(
-                "LiDAR replan budget exhausted; repaired route with existing "
-                "run-local map after scan blockage."
-            )
             return replanned
         raise RuntimeError("lidar_replan_failed:max_replans_exceeded")
     if node.args.run_local_map_update_mode == "none":

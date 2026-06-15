@@ -44,6 +44,9 @@ def ensure_follow_runtime_state(node, build_command_smoother):
     _setdefault_attr(node, "last_odom_frame_id", "")
     _setdefault_attr(node, "last_odom_child_frame_id", "")
     _setdefault_attr(node, "active_route_generation_id", 0)
+    _setdefault_attr(node, "lookahead_guard_budget_repair_count", 0)
+    _setdefault_attr(node, "last_lookahead_guard_budget_repair_signature", None)
+    _setdefault_attr(node, "last_lookahead_guard_budget_repair_reason", "")
     _setdefault_attr(node, "post_replan_recovery", None)
     _setdefault_attr(node, "post_replan_recovery_activations", 0)
     _setdefault_attr(node, "last_post_replan_recovery_status", "")
@@ -97,6 +100,23 @@ def ensure_follow_runtime_state(node, build_command_smoother):
     _setdefault_attr(node, "last_post_replan_activation_first_target_distance_m", None)
     _setdefault_attr(node, "last_post_replan_activation_status", "")
     _setdefault_attr(node, "last_post_replan_recovery_log_sec", None)
+
+
+def clear_lookahead_budget_repair_if_route_changed(node, follower_type, waypoints):
+    signature = getattr(
+        node,
+        "last_lookahead_guard_budget_repair_signature",
+        None,
+    )
+    if not signature:
+        return
+    route_signature = follower_type._compat_method(
+        node,
+        "route_signature",
+        waypoints,
+    )
+    if route_signature != signature[-1]:
+        node.last_lookahead_guard_budget_repair_signature = None
 
 
 def follow_waypoints(
@@ -316,6 +336,7 @@ def follow_waypoints(
                 self.suppressed_known_corridor_signature = None
                 self.last_scan_block_budget_repair_signature = None
                 self.last_lookahead_guard_block_signature = None
+                self.last_lookahead_guard_budget_repair_signature = None
                 WaypointFollower.reset_post_replan_recovery(self, "reached")
                 reset_command_smoother(self)
                 reset_route_projection_controller(controller)
@@ -392,6 +413,7 @@ def follow_waypoints(
                     pose,
                     remaining,
                     trigger=REPLAN_TRIGGER_LOOKAHEAD_GUARD,
+                    guard_signature=guard_signature,
                 )
                 publish_rviz_route_if_available(
                     self,
@@ -410,36 +432,49 @@ def follow_waypoints(
                         "base_frame_used": self.base_frame_used,
                         "status": "replan_artifact_only_complete",
                     }
-                waypoints = self.prune_replanned_waypoints_for_progress(
-                    replanned,
-                    pose,
+                activation_route = (
+                    WaypointFollower.prepare_run_local_route_activation(
+                        self,
+                        replanned,
+                        pose,
+                        route_state.final_goal(),
+                        REPLAN_TRIGGER_LOOKAHEAD_GUARD,
+                    )
                 )
+                if activation_route.goal_reached:
+                    route_state.mark_complete()
+                    reached_count = len(route_state.waypoints)
+                    self.reached_count = reached_count
+                    WaypointFollower.reset_post_replan_recovery(
+                        self,
+                        "goal_reached_after_lookahead_guard_activation",
+                    )
+                    reset_command_smoother(self)
+                    self.stop_repeatedly()
+                    reached_current = True
+                    break
+                if not activation_route.waypoints:
+                    raise RuntimeError("lookahead_guard_no_meaningful_target")
+                waypoints = activation_route.waypoints
                 route_state.replace_route(
                     waypoints,
-                    tracking_points=getattr(
-                        self,
-                        "last_replan_tracking_points",
-                        None,
-                    ),
-                    tracking_source=getattr(
-                        self,
-                        "last_replan_tracking_source",
-                        "waypoints",
-                    ),
-                    tracking_validation=getattr(
-                        self,
-                        "last_replan_tracking_validation",
-                        None,
-                    ),
+                    tracking_points=activation_route.tracking_points,
+                    tracking_source=activation_route.tracking_source,
+                    tracking_validation=activation_route.tracking_validation,
                 )
+                self.last_lookahead_guard_block_signature = None
                 self.active_route_generation_id += 1
-                WaypointFollower.reset_post_replan_recovery(self, "route_replaced")
                 reset_command_smoother(self)
                 controller = build_path_controller(
                     self.args,
                     lookahead_guard=getattr(self, "lookahead_guard", None),
                 )
                 self._current_path_controller = controller
+                WaypointFollower.activate_post_replan_recovery(
+                    self,
+                    pose,
+                    route_state,
+                )
                 replanned_current = True
                 break
 
@@ -514,6 +549,12 @@ def follow_waypoints(
                         tracking_points=activation_route.tracking_points,
                         tracking_source=activation_route.tracking_source,
                         tracking_validation=activation_route.tracking_validation,
+                    )
+                    self.last_lookahead_guard_block_signature = None
+                    clear_lookahead_budget_repair_if_route_changed(
+                        self,
+                        WaypointFollower,
+                        waypoints,
                     )
                     self.active_route_generation_id += 1
                     reset_command_smoother(self)
@@ -606,11 +647,13 @@ def follow_waypoints(
                         tracking_source=activation_route.tracking_source,
                         tracking_validation=activation_route.tracking_validation,
                     )
-                    self.active_route_generation_id += 1
-                    WaypointFollower.reset_post_replan_recovery(
+                    self.last_lookahead_guard_block_signature = None
+                    clear_lookahead_budget_repair_if_route_changed(
                         self,
-                        "route_replaced",
+                        WaypointFollower,
+                        waypoints,
                     )
+                    self.active_route_generation_id += 1
                     reset_command_smoother(self)
                     controller = build_path_controller(
                         self.args,
@@ -618,6 +661,11 @@ def follow_waypoints(
                     )
                     self._current_path_controller = controller
                     self.remember_known_corridor_repair(waypoints)
+                    WaypointFollower.activate_post_replan_recovery(
+                        self,
+                        pose,
+                        route_state,
+                    )
                     replanned_current = True
                     break
             command = smoothed_step_command(self, step, time.time())

@@ -43,10 +43,13 @@ def initialize_runtime_state(node, args, context):
     node.run_local_map = None
     node.live_replan_attempt_count = 0
     node.known_corridor_repair_count = 0
+    node.lookahead_guard_budget_repair_count = 0
     node.last_known_corridor_repair_signature = None
     node.suppressed_known_corridor_signature = None
     node.last_scan_block_budget_repair_signature = None
     node.last_lookahead_guard_block_signature = None
+    node.last_lookahead_guard_budget_repair_signature = None
+    node.last_lookahead_guard_budget_repair_reason = ""
     node.last_lookahead_guard_result = None
     node.active_route_generation_id = 0
     node.post_replan_recovery = None

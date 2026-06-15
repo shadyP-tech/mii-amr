@@ -1332,11 +1332,13 @@ class WaypointFollower(Node):
         current_pose,
         old_remaining_waypoints,
         trigger=REPLAN_TRIGGER_SCAN_BLOCKAGE,
+        guard_signature=None,
     ):
         return WaypointFollower._replan_manager(self).replan_after_blockage(
             current_pose,
             old_remaining_waypoints,
             trigger=trigger,
+            guard_signature=guard_signature,
         )
 
     def follow_waypoints(
