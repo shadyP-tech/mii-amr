@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import lidar_obstacle_map
 import replan_runtime
@@ -1219,19 +1219,21 @@ def maybe_allow_post_replan_route_block_extra_update(node):
     used = int(getattr(node, "post_replan_route_block_extra_update_count", 0))
     if used >= limit:
         raise RuntimeError("post_replan_route_block_repair_budget_exhausted")
-    original_max_updates = config.max_updates
-    config.max_updates = max(original_max_updates, update_count + 1)
+    original_config = config
+    run_local_map.config = replace(
+        config,
+        max_updates=max(max_updates, update_count + 1),
+    )
     node.post_replan_route_block_extra_update_count = used + 1
-    return True, original_max_updates
+    return True, original_config
 
 
-def restore_post_replan_route_block_extra_update_budget(node, original_max_updates):
-    if original_max_updates is None:
+def restore_post_replan_route_block_extra_update_budget(node, original_config):
+    if original_config is None:
         return
     run_local_map = getattr(node, "run_local_map", None)
-    config = getattr(run_local_map, "config", None)
-    if config is not None:
-        config.max_updates = original_max_updates
+    if run_local_map is not None:
+        run_local_map.config = original_config
 
 
 def replan_after_post_replan_route_block(
