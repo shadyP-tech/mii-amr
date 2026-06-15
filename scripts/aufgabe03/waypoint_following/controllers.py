@@ -785,7 +785,6 @@ class PurePursuitController:
                 goal_tolerance_m,
                 lookahead_m,
                 current_point,
-                require_rotate=True,
             )
         self.max_projection_backward_delta_m = max(
             self.max_projection_backward_delta_m,
@@ -989,7 +988,6 @@ class PurePursuitController:
         goal_tolerance_m,
         lookahead_m,
         current_point,
-        require_rotate=False,
     ):
         anchor = self.rotate_projection_anchor
         if anchor is None:
@@ -1063,11 +1061,6 @@ class PurePursuitController:
                 goal_tolerance_m,
             )
         )
-        if require_rotate and not rotate_mode:
-            self.last_rotate_anchor_aligned_samples = 0
-            self.rotate_projection_anchor = None
-            raise RuntimeError("route_projection_moved_backward")
-
         rotate_error_rad = (
             alpha_rad
             if rotate_source == "alpha"
