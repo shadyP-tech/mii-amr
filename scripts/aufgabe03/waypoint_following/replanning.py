@@ -205,31 +205,17 @@ def replanned_tracking_points_from_result(node, result):
             converted.append(Waypoint(point[0], point[1], point[2]))
     return converted
 
-def remember_replan_tracking_replacement(node, result, replanned, current_pose):
-    node.last_replan_tracking_points = None
-    node.last_replan_tracking_source = "waypoints"
-    node.last_replan_tracking_validation = None
-    if getattr(node.args, "controller", DEFAULT_CONTROLLER) != "pure-pursuit":
-        return
+def raw_replanned_tracking_points_from_result(node, result):
+    raw_points = getattr(result, "raw_path_points", None) or []
+    converted = []
+    for point in raw_points:
+        if isinstance(point, Waypoint):
+            converted.append(point)
+        else:
+            converted.append(Waypoint(point[0], point[1], point[2]))
+    return converted
 
-    path_points = replanned_tracking_points_from_result(
-        node,
-        result,
-    )
-    if not path_points:
-        node.last_replan_tracking_points = list(replanned)
-        node.last_replan_tracking_source = "replan_sparse_fallback"
-        node.last_replan_tracking_validation = TrackingPathValidation(
-            source="replan_sparse_fallback",
-            point_count=len(replanned),
-            validation_status="fallback_sparse_waypoints",
-        )
-        node.get_logger().warn(
-            "Pure-pursuit LiDAR replan did not include dense path_points; "
-            "falling back to sparse replanned waypoints for tracking."
-        )
-        return
-
+def validate_replan_tracking_points(node, path_points, replanned, current_pose, source):
     structural_warnings = validate_tracking_point_structure(
         path_points,
         max_segment_m=getattr(
@@ -258,9 +244,87 @@ def remember_replan_tracking_replacement(node, result, replanned, current_pose):
             False,
         ),
         current_pose=current_pose,
-        source="replan",
+        source=source,
         structural_warnings=structural_warnings,
     )
+    return validation
+
+def replan_result_used_smoothed_tracking(result):
+    diagnostics = getattr(result, "diagnostics", None)
+    return (
+        diagnostics is not None
+        and getattr(diagnostics, "tracking_path_smoothing_status", "") == "smoothed"
+    )
+
+def mark_replan_tracking_smoothing_fallback(node, result, reason):
+    diagnostics = getattr(result, "diagnostics", None)
+    if diagnostics is not None:
+        diagnostics.tracking_path_smoothing_status = "fallback_raw"
+        diagnostics.tracking_path_smoothing_reason = str(reason)
+        diagnostics.tracking_path_smoothing_artifact = ""
+        diagnostics.tracking_path_smoothing_smoothed_point_count = (
+            diagnostics.tracking_path_smoothing_raw_point_count
+        )
+        diagnostics.tracking_path_smoothing_smoothed_length_m = (
+            diagnostics.tracking_path_smoothing_raw_length_m
+        )
+    replan_runtime.apply_tracking_path_smoothing_metadata(node.args, result)
+
+def remember_replan_tracking_replacement(node, result, replanned, current_pose):
+    node.last_replan_tracking_points = None
+    node.last_replan_tracking_source = "waypoints"
+    node.last_replan_tracking_validation = None
+    if getattr(node.args, "controller", DEFAULT_CONTROLLER) != "pure-pursuit":
+        return
+
+    path_points = replanned_tracking_points_from_result(
+        node,
+        result,
+    )
+    if not path_points:
+        node.last_replan_tracking_points = list(replanned)
+        node.last_replan_tracking_source = "replan_sparse_fallback"
+        node.last_replan_tracking_validation = TrackingPathValidation(
+            source="replan_sparse_fallback",
+            point_count=len(replanned),
+            validation_status="fallback_sparse_waypoints",
+        )
+        node.get_logger().warn(
+            "Pure-pursuit LiDAR replan did not include dense path_points; "
+            "falling back to sparse replanned waypoints for tracking."
+        )
+        return
+
+    try:
+        validation = validate_replan_tracking_points(
+            node,
+            path_points,
+            replanned,
+            current_pose,
+            source="replan",
+        )
+    except Exception as exc:
+        raw_path_points = raw_replanned_tracking_points_from_result(node, result)
+        if not raw_path_points or not replan_result_used_smoothed_tracking(result):
+            raise
+        validation = validate_replan_tracking_points(
+            node,
+            raw_path_points,
+            replanned,
+            current_pose,
+            source="replan",
+        )
+        path_points = raw_path_points
+        mark_replan_tracking_smoothing_fallback(
+            node,
+            result,
+            f"smoothed_validation_failed:{exc}",
+        )
+        node.get_logger().warn(
+            "Smoothed LiDAR replan tracking path failed validation; "
+            "using raw dense path_points. "
+            f"reason={exc}"
+        )
     for warning in validation.warnings:
         node.get_logger().warn(warning)
     node.last_replan_tracking_points = path_points

@@ -79,6 +79,16 @@ class PlanResult:
     path_length_m: float
 
 
+@dataclass(frozen=True)
+class TrackingPathSmoothingResult:
+    points: list[tuple[float, float]]
+    status: str
+    raw_point_count: int
+    smoothed_point_count: int
+    raw_length_m: float
+    smoothed_length_m: float
+
+
 def strip_inline_comment(line):
     in_single = False
     in_double = False
@@ -523,6 +533,19 @@ def path_length_m(path, metadata):
     return total
 
 
+def world_path_length_m(points):
+    points = list(points)
+    if len(points) < 2:
+        return 0.0
+    total = 0.0
+    for index in range(1, len(points)):
+        total += math.hypot(
+            points[index][0] - points[index - 1][0],
+            points[index][1] - points[index - 1][1],
+        )
+    return total
+
+
 def build_path_rows(path, metadata):
     rows = []
     cumulative = 0.0
@@ -545,6 +568,191 @@ def build_path_rows(path, metadata):
         ])
         previous = cell
     return rows
+
+
+def build_world_path_rows(points, metadata):
+    rows = []
+    cumulative = 0.0
+    previous = None
+    for index, point in enumerate(points):
+        world_x = float(point[0])
+        world_y = float(point[1])
+        grid_x, grid_y = world_to_grid(world_x, world_y, metadata)
+        if previous is None:
+            segment = 0.0
+        else:
+            segment = math.hypot(world_x - previous[0], world_y - previous[1])
+            cumulative += segment
+        rows.append([
+            index,
+            grid_x,
+            grid_y,
+            world_x,
+            world_y,
+            segment,
+            cumulative,
+        ])
+        previous = (world_x, world_y)
+    return rows
+
+
+def sampled_segment_cells(occupancy_map, start_world, end_world):
+    start_x, start_y = start_world
+    end_x, end_y = end_world
+    distance_m = math.hypot(end_x - start_x, end_y - start_y)
+    step_m = max(occupancy_map.metadata.resolution * 0.5, 1e-6)
+    steps = max(1, int(math.ceil(distance_m / step_m)))
+    cells = []
+    previous = None
+    for index in range(steps + 1):
+        ratio = index / float(steps)
+        world_x = start_x + (end_x - start_x) * ratio
+        world_y = start_y + (end_y - start_y) * ratio
+        cell = world_to_grid(world_x, world_y, occupancy_map.metadata)
+        if cell != previous:
+            cells.append(cell)
+            previous = cell
+    return cells
+
+
+def world_segment_is_clear(occupancy_map, blocked, start_world, end_world):
+    for cell in sampled_segment_cells(occupancy_map, start_world, end_world):
+        if not is_traversable(occupancy_map, blocked, cell):
+            return False
+    return True
+
+
+def cell_segment_is_clear(occupancy_map, blocked, start_cell, end_cell):
+    start_world = grid_to_world(start_cell[0], start_cell[1], occupancy_map.metadata)
+    end_world = grid_to_world(end_cell[0], end_cell[1], occupancy_map.metadata)
+    return world_segment_is_clear(occupancy_map, blocked, start_world, end_world)
+
+
+def shortcut_cell_path(occupancy_map, blocked, path):
+    path = list(path)
+    if len(path) < 2:
+        raise ValueError("tracking smoothing needs at least two path cells")
+    for cell in path:
+        if not is_traversable(occupancy_map, blocked, cell):
+            raise ValueError(f"tracking smoothing path cell is blocked: {cell}")
+
+    shortcut = [path[0]]
+    index = 0
+    while index < len(path) - 1:
+        next_index = index + 1
+        for candidate in range(len(path) - 1, index, -1):
+            if cell_segment_is_clear(
+                occupancy_map,
+                blocked,
+                path[index],
+                path[candidate],
+            ):
+                next_index = candidate
+                break
+        shortcut.append(path[next_index])
+        index = next_index
+    return shortcut
+
+
+def shortcut_world_path(occupancy_map, blocked, points):
+    points = [(float(point[0]), float(point[1])) for point in points]
+    if len(points) < 2:
+        raise ValueError("tracking smoothing needs at least two world points")
+    for point in points:
+        cell = world_to_grid(point[0], point[1], occupancy_map.metadata)
+        if not is_traversable(occupancy_map, blocked, cell):
+            raise ValueError(
+                "tracking smoothing point is blocked or outside map: "
+                f"x={point[0]:.3f}, y={point[1]:.3f}, cell={cell}"
+            )
+
+    shortcut = [points[0]]
+    index = 0
+    while index < len(points) - 1:
+        next_index = index + 1
+        for candidate in range(len(points) - 1, index, -1):
+            if world_segment_is_clear(
+                occupancy_map,
+                blocked,
+                points[index],
+                points[candidate],
+            ):
+                next_index = candidate
+                break
+        shortcut.append(points[next_index])
+        index = next_index
+    return shortcut
+
+
+def resample_world_path(points, spacing_m):
+    points = [(float(point[0]), float(point[1])) for point in points]
+    spacing_m = float(spacing_m)
+    if spacing_m <= 0.0:
+        raise ValueError("tracking smoothing spacing must be greater than zero")
+    if len(points) < 2:
+        raise ValueError("tracking smoothing needs at least two world points")
+
+    resampled = [points[0]]
+    for index in range(1, len(points)):
+        start = points[index - 1]
+        end = points[index]
+        distance_m = math.hypot(end[0] - start[0], end[1] - start[1])
+        if distance_m <= 1e-12:
+            continue
+        steps = max(1, int(math.ceil(distance_m / spacing_m)))
+        for step in range(1, steps + 1):
+            ratio = step / float(steps)
+            point = (
+                start[0] + (end[0] - start[0]) * ratio,
+                start[1] + (end[1] - start[1]) * ratio,
+            )
+            duplicate_distance_m = math.hypot(
+                point[0] - resampled[-1][0],
+                point[1] - resampled[-1][1],
+            )
+            if duplicate_distance_m > 1e-12:
+                resampled.append(point)
+
+    if len(resampled) < 2:
+        raise ValueError("tracking smoothing collapsed to fewer than two points")
+    if resampled[-1] != points[-1]:
+        resampled.append(points[-1])
+    return resampled
+
+
+def smooth_cell_path_for_tracking(occupancy_map, blocked, path, spacing_m):
+    raw_points = [
+        grid_to_world(cell[0], cell[1], occupancy_map.metadata)
+        for cell in path
+    ]
+    shortcut_cells = shortcut_cell_path(occupancy_map, blocked, path)
+    shortcut_points = [
+        grid_to_world(cell[0], cell[1], occupancy_map.metadata)
+        for cell in shortcut_cells
+    ]
+    smoothed = resample_world_path(shortcut_points, spacing_m)
+    return TrackingPathSmoothingResult(
+        points=smoothed,
+        status="smoothed",
+        raw_point_count=len(raw_points),
+        smoothed_point_count=len(smoothed),
+        raw_length_m=world_path_length_m(raw_points),
+        smoothed_length_m=world_path_length_m(smoothed),
+    )
+
+
+def smooth_world_path_for_tracking(occupancy_map, blocked, points, spacing_m):
+    raw_points = [(float(point[0]), float(point[1])) for point in points]
+    shortcut_points = shortcut_world_path(occupancy_map, blocked, raw_points)
+    smoothed = resample_world_path(shortcut_points, spacing_m)
+    return TrackingPathSmoothingResult(
+        points=smoothed,
+        status="smoothed",
+        raw_point_count=len(raw_points),
+        smoothed_point_count=len(smoothed),
+        raw_length_m=world_path_length_m(raw_points),
+        smoothed_length_m=world_path_length_m(smoothed),
+    )
 
 
 def write_path_csv(path, rows):

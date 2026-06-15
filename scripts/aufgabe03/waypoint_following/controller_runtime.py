@@ -2,7 +2,17 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
+
+import map_path_planner as planner
+
+from .models import Waypoint
+from .path_progress import (
+    TRACKING_PATH_SMOOTHING_OFF,
+    TRACKING_PATH_SMOOTHING_SHORTCUT,
+    validate_tracking_point_structure,
+)
 
 
 @dataclass(frozen=True)
@@ -50,6 +60,185 @@ def build_sparse_tracking_validation(source, point_count, status, context):
     )
 
 
+def _waypoints_to_world_points(points):
+    return [
+        (float(point.x), float(point.y))
+        for point in points
+    ]
+
+
+def _waypoints_from_world_points(points):
+    return [
+        # Keep generated tracking artifacts clearly separated from source indices.
+        # The CSV row index remains authoritative for smoothed tracking points.
+        Waypoint(index, float(point[0]), float(point[1]))
+        for index, point in enumerate(points)
+    ]
+
+
+def tracking_path_smoothing_enabled(args):
+    return (
+        getattr(args, "tracking_path_smoothing", TRACKING_PATH_SMOOTHING_OFF)
+        == TRACKING_PATH_SMOOTHING_SHORTCUT
+    )
+
+
+def _tracking_path_artifact_path(args):
+    output_dir = Path(getattr(args, "replan_output_dir", Path("results/aufgabe03")))
+    run_id = getattr(args, "run_id", None) or "waypoint_follow"
+    return output_dir / f"{run_id}_tracking_path.csv"
+
+
+def _set_tracking_path_smoothing_metadata(
+    args,
+    *,
+    mode,
+    status,
+    raw_point_count=0,
+    smoothed_point_count=0,
+    raw_length_m=None,
+    smoothed_length_m=None,
+    artifact="",
+    reason="",
+):
+    args.tracking_path_smoothing_status = status
+    args.tracking_path_smoothing_mode_resolved = mode
+    args.tracking_path_smoothing_raw_point_count = int(raw_point_count)
+    args.tracking_path_smoothing_smoothed_point_count = int(smoothed_point_count)
+    args.tracking_path_smoothing_raw_length_m = raw_length_m
+    args.tracking_path_smoothing_smoothed_length_m = smoothed_length_m
+    args.tracking_path_smoothing_artifact = str(artifact or "")
+    args.tracking_path_smoothing_reason = str(reason or "")
+
+
+def _format_optional_float(value):
+    return "n/a" if value is None else f"{float(value):.3f}"
+
+
+def _tracking_path_smoothing_notes(notes, args):
+    mode = getattr(args, "tracking_path_smoothing", TRACKING_PATH_SMOOTHING_OFF)
+    if mode == TRACKING_PATH_SMOOTHING_OFF:
+        return notes
+    return (
+        f"{notes};tracking_path_smoothing={mode};"
+        "tracking_path_smoothing_status="
+        f"{getattr(args, 'tracking_path_smoothing_status', 'not_attempted')};"
+        "tracking_path_smoothing_raw_point_count="
+        f"{getattr(args, 'tracking_path_smoothing_raw_point_count', 0)};"
+        "tracking_path_smoothing_smoothed_point_count="
+        f"{getattr(args, 'tracking_path_smoothing_smoothed_point_count', 0)};"
+        "tracking_path_smoothing_raw_length_m="
+        f"{_format_optional_float(getattr(args, 'tracking_path_smoothing_raw_length_m', None))};"
+        "tracking_path_smoothing_smoothed_length_m="
+        f"{_format_optional_float(getattr(args, 'tracking_path_smoothing_smoothed_length_m', None))};"
+        "tracking_path_smoothing_artifact="
+        f"{getattr(args, 'tracking_path_smoothing_artifact', '')};"
+        "tracking_path_smoothing_reason="
+        f"{getattr(args, 'tracking_path_smoothing_reason', '')}"
+    )
+
+
+def _static_smoothing_blocked_cells(args, occupancy_map):
+    inflation_radius_m = getattr(
+        args,
+        "pure_pursuit_lookahead_guard_static_inflation_radius_m",
+        planner.DEFAULT_INFLATE_RADIUS_M,
+    )
+    blocked, _inflation_cells = planner.inflate_blocked_cells(
+        occupancy_map,
+        inflation_radius_m,
+        block_unknown=True,
+    )
+    return blocked
+
+
+def _apply_static_tracking_path_smoothing(
+    args,
+    route_waypoints,
+    tracking_points,
+    context,
+    current_pose,
+    structural_warnings,
+    logger,
+    structural_only,
+):
+    if not tracking_path_smoothing_enabled(args):
+        return tracking_points, None
+
+    raw_points = _waypoints_to_world_points(tracking_points)
+    try:
+        occupancy_map = planner.load_occupancy_map(args.static_map)
+        blocked = _static_smoothing_blocked_cells(args, occupancy_map)
+        result = planner.smooth_world_path_for_tracking(
+            occupancy_map,
+            blocked,
+            raw_points,
+            args.tracking_path_smoothing_spacing_m,
+        )
+        smoothed_points = _waypoints_from_world_points(result.points)
+        smoothed_warnings = validate_tracking_point_structure(
+            smoothed_points,
+            max_segment_m=args.tracking_max_segment_m,
+            label="smoothed tracking path",
+        )
+        warnings = tuple(structural_warnings) + tuple(smoothed_warnings)
+        if structural_only:
+            validation = context.TrackingPathValidation(
+                source="csv_smoothed",
+                point_count=len(smoothed_points),
+                validation_status="structural_ok",
+                warnings=warnings,
+            )
+        else:
+            validation = context.validate_tracking_path_geometry(
+                route_waypoints,
+                smoothed_points,
+                endpoint_tolerance_m=args.tracking_endpoint_tolerance_m,
+                start_tolerance_m=args.tracking_start_tolerance_m,
+                allow_mismatch=args.allow_tracking_path_mismatch,
+                current_pose=current_pose,
+                source="csv_smoothed",
+                structural_warnings=warnings,
+            )
+        artifact = _tracking_path_artifact_path(args)
+        planner.write_path_csv(
+            artifact,
+            planner.build_world_path_rows(result.points, occupancy_map.metadata),
+        )
+        _set_tracking_path_smoothing_metadata(
+            args,
+            mode=args.tracking_path_smoothing,
+            status="smoothed",
+            raw_point_count=result.raw_point_count,
+            smoothed_point_count=result.smoothed_point_count,
+            raw_length_m=result.raw_length_m,
+            smoothed_length_m=result.smoothed_length_m,
+            artifact=artifact,
+        )
+        for warning in validation.warnings:
+            warn_logger(logger, warning, context)
+        return smoothed_points, validation
+    except Exception as exc:
+        raw_length_m = planner.world_path_length_m(raw_points)
+        _set_tracking_path_smoothing_metadata(
+            args,
+            mode=args.tracking_path_smoothing,
+            status="fallback_raw",
+            raw_point_count=len(tracking_points),
+            smoothed_point_count=len(tracking_points),
+            raw_length_m=raw_length_m,
+            smoothed_length_m=raw_length_m,
+            reason=str(exc),
+        )
+        warn_logger(
+            logger,
+            "Tracking path shortcut smoothing failed; using raw tracking path. "
+            f"reason={exc}",
+            context,
+        )
+        return tracking_points, None
+
+
 def prepare_tracking_setup(
     args,
     route_waypoints,
@@ -86,6 +275,18 @@ def prepare_tracking_setup(
     )
     for warning in warnings:
         warn_logger(logger, warning, context)
+    smoothed_points, smoothed_validation = _apply_static_tracking_path_smoothing(
+        args,
+        route_waypoints,
+        tracking_points,
+        context,
+        current_pose,
+        warnings,
+        logger,
+        structural_only,
+    )
+    if smoothed_validation is not None:
+        return smoothed_points, smoothed_validation
     if structural_only:
         return tracking_points, context.TrackingPathValidation(
             source="csv",
@@ -110,6 +311,21 @@ def prepare_tracking_setup(
 
 def _format_optional_m(value):
     return "n/a" if value is None else f"{value:.3f}"
+
+
+def _percentile(values, percentile):
+    values = sorted(float(value) for value in values)
+    if not values:
+        return None
+    if len(values) == 1:
+        return values[0]
+    rank = (len(values) - 1) * (float(percentile) / 100.0)
+    lower = int(math.floor(rank))
+    upper = int(math.ceil(rank))
+    if lower == upper:
+        return values[lower]
+    ratio = rank - lower
+    return values[lower] + (values[upper] - values[lower]) * ratio
 
 
 def format_optional_m(value, context):
@@ -242,24 +458,25 @@ def smoothed_step_command(node, step, now_sec, context):
 
 
 def notes_with_smoothing_metadata(notes, args, context):
-    if not command_smoothing_active(args, context):
-        return notes
-    return (
-        f"{notes};pure_pursuit_command_smoothing="
-        f"{args.pure_pursuit_command_smoothing};"
-        "pure_pursuit_max_linear_accel_mps2="
-        f"{args.pure_pursuit_max_linear_accel_mps2:.3f};"
-        "pure_pursuit_max_linear_decel_mps2="
-        f"{args.pure_pursuit_max_linear_decel_mps2:.3f};"
-        "pure_pursuit_max_angular_accel_radps2="
-        f"{args.pure_pursuit_max_angular_accel_radps2:.3f};"
-        "pure_pursuit_max_angular_decel_radps2="
-        f"{args.pure_pursuit_max_angular_decel_radps2:.3f};"
-        "pure_pursuit_final_decel_distance_m="
-        f"{args.pure_pursuit_final_decel_distance_m:.3f};"
-        "pure_pursuit_min_smoothed_linear_speed_mps="
-        f"{args.pure_pursuit_min_smoothed_linear_speed_mps:.3f}"
-    )
+    result = notes
+    if command_smoothing_active(args, context):
+        result = (
+            f"{result};pure_pursuit_command_smoothing="
+            f"{args.pure_pursuit_command_smoothing};"
+            "pure_pursuit_max_linear_accel_mps2="
+            f"{args.pure_pursuit_max_linear_accel_mps2:.3f};"
+            "pure_pursuit_max_linear_decel_mps2="
+            f"{args.pure_pursuit_max_linear_decel_mps2:.3f};"
+            "pure_pursuit_max_angular_accel_radps2="
+            f"{args.pure_pursuit_max_angular_accel_radps2:.3f};"
+            "pure_pursuit_max_angular_decel_radps2="
+            f"{args.pure_pursuit_max_angular_decel_radps2:.3f};"
+            "pure_pursuit_final_decel_distance_m="
+            f"{args.pure_pursuit_final_decel_distance_m:.3f};"
+            "pure_pursuit_min_smoothed_linear_speed_mps="
+            f"{args.pure_pursuit_min_smoothed_linear_speed_mps:.3f}"
+        )
+    return _tracking_path_smoothing_notes(result, args)
 
 
 def notes_with_velocity_scheduler_metadata(notes, args, context):
@@ -373,14 +590,34 @@ def notes_with_route_projection_metadata(notes, args, node, context):
         if count <= 0
         else getattr(node, "cross_track_error_sum_m", 0.0) / count
     )
+    cte_samples = getattr(node, "cross_track_error_samples_m", [])
+    cte_p50 = _percentile(cte_samples, 50)
+    cte_p90 = _percentile(cte_samples, 90)
+    cte_p95 = _percentile(cte_samples, 95)
     return (
         f"{notes};pure_pursuit_target_source=route_projection;"
         "pure_pursuit_max_cross_track_error_observed_m="
         f"{getattr(node, 'max_cross_track_error_m', 0.0):.3f};"
         "pure_pursuit_mean_abs_cross_track_error_m="
         f"{mean_error:.3f};"
+        "pure_pursuit_p50_abs_cross_track_error_m="
+        f"{format_optional_m(cte_p50)};"
+        "pure_pursuit_p90_abs_cross_track_error_m="
+        f"{format_optional_m(cte_p90)};"
+        "pure_pursuit_p95_abs_cross_track_error_m="
+        f"{format_optional_m(cte_p95)};"
         "pure_pursuit_max_route_heading_error_deg="
         f"{getattr(node, 'max_route_heading_error_deg', 0.0):.3f};"
+        "pure_pursuit_angular_feasibility_sample_count="
+        f"{getattr(node, 'angular_feasibility_sample_count', 0)};"
+        "pure_pursuit_angular_feasibility_limited_count="
+        f"{getattr(node, 'angular_feasibility_limited_count', 0)};"
+        "pure_pursuit_angular_feasibility_min_scale="
+        f"{getattr(node, 'angular_feasibility_min_scale', 1.0):.3f};"
+        "pure_pursuit_angular_feasibility_last_scale="
+        f"{format_optional_m(getattr(node, 'angular_feasibility_last_scale', None))};"
+        "pure_pursuit_angular_feasibility_max_raw_angular_z_radps="
+        f"{getattr(node, 'angular_feasibility_max_raw_angular_z_radps', 0.0):.3f};"
         "pure_pursuit_rotate_gate_entries="
         f"{getattr(node, 'pure_pursuit_rotate_gate_entries', 0)};"
         "pure_pursuit_projection_status="
@@ -529,6 +766,29 @@ def record_route_projection_result(self, step, context):
     self.max_cross_track_error_m = max(self.max_cross_track_error_m, error_m)
     self.cross_track_error_sum_m += error_m
     self.cross_track_error_count += 1
+    samples = getattr(self, "cross_track_error_samples_m", None)
+    if samples is not None:
+        samples.append(error_m)
+    forward_control = getattr(step, "forward_control_result", None)
+    if forward_control is not None:
+        self.angular_feasibility_sample_count = (
+            getattr(self, "angular_feasibility_sample_count", 0) + 1
+        )
+        scale = float(getattr(forward_control, "angular_feasibility_scale", 1.0))
+        self.angular_feasibility_last_scale = scale
+        self.angular_feasibility_min_scale = min(
+            getattr(self, "angular_feasibility_min_scale", 1.0),
+            scale,
+        )
+        raw_angular_z = abs(float(getattr(forward_control, "raw_angular_z", 0.0)))
+        self.angular_feasibility_max_raw_angular_z_radps = max(
+            getattr(self, "angular_feasibility_max_raw_angular_z_radps", 0.0),
+            raw_angular_z,
+        )
+        if getattr(forward_control, "angular_feasibility_limited", False):
+            self.angular_feasibility_limited_count = (
+                getattr(self, "angular_feasibility_limited_count", 0) + 1
+            )
     route_heading = getattr(step, "route_heading_result", None)
     route_heading_error = (
         getattr(route_heading, "heading_error_deg", None)

@@ -192,6 +192,12 @@ def replan_config_from_args(args):
         max_start_snap_m=args.max_start_snap_m,
         max_goal_snap_m=args.max_goal_snap_m,
         max_replan_path_length_ratio=args.max_replan_path_length_ratio,
+        tracking_path_smoothing=getattr(args, "tracking_path_smoothing", "off"),
+        tracking_path_smoothing_spacing_m=getattr(
+            args,
+            "tracking_path_smoothing_spacing_m",
+            0.05,
+        ),
     )
 
 
@@ -217,7 +223,59 @@ def run_local_config_from_args(args):
         max_replan_path_length_ratio=getattr(args, "max_replan_path_length_ratio", 3.0),
         max_start_snap_m=getattr(args, "max_start_snap_m", 0.20),
         max_goal_snap_m=getattr(args, "max_goal_snap_m", 0.30),
+        tracking_path_smoothing=getattr(args, "tracking_path_smoothing", "off"),
+        tracking_path_smoothing_spacing_m=getattr(
+            args,
+            "tracking_path_smoothing_spacing_m",
+            0.05,
+        ),
     )
+
+
+def apply_tracking_path_smoothing_metadata(args, result):
+    diagnostics = getattr(result, "diagnostics", None)
+    if diagnostics is None:
+        return result
+    mode = getattr(diagnostics, "tracking_path_smoothing_mode", "off")
+    if mode == "off":
+        return result
+    args.tracking_path_smoothing_status = getattr(
+        diagnostics,
+        "tracking_path_smoothing_status",
+        "not_attempted",
+    )
+    args.tracking_path_smoothing_mode_resolved = mode
+    args.tracking_path_smoothing_raw_point_count = getattr(
+        diagnostics,
+        "tracking_path_smoothing_raw_point_count",
+        0,
+    )
+    args.tracking_path_smoothing_smoothed_point_count = getattr(
+        diagnostics,
+        "tracking_path_smoothing_smoothed_point_count",
+        0,
+    )
+    args.tracking_path_smoothing_raw_length_m = getattr(
+        diagnostics,
+        "tracking_path_smoothing_raw_length_m",
+        None,
+    )
+    args.tracking_path_smoothing_smoothed_length_m = getattr(
+        diagnostics,
+        "tracking_path_smoothing_smoothed_length_m",
+        None,
+    )
+    args.tracking_path_smoothing_artifact = getattr(
+        diagnostics,
+        "tracking_path_smoothing_artifact",
+        "",
+    )
+    args.tracking_path_smoothing_reason = getattr(
+        diagnostics,
+        "tracking_path_smoothing_reason",
+        "",
+    )
+    return result
 
 
 def args_with_obstacle_roi(
@@ -467,6 +525,7 @@ def build_run_local_replan(
         old_remaining_waypoints=old_remaining_waypoints,
         run_local_map=run_local_map,
     )
+    apply_tracking_path_smoothing_metadata(args, result)
     replan_duration_sec = result.diagnostics.replan_duration_sec
     if (
         replan_duration_sec is not None
@@ -508,6 +567,7 @@ def plan_existing_run_local_map(
         artifact_prefix=artifact_prefix_from_args(args, sequence=sequence),
         old_remaining_waypoints=old_remaining_waypoints,
     )
+    apply_tracking_path_smoothing_metadata(args, result)
     replan_duration_sec = result.diagnostics.replan_duration_sec
     if (
         replan_duration_sec is not None

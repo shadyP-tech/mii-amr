@@ -21,6 +21,12 @@ from typing import Sequence
 
 import map_path_planner as planner
 from waypoint_following.models import Waypoint
+from waypoint_following.path_progress import (
+    DEFAULT_TRACKING_PATH_SMOOTHING,
+    DEFAULT_TRACKING_PATH_SMOOTHING_SPACING_M,
+    TRACKING_PATH_SMOOTHING_OFF,
+    TRACKING_PATH_SMOOTHING_SHORTCUT,
+)
 
 
 DEFAULT_STATIC_MAP = Path("maps/aufgabe03/arena_1p898x3p9_auto.yaml")
@@ -93,6 +99,8 @@ class RunLocalMapConfig:
     planner_snap_radius_m: float = planner.DEFAULT_SNAP_RADIUS_M
     max_start_snap_m: float = 0.20
     max_goal_snap_m: float = 0.30
+    tracking_path_smoothing: str = DEFAULT_TRACKING_PATH_SMOOTHING
+    tracking_path_smoothing_spacing_m: float = DEFAULT_TRACKING_PATH_SMOOTHING_SPACING_M
 
 
 @dataclass
@@ -178,6 +186,8 @@ class ObstacleOverlayConfig:
     run_local_clearance_margin_m: float = 0.04
     run_local_min_used_points: int = 3
     run_local_max_rejected_ratio: float = 0.90
+    tracking_path_smoothing: str = DEFAULT_TRACKING_PATH_SMOOTHING
+    tracking_path_smoothing_spacing_m: float = DEFAULT_TRACKING_PATH_SMOOTHING_SPACING_M
 
 
 @dataclass
@@ -223,6 +233,14 @@ class ObstacleOverlayDiagnostics:
     run_local_map_yaml: str = ""
     run_local_waypoints_csv: str = ""
     run_local_cell_source_counts: dict[str, int] = field(default_factory=dict)
+    tracking_path_smoothing_mode: str = TRACKING_PATH_SMOOTHING_OFF
+    tracking_path_smoothing_status: str = TRACKING_PATH_SMOOTHING_OFF
+    tracking_path_smoothing_raw_point_count: int = 0
+    tracking_path_smoothing_smoothed_point_count: int = 0
+    tracking_path_smoothing_raw_length_m: float | None = None
+    tracking_path_smoothing_smoothed_length_m: float | None = None
+    tracking_path_smoothing_artifact: str = ""
+    tracking_path_smoothing_reason: str = ""
 
 
 @dataclass
@@ -234,10 +252,12 @@ class ReplanResult:
     updated_map_pgm: str | None = None
     updated_path_csv: str | None = None
     updated_waypoints_csv: str | None = None
+    updated_tracking_path_csv: str | None = None
     updated_path_ppm: str | None = None
     detected_obstacles_csv: str | None = None
     waypoints: list[tuple[int, float, float]] = field(default_factory=list)
     path_points: list[Waypoint] = field(default_factory=list)
+    raw_path_points: list[Waypoint] = field(default_factory=list)
     path_cells: list[tuple[int, int]] = field(default_factory=list)
     inflated_obstacle_cells: set[tuple[int, int]] = field(default_factory=set)
     run_local_map: "RunLocalObstacleMap | None" = None
@@ -581,9 +601,98 @@ def run_local_artifact_paths(output_dir, prefix):
         "map_pgm": output_dir / f"{prefix}_map.pgm",
         "path_csv": output_dir / f"{prefix}_path.csv",
         "waypoints_csv": output_dir / f"{prefix}_waypoints.csv",
+        "tracking_path_csv": output_dir / f"{prefix}_tracking_path.csv",
         "path_ppm": output_dir / f"{prefix}_path.ppm",
         "obstacles_csv": output_dir / f"{prefix}_obstacles.csv",
     }
+
+
+def _record_tracking_path_smoothing(
+    diagnostics,
+    *,
+    mode,
+    status,
+    raw_point_count=0,
+    smoothed_point_count=0,
+    raw_length_m=None,
+    smoothed_length_m=None,
+    artifact="",
+    reason="",
+):
+    diagnostics.tracking_path_smoothing_mode = mode
+    diagnostics.tracking_path_smoothing_status = status
+    diagnostics.tracking_path_smoothing_raw_point_count = int(raw_point_count)
+    diagnostics.tracking_path_smoothing_smoothed_point_count = int(
+        smoothed_point_count,
+    )
+    diagnostics.tracking_path_smoothing_raw_length_m = raw_length_m
+    diagnostics.tracking_path_smoothing_smoothed_length_m = smoothed_length_m
+    diagnostics.tracking_path_smoothing_artifact = str(artifact or "")
+    diagnostics.tracking_path_smoothing_reason = str(reason or "")
+
+
+def tracking_path_rows_for_plan(
+    occupancy_map,
+    inflated_blocked,
+    plan,
+    artifact_path,
+    config,
+    diagnostics,
+):
+    raw_rows = planner.build_path_rows(plan.path, occupancy_map.metadata)
+    mode = getattr(
+        config,
+        "tracking_path_smoothing",
+        TRACKING_PATH_SMOOTHING_OFF,
+    )
+    if mode != TRACKING_PATH_SMOOTHING_SHORTCUT:
+        _record_tracking_path_smoothing(
+            diagnostics,
+            mode=mode,
+            status=TRACKING_PATH_SMOOTHING_OFF,
+            raw_point_count=len(plan.path),
+            smoothed_point_count=len(plan.path),
+            raw_length_m=plan.path_length_m,
+            smoothed_length_m=plan.path_length_m,
+        )
+        return raw_rows, None
+
+    try:
+        result = planner.smooth_cell_path_for_tracking(
+            occupancy_map,
+            inflated_blocked,
+            plan.path,
+            getattr(
+                config,
+                "tracking_path_smoothing_spacing_m",
+                DEFAULT_TRACKING_PATH_SMOOTHING_SPACING_M,
+            ),
+        )
+        rows = planner.build_world_path_rows(result.points, occupancy_map.metadata)
+        planner.write_path_csv(artifact_path, rows)
+        _record_tracking_path_smoothing(
+            diagnostics,
+            mode=mode,
+            status="smoothed",
+            raw_point_count=result.raw_point_count,
+            smoothed_point_count=result.smoothed_point_count,
+            raw_length_m=result.raw_length_m,
+            smoothed_length_m=result.smoothed_length_m,
+            artifact=artifact_path,
+        )
+        return rows, str(artifact_path)
+    except Exception as exc:
+        _record_tracking_path_smoothing(
+            diagnostics,
+            mode=mode,
+            status="fallback_raw",
+            raw_point_count=len(plan.path),
+            smoothed_point_count=len(plan.path),
+            raw_length_m=plan.path_length_m,
+            smoothed_length_m=plan.path_length_m,
+            reason=str(exc),
+        )
+        return raw_rows, None
 
 
 def write_run_local_obstacle_csv(path, run_local_map):
@@ -764,7 +873,8 @@ def plan_with_run_local_map(
 
         paths = run_local_artifact_paths(output_dir, artifact_prefix)
         planner.write_occupancy_map_copy(planning_map, paths["map_yaml"], paths["map_pgm"])
-        planner.write_path_csv(paths["path_csv"], planner.build_path_rows(plan.path, planning_map.metadata))
+        path_rows = planner.build_path_rows(plan.path, planning_map.metadata)
+        planner.write_path_csv(paths["path_csv"], path_rows)
         planner.write_path_csv(
             paths["waypoints_csv"],
             planner.build_path_rows(plan.waypoints, planning_map.metadata),
@@ -779,6 +889,15 @@ def plan_with_run_local_map(
             ),
         )
         write_run_local_obstacle_csv(paths["obstacles_csv"], run_local_map)
+        tracking_path_rows, tracking_path_csv = tracking_path_rows_for_plan(
+            planning_map,
+            inflated_blocked,
+            plan,
+            paths["tracking_path_csv"],
+            run_local_map.config,
+            overlay_diag,
+        )
+        waypoint_rows = planner.build_path_rows(plan.waypoints, planning_map.metadata)
         plan_diag.replan_duration_sec = time.time() - start_time
         populate_overlay_diagnostics_from_run_local(
             overlay_diag,
@@ -791,8 +910,6 @@ def plan_with_run_local_map(
         overlay_diag.updated_waypoints_csv = str(paths["waypoints_csv"])
         overlay_diag.run_local_map_yaml = str(paths["map_yaml"])
         overlay_diag.run_local_waypoints_csv = str(paths["waypoints_csv"])
-        path_rows = planner.build_path_rows(plan.path, planning_map.metadata)
-        waypoint_rows = planner.build_path_rows(plan.waypoints, planning_map.metadata)
         return ReplanResult(
             success=True,
             reason="run_local_replan_completed",
@@ -801,6 +918,7 @@ def plan_with_run_local_map(
             updated_map_pgm=str(paths["map_pgm"]),
             updated_path_csv=str(paths["path_csv"]),
             updated_waypoints_csv=str(paths["waypoints_csv"]),
+            updated_tracking_path_csv=tracking_path_csv,
             updated_path_ppm=str(paths["path_ppm"]),
             detected_obstacles_csv=str(paths["obstacles_csv"]),
             waypoints=[
@@ -808,6 +926,10 @@ def plan_with_run_local_map(
                 for row in waypoint_rows
             ],
             path_points=[
+                Waypoint(int(row[0]), float(row[3]), float(row[4]))
+                for row in tracking_path_rows
+            ],
+            raw_path_points=[
                 Waypoint(int(row[0]), float(row[3]), float(row[4]))
                 for row in path_rows
             ],
@@ -1048,6 +1170,7 @@ def artifact_paths(output_dir, run_id, sequence=1):
         "map_pgm": output_dir / f"{stem}_map.pgm",
         "path_csv": output_dir / f"{stem}_path.csv",
         "waypoints_csv": output_dir / f"{stem}_waypoints.csv",
+        "tracking_path_csv": output_dir / f"{stem}_tracking_path.csv",
         "path_ppm": output_dir / f"{stem}_path.ppm",
         "obstacles_csv": output_dir / f"{stem}_detected_obstacles.csv",
     }
@@ -1130,7 +1253,8 @@ def build_replan_result(
 
         paths = artifact_paths(output_dir, run_id, sequence=sequence)
         planner.write_occupancy_map_copy(updated_map, paths["map_yaml"], paths["map_pgm"])
-        planner.write_path_csv(paths["path_csv"], planner.build_path_rows(plan.path, updated_map.metadata))
+        path_rows = planner.build_path_rows(plan.path, updated_map.metadata)
+        planner.write_path_csv(paths["path_csv"], path_rows)
         planner.write_path_csv(
             paths["waypoints_csv"],
             planner.build_path_rows(plan.waypoints, updated_map.metadata),
@@ -1145,9 +1269,16 @@ def build_replan_result(
             ),
         )
         write_obstacle_csv(paths["obstacles_csv"], obstacle_rows)
-        diagnostics.replan_duration_sec = time.time() - start_time
-        path_rows = planner.build_path_rows(plan.path, updated_map.metadata)
+        tracking_path_rows, tracking_path_csv = tracking_path_rows_for_plan(
+            updated_map,
+            inflated_blocked,
+            plan,
+            paths["tracking_path_csv"],
+            config,
+            diagnostics,
+        )
         waypoint_rows = planner.build_path_rows(plan.waypoints, updated_map.metadata)
+        diagnostics.replan_duration_sec = time.time() - start_time
         return ReplanResult(
             success=True,
             reason="replan_completed",
@@ -1156,6 +1287,7 @@ def build_replan_result(
             updated_map_pgm=str(paths["map_pgm"]),
             updated_path_csv=str(paths["path_csv"]),
             updated_waypoints_csv=str(paths["waypoints_csv"]),
+            updated_tracking_path_csv=tracking_path_csv,
             updated_path_ppm=str(paths["path_ppm"]),
             detected_obstacles_csv=str(paths["obstacles_csv"]),
             waypoints=[
@@ -1163,6 +1295,10 @@ def build_replan_result(
                 for row in waypoint_rows
             ],
             path_points=[
+                Waypoint(int(row[0]), float(row[3]), float(row[4]))
+                for row in tracking_path_rows
+            ],
+            raw_path_points=[
                 Waypoint(int(row[0]), float(row[3]), float(row[4]))
                 for row in path_rows
             ],
@@ -1210,6 +1346,16 @@ def parse_args(argv):
     parser.add_argument("--obstacle-min-cluster-size", default=ObstacleOverlayConfig.min_cluster_size, type=int)
     parser.add_argument("--obstacle-min-cluster-width-m", default=ObstacleOverlayConfig.min_cluster_width_m, type=float)
     parser.add_argument("--obstacle-inflate-radius-m", default=ObstacleOverlayConfig.inflate_radius_m, type=float)
+    parser.add_argument(
+        "--tracking-path-smoothing",
+        default=DEFAULT_TRACKING_PATH_SMOOTHING,
+        choices=(TRACKING_PATH_SMOOTHING_OFF, TRACKING_PATH_SMOOTHING_SHORTCUT),
+    )
+    parser.add_argument(
+        "--tracking-path-smoothing-spacing-m",
+        default=DEFAULT_TRACKING_PATH_SMOOTHING_SPACING_M,
+        type=float,
+    )
     args = parser.parse_args(argv)
 
     positive_fields = [
@@ -1221,6 +1367,7 @@ def parse_args(argv):
         "robot_footprint_radius_m",
         "obstacle_min_cluster_width_m",
         "obstacle_inflate_radius_m",
+        "tracking_path_smoothing_spacing_m",
     ]
     for field in positive_fields:
         if getattr(args, field) <= 0.0:
@@ -1243,6 +1390,8 @@ def main(argv=None):
         min_cluster_size=args.obstacle_min_cluster_size,
         min_cluster_width_m=args.obstacle_min_cluster_width_m,
         inflate_radius_m=args.obstacle_inflate_radius_m,
+        tracking_path_smoothing=args.tracking_path_smoothing,
+        tracking_path_smoothing_spacing_m=args.tracking_path_smoothing_spacing_m,
     )
     points = synthetic_obstacle_points(
         args.synthetic_obstacle_base_x,
@@ -1266,6 +1415,8 @@ def main(argv=None):
     if result.success:
         print(f"Updated map YAML: {result.updated_map_yaml}")
         print(f"Updated waypoint CSV: {result.updated_waypoints_csv}")
+        if result.updated_tracking_path_csv:
+            print(f"Updated tracking path CSV: {result.updated_tracking_path_csv}")
         print(f"Updated path PPM: {result.updated_path_ppm}")
         return 0
     return 1

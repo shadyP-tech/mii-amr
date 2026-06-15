@@ -11,6 +11,10 @@ from waypoint_following.controllers import (
     PATH_PROFILE_SHORT_SPEED_CAP_MPS,
 )
 from waypoint_following.lookahead_guard import LOOKAHEAD_GUARD_OFF
+from waypoint_following.path_progress import (
+    DEFAULT_TRACKING_PATH_SMOOTHING,
+    DEFAULT_TRACKING_PATH_SMOOTHING_SPACING_M,
+)
 from waypoint_following.velocity_scheduler import SPEED_PROFILE_FIXED
 
 
@@ -83,6 +87,8 @@ __all__ = (
     "DEFAULT_TRACKING_ENDPOINT_TOLERANCE_M",
     "DEFAULT_TRACKING_START_TOLERANCE_M",
     "DEFAULT_TRACKING_MAX_SEGMENT_M",
+    "DEFAULT_TRACKING_PATH_SMOOTHING",
+    "DEFAULT_TRACKING_PATH_SMOOTHING_SPACING_M",
     "DEFAULT_ODOM_FRAME",
     "DEFAULT_SCAN_HALF_ANGLE_DEG",
     "DEFAULT_HARD_STOP_RANGE_M",

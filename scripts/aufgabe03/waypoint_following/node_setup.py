@@ -128,7 +128,13 @@ def initialize_runtime_state(node, args, context):
     node.max_cross_track_error_m = 0.0
     node.cross_track_error_sum_m = 0.0
     node.cross_track_error_count = 0
+    node.cross_track_error_samples_m = []
     node.max_route_heading_error_deg = 0.0
+    node.angular_feasibility_sample_count = 0
+    node.angular_feasibility_limited_count = 0
+    node.angular_feasibility_min_scale = 1.0
+    node.angular_feasibility_last_scale = None
+    node.angular_feasibility_max_raw_angular_z_radps = 0.0
     node.last_route_heading_source = ""
     node.last_route_heading_error_deg = None
     node.last_pure_pursuit_rotate_reason = ""

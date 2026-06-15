@@ -16,6 +16,7 @@ def require_motion_confirmation(args, waypoints):
     print(f"  - no active Nav2 goal/controller is publishing {args.cmd_vel_topic}")
     print("  - clear the path and keep an operator near the robot")
     print("  - keep Ctrl+C and physical stop available")
+    print(f"  - keep a separate {args.cmd_vel_topic} stop terminal available")
     print(f"Run ID: {args.run_id}")
     print(f"Waypoints: {len(waypoints)} from {args.waypoints}")
     response = input("Type RUN to start waypoint following: ").strip()
@@ -31,6 +32,7 @@ def wait_before_follow_confirmation(args, current_pose, executable_waypoints, in
     print("Safety requirements:")
     print("  - keep the path area clear except for the test obstacle")
     print("  - keep Ctrl+C and physical stop available")
+    print(f"  - keep a separate {args.cmd_vel_topic} stop terminal available")
     print(
         "Current pose: "
         f"x={current_pose.x:.3f}, y={current_pose.y:.3f}, yaw={current_pose.yaw_deg:.1f} deg"
@@ -300,6 +302,18 @@ def print_dry_run(
             f"{args.pure_pursuit_min_curvature_linear_speed_mps:.3f}"
         )
         print(f"Tracking path CSV: {args.tracking_path_csv or 'none'}")
+        print(f"tracking_path_smoothing={args.tracking_path_smoothing}")
+        print(
+            "tracking_path_smoothing_spacing_m="
+            f"{args.tracking_path_smoothing_spacing_m:.3f}"
+        )
+        smoothing_status = getattr(args, "tracking_path_smoothing_status", "")
+        if smoothing_status:
+            print(f"tracking_path_smoothing_status={smoothing_status}")
+            print(
+                "tracking_path_smoothing_artifact="
+                f"{getattr(args, 'tracking_path_smoothing_artifact', '')}"
+            )
         print(f"pure_pursuit_lookahead_guard={args.pure_pursuit_lookahead_guard}")
         print(
             "pure_pursuit_min_guarded_lookahead_m="
@@ -558,6 +572,8 @@ def parse_args(argv, *, context):
     DEFAULT_TF_RECOVERY_TIME_SEC = context['DEFAULT_TF_RECOVERY_TIME_SEC']
     DEFAULT_TRACKING_ENDPOINT_TOLERANCE_M = context['DEFAULT_TRACKING_ENDPOINT_TOLERANCE_M']
     DEFAULT_TRACKING_MAX_SEGMENT_M = context['DEFAULT_TRACKING_MAX_SEGMENT_M']
+    DEFAULT_TRACKING_PATH_SMOOTHING = context['DEFAULT_TRACKING_PATH_SMOOTHING']
+    DEFAULT_TRACKING_PATH_SMOOTHING_SPACING_M = context['DEFAULT_TRACKING_PATH_SMOOTHING_SPACING_M']
     DEFAULT_TRACKING_START_TOLERANCE_M = context['DEFAULT_TRACKING_START_TOLERANCE_M']
     DEFAULT_WAYPOINTS_CSV = context['DEFAULT_WAYPOINTS_CSV']
     DEFAULT_WAYPOINT_TOLERANCE_M = context['DEFAULT_WAYPOINT_TOLERANCE_M']
@@ -570,6 +586,7 @@ def parse_args(argv, *, context):
     POST_REPLAN_ESCAPE_STEERING_MODES = context['POST_REPLAN_ESCAPE_STEERING_MODES']
     Path = context['Path']
     SPEED_PROFILE_MODES = context['SPEED_PROFILE_MODES']
+    TRACKING_PATH_SMOOTHING_MODES = context['TRACKING_PATH_SMOOTHING_MODES']
     argparse = context['argparse']
     datetime = context['datetime']
     sys = context['sys']
@@ -787,6 +804,16 @@ def parse_args(argv, *, context):
     )
     parser.add_argument("--pure-pursuit-min-smoothed-linear-speed-mps", type=float)
     parser.add_argument("--tracking-path-csv", type=Path)
+    parser.add_argument(
+        "--tracking-path-smoothing",
+        default=DEFAULT_TRACKING_PATH_SMOOTHING,
+        choices=TRACKING_PATH_SMOOTHING_MODES,
+    )
+    parser.add_argument(
+        "--tracking-path-smoothing-spacing-m",
+        default=DEFAULT_TRACKING_PATH_SMOOTHING_SPACING_M,
+        type=float,
+    )
     parser.add_argument(
         "--tracking-endpoint-tolerance-m",
         default=DEFAULT_TRACKING_ENDPOINT_TOLERANCE_M,
@@ -1088,6 +1115,7 @@ def validate_args(parser, args, *, context):
         "tracking_endpoint_tolerance_m",
         "tracking_start_tolerance_m",
         "tracking_max_segment_m",
+        "tracking_path_smoothing_spacing_m",
         "rotate_start_heading_error_deg",
         "rotate_stop_heading_error_deg",
         "scan_half_angle_deg",
