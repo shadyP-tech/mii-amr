@@ -65,6 +65,10 @@ POST_REPLAN_ESCAPE_STRAIGHT_UNTIL_PROGRESS_M = 0.010
 POST_REPLAN_ESCAPE_NO_MOTION_EPS_M = 0.003
 POST_REPLAN_ESCAPE_NO_MOTION_TIMEOUT_ODOM_SEC = 3.0
 POST_REPLAN_ESCAPE_NO_MOTION_TIMEOUT_MAP_SEC = 4.0
+POST_REPLAN_ESCAPE_ROUTE_BLOCKED_COUNT_THRESHOLD = 2
+POST_REPLAN_ESCAPE_ROUTE_BLOCKED_PERSISTENCE_SCANS = 2
+POST_REPLAN_ESCAPE_ROUTE_BLOCKED_MARGIN_M = 0.02
+POST_REPLAN_ESCAPE_ROUTE_PROGRESS_BUCKET_M = 0.05
 POST_REPLAN_ACTIVATION_MIN_TARGET_FLOOR_M = 0.08
 POST_REPLAN_RECOVERY_ALIGN = "align"
 POST_REPLAN_RECOVERY_CLEARANCE_SEARCH = "clearance_search"
@@ -145,6 +149,14 @@ class PostReplanRecoveryState:
     route_corridor_blocked_count: int = 0
     route_clear_side_obstacle_count: int = 0
     route_corridor_preview_distance_m: float = 0.0
+    route_corridor_nearest_blocked_segment_index: int | None = None
+    route_corridor_nearest_blocked_progress_m: float | None = None
+    route_corridor_nearest_blocked_penetration_m: float | None = None
+    escape_route_blocked_streak: int = 0
+    escape_route_blocked_tolerated_count: int = 0
+    escape_route_block_decision: str = ""
+    escape_route_blocked_signature: tuple | None = None
+    escape_route_blocked_last_scan_identity: tuple[float | None, float | None] | None = None
     final_status: str = "active"
 
 
@@ -167,6 +179,9 @@ class PostReplanRouteClearance:
     side_obstacle_count: int
     min_corridor_distance_m: float | None
     min_scan_range_m: float | None
+    nearest_blocked_segment_index: int | None = None
+    nearest_blocked_route_progress_m: float | None = None
+    nearest_blocked_corridor_penetration_m: float | None = None
 
 
 @dataclass(frozen=True)
@@ -328,13 +343,12 @@ def post_replan_recovery_should_preempt_controller(recovery, args=None):
     phase = getattr(recovery, "phase", "")
     if phase in POST_REPLAN_PRE_CONTROLLER_RECOVERY_PHASES:
         return True
-    if (
-        phase == POST_REPLAN_RECOVERY_ESCAPE
-        and args is not None
-        and resolve_post_replan_escape_steering_mode(args)
-        == POST_REPLAN_ESCAPE_STEERING_ROUTE_HINT
-    ):
-        return False
+    if phase == POST_REPLAN_RECOVERY_ESCAPE:
+        resolved_steering = resolve_post_replan_escape_steering_mode(args)
+        if resolved_steering == POST_REPLAN_ESCAPE_STEERING_ROUTE_HINT:
+            return False
+        if resolved_steering == POST_REPLAN_ESCAPE_STEERING_STRAIGHT_UNTIL_PROGRESS:
+            return True
     return (
         phase == POST_REPLAN_RECOVERY_ESCAPE
         and getattr(recovery, "best_escape_distance_m", 0.0)
@@ -664,6 +678,25 @@ def notes_with_post_replan_recovery_metadata(notes, args, node):
         if recovery is not None
         else getattr(node, "last_post_replan_route_corridor_preview_distance_m", 0.0)
     )
+    escape_route_blocked_streak = (
+        getattr(recovery, "escape_route_blocked_streak", 0)
+        if recovery is not None
+        else getattr(node, "last_post_replan_escape_route_blocked_streak", 0)
+    )
+    escape_route_blocked_tolerated_count = (
+        getattr(recovery, "escape_route_blocked_tolerated_count", 0)
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_escape_route_blocked_tolerated_count",
+            0,
+        )
+    )
+    escape_route_block_decision = (
+        getattr(recovery, "escape_route_block_decision", "")
+        if recovery is not None
+        else getattr(node, "last_post_replan_escape_route_block_decision", "")
+    )
     lookahead_budget_repair_count = getattr(
         node,
         "lookahead_guard_budget_repair_count",
@@ -693,6 +726,12 @@ def notes_with_post_replan_recovery_metadata(notes, args, node):
         f"{route_clear_side_obstacle_count};"
         "route_corridor_preview_distance_m="
         f"{route_corridor_preview_distance:.3f};"
+        "post_replan_escape_route_blocked_streak="
+        f"{escape_route_blocked_streak};"
+        "post_replan_escape_route_blocked_tolerated_count="
+        f"{escape_route_blocked_tolerated_count};"
+        "post_replan_escape_route_block_decision="
+        f"{escape_route_block_decision};"
         "lookahead_guard_budget_repair_count="
         f"{lookahead_budget_repair_count};"
         "lookahead_guard_budget_repair_signature="
@@ -989,6 +1028,24 @@ def reset_post_replan_recovery(node, status=""):
         node.last_post_replan_route_corridor_preview_distance_m = (
             recovery.route_corridor_preview_distance_m
         )
+        node.last_post_replan_route_corridor_nearest_blocked_segment_index = (
+            recovery.route_corridor_nearest_blocked_segment_index
+        )
+        node.last_post_replan_route_corridor_nearest_blocked_progress_m = (
+            recovery.route_corridor_nearest_blocked_progress_m
+        )
+        node.last_post_replan_route_corridor_nearest_blocked_penetration_m = (
+            recovery.route_corridor_nearest_blocked_penetration_m
+        )
+        node.last_post_replan_escape_route_blocked_streak = (
+            recovery.escape_route_blocked_streak
+        )
+        node.last_post_replan_escape_route_blocked_tolerated_count = (
+            recovery.escape_route_blocked_tolerated_count
+        )
+        node.last_post_replan_escape_route_block_decision = (
+            recovery.escape_route_block_decision
+        )
     if status:
         node.last_post_replan_recovery_status = status
     node.post_replan_recovery = None
@@ -1096,7 +1153,7 @@ def _valid_scan_base_points(scan):
     return tuple(points)
 
 
-def _point_segment_projection_distance_m(point, start, end):
+def _point_segment_projection_info(point, start, end):
     px, py = point
     sx, sy = start
     ex, ey = end
@@ -1110,22 +1167,34 @@ def _point_segment_projection_distance_m(point, start, end):
         return None
     ratio = clamp(ratio, 0.0, 1.0)
     closest = (sx + ratio * dx, sy + ratio * dy)
-    return math.hypot(px - closest[0], py - closest[1])
+    return math.hypot(px - closest[0], py - closest[1]), ratio, math.sqrt(length_sq)
+
+
+def _point_preview_projection_info(point, preview_points):
+    best = None
+    progress_before_segment = 0.0
+    for index in range(len(preview_points) - 1):
+        start = preview_points[index]
+        end = preview_points[index + 1]
+        segment_length = math.hypot(end[0] - start[0], end[1] - start[1])
+        projection = _point_segment_projection_info(
+            point,
+            start,
+            end,
+        )
+        if projection is not None:
+            distance, ratio, _segment_length = projection
+            route_progress_m = progress_before_segment + ratio * segment_length
+            candidate = (distance, index, route_progress_m)
+            if best is None or distance < best[0]:
+                best = candidate
+        progress_before_segment += segment_length
+    return best
 
 
 def _point_preview_distance_m(point, preview_points):
-    best_distance = None
-    for index in range(len(preview_points) - 1):
-        distance = _point_segment_projection_distance_m(
-            point,
-            preview_points[index],
-            preview_points[index + 1],
-        )
-        if distance is None:
-            continue
-        if best_distance is None or distance < best_distance:
-            best_distance = distance
-    return best_distance
+    projection = _point_preview_projection_info(point, preview_points)
+    return None if projection is None else projection[0]
 
 
 def evaluate_post_replan_route_clearance(node, pose, route_state):
@@ -1177,10 +1246,14 @@ def evaluate_post_replan_route_clearance(node, pose, route_state):
     min_range = None
     blocked_count = 0
     side_obstacle_count = 0
+    nearest_blocked_segment_index = None
+    nearest_blocked_route_progress_m = None
+    nearest_blocked_corridor_penetration_m = None
     half_angle_rad = math.radians(float(node.args.scan_half_angle_deg))
     min_scan_range_m = float(node.args.min_scan_range_m)
     for x, y, range_m, angle in scan_points:
-        distance = _point_preview_distance_m((x, y), preview_points)
+        projection = _point_preview_projection_info((x, y), preview_points)
+        distance = None if projection is None else projection[0]
         blocked = distance is not None and distance <= corridor_radius + 1e-9
         if distance is not None:
             min_distance = (
@@ -1192,6 +1265,14 @@ def evaluate_post_replan_route_clearance(node, pose, route_state):
             min_range = range_m
         if blocked:
             blocked_count += 1
+            penetration_m = max(0.0, corridor_radius - distance)
+            if (
+                nearest_blocked_corridor_penetration_m is None
+                or penetration_m > nearest_blocked_corridor_penetration_m
+            ):
+                nearest_blocked_segment_index = projection[1]
+                nearest_blocked_route_progress_m = projection[2]
+                nearest_blocked_corridor_penetration_m = penetration_m
         elif abs(angle) <= half_angle_rad and range_m < min_scan_range_m:
             side_obstacle_count += 1
 
@@ -1209,6 +1290,9 @@ def evaluate_post_replan_route_clearance(node, pose, route_state):
         side_obstacle_count,
         min_distance,
         min_range,
+        nearest_blocked_segment_index,
+        nearest_blocked_route_progress_m,
+        nearest_blocked_corridor_penetration_m,
     )
 
 
@@ -1224,12 +1308,30 @@ def _record_route_clearance_result(node, recovery, result):
     node.last_post_replan_route_corridor_preview_distance_m = (
         result.preview_distance_m
     )
+    node.last_post_replan_route_corridor_nearest_blocked_segment_index = (
+        result.nearest_blocked_segment_index
+    )
+    node.last_post_replan_route_corridor_nearest_blocked_progress_m = (
+        result.nearest_blocked_route_progress_m
+    )
+    node.last_post_replan_route_corridor_nearest_blocked_penetration_m = (
+        result.nearest_blocked_corridor_penetration_m
+    )
     if recovery is not None:
         recovery.route_clearance_reason = result.reason
         recovery.route_corridor_min_distance_m = result.min_corridor_distance_m
         recovery.route_corridor_blocked_count = result.blocked_count
         recovery.route_clear_side_obstacle_count = result.side_obstacle_count
         recovery.route_corridor_preview_distance_m = result.preview_distance_m
+        recovery.route_corridor_nearest_blocked_segment_index = (
+            result.nearest_blocked_segment_index
+        )
+        recovery.route_corridor_nearest_blocked_progress_m = (
+            result.nearest_blocked_route_progress_m
+        )
+        recovery.route_corridor_nearest_blocked_penetration_m = (
+            result.nearest_blocked_corridor_penetration_m
+        )
 
 
 def post_replan_forward_clearance_safety(node, pose, route_state, cone_safety=None):
@@ -1320,6 +1422,97 @@ def post_replan_forward_clearance_safety(node, pose, route_state, cone_safety=No
             cone_safety.percentile_5_m,
         )
     return cone_safety
+
+
+def reset_post_replan_escape_route_blocked_streak(recovery, decision="clear"):
+    recovery.escape_route_blocked_streak = 0
+    recovery.escape_route_blocked_signature = None
+    recovery.escape_route_blocked_last_scan_identity = None
+    recovery.escape_route_block_decision = decision
+
+
+def post_replan_escape_route_block_signature(recovery):
+    progress_m = recovery.route_corridor_nearest_blocked_progress_m
+    progress_bucket = (
+        None
+        if progress_m is None
+        else int(round(progress_m / POST_REPLAN_ESCAPE_ROUTE_PROGRESS_BUCKET_M))
+    )
+    return (
+        POST_REPLAN_ROUTE_CLEARANCE_REASON_BLOCKED,
+        1,
+        recovery.route_corridor_nearest_blocked_segment_index,
+        progress_bucket,
+        "marginal",
+    )
+
+
+def post_replan_escape_clearance_safety(node, recovery, pose, route_state):
+    safety = post_replan_forward_clearance_safety(
+        node,
+        pose,
+        route_state,
+    )
+    if safety.reason == "hard_stop":
+        reset_post_replan_escape_route_blocked_streak(recovery, "hard_stop")
+        return safety
+    if safety.safe:
+        reset_post_replan_escape_route_blocked_streak(recovery, "clear")
+        return safety
+    if safety.reason != POST_REPLAN_ROUTE_CLEARANCE_REASON_BLOCKED:
+        reset_post_replan_escape_route_blocked_streak(recovery, "clear")
+        return safety
+
+    blocked_count = int(getattr(recovery, "route_corridor_blocked_count", 0))
+    if blocked_count >= POST_REPLAN_ESCAPE_ROUTE_BLOCKED_COUNT_THRESHOLD:
+        reset_post_replan_escape_route_blocked_streak(
+            recovery,
+            "blocked_count_threshold",
+        )
+        return safety
+
+    penetration_m = getattr(
+        recovery,
+        "route_corridor_nearest_blocked_penetration_m",
+        None,
+    )
+    if (
+        blocked_count != 1
+        or penetration_m is None
+        or penetration_m > POST_REPLAN_ESCAPE_ROUTE_BLOCKED_MARGIN_M
+    ):
+        reset_post_replan_escape_route_blocked_streak(
+            recovery,
+            "deep_single_block",
+        )
+        return safety
+
+    signature = post_replan_escape_route_block_signature(recovery)
+    scan_identity = node.current_scan_identity()
+    previous_scan_identity = recovery.escape_route_blocked_last_scan_identity
+    if scan_identity == previous_scan_identity:
+        streak = recovery.escape_route_blocked_streak
+    elif signature == recovery.escape_route_blocked_signature:
+        streak = recovery.escape_route_blocked_streak + 1
+    else:
+        streak = 1
+    recovery.escape_route_blocked_signature = signature
+    recovery.escape_route_blocked_last_scan_identity = scan_identity
+    recovery.escape_route_blocked_streak = streak
+
+    if streak >= POST_REPLAN_ESCAPE_ROUTE_BLOCKED_PERSISTENCE_SCANS:
+        recovery.escape_route_block_decision = "persistent_blocked_scan"
+        return safety
+
+    recovery.escape_route_blocked_tolerated_count += 1
+    recovery.escape_route_block_decision = "transient_blocked_tolerated"
+    return ScanSafety(
+        True,
+        POST_REPLAN_ROUTE_CLEARANCE_REASON_BLOCKED,
+        safety.valid_count,
+        safety.min_range_m,
+        safety.percentile_5_m,
+    )
 
 
 def local_post_replan_alignment_heading(node, route_points, segment_index):
@@ -1460,6 +1653,12 @@ def activate_post_replan_recovery(node, pose, route_state):
     node.last_post_replan_route_corridor_blocked_count = 0
     node.last_post_replan_route_clear_side_obstacle_count = 0
     node.last_post_replan_route_corridor_preview_distance_m = 0.0
+    node.last_post_replan_route_corridor_nearest_blocked_segment_index = None
+    node.last_post_replan_route_corridor_nearest_blocked_progress_m = None
+    node.last_post_replan_route_corridor_nearest_blocked_penetration_m = None
+    node.last_post_replan_escape_route_blocked_streak = 0
+    node.last_post_replan_escape_route_blocked_tolerated_count = 0
+    node.last_post_replan_escape_route_block_decision = ""
     _reset_command_smoother(node)
     node.publish_velocity(0.0, 0.0)
 
@@ -2226,6 +2425,11 @@ def handle_post_replan_recovery(
             recovery.last_progress_distance_m = 0.0
             recovery.last_progress_time_sec = None
             recovery.first_escape_command_time_sec = None
+            recovery.escape_route_blocked_streak = 0
+            recovery.escape_route_blocked_tolerated_count = 0
+            recovery.escape_route_block_decision = ""
+            recovery.escape_route_blocked_signature = None
+            recovery.escape_route_blocked_last_scan_identity = None
             if recovery.escape_start_direct_odom_pose is not None:
                 recovery.last_escape_distance_source = "direct_odom"
                 recovery.last_escape_odom_source_fallback_reason = "none"
@@ -2283,8 +2487,9 @@ def handle_post_replan_recovery(
             _reset_command_smoother(node)
             reset_post_replan_recovery(node, "reached")
             return False
-        safety = post_replan_forward_clearance_safety(
+        safety = post_replan_escape_clearance_safety(
             node,
+            recovery,
             pose,
             route_state,
         )
@@ -2350,9 +2555,13 @@ def handle_post_replan_recovery(
                 node.publish_velocity(0.0, 0.0)
                 reset_post_replan_recovery(node, reason)
                 raise
-        elif recovery.escape_straight_until_progress_active:
+        elif resolved_steering == POST_REPLAN_ESCAPE_STEERING_STRAIGHT_UNTIL_PROGRESS:
             angular_z = 0.0
-            angular_hint_source = "straight_until_progress"
+            angular_hint_source = (
+                "straight_until_progress"
+                if recovery.escape_straight_until_progress_active
+                else "straight_escape"
+            )
         else:
             try:
                 angular_z, angular_hint_source = (

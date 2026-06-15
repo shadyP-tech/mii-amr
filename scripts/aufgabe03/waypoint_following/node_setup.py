@@ -103,6 +103,12 @@ def initialize_runtime_state(node, args, context):
     node.last_post_replan_route_corridor_blocked_count = 0
     node.last_post_replan_route_clear_side_obstacle_count = 0
     node.last_post_replan_route_corridor_preview_distance_m = 0.0
+    node.last_post_replan_route_corridor_nearest_blocked_segment_index = None
+    node.last_post_replan_route_corridor_nearest_blocked_progress_m = None
+    node.last_post_replan_route_corridor_nearest_blocked_penetration_m = None
+    node.last_post_replan_escape_route_blocked_streak = 0
+    node.last_post_replan_escape_route_blocked_tolerated_count = 0
+    node.last_post_replan_escape_route_block_decision = ""
     node.last_post_replan_activation_min_target_distance_m = 0.0
     node.last_post_replan_activation_pruned_sparse_count = 0
     node.last_post_replan_activation_pruned_dense_count = 0
