@@ -45,6 +45,7 @@ from arena_shadow_coverage import (
     ShadowCoverageConfig,
     ShadowCoverageSummary,
     ShadowScanSample,
+    heading_error_to_point_deg,
     plan_shadow_coverage_move,
     prune_shadow_samples,
 )
@@ -91,6 +92,13 @@ DEFAULT_SHADOW_CURVE_GOAL_TOLERANCE_M = 0.04
 DEFAULT_SHADOW_CURVE_LINEAR_SPEED_MPS = 0.05
 DEFAULT_SHADOW_CURVE_MAX_ANGULAR_RADPS = 0.40
 DEFAULT_SHADOW_MAX_ODOM_SCAN_AGE_SEC = 0.5
+DEFAULT_SHADOW_MAX_INITIAL_HEADING_ERROR_DEG = 80.0
+DEFAULT_SHADOW_PRETURN_MAX_HEADING_ERROR_DEG = 135.0
+DEFAULT_SHADOW_PRETURN_HANDOFF_HEADING_ERROR_DEG = 45.0
+DEFAULT_SHADOW_PRETURN_HANDOFF_DEADBAND_DEG = 3.0
+DEFAULT_SHADOW_PRETURN_MAX_ANGULAR_RADPS = 0.40
+DEFAULT_SHADOW_PRETURN_MIN_ANGULAR_RADPS = 0.12
+DEFAULT_SHADOW_PRETURN_TIMEOUT_SEC = 6.0
 DEFAULT_MAPPER_TOPIC = "/map"
 DEFAULT_MAPPER_TOPIC_TIMEOUT_SEC = 5.0
 
@@ -149,6 +157,14 @@ class CurveSafety:
     front: ScanSafety
     left_min_m: float | None
     right_min_m: float | None
+
+
+class ShadowExecutionError(RuntimeError):
+    def __init__(self, reason, record=None, motion_started=False):
+        super().__init__(reason)
+        self.reason = reason
+        self.record = record
+        self.motion_started = bool(motion_started)
 
 
 def shortest_angle_delta_deg(start_deg, end_deg):
@@ -395,6 +411,12 @@ def shadow_config_from_args(args):
         recent_target_radius_m=args.shadow_recent_target_radius_m,
         min_endpoint_clearance_m=args.shadow_side_stop_distance_m,
         completion_confirmations=args.shadow_completion_confirmations,
+        max_initial_heading_error_deg=args.shadow_max_initial_heading_error_deg,
+        allow_initial_preturn=args.shadow_allow_initial_preturn,
+        preturn_max_heading_error_deg=args.shadow_preturn_max_heading_error_deg,
+        preturn_handoff_heading_error_deg=args.shadow_preturn_handoff_heading_error_deg,
+        curve_lookahead_m=args.shadow_curve_lookahead_m,
+        preturn_handoff_deadband_deg=args.shadow_preturn_handoff_deadband_deg,
     )
 
 
@@ -481,6 +503,13 @@ def validate_motion_config(args, route):
             ("shadow_curve_linear_speed_mps", "--shadow-curve-linear-speed"),
             ("shadow_curve_max_angular_radps", "--shadow-curve-max-angular"),
             ("shadow_max_odom_scan_age_sec", "--shadow-max-odom-scan-age-sec"),
+            ("shadow_max_initial_heading_error_deg", "--shadow-max-initial-heading-error-deg"),
+            ("shadow_preturn_max_heading_error_deg", "--shadow-preturn-max-heading-error-deg"),
+            ("shadow_preturn_handoff_heading_error_deg", "--shadow-preturn-handoff-heading-error-deg"),
+            ("shadow_preturn_handoff_deadband_deg", "--shadow-preturn-handoff-deadband-deg"),
+            ("shadow_preturn_max_angular_radps", "--shadow-preturn-max-angular"),
+            ("shadow_preturn_min_angular_radps", "--shadow-preturn-min-angular"),
+            ("shadow_preturn_timeout_sec", "--shadow-preturn-timeout-sec"),
             ("mapper_topic_timeout_sec", "--mapper-topic-timeout-sec"),
         ):
             if getattr(args, attr) <= 0.0:
@@ -511,6 +540,51 @@ def validate_motion_config(args, route):
             errors.append("--shadow-curve-linear-speed must be <= 0.10")
         if args.shadow_curve_max_angular_radps > 0.80:
             errors.append("--shadow-curve-max-angular must be <= 0.80")
+        if not (
+            args.shadow_max_initial_heading_error_deg
+            < args.shadow_preturn_max_heading_error_deg
+        ):
+            errors.append(
+                "--shadow-max-initial-heading-error-deg must be below "
+                "--shadow-preturn-max-heading-error-deg"
+            )
+        if not (
+            args.shadow_preturn_handoff_heading_error_deg
+            < args.shadow_max_initial_heading_error_deg
+        ):
+            errors.append(
+                "--shadow-preturn-handoff-heading-error-deg must be below "
+                "--shadow-max-initial-heading-error-deg"
+            )
+        if args.shadow_preturn_handoff_deadband_deg >= args.shadow_preturn_handoff_heading_error_deg:
+            errors.append(
+                "--shadow-preturn-handoff-deadband-deg must be below "
+                "--shadow-preturn-handoff-heading-error-deg"
+            )
+        if args.shadow_preturn_min_angular_radps > args.shadow_preturn_max_angular_radps:
+            errors.append("--shadow-preturn-min-angular must be <= --shadow-preturn-max-angular")
+        if args.shadow_preturn_max_angular_radps > 0.40:
+            errors.append("--shadow-preturn-max-angular must be <= 0.40")
+        if args.shadow_preturn_max_angular_radps > 0.0:
+            angular_speed_deg_s = math.degrees(args.shadow_preturn_max_angular_radps)
+            handoff_success_deg = (
+                args.shadow_preturn_handoff_heading_error_deg
+                - args.shadow_preturn_handoff_deadband_deg
+            )
+            required_timeout = max(
+                3.0,
+                (
+                    args.shadow_preturn_max_heading_error_deg
+                    - handoff_success_deg
+                )
+                / angular_speed_deg_s
+                + 2.0,
+            )
+            if args.shadow_preturn_timeout_sec + 0.25 < required_timeout:
+                errors.append(
+                    "--shadow-preturn-timeout-sec is too short for the configured "
+                    "pre-turn heading range and angular speed"
+                )
 
     if errors:
         raise ValueError("; ".join(errors))
@@ -921,11 +995,21 @@ class ArenaCoverageDrive(Node):
             "driven_distance_m": float(driven_distance_m),
             "duration_sec": float(duration_sec),
             "stop_reason": stop_reason,
+            "alignment_motion_executed": False,
+            "translation_motion_executed": False,
+            "motion_started": False,
+            "heading_gate_stage": "",
+            "preturn_executed": False,
+            "preturn_stop_reason": "",
+            "preturn_initial_heading_error_deg": None,
+            "preturn_final_heading_error_deg": None,
+            "preturn_duration_sec": 0.0,
+            "preturn_command_count": 0,
         }
         record.update(extra)
         return record
 
-    def execute_shadow_curve(self, candidate, args, distance_limit_m):
+    def _shadow_curve_context(self, candidate, args, distance_limit_m):
         self.wait_for_fresh_shadow_inputs(args)
         if self.latest_odom_pose is None:
             raise RuntimeError("shadow_curve_missing_latest_odom_pose")
@@ -934,11 +1018,6 @@ class ArenaCoverageDrive(Node):
             candidate,
             self.latest_odom_pose,
             move_limit,
-        )
-        start = time.time()
-        deadline = start + max(
-            8.0,
-            move_limit / max(0.01, abs(args.shadow_curve_linear_speed_mps)) + 5.0,
         )
         final_target = path_points[-1]
         candidate_goal = (
@@ -954,12 +1033,113 @@ class ArenaCoverageDrive(Node):
             distance_2d(final_target, candidate_goal)
             > args.shadow_curve_goal_tolerance_m
         )
+        current_point = (
+            float(self.latest_odom_pose.x),
+            float(self.latest_odom_pose.y),
+        )
+        lookahead_target = select_curve_lookahead_target(
+            path_points,
+            current_point,
+            args.shadow_curve_lookahead_m,
+        )
+        initial_heading_error_deg = heading_error_to_point_deg(
+            self.latest_odom_pose,
+            lookahead_target,
+        )
+        return {
+            "move_limit": move_limit,
+            "path_points": path_points,
+            "final_target": final_target,
+            "path_truncated": path_truncated,
+            "lookahead_target": lookahead_target,
+            "initial_heading_error_deg": initial_heading_error_deg,
+        }
+
+    def _shadow_preturn_timeout_sec(self, args, initial_heading_error_deg):
+        angular_speed_deg_s = math.degrees(abs(args.shadow_preturn_max_angular_radps))
+        handoff_success_deg = (
+            args.shadow_preturn_handoff_heading_error_deg
+            - args.shadow_preturn_handoff_deadband_deg
+        )
+        required = max(
+            3.0,
+            (
+                abs(initial_heading_error_deg)
+                - handoff_success_deg
+            )
+            / max(1e-6, angular_speed_deg_s)
+            + 2.0,
+        )
+        return min(args.shadow_preturn_timeout_sec, required)
+
+    def _shadow_preturn_failure_record(
+        self,
+        candidate,
+        path_points,
+        driven_distance_m,
+        duration_sec,
+        stop_reason,
+        initial_heading_error_deg,
+        final_heading_error_deg,
+        command_count,
+        motion_started,
+        **extra,
+    ):
+        final_target = path_points[-1]
+        current_point = (
+            (float(self.latest_odom_pose.x), float(self.latest_odom_pose.y))
+            if self.latest_odom_pose is not None
+            else final_target
+        )
+        return self._shadow_curve_record(
+            candidate,
+            path_points,
+            [],
+            driven_distance_m,
+            duration_sec,
+            stop_reason,
+            final_target_distance_m=distance_2d(current_point, final_target),
+            goal_reached=False,
+            path_truncated=True,
+            initial_heading_error_deg=initial_heading_error_deg,
+            alignment_motion_executed=motion_started,
+            translation_motion_executed=False,
+            motion_started=motion_started,
+            heading_gate_stage="execution",
+            preturn_executed=motion_started,
+            preturn_stop_reason=stop_reason,
+            preturn_initial_heading_error_deg=initial_heading_error_deg,
+            preturn_final_heading_error_deg=final_heading_error_deg,
+            preturn_duration_sec=duration_sec,
+            preturn_command_count=command_count,
+            **extra,
+        )
+
+    def execute_shadow_preturn(
+        self,
+        candidate,
+        path_points,
+        target_point,
+        initial_heading_error_deg,
+        args,
+    ):
+        start = time.time()
+        deadline = start + self._shadow_preturn_timeout_sec(
+            args,
+            initial_heading_error_deg,
+        )
+        handoff_success_deg = (
+            args.shadow_preturn_handoff_heading_error_deg
+            - args.shadow_preturn_handoff_deadband_deg
+        )
         previous_point = (
             float(self.latest_odom_pose.x),
             float(self.latest_odom_pose.y),
         )
         total_driven = 0.0
-        curve_samples = []
+        command_count = 0
+        motion_started = False
+        final_heading_error_deg = initial_heading_error_deg
 
         try:
             while rclpy.ok() and time.time() <= deadline:
@@ -967,11 +1147,313 @@ class ArenaCoverageDrive(Node):
                 scan_age = self.fresh_scan_age_sec()
                 odom_age = self.fresh_odom_age_sec()
                 if scan_age is None or scan_age > args.shadow_max_odom_scan_age_sec:
-                    raise RuntimeError("stale_scan_during_shadow_curve")
+                    record = self._shadow_preturn_failure_record(
+                        candidate,
+                        path_points,
+                        total_driven,
+                        time.time() - start,
+                        "stale_scan_during_shadow_preturn",
+                        initial_heading_error_deg,
+                        final_heading_error_deg,
+                        command_count,
+                        motion_started,
+                    )
+                    raise ShadowExecutionError(
+                        "stale_scan_during_shadow_preturn",
+                        record,
+                        motion_started,
+                    )
                 if odom_age is None or odom_age > args.shadow_max_odom_scan_age_sec:
-                    raise RuntimeError("stale_odom_during_shadow_curve")
+                    record = self._shadow_preturn_failure_record(
+                        candidate,
+                        path_points,
+                        total_driven,
+                        time.time() - start,
+                        "stale_odom_during_shadow_preturn",
+                        initial_heading_error_deg,
+                        final_heading_error_deg,
+                        command_count,
+                        motion_started,
+                    )
+                    raise ShadowExecutionError(
+                        "stale_odom_during_shadow_preturn",
+                        record,
+                        motion_started,
+                    )
                 if self.latest_odom_pose is None:
-                    raise RuntimeError("fresh_odom_unavailable_during_shadow_curve")
+                    record = self._shadow_preturn_failure_record(
+                        candidate,
+                        path_points,
+                        total_driven,
+                        time.time() - start,
+                        "fresh_odom_unavailable_during_shadow_preturn",
+                        initial_heading_error_deg,
+                        final_heading_error_deg,
+                        command_count,
+                        motion_started,
+                    )
+                    raise ShadowExecutionError(
+                        "fresh_odom_unavailable_during_shadow_preturn",
+                        record,
+                        motion_started,
+                    )
+
+                current_point = (
+                    float(self.latest_odom_pose.x),
+                    float(self.latest_odom_pose.y),
+                )
+                delta = distance_2d(previous_point, current_point)
+                if math.isfinite(delta):
+                    total_driven += delta
+                previous_point = current_point
+
+                final_heading_error_deg = heading_error_to_point_deg(
+                    self.latest_odom_pose,
+                    target_point,
+                )
+                safety = evaluate_shadow_curve_safety(self.last_scan, args)
+                if not safety.safe:
+                    self.stop_repeatedly()
+                    record = self._shadow_preturn_failure_record(
+                        candidate,
+                        path_points,
+                        total_driven,
+                        time.time() - start,
+                        f"preturn_safety_stop:{safety.reason}",
+                        initial_heading_error_deg,
+                        final_heading_error_deg,
+                        command_count,
+                        motion_started,
+                        safety_reason=safety.reason,
+                    )
+                    raise ShadowExecutionError(
+                        record["stop_reason"],
+                        record,
+                        motion_started,
+                    )
+                if abs(final_heading_error_deg) <= handoff_success_deg:
+                    self.stop_repeatedly()
+                    return {
+                        "alignment_motion_executed": motion_started,
+                        "preturn_executed": motion_started,
+                        "preturn_stop_reason": "handoff_heading_reached",
+                        "preturn_initial_heading_error_deg": initial_heading_error_deg,
+                        "preturn_final_heading_error_deg": final_heading_error_deg,
+                        "preturn_duration_sec": time.time() - start,
+                        "preturn_command_count": command_count,
+                        "preturn_driven_distance_m": total_driven,
+                    }
+
+                sign = 1.0 if final_heading_error_deg >= 0.0 else -1.0
+                angular_z = sign * abs(args.shadow_preturn_max_angular_radps)
+                self.publish_velocity(0.0, angular_z)
+                motion_started = True
+                command_count += 1
+                time.sleep(COMMAND_PERIOD_SEC)
+
+            self.stop_repeatedly()
+            record = self._shadow_preturn_failure_record(
+                candidate,
+                path_points,
+                total_driven,
+                time.time() - start,
+                "preturn_timeout",
+                initial_heading_error_deg,
+                final_heading_error_deg,
+                command_count,
+                motion_started,
+                timeout_sec=deadline - start,
+            )
+            raise ShadowExecutionError("preturn_timeout", record, motion_started)
+        except ShadowExecutionError:
+            self.stop_repeatedly()
+            raise
+
+        self.stop_repeatedly()
+        record = self._shadow_preturn_failure_record(
+            candidate,
+            path_points,
+            total_driven,
+            time.time() - start,
+            "ros_shutdown_during_shadow_preturn",
+            initial_heading_error_deg,
+            final_heading_error_deg,
+            command_count,
+            motion_started,
+        )
+        raise ShadowExecutionError(
+            "ros_shutdown_during_shadow_preturn",
+            record,
+            motion_started,
+        )
+
+    def _shadow_heading_gate_failure_record(self, candidate, context, stop_reason):
+        return self._shadow_curve_record(
+            candidate,
+            context["path_points"],
+            [],
+            0.0,
+            0.0,
+            stop_reason,
+            executed=False,
+            final_target_distance_m=distance_2d(
+                (
+                    float(self.latest_odom_pose.x),
+                    float(self.latest_odom_pose.y),
+                ),
+                context["final_target"],
+            ),
+            goal_reached=False,
+            path_truncated=context["path_truncated"],
+            initial_heading_error_deg=context["initial_heading_error_deg"],
+            initial_lookahead_target=[
+                float(context["lookahead_target"][0]),
+                float(context["lookahead_target"][1]),
+            ],
+            alignment_motion_executed=False,
+            translation_motion_executed=False,
+            motion_started=False,
+            heading_gate_stage="execution",
+            allow_before_motion_fallback=True,
+        )
+
+    def execute_shadow_curve(self, candidate, args, distance_limit_m):
+        context = self._shadow_curve_context(candidate, args, distance_limit_m)
+        initial_heading_error_deg = context["initial_heading_error_deg"]
+        if abs(initial_heading_error_deg) > args.shadow_max_initial_heading_error_deg:
+            if (
+                args.shadow_allow_initial_preturn
+                and abs(initial_heading_error_deg)
+                <= args.shadow_preturn_max_heading_error_deg
+            ):
+                preturn_result = self.execute_shadow_preturn(
+                    candidate,
+                    context["path_points"],
+                    context["lookahead_target"],
+                    initial_heading_error_deg,
+                    args,
+                )
+                self.wait_for_fresh_shadow_inputs(args)
+                context = self._shadow_curve_context(candidate, args, distance_limit_m)
+            else:
+                return self._shadow_heading_gate_failure_record(
+                    candidate,
+                    context,
+                    "initial_heading_error_too_large_execution",
+                )
+        else:
+            preturn_result = {
+                "alignment_motion_executed": False,
+                "preturn_executed": False,
+                "preturn_stop_reason": "",
+                "preturn_initial_heading_error_deg": None,
+                "preturn_final_heading_error_deg": None,
+                "preturn_duration_sec": 0.0,
+                "preturn_command_count": 0,
+                "preturn_driven_distance_m": 0.0,
+            }
+
+        if (
+            abs(context["initial_heading_error_deg"])
+            > args.shadow_max_initial_heading_error_deg
+        ):
+            record = self._shadow_heading_gate_failure_record(
+                candidate,
+                context,
+                "initial_heading_error_too_large_after_preturn",
+            )
+            record.update(preturn_result)
+            record["motion_started"] = bool(
+                preturn_result["alignment_motion_executed"]
+            )
+            record["alignment_motion_executed"] = bool(
+                preturn_result["alignment_motion_executed"]
+            )
+            if record["motion_started"]:
+                raise ShadowExecutionError(
+                    record["stop_reason"],
+                    record,
+                    motion_started=True,
+                )
+            return record
+
+        move_limit = context["move_limit"]
+        path_points = context["path_points"]
+        final_target = context["final_target"]
+        path_truncated = context["path_truncated"]
+        start = time.time()
+        deadline = start + max(
+            8.0,
+            move_limit / max(0.01, abs(args.shadow_curve_linear_speed_mps)) + 5.0,
+        )
+        previous_point = (
+            float(self.latest_odom_pose.x),
+            float(self.latest_odom_pose.y),
+        )
+        total_driven = float(preturn_result.get("preturn_driven_distance_m", 0.0))
+        curve_samples = []
+        motion_started = bool(preturn_result.get("alignment_motion_executed", False))
+        translation_motion_executed = False
+
+        try:
+            while rclpy.ok() and time.time() <= deadline:
+                rclpy.spin_once(self, timeout_sec=COMMAND_PERIOD_SEC)
+                scan_age = self.fresh_scan_age_sec()
+                odom_age = self.fresh_odom_age_sec()
+                if scan_age is None or scan_age > args.shadow_max_odom_scan_age_sec:
+                    raise ShadowExecutionError(
+                        "stale_scan_during_shadow_curve",
+                        self._shadow_curve_record(
+                            candidate,
+                            path_points,
+                            curve_samples,
+                            total_driven,
+                            time.time() - start,
+                            "stale_scan_during_shadow_curve",
+                            path_truncated=path_truncated,
+                            motion_started=motion_started,
+                            translation_motion_executed=translation_motion_executed,
+                            initial_heading_error_deg=initial_heading_error_deg,
+                            **preturn_result,
+                        ),
+                        motion_started,
+                    )
+                if odom_age is None or odom_age > args.shadow_max_odom_scan_age_sec:
+                    raise ShadowExecutionError(
+                        "stale_odom_during_shadow_curve",
+                        self._shadow_curve_record(
+                            candidate,
+                            path_points,
+                            curve_samples,
+                            total_driven,
+                            time.time() - start,
+                            "stale_odom_during_shadow_curve",
+                            path_truncated=path_truncated,
+                            motion_started=motion_started,
+                            translation_motion_executed=translation_motion_executed,
+                            initial_heading_error_deg=initial_heading_error_deg,
+                            **preturn_result,
+                        ),
+                        motion_started,
+                    )
+                if self.latest_odom_pose is None:
+                    raise ShadowExecutionError(
+                        "fresh_odom_unavailable_during_shadow_curve",
+                        self._shadow_curve_record(
+                            candidate,
+                            path_points,
+                            curve_samples,
+                            total_driven,
+                            time.time() - start,
+                            "fresh_odom_unavailable_during_shadow_curve",
+                            path_truncated=path_truncated,
+                            motion_started=motion_started,
+                            translation_motion_executed=translation_motion_executed,
+                            initial_heading_error_deg=initial_heading_error_deg,
+                            **preturn_result,
+                        ),
+                        motion_started,
+                    )
 
                 current_point = (
                     float(self.latest_odom_pose.x),
@@ -1000,6 +1482,10 @@ class ArenaCoverageDrive(Node):
                             <= args.shadow_curve_goal_tolerance_m
                         ),
                         path_truncated=path_truncated,
+                        initial_heading_error_deg=initial_heading_error_deg,
+                        motion_started=motion_started,
+                        translation_motion_executed=translation_motion_executed,
+                        **preturn_result,
                     )
 
                 final_target_distance_m = distance_2d(current_point, final_target)
@@ -1021,6 +1507,10 @@ class ArenaCoverageDrive(Node):
                             <= args.shadow_curve_goal_tolerance_m
                         ),
                         path_truncated=path_truncated,
+                        initial_heading_error_deg=initial_heading_error_deg,
+                        motion_started=motion_started,
+                        translation_motion_executed=translation_motion_executed,
+                        **preturn_result,
                     )
 
                 target = select_curve_lookahead_target(
@@ -1053,6 +1543,10 @@ class ArenaCoverageDrive(Node):
                     }
                 )
                 self.publish_velocity(linear_x, angular_z)
+                if abs(linear_x) > 1e-9 or abs(angular_z) > 1e-9:
+                    motion_started = True
+                if abs(linear_x) > 1e-9:
+                    translation_motion_executed = True
                 time.sleep(COMMAND_PERIOD_SEC)
 
             final_target_distance_m = distance_2d(
@@ -1076,9 +1570,31 @@ class ArenaCoverageDrive(Node):
                     final_target_distance_m <= args.shadow_curve_goal_tolerance_m
                 ),
                 path_truncated=path_truncated,
+                initial_heading_error_deg=initial_heading_error_deg,
+                motion_started=motion_started,
+                translation_motion_executed=translation_motion_executed,
+                **preturn_result,
             )
-        except Exception:
+        except ShadowExecutionError:
             self.stop_repeatedly()
+            raise
+        except Exception as exc:
+            self.stop_repeatedly()
+            if motion_started:
+                record = self._shadow_curve_record(
+                    candidate,
+                    path_points,
+                    curve_samples,
+                    total_driven,
+                    time.time() - start,
+                    str(exc),
+                    path_truncated=path_truncated,
+                    motion_started=True,
+                    translation_motion_executed=translation_motion_executed,
+                    initial_heading_error_deg=initial_heading_error_deg,
+                    **preturn_result,
+                )
+                raise ShadowExecutionError(str(exc), record, True) from exc
             raise
 
     def _record_shadow_phase(self, diagnostics, phase, reason, plan=None):
@@ -1169,25 +1685,98 @@ class ArenaCoverageDrive(Node):
                 confirmations = 0
                 self.begin_shadow_segment()
                 remaining_distance = args.shadow_max_total_distance_m - summary.total_distance_m
-                record = self.execute_shadow_curve(
-                    plan.selected,
-                    args,
-                    distance_limit_m=remaining_distance,
-                )
+                try:
+                    record = self.execute_shadow_curve(
+                        plan.selected,
+                        args,
+                        distance_limit_m=remaining_distance,
+                    )
+                except ShadowExecutionError as exc:
+                    record = exc.record
+                    if record is not None:
+                        diagnostics["executions"].append(record)
+                        diagnostics["safety_events"].append(
+                            {
+                                "attempt": summary.attempts,
+                                "reason": record["stop_reason"],
+                                "target_x": record.get("target_x"),
+                                "target_y": record.get("target_y"),
+                                "motion_started": exc.motion_started,
+                            }
+                        )
+                    if exc.motion_started:
+                        shadow_motion_executed = True
+                    summary = replace(
+                        summary,
+                        attempts=summary.attempts + (1 if exc.motion_started else 0),
+                        moves_executed=(
+                            summary.moves_executed
+                            + (
+                                1
+                                if record is not None
+                                and record.get("translation_motion_executed")
+                                else 0
+                            )
+                        ),
+                        total_distance_m=(
+                            summary.total_distance_m
+                            + (
+                                float(record.get("driven_distance_m", 0.0))
+                                if record is not None
+                                else 0.0
+                            )
+                        ),
+                        stop_reason=exc.reason,
+                        final_phase="failed",
+                    )
+                    diagnostics["summary"] = summary.to_dict()
+                    raise RuntimeError(exc.reason) from exc
                 diagnostics["executions"].append(record)
                 if record["stop_reason"] != "completed":
+                    if record.get("motion_started"):
+                        shadow_motion_executed = True
                     diagnostics["safety_events"].append(
                         {
                             "attempt": summary.attempts,
                             "reason": record["stop_reason"],
                             "target_x": record["target_x"],
                             "target_y": record["target_y"],
+                            "motion_started": record.get("motion_started", False),
                         }
                     )
+                    if (
+                        record.get("allow_before_motion_fallback")
+                        and not shadow_motion_executed
+                        and not args.no_shadow_fallback_route
+                    ):
+                        self._record_shadow_phase(
+                            diagnostics,
+                            "fixed_fallback",
+                            f"shadow_execution_failed_before_motion:{record['stop_reason']}",
+                        )
+                        self.execute_route(fallback_route, args)
+                        summary = replace(
+                            summary,
+                            fallback_used=True,
+                            stop_reason="fixed_fallback_completed",
+                            final_phase="complete",
+                        )
+                        diagnostics["summary"] = summary.to_dict()
+                        return summary
                     summary = replace(
                         summary,
-                        attempts=summary.attempts + 1,
-                        moves_executed=summary.moves_executed + 1,
+                        attempts=(
+                            summary.attempts
+                            + (1 if record.get("motion_started") else 0)
+                        ),
+                        moves_executed=(
+                            summary.moves_executed
+                            + (
+                                1
+                                if record.get("translation_motion_executed")
+                                else 0
+                            )
+                        ),
                         total_distance_m=(
                             summary.total_distance_m
                             + float(record.get("driven_distance_m", 0.0))
@@ -1197,7 +1786,9 @@ class ArenaCoverageDrive(Node):
                     )
                     diagnostics["summary"] = summary.to_dict()
                     raise RuntimeError(record["stop_reason"])
-                shadow_motion_executed = True
+                shadow_motion_executed = (
+                    shadow_motion_executed or record.get("motion_started", False)
+                )
                 recent_attempt = {
                     "target_x": float(plan.selected.target_x),
                     "target_y": float(plan.selected.target_y),
@@ -1214,7 +1805,14 @@ class ArenaCoverageDrive(Node):
                 summary = replace(
                     summary,
                     attempts=summary.attempts + 1,
-                    moves_executed=summary.moves_executed + 1,
+                    moves_executed=(
+                        summary.moves_executed
+                        + (
+                            1
+                            if record.get("translation_motion_executed", True)
+                            else 0
+                        )
+                    ),
                     total_distance_m=(
                         summary.total_distance_m
                         + float(record.get("driven_distance_m", 0.0))
@@ -1354,6 +1952,24 @@ def print_dry_run(args, route):
         print(f"  - max total distance: {args.shadow_max_total_distance_m:.3f} m")
         print(f"  - sample window: current + previous segment, max {args.shadow_max_samples} samples")
         print(f"  - side stop distance: {args.shadow_side_stop_distance_m:.3f} m")
+        if args.shadow_allow_initial_preturn:
+            handoff = (
+                args.shadow_preturn_handoff_heading_error_deg
+                - args.shadow_preturn_handoff_deadband_deg
+            )
+            print(
+                "  - initial heading gate: "
+                f"reject >{args.shadow_max_initial_heading_error_deg:.0f} deg; "
+                f"pre-turn {args.shadow_max_initial_heading_error_deg:.0f}.."
+                f"{args.shadow_preturn_max_heading_error_deg:.0f} deg, "
+                f"handoff {handoff:.0f} deg"
+            )
+        else:
+            print(
+                "  - initial heading gate: "
+                f"reject >{args.shadow_max_initial_heading_error_deg:.0f} deg; "
+                "pre-turn disabled"
+            )
         print(f"  - fixed fallback before shadow motion: {not args.no_shadow_fallback_route}")
         print(f"  - diagnostics: {shadow_diagnostics_path_for_args(args)}")
     else:
@@ -1399,6 +2015,11 @@ def require_motion_confirmation(args, route):
         print(f"  - mapper topic check: {args.mapper_topic}")
         print(f"  - max shadow distance: {args.shadow_max_total_distance_m:.3f} m")
         print(f"  - side stop distance: {args.shadow_side_stop_distance_m:.3f} m")
+        print(
+            "  - initial heading gate: "
+            f"reject >{args.shadow_max_initial_heading_error_deg:.0f} deg; "
+            f"pre-turn {'enabled' if args.shadow_allow_initial_preturn else 'disabled'}"
+        )
     else:
         print(f"Route: {route_actions_text(route)}")
     response = input("Type RUN to start arena coverage motion: ").strip()
@@ -1635,6 +2256,55 @@ def parse_args(argv):
         default=DEFAULT_SHADOW_CURVE_MAX_ANGULAR_RADPS,
         type=float,
         help="Maximum angular speed for shadow curve execution.",
+    )
+    parser.add_argument(
+        "--shadow-max-initial-heading-error-deg",
+        default=DEFAULT_SHADOW_MAX_INITIAL_HEADING_ERROR_DEG,
+        type=float,
+        help="Maximum initial curve heading error accepted without pre-turn.",
+    )
+    parser.add_argument(
+        "--shadow-allow-initial-preturn",
+        action="store_true",
+        help="Allow targeted angular-only pre-turn before a shadow curve.",
+    )
+    parser.add_argument(
+        "--shadow-preturn-max-heading-error-deg",
+        default=DEFAULT_SHADOW_PRETURN_MAX_HEADING_ERROR_DEG,
+        type=float,
+        help="Maximum initial heading error eligible for opt-in pre-turn.",
+    )
+    parser.add_argument(
+        "--shadow-preturn-handoff-heading-error-deg",
+        default=DEFAULT_SHADOW_PRETURN_HANDOFF_HEADING_ERROR_DEG,
+        type=float,
+        help="Heading error below which pre-turn can hand off to curve driving.",
+    )
+    parser.add_argument(
+        "--shadow-preturn-handoff-deadband-deg",
+        default=DEFAULT_SHADOW_PRETURN_HANDOFF_DEADBAND_DEG,
+        type=float,
+        help="Deadband subtracted from pre-turn handoff threshold.",
+    )
+    parser.add_argument(
+        "--shadow-preturn-max-angular",
+        dest="shadow_preturn_max_angular_radps",
+        default=DEFAULT_SHADOW_PRETURN_MAX_ANGULAR_RADPS,
+        type=float,
+        help="Fixed-sign angular speed cap for opt-in pre-turn.",
+    )
+    parser.add_argument(
+        "--shadow-preturn-min-angular",
+        dest="shadow_preturn_min_angular_radps",
+        default=DEFAULT_SHADOW_PRETURN_MIN_ANGULAR_RADPS,
+        type=float,
+        help="Minimum useful angular speed for opt-in pre-turn validation.",
+    )
+    parser.add_argument(
+        "--shadow-preturn-timeout-sec",
+        default=DEFAULT_SHADOW_PRETURN_TIMEOUT_SEC,
+        type=float,
+        help="Maximum seconds allowed for one opt-in pre-turn.",
     )
     parser.add_argument(
         "--shadow-max-odom-scan-age-sec",

@@ -24,6 +24,10 @@ from arena_active_explore import (
     plan_candidate,
     world_to_cell,
 )
+from arena_active_spin_core.curve_following import (
+    active_explore_curve_path,
+    select_curve_lookahead_target,
+)
 
 
 NO_SHADOW_REASONS = {
@@ -53,6 +57,12 @@ class ShadowCoverageConfig:
     recent_target_radius_m: float = 0.25
     min_endpoint_clearance_m: float = 0.16
     completion_confirmations: int = 2
+    max_initial_heading_error_deg: float = 80.0
+    allow_initial_preturn: bool = False
+    preturn_max_heading_error_deg: float = 135.0
+    preturn_handoff_heading_error_deg: float = 45.0
+    curve_lookahead_m: float = 0.16
+    preturn_handoff_deadband_deg: float = 3.0
 
     def active_explore_config(self):
         return ActiveExploreConfig(
@@ -296,6 +306,12 @@ def _reject_candidate(candidate, reason, extra_metadata=None):
     )
 
 
+def _annotate_candidate(candidate, extra_metadata):
+    metadata = dict(candidate.metadata)
+    metadata.update(extra_metadata)
+    return replace(candidate, metadata=metadata)
+
+
 def _increment(counts, reason):
     counts[reason] = counts.get(reason, 0) + 1
 
@@ -332,6 +348,71 @@ def _shadow_status(grid, candidates, raw_shadow_unknown_count):
         "moving_frontier_count": len(moving_frontiers),
         "cell_counts": None if grid is None else grid_cell_counts(grid),
     }
+
+
+def heading_error_to_point_deg(robot_pose, target_point):
+    dx = float(target_point[0]) - float(robot_pose.x)
+    dy = float(target_point[1]) - float(robot_pose.y)
+    target_heading = math.atan2(dy, dx)
+    yaw = math.radians(float(robot_pose.yaw_deg))
+    return math.degrees((target_heading - yaw + math.pi) % (2.0 * math.pi) - math.pi)
+
+
+def candidate_initial_heading_metadata(candidate, robot_pose, config: ShadowCoverageConfig):
+    path_points = active_explore_curve_path(
+        candidate,
+        robot_pose,
+        config.max_single_move_m,
+    )
+    current_point = (float(robot_pose.x), float(robot_pose.y))
+    lookahead_target = select_curve_lookahead_target(
+        path_points,
+        current_point,
+        config.curve_lookahead_m,
+    )
+    heading_error_deg = heading_error_to_point_deg(robot_pose, lookahead_target)
+    return {
+        "initial_heading_error_deg": heading_error_deg,
+        "initial_lookahead_target": [float(lookahead_target[0]), float(lookahead_target[1])],
+        "requires_initial_preturn": False,
+        "heading_gate_stage": "planner",
+    }
+
+
+def apply_initial_heading_gate(candidate, robot_pose, config: ShadowCoverageConfig):
+    try:
+        metadata = candidate_initial_heading_metadata(candidate, robot_pose, config)
+    except RuntimeError as exc:
+        return _reject_candidate(
+            candidate,
+            "initial_heading_error_unavailable",
+            {
+                "heading_gate_stage": "planner",
+                "heading_gate_reason": str(exc),
+            },
+        )
+
+    error_abs = abs(metadata["initial_heading_error_deg"])
+    if error_abs <= config.max_initial_heading_error_deg:
+        metadata["heading_gate_reason"] = "accepted"
+        return _annotate_candidate(candidate, metadata)
+    if (
+        config.allow_initial_preturn
+        and error_abs <= config.preturn_max_heading_error_deg
+    ):
+        metadata["requires_initial_preturn"] = True
+        metadata["heading_gate_reason"] = "preturn_required"
+        return _annotate_candidate(candidate, metadata)
+    return _reject_candidate(
+        candidate,
+        "initial_heading_error_too_large",
+        {
+            **metadata,
+            "heading_gate_reason": "initial_heading_error_too_large",
+            "max_initial_heading_error_deg": config.max_initial_heading_error_deg,
+            "preturn_max_heading_error_deg": config.preturn_max_heading_error_deg,
+        },
+    )
 
 
 def plan_shadow_coverage_move(samples, config: ShadowCoverageConfig, recent_attempts=()):
@@ -421,6 +502,12 @@ def plan_shadow_coverage_move(samples, config: ShadowCoverageConfig, recent_atte
                     {"endpoint_clearance_m": clearance_m},
                 )
             )
+            continue
+
+        candidate = apply_initial_heading_gate(candidate, robot_pose, config)
+        if not candidate.accepted:
+            _increment(rejections, candidate.rejection_reason or "initial_heading_error_too_large")
+            candidates.append(candidate)
             continue
 
         candidates.append(candidate)
