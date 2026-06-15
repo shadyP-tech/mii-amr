@@ -715,7 +715,11 @@ def resample_world_path(points, spacing_m):
 
     if len(resampled) < 2:
         raise ValueError("tracking smoothing collapsed to fewer than two points")
-    if resampled[-1] != points[-1]:
+    endpoint_distance_m = math.hypot(
+        resampled[-1][0] - points[-1][0],
+        resampled[-1][1] - points[-1][1],
+    )
+    if endpoint_distance_m > 1e-9:
         resampled.append(points[-1])
     return resampled
 

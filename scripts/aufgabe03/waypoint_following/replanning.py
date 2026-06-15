@@ -28,6 +28,7 @@ DEFAULT_RUN_LOCAL_MAP_SPARSE_RETRY_FORWARD_HALF_WIDTH_M = 0.40
 DEFAULT_RUN_LOCAL_MAP_SPARSE_RETRY_ANGLE_WINDOW_DEG = 75.0
 DEFAULT_RUN_LOCAL_MAP_SPARSE_RETRY_FORWARD_DISTANCE_M = 1.00
 DEFAULT_RUN_LOCAL_MAP_PRUNE_BEHIND_DISTANCE_M = 0.20
+DEFAULT_POST_REPLAN_ROUTE_BLOCK_EXTRA_UPDATES = 1
 
 INITIAL_RUN_LOCAL_MAP_NONFATAL_REASONS = {
     lidar_obstacle_map.RUN_LOCAL_FAILURE_TOO_FEW_SCAN_POINTS,
@@ -37,6 +38,7 @@ INITIAL_RUN_LOCAL_MAP_NONFATAL_REASONS = {
 REPLAN_TRIGGER_SCAN_BLOCKAGE = "scan_blockage"
 REPLAN_TRIGGER_KNOWN_CORRIDOR = "known_corridor"
 REPLAN_TRIGGER_LOOKAHEAD_GUARD = "lookahead_guard"
+REPLAN_TRIGGER_POST_REPLAN_ROUTE_BLOCKED = "post_replan_route_blocked"
 
 
 @dataclass(frozen=True)
@@ -87,6 +89,8 @@ class ReplanManager:
         old_remaining_waypoints,
         trigger,
         guard_signature=None,
+        blocked_scan_identity=None,
+        blockage_signature=None,
     ):
         return replan_after_blockage(
             self.runtime,
@@ -94,6 +98,8 @@ class ReplanManager:
             old_remaining_waypoints,
             trigger=trigger,
             guard_signature=guard_signature,
+            blocked_scan_identity=blocked_scan_identity,
+            blockage_signature=blockage_signature,
         )
 
     def prune_after_progress(self, current_pose, remaining_waypoints):
@@ -731,6 +737,69 @@ def route_signature(node, waypoints):
         round(goal.y, 3),
     )
 
+
+def detailed_route_signature(node, waypoints):
+    return tuple(
+        (round(float(waypoint.x), 3), round(float(waypoint.y), 3))
+        for waypoint in waypoints
+    )
+
+
+def post_replan_route_block_repair_signature(
+    node,
+    current_pose,
+    waypoints,
+    blockage_signature,
+):
+    return (
+        round(current_pose.x, 2),
+        round(current_pose.y, 2),
+        blockage_signature,
+        detailed_route_signature(node, waypoints),
+    )
+
+
+def remember_post_replan_route_block_repair(
+    node,
+    current_pose,
+    waypoints,
+    blockage_signature,
+):
+    signature = post_replan_route_block_repair_signature(
+        node,
+        current_pose,
+        waypoints,
+        blockage_signature,
+    )
+    if (
+        signature
+        and signature
+        == getattr(node, "last_post_replan_route_block_repair_signature", None)
+    ):
+        raise RuntimeError("post_replan_route_corridor_persistently_blocked")
+    node.last_post_replan_route_block_repair_signature = signature
+    node.post_replan_route_block_repair_signature = str(signature)
+    return signature
+
+
+def mark_post_replan_route_block_repair(
+    node,
+    *,
+    status,
+    signature=None,
+    extra_update_used=None,
+    failure_reason="",
+):
+    node.post_replan_route_block_repair_status = status
+    if signature is not None:
+        node.post_replan_route_block_repair_signature = str(signature)
+    if extra_update_used is not None:
+        node.post_replan_route_block_repair_extra_update_used = bool(
+            extra_update_used,
+        )
+    node.post_replan_route_block_repair_failure_reason = str(failure_reason or "")
+
+
 def remember_known_corridor_repair(node, waypoints):
     node.last_known_corridor_repair_signature = route_signature(node, waypoints)
     node.suppressed_known_corridor_signature = None
@@ -1117,16 +1186,205 @@ def retry_sparse_lidar_replan(
     )
     return last_result
 
+
+def blocked_scan_min_times(blocked_scan_identity):
+    if not blocked_scan_identity:
+        return None, None
+    stamp_sec, received_sec = blocked_scan_identity
+    epsilon = 1e-6
+    min_received = None if received_sec is None else received_sec + epsilon
+    min_stamp = None if stamp_sec is None else stamp_sec + epsilon
+    return min_received, min_stamp
+
+
+def maybe_allow_post_replan_route_block_extra_update(node):
+    run_local_map = getattr(node, "run_local_map", None)
+    config = getattr(run_local_map, "config", None)
+    if run_local_map is None or config is None:
+        return False, None
+    update_count = int(getattr(run_local_map, "update_count", 0))
+    max_updates = int(getattr(config, "max_updates", 0))
+    if update_count < max_updates:
+        return False, None
+    limit = max(
+        0,
+        int(
+            getattr(
+                node.args,
+                "post_replan_route_block_extra_updates",
+                DEFAULT_POST_REPLAN_ROUTE_BLOCK_EXTRA_UPDATES,
+            )
+        ),
+    )
+    used = int(getattr(node, "post_replan_route_block_extra_update_count", 0))
+    if used >= limit:
+        raise RuntimeError("post_replan_route_block_repair_budget_exhausted")
+    original_max_updates = config.max_updates
+    config.max_updates = max(original_max_updates, update_count + 1)
+    node.post_replan_route_block_extra_update_count = used + 1
+    return True, original_max_updates
+
+
+def restore_post_replan_route_block_extra_update_budget(node, original_max_updates):
+    if original_max_updates is None:
+        return
+    run_local_map = getattr(node, "run_local_map", None)
+    config = getattr(run_local_map, "config", None)
+    if config is not None:
+        config.max_updates = original_max_updates
+
+
+def replan_after_post_replan_route_block(
+    node,
+    current_pose,
+    old_remaining_waypoints,
+    goal_waypoint,
+    sequence,
+    blocked_scan_identity,
+    blockage_signature,
+):
+    node.post_replan_route_block_repair_count = (
+        getattr(node, "post_replan_route_block_repair_count", 0) + 1
+    )
+    repair_signature = post_replan_route_block_repair_signature(
+        node,
+        current_pose,
+        old_remaining_waypoints,
+        blockage_signature,
+    )
+    if (
+        repair_signature
+        and repair_signature
+        == getattr(node, "last_post_replan_route_block_repair_signature", None)
+    ):
+        mark_post_replan_route_block_repair(
+            node,
+            status="failed",
+            signature=repair_signature,
+            failure_reason="post_replan_route_corridor_persistently_blocked",
+        )
+        raise RuntimeError("post_replan_route_corridor_persistently_blocked")
+    node.last_post_replan_route_block_repair_signature = repair_signature
+    mark_post_replan_route_block_repair(
+        node,
+        status="started",
+        signature=repair_signature,
+        extra_update_used=False,
+    )
+    min_received, min_stamp = blocked_scan_min_times(blocked_scan_identity)
+    extra_update_used = False
+    original_max_updates = None
+    try:
+        try:
+            extra_update_used, original_max_updates = (
+                maybe_allow_post_replan_route_block_extra_update(node)
+            )
+        except RuntimeError as exc:
+            mark_post_replan_route_block_repair(
+                node,
+                status="failed",
+                signature=repair_signature,
+                extra_update_used=False,
+                failure_reason=str(exc),
+            )
+            raise
+        mark_post_replan_route_block_repair(
+            node,
+            status="updating",
+            signature=repair_signature,
+            extra_update_used=extra_update_used,
+        )
+        try:
+            result = replan_runtime.perform_lidar_replan(
+                node,
+                node.args,
+                current_pose,
+                goal_waypoint,
+                old_remaining_waypoints,
+                sequence=sequence,
+                min_scan_received_sec=min_received,
+                min_scan_stamp_sec=min_stamp,
+            )
+        except RuntimeError as exc:
+            message = str(exc)
+            if (
+                lidar_obstacle_map.RUN_LOCAL_FAILURE_STALE_SCAN in message
+                or "No /scan sample is available" in message
+                or "no fresh /scan" in message
+            ):
+                reason = "post_replan_route_block_repair_no_fresh_scan"
+            else:
+                reason = message
+            mark_post_replan_route_block_repair(
+                node,
+                status="failed",
+                signature=repair_signature,
+                extra_update_used=extra_update_used,
+                failure_reason=reason,
+            )
+            raise RuntimeError(reason) from exc
+    finally:
+        restore_post_replan_route_block_extra_update_budget(
+            node,
+            original_max_updates,
+        )
+
+    update_replan_diagnostics(node, result)
+    if not result.success:
+        reason = result.reason
+        if reason == lidar_obstacle_map.RUN_LOCAL_FAILURE_MAX_UPDATES_EXCEEDED:
+            reason = "post_replan_route_block_repair_budget_exhausted"
+        mark_post_replan_route_block_repair(
+            node,
+            status="failed",
+            signature=repair_signature,
+            extra_update_used=extra_update_used,
+            failure_reason=reason,
+        )
+        raise RuntimeError(reason)
+    replanned = validate_replan_result(
+        node,
+        result,
+        current_pose,
+        old_remaining_waypoints,
+        goal_waypoint,
+        require_changed=False,
+    )
+    node.live_replan_attempt_count += 1
+    mark_post_replan_route_block_repair(
+        node,
+        status="replanned",
+        signature=repair_signature,
+        extra_update_used=extra_update_used,
+    )
+    node.get_logger().warn(
+        "Replanned after post-replan route corridor blockage using fresh scan."
+    )
+    return replanned
+
+
 def replan_after_blockage(
     node,
     current_pose,
     old_remaining_waypoints,
     trigger=REPLAN_TRIGGER_SCAN_BLOCKAGE,
     guard_signature=None,
+    blocked_scan_identity=None,
+    blockage_signature=None,
 ):
     known_corridor_repair_count = getattr(node, "known_corridor_repair_count", 0)
     sequence = node.live_replan_attempt_count + known_corridor_repair_count + 1
     goal_waypoint = old_remaining_waypoints[-1]
+    if trigger == REPLAN_TRIGGER_POST_REPLAN_ROUTE_BLOCKED:
+        return replan_after_post_replan_route_block(
+            node,
+            current_pose,
+            old_remaining_waypoints,
+            goal_waypoint,
+            sequence,
+            blocked_scan_identity,
+            blockage_signature,
+        )
     if trigger == REPLAN_TRIGGER_KNOWN_CORRIDOR and node.run_local_map is not None:
         replanned = plan_with_existing_run_local_map(
             node,

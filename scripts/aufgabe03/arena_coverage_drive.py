@@ -2099,7 +2099,10 @@ class ArenaCoverageDrive(Node):
                 plan=plan,
                 verification_result="candidate_plan_residual",
             )
-            if is_residual_shadow_plan(plan) and residual_state["eligible"]:
+            if residual_state["eligible"] and (
+                is_residual_shadow_plan(plan)
+                or is_residual_shadow_plan(plan, allow_no_positive_gain=True)
+            ):
                 summary, completed = self._verify_shadow_terminal_plan(
                     args,
                     config,

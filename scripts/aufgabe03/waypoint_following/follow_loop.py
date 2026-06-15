@@ -14,6 +14,7 @@ class FollowLoopContext:
     compat_follower_type: type
     format_optional_m: Callable[[Any], str]
     guard_block_signature: Callable[..., Any]
+    post_replan_route_blocked_repair_needed_type: type[Exception]
     post_replan_recovery_escape: str
     post_replan_recovery_should_preempt_controller: Callable[..., bool]
     publish_rviz_obstacles_if_available: Callable[..., Any]
@@ -21,6 +22,7 @@ class FollowLoopContext:
     rclpy: Any
     replan_trigger_known_corridor: str
     replan_trigger_lookahead_guard: str
+    replan_trigger_post_replan_route_blocked: str
     replan_trigger_scan_blockage: str
     reset_command_smoother: Callable[..., Any]
     reset_route_projection_controller: Callable[..., Any]
@@ -96,9 +98,20 @@ def ensure_follow_runtime_state(node, build_command_smoother):
     _setdefault_attr(node, "last_post_replan_route_corridor_nearest_blocked_segment_index", None)
     _setdefault_attr(node, "last_post_replan_route_corridor_nearest_blocked_progress_m", None)
     _setdefault_attr(node, "last_post_replan_route_corridor_nearest_blocked_penetration_m", None)
+    _setdefault_attr(node, "last_post_replan_route_corridor_nearest_blocked_x_m", None)
+    _setdefault_attr(node, "last_post_replan_route_corridor_nearest_blocked_y_m", None)
+    _setdefault_attr(node, "last_post_replan_route_corridor_nearest_blocked_range_m", None)
+    _setdefault_attr(node, "last_post_replan_route_corridor_nearest_blocked_angle_deg", None)
     _setdefault_attr(node, "last_post_replan_escape_route_blocked_streak", 0)
     _setdefault_attr(node, "last_post_replan_escape_route_blocked_tolerated_count", 0)
     _setdefault_attr(node, "last_post_replan_escape_route_block_decision", "")
+    _setdefault_attr(node, "post_replan_route_block_repair_count", 0)
+    _setdefault_attr(node, "post_replan_route_block_repair_status", "")
+    _setdefault_attr(node, "post_replan_route_block_repair_signature", "")
+    _setdefault_attr(node, "post_replan_route_block_repair_extra_update_used", False)
+    _setdefault_attr(node, "post_replan_route_block_repair_failure_reason", "")
+    _setdefault_attr(node, "post_replan_route_block_extra_update_count", 0)
+    _setdefault_attr(node, "last_post_replan_route_block_repair_signature", None)
     _setdefault_attr(node, "last_post_replan_activation_min_target_distance_m", 0.0)
     _setdefault_attr(node, "last_post_replan_activation_pruned_sparse_count", 0)
     _setdefault_attr(node, "last_post_replan_activation_pruned_dense_count", 0)
@@ -135,9 +148,15 @@ def follow_waypoints(
 ):
     self = node
     BlockedByScanError = context.blocked_by_scan_error_type
+    PostReplanRouteBlockedRepairNeeded = (
+        context.post_replan_route_blocked_repair_needed_type
+    )
     POST_REPLAN_RECOVERY_ESCAPE = context.post_replan_recovery_escape
     REPLAN_TRIGGER_KNOWN_CORRIDOR = context.replan_trigger_known_corridor
     REPLAN_TRIGGER_LOOKAHEAD_GUARD = context.replan_trigger_lookahead_guard
+    REPLAN_TRIGGER_POST_REPLAN_ROUTE_BLOCKED = (
+        context.replan_trigger_post_replan_route_blocked
+    )
     REPLAN_TRIGGER_SCAN_BLOCKAGE = context.replan_trigger_scan_blockage
     RouteState = context.route_state_type
     WaypointFollower = context.compat_follower_type
@@ -270,20 +289,132 @@ def follow_waypoints(
             self.final_pose = final_pose
             self.last_amcl_health = amcl_health
             recovery = getattr(self, "post_replan_recovery", None)
-            if (
-                post_replan_recovery_should_preempt_controller(
-                    recovery,
-                    self.args,
-                )
-                and WaypointFollower.handle_post_replan_recovery(
+            try:
+                if (
+                    post_replan_recovery_should_preempt_controller(
+                        recovery,
+                        self.args,
+                    )
+                    and WaypointFollower.handle_post_replan_recovery(
+                        self,
+                        None,
+                        pose,
+                        time.time(),
+                        route_state,
+                    )
+                ):
+                    continue
+            except PostReplanRouteBlockedRepairNeeded as exc:
+                reset_command_smoother(self)
+                self.stop_repeatedly()
+                if not self.args.enable_lidar_map_replan:
+                    raise RuntimeError(
+                        "post_replan_route_block_repair_unavailable"
+                    ) from exc
+                remaining = route_state.remaining()
+                old_activation_signature = WaypointFollower._compat_method(
                     self,
-                    None,
+                    "detailed_route_signature",
+                    remaining,
+                )
+                replanned = WaypointFollower._compat_method(
+                    self,
+                    "replan_after_blockage",
                     pose,
-                    time.time(),
+                    remaining,
+                    trigger=REPLAN_TRIGGER_POST_REPLAN_ROUTE_BLOCKED,
+                    blocked_scan_identity=exc.scan_identity,
+                    blockage_signature=exc.blockage_signature,
+                )
+                publish_rviz_route_if_available(
+                    self,
+                    replanned,
+                    current_pose=pose,
+                    current_waypoint_index=0,
+                )
+                if self.args.lidar_replan_artifact_only:
+                    self.stop_repeatedly()
+                    return {
+                        "reached_count": reached_count,
+                        "start_pose": start_pose,
+                        "final_pose": final_pose,
+                        "scan_safety": last_scan_safety,
+                        "amcl_health": amcl_health,
+                        "base_frame_used": self.base_frame_used,
+                        "status": "replan_artifact_only_complete",
+                    }
+                activation_route = (
+                    WaypointFollower.prepare_run_local_route_activation(
+                        self,
+                        replanned,
+                        pose,
+                        route_state.final_goal(),
+                        REPLAN_TRIGGER_POST_REPLAN_ROUTE_BLOCKED,
+                    )
+                )
+                if activation_route.goal_reached:
+                    route_state.mark_complete()
+                    reached_count = len(route_state.waypoints)
+                    self.reached_count = reached_count
+                    self.post_replan_route_block_repair_status = (
+                        "goal_reached_after_activation"
+                    )
+                    WaypointFollower.reset_post_replan_recovery(
+                        self,
+                        "goal_reached_after_post_replan_route_block_activation",
+                    )
+                    reset_command_smoother(self)
+                    self.stop_repeatedly()
+                    reached_current = True
+                    break
+                if not activation_route.waypoints:
+                    self.post_replan_route_block_repair_status = "failed"
+                    self.post_replan_route_block_repair_failure_reason = (
+                        "post_replan_route_block_no_meaningful_target"
+                    )
+                    raise RuntimeError("post_replan_route_block_no_meaningful_target")
+                new_activation_signature = WaypointFollower._compat_method(
+                    self,
+                    "detailed_route_signature",
+                    activation_route.waypoints,
+                )
+                if new_activation_signature == old_activation_signature:
+                    self.post_replan_route_block_repair_status = "failed"
+                    self.post_replan_route_block_repair_failure_reason = (
+                        "post_replan_route_corridor_persistently_blocked"
+                    )
+                    self.stop_repeatedly()
+                    raise RuntimeError(
+                        "post_replan_route_corridor_persistently_blocked"
+                    )
+                waypoints = activation_route.waypoints
+                route_state.replace_route(
+                    waypoints,
+                    tracking_points=activation_route.tracking_points,
+                    tracking_source=activation_route.tracking_source,
+                    tracking_validation=activation_route.tracking_validation,
+                )
+                self.last_lookahead_guard_block_signature = None
+                clear_lookahead_budget_repair_if_route_changed(
+                    self,
+                    WaypointFollower,
+                    waypoints,
+                )
+                self.active_route_generation_id += 1
+                reset_command_smoother(self)
+                controller = build_path_controller(
+                    self.args,
+                    lookahead_guard=getattr(self, "lookahead_guard", None),
+                )
+                self._current_path_controller = controller
+                self.post_replan_route_block_repair_status = "activated"
+                WaypointFollower.activate_post_replan_recovery(
+                    self,
+                    pose,
                     route_state,
                 )
-            ):
-                continue
+                replanned_current = True
+                break
             step = controller.compute(pose, route_state)
             self.last_lookahead_guard_result = step.guard_result
             if hasattr(self, "record_route_projection_result"):

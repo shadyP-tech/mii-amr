@@ -653,9 +653,14 @@ def perform_lidar_replan(
     old_remaining_waypoints,
     sequence,
     scan_args=None,
+    min_scan_received_sec=None,
+    min_scan_stamp_sec=None,
 ):
     node.stop_repeatedly()
-    min_scan_received_sec = time.time() if hasattr(node, "spin_once") else None
+    if min_scan_received_sec is None and hasattr(node, "spin_once"):
+        min_scan_received_sec = time.time()
+    if min_scan_stamp_sec is None:
+        min_scan_stamp_sec = min_scan_received_sec
     return update_run_local_map_from_latest_scan(
         node,
         args,
@@ -664,6 +669,6 @@ def perform_lidar_replan(
         old_remaining_waypoints,
         sequence=sequence,
         min_scan_received_sec=min_scan_received_sec,
-        min_scan_stamp_sec=min_scan_received_sec,
+        min_scan_stamp_sec=min_scan_stamp_sec,
         scan_args=scan_args,
     )

@@ -539,6 +539,7 @@ def parse_args(argv, *, context):
     DEFAULT_REPLAN_TIMEOUT_SEC = context['DEFAULT_REPLAN_TIMEOUT_SEC']
     DEFAULT_RESULTS_CSV = context['DEFAULT_RESULTS_CSV']
     DEFAULT_ROBOT_FOOTPRINT_RADIUS_M = context['DEFAULT_ROBOT_FOOTPRINT_RADIUS_M']
+    DEFAULT_POST_REPLAN_ROUTE_BLOCK_EXTRA_UPDATES = context['DEFAULT_POST_REPLAN_ROUTE_BLOCK_EXTRA_UPDATES']
     DEFAULT_ROTATE_START_HEADING_ERROR_DEG = context['DEFAULT_ROTATE_START_HEADING_ERROR_DEG']
     DEFAULT_ROTATE_STOP_HEADING_ERROR_DEG = context['DEFAULT_ROTATE_STOP_HEADING_ERROR_DEG']
     DEFAULT_ROTATION_STOP_RANGE_M = context['DEFAULT_ROTATION_STOP_RANGE_M']
@@ -1041,6 +1042,11 @@ def parse_args(argv, *, context):
         default=DEFAULT_POST_REPLAN_ROUTE_CLEARANCE_PREVIEW_DISTANCE_M,
         type=float,
     )
+    parser.add_argument(
+        "--post-replan-route-block-extra-updates",
+        default=DEFAULT_POST_REPLAN_ROUTE_BLOCK_EXTRA_UPDATES,
+        type=int,
+    )
     parser.add_argument("--run-local-map-artifact-prefix")
     parser.add_argument("--wait-before-follow", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -1210,6 +1216,8 @@ def validate_args(parser, args, *, context):
         parser.error("--run-local-map-sparse-retry-angle-window-deg must be <= 90")
     if args.post_replan_clear_scan_samples < 1:
         parser.error("--post-replan-clear-scan-samples must be >= 1")
+    if args.post_replan_route_block_extra_updates < 0:
+        parser.error("--post-replan-route-block-extra-updates must be >= 0")
     if args.post_replan_escape_linear_speed_mps > args.linear_speed:
         parser.error(
             "--post-replan-escape-linear-speed-mps must be <= --linear-speed"

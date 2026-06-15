@@ -412,6 +412,9 @@ POST_REPLAN_PRE_CONTROLLER_RECOVERY_PHASES = (
 )
 PostReplanRecoveryState = post_replan_recovery.PostReplanRecoveryState
 PostReplanAlignmentHeading = post_replan_recovery.PostReplanAlignmentHeading
+PostReplanRouteBlockedRepairNeeded = (
+    post_replan_recovery.PostReplanRouteBlockedRepairNeeded
+)
 post_replan_recovery_should_preempt_controller = (
     post_replan_recovery.post_replan_recovery_should_preempt_controller
 )
@@ -422,6 +425,12 @@ INITIAL_RUN_LOCAL_MAP_NONFATAL_REASONS = (
 REPLAN_TRIGGER_SCAN_BLOCKAGE = replanning.REPLAN_TRIGGER_SCAN_BLOCKAGE
 REPLAN_TRIGGER_KNOWN_CORRIDOR = replanning.REPLAN_TRIGGER_KNOWN_CORRIDOR
 REPLAN_TRIGGER_LOOKAHEAD_GUARD = replanning.REPLAN_TRIGGER_LOOKAHEAD_GUARD
+REPLAN_TRIGGER_POST_REPLAN_ROUTE_BLOCKED = (
+    replanning.REPLAN_TRIGGER_POST_REPLAN_ROUTE_BLOCKED
+)
+DEFAULT_POST_REPLAN_ROUTE_BLOCK_EXTRA_UPDATES = (
+    replanning.DEFAULT_POST_REPLAN_ROUTE_BLOCK_EXTRA_UPDATES
+)
 PostReplanActivationRoute = replanning.PostReplanActivationRoute
 
 
@@ -1254,6 +1263,9 @@ class WaypointFollower(Node):
     def route_signature(self, waypoints):
         return replanning.route_signature(self, waypoints)
 
+    def detailed_route_signature(self, waypoints):
+        return replanning.detailed_route_signature(self, waypoints)
+
     def remember_known_corridor_repair(self, waypoints):
         return replanning.remember_known_corridor_repair(self, waypoints)
 
@@ -1347,12 +1359,16 @@ class WaypointFollower(Node):
         old_remaining_waypoints,
         trigger=REPLAN_TRIGGER_SCAN_BLOCKAGE,
         guard_signature=None,
+        blocked_scan_identity=None,
+        blockage_signature=None,
     ):
         return WaypointFollower._replan_manager(self).replan_after_blockage(
             current_pose,
             old_remaining_waypoints,
             trigger=trigger,
             guard_signature=guard_signature,
+            blocked_scan_identity=blocked_scan_identity,
+            blockage_signature=blockage_signature,
         )
 
     def follow_waypoints(

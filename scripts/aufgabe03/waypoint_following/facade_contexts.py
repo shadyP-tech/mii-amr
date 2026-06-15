@@ -148,6 +148,9 @@ def follow_loop_context(facade):
         compat_follower_type=facade["WaypointFollower"],
         format_optional_m=facade["format_optional_m"],
         guard_block_signature=facade["guard_block_signature"],
+        post_replan_route_blocked_repair_needed_type=facade[
+            "PostReplanRouteBlockedRepairNeeded"
+        ],
         post_replan_recovery_escape=facade["POST_REPLAN_RECOVERY_ESCAPE"],
         post_replan_recovery_should_preempt_controller=facade[
             "post_replan_recovery_should_preempt_controller"
@@ -162,6 +165,9 @@ def follow_loop_context(facade):
         replan_trigger_known_corridor=facade["REPLAN_TRIGGER_KNOWN_CORRIDOR"],
         replan_trigger_lookahead_guard=facade[
             "REPLAN_TRIGGER_LOOKAHEAD_GUARD"
+        ],
+        replan_trigger_post_replan_route_blocked=facade[
+            "REPLAN_TRIGGER_POST_REPLAN_ROUTE_BLOCKED"
         ],
         replan_trigger_scan_blockage=facade["REPLAN_TRIGGER_SCAN_BLOCKAGE"],
         reset_command_smoother=facade["reset_command_smoother"],

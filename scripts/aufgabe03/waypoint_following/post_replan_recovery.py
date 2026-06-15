@@ -69,6 +69,7 @@ POST_REPLAN_ESCAPE_ROUTE_BLOCKED_COUNT_THRESHOLD = 2
 POST_REPLAN_ESCAPE_ROUTE_BLOCKED_PERSISTENCE_SCANS = 2
 POST_REPLAN_ESCAPE_ROUTE_BLOCKED_MARGIN_M = 0.02
 POST_REPLAN_ESCAPE_ROUTE_PROGRESS_BUCKET_M = 0.05
+POST_REPLAN_ESCAPE_ROUTE_PENETRATION_BUCKET_M = 0.01
 POST_REPLAN_ACTIVATION_MIN_TARGET_FLOOR_M = 0.08
 POST_REPLAN_RECOVERY_ALIGN = "align"
 POST_REPLAN_RECOVERY_CLEARANCE_SEARCH = "clearance_search"
@@ -152,6 +153,10 @@ class PostReplanRecoveryState:
     route_corridor_nearest_blocked_segment_index: int | None = None
     route_corridor_nearest_blocked_progress_m: float | None = None
     route_corridor_nearest_blocked_penetration_m: float | None = None
+    route_corridor_nearest_blocked_x_m: float | None = None
+    route_corridor_nearest_blocked_y_m: float | None = None
+    route_corridor_nearest_blocked_range_m: float | None = None
+    route_corridor_nearest_blocked_angle_deg: float | None = None
     escape_route_blocked_streak: int = 0
     escape_route_blocked_tolerated_count: int = 0
     escape_route_block_decision: str = ""
@@ -182,6 +187,17 @@ class PostReplanRouteClearance:
     nearest_blocked_segment_index: int | None = None
     nearest_blocked_route_progress_m: float | None = None
     nearest_blocked_corridor_penetration_m: float | None = None
+    nearest_blocked_x_m: float | None = None
+    nearest_blocked_y_m: float | None = None
+    nearest_blocked_range_m: float | None = None
+    nearest_blocked_angle_deg: float | None = None
+
+
+class PostReplanRouteBlockedRepairNeeded(RuntimeError):
+    def __init__(self, scan_identity, blockage_signature):
+        super().__init__("post_replan_route_block_repair_needed")
+        self.scan_identity = scan_identity
+        self.blockage_signature = blockage_signature
 
 
 @dataclass(frozen=True)
@@ -678,6 +694,76 @@ def notes_with_post_replan_recovery_metadata(notes, args, node):
         if recovery is not None
         else getattr(node, "last_post_replan_route_corridor_preview_distance_m", 0.0)
     )
+    route_corridor_radius = (
+        float(getattr(args, "robot_footprint_radius_m", 0.0))
+        + float(getattr(args, "run_local_map_clearance_margin_m", 0.0))
+    )
+    route_corridor_nearest_x = (
+        getattr(recovery, "route_corridor_nearest_blocked_x_m", None)
+        if recovery is not None
+        else getattr(node, "last_post_replan_route_corridor_nearest_blocked_x_m", None)
+    )
+    route_corridor_nearest_y = (
+        getattr(recovery, "route_corridor_nearest_blocked_y_m", None)
+        if recovery is not None
+        else getattr(node, "last_post_replan_route_corridor_nearest_blocked_y_m", None)
+    )
+    route_corridor_nearest_range = (
+        getattr(recovery, "route_corridor_nearest_blocked_range_m", None)
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_route_corridor_nearest_blocked_range_m",
+            None,
+        )
+    )
+    route_corridor_nearest_angle = (
+        getattr(recovery, "route_corridor_nearest_blocked_angle_deg", None)
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_route_corridor_nearest_blocked_angle_deg",
+            None,
+        )
+    )
+    route_corridor_nearest_segment = (
+        getattr(recovery, "route_corridor_nearest_blocked_segment_index", None)
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_route_corridor_nearest_blocked_segment_index",
+            None,
+        )
+    )
+    route_corridor_nearest_progress = (
+        getattr(recovery, "route_corridor_nearest_blocked_progress_m", None)
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_route_corridor_nearest_blocked_progress_m",
+            None,
+        )
+    )
+    route_corridor_nearest_penetration = (
+        getattr(recovery, "route_corridor_nearest_blocked_penetration_m", None)
+        if recovery is not None
+        else getattr(
+            node,
+            "last_post_replan_route_corridor_nearest_blocked_penetration_m",
+            None,
+        )
+    )
+    route_corridor_progress_bucket = _bucket_optional(
+        route_corridor_nearest_progress,
+        POST_REPLAN_ESCAPE_ROUTE_PROGRESS_BUCKET_M,
+    )
+    route_corridor_blocked_count_bucket = _blocked_count_bucket(
+        route_corridor_blocked_count,
+    )
+    route_corridor_penetration_bucket = _bucket_optional(
+        route_corridor_nearest_penetration,
+        POST_REPLAN_ESCAPE_ROUTE_PENETRATION_BUCKET_M,
+    )
     escape_route_blocked_streak = (
         getattr(recovery, "escape_route_blocked_streak", 0)
         if recovery is not None
@@ -712,6 +798,31 @@ def notes_with_post_replan_recovery_metadata(notes, args, node):
         "last_lookahead_guard_budget_repair_reason",
         "",
     )
+    route_block_repair_count = getattr(
+        node,
+        "post_replan_route_block_repair_count",
+        0,
+    )
+    route_block_repair_status = getattr(
+        node,
+        "post_replan_route_block_repair_status",
+        "",
+    )
+    route_block_repair_signature = getattr(
+        node,
+        "post_replan_route_block_repair_signature",
+        "",
+    )
+    route_block_repair_extra_update_used = getattr(
+        node,
+        "post_replan_route_block_repair_extra_update_used",
+        False,
+    )
+    route_block_repair_failure_reason = getattr(
+        node,
+        "post_replan_route_block_repair_failure_reason",
+        "",
+    )
     return (
         f"{notes};post_replan_recovery={args.post_replan_recovery};"
         "post_replan_clearance_mode="
@@ -726,6 +837,38 @@ def notes_with_post_replan_recovery_metadata(notes, args, node):
         f"{route_clear_side_obstacle_count};"
         "route_corridor_preview_distance_m="
         f"{route_corridor_preview_distance:.3f};"
+        "route_corridor_radius_m="
+        f"{route_corridor_radius:.3f};"
+        "route_corridor_nearest_blocked_base_x_m="
+        f"{_format_optional_m(route_corridor_nearest_x)};"
+        "route_corridor_nearest_blocked_base_y_m="
+        f"{_format_optional_m(route_corridor_nearest_y)};"
+        "route_corridor_nearest_blocked_range_m="
+        f"{_format_optional_m(route_corridor_nearest_range)};"
+        "route_corridor_nearest_blocked_angle_deg="
+        f"{_format_optional_m(route_corridor_nearest_angle)};"
+        "route_corridor_nearest_blocked_segment_index="
+        f"{route_corridor_nearest_segment if route_corridor_nearest_segment is not None else ''};"
+        "route_corridor_nearest_blocked_progress_m="
+        f"{_format_optional_m(route_corridor_nearest_progress)};"
+        "route_corridor_nearest_blocked_progress_bucket="
+        f"{route_corridor_progress_bucket if route_corridor_progress_bucket is not None else ''};"
+        "route_corridor_blocked_count_bucket="
+        f"{route_corridor_blocked_count_bucket};"
+        "route_corridor_nearest_blocked_penetration_m="
+        f"{_format_optional_m(route_corridor_nearest_penetration)};"
+        "route_corridor_nearest_blocked_penetration_bucket="
+        f"{route_corridor_penetration_bucket if route_corridor_penetration_bucket is not None else ''};"
+        "post_replan_route_block_repair_count="
+        f"{route_block_repair_count};"
+        "post_replan_route_block_repair_status="
+        f"{route_block_repair_status};"
+        "post_replan_route_block_repair_signature="
+        f"{route_block_repair_signature};"
+        "post_replan_route_block_repair_extra_update_used="
+        f"{route_block_repair_extra_update_used};"
+        "post_replan_route_block_repair_failure_reason="
+        f"{route_block_repair_failure_reason};"
         "post_replan_escape_route_blocked_streak="
         f"{escape_route_blocked_streak};"
         "post_replan_escape_route_blocked_tolerated_count="
@@ -1037,6 +1180,18 @@ def reset_post_replan_recovery(node, status=""):
         node.last_post_replan_route_corridor_nearest_blocked_penetration_m = (
             recovery.route_corridor_nearest_blocked_penetration_m
         )
+        node.last_post_replan_route_corridor_nearest_blocked_x_m = (
+            recovery.route_corridor_nearest_blocked_x_m
+        )
+        node.last_post_replan_route_corridor_nearest_blocked_y_m = (
+            recovery.route_corridor_nearest_blocked_y_m
+        )
+        node.last_post_replan_route_corridor_nearest_blocked_range_m = (
+            recovery.route_corridor_nearest_blocked_range_m
+        )
+        node.last_post_replan_route_corridor_nearest_blocked_angle_deg = (
+            recovery.route_corridor_nearest_blocked_angle_deg
+        )
         node.last_post_replan_escape_route_blocked_streak = (
             recovery.escape_route_blocked_streak
         )
@@ -1249,6 +1404,10 @@ def evaluate_post_replan_route_clearance(node, pose, route_state):
     nearest_blocked_segment_index = None
     nearest_blocked_route_progress_m = None
     nearest_blocked_corridor_penetration_m = None
+    nearest_blocked_x_m = None
+    nearest_blocked_y_m = None
+    nearest_blocked_range_m = None
+    nearest_blocked_angle_deg = None
     half_angle_rad = math.radians(float(node.args.scan_half_angle_deg))
     min_scan_range_m = float(node.args.min_scan_range_m)
     for x, y, range_m, angle in scan_points:
@@ -1273,6 +1432,10 @@ def evaluate_post_replan_route_clearance(node, pose, route_state):
                 nearest_blocked_segment_index = projection[1]
                 nearest_blocked_route_progress_m = projection[2]
                 nearest_blocked_corridor_penetration_m = penetration_m
+                nearest_blocked_x_m = x
+                nearest_blocked_y_m = y
+                nearest_blocked_range_m = range_m
+                nearest_blocked_angle_deg = math.degrees(angle)
         elif abs(angle) <= half_angle_rad and range_m < min_scan_range_m:
             side_obstacle_count += 1
 
@@ -1293,6 +1456,10 @@ def evaluate_post_replan_route_clearance(node, pose, route_state):
         nearest_blocked_segment_index,
         nearest_blocked_route_progress_m,
         nearest_blocked_corridor_penetration_m,
+        nearest_blocked_x_m,
+        nearest_blocked_y_m,
+        nearest_blocked_range_m,
+        nearest_blocked_angle_deg,
     )
 
 
@@ -1317,6 +1484,18 @@ def _record_route_clearance_result(node, recovery, result):
     node.last_post_replan_route_corridor_nearest_blocked_penetration_m = (
         result.nearest_blocked_corridor_penetration_m
     )
+    node.last_post_replan_route_corridor_nearest_blocked_x_m = (
+        result.nearest_blocked_x_m
+    )
+    node.last_post_replan_route_corridor_nearest_blocked_y_m = (
+        result.nearest_blocked_y_m
+    )
+    node.last_post_replan_route_corridor_nearest_blocked_range_m = (
+        result.nearest_blocked_range_m
+    )
+    node.last_post_replan_route_corridor_nearest_blocked_angle_deg = (
+        result.nearest_blocked_angle_deg
+    )
     if recovery is not None:
         recovery.route_clearance_reason = result.reason
         recovery.route_corridor_min_distance_m = result.min_corridor_distance_m
@@ -1331,6 +1510,14 @@ def _record_route_clearance_result(node, recovery, result):
         )
         recovery.route_corridor_nearest_blocked_penetration_m = (
             result.nearest_blocked_corridor_penetration_m
+        )
+        recovery.route_corridor_nearest_blocked_x_m = result.nearest_blocked_x_m
+        recovery.route_corridor_nearest_blocked_y_m = result.nearest_blocked_y_m
+        recovery.route_corridor_nearest_blocked_range_m = (
+            result.nearest_blocked_range_m
+        )
+        recovery.route_corridor_nearest_blocked_angle_deg = (
+            result.nearest_blocked_angle_deg
         )
 
 
@@ -1431,19 +1618,99 @@ def reset_post_replan_escape_route_blocked_streak(recovery, decision="clear"):
     recovery.escape_route_block_decision = decision
 
 
-def post_replan_escape_route_block_signature(recovery):
-    progress_m = recovery.route_corridor_nearest_blocked_progress_m
-    progress_bucket = (
-        None
-        if progress_m is None
-        else int(round(progress_m / POST_REPLAN_ESCAPE_ROUTE_PROGRESS_BUCKET_M))
+def _bucket_optional(value, bucket_m):
+    if value is None:
+        return None
+    return int(round(float(value) / float(bucket_m)))
+
+
+def _blocked_count_bucket(count):
+    count = int(count)
+    if count <= 3:
+        return count
+    if count <= 5:
+        return 5
+    if count <= 10:
+        return 10
+    if count <= 25:
+        return 25
+    return 50
+
+
+def route_block_is_marginal(recovery):
+    blocked_count = int(getattr(recovery, "route_corridor_blocked_count", 0))
+    penetration_m = getattr(
+        recovery,
+        "route_corridor_nearest_blocked_penetration_m",
+        None,
     )
     return (
+        blocked_count == 1
+        and penetration_m is not None
+        and penetration_m <= POST_REPLAN_ESCAPE_ROUTE_BLOCKED_MARGIN_M
+    )
+
+
+def post_replan_route_block_signature(recovery):
+    return (
         POST_REPLAN_ROUTE_CLEARANCE_REASON_BLOCKED,
-        1,
+        getattr(recovery, "route_generation_id", None),
         recovery.route_corridor_nearest_blocked_segment_index,
-        progress_bucket,
-        "marginal",
+        _bucket_optional(
+            recovery.route_corridor_nearest_blocked_progress_m,
+            POST_REPLAN_ESCAPE_ROUTE_PROGRESS_BUCKET_M,
+        ),
+        _blocked_count_bucket(recovery.route_corridor_blocked_count),
+        _bucket_optional(
+            recovery.route_corridor_nearest_blocked_penetration_m,
+            POST_REPLAN_ESCAPE_ROUTE_PENETRATION_BUCKET_M,
+        ),
+    )
+
+
+def update_route_blocked_streak(node, recovery):
+    signature = post_replan_route_block_signature(recovery)
+    scan_identity = node.current_scan_identity()
+    previous_scan_identity = recovery.escape_route_blocked_last_scan_identity
+    if scan_identity == previous_scan_identity:
+        streak = recovery.escape_route_blocked_streak
+    elif signature == recovery.escape_route_blocked_signature:
+        streak = recovery.escape_route_blocked_streak + 1
+    else:
+        streak = 1
+    recovery.escape_route_blocked_signature = signature
+    recovery.escape_route_blocked_last_scan_identity = scan_identity
+    recovery.escape_route_blocked_streak = streak
+    return streak, signature
+
+
+def post_replan_escape_route_block_signature(recovery):
+    return post_replan_route_block_signature(recovery)
+
+
+def wait_clear_route_block_decision(node, recovery):
+    if not route_block_is_marginal(recovery):
+        reset_post_replan_escape_route_blocked_streak(
+            recovery,
+            "route_block_repair_needed",
+        )
+        return "repair", post_replan_route_block_signature(recovery)
+
+    streak, signature = update_route_blocked_streak(node, recovery)
+    if streak >= POST_REPLAN_ESCAPE_ROUTE_BLOCKED_PERSISTENCE_SCANS:
+        recovery.escape_route_block_decision = "persistent_blocked_scan"
+        return "repair", signature
+
+    recovery.escape_route_blocked_tolerated_count += 1
+    recovery.escape_route_block_decision = "wait_clear_transient_blocked_tolerated"
+    return "wait", signature
+
+
+def raise_route_block_repair_needed(node, recovery):
+    signature = post_replan_route_block_signature(recovery)
+    raise PostReplanRouteBlockedRepairNeeded(
+        node.current_scan_identity(),
+        signature,
     )
 
 
@@ -1656,6 +1923,10 @@ def activate_post_replan_recovery(node, pose, route_state):
     node.last_post_replan_route_corridor_nearest_blocked_segment_index = None
     node.last_post_replan_route_corridor_nearest_blocked_progress_m = None
     node.last_post_replan_route_corridor_nearest_blocked_penetration_m = None
+    node.last_post_replan_route_corridor_nearest_blocked_x_m = None
+    node.last_post_replan_route_corridor_nearest_blocked_y_m = None
+    node.last_post_replan_route_corridor_nearest_blocked_range_m = None
+    node.last_post_replan_route_corridor_nearest_blocked_angle_deg = None
     node.last_post_replan_escape_route_blocked_streak = 0
     node.last_post_replan_escape_route_blocked_tolerated_count = 0
     node.last_post_replan_escape_route_block_decision = ""
@@ -2019,7 +2290,25 @@ def maybe_log_post_replan_recovery(node, safety=None, heading_error_deg=None):
         "route_clear_side_obstacle_count="
         f"{recovery.route_clear_side_obstacle_count}, "
         "route_corridor_preview_distance_m="
-        f"{recovery.route_corridor_preview_distance_m:.3f}"
+        f"{recovery.route_corridor_preview_distance_m:.3f}, "
+        "route_corridor_radius_m="
+        f"{float(getattr(node.args, 'robot_footprint_radius_m', 0.0)) + float(getattr(node.args, 'run_local_map_clearance_margin_m', 0.0)):.3f}, "
+        "route_corridor_nearest_blocked_base_x_m="
+        f"{_format_optional_m(recovery.route_corridor_nearest_blocked_x_m)}, "
+        "route_corridor_nearest_blocked_base_y_m="
+        f"{_format_optional_m(recovery.route_corridor_nearest_blocked_y_m)}, "
+        "route_corridor_nearest_blocked_range_m="
+        f"{_format_optional_m(recovery.route_corridor_nearest_blocked_range_m)}, "
+        "route_corridor_nearest_blocked_angle_deg="
+        f"{_format_optional_m(recovery.route_corridor_nearest_blocked_angle_deg)}, "
+        "route_corridor_nearest_blocked_segment_index="
+        f"{recovery.route_corridor_nearest_blocked_segment_index}, "
+        "route_corridor_nearest_blocked_progress_m="
+        f"{_format_optional_m(recovery.route_corridor_nearest_blocked_progress_m)}, "
+        "route_corridor_nearest_blocked_penetration_m="
+        f"{_format_optional_m(recovery.route_corridor_nearest_blocked_penetration_m)}, "
+        "route_block_signature="
+        f"{post_replan_route_block_signature(recovery) if recovery.route_corridor_blocked_count else ''}"
     )
 
 def post_replan_escape_angular_hint(node, step):
@@ -2375,6 +2664,26 @@ def handle_post_replan_recovery(
             raise RuntimeError(reason)
         if not safety.safe:
             recovery.clear_scan_count = 0
+            if (
+                safety.reason == POST_REPLAN_ROUTE_CLEARANCE_REASON_BLOCKED
+                and scan_is_fresh_for_post_replan_recovery(
+                    node,
+                    recovery,
+                )
+            ):
+                decision, _signature = wait_clear_route_block_decision(
+                    node,
+                    recovery,
+                )
+                if decision == "repair":
+                    _reset_command_smoother(node)
+                    node.publish_velocity(0.0, 0.0)
+                    reset_post_replan_recovery(
+                        node,
+                        recovery.escape_route_block_decision
+                        or "post_replan_route_block_repair_needed",
+                    )
+                    raise_route_block_repair_needed(node, recovery)
             if (
                 safety.reason == "soft_stop"
                 and not recovery.clearance_search_attempted
