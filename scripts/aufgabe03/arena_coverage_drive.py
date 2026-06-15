@@ -104,6 +104,7 @@ DEFAULT_SHADOW_PRETURN_TIMEOUT_SEC = 6.0
 DEFAULT_SHADOW_RESIDUAL_COMPLETE = True
 DEFAULT_SHADOW_RESIDUAL_COMPLETE_MIN_MOVES = 3
 DEFAULT_SHADOW_RESIDUAL_COMPLETE_MIN_DISTANCE_M = 0.75
+MIN_LEGACY_COMPLETED_TRANSLATION_M = 0.02
 DEFAULT_MAPPER_TOPIC = "/map"
 DEFAULT_MAPPER_TOPIC_TIMEOUT_SEC = 5.0
 
@@ -1643,11 +1644,21 @@ class ArenaCoverageDrive(Node):
         return plan_shadow_coverage_move(pruned, config, recent_attempts)
 
     def _completed_translation_count(self, diagnostics):
+        def completed_translation(record):
+            if record.get("stop_reason") != "completed":
+                return False
+            if "translation_motion_executed" in record:
+                return bool(record.get("translation_motion_executed"))
+            try:
+                driven_distance_m = float(record.get("driven_distance_m", 0.0))
+            except (TypeError, ValueError):
+                driven_distance_m = 0.0
+            return driven_distance_m >= MIN_LEGACY_COMPLETED_TRANSLATION_M
+
         return sum(
             1
             for record in diagnostics.get("executions", [])
-            if record.get("stop_reason") == "completed"
-            and record.get("translation_motion_executed", False)
+            if completed_translation(record)
         )
 
     def _residual_completion_state(
