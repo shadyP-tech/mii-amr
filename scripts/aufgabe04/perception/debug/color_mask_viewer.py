@@ -35,6 +35,7 @@ class FrameRead:
     frame: object | None = None
     message: str | None = None
     waiting: bool = False
+    stamp_sec: float | None = None
 
 
 @dataclass(frozen=True)
@@ -107,6 +108,16 @@ def image_msg_to_bgr_frame(msg, numpy):
     if encoding in {"rgb8", "rgb888"}:
         frame = frame[:, :, ::-1]
     return frame.copy()
+
+
+def image_msg_stamp_sec(msg) -> float | None:
+    stamp = getattr(getattr(msg, "header", None), "stamp", None)
+    if stamp is None:
+        return None
+    try:
+        return float(stamp.sec) + float(stamp.nanosec) / 1_000_000_000.0
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 def build_mask_for_ranges(cv2, numpy, hsv_frame, color_ranges: Sequence[ColorRange]):
@@ -184,6 +195,7 @@ def annotate_frame(
     *,
     receive_fps: float | None = None,
     display_fps: float | None = None,
+    age_ms: float | None = None,
 ) -> None:
     if roi is not None:
         clipped = clamp_roi(roi, frame.shape)
@@ -207,6 +219,8 @@ def annotate_frame(
         fps_parts.append(f"rx={receive_fps:.1f}")
     if display_fps is not None:
         fps_parts.append(f"disp={display_fps:.1f}")
+    if age_ms is not None:
+        fps_parts.append(f"age={age_ms:.0f}ms")
     if fps_parts:
         cv2.putText(
             frame,
@@ -235,6 +249,7 @@ class RosImageTopicFrameSource:
         self.topic = topic
         self.description = f"ROS image topic {topic}"
         self.latest_frame = None
+        self.latest_stamp_sec = None
         self.latest_sequence = 0
         self.latest_error = None
         self.received_count = 0
@@ -285,9 +300,11 @@ class RosImageTopicFrameSource:
     def _on_image(self, msg) -> None:
         try:
             frame = image_msg_to_bgr_frame(msg, self.numpy)
+            stamp_sec = image_msg_stamp_sec(msg)
             now = time.time()
             with self._lock:
                 self.latest_frame = frame
+                self.latest_stamp_sec = stamp_sec
                 self.latest_sequence += 1
                 self.latest_error = None
                 self.received_count += 1
@@ -319,6 +336,7 @@ class RosImageTopicFrameSource:
         with self._lock:
             error = self.latest_error
             frame = self.latest_frame
+            stamp_sec = self.latest_stamp_sec
         if error:
             return FrameRead(False, message=error, waiting=True)
         if frame is None:
@@ -327,7 +345,7 @@ class RosImageTopicFrameSource:
                 message=f"waiting for first frame on {self.topic}",
                 waiting=True,
             )
-        return FrameRead(True, frame=frame)
+        return FrameRead(True, frame=frame, stamp_sec=stamp_sec)
 
     def release(self) -> None:
         self._running = False
@@ -442,6 +460,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             frame = read.frame
             now = time.time()
             last_display_sec = now
+            age_ms = (now - read.stamp_sec) * 1000.0 if read.stamp_sec is not None else None
 
             if args.resize != 1.0:
                 frame = cv2.resize(frame, None, fx=args.resize, fy=args.resize)
@@ -480,6 +499,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 warning,
                 receive_fps=frame_source.receive_fps,
                 display_fps=display_fps,
+                age_ms=age_ms,
             )
             preview = None
             if args.display_mode == "all" or args.save_snapshot is not None:
@@ -493,10 +513,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 last_display_fps_count = 0
                 last_display_fps_sec = time.time()
             if args.print_every > 0 and frame_count % args.print_every == 0:
-                print(
+                line = (
                     f"{result.label} confidence={result.confidence:.3f} "
-                    f"matched={result.matched_pixels}/{result.total_pixels}"
+                    f"matched={result.matched_pixels}/{result.total_pixels} "
                 )
+                if age_ms is not None:
+                    line += f"age_ms={age_ms:.0f}"
+                print(line)
 
             cv2.imshow(WINDOW_FRAME, annotated)
             if args.display_mode in {"frame-mask", "all"}:

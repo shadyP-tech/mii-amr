@@ -58,3 +58,5 @@ Tune thresholds in the actual lighting where the stands will be seen. Prefer sel
 The low-latency default is a single annotated frame window. Use `--display-mode frame-mask` to also show the mask, or `--display-mode all` to show frame, mask, and masked preview. Extra windows can add visible lag over Apptainer/X11.
 
 The mask is built with vectorized OpenCV operations and ROI confidence is computed from `cv2.countNonZero(mask_roi)`. Lower `--max-display-fps` if the laptop is overloaded; the ROS subscriber still keeps the latest received frame in a background thread. Duplicate-frame checks are disabled by default; enable `--detect-duplicates` only when diagnosing frozen input.
+
+The frame overlay includes `age=...ms` when the incoming image has a ROS header stamp. A large age means frames are already stale before display, while a small age with laggy windows points to local rendering overhead.

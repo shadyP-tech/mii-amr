@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT))
 from scripts.aufgabe04.perception.debug.color_mask_viewer import (  # noqa: E402
     build_parser,
     image_msg_to_bgr_frame,
+    image_msg_stamp_sec,
 )
 
 
@@ -28,6 +29,22 @@ class FakeImage:
     encoding: str
     step: int
     data: bytes
+
+
+@dataclass
+class FakeStamp:
+    sec: int
+    nanosec: int
+
+
+@dataclass
+class FakeHeader:
+    stamp: FakeStamp
+
+
+@dataclass
+class FakeStampedImage(FakeImage):
+    header: FakeHeader
 
 
 @unittest.skipIf(numpy is None, "numpy is required for image conversion tests")
@@ -99,6 +116,31 @@ class ImageMessageConversionTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "unsupported"):
             image_msg_to_bgr_frame(msg, numpy)
+
+
+class ImageMessageStampTest(unittest.TestCase):
+    def test_extracts_header_stamp_seconds(self):
+        msg = FakeStampedImage(
+            height=1,
+            width=1,
+            encoding="8UC3",
+            step=3,
+            data=bytes([0, 0, 0]),
+            header=FakeHeader(FakeStamp(sec=12, nanosec=345_000_000)),
+        )
+
+        self.assertAlmostEqual(image_msg_stamp_sec(msg), 12.345)
+
+    def test_missing_header_stamp_returns_none(self):
+        msg = FakeImage(
+            height=1,
+            width=1,
+            encoding="8UC3",
+            step=3,
+            data=bytes([0, 0, 0]),
+        )
+
+        self.assertIsNone(image_msg_stamp_sec(msg))
 
 
 class ColorMaskViewerCliTest(unittest.TestCase):
