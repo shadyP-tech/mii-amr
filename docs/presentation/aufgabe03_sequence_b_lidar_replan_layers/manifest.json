@@ -1,0 +1,63 @@
+{
+  "title": "Aufgabe 03 Sequence B LiDAR obstacle and replan layers",
+  "map": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+  "canvas": {
+    "width": 1920,
+    "height": 1080
+  },
+  "robot_pose": {
+    "x_m": 0.555,
+    "y_m": -0.015,
+    "yaw_deg": 45.0
+  },
+  "goal_pose": {
+    "x_m": 1.005,
+    "y_m": 0.285
+  },
+  "synthetic_obstacle_base_frame": {
+    "x_m": 0.28,
+    "y_m": 0.0,
+    "width_m": 0.12,
+    "points": 9
+  },
+  "accepted_cells": 3,
+  "raw_obstacle_cells": 3,
+  "inflated_obstacle_cells": 47,
+  "blocked_old_path_cells": 6,
+  "replanned_path_cells": 15,
+  "replanned_waypoints": 9,
+  "frames": [
+    {
+      "index": 1,
+      "file": "frames/001_planned_route_robot.png"
+    },
+    {
+      "index": 2,
+      "file": "frames/002_raw_lidar_scan_points.png"
+    },
+    {
+      "index": 3,
+      "file": "frames/003_forward_obstacle_roi.png"
+    },
+    {
+      "index": 4,
+      "file": "frames/004_accepted_rejected_cells.png"
+    },
+    {
+      "index": 5,
+      "file": "frames/005_run_local_obstacle_overlay.png"
+    },
+    {
+      "index": 6,
+      "file": "frames/006_old_path_blocked.png"
+    },
+    {
+      "index": 7,
+      "file": "frames/007_replanned_path.png"
+    },
+    {
+      "index": 8,
+      "file": "frames/008_validation_frame.png"
+    }
+  ]
+}
