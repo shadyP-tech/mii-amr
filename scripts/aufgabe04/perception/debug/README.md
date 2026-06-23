@@ -12,17 +12,34 @@ Keep all OpenCV window, camera, and live-debug code in this debug package. Pure 
 
 Run this only when the robot is stationary or physically secured. Confirm no autonomous mission, Nav2 goal, custom follower, or station-route runner is active.
 
+Start the TurtleBot built-in camera on the robot or ROS host:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/turtlebot3_ws/install/setup.bash
+
+export ROS_DOMAIN_ID=30
+export ROS_LOCALHOST_ONLY=0
+export TURTLEBOT3_MODEL=burger
+export LDS_MODEL=LDS-02
+
+ros2 run camera_ros camera_node --ros-args \
+  -p width:=640 \
+  -p height:=480 \
+  -p format:=BGR888
+```
+
+Run the viewer from an environment that can see the image topic:
+
 ```bash
 python3 -m scripts.aufgabe04.perception.debug.color_mask_viewer \
-  --camera-index 0 \
-  --width 1280 \
-  --height 720 \
-  --fps 30 \
-  --resize 0.7 \
+  --ros-image-topic /image_raw \
   --color green \
-  --roi 420,220,220,180 \
+  --roi 120,100,220,180 \
   --tune
 ```
+
+The viewer only supports ROS 2 `sensor_msgs/Image` input. Local OpenCV camera indexes and video files are intentionally not supported in this Aufgabe 04 debug tool.
 
 Useful keys:
 
@@ -31,4 +48,3 @@ Useful keys:
 - `q` or `Esc`: quit.
 
 Tune thresholds in the actual lighting where the stands will be seen. Prefer selecting a stand ROI over classifying the full frame, because full-frame classification dilutes confidence with background pixels.
-

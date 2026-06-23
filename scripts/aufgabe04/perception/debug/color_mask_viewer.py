@@ -33,6 +33,14 @@ class Rect:
     height: int
 
 
+@dataclass(frozen=True)
+class FrameRead:
+    ok: bool
+    frame: object | None = None
+    message: str | None = None
+    waiting: bool = False
+
+
 def parse_roi(value: str) -> Rect:
     parts = [part.strip() for part in value.split(",")]
     if len(parts) != 4:
@@ -96,6 +104,33 @@ def classify_roi(
         config=ColorClassifierConfig(min_confidence=min_confidence),
         timestamp_sec=time.time(),
     )
+
+
+def image_msg_to_bgr_frame(msg, numpy):
+    encoding = str(getattr(msg, "encoding", "")).strip().lower()
+    if encoding not in {"bgr8", "bgr888", "rgb8", "rgb888"}:
+        raise ValueError(f"unsupported ROS image encoding: {getattr(msg, 'encoding', '')!r}")
+
+    height = int(msg.height)
+    width = int(msg.width)
+    step = int(msg.step)
+    channels = 3
+    min_step = width * channels
+    if height <= 0 or width <= 0:
+        raise ValueError("ROS image dimensions must be positive")
+    if step < min_step:
+        raise ValueError("ROS image step is smaller than width * channels")
+
+    data = numpy.frombuffer(msg.data, dtype=numpy.uint8)
+    expected_values = height * step
+    if data.size < expected_values:
+        raise ValueError("ROS image data is shorter than height * step")
+
+    rows = data[:expected_values].reshape((height, step))
+    frame = rows[:, :min_step].reshape((height, width, channels))
+    if encoding in {"rgb8", "rgb888"}:
+        frame = frame[:, :, ::-1]
+    return frame.copy()
 
 
 def build_mask_for_ranges(cv2, numpy, hsv_frame, color_ranges: Sequence[ColorRange]):
@@ -189,18 +224,69 @@ def save_snapshot(cv2, directory: Path, frame, mask, preview, color_label: str) 
     print(f"saved snapshot: {prefix}_*.png")
 
 
-def open_capture(cv2, args):
-    if args.video:
-        return cv2.VideoCapture(args.video)
-    backend = cv2.CAP_AVFOUNDATION if args.backend == "avfoundation" else 0
-    cap = cv2.VideoCapture(args.camera_index, backend) if backend else cv2.VideoCapture(args.camera_index)
-    if args.width:
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
-    if args.height:
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
-    if args.fps:
-        cap.set(cv2.CAP_PROP_FPS, args.fps)
-    return cap
+class RosImageTopicFrameSource:
+    def __init__(self, numpy, topic: str):
+        self.numpy = numpy
+        self.topic = topic
+        self.description = f"ROS image topic {topic}"
+        self.latest_frame = None
+        self.latest_error = None
+        self.received_count = 0
+        self.last_received_sec = None
+
+        try:
+            import rclpy
+            from rclpy.node import Node
+            from sensor_msgs.msg import Image
+        except ImportError as exc:
+            raise SystemExit(
+                "ROS image topic mode requires rclpy and sensor_msgs. "
+                "Source the ROS 2 Humble and TurtleBot workspaces first."
+            ) from exc
+
+        self.rclpy = rclpy
+        self.owns_rclpy = not rclpy.ok()
+        if self.owns_rclpy:
+            rclpy.init(args=None)
+
+        class ColorMaskViewerNode(Node):
+            pass
+
+        self.node = ColorMaskViewerNode("aufgabe04_color_mask_viewer")
+        self.subscription = self.node.create_subscription(Image, topic, self._on_image, 10)
+
+    def _on_image(self, msg) -> None:
+        try:
+            self.latest_frame = image_msg_to_bgr_frame(msg, self.numpy)
+            self.latest_error = None
+            self.received_count += 1
+            self.last_received_sec = time.time()
+        except ValueError as exc:
+            self.latest_error = str(exc)
+
+    def is_opened(self) -> bool:
+        return True
+
+    def read(self) -> FrameRead:
+        self.rclpy.spin_once(self.node, timeout_sec=0.05)
+        if self.latest_error:
+            return FrameRead(False, message=self.latest_error, waiting=True)
+        if self.latest_frame is None:
+            return FrameRead(
+                False,
+                message=f"waiting for first frame on {self.topic}",
+                waiting=True,
+            )
+        return FrameRead(True, frame=self.latest_frame.copy())
+
+    def release(self) -> None:
+        self.node.destroy_node()
+        if self.owns_rclpy and self.rclpy.ok():
+            self.rclpy.shutdown()
+
+
+def create_frame_source(numpy, args):
+    return RosImageTopicFrameSource(numpy, args.ros_image_topic)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -208,12 +294,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Debug-only Aufgabe 04 stand color HSV mask viewer. Does not move the robot."
     )
-    parser.add_argument("--camera-index", type=int, default=0)
-    parser.add_argument("--video", help="Read frames from a video file instead of a live camera.")
-    parser.add_argument("--backend", choices=("default", "avfoundation"), default="default")
-    parser.add_argument("--width", type=int)
-    parser.add_argument("--height", type=int)
-    parser.add_argument("--fps", type=float)
+    parser.add_argument(
+        "--ros-image-topic",
+        required=True,
+        help="Read frames from a ROS 2 sensor_msgs/Image topic, e.g. /image_raw.",
+    )
     parser.add_argument("--resize", type=float, default=1.0)
     parser.add_argument("--color", choices=labels, default="green")
     parser.add_argument("--roi", type=parse_roi, help="ROI as x,y,w,h in resized frame pixels.")
@@ -243,9 +328,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.print_palette:
         print_palette(selected_ranges)
 
-    cap = open_capture(cv2, args)
-    if not cap.isOpened():
-        raise SystemExit("failed to open camera/video source")
+    frame_source = create_frame_source(numpy, args)
+    if not frame_source.is_opened():
+        raise SystemExit(f"failed to open frame source: {frame_source.description}")
 
     if args.tune:
         create_trackbars(cv2, selected_ranges[0])
@@ -256,12 +341,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     frame_count = 0
     last_digest = None
     duplicate_count = 0
+    last_waiting_message_sec = 0.0
     try:
         while True:
-            ok, frame = cap.read()
-            if not ok:
-                print("WARNING: failed to read frame")
+            read = frame_source.read()
+            if not read.ok:
+                if read.waiting:
+                    now = time.time()
+                    if now - last_waiting_message_sec >= 1.0:
+                        print(f"WARNING: {read.message}")
+                        last_waiting_message_sec = now
+                    key = cv2.waitKey(1) & 0xFF
+                    if key in (27, ord("q")):
+                        break
+                    continue
+                print(f"WARNING: {read.message}")
                 break
+            frame = read.frame
 
             if args.resize != 1.0:
                 frame = cv2.resize(frame, None, fx=args.resize, fy=args.resize)
@@ -320,11 +416,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             if key == ord("s") and args.save_snapshot is not None:
                 save_snapshot(cv2, args.save_snapshot, annotated, mask, preview, args.color)
     finally:
-        cap.release()
+        frame_source.release()
         cv2.destroyAllWindows()
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
