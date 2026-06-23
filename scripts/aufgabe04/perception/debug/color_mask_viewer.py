@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import threading
 import time
 from dataclasses import dataclass
@@ -176,10 +175,6 @@ def print_palette(color_ranges: Iterable[ColorRange]) -> None:
         )
 
 
-def frame_digest(frame) -> str:
-    return hashlib.sha1(frame.tobytes()).hexdigest()
-
-
 def annotate_frame(
     cv2,
     frame,
@@ -240,6 +235,7 @@ class RosImageTopicFrameSource:
         self.topic = topic
         self.description = f"ROS image topic {topic}"
         self.latest_frame = None
+        self.latest_sequence = 0
         self.latest_error = None
         self.received_count = 0
         self.last_received_sec = None
@@ -288,6 +284,7 @@ class RosImageTopicFrameSource:
             now = time.time()
             with self._lock:
                 self.latest_frame = frame
+                self.latest_sequence += 1
                 self.latest_error = None
                 self.received_count += 1
                 self.last_received_sec = now
@@ -317,7 +314,7 @@ class RosImageTopicFrameSource:
     def read(self) -> FrameRead:
         with self._lock:
             error = self.latest_error
-            frame = None if self.latest_frame is None else self.latest_frame.copy()
+            frame = self.latest_frame
         if error:
             return FrameRead(False, message=error, waiting=True)
         if frame is None:
@@ -363,12 +360,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--morph-kernel", type=int, default=5)
     parser.add_argument("--close-iterations", type=int, default=2)
     parser.add_argument("--open-iterations", type=int, default=1)
-    parser.add_argument("--duplicate-frame-warn-count", type=int, default=15)
+    parser.add_argument("--detect-duplicates", action="store_true")
     parser.add_argument(
         "--max-display-fps",
         type=float,
         default=30.0,
         help="Limit display/render rate while keeping the latest received ROS frame. Use 0 for unlimited.",
+    )
+    parser.add_argument(
+        "--display-mode",
+        choices=("frame", "frame-mask", "all"),
+        default="frame",
+        help="frame is lowest latency; frame-mask also shows mask; all also shows masked preview.",
     )
     return parser
 
@@ -398,7 +401,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print("Keys: ESC/q quit, p print ColorRange, s save snapshot.")
 
     frame_count = 0
-    last_digest = None
+    last_frame_id = None
     duplicate_count = 0
     last_waiting_message_sec = 0.0
     last_display_sec = 0.0
@@ -407,6 +410,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     display_fps = None
     try:
         while True:
+            now = time.time()
+            if args.max_display_fps > 0.0:
+                min_period = 1.0 / args.max_display_fps
+                sleep_sec = min_period - (now - last_display_sec)
+                if sleep_sec > 0.0:
+                    time.sleep(min(sleep_sec, 0.05))
             read = frame_source.read()
             if not read.ok:
                 if read.waiting:
@@ -422,29 +431,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 break
             frame = read.frame
             now = time.time()
-            if args.max_display_fps > 0.0:
-                min_period = 1.0 / args.max_display_fps
-                if now - last_display_sec < min_period:
-                    key = cv2.waitKey(1) & 0xFF
-                    if key in (27, ord("q")):
-                        break
-                    continue
             last_display_sec = now
 
             if args.resize != 1.0:
                 frame = cv2.resize(frame, None, fx=args.resize, fy=args.resize)
 
-            digest = frame_digest(frame)
-            if digest == last_digest:
-                duplicate_count += 1
-            else:
-                duplicate_count = 0
-            last_digest = digest
-            warning = (
-                "WARNING: repeated camera frame"
-                if duplicate_count >= args.duplicate_frame_warn_count
-                else None
-            )
+            frame_id = id(frame)
+            warning = None
+            if args.detect_duplicates:
+                if frame_id == last_frame_id:
+                    duplicate_count += 1
+                else:
+                    duplicate_count = 0
+                last_frame_id = frame_id
+                if duplicate_count >= 15:
+                    warning = "WARNING: repeated camera frame"
 
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
             active_ranges = [current_track_range(cv2, args.color)] if args.tune else selected_ranges
@@ -460,7 +461,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             roi = args.roi or Rect(0, 0, frame.shape[1], frame.shape[0])
             result = classify_mask_roi(cv2, mask, roi, args.color)
-            preview = cv2.bitwise_and(frame, frame, mask=mask)
             annotated = frame.copy()
             annotate_frame(
                 cv2,
@@ -471,6 +471,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 receive_fps=frame_source.receive_fps,
                 display_fps=display_fps,
             )
+            preview = None
+            if args.display_mode == "all" or args.save_snapshot is not None:
+                preview = cv2.bitwise_and(frame, frame, mask=mask)
 
             frame_count += 1
             last_display_fps_count += 1
@@ -486,8 +489,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
 
             cv2.imshow(WINDOW_FRAME, annotated)
-            cv2.imshow(WINDOW_MASK, mask)
-            cv2.imshow(WINDOW_PREVIEW, preview)
+            if args.display_mode in {"frame-mask", "all"}:
+                cv2.imshow(WINDOW_MASK, mask)
+            if args.display_mode == "all":
+                cv2.imshow(WINDOW_PREVIEW, preview)
 
             key = cv2.waitKey(1) & 0xFF
             if key in (27, ord("q")):
@@ -495,6 +500,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             if key == ord("p"):
                 print_palette(active_ranges)
             if key == ord("s") and args.save_snapshot is not None:
+                if preview is None:
+                    preview = cv2.bitwise_and(frame, frame, mask=mask)
                 save_snapshot(cv2, args.save_snapshot, annotated, mask, preview, args.color)
     finally:
         frame_source.release()
