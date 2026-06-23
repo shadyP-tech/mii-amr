@@ -10,7 +10,6 @@ from typing import Iterable, List, Sequence, Tuple
 from scripts.aufgabe04.perception.color_classifier import (
     DEFAULT_STAND_PALETTE,
     classify_hsv_pixels,
-    hsv_pixel_in_range,
 )
 from scripts.aufgabe04.perception.models import (
     ColorClassification,
@@ -135,12 +134,11 @@ def image_msg_to_bgr_frame(msg, numpy):
 
 def build_mask_for_ranges(cv2, numpy, hsv_frame, color_ranges: Sequence[ColorRange]):
     mask = numpy.zeros(hsv_frame.shape[:2], dtype=numpy.uint8)
-    flat_hsv = hsv_frame.reshape(-1, 3)
-    flat_mask = mask.reshape(-1)
-    for index, pixel in enumerate(flat_hsv):
-        hsv_pixel = (int(pixel[0]), int(pixel[1]), int(pixel[2]))
-        if any(hsv_pixel_in_range(hsv_pixel, color_range) for color_range in color_ranges):
-            flat_mask[index] = 255
+    for color_range in color_ranges:
+        lower = numpy.array(color_range.lower_hsv, dtype=numpy.uint8)
+        upper = numpy.array(color_range.upper_hsv, dtype=numpy.uint8)
+        range_mask = cv2.inRange(hsv_frame, lower, upper)
+        mask = cv2.bitwise_or(mask, range_mask)
     return mask
 
 
@@ -194,7 +192,16 @@ def frame_digest(frame) -> str:
     return hashlib.sha1(frame.tobytes()).hexdigest()
 
 
-def annotate_frame(cv2, frame, roi: Rect | None, result: ColorClassification, warning: str | None) -> None:
+def annotate_frame(
+    cv2,
+    frame,
+    roi: Rect | None,
+    result: ColorClassification,
+    warning: str | None,
+    *,
+    receive_fps: float | None = None,
+    display_fps: float | None = None,
+) -> None:
     if roi is not None:
         clipped = clamp_roi(roi, frame.shape)
         if clipped.width > 0 and clipped.height > 0:
@@ -212,6 +219,21 @@ def annotate_frame(cv2, frame, roi: Rect | None, result: ColorClassification, wa
     cv2.putText(frame, text, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     if warning:
         cv2.putText(frame, warning, (12, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
+    fps_parts = []
+    if receive_fps is not None:
+        fps_parts.append(f"rx={receive_fps:.1f}")
+    if display_fps is not None:
+        fps_parts.append(f"disp={display_fps:.1f}")
+    if fps_parts:
+        cv2.putText(
+            frame,
+            " ".join(fps_parts),
+            (12, frame.shape[0] - 12),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (255, 255, 255),
+            2,
+        )
 
 
 def save_snapshot(cv2, directory: Path, frame, mask, preview, color_label: str) -> None:
@@ -233,6 +255,9 @@ class RosImageTopicFrameSource:
         self.latest_error = None
         self.received_count = 0
         self.last_received_sec = None
+        self._last_fps_count = 0
+        self._last_fps_sec = time.time()
+        self.receive_fps = None
 
         try:
             import rclpy
@@ -267,6 +292,11 @@ class RosImageTopicFrameSource:
             self.latest_error = None
             self.received_count += 1
             self.last_received_sec = time.time()
+            elapsed = self.last_received_sec - self._last_fps_sec
+            if elapsed >= 1.0:
+                self.receive_fps = (self.received_count - self._last_fps_count) / elapsed
+                self._last_fps_count = self.received_count
+                self._last_fps_sec = self.last_received_sec
         except ValueError as exc:
             self.latest_error = str(exc)
 
@@ -275,6 +305,10 @@ class RosImageTopicFrameSource:
 
     def read(self) -> FrameRead:
         self.rclpy.spin_once(self.node, timeout_sec=0.05)
+        drained = 0
+        while drained < 5:
+            self.rclpy.spin_once(self.node, timeout_sec=0.0)
+            drained += 1
         if self.latest_error:
             return FrameRead(False, message=self.latest_error, waiting=True)
         if self.latest_frame is None:
@@ -318,6 +352,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--close-iterations", type=int, default=2)
     parser.add_argument("--open-iterations", type=int, default=1)
     parser.add_argument("--duplicate-frame-warn-count", type=int, default=15)
+    parser.add_argument(
+        "--max-display-fps",
+        type=float,
+        default=30.0,
+        help="Limit display/render rate while keeping the latest received ROS frame. Use 0 for unlimited.",
+    )
     return parser
 
 
@@ -348,6 +388,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     last_digest = None
     duplicate_count = 0
     last_waiting_message_sec = 0.0
+    last_display_sec = 0.0
+    last_display_fps_sec = time.time()
+    last_display_fps_count = 0
+    display_fps = None
     try:
         while True:
             read = frame_source.read()
@@ -364,6 +408,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"WARNING: {read.message}")
                 break
             frame = read.frame
+            now = time.time()
+            if args.max_display_fps > 0.0:
+                min_period = 1.0 / args.max_display_fps
+                if now - last_display_sec < min_period:
+                    key = cv2.waitKey(1) & 0xFF
+                    if key in (27, ord("q")):
+                        break
+                    continue
+            last_display_sec = now
 
             if args.resize != 1.0:
                 frame = cv2.resize(frame, None, fx=args.resize, fy=args.resize)
@@ -401,9 +454,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             preview = cv2.bitwise_and(frame, frame, mask=mask)
             annotated = frame.copy()
-            annotate_frame(cv2, annotated, roi, result, warning)
+            annotate_frame(
+                cv2,
+                annotated,
+                roi,
+                result,
+                warning,
+                receive_fps=frame_source.receive_fps,
+                display_fps=display_fps,
+            )
 
             frame_count += 1
+            last_display_fps_count += 1
+            fps_elapsed = time.time() - last_display_fps_sec
+            if fps_elapsed >= 1.0:
+                display_fps = last_display_fps_count / fps_elapsed
+                last_display_fps_count = 0
+                last_display_fps_sec = time.time()
             if args.print_every > 0 and frame_count % args.print_every == 0:
                 print(
                     f"{result.label} confidence={result.confidence:.3f} "

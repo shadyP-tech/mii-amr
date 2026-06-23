@@ -36,6 +36,7 @@ python3 -m scripts.aufgabe04.perception.debug.color_mask_viewer \
   --ros-image-topic /camera/image_raw \
   --color green \
   --roi 120,100,220,180 \
+  --max-display-fps 30 \
   --tune
 ```
 
@@ -48,3 +49,5 @@ Useful keys:
 - `q` or `Esc`: quit.
 
 Tune thresholds in the actual lighting where the stands will be seen. Prefer selecting a stand ROI over classifying the full frame, because full-frame classification dilutes confidence with background pixels.
+
+The mask display uses vectorized OpenCV operations and overlays receive/display FPS in the frame window. Lower `--max-display-fps` if the laptop is overloaded; the ROS subscriber still keeps the latest received frame.
