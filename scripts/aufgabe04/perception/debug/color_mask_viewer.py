@@ -237,6 +237,7 @@ class RosImageTopicFrameSource:
         try:
             import rclpy
             from rclpy.node import Node
+            from rclpy.qos import qos_profile_sensor_data
             from sensor_msgs.msg import Image
         except ImportError as exc:
             raise SystemExit(
@@ -253,7 +254,12 @@ class RosImageTopicFrameSource:
             pass
 
         self.node = ColorMaskViewerNode("aufgabe04_color_mask_viewer")
-        self.subscription = self.node.create_subscription(Image, topic, self._on_image, 10)
+        self.subscription = self.node.create_subscription(
+            Image,
+            topic,
+            self._on_image,
+            qos_profile_sensor_data,
+        )
 
     def _on_image(self, msg) -> None:
         try:
@@ -297,7 +303,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ros-image-topic",
         required=True,
-        help="Read frames from a ROS 2 sensor_msgs/Image topic, e.g. /image_raw.",
+        help="Read frames from a ROS 2 sensor_msgs/Image topic, e.g. /camera/image_raw.",
     )
     parser.add_argument("--resize", type=float, default=1.0)
     parser.add_argument("--color", choices=labels, default="green")

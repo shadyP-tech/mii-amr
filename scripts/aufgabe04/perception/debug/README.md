@@ -33,7 +33,7 @@ Run the viewer from an environment that can see the image topic:
 
 ```bash
 python3 -m scripts.aufgabe04.perception.debug.color_mask_viewer \
-  --ros-image-topic /image_raw \
+  --ros-image-topic /camera/image_raw \
   --color green \
   --roi 120,100,220,180 \
   --tune
