@@ -84,7 +84,7 @@ def ranges_for_label(label: str, palette: Sequence[ColorRange] = DEFAULT_STAND_P
 
 def image_msg_to_bgr_frame(msg, numpy):
     encoding = str(getattr(msg, "encoding", "")).strip().lower()
-    if encoding not in {"bgr8", "bgr888", "rgb8", "rgb888"}:
+    if encoding not in {"bgr8", "bgr888", "rgb8", "rgb888", "8uc3"}:
         raise ValueError(f"unsupported ROS image encoding: {getattr(msg, 'encoding', '')!r}")
 
     height = int(msg.height)

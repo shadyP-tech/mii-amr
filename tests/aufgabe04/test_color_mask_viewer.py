@@ -60,6 +60,19 @@ class ImageMessageConversionTest(unittest.TestCase):
 
         self.assertEqual(frame[0, 0].tolist(), [30, 20, 10])
 
+    def test_treats_8uc3_image_as_bgr(self):
+        msg = FakeImage(
+            height=1,
+            width=1,
+            encoding="8UC3",
+            step=3,
+            data=bytes([7, 8, 9]),
+        )
+
+        frame = image_msg_to_bgr_frame(msg, numpy)
+
+        self.assertEqual(frame[0, 0].tolist(), [7, 8, 9])
+
     def test_ignores_row_padding(self):
         msg = FakeImage(
             height=2,
