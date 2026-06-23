@@ -244,9 +244,10 @@ def save_snapshot(cv2, directory: Path, frame, mask, preview, color_label: str) 
 
 
 class RosImageTopicFrameSource:
-    def __init__(self, numpy, topic: str, qos: str):
+    def __init__(self, numpy, topic: str, qos: str, max_frame_age_sec: float):
         self.numpy = numpy
         self.topic = topic
+        self.max_frame_age_sec = max_frame_age_sec
         self.description = f"ROS image topic {topic}"
         self.latest_frame = None
         self.latest_stamp_sec = None
@@ -299,9 +300,15 @@ class RosImageTopicFrameSource:
 
     def _on_image(self, msg) -> None:
         try:
-            frame = image_msg_to_bgr_frame(msg, self.numpy)
             stamp_sec = image_msg_stamp_sec(msg)
             now = time.time()
+            if (
+                self.max_frame_age_sec > 0.0
+                and stamp_sec is not None
+                and now - stamp_sec > self.max_frame_age_sec
+            ):
+                return
+            frame = image_msg_to_bgr_frame(msg, self.numpy)
             with self._lock:
                 self.latest_frame = frame
                 self.latest_stamp_sec = stamp_sec
@@ -357,7 +364,12 @@ class RosImageTopicFrameSource:
 
 
 def create_frame_source(numpy, args):
-    return RosImageTopicFrameSource(numpy, args.ros_image_topic, args.qos)
+    return RosImageTopicFrameSource(
+        numpy,
+        args.ros_image_topic,
+        args.qos,
+        args.max_frame_age_sec,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -394,6 +406,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=30.0,
         help="Limit display/render rate while keeping the latest received ROS frame. Use 0 for unlimited.",
+    )
+    parser.add_argument(
+        "--max-frame-age-sec",
+        type=float,
+        default=0.25,
+        help="Drop incoming ROS image messages older than this. Use 0 to disable.",
     )
     parser.add_argument(
         "--display-mode",

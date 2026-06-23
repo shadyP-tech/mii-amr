@@ -166,6 +166,15 @@ class ColorMaskViewerCliTest(unittest.TestCase):
 
         self.assertEqual(args.qos, "reliable")
 
+    def test_max_frame_age_default_and_override(self):
+        parser = build_parser()
+
+        default_args = parser.parse_args(["--ros-image-topic", "/image_raw"])
+        disabled_args = parser.parse_args(["--ros-image-topic", "/image_raw", "--max-frame-age-sec", "0"])
+
+        self.assertAlmostEqual(default_args.max_frame_age_sec, 0.25)
+        self.assertAlmostEqual(disabled_args.max_frame_age_sec, 0.0)
+
     def test_opencv_camera_and_video_sources_are_not_supported(self):
         parser = build_parser()
 

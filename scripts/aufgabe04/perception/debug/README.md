@@ -38,6 +38,7 @@ python3 -m scripts.aufgabe04.perception.debug.color_mask_viewer \
   --color green \
   --roi 120,100,220,180 \
   --max-display-fps 10 \
+  --max-frame-age-sec 0.25 \
   --display-mode frame \
   --no-morph \
   --tune
@@ -59,4 +60,4 @@ The low-latency default is a single annotated frame window. Use `--display-mode 
 
 The mask is built with vectorized OpenCV operations and ROI confidence is computed from `cv2.countNonZero(mask_roi)`. Lower `--max-display-fps` if the laptop is overloaded; the ROS subscriber still keeps the latest received frame in a background thread. Duplicate-frame checks are disabled by default; enable `--detect-duplicates` only when diagnosing frozen input.
 
-The frame overlay includes `age=...ms` when the incoming image has a ROS header stamp. A large age means frames are already stale before display, while a small age with laggy windows points to local rendering overhead.
+The frame overlay includes `age=...ms` when the incoming image has a ROS header stamp. Incoming stamped frames older than `--max-frame-age-sec` are dropped in the callback before conversion; use `--max-frame-age-sec 0` to disable that guard. A large displayed age means frames are still stale before display, while a small age with laggy windows points to local rendering overhead.
