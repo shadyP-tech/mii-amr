@@ -282,7 +282,7 @@ class RosImageTopicFrameSource:
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
-            depth=10,
+            depth=1,
         )
         self.subscription = self.node.create_subscription(
             Image,

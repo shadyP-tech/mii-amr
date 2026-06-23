@@ -24,8 +24,8 @@ export TURTLEBOT3_MODEL=burger
 export LDS_MODEL=LDS-02
 
 ros2 run camera_ros camera_node --ros-args \
-  -p width:=640 \
-  -p height:=480 \
+  -p width:=320 \
+  -p height:=240 \
   -p format:=BGR888
 ```
 
@@ -36,13 +36,14 @@ python3 -m scripts.aufgabe04.perception.debug.color_mask_viewer \
   --ros-image-topic /camera/image_raw \
   --color green \
   --roi 120,100,220,180 \
-  --max-display-fps 30 \
+  --max-display-fps 10 \
+  --no-morph \
   --tune
 ```
 
 The viewer only supports ROS 2 `sensor_msgs/Image` input. Local OpenCV camera indexes and video files are intentionally not supported in this Aufgabe 04 debug tool.
 
-The viewer subscribes with reliable `KEEP_LAST` QoS because the lab `camera_ros` publisher reports reliable image QoS. If the viewer is running, `ros2 topic info /camera/image_raw -v` should show one subscription.
+The viewer subscribes with reliable `KEEP_LAST` QoS at depth 1 because the lab `camera_ros` publisher reports reliable image QoS. Depth 1 drops stale frames so the display follows the newest image. If the viewer is running, `ros2 topic info /camera/image_raw -v` should show one subscription.
 
 Useful keys:
 
