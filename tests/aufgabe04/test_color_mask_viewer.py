@@ -102,6 +102,14 @@ class ColorMaskViewerCliTest(unittest.TestCase):
         args = parser.parse_args(["--ros-image-topic", "/image_raw", "--color", "green"])
 
         self.assertEqual(args.ros_image_topic, "/image_raw")
+        self.assertEqual(args.qos, "best-effort")
+
+    def test_reliable_qos_can_be_selected(self):
+        parser = build_parser()
+
+        args = parser.parse_args(["--ros-image-topic", "/image_raw", "--qos", "reliable"])
+
+        self.assertEqual(args.qos, "reliable")
 
     def test_opencv_camera_and_video_sources_are_not_supported(self):
         parser = build_parser()

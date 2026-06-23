@@ -230,7 +230,7 @@ def save_snapshot(cv2, directory: Path, frame, mask, preview, color_label: str) 
 
 
 class RosImageTopicFrameSource:
-    def __init__(self, numpy, topic: str):
+    def __init__(self, numpy, topic: str, qos: str):
         self.numpy = numpy
         self.topic = topic
         self.description = f"ROS image topic {topic}"
@@ -267,7 +267,11 @@ class RosImageTopicFrameSource:
 
         self.node = ColorMaskViewerNode("aufgabe04_color_mask_viewer")
         qos_profile = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
+            reliability=(
+                ReliabilityPolicy.BEST_EFFORT
+                if qos == "best-effort"
+                else ReliabilityPolicy.RELIABLE
+            ),
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
         )
@@ -335,7 +339,7 @@ class RosImageTopicFrameSource:
 
 
 def create_frame_source(numpy, args):
-    return RosImageTopicFrameSource(numpy, args.ros_image_topic)
+    return RosImageTopicFrameSource(numpy, args.ros_image_topic, args.qos)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -347,6 +351,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--ros-image-topic",
         required=True,
         help="Read frames from a ROS 2 sensor_msgs/Image topic, e.g. /camera/image_raw.",
+    )
+    parser.add_argument(
+        "--qos",
+        choices=("best-effort", "reliable"),
+        default="best-effort",
+        help="ROS image subscription reliability. best-effort is lower latency for live video.",
     )
     parser.add_argument("--resize", type=float, default=1.0)
     parser.add_argument("--color", choices=labels, default="green")

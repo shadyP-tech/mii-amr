@@ -34,6 +34,7 @@ Run the viewer from an environment that can see the image topic:
 ```bash
 python3 -m scripts.aufgabe04.perception.debug.color_mask_viewer \
   --ros-image-topic /camera/image_raw \
+  --qos best-effort \
   --color green \
   --roi 120,100,220,180 \
   --max-display-fps 10 \
@@ -44,7 +45,7 @@ python3 -m scripts.aufgabe04.perception.debug.color_mask_viewer \
 
 The viewer only supports ROS 2 `sensor_msgs/Image` input. Local OpenCV camera indexes and video files are intentionally not supported in this Aufgabe 04 debug tool.
 
-The viewer subscribes with reliable `KEEP_LAST` QoS at depth 1 because the lab `camera_ros` publisher reports reliable image QoS. Depth 1 drops stale frames so the display follows the newest image. If the viewer is running, `ros2 topic info /camera/image_raw -v` should show one subscription.
+The viewer defaults to best-effort `KEEP_LAST` QoS at depth 1 for low-latency live video. If topic matching fails with another camera publisher, retry with `--qos reliable`. If the viewer is running, `ros2 topic info /camera/image_raw -v` should show one subscription.
 
 Useful keys:
 
