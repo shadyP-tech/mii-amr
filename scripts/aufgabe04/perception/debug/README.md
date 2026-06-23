@@ -42,6 +42,8 @@ python3 -m scripts.aufgabe04.perception.debug.color_mask_viewer \
 
 The viewer only supports ROS 2 `sensor_msgs/Image` input. Local OpenCV camera indexes and video files are intentionally not supported in this Aufgabe 04 debug tool.
 
+The viewer subscribes with reliable `KEEP_LAST` QoS because the lab `camera_ros` publisher reports reliable image QoS. If the viewer is running, `ros2 topic info /camera/image_raw -v` should show one subscription.
+
 Useful keys:
 
 - `p`: print the active `ColorRange(...)` threshold.

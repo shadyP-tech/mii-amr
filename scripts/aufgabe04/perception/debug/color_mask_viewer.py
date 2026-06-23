@@ -262,7 +262,7 @@ class RosImageTopicFrameSource:
         try:
             import rclpy
             from rclpy.node import Node
-            from rclpy.qos import qos_profile_sensor_data
+            from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
             from sensor_msgs.msg import Image
         except ImportError as exc:
             raise SystemExit(
@@ -279,11 +279,16 @@ class RosImageTopicFrameSource:
             pass
 
         self.node = ColorMaskViewerNode("aufgabe04_color_mask_viewer")
+        qos_profile = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+        )
         self.subscription = self.node.create_subscription(
             Image,
             topic,
             self._on_image,
-            qos_profile_sensor_data,
+            qos_profile,
         )
 
     def _on_image(self, msg) -> None:
