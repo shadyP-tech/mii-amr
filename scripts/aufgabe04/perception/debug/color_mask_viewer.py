@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,11 +10,8 @@ from typing import Iterable, List, Sequence, Tuple
 
 from scripts.aufgabe04.perception.color_classifier import (
     DEFAULT_STAND_PALETTE,
-    classify_hsv_pixels,
 )
 from scripts.aufgabe04.perception.models import (
-    ColorClassification,
-    ColorClassifierConfig,
     ColorRange,
 )
 
@@ -38,6 +36,14 @@ class FrameRead:
     frame: object | None = None
     message: str | None = None
     waiting: bool = False
+
+
+@dataclass(frozen=True)
+class LiveMaskClassification:
+    label: str
+    confidence: float
+    matched_pixels: int
+    total_pixels: int
 
 
 def parse_roi(value: str) -> Rect:
@@ -75,34 +81,6 @@ def ranges_for_label(label: str, palette: Sequence[ColorRange] = DEFAULT_STAND_P
     if not selected:
         raise ValueError(f"unknown color label: {label}")
     return selected
-
-
-def hsv_pixels_from_roi(hsv_frame, roi: Rect) -> List[Tuple[int, int, int]]:
-    clipped = clamp_roi(roi, hsv_frame.shape)
-    if clipped.width <= 0 or clipped.height <= 0:
-        return []
-    region = hsv_frame[clipped.y : clipped.y + clipped.height, clipped.x : clipped.x + clipped.width]
-    return [
-        (int(pixel[0]), int(pixel[1]), int(pixel[2]))
-        for row in region
-        for pixel in row
-    ]
-
-
-def classify_roi(
-    hsv_frame,
-    roi: Rect,
-    *,
-    palette: Sequence[ColorRange],
-    min_confidence: float,
-) -> ColorClassification:
-    pixels = hsv_pixels_from_roi(hsv_frame, roi)
-    return classify_hsv_pixels(
-        pixels,
-        palette=palette,
-        config=ColorClassifierConfig(min_confidence=min_confidence),
-        timestamp_sec=time.time(),
-    )
 
 
 def image_msg_to_bgr_frame(msg, numpy):
@@ -148,6 +126,16 @@ def apply_morphology(cv2, mask, *, kernel_size: int, close_iterations: int, open
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
     cleaned = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=close_iterations)
     return cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, kernel, iterations=open_iterations)
+
+
+def classify_mask_roi(cv2, mask, roi: Rect, label: str) -> LiveMaskClassification:
+    clipped = clamp_roi(roi, mask.shape)
+    total = clipped.width * clipped.height
+    if total <= 0:
+        return LiveMaskClassification("unknown", 0.0, 0, 0)
+    mask_roi = mask[clipped.y : clipped.y + clipped.height, clipped.x : clipped.x + clipped.width]
+    matched = int(cv2.countNonZero(mask_roi))
+    return LiveMaskClassification(label, matched / total, matched, total)
 
 
 def current_track_range(cv2, label: str) -> ColorRange:
@@ -196,7 +184,7 @@ def annotate_frame(
     cv2,
     frame,
     roi: Rect | None,
-    result: ColorClassification,
+    result: LiveMaskClassification,
     warning: str | None,
     *,
     receive_fps: float | None = None,
@@ -258,6 +246,9 @@ class RosImageTopicFrameSource:
         self._last_fps_count = 0
         self._last_fps_sec = time.time()
         self.receive_fps = None
+        self._lock = threading.Lock()
+        self._running = False
+        self._spin_thread = None
 
         try:
             import rclpy
@@ -293,38 +284,54 @@ class RosImageTopicFrameSource:
 
     def _on_image(self, msg) -> None:
         try:
-            self.latest_frame = image_msg_to_bgr_frame(msg, self.numpy)
-            self.latest_error = None
-            self.received_count += 1
-            self.last_received_sec = time.time()
-            elapsed = self.last_received_sec - self._last_fps_sec
-            if elapsed >= 1.0:
-                self.receive_fps = (self.received_count - self._last_fps_count) / elapsed
-                self._last_fps_count = self.received_count
-                self._last_fps_sec = self.last_received_sec
+            frame = image_msg_to_bgr_frame(msg, self.numpy)
+            now = time.time()
+            with self._lock:
+                self.latest_frame = frame
+                self.latest_error = None
+                self.received_count += 1
+                self.last_received_sec = now
+                elapsed = now - self._last_fps_sec
+                if elapsed >= 1.0:
+                    self.receive_fps = (self.received_count - self._last_fps_count) / elapsed
+                    self._last_fps_count = self.received_count
+                    self._last_fps_sec = now
         except ValueError as exc:
-            self.latest_error = str(exc)
+            with self._lock:
+                self.latest_error = str(exc)
 
     def is_opened(self) -> bool:
         return True
 
+    def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        self._spin_thread = threading.Thread(target=self._spin_loop, daemon=True)
+        self._spin_thread.start()
+
+    def _spin_loop(self) -> None:
+        while self._running and self.rclpy.ok():
+            self.rclpy.spin_once(self.node, timeout_sec=0.05)
+
     def read(self) -> FrameRead:
-        self.rclpy.spin_once(self.node, timeout_sec=0.05)
-        drained = 0
-        while drained < 5:
-            self.rclpy.spin_once(self.node, timeout_sec=0.0)
-            drained += 1
-        if self.latest_error:
-            return FrameRead(False, message=self.latest_error, waiting=True)
-        if self.latest_frame is None:
+        with self._lock:
+            error = self.latest_error
+            frame = None if self.latest_frame is None else self.latest_frame.copy()
+        if error:
+            return FrameRead(False, message=error, waiting=True)
+        if frame is None:
             return FrameRead(
                 False,
                 message=f"waiting for first frame on {self.topic}",
                 waiting=True,
             )
-        return FrameRead(True, frame=self.latest_frame.copy())
+        return FrameRead(True, frame=frame)
 
     def release(self) -> None:
+        self._running = False
+        if self._spin_thread is not None:
+            self._spin_thread.join(timeout=1.0)
         self.node.destroy_node()
         if self.owns_rclpy and self.rclpy.ok():
             self.rclpy.shutdown()
@@ -382,6 +389,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     frame_source = create_frame_source(numpy, args)
     if not frame_source.is_opened():
         raise SystemExit(f"failed to open frame source: {frame_source.description}")
+    frame_source.start()
 
     if args.tune:
         create_trackbars(cv2, selected_ranges[0])
@@ -451,12 +459,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
 
             roi = args.roi or Rect(0, 0, frame.shape[1], frame.shape[0])
-            result = classify_roi(
-                hsv,
-                roi,
-                palette=active_ranges,
-                min_confidence=args.min_confidence,
-            )
+            result = classify_mask_roi(cv2, mask, roi, args.color)
             preview = cv2.bitwise_and(frame, frame, mask=mask)
             annotated = frame.copy()
             annotate_frame(
