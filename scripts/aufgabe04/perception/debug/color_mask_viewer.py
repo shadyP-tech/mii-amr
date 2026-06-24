@@ -36,6 +36,13 @@ class FrameRead:
     message: str | None = None
     waiting: bool = False
     stamp_sec: float | None = None
+    sequence: int = 0
+
+
+@dataclass(frozen=True)
+class CompressedFrame:
+    data: bytes
+    format: str
 
 
 @dataclass(frozen=True)
@@ -83,34 +90,18 @@ def ranges_for_label(label: str, palette: Sequence[ColorRange] = DEFAULT_STAND_P
     return selected
 
 
-def image_msg_to_bgr_frame(msg, numpy):
-    encoding = str(getattr(msg, "encoding", "")).strip().lower()
-    if encoding not in {"bgr8", "bgr888", "rgb8", "rgb888", "8uc3"}:
-        raise ValueError(f"unsupported ROS image encoding: {getattr(msg, 'encoding', '')!r}")
-
-    height = int(msg.height)
-    width = int(msg.width)
-    step = int(msg.step)
-    channels = 3
-    min_step = width * channels
-    if height <= 0 or width <= 0:
-        raise ValueError("ROS image dimensions must be positive")
-    if step < min_step:
-        raise ValueError("ROS image step is smaller than width * channels")
-
+def compressed_msg_to_bgr_frame(msg, cv2, numpy):
     data = numpy.frombuffer(msg.data, dtype=numpy.uint8)
-    expected_values = height * step
-    if data.size < expected_values:
-        raise ValueError("ROS image data is shorter than height * step")
-
-    rows = data[:expected_values].reshape((height, step))
-    frame = rows[:, :min_step].reshape((height, width, channels))
-    if encoding in {"rgb8", "rgb888"}:
-        frame = frame[:, :, ::-1]
-    return frame.copy()
+    if data.size == 0:
+        raise ValueError("compressed ROS image data is empty")
+    frame = cv2.imdecode(data, cv2.IMREAD_COLOR)
+    if frame is None:
+        image_format = getattr(msg, "format", "")
+        raise ValueError(f"failed to decode compressed ROS image: {image_format!r}")
+    return frame
 
 
-def image_msg_stamp_sec(msg) -> float | None:
+def compressed_msg_stamp_sec(msg) -> float | None:
     stamp = getattr(getattr(msg, "header", None), "stamp", None)
     if stamp is None:
         return None
@@ -243,16 +234,15 @@ def save_snapshot(cv2, directory: Path, frame, mask, preview, color_label: str) 
     print(f"saved snapshot: {prefix}_*.png")
 
 
-class RosImageTopicFrameSource:
-    def __init__(self, numpy, topic: str, qos: str, max_frame_age_sec: float):
-        self.numpy = numpy
+class RosCompressedImageTopicFrameSource:
+    def __init__(self, topic: str, max_frame_age_sec: float):
         self.topic = topic
         self.max_frame_age_sec = max_frame_age_sec
-        self.description = f"ROS image topic {topic}"
-        self.latest_frame = None
+        self.description = f"ROS compressed image topic {topic}"
+        self.latest_data = None
+        self.latest_format = None
         self.latest_stamp_sec = None
         self.latest_sequence = 0
-        self.latest_error = None
         self.received_count = 0
         self.last_received_sec = None
         self._last_fps_count = 0
@@ -265,11 +255,11 @@ class RosImageTopicFrameSource:
         try:
             import rclpy
             from rclpy.node import Node
-            from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
-            from sensor_msgs.msg import Image
+            from rclpy.qos import QoSProfile, qos_profile_sensor_data
+            from sensor_msgs.msg import CompressedImage
         except ImportError as exc:
             raise SystemExit(
-                "ROS image topic mode requires rclpy and sensor_msgs. "
+                "ROS compressed image topic mode requires rclpy and sensor_msgs. "
                 "Source the ROS 2 Humble and TurtleBot workspaces first."
             ) from exc
 
@@ -283,47 +273,41 @@ class RosImageTopicFrameSource:
 
         self.node = ColorMaskViewerNode("aufgabe04_color_mask_viewer")
         qos_profile = QoSProfile(
-            reliability=(
-                ReliabilityPolicy.BEST_EFFORT
-                if qos == "best-effort"
-                else ReliabilityPolicy.RELIABLE
-            ),
-            history=HistoryPolicy.KEEP_LAST,
+            reliability=qos_profile_sensor_data.reliability,
+            durability=qos_profile_sensor_data.durability,
+            history=qos_profile_sensor_data.history,
             depth=1,
         )
         self.subscription = self.node.create_subscription(
-            Image,
+            CompressedImage,
             topic,
             self._on_image,
             qos_profile,
         )
 
     def _on_image(self, msg) -> None:
-        try:
-            stamp_sec = image_msg_stamp_sec(msg)
-            now = time.time()
-            if (
-                self.max_frame_age_sec > 0.0
-                and stamp_sec is not None
-                and now - stamp_sec > self.max_frame_age_sec
-            ):
-                return
-            frame = image_msg_to_bgr_frame(msg, self.numpy)
-            with self._lock:
-                self.latest_frame = frame
-                self.latest_stamp_sec = stamp_sec
-                self.latest_sequence += 1
-                self.latest_error = None
-                self.received_count += 1
-                self.last_received_sec = now
-                elapsed = now - self._last_fps_sec
-                if elapsed >= 1.0:
-                    self.receive_fps = (self.received_count - self._last_fps_count) / elapsed
-                    self._last_fps_count = self.received_count
-                    self._last_fps_sec = now
-        except ValueError as exc:
-            with self._lock:
-                self.latest_error = str(exc)
+        stamp_sec = compressed_msg_stamp_sec(msg)
+        now = time.time()
+        if (
+            self.max_frame_age_sec > 0.0
+            and stamp_sec is not None
+            and now - stamp_sec > self.max_frame_age_sec
+        ):
+            return
+        data = bytes(msg.data)
+        image_format = str(getattr(msg, "format", ""))
+        with self._lock:
+            self.latest_data = data
+            self.latest_format = image_format
+            self.latest_stamp_sec = stamp_sec
+            self.latest_sequence += 1
+            self.received_count += 1
+            self.last_received_sec = now
+            elapsed = now - self._last_fps_sec
+            if elapsed >= 1.0:
+                self.receive_fps = (self.received_count - self._last_fps_count) / elapsed
+                self._last_fps_count = self.received_count
+                self._last_fps_sec = now
 
     def is_opened(self) -> bool:
         return True
@@ -341,18 +325,22 @@ class RosImageTopicFrameSource:
 
     def read(self) -> FrameRead:
         with self._lock:
-            error = self.latest_error
-            frame = self.latest_frame
+            data = self.latest_data
+            image_format = self.latest_format
             stamp_sec = self.latest_stamp_sec
-        if error:
-            return FrameRead(False, message=error, waiting=True)
-        if frame is None:
+            sequence = self.latest_sequence
+        if data is None:
             return FrameRead(
                 False,
                 message=f"waiting for first frame on {self.topic}",
                 waiting=True,
             )
-        return FrameRead(True, frame=frame, stamp_sec=stamp_sec)
+        return FrameRead(
+            True,
+            frame=CompressedFrame(data, image_format or ""),
+            stamp_sec=stamp_sec,
+            sequence=sequence,
+        )
 
     def release(self) -> None:
         self._running = False
@@ -363,11 +351,9 @@ class RosImageTopicFrameSource:
             self.rclpy.shutdown()
 
 
-def create_frame_source(numpy, args):
-    return RosImageTopicFrameSource(
-        numpy,
-        args.ros_image_topic,
-        args.qos,
+def create_frame_source(_numpy, args):
+    return RosCompressedImageTopicFrameSource(
+        args.compressed_image_topic,
         args.max_frame_age_sec,
     )
 
@@ -378,15 +364,12 @@ def build_parser() -> argparse.ArgumentParser:
         description="Debug-only Aufgabe 04 stand color HSV mask viewer. Does not move the robot."
     )
     parser.add_argument(
-        "--ros-image-topic",
+        "--compressed-image-topic",
         required=True,
-        help="Read frames from a ROS 2 sensor_msgs/Image topic, e.g. /camera/image_raw.",
-    )
-    parser.add_argument(
-        "--qos",
-        choices=("best-effort", "reliable"),
-        default="best-effort",
-        help="ROS image subscription reliability. best-effort is lower latency for live video.",
+        help=(
+            "Read frames from a ROS 2 sensor_msgs/CompressedImage topic, "
+            "e.g. /camera/image_raw/compressed."
+        ),
     )
     parser.add_argument("--resize", type=float, default=1.0)
     parser.add_argument("--color", choices=labels, default="green")
@@ -447,13 +430,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     print("Keys: ESC/q quit, p print ColorRange, s save snapshot.")
 
     frame_count = 0
-    last_frame_id = None
     duplicate_count = 0
     last_waiting_message_sec = 0.0
     last_display_sec = 0.0
     last_display_fps_sec = time.time()
     last_display_fps_count = 0
     display_fps = None
+    last_processed_sequence = 0
+    last_frame_payload = None
     try:
         while True:
             now = time.time()
@@ -475,7 +459,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                     continue
                 print(f"WARNING: {read.message}")
                 break
-            frame = read.frame
+            if read.sequence == last_processed_sequence:
+                key = cv2.waitKey(1) & 0xFF
+                if key in (27, ord("q")):
+                    break
+                continue
+            last_processed_sequence = read.sequence
+            try:
+                frame = compressed_msg_to_bgr_frame(read.frame, cv2, numpy)
+            except ValueError as exc:
+                print(f"WARNING: {exc}")
+                key = cv2.waitKey(1) & 0xFF
+                if key in (27, ord("q")):
+                    break
+                continue
             now = time.time()
             last_display_sec = now
             age_ms = (now - read.stamp_sec) * 1000.0 if read.stamp_sec is not None else None
@@ -483,14 +480,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.resize != 1.0:
                 frame = cv2.resize(frame, None, fx=args.resize, fy=args.resize)
 
-            frame_id = id(frame)
             warning = None
             if args.detect_duplicates:
-                if frame_id == last_frame_id:
+                frame_payload = read.frame.data
+                if frame_payload == last_frame_payload:
                     duplicate_count += 1
                 else:
                     duplicate_count = 0
-                last_frame_id = frame_id
+                last_frame_payload = frame_payload
                 if duplicate_count >= 15:
                     warning = "WARNING: repeated camera frame"
 

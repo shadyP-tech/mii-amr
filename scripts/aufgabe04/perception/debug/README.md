@@ -1,6 +1,6 @@
 # Aufgabe 04 Perception Debug Viewer
 
-This tool is debug-only. It visualizes camera frames, HSV masks, masked previews, and ROI color classification results for stand-color threshold tuning.
+This tool is debug-only. It visualizes compressed camera frames, HSV masks, masked previews, and ROI color classification results for stand-color threshold tuning.
 
 It does not command robot motion, does not publish `/cmd_vel`, does not send Nav2 goals, and does not execute station approach behavior.
 
@@ -11,6 +11,12 @@ Keep all OpenCV window, camera, and live-debug code in this debug package. Pure 
 ## Usage
 
 Run this only when the robot is stationary or physically secured. Confirm no autonomous mission, Nav2 goal, custom follower, or station-route runner is active.
+
+The intended topic split is:
+
+- TurtleBot: `camera_ros` publishes `/camera/image_raw`.
+- TurtleBot: the QR scanner publishes decoded payloads on `/qr_scanner/decoded`.
+- Workstation: this debug viewer subscribes to `/camera/image_raw/compressed`.
 
 Start the TurtleBot built-in camera on the robot or ROS host:
 
@@ -33,20 +39,29 @@ Run the viewer from an environment that can see the image topic:
 
 ```bash
 python3 -m scripts.aufgabe04.perception.debug.color_mask_viewer \
-  --ros-image-topic /camera/image_raw \
-  --qos best-effort \
+  --compressed-image-topic /camera/image_raw/compressed \
   --color green \
   --roi 120,100,220,180 \
-  --max-display-fps 10 \
+  --max-display-fps 15 \
   --max-frame-age-sec 0.25 \
   --display-mode frame \
   --no-morph \
   --tune
 ```
 
-The viewer only supports ROS 2 `sensor_msgs/Image` input. Local OpenCV camera indexes and video files are intentionally not supported in this Aufgabe 04 debug tool.
+The viewer only supports ROS 2 `sensor_msgs/CompressedImage` input. Local OpenCV camera indexes, raw `sensor_msgs/Image` topics, and video files are intentionally not supported in this Aufgabe 04 debug tool.
 
-The viewer defaults to best-effort `KEEP_LAST` QoS at depth 1 for low-latency live video. If topic matching fails with another camera publisher, retry with `--qos reliable`. If the viewer is running, `ros2 topic info /camera/image_raw -v` should show one subscription.
+The viewer uses sensor-data QoS with queue depth 1 for low-latency live video. If the viewer is running, `ros2 topic info /camera/image_raw/compressed -v` should show one subscription from `aufgabe04_color_mask_viewer`.
+
+Audit the live topic before running:
+
+```bash
+ros2 topic list -t | grep camera
+ros2 topic info /camera/image_raw/compressed -v
+ros2 topic hz /camera/image_raw/compressed
+```
+
+The expected topic type is `sensor_msgs/msg/CompressedImage`. If `/camera/image_raw/compressed` is missing, fix the camera/image-transport setup on the TurtleBot side instead of falling back to raw video over Wi-Fi.
 
 Useful keys:
 
@@ -58,6 +73,6 @@ Tune thresholds in the actual lighting where the stands will be seen. Prefer sel
 
 The low-latency default is a single annotated frame window. Use `--display-mode frame-mask` to also show the mask, or `--display-mode all` to show frame, mask, and masked preview. Extra windows can add visible lag over Apptainer/X11.
 
-The mask is built with vectorized OpenCV operations and ROI confidence is computed from `cv2.countNonZero(mask_roi)`. Lower `--max-display-fps` if the laptop is overloaded; the ROS subscriber still keeps the latest received frame in a background thread. Duplicate-frame checks are disabled by default; enable `--detect-duplicates` only when diagnosing frozen input.
+The ROS callback stores only the latest compressed frame bytes. JPEG decoding, masking, classification, and display happen outside the callback. The mask is built with vectorized OpenCV operations and ROI confidence is computed from `cv2.countNonZero(mask_roi)`. Lower `--max-display-fps` if the laptop is overloaded; the ROS subscriber still keeps only the latest received frame in a background thread. Duplicate-frame checks are disabled by default; enable `--detect-duplicates` only when diagnosing frozen input.
 
 The frame overlay includes `age=...ms` when the incoming image has a ROS header stamp. Incoming stamped frames older than `--max-frame-age-sec` are dropped in the callback before conversion; use `--max-frame-age-sec 0` to disable that guard. A large displayed age means frames are still stale before display, while a small age with laggy windows points to local rendering overhead.

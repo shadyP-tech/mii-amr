@@ -11,3 +11,9 @@ Initial implementation order:
 4. Navigation adapter around Aufgabe 03 planning.
 5. ROS wrappers and real-robot run commands only after safety gates exist.
 
+Dry-run artifact layout:
+
+- Generated station layouts: `results/aufgabe04/layouts/`
+- Dry-run station routes and diagnostics: `results/aufgabe04/routes/`
+- Mission/evidence logs remain grouped by purpose under `results/aufgabe04/`
+  or a more specific subfolder when a feature starts producing repeated files.

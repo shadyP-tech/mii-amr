@@ -1,0 +1,97 @@
+{
+  "legs": [
+    {
+      "diagnostics": {
+        "expanded_cells": 212,
+        "goal_cell": {
+          "x": 44,
+          "y": 21
+        },
+        "path_cell_count": 20,
+        "reason": "",
+        "route_length_m": 1.0949747468305833,
+        "snapped_goal_cell": {
+          "x": 44,
+          "y": 21
+        },
+        "snapped_start_cell": {
+          "x": 56,
+          "y": 33
+        },
+        "start_cell": {
+          "x": 56,
+          "y": 33
+        },
+        "status": "ok"
+      },
+      "failure": null,
+      "route_length_m": 1.0949747468305833,
+      "route_point_count": 20
+    },
+    {
+      "diagnostics": {
+        "expanded_cells": 100,
+        "goal_cell": {
+          "x": 37,
+          "y": 39
+        },
+        "path_cell_count": 19,
+        "reason": "",
+        "route_length_m": 1.0449747468305832,
+        "snapped_goal_cell": {
+          "x": 37,
+          "y": 39
+        },
+        "snapped_start_cell": {
+          "x": 44,
+          "y": 21
+        },
+        "start_cell": {
+          "x": 44,
+          "y": 21
+        },
+        "status": "ok"
+      },
+      "failure": null,
+      "route_length_m": 1.0449747468305832,
+      "route_point_count": 19
+    },
+    {
+      "diagnostics": {
+        "expanded_cells": 179,
+        "goal_cell": {
+          "x": 69,
+          "y": 42
+        },
+        "path_cell_count": 33,
+        "reason": "",
+        "route_length_m": 1.744974746830584,
+        "snapped_goal_cell": {
+          "x": 69,
+          "y": 42
+        },
+        "snapped_start_cell": {
+          "x": 37,
+          "y": 39
+        },
+        "start_cell": {
+          "x": 37,
+          "y": 39
+        },
+        "status": "ok"
+      },
+      "failure": null,
+      "route_length_m": 1.744974746830584,
+      "route_point_count": 33
+    }
+  ],
+  "metadata": {
+    "map": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+    "station_layout_json": "results/aufgabe04/layouts/random_station_layout.json",
+    "stations": [
+      "A",
+      "B",
+      "C"
+    ]
+  }
+}
