@@ -1,0 +1,74 @@
+"""Small pure waypoint-control helpers for Aufgabe 04."""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import Sequence
+
+from scripts.aufgabe04.navigation.models import Pose2D
+
+
+@dataclass(frozen=True)
+class VelocityCommand:
+    linear_x_mps: float
+    angular_z_radps: float
+
+
+@dataclass(frozen=True)
+class ControllerConfig:
+    max_linear_mps: float = 0.05
+    max_angular_radps: float = 0.15
+    goal_tolerance_m: float = 0.08
+    heading_tolerance_rad: float = 0.25
+    rotate_gain: float = 1.2
+
+
+@dataclass(frozen=True)
+class ControllerStep:
+    command: VelocityCommand
+    target_index: int
+    reached_goal: bool
+    distance_to_target_m: float
+
+
+def normalize_angle(angle_rad: float) -> float:
+    while angle_rad > math.pi:
+        angle_rad -= 2.0 * math.pi
+    while angle_rad < -math.pi:
+        angle_rad += 2.0 * math.pi
+    return angle_rad
+
+
+def distance(a: Pose2D, b: Pose2D) -> float:
+    return math.hypot(a.x_m - b.x_m, a.y_m - b.y_m)
+
+
+def compute_waypoint_command(
+    pose: Pose2D,
+    waypoints: Sequence[Pose2D],
+    target_index: int,
+    config: ControllerConfig,
+) -> ControllerStep:
+    if not waypoints:
+        return ControllerStep(VelocityCommand(0.0, 0.0), 0, True, 0.0)
+    index = min(max(target_index, 0), len(waypoints) - 1)
+    target = waypoints[index]
+    target_distance = distance(pose, target)
+    while target_distance <= config.goal_tolerance_m and index < len(waypoints) - 1:
+        index += 1
+        target = waypoints[index]
+        target_distance = distance(pose, target)
+
+    reached_goal = index == len(waypoints) - 1 and target_distance <= config.goal_tolerance_m
+    if reached_goal:
+        return ControllerStep(VelocityCommand(0.0, 0.0), index, True, target_distance)
+
+    heading = math.atan2(target.y_m - pose.y_m, target.x_m - pose.x_m)
+    heading_error = normalize_angle(heading - pose.yaw_rad)
+    angular = max(
+        -config.max_angular_radps,
+        min(config.max_angular_radps, heading_error * config.rotate_gain),
+    )
+    linear = 0.0 if abs(heading_error) > config.heading_tolerance_rad else config.max_linear_mps
+    return ControllerStep(VelocityCommand(linear, angular), index, False, target_distance)
