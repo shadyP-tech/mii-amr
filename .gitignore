@@ -37,4 +37,4 @@ tests/aufgabe03/*
 !tests/aufgabe04/
 tests/aufgabe04/*
 !tests/aufgabe04/*.py
-
+!tests/test_run_with_bundle.py

@@ -1,7 +1,8 @@
 # Aufgabe 04 Logistics Runbook
 
-Draft placeholder. Fill this after QR payload format, station coordinates, puck
-handling rules, and real parkour constraints are confirmed.
+This runbook tracks the implementation order and evidence split for Aufgabe 04.
+Keep logistics logic mostly pure. Add ROS motion only behind dry-run/preflight
+gates, and wrap every physical run in a debug bundle.
 
 Initial implementation order:
 
@@ -9,7 +10,9 @@ Initial implementation order:
 2. Pure station map and route selection.
 3. Dry-run mission state machine.
 4. Navigation adapter around Aufgabe 03 planning.
-5. ROS wrappers and real-robot run commands only after safety gates exist.
+5. Single-segment station-route execution behind strict preflight.
+6. ROS camera integration, multi-segment missions, and two-robot operation only
+   after single-robot dry-run and real-run evidence exists.
 
 Dry-run artifact layout:
 
@@ -17,3 +20,57 @@ Dry-run artifact layout:
 - Dry-run station routes and diagnostics: `results/aufgabe04/routes/`
 - Mission/evidence logs remain grouped by purpose under `results/aufgabe04/`
   or a more specific subfolder when a feature starts producing repeated files.
+- Raw physical-run debug bundles go under `results/real_runs/<run_id>/`.
+
+## Current Single-Segment Navigation Slice
+
+Current route generation remains dry-run only:
+
+```bash
+python3 scripts/aufgabe04/navigation/run_station_route.py \
+  --map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
+  --stations A,B,C \
+  --route-csv results/aufgabe04/routes/station_route.csv \
+  --diagnostics-json results/aufgabe04/routes/station_route_diagnostics.json
+```
+
+Before physical motion, run the single-segment dry run:
+
+```bash
+python3 scripts/aufgabe04/navigation/run_single_station_segment.py \
+  --dry-run \
+  --leg-index 1 \
+  --route-csv results/aufgabe04/routes/station_route.csv \
+  --diagnostics-json results/aufgabe04/routes/station_route_diagnostics.json
+```
+
+The dry run must pass route CSV validation, diagnostics cross-checking, speed
+limits, resolved namespace/topic/frame checks, sensor freshness, TF/localization
+freshness, `/cmd_vel` ownership, and Nav2 handoff checks.
+
+For physical motion, wrap the command:
+
+```bash
+scripts/common/run_with_bundle.sh run_001 -- \
+  python3 scripts/aufgabe04/navigation/run_single_station_segment.py \
+    --leg-index 1 \
+    --route-csv results/aufgabe04/routes/station_route.csv \
+    --diagnostics-json results/aufgabe04/routes/station_route_diagnostics.json \
+    --preflight-json results/real_runs/run_001/aufgabe04_preflight.json
+```
+
+The bundle captures raw diagnostics only. It never publishes motion and does
+not replace the runner's strict preflight or typed `RUN` confirmation.
+
+If using namespaces, pass matching namespace/topic/frame options to
+`run_with_bundle.sh` and `run_single_station_segment.py`; otherwise the bundle
+may capture evidence for the wrong robot.
+
+## Tests
+
+```bash
+python3 -m unittest discover tests/aufgabe04
+python3 -m unittest tests.test_run_with_bundle
+```
+
+Default tests must remain ROS-free.

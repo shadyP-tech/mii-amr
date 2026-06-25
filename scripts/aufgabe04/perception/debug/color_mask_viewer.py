@@ -10,8 +10,19 @@ from typing import Iterable, List, Sequence, Tuple
 from scripts.aufgabe04.perception.color_classifier import (
     DEFAULT_STAND_PALETTE,
 )
+from scripts.aufgabe04.perception.mask_processing import (
+    apply_morphology,
+    build_mask_for_ranges,
+    classify_mask_roi,
+)
 from scripts.aufgabe04.perception.models import (
+    ColorClassification,
     ColorRange,
+)
+from scripts.aufgabe04.perception.roi import Rect, clamp_roi, parse_roi
+from scripts.aufgabe04.perception.ros_image_adapter import (
+    compressed_msg_stamp_sec,
+    compressed_msg_to_bgr_frame,
 )
 
 
@@ -19,14 +30,6 @@ WINDOW_FRAME = "aufgabe04/frame"
 WINDOW_MASK = "aufgabe04/mask"
 WINDOW_PREVIEW = "aufgabe04/preview"
 WINDOW_CONTROLS = "aufgabe04/controls"
-
-
-@dataclass(frozen=True)
-class Rect:
-    x: int
-    y: int
-    width: int
-    height: int
 
 
 @dataclass(frozen=True)
@@ -45,36 +48,6 @@ class CompressedFrame:
     format: str
 
 
-@dataclass(frozen=True)
-class LiveMaskClassification:
-    label: str
-    confidence: float
-    matched_pixels: int
-    total_pixels: int
-
-
-def parse_roi(value: str) -> Rect:
-    parts = [part.strip() for part in value.split(",")]
-    if len(parts) != 4:
-        raise argparse.ArgumentTypeError("--roi must use x,y,w,h")
-    try:
-        x, y, width, height = (int(part) for part in parts)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("--roi values must be integers") from exc
-    if width <= 0 or height <= 0:
-        raise argparse.ArgumentTypeError("--roi width and height must be positive")
-    return Rect(x, y, width, height)
-
-
-def clamp_roi(roi: Rect, frame_shape: Sequence[int]) -> Rect:
-    frame_h, frame_w = int(frame_shape[0]), int(frame_shape[1])
-    x = max(0, min(roi.x, frame_w))
-    y = max(0, min(roi.y, frame_h))
-    width = max(0, min(roi.width, frame_w - x))
-    height = max(0, min(roi.height, frame_h - y))
-    return Rect(x, y, width, height)
-
-
 def palette_labels(palette: Sequence[ColorRange] = DEFAULT_STAND_PALETTE) -> Tuple[str, ...]:
     labels: List[str] = []
     for color_range in palette:
@@ -88,55 +61,6 @@ def ranges_for_label(label: str, palette: Sequence[ColorRange] = DEFAULT_STAND_P
     if not selected:
         raise ValueError(f"unknown color label: {label}")
     return selected
-
-
-def compressed_msg_to_bgr_frame(msg, cv2, numpy):
-    data = numpy.frombuffer(msg.data, dtype=numpy.uint8)
-    if data.size == 0:
-        raise ValueError("compressed ROS image data is empty")
-    frame = cv2.imdecode(data, cv2.IMREAD_COLOR)
-    if frame is None:
-        image_format = getattr(msg, "format", "")
-        raise ValueError(f"failed to decode compressed ROS image: {image_format!r}")
-    return frame
-
-
-def compressed_msg_stamp_sec(msg) -> float | None:
-    stamp = getattr(getattr(msg, "header", None), "stamp", None)
-    if stamp is None:
-        return None
-    try:
-        return float(stamp.sec) + float(stamp.nanosec) / 1_000_000_000.0
-    except (AttributeError, TypeError, ValueError):
-        return None
-
-
-def build_mask_for_ranges(cv2, numpy, hsv_frame, color_ranges: Sequence[ColorRange]):
-    mask = numpy.zeros(hsv_frame.shape[:2], dtype=numpy.uint8)
-    for color_range in color_ranges:
-        lower = numpy.array(color_range.lower_hsv, dtype=numpy.uint8)
-        upper = numpy.array(color_range.upper_hsv, dtype=numpy.uint8)
-        range_mask = cv2.inRange(hsv_frame, lower, upper)
-        mask = cv2.bitwise_or(mask, range_mask)
-    return mask
-
-
-def apply_morphology(cv2, mask, *, kernel_size: int, close_iterations: int, open_iterations: int):
-    if kernel_size <= 1:
-        return mask
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-    cleaned = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=close_iterations)
-    return cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, kernel, iterations=open_iterations)
-
-
-def classify_mask_roi(cv2, mask, roi: Rect, label: str) -> LiveMaskClassification:
-    clipped = clamp_roi(roi, mask.shape)
-    total = clipped.width * clipped.height
-    if total <= 0:
-        return LiveMaskClassification("unknown", 0.0, 0, 0)
-    mask_roi = mask[clipped.y : clipped.y + clipped.height, clipped.x : clipped.x + clipped.width]
-    matched = int(cv2.countNonZero(mask_roi))
-    return LiveMaskClassification(label, matched / total, matched, total)
 
 
 def current_track_range(cv2, label: str) -> ColorRange:
@@ -181,7 +105,7 @@ def annotate_frame(
     cv2,
     frame,
     roi: Rect | None,
-    result: LiveMaskClassification,
+    result: ColorClassification,
     warning: str | None,
     *,
     receive_fps: float | None = None,

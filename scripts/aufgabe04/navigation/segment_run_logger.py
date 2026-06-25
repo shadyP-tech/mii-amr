@@ -31,6 +31,8 @@ SEGMENT_RUN_HEADER = [
     "duration_sec",
     "distance_estimate_m",
     "motion_published",
+    "semantic_log_path",
+    "preflight_json_path",
     "operator_note",
 ]
 

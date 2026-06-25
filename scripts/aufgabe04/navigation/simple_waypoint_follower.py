@@ -5,8 +5,16 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
-from typing import Sequence, Tuple
+from typing import Sequence
 
+from scripts.aufgabe04.navigation.follower_models import FollowerResult
+from scripts.aufgabe04.navigation.follower_safety import (
+    cmd_vel_ownership_failure,
+    initial_pose_failure,
+    message_freshness_failure,
+    obstacle_failure,
+    waypoint_timeout_failure,
+)
 from scripts.aufgabe04.navigation.models import Pose2D
 from scripts.aufgabe04.navigation.ros_runtime_config import ResolvedRuntimeConfig
 from scripts.aufgabe04.navigation.waypoint_controller import (
@@ -46,22 +54,23 @@ class FollowerConfig:
     waypoint_timeout_sec: float = 45.0
     initial_distance_limit_m: float = 0.35
     control_rate_hz: float = 10.0
-    allow_idle_nav2: bool = True
-    allowed_cmd_vel_publishers: Tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class FollowerResult:
-    status: str
-    stop_reason: str
-    duration_sec: float
-    distance_estimate_m: float
-    motion_published: bool
 
 
 def _require_ros() -> None:
     if rclpy is None:
         raise RuntimeError("ROS2 Python packages are not available in this environment")
+
+
+def _node_identity(endpoint) -> str:
+    namespace = getattr(endpoint, "node_namespace", "") or ""
+    name = getattr(endpoint, "node_name", "") or ""
+    return _format_node_identity(namespace, name)
+
+
+def _format_node_identity(namespace: str, name: str) -> str:
+    if namespace in ("", "/"):
+        return f"/{name}"
+    return f"{namespace.rstrip('/')}/{name}"
 
 
 def _yaw_from_quaternion(q) -> float:
@@ -149,15 +158,16 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                     )
                 self.last_pose = pose
                 if self.target_index == 0:
-                    first_distance = math.hypot(
-                        pose.x_m - self.waypoints[0].x_m,
-                        pose.y_m - self.waypoints[0].y_m,
+                    initial_failure = initial_pose_failure(
+                        pose,
+                        self.waypoints[0],
+                        self.follower_config.initial_distance_limit_m,
                     )
-                    if first_distance > self.follower_config.initial_distance_limit_m:
+                    if initial_failure:
                         self.publish_repeated_zero()
                         return FollowerResult(
                             "stopped",
-                            "initial pose too far from first waypoint",
+                            initial_failure,
                             time.monotonic() - started_at,
                             self.distance_estimate_m,
                             self.motion_published,
@@ -180,11 +190,15 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                         self.distance_estimate_m,
                         self.motion_published,
                     )
-                if time.monotonic() - self.target_started_at > self.follower_config.waypoint_timeout_sec:
+                timeout_failure = waypoint_timeout_failure(
+                    time.monotonic() - self.target_started_at,
+                    self.follower_config.waypoint_timeout_sec,
+                )
+                if timeout_failure:
                     self.publish_repeated_zero()
                     return FollowerResult(
                         "stopped",
-                        "waypoint timeout",
+                        timeout_failure,
                         time.monotonic() - started_at,
                         self.distance_estimate_m,
                         self.motion_published,
@@ -215,37 +229,35 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
 
     def _freshness_failure(self, name: str, msg, receipt, max_age_sec: float) -> str:
         if msg is None or receipt is None:
-            return f"missing {name}"
+            return message_freshness_failure(
+                name,
+                has_message=False,
+                receipt_age_sec=None,
+                header_age_sec=None,
+                max_age_sec=max_age_sec,
+            )
         now = self.get_clock().now()
         receipt_age = (now - receipt).nanoseconds / 1_000_000_000.0
         header_age = (now - Time.from_msg(msg.header.stamp)).nanoseconds / 1_000_000_000.0
-        if receipt_age > max_age_sec or header_age > max_age_sec:
-            return f"stale {name}"
-        return ""
+        return message_freshness_failure(
+            name,
+            has_message=True,
+            receipt_age_sec=receipt_age,
+            header_age_sec=header_age,
+            max_age_sec=max_age_sec,
+        )
 
     def _obstacle_failure(self) -> str:
-        ranges = getattr(self.latest_scan, "ranges", None)
-        if not ranges:
-            return ""
-        finite_ranges = [value for value in ranges if math.isfinite(value) and value > 0.0]
-        if finite_ranges and min(finite_ranges) < self.follower_config.min_obstacle_distance_m:
-            return "obstacle too close"
-        return ""
+        return obstacle_failure(
+            getattr(self.latest_scan, "ranges", None),
+            self.follower_config.min_obstacle_distance_m,
+        )
 
     def _cmd_vel_ownership_failure(self) -> str:
         publishers = self.get_publishers_info_by_topic(self.runtime_config.cmd_vel_topic)
-        publisher_names = sorted({publisher.node_name for publisher in publishers})
-        allowed = set(self.follower_config.allowed_cmd_vel_publishers)
-        allowed.add(self.get_name())
-        unknown = [
-            name
-            for name in publisher_names
-            if name not in allowed
-            and not (self.follower_config.allow_idle_nav2 and "nav" in name.lower())
-        ]
-        if unknown:
-            return f"unapproved cmd_vel publisher during run: {', '.join(unknown)}"
-        return ""
+        publisher_identities = sorted({_node_identity(publisher) for publisher in publishers})
+        self_identity = _format_node_identity(self.get_namespace(), self.get_name())
+        return cmd_vel_ownership_failure(publisher_identities, self_identity)
 
     def _current_pose(self) -> Pose2D | None:
         try:

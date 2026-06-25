@@ -10,11 +10,21 @@ import json
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence
+from typing import Dict, Iterable, List, Sequence, Tuple
 
+from scripts.aufgabe04.navigation.localization_ownership import (
+    LocalizationOwnershipEvidence,
+    evaluate_localization_ownership,
+)
+from scripts.aufgabe04.navigation.localization_preflight_evidence import (
+    build_dynamic_map_to_odom_freshness,
+    build_localization_ownership_observation_data,
+    find_external_tf_owner_candidates,
+)
 from scripts.aufgabe04.navigation.ros_runtime_config import (
     ResolvedRuntimeConfig,
     RuntimeConfig,
+    resolve_topic,
     resolve_runtime_config,
 )
 
@@ -27,6 +37,7 @@ try:  # pragma: no cover - exercised on ROS hosts.
     from rclpy.node import Node
     from rclpy.time import Time
     from sensor_msgs.msg import LaserScan
+    from tf2_msgs.msg import TFMessage
     from tf2_ros import Buffer, TransformException, TransformListener
 except ImportError:  # pragma: no cover - keeps offline tests ROS-free.
     rclpy = None
@@ -34,6 +45,7 @@ except ImportError:  # pragma: no cover - keeps offline tests ROS-free.
     LaserScan = None
     Odometry = None
     PoseWithCovarianceStamped = None
+    TFMessage = None
     Duration = None
     Node = object
     Time = None
@@ -43,6 +55,18 @@ except ImportError:  # pragma: no cover - keeps offline tests ROS-free.
 
 
 ACTIVE_GOAL_STATUS = {1, 2, 3, 4}
+
+
+def _node_identity(endpoint) -> str:
+    namespace = getattr(endpoint, "node_namespace", "") or ""
+    name = getattr(endpoint, "node_name", "") or ""
+    return _node_identity_from_names(namespace, name)
+
+
+def _node_identity_from_names(namespace: str, name: str) -> str:
+    if namespace in ("", "/"):
+        return f"/{name}"
+    return f"{namespace.rstrip('/')}/{name}"
 
 
 @dataclass(frozen=True)
@@ -89,6 +113,10 @@ def _topic_types(node: Node, topic: str) -> List[str]:
     return []
 
 
+def _frame_id(frame_id: str) -> str:
+    return frame_id.strip("/")
+
+
 class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
     def __init__(
         self,
@@ -121,9 +149,14 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         self.latest_amcl = None
         self.latest_amcl_receipt = None
         self.latest_nav2_status = None
+        self.latest_dynamic_map_to_odom = None
+        self.latest_dynamic_map_to_odom_receipt = None
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.dynamic_tf_topics = self._dynamic_tf_topic_candidates()
+        for topic in self.dynamic_tf_topics:
+            self.create_subscription(TFMessage, topic, self._dynamic_tf_callback, 10)
         self.create_subscription(LaserScan, config.scan_topic, self._scan_callback, 10)
         self.create_subscription(Odometry, config.odom_topic, self._odom_callback, 10)
         self.create_subscription(
@@ -150,6 +183,21 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
 
     def _nav2_status_callback(self, msg) -> None:
         self.latest_nav2_status = msg
+
+    def _dynamic_tf_callback(self, msg) -> None:
+        for transform in msg.transforms:
+            if self._is_configured_map_to_odom(transform):
+                self.latest_dynamic_map_to_odom = transform
+                self.latest_dynamic_map_to_odom_receipt = self.get_clock().now()
+
+    def _is_configured_map_to_odom(self, transform) -> bool:
+        return (
+            _frame_id(transform.header.frame_id) == _frame_id(self.config.map_frame)
+            and _frame_id(transform.child_frame_id) == _frame_id(self.config.odom_frame)
+        )
+
+    def _dynamic_tf_topic_candidates(self) -> List[str]:
+        return sorted({"/tf", resolve_topic("tf", self.config.namespace)})
 
     def _find_nav2_status_topics(self) -> List[str]:
         topics = [
@@ -211,19 +259,27 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                 self.latest_amcl_receipt,
                 self.max_amcl_age_sec,
             )
-        self._observe_tf(
+        map_to_base_ok, map_to_base_data = self._observe_tf(
             observations,
             failures,
             self.config.map_frame,
             self.config.base_frame,
             self.max_tf_age_sec,
         )
-        self._observe_tf(
+        odom_to_base_ok, odom_to_base_data = self._observe_tf(
             observations,
             failures,
             self.config.odom_frame,
             self.config.base_frame,
             self.max_tf_age_sec,
+        )
+        self._observe_localization_ownership(
+            observations,
+            failures,
+            route_transform_fresh=map_to_base_ok,
+            route_transform_data=map_to_base_data,
+            odom_to_base_fresh=odom_to_base_ok,
+            odom_to_base_data=odom_to_base_data,
         )
         self._observe_use_sim_time(observations, failures)
         self._observe_cmd_vel_ownership(observations, failures)
@@ -276,6 +332,19 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         if not ok:
             failures.append(f"{name}: stale message")
 
+    def _message_freshness(self, msg, receipt, max_age_sec: float) -> Tuple[bool, Dict[str, object]]:
+        if msg is None or receipt is None:
+            return False, {"received": False}
+        now = self.get_clock().now()
+        receipt_age = (now - receipt).nanoseconds / 1_000_000_000.0
+        header_age = (now - Time.from_msg(msg.header.stamp)).nanoseconds / 1_000_000_000.0
+        ok = receipt_age <= max_age_sec and header_age <= max_age_sec
+        return ok, {
+            "received": True,
+            "receipt_age_sec": receipt_age,
+            "header_age_sec": header_age,
+        }
+
     def _observe_tf(
         self,
         observations: List[RosObservation],
@@ -283,7 +352,7 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         target_frame: str,
         source_frame: str,
         max_age_sec: float,
-    ) -> None:
+    ) -> Tuple[bool, Dict[str, object]]:
         name = f"tf {target_frame}->{source_frame}"
         try:
             transform = self.tf_buffer.lookup_transform(
@@ -293,14 +362,105 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                 timeout=Duration(seconds=0.2),
             )
         except TransformException as exc:
-            observations.append(RosObservation(name, False, str(exc)))
+            data = {"available": False, "error": str(exc)}
+            observations.append(RosObservation(name, False, str(exc), data))
             failures.append(f"{name}: unavailable")
-            return
+            return False, data
         age = (self.get_clock().now() - Time.from_msg(transform.header.stamp)).nanoseconds / 1_000_000_000.0
         ok = age <= max_age_sec
-        observations.append(RosObservation(name, ok, f"age={age:.3f}s", {"age_sec": age}))
+        data = {"available": True, "age_sec": age}
+        observations.append(RosObservation(name, ok, f"age={age:.3f}s", data))
         if not ok:
             failures.append(f"{name}: stale transform")
+        return ok, data
+
+    def _observe_localization_ownership(
+        self,
+        observations: List[RosObservation],
+        failures: List[str],
+        *,
+        route_transform_fresh: bool,
+        route_transform_data: Dict[str, object],
+        odom_to_base_fresh: bool,
+        odom_to_base_data: Dict[str, object],
+    ) -> None:
+        amcl_fresh, amcl_data = self._message_freshness(
+            self.latest_amcl,
+            self.latest_amcl_receipt,
+            self.max_amcl_age_sec,
+        )
+        map_to_odom_fresh, map_to_odom_data = self._dynamic_map_to_odom_freshness()
+        owner_candidates = self._external_tf_owner_candidates()
+        evidence = LocalizationOwnershipEvidence(
+            localization_source=self.config.localization_source,
+            amcl_fresh=amcl_fresh,
+            map_to_odom_dynamic_fresh=map_to_odom_fresh,
+            route_transform_fresh=route_transform_fresh,
+            odom_to_base_fresh=odom_to_base_fresh,
+            external_tf_owner_candidates=owner_candidates,
+        )
+        decision = evaluate_localization_ownership(evidence)
+        data = build_localization_ownership_observation_data(
+            decision_data=decision.data,
+            map_frame=self.config.map_frame,
+            odom_frame=self.config.odom_frame,
+            base_frame=self.config.base_frame,
+            amcl_topic=self.config.amcl_topic,
+            dynamic_tf_topics=self.dynamic_tf_topics,
+            amcl_data=amcl_data,
+            map_to_odom_dynamic_data=map_to_odom_data,
+            route_transform_data=route_transform_data,
+            odom_to_base_data=odom_to_base_data,
+        )
+        observations.append(
+            RosObservation(
+                "localization transform ownership",
+                decision.ok,
+                "ok" if decision.ok else decision.failure,
+                data,
+            )
+        )
+        if not decision.ok:
+            failures.append(decision.failure)
+
+    def _dynamic_map_to_odom_freshness(self) -> Tuple[bool, Dict[str, object]]:
+        if self.latest_dynamic_map_to_odom is None or self.latest_dynamic_map_to_odom_receipt is None:
+            return build_dynamic_map_to_odom_freshness(
+                has_dynamic_transform=False,
+                receipt_age_sec=None,
+                header_age_sec=None,
+                max_age_sec=self.max_tf_age_sec,
+            )
+        now = self.get_clock().now()
+        receipt_age = (now - self.latest_dynamic_map_to_odom_receipt).nanoseconds / 1_000_000_000.0
+        header_age = (
+            now - Time.from_msg(self.latest_dynamic_map_to_odom.header.stamp)
+        ).nanoseconds / 1_000_000_000.0
+        return build_dynamic_map_to_odom_freshness(
+            has_dynamic_transform=True,
+            receipt_age_sec=receipt_age,
+            header_age_sec=header_age,
+            max_age_sec=self.max_tf_age_sec,
+        )
+
+    def _external_tf_owner_candidates(self) -> List[str]:
+        node_items = []
+        try:
+            node_items = self.get_node_names_and_namespaces()
+        except AttributeError:
+            node_items = []
+        topic_names = [topic for topic, _types in self.get_topic_names_and_types()]
+        try:
+            service_items = self.get_service_names_and_types()
+        except AttributeError:
+            service_items = []
+        service_names = [service for service, _types in service_items]
+        return find_external_tf_owner_candidates(
+            resolved_namespace=self.config.namespace,
+            node_items=node_items,
+            topic_names=topic_names,
+            service_names=service_names,
+        )
 
     def _observe_use_sim_time(self, observations: List[RosObservation], failures: List[str]) -> None:
         value = bool(self.get_parameter("use_sim_time").value)
@@ -315,29 +475,27 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         failures: List[str],
     ) -> None:
         publishers = self.get_publishers_info_by_topic(self.config.cmd_vel_topic)
-        publisher_names = sorted({publisher.node_name for publisher in publishers})
+        publisher_identities = sorted({_node_identity(publisher) for publisher in publishers})
         active_nav2 = self._has_active_nav2_goal()
-        nav2_publishers = [name for name in publisher_names if "nav" in name.lower()]
         nav2_status_observed = self.latest_nav2_status is not None
         allowed = set(self.allowed_cmd_vel_publishers)
         unknown_publishers = [
-            name
-            for name in publisher_names
-            if name not in allowed and not (self.allow_idle_nav2 and "nav" in name.lower())
+            identity
+            for identity in publisher_identities
+            if identity not in allowed
         ]
-        ambiguous_nav2 = bool(nav2_publishers) and self.allow_idle_nav2 and not nav2_status_observed
-        ok = not active_nav2 and not unknown_publishers and not ambiguous_nav2
+        ok = not active_nav2 and not unknown_publishers
         observations.append(
             RosObservation(
                 "cmd_vel ownership",
                 ok,
                 (
-                    f"publishers={publisher_names} active_nav2={active_nav2} "
+                    f"publishers={publisher_identities} active_nav2={active_nav2} "
                     f"nav2_status_observed={nav2_status_observed}"
                 ),
                 {
                     "cmd_vel_topic": self.config.cmd_vel_topic,
-                    "publishers": publisher_names,
+                    "publishers": publisher_identities,
                     "active_nav2_goal": active_nav2,
                     "nav2_status_observed": nav2_status_observed,
                     "allowed_publishers": sorted(allowed),
@@ -346,14 +504,8 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         )
         if active_nav2:
             failures.append("active Nav2 goal/controller detected")
-        if ambiguous_nav2:
-            failures.append("Nav2 cmd_vel publisher present but no NavigateToPose status observed")
         if unknown_publishers:
             failures.append(f"unapproved cmd_vel publishers: {', '.join(unknown_publishers)}")
-        if publishers and not ok:
-            return
-        if publisher_names and not self.allow_idle_nav2 and not allowed:
-            failures.append("cmd_vel publishers present and no allowlist configured")
 
     def _has_active_nav2_goal(self) -> bool:
         if self.latest_nav2_status is None:
@@ -369,7 +521,7 @@ def run_ros_preflight(
     max_tf_age_sec: float = 1.0,
     max_amcl_age_sec: float = 2.0,
     observation_window_sec: float = 2.0,
-    allow_idle_nav2: bool = True,
+    allow_idle_nav2: bool = False,
     allowed_cmd_vel_publishers: Sequence[str] = (),
     require_real_time: bool = True,
 ) -> RosPreflightResult:
@@ -406,7 +558,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--localization-source", default="amcl", choices=["amcl", "tf"])
     parser.add_argument("--allow-sim-time", action="store_true")
     parser.add_argument("--output-json", type=Path, default=None)
-    parser.add_argument("--allowed-cmd-vel-publisher", action="append", default=[])
+    parser.add_argument(
+        "--allowed-cmd-vel-publisher",
+        action="append",
+        default=[],
+        help="Namespace-qualified node identity allowed in preflight, e.g. /robot1/controller_server",
+    )
     return parser
 
 
