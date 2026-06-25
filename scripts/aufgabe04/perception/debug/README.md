@@ -35,7 +35,25 @@ ros2 run camera_ros camera_node --ros-args \
   -p format:=BGR888
 ```
 
-Run the viewer from an environment that can see the image topic:
+Run the viewer from the Apptainer workstation environment with the helper:
+
+```bash
+scripts/aufgabe04/perception/debug/run_color_mask_viewer.sh \
+  --compressed-image-topic /camera/image_raw/compressed \
+  --color green \
+  --roi 120,100,220,180 \
+  --max-display-fps 15 \
+  --max-frame-age-sec 0.25 \
+  --display-mode frame \
+  --no-morph \
+  --tune
+```
+
+The helper enters `/workspace/mii-amr`, sources ROS 2 and the TurtleBot
+workspace, sets the standard TurtleBot environment defaults, and then calls the
+viewer module.
+
+If the environment is already sourced, the direct module form is:
 
 ```bash
 python3 -m scripts.aufgabe04.perception.debug.color_mask_viewer \
