@@ -74,3 +74,55 @@ python3 -m unittest tests.test_run_with_bundle
 ```
 
 Default tests must remain ROS-free.
+
+## Observe-Only LiDAR Stand Discovery
+
+The first detected-station slice is split into observe-only perception, ROS-free
+artifact planning, and the existing gated segment runner. The observer never
+publishes `cmd_vel`.
+
+Observe live LiDAR stand candidates and write provenance-rich evidence:
+
+```bash
+python3 scripts/aufgabe04/perception/stand_explorer_node.py \
+  --scan-topic scan \
+  --map-frame map \
+  --base-frame base_footprint \
+  --localization-source amcl \
+  --map-yaml maps/aufgabe03/arena_1p898x3p9_auto.yaml \
+  --output-jsonl results/aufgabe04/detected_stations/stand_observations.jsonl
+```
+
+The observer uses `LaserScan.header.frame_id` as the source frame and requires a
+fresh timestamped TF transform into `map`. It drops observations when frame or TF
+provenance is missing or stale.
+
+Create first-station layout and route artifacts from confirmed observations:
+
+```bash
+python3 scripts/aufgabe04/navigation/read_current_amcl_pose.py \
+  --amcl-topic amcl_pose \
+  --map-frame map \
+  --max-age-sec 2.0
+```
+
+Use the printed `--start-x`, `--start-y`, and `--start-yaw` arguments in the
+planner command:
+
+```bash
+python3 scripts/aufgabe04/navigation/plan_first_detected_station.py \
+  --observations-jsonl results/aufgabe04/detected_stations/stand_observations.jsonl \
+  --map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
+  --start-x <amcl_x> \
+  --start-y <amcl_y> \
+  --start-yaw <amcl_yaw> \
+  --require-map-hash \
+  --layout-json results/aufgabe04/detected_stations/first_detected_station_layout.json \
+  --layout-csv results/aufgabe04/detected_stations/first_detected_station_layout.csv \
+  --route-csv results/aufgabe04/routes/first_detected_station_route.csv \
+  --diagnostics-json results/aufgabe04/routes/first_detected_station_route_diagnostics.json
+```
+
+Physical motion remains a separate step through
+`scripts/aufgabe04/navigation/run_single_station_segment.py --dry-run` and then
+the bundle-wrapped real runner with typed `RUN`.

@@ -62,6 +62,97 @@ class ProductionImportBoundaryTest(unittest.TestCase):
 
         self.assertEqual(offenders, [])
 
+    def test_aufgabe04_does_not_import_aufgabe03(self):
+        scripts_root = ROOT / "scripts" / "aufgabe04"
+        offenders = []
+        for path in scripts_root.rglob("*.py"):
+            tree = ast.parse(path.read_text(), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported_modules = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    imported_modules = [node.module or ""]
+                else:
+                    continue
+                for module in imported_modules:
+                    if module.startswith("scripts.aufgabe03"):
+                        offenders.append((path.relative_to(ROOT), module))
+
+        self.assertEqual(offenders, [])
+
+    def test_qr_scanning_and_task_client_do_not_import_motion_modules(self):
+        checked_roots = [
+            ROOT / "scripts" / "aufgabe04" / "qr_scanning",
+            ROOT / "scripts" / "aufgabe04" / "task_client",
+        ]
+        always_forbidden_prefixes = (
+            "scripts.aufgabe04.navigation",
+            "scripts.aufgabe04.fleet",
+            "geometry_msgs",
+            "nav2_msgs",
+        )
+        pure_qr_forbidden_prefixes = (
+            "scripts.aufgabe04.perception",
+            "rclpy",
+            "sensor_msgs",
+            "cv2",
+            "numpy",
+        )
+        offenders = []
+        for checked_root in checked_roots:
+            for path in checked_root.rglob("*.py"):
+                tree = ast.parse(path.read_text(), filename=str(path))
+                rel_path = path.relative_to(ROOT)
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        imported_modules = [alias.name for alias in node.names]
+                    elif isinstance(node, ast.ImportFrom):
+                        imported_modules = [node.module or ""]
+                    else:
+                        continue
+                    for module in imported_modules:
+                        if module.startswith(always_forbidden_prefixes):
+                            offenders.append((rel_path, module))
+                        if (
+                            checked_root.name == "qr_scanning"
+                            and path.name != "onboard_camera_node.py"
+                            and module.startswith(pure_qr_forbidden_prefixes)
+                        ):
+                            offenders.append((rel_path, module))
+                        if checked_root.name == "task_client" and module.startswith(
+                            ("rclpy", "sensor_msgs", "cv2", "numpy")
+                        ):
+                            offenders.append((rel_path, module))
+
+        self.assertEqual(offenders, [])
+
+    def test_onboard_camera_node_does_not_import_task_or_motion_runtime(self):
+        node_path = ROOT / "scripts" / "aufgabe04" / "qr_scanning" / "onboard_camera_node.py"
+        source = node_path.read_text()
+        tree = ast.parse(source, filename=str(node_path))
+        forbidden_prefixes = (
+            "scripts.aufgabe04.navigation",
+            "scripts.aufgabe04.task_client",
+            "scripts.aufgabe04.logistics",
+            "geometry_msgs",
+            "nav2_msgs",
+        )
+        offenders = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported_modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                imported_modules = [node.module or ""]
+            else:
+                continue
+            for module in imported_modules:
+                if module.startswith(forbidden_prefixes):
+                    offenders.append(module)
+
+        self.assertEqual(offenders, [])
+        self.assertNotIn("/cmd_vel", source)
+        self.assertNotIn("Twist", source)
+
 
 if __name__ == "__main__":
     unittest.main()
