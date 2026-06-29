@@ -46,4 +46,15 @@ def detect_qr_texts_bgr(frame, cv2) -> tuple[str, ...]:
 
     single_result = detector.detectAndDecode(frame)
     single_text = single_result[0] if single_result else ""
-    return _nonblank_texts(single_text)
+    texts = _nonblank_texts(single_text)
+    if texts:
+        return texts
+
+    wechat_detector_factory = getattr(cv2, "wechat_qrcode_WeChatQRCode", None)
+    if wechat_detector_factory is None:
+        return ()
+
+    wechat_detector = wechat_detector_factory()
+    wechat_result = wechat_detector.detectAndDecode(frame)
+    wechat_texts = wechat_result[0] if wechat_result else ()
+    return _nonblank_texts(wechat_texts)

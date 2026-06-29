@@ -22,11 +22,21 @@ class FakeDetector:
 
 
 class FakeCv2:
-    def __init__(self, detector):
+    def __init__(self, detector, wechat_detector=None):
         self.detector = detector
+        if wechat_detector is not None:
+            self.wechat_qrcode_WeChatQRCode = lambda: wechat_detector
 
     def QRCodeDetector(self):
         return self.detector
+
+
+class FakeWeChatDetector:
+    def __init__(self, result):
+        self.result = result
+
+    def detectAndDecode(self, frame):
+        return self.result
 
 
 class OpenCvQRDetectorTest(unittest.TestCase):
@@ -49,6 +59,22 @@ class OpenCvQRDetectorTest(unittest.TestCase):
         cv2 = FakeCv2(FakeDetector((True,), ("", None, None)))
 
         self.assertEqual(detect_qr_texts_bgr(object(), cv2), ())
+
+    def test_falls_back_to_wechat_qr_detector_when_qrcode_detector_decodes_nothing(self):
+        cv2 = FakeCv2(
+            FakeDetector((False, (), None, None), ("", None, None)),
+            FakeWeChatDetector(((" QR_003 ", ""), None)),
+        )
+
+        self.assertEqual(detect_qr_texts_bgr(object(), cv2), ("QR_003",))
+
+    def test_qrcode_detector_result_wins_over_wechat_fallback(self):
+        cv2 = FakeCv2(
+            FakeDetector((False, (), None, None), ("QR_004", None, None)),
+            FakeWeChatDetector((("QR_005",), None)),
+        )
+
+        self.assertEqual(detect_qr_texts_bgr(object(), cv2), ("QR_004",))
 
 
 if __name__ == "__main__":
