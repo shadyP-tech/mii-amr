@@ -58,8 +58,17 @@ def classify_stand_side_from_frame(
     min_color_confidence: float = 0.20,
     qr_crop_margin_px: int = 8,
 ) -> StandSideClassification:
-    qr_frame = _crop_frame_to_estimate(cv2, frame, estimate, margin_px=qr_crop_margin_px)
-    qr_texts = detect_qr_texts_bgr(qr_frame, cv2)
+    qr_texts = ()
+    for qr_frame in _qr_scan_frames_for_estimate(
+        cv2,
+        numpy,
+        frame,
+        estimate,
+        margin_px=qr_crop_margin_px,
+    ):
+        qr_texts = detect_qr_texts_bgr(qr_frame, cv2)
+        if qr_texts:
+            break
     color_confidence = color_confidence_for_estimate(cv2, numpy, color_mask, estimate)
     return classify_stand_side(
         qr_texts=qr_texts,
@@ -97,6 +106,52 @@ def _crop_frame_to_estimate(cv2, frame, estimate: StandAxisImageEstimate, *, mar
     return frame[y_min:y_max, x_min:x_max]
 
 
+def _qr_scan_frames_for_estimate(cv2, numpy, frame, estimate: StandAxisImageEstimate, *, margin_px: int):
+    frames = []
+    rectified = _rectify_frame_to_estimate(cv2, numpy, frame, estimate)
+    if rectified is not None:
+        frames.append(rectified)
+    crop = _crop_frame_to_estimate(cv2, frame, estimate, margin_px=max(margin_px, 18))
+    if crop is not frame:
+        frames.append(crop)
+    frames.append(frame)
+    return tuple(frames)
+
+
+def _rectify_frame_to_estimate(cv2, numpy, frame, estimate: StandAxisImageEstimate):
+    if estimate.corners is None:
+        return None
+    top_left, top_right, bottom_right, bottom_left = order_corners(estimate.corners)
+    width = int(round(max(_distance(top_left, top_right), _distance(bottom_left, bottom_right))))
+    height = int(round(max(_distance(top_left, bottom_left), _distance(top_right, bottom_right))))
+    if width < 16 or height < 16:
+        return None
+
+    src = numpy.array(
+        [
+            [top_left.u_px, top_left.v_px],
+            [top_right.u_px, top_right.v_px],
+            [bottom_right.u_px, bottom_right.v_px],
+            [bottom_left.u_px, bottom_left.v_px],
+        ],
+        dtype=numpy.float32,
+    )
+    dst = numpy.array(
+        [
+            [0.0, 0.0],
+            [float(width - 1), 0.0],
+            [float(width - 1), float(height - 1)],
+            [0.0, float(height - 1)],
+        ],
+        dtype=numpy.float32,
+    )
+    try:
+        transform = cv2.getPerspectiveTransform(src, dst)
+        return cv2.warpPerspective(frame, transform, (width, height))
+    except Exception:
+        return None
+
+
 def _corner_bounds(corners: Sequence[ImagePoint]) -> tuple[float, float, float, float]:
     return (
         min(point.u_px for point in corners),
@@ -104,3 +159,7 @@ def _corner_bounds(corners: Sequence[ImagePoint]) -> tuple[float, float, float, 
         max(point.u_px for point in corners),
         max(point.v_px for point in corners),
     )
+
+
+def _distance(first: ImagePoint, second: ImagePoint) -> float:
+    return ((second.u_px - first.u_px) ** 2 + (second.v_px - first.v_px) ** 2) ** 0.5

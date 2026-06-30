@@ -330,6 +330,7 @@ def _face_quadrilateral_from_silhouette(
         )
         if corners is None:
             continue
+        corners = _refine_quadrilateral_to_outer_edge_support(cv2, edges, corners)
         aspect_ratio = quadrilateral_aspect_ratio(corners)
         if aspect_ratio < min_aspect_ratio or aspect_ratio > max_aspect_ratio:
             continue
@@ -363,6 +364,128 @@ def _quadrilateral_from_mask_component(
             for point in corners
         )
     )
+
+
+def _refine_quadrilateral_to_outer_edge_support(
+    cv2,
+    edges,
+    corners: Sequence[ImagePoint],
+) -> tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint]:
+    ordered = order_corners(corners)
+    top_left, top_right, bottom_right, bottom_left = ordered
+    center = _polygon_center(ordered)
+    width = (_distance(top_left, top_right) + _distance(bottom_left, bottom_right)) / 2.0
+    height = (_distance(top_left, bottom_left) + _distance(top_right, bottom_right)) / 2.0
+    max_offset_px = max(3.0, min(24.0, min(width, height) * 0.10))
+
+    top = _outer_supported_side(edges, top_left, top_right, center, max_offset_px=max_offset_px)
+    right = _outer_supported_side(edges, top_right, bottom_right, center, max_offset_px=max_offset_px)
+    bottom = _outer_supported_side(edges, bottom_right, bottom_left, center, max_offset_px=max_offset_px)
+    left = _outer_supported_side(edges, bottom_left, top_left, center, max_offset_px=max_offset_px)
+
+    refined = (
+        _line_intersection(top, left),
+        _line_intersection(top, right),
+        _line_intersection(bottom, right),
+        _line_intersection(bottom, left),
+    )
+    if any(point is None for point in refined):
+        return ordered
+
+    refined_ordered = order_corners(tuple(point for point in refined if point is not None))
+    old_area = _polygon_area(ordered)
+    new_area = _polygon_area(refined_ordered)
+    if old_area <= 0.0 or new_area < 0.75 * old_area or new_area > 1.60 * old_area:
+        return ordered
+    return refined_ordered
+
+
+def _outer_supported_side(
+    edges,
+    start: ImagePoint,
+    end: ImagePoint,
+    center: ImagePoint,
+    *,
+    max_offset_px: float,
+) -> tuple[ImagePoint, ImagePoint]:
+    dx = end.u_px - start.u_px
+    dy = end.v_px - start.v_px
+    length = math.hypot(dx, dy)
+    if length <= 0.0:
+        return start, end
+
+    normal_a = ImagePoint(-dy / length, dx / length)
+    normal_b = ImagePoint(dy / length, -dx / length)
+    midpoint = ImagePoint((start.u_px + end.u_px) / 2.0, (start.v_px + end.v_px) / 2.0)
+    away = ImagePoint(midpoint.u_px - center.u_px, midpoint.v_px - center.v_px)
+    normal = normal_a if _dot(normal_a, away) >= _dot(normal_b, away) else normal_b
+
+    samples = max(12, min(160, int(length)))
+    support_by_offset = []
+    for offset_px in range(0, int(max_offset_px) + 1):
+        offset_start = ImagePoint(start.u_px + normal.u_px * offset_px, start.v_px + normal.v_px * offset_px)
+        offset_end = ImagePoint(end.u_px + normal.u_px * offset_px, end.v_px + normal.v_px * offset_px)
+        support = _edge_support_fraction(edges, offset_start, offset_end, samples=samples)
+        support_by_offset.append((float(offset_px), support))
+
+    best_support = max(support for _offset, support in support_by_offset)
+    min_support = max(0.18, best_support * 0.55)
+    chosen_offset = 0.0
+    for offset_px, support in support_by_offset:
+        if support >= min_support:
+            chosen_offset = offset_px
+
+    return (
+        ImagePoint(start.u_px + normal.u_px * chosen_offset, start.v_px + normal.v_px * chosen_offset),
+        ImagePoint(end.u_px + normal.u_px * chosen_offset, end.v_px + normal.v_px * chosen_offset),
+    )
+
+
+def _edge_support_fraction(edges, start: ImagePoint, end: ImagePoint, *, samples: int) -> float:
+    height, width = edges.shape[:2]
+    hits = 0
+    for index in range(samples):
+        t = index / max(1, samples - 1)
+        x = int(round(start.u_px + (end.u_px - start.u_px) * t))
+        y = int(round(start.v_px + (end.v_px - start.v_px) * t))
+        if x < 0 or y < 0 or x >= width or y >= height:
+            continue
+        x0 = max(0, x - 1)
+        x1 = min(width, x + 2)
+        y0 = max(0, y - 1)
+        y1 = min(height, y + 2)
+        if edges[y0:y1, x0:x1].max() > 0:
+            hits += 1
+    return hits / max(1, samples)
+
+
+def _line_intersection(
+    first: tuple[ImagePoint, ImagePoint],
+    second: tuple[ImagePoint, ImagePoint],
+) -> ImagePoint | None:
+    p1, p2 = first
+    p3, p4 = second
+    x1, y1 = p1.u_px, p1.v_px
+    x2, y2 = p2.u_px, p2.v_px
+    x3, y3 = p3.u_px, p3.v_px
+    x4, y4 = p4.u_px, p4.v_px
+    denominator = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if abs(denominator) < 1e-6:
+        return None
+    px = ((x1 * y2 - y1 * x2) * (x3 - x4) - (x1 - x2) * (x3 * y4 - y3 * x4)) / denominator
+    py = ((x1 * y2 - y1 * x2) * (y3 - y4) - (y1 - y2) * (x3 * y4 - y3 * x4)) / denominator
+    return ImagePoint(px, py)
+
+
+def _polygon_center(corners: Sequence[ImagePoint]) -> ImagePoint:
+    return ImagePoint(
+        sum(point.u_px for point in corners) / len(corners),
+        sum(point.v_px for point in corners) / len(corners),
+    )
+
+
+def _dot(first: ImagePoint, second: ImagePoint) -> float:
+    return first.u_px * second.u_px + first.v_px * second.v_px
 
 
 def _largest_external_bounding_area(cv2, edges) -> float:

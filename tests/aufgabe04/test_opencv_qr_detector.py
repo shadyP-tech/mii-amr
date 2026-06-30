@@ -21,6 +21,14 @@ class FakeDetector:
         return self.single_result
 
 
+class RaisingDetector:
+    def detectAndDecodeMulti(self, frame):
+        raise RuntimeError("opencv decoder failed")
+
+    def detectAndDecode(self, frame):
+        raise RuntimeError("opencv decoder failed")
+
+
 class FakeCv2:
     def __init__(self, detector, wechat_detector=None):
         self.detector = detector
@@ -75,6 +83,19 @@ class OpenCvQRDetectorTest(unittest.TestCase):
         )
 
         self.assertEqual(detect_qr_texts_bgr(object(), cv2), ("QR_004",))
+
+    def test_opencv_decoder_errors_fall_back_to_wechat_detector(self):
+        cv2 = FakeCv2(
+            RaisingDetector(),
+            FakeWeChatDetector((("QR_006",), None)),
+        )
+
+        self.assertEqual(detect_qr_texts_bgr(object(), cv2), ("QR_006",))
+
+    def test_opencv_decoder_errors_return_empty_without_wechat_detector(self):
+        cv2 = FakeCv2(RaisingDetector())
+
+        self.assertEqual(detect_qr_texts_bgr(object(), cv2), ())
 
 
 if __name__ == "__main__":
