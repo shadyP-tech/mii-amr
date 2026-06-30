@@ -76,13 +76,13 @@ class OpenCvQRDetectorTest(unittest.TestCase):
 
         self.assertEqual(detect_qr_texts_bgr(object(), cv2), ("QR_003",))
 
-    def test_qrcode_detector_result_wins_over_wechat_fallback(self):
+    def test_wechat_qr_detector_wins_over_standard_qrcode_detector(self):
         cv2 = FakeCv2(
             FakeDetector((False, (), None, None), ("QR_004", None, None)),
             FakeWeChatDetector((("QR_005",), None)),
         )
 
-        self.assertEqual(detect_qr_texts_bgr(object(), cv2), ("QR_004",))
+        self.assertEqual(detect_qr_texts_bgr(object(), cv2), ("QR_005",))
 
     def test_opencv_decoder_errors_fall_back_to_wechat_detector(self):
         cv2 = FakeCv2(

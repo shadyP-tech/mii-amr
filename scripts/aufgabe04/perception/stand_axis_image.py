@@ -413,6 +413,7 @@ def _outer_supported_side(
     length = math.hypot(dx, dy)
     if length <= 0.0:
         return start, end
+    direction = ImagePoint(dx / length, dy / length)
 
     normal_a = ImagePoint(-dy / length, dx / length)
     normal_b = ImagePoint(dy / length, -dx / length)
@@ -435,9 +436,67 @@ def _outer_supported_side(
         if support >= min_support:
             chosen_offset = offset_px
 
-    return (
+    shifted = (
         ImagePoint(start.u_px + normal.u_px * chosen_offset, start.v_px + normal.v_px * chosen_offset),
         ImagePoint(end.u_px + normal.u_px * chosen_offset, end.v_px + normal.v_px * chosen_offset),
+    )
+    fitted = _fit_supported_edge_line(edges, shifted[0], shifted[1], direction=direction)
+    return fitted if fitted is not None else shifted
+
+
+def _fit_supported_edge_line(
+    edges,
+    start: ImagePoint,
+    end: ImagePoint,
+    *,
+    direction: ImagePoint,
+    search_radius_px: int = 2,
+    max_angle_delta_deg: float = 25.0,
+) -> tuple[ImagePoint, ImagePoint] | None:
+    height, width = edges.shape[:2]
+    length = _distance(start, end)
+    samples = max(12, min(160, int(length)))
+    points: set[tuple[int, int]] = set()
+    for index in range(samples):
+        t = index / max(1, samples - 1)
+        x = int(round(start.u_px + (end.u_px - start.u_px) * t))
+        y = int(round(start.v_px + (end.v_px - start.v_px) * t))
+        if x < 0 or y < 0 or x >= width or y >= height:
+            continue
+        x0 = max(0, x - search_radius_px)
+        x1 = min(width, x + search_radius_px + 1)
+        y0 = max(0, y - search_radius_px)
+        y1 = min(height, y + search_radius_px + 1)
+        for yy in range(y0, y1):
+            for xx in range(x0, x1):
+                if edges[yy, xx] > 0:
+                    points.add((xx, yy))
+
+    if len(points) < max(6, int(samples * 0.08)):
+        return None
+
+    mean_x = sum(float(x) for x, _y in points) / len(points)
+    mean_y = sum(float(y) for _x, y in points) / len(points)
+    cov_xx = sum((float(x) - mean_x) ** 2 for x, _y in points) / len(points)
+    cov_yy = sum((float(y) - mean_y) ** 2 for _x, y in points) / len(points)
+    cov_xy = sum((float(x) - mean_x) * (float(y) - mean_y) for x, y in points) / len(points)
+    angle = 0.5 * math.atan2(2.0 * cov_xy, cov_xx - cov_yy)
+    fitted_dir = ImagePoint(math.cos(angle), math.sin(angle))
+    if _dot(fitted_dir, direction) < 0.0:
+        fitted_dir = ImagePoint(-fitted_dir.u_px, -fitted_dir.v_px)
+
+    angle_delta = abs(math.degrees(math.atan2(
+        fitted_dir.u_px * direction.v_px - fitted_dir.v_px * direction.u_px,
+        _dot(fitted_dir, direction),
+    )))
+    if angle_delta > max_angle_delta_deg:
+        return None
+
+    start_projection = (start.u_px - mean_x) * fitted_dir.u_px + (start.v_px - mean_y) * fitted_dir.v_px
+    end_projection = (end.u_px - mean_x) * fitted_dir.u_px + (end.v_px - mean_y) * fitted_dir.v_px
+    return (
+        ImagePoint(mean_x + fitted_dir.u_px * start_projection, mean_y + fitted_dir.v_px * start_projection),
+        ImagePoint(mean_x + fitted_dir.u_px * end_projection, mean_y + fitted_dir.v_px * end_projection),
     )
 
 

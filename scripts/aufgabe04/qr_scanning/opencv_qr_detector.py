@@ -43,6 +43,27 @@ def detect_qr_texts_bgr(frame, cv2) -> tuple[str, ...]:
 
 
 def _detect_qr_texts_single_candidate(frame, cv2) -> tuple[str, ...]:
+    texts = _detect_qr_texts_with_wechat(frame, cv2)
+    if texts:
+        return texts
+    return _detect_qr_texts_with_standard_opencv(frame, cv2)
+
+
+def _detect_qr_texts_with_wechat(frame, cv2) -> tuple[str, ...]:
+    wechat_detector_factory = getattr(cv2, "wechat_qrcode_WeChatQRCode", None)
+    if wechat_detector_factory is None:
+        return ()
+
+    try:
+        wechat_detector = wechat_detector_factory()
+        wechat_result = wechat_detector.detectAndDecode(frame)
+    except Exception:
+        return ()
+    wechat_texts = wechat_result[0] if wechat_result else ()
+    return _nonblank_texts(wechat_texts)
+
+
+def _detect_qr_texts_with_standard_opencv(frame, cv2) -> tuple[str, ...]:
     detector = cv2.QRCodeDetector()
     try:
         multi_result = detector.detectAndDecodeMulti(frame)
@@ -63,18 +84,7 @@ def _detect_qr_texts_single_candidate(frame, cv2) -> tuple[str, ...]:
     texts = _nonblank_texts(single_text)
     if texts:
         return texts
-
-    wechat_detector_factory = getattr(cv2, "wechat_qrcode_WeChatQRCode", None)
-    if wechat_detector_factory is None:
-        return ()
-
-    wechat_detector = wechat_detector_factory()
-    try:
-        wechat_result = wechat_detector.detectAndDecode(frame)
-    except Exception:
-        return ()
-    wechat_texts = wechat_result[0] if wechat_result else ()
-    return _nonblank_texts(wechat_texts)
+    return ()
 
 
 def _qr_decode_candidates(frame, cv2) -> tuple[object, ...]:
