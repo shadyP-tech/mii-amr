@@ -97,24 +97,38 @@ The frame overlay includes `age=...ms` when the incoming image has a ROS header 
 
 ## Stand Axis Viewer
 
-The stand-axis viewer uses the selected HSV mask to find the largest four-corner stand face in the live camera frame. It overlays the detected quadrilateral and reports:
+The stand-axis viewer uses grayscale edge detection by default, so the axis estimate does not depend on the stand color or on the QR-code side being visible. It has two interpretation modes:
+
+1. Face visible: the outer square is detected as a quadrilateral and the tool reports the left/right edge-height ratio.
+2. Edge-on: the square face has collapsed to a thin vertical line and the tool reports approximate side-on / 90 degrees. In this mode it does not compute a height ratio.
+
+In face-visible mode it overlays the detected outer quadrilateral and reports:
 
 - `L` / `R`: apparent pixel heights of the left and right stand edges.
 - `ratio`: `L / R`.
 - `closer`: the side with the larger apparent edge height.
-- `proxy`: `(ratio - 1) / (ratio + 1)`, a signed rotation cue.
+- `camera axis rot proxy`: `(ratio - 1) / (ratio + 1)`, a signed rotation cue relative to the robot camera.
 - `med_ratio` / `med_proxy`: median-filtered values over the recent usable frames.
+
+Sign convention: positive means the left image edge is taller/closer to the camera; negative means the right image edge is taller/closer.
+
+In edge-on mode it overlays the detected vertical line and reports:
+
+- `camera axis approx side-on / 90deg`
+- `line_height_px`
+- `ratio unavailable`
+
+The console output mirrors this with either `camera_axis_rotation_proxy=...` or `camera_axis_edge_on_approx_90deg=true`.
 
 Run it from the Apptainer workstation environment with:
 
 ```bash
 scripts/aufgabe04/perception/debug/run_stand_axis_viewer.sh \
   --compressed-image-topic /camera/image_raw/compressed \
-  --color green \
+  --axis-source edges \
   --max-display-fps 15 \
   --max-frame-age-sec 0.25 \
-  --display-mask \
-  --tune
+  --display-edges
 ```
 
 Direct module form when the environment is already sourced:
@@ -122,10 +136,9 @@ Direct module form when the environment is already sourced:
 ```bash
 python3 -m scripts.aufgabe04.perception.debug.stand_axis_viewer \
   --compressed-image-topic /camera/image_raw/compressed \
-  --color green \
+  --axis-source edges \
   --max-display-fps 15 \
-  --display-mask \
-  --tune
+  --display-edges
 ```
 
 Approximate yaw degrees require extra geometry:
@@ -133,9 +146,52 @@ Approximate yaw degrees require extra geometry:
 ```bash
 python3 -m scripts.aufgabe04.perception.debug.stand_axis_viewer \
   --compressed-image-topic /camera/image_raw/compressed \
-  --color green \
+  --axis-source edges \
   --stand-width-m 0.12 \
   --stand-distance-m 0.45
 ```
 
-Without `--stand-width-m` and `--stand-distance-m`, use the displayed ratio/proxy as a direction and relative-strength cue, not as a calibrated physical angle. At the lowest camera resolution, keep the stand face large enough that both vertical edges are at least about 8 to 10 pixels tall; otherwise the viewer will reject the estimate as `edge_too_short`.
+Without `--stand-width-m` and `--stand-distance-m`, use the displayed camera-relative proxy as a direction and relative-strength cue, not as a calibrated physical angle. At the lowest camera resolution, keep the stand face large enough that both vertical edges are at least about 8 to 10 pixels tall; otherwise the viewer will reject the estimate as `edge_too_short`.
+
+Use these knobs when the outer square is not selected cleanly:
+
+```bash
+python3 -m scripts.aufgabe04.perception.debug.stand_axis_viewer \
+  --compressed-image-topic /camera/image_raw/compressed \
+  --axis-source edges \
+  --display-edges \
+  --canny-low 40 \
+  --canny-high 120 \
+  --edge-close-kernel 7 \
+  --edge-close-iterations 2 \
+  --min-area-px 300
+```
+
+If the square face and vertical stem are the same color and physically connected, the edge contour can become one T-shaped outline. The detector handles this by first searching all square-like edge contours and rejecting candidates with a lower appendage, then falling back to Hough line segments for the square's left and right outer edges. Tune the line fallback with:
+
+```bash
+python3 -m scripts.aufgabe04.perception.debug.stand_axis_viewer \
+  --compressed-image-topic /camera/image_raw/compressed \
+  --axis-source edges \
+  --display-edges \
+  --hough-threshold 18 \
+  --hough-min-line-length-px 10 \
+  --hough-max-line-gap-px 6
+```
+
+When the line fallback is used, the overlay/console reports `source=edge_lines`; when a contour quadrilateral is used, it reports `source=edges`.
+
+When the face is nearly 90 degrees to the robot camera and only a thin line is visible, the overlay/console reports `source=edge_on_line`. This is a different interpretation from `source=edge_lines`: `edge_lines` still reconstructs a visible quadrilateral from line pairs, while `edge_on_line` reports side-on geometry without a ratio.
+
+The legacy HSV contour mode is still available for comparison:
+
+```bash
+python3 -m scripts.aufgabe04.perception.debug.stand_axis_viewer \
+  --compressed-image-topic /camera/image_raw/compressed \
+  --axis-source color-mask \
+  --color green \
+  --display-mask \
+  --tune
+```
+
+Use color-mask mode only for debugging color segmentation. For stand-axis rotation, prefer `--axis-source edges` because it can work on the QR side and the plain backside as long as the square's outer boundary has visible contrast.

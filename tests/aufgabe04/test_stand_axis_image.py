@@ -11,8 +11,10 @@ sys.path.insert(0, str(ROOT))
 from scripts.aufgabe04.perception.debug.stand_axis_viewer import build_parser  # noqa: E402
 from scripts.aufgabe04.perception.stand_axis_image import (  # noqa: E402
     ImagePoint,
+    estimate_edge_on_axis_from_line,
     estimate_stand_axis_from_corners,
     order_corners,
+    quadrilateral_aspect_ratio,
 )
 
 
@@ -32,12 +34,20 @@ class StandAxisImageTest(unittest.TestCase):
 
         self.assertEqual([(point.u_px, point.v_px) for point in corners], [(20, 20), (95, 25), (90, 80), (25, 85)])
 
+    def test_quadrilateral_aspect_ratio_uses_outer_edges(self):
+        ratio = quadrilateral_aspect_ratio(
+            self.make_corners([(40, 20), (100, 20), (100, 80), (40, 80)])
+        )
+
+        self.assertAlmostEqual(ratio, 1.0)
+
     def test_front_facing_square_has_neutral_ratio(self):
         estimate = estimate_stand_axis_from_corners(
             self.make_corners([(40, 25), (100, 25), (100, 85), (40, 85)])
         )
 
         self.assertTrue(estimate.usable)
+        self.assertEqual(estimate.mode, "face_visible")
         self.assertAlmostEqual(estimate.height_ratio, 1.0, delta=0.03)
         self.assertAlmostEqual(estimate.yaw_proxy, 0.0, delta=0.02)
         self.assertEqual(estimate.closer_side, "equal")
@@ -48,10 +58,38 @@ class StandAxisImageTest(unittest.TestCase):
         )
 
         self.assertTrue(estimate.usable)
+        self.assertEqual(estimate.mode, "face_visible")
         self.assertGreater(estimate.left_height_px, estimate.right_height_px)
         self.assertGreater(estimate.height_ratio, 1.0)
         self.assertGreater(estimate.yaw_proxy, 0.0)
         self.assertEqual(estimate.closer_side, "left")
+
+    def test_edge_on_line_reports_side_on_without_ratio(self):
+        estimate = estimate_edge_on_axis_from_line(
+            ImagePoint(80, 20),
+            ImagePoint(82, 92),
+            min_edge_height_px=8.0,
+        )
+
+        self.assertTrue(estimate.usable)
+        self.assertEqual(estimate.mode, "edge_on")
+        self.assertEqual(estimate.reason, "edge_on_approx_90_deg")
+        self.assertIsNone(estimate.height_ratio)
+        self.assertIsNone(estimate.yaw_proxy)
+        self.assertIsNone(estimate.yaw_deg)
+        self.assertEqual(estimate.closer_side, "side_on")
+        self.assertIsNotNone(estimate.axis_line)
+
+    def test_short_edge_on_line_is_not_usable(self):
+        estimate = estimate_edge_on_axis_from_line(
+            ImagePoint(80, 20),
+            ImagePoint(80, 24),
+            min_edge_height_px=8.0,
+        )
+
+        self.assertFalse(estimate.usable)
+        self.assertEqual(estimate.mode, "unavailable")
+        self.assertEqual(estimate.reason, "edge_on_line_too_short")
 
     def test_optional_geometry_converts_ratio_to_yaw_degrees(self):
         estimate = estimate_stand_axis_from_corners(
@@ -73,6 +111,7 @@ class StandAxisImageTest(unittest.TestCase):
 
         args = parser.parse_args(["--compressed-image-topic", "/camera/image_raw/compressed"])
         self.assertEqual(args.compressed_image_topic, "/camera/image_raw/compressed")
+        self.assertEqual(args.axis_source, "edges")
 
     def test_stand_axis_viewer_has_no_motion_arguments(self):
         parser = build_parser()
@@ -85,6 +124,37 @@ class StandAxisImageTest(unittest.TestCase):
         self.assertNotIn("--cmd-vel-topic", option_strings)
         self.assertNotIn("--run", option_strings)
         self.assertNotIn("--nav2-goal", option_strings)
+
+    def test_stand_axis_viewer_exposes_edge_debug_options(self):
+        parser = build_parser()
+
+        args = parser.parse_args(
+            [
+                "--compressed-image-topic",
+                "/camera/image_raw/compressed",
+                "--axis-source",
+                "edges",
+                "--display-edges",
+                "--canny-low",
+                "40",
+                "--canny-high",
+                "120",
+                "--hough-threshold",
+                "18",
+                "--hough-min-line-length-px",
+                "10",
+                "--hough-max-line-gap-px",
+                "6",
+            ]
+        )
+
+        self.assertEqual(args.axis_source, "edges")
+        self.assertTrue(args.display_edges)
+        self.assertEqual(args.canny_low, 40)
+        self.assertEqual(args.canny_high, 120)
+        self.assertEqual(args.hough_threshold, 18)
+        self.assertEqual(args.hough_min_line_length_px, 10)
+        self.assertEqual(args.hough_max_line_gap_px, 6)
 
 
 if __name__ == "__main__":

@@ -15,7 +15,9 @@ class ImagePoint:
 class StandAxisImageEstimate:
     usable: bool
     reason: str
+    mode: str
     corners: tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint] | None
+    axis_line: tuple[ImagePoint, ImagePoint] | None
     left_height_px: float
     right_height_px: float
     height_ratio: float | None
@@ -23,6 +25,7 @@ class StandAxisImageEstimate:
     yaw_deg: float | None
     closer_side: str | None
     contour_area_px: float
+    source: str = "unknown"
 
 
 def estimate_stand_axis_from_mask(
@@ -36,16 +39,16 @@ def estimate_stand_axis_from_mask(
 ) -> StandAxisImageEstimate:
     contours, _hierarchy = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
-        return _unusable("no_contour")
+        return _unusable("no_contour", source="color_mask")
 
     contour = max(contours, key=cv2.contourArea)
     area = float(cv2.contourArea(contour))
     if area < min_area_px:
-        return _unusable("contour_too_small", contour_area_px=area)
+        return _unusable("contour_too_small", contour_area_px=area, source="color_mask")
 
     corners = _quadrilateral_corners(cv2, contour)
     if corners is None:
-        return _unusable("no_four_corner_contour", contour_area_px=area)
+        return _unusable("no_four_corner_contour", contour_area_px=area, source="color_mask")
 
     return estimate_stand_axis_from_corners(
         corners,
@@ -53,7 +56,114 @@ def estimate_stand_axis_from_mask(
         stand_width_m=stand_width_m,
         stand_distance_m=stand_distance_m,
         contour_area_px=area,
+        source="color_mask",
     )
+
+
+def estimate_stand_axis_from_edges(
+    cv2,
+    frame,
+    *,
+    blur_kernel: int = 5,
+    canny_low: int = 50,
+    canny_high: int = 150,
+    dilate_iterations: int = 1,
+    close_kernel: int = 5,
+    close_iterations: int = 1,
+    hough_threshold: int = 20,
+    hough_min_line_length_px: int = 12,
+    hough_max_line_gap_px: int = 8,
+    min_area_px: float = 250.0,
+    min_edge_height_px: float = 8.0,
+    min_aspect_ratio: float = 0.45,
+    max_aspect_ratio: float = 1.80,
+    stand_width_m: float | None = None,
+    stand_distance_m: float | None = None,
+) -> tuple[StandAxisImageEstimate, object]:
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    if blur_kernel > 1:
+        if blur_kernel % 2 == 0:
+            blur_kernel += 1
+        gray = cv2.GaussianBlur(gray, (blur_kernel, blur_kernel), 0)
+
+    edges = cv2.Canny(gray, canny_low, canny_high)
+    if dilate_iterations > 0:
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        edges = cv2.dilate(edges, kernel, iterations=dilate_iterations)
+    if close_kernel > 1 and close_iterations > 0:
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (close_kernel, close_kernel))
+        edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=close_iterations)
+
+    contours, _hierarchy = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    best: StandAxisImageEstimate | None = None
+    best_score = -1.0
+    for contour in contours:
+        area = float(cv2.contourArea(contour))
+        if area < min_area_px:
+            continue
+        corners = _quadrilateral_corners(cv2, contour)
+        if corners is None or not cv2.isContourConvex(_points_to_cv2(corners)):
+            continue
+        if _contour_has_lower_appendage(cv2, contour, corners):
+            continue
+        aspect_ratio = quadrilateral_aspect_ratio(corners)
+        if aspect_ratio < min_aspect_ratio or aspect_ratio > max_aspect_ratio:
+            continue
+        estimate = estimate_stand_axis_from_corners(
+            corners,
+            min_edge_height_px=min_edge_height_px,
+            stand_width_m=stand_width_m,
+            stand_distance_m=stand_distance_m,
+            contour_area_px=area,
+            source="edges",
+        )
+        if not estimate.usable:
+            continue
+        score = score_quadrilateral_candidate(corners, area)
+        if score > best_score:
+            best = estimate
+            best_score = score
+
+    if best is not None:
+        return best, edges
+
+    line_corners = _quadrilateral_from_line_segments(
+        cv2,
+        edges,
+        hough_threshold=hough_threshold,
+        hough_min_line_length_px=hough_min_line_length_px,
+        hough_max_line_gap_px=hough_max_line_gap_px,
+        min_edge_height_px=min_edge_height_px,
+        min_area_px=min_area_px,
+        min_aspect_ratio=min_aspect_ratio,
+        max_aspect_ratio=max_aspect_ratio,
+    )
+    if line_corners is not None:
+        return (
+            estimate_stand_axis_from_corners(
+                line_corners,
+                min_edge_height_px=min_edge_height_px,
+                stand_width_m=stand_width_m,
+                stand_distance_m=stand_distance_m,
+                contour_area_px=_polygon_area(line_corners),
+                source="edge_lines",
+            ),
+            edges,
+        )
+
+    edge_on = _edge_on_from_line_segments(
+        cv2,
+        edges,
+        hough_threshold=hough_threshold,
+        hough_min_line_length_px=hough_min_line_length_px,
+        hough_max_line_gap_px=hough_max_line_gap_px,
+        min_edge_height_px=min_edge_height_px,
+    )
+    if edge_on is not None:
+        return edge_on, edges
+
+    if best is None:
+        return _unusable("no_edge_quadrilateral", source="edges"), edges
 
 
 def estimate_stand_axis_from_corners(
@@ -63,13 +173,14 @@ def estimate_stand_axis_from_corners(
     stand_width_m: float | None = None,
     stand_distance_m: float | None = None,
     contour_area_px: float = 0.0,
+    source: str = "corners",
 ) -> StandAxisImageEstimate:
     corners = order_corners(corners)
     top_left, top_right, bottom_right, bottom_left = corners
     left_height = _distance(top_left, bottom_left)
     right_height = _distance(top_right, bottom_right)
     if left_height < min_edge_height_px or right_height < min_edge_height_px:
-        return _unusable("edge_too_short", corners=corners, contour_area_px=contour_area_px)
+        return _unusable("edge_too_short", corners=corners, contour_area_px=contour_area_px, source=source)
 
     ratio = left_height / right_height
     yaw_proxy = (ratio - 1.0) / (ratio + 1.0)
@@ -79,7 +190,9 @@ def estimate_stand_axis_from_corners(
     return StandAxisImageEstimate(
         usable=True,
         reason="axis_estimated",
+        mode="face_visible",
         corners=corners,
+        axis_line=None,
         left_height_px=left_height,
         right_height_px=right_height,
         height_ratio=ratio,
@@ -87,7 +200,264 @@ def estimate_stand_axis_from_corners(
         yaw_deg=yaw_deg,
         closer_side=closer_side,
         contour_area_px=contour_area_px,
+        source=source,
     )
+
+
+def quadrilateral_aspect_ratio(corners: Sequence[ImagePoint]) -> float:
+    top_left, top_right, bottom_right, bottom_left = order_corners(corners)
+    width = (_distance(top_left, top_right) + _distance(bottom_left, bottom_right)) / 2.0
+    height = (_distance(top_left, bottom_left) + _distance(top_right, bottom_right)) / 2.0
+    if height <= 0.0:
+        return 0.0
+    return width / height
+
+
+def score_quadrilateral_candidate(corners: Sequence[ImagePoint], area_px: float) -> float:
+    aspect_ratio = quadrilateral_aspect_ratio(corners)
+    aspect_score = max(0.0, 1.0 - abs(math.log(max(aspect_ratio, 1e-6))))
+    return area_px * (0.5 + 0.5 * aspect_score)
+
+
+@dataclass(frozen=True)
+class _LineSegment:
+    start: ImagePoint
+    end: ImagePoint
+    length_px: float
+    angle_deg: float
+
+    @property
+    def y_min(self) -> float:
+        return min(self.start.v_px, self.end.v_px)
+
+    @property
+    def y_max(self) -> float:
+        return max(self.start.v_px, self.end.v_px)
+
+    @property
+    def x_min(self) -> float:
+        return min(self.start.u_px, self.end.u_px)
+
+    @property
+    def x_max(self) -> float:
+        return max(self.start.u_px, self.end.u_px)
+
+    @property
+    def x_mid(self) -> float:
+        return (self.start.u_px + self.end.u_px) / 2.0
+
+    def top_point(self) -> ImagePoint:
+        return self.start if self.start.v_px <= self.end.v_px else self.end
+
+    def bottom_point(self) -> ImagePoint:
+        return self.start if self.start.v_px > self.end.v_px else self.end
+
+
+def estimate_edge_on_axis_from_line(
+    start: ImagePoint,
+    end: ImagePoint,
+    *,
+    min_edge_height_px: float = 8.0,
+    source: str = "edge_on_line",
+) -> StandAxisImageEstimate:
+    top = start if start.v_px <= end.v_px else end
+    bottom = end if top is start else start
+    length_px = _distance(top, bottom)
+    if length_px < min_edge_height_px:
+        return _unusable("edge_on_line_too_short", source=source, axis_line=(top, bottom))
+    return StandAxisImageEstimate(
+        usable=True,
+        reason="edge_on_approx_90_deg",
+        mode="edge_on",
+        corners=None,
+        axis_line=(top, bottom),
+        left_height_px=length_px,
+        right_height_px=0.0,
+        height_ratio=None,
+        yaw_proxy=None,
+        yaw_deg=None,
+        closer_side="side_on",
+        contour_area_px=0.0,
+        source=source,
+    )
+
+
+def _quadrilateral_from_line_segments(
+    cv2,
+    edges,
+    *,
+    hough_threshold: int,
+    hough_min_line_length_px: int,
+    hough_max_line_gap_px: int,
+    min_edge_height_px: float,
+    min_area_px: float,
+    min_aspect_ratio: float,
+    max_aspect_ratio: float,
+) -> tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint] | None:
+    segments = _line_segments_from_edges(
+        cv2,
+        edges,
+        hough_threshold=hough_threshold,
+        hough_min_line_length_px=hough_min_line_length_px,
+        hough_max_line_gap_px=hough_max_line_gap_px,
+    )
+    if not segments:
+        return None
+
+    verticals = [
+        segment
+        for segment in segments
+        if segment.length_px >= min_edge_height_px and abs(abs(segment.angle_deg) - 90.0) <= 25.0
+    ]
+    horizontals = [
+        segment
+        for segment in segments
+        if segment.length_px >= min_edge_height_px and abs(segment.angle_deg) <= 25.0
+    ]
+
+    best_corners = None
+    best_score = -1.0
+    for left in verticals:
+        for right in verticals:
+            if left.x_mid >= right.x_mid:
+                continue
+            width = right.x_mid - left.x_mid
+            avg_height = (left.length_px + right.length_px) / 2.0
+            if width < min_edge_height_px or avg_height < min_edge_height_px:
+                continue
+            if abs(left.length_px - right.length_px) > 0.55 * avg_height:
+                continue
+            if abs(left.y_min - right.y_min) > 0.45 * avg_height:
+                continue
+            if abs(left.y_max - right.y_max) > 0.45 * avg_height:
+                continue
+
+            corners = order_corners((left.top_point(), right.top_point(), right.bottom_point(), left.bottom_point()))
+            aspect_ratio = quadrilateral_aspect_ratio(corners)
+            if aspect_ratio < min_aspect_ratio or aspect_ratio > max_aspect_ratio:
+                continue
+            area = _polygon_area(corners)
+            if area < min_area_px:
+                continue
+            support = _horizontal_support_score(horizontals, corners)
+            score = score_quadrilateral_candidate(corners, area) * (1.0 + 0.25 * support)
+            if score > best_score:
+                best_corners = corners
+                best_score = score
+    return best_corners
+
+
+def _edge_on_from_line_segments(
+    cv2,
+    edges,
+    *,
+    hough_threshold: int,
+    hough_min_line_length_px: int,
+    hough_max_line_gap_px: int,
+    min_edge_height_px: float,
+) -> StandAxisImageEstimate | None:
+    segments = _line_segments_from_edges(
+        cv2,
+        edges,
+        hough_threshold=hough_threshold,
+        hough_min_line_length_px=hough_min_line_length_px,
+        hough_max_line_gap_px=hough_max_line_gap_px,
+    )
+    verticals = [
+        segment
+        for segment in segments
+        if segment.length_px >= max(min_edge_height_px * 2.0, hough_min_line_length_px)
+        and abs(abs(segment.angle_deg) - 90.0) <= 15.0
+    ]
+    if not verticals:
+        return None
+    frame_height = float(edges.shape[0])
+    best = max(
+        verticals,
+        key=lambda segment: segment.length_px * (1.0 + max(0.0, (frame_height - segment.y_min) / frame_height)),
+    )
+    return estimate_edge_on_axis_from_line(
+        best.top_point(),
+        best.bottom_point(),
+        min_edge_height_px=min_edge_height_px,
+        source="edge_on_line",
+    )
+
+
+def _line_segments_from_edges(
+    cv2,
+    edges,
+    *,
+    hough_threshold: int,
+    hough_min_line_length_px: int,
+    hough_max_line_gap_px: int,
+) -> tuple[_LineSegment, ...]:
+    raw_lines = cv2.HoughLinesP(
+        edges,
+        1,
+        math.pi / 180.0,
+        threshold=hough_threshold,
+        minLineLength=hough_min_line_length_px,
+        maxLineGap=hough_max_line_gap_px,
+    )
+    if raw_lines is None:
+        return ()
+    return tuple(_line_segment_from_hough(line[0]) for line in raw_lines)
+
+
+def _line_segment_from_hough(values) -> _LineSegment:
+    x1, y1, x2, y2 = (float(value) for value in values)
+    start = ImagePoint(x1, y1)
+    end = ImagePoint(x2, y2)
+    dx = x2 - x1
+    dy = y2 - y1
+    angle = math.degrees(math.atan2(dy, dx))
+    if angle > 90.0:
+        angle -= 180.0
+    if angle < -90.0:
+        angle += 180.0
+    return _LineSegment(start, end, math.hypot(dx, dy), angle)
+
+
+def _horizontal_support_score(horizontals: Sequence[_LineSegment], corners: Sequence[ImagePoint]) -> int:
+    top_left, top_right, bottom_right, bottom_left = order_corners(corners)
+    x_min = min(top_left.u_px, bottom_left.u_px)
+    x_max = max(top_right.u_px, bottom_right.u_px)
+    width = max(1.0, x_max - x_min)
+    top_y = (top_left.v_px + top_right.v_px) / 2.0
+    bottom_y = (bottom_left.v_px + bottom_right.v_px) / 2.0
+    tolerance = max(5.0, 0.18 * width)
+    support = 0
+    for target_y in (top_y, bottom_y):
+        if any(
+            abs(((line.start.v_px + line.end.v_px) / 2.0) - target_y) <= tolerance
+            and _overlap_length(line.x_min, line.x_max, x_min, x_max) >= 0.35 * width
+            for line in horizontals
+        ):
+            support += 1
+    return support
+
+
+def _overlap_length(a_min: float, a_max: float, b_min: float, b_max: float) -> float:
+    return max(0.0, min(a_max, b_max) - max(a_min, b_min))
+
+
+def _contour_has_lower_appendage(cv2, contour, corners: Sequence[ImagePoint]) -> bool:
+    _x, y, _w, h = cv2.boundingRect(contour)
+    contour_bottom = y + h
+    candidate_bottom = max(point.v_px for point in corners)
+    candidate_height = max(point.v_px for point in corners) - min(point.v_px for point in corners)
+    if candidate_height <= 0.0:
+        return False
+    return contour_bottom > candidate_bottom + 0.25 * candidate_height
+
+
+def _polygon_area(corners: Sequence[ImagePoint]) -> float:
+    ordered = order_corners(corners)
+    area = 0.0
+    for current, following in zip(ordered, ordered[1:] + ordered[:1]):
+        area += current.u_px * following.v_px - following.u_px * current.v_px
+    return abs(area) / 2.0
 
 
 def _quadrilateral_corners(cv2, contour) -> tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint] | None:
@@ -130,16 +500,26 @@ def _distance(first: ImagePoint, second: ImagePoint) -> float:
     return math.hypot(second.u_px - first.u_px, second.v_px - first.v_px)
 
 
+def _points_to_cv2(corners: Sequence[ImagePoint]):
+    import numpy
+
+    return numpy.array([[[point.u_px, point.v_px]] for point in corners], dtype=numpy.float32)
+
+
 def _unusable(
     reason: str,
     *,
     corners: tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint] | None = None,
+    axis_line: tuple[ImagePoint, ImagePoint] | None = None,
     contour_area_px: float = 0.0,
+    source: str = "unknown",
 ) -> StandAxisImageEstimate:
     return StandAxisImageEstimate(
         usable=False,
         reason=reason,
+        mode="unavailable",
         corners=corners,
+        axis_line=axis_line,
         left_height_px=0.0,
         right_height_px=0.0,
         height_ratio=None,
@@ -147,4 +527,5 @@ def _unusable(
         yaw_deg=None,
         closer_side=None,
         contour_area_px=contour_area_px,
+        source=source,
     )
