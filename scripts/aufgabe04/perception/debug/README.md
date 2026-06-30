@@ -168,12 +168,15 @@ python3 -m scripts.aufgabe04.perception.debug.stand_axis_viewer \
   --edge-close-kernel 7 \
   --edge-close-iterations 2 \
   --min-area-px 300 \
-  --min-boundary-line-length-px 45
+  --min-boundary-line-length-px 45 \
+  --face-width-fraction 0.60
 ```
 
 If the edge window is full of QR-code internals, keep `--edge-preprocess outer-border` and raise `--min-boundary-line-length-px` until short QR module edges stop being considered as square boundaries. Use `--edge-preprocess gray` only when you want to inspect the raw grayscale edge detector.
 
-If the square face and vertical stem are the same color and physically connected, the edge contour can become one T-shaped outline. The detector handles this by first searching all square-like edge contours and rejecting candidates with a lower appendage, then falling back to Hough line segments for the square's left and right outer edges. Tune the line fallback with:
+If the square face and vertical stem are the same color and physically connected, the edge contour can become one T-shaped outline. The detector handles this by first searching square-like edge contours, then extracting the broad upper band from the filled silhouette to ignore the narrow stem, then falling back to Hough line segments for the square's left and right outer edges. Tune the silhouette fallback with `--face-width-fraction`: raise it if the stem is included, lower it if the side edges are incomplete.
+
+Tune the line fallback with:
 
 ```bash
 python3 -m scripts.aufgabe04.perception.debug.stand_axis_viewer \
@@ -187,7 +190,7 @@ python3 -m scripts.aufgabe04.perception.debug.stand_axis_viewer \
   --min-boundary-line-length-px 45
 ```
 
-When the line fallback is used, the overlay/console reports `source=edge_lines`; when a contour quadrilateral is used, it reports `source=edges`.
+When the silhouette fallback is used, the overlay/console reports `source=edge_silhouette`; when the line fallback is used, it reports `source=edge_lines`; when a contour quadrilateral is used, it reports `source=edges`.
 
 When the face is nearly 90 degrees to the robot camera and only a thin line is visible, the overlay/console reports `source=edge_on_line`. This is a different interpretation from `source=edge_lines`: `edge_lines` still reconstructs a visible quadrilateral from line pairs, while `edge_on_line` reports side-on geometry without a ratio.
 

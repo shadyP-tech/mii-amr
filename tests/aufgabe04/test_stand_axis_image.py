@@ -15,6 +15,7 @@ from scripts.aufgabe04.perception.stand_axis_image import (  # noqa: E402
     estimate_stand_axis_from_corners,
     order_corners,
     quadrilateral_aspect_ratio,
+    wide_row_band,
 )
 
 
@@ -40,6 +41,11 @@ class StandAxisImageTest(unittest.TestCase):
         )
 
         self.assertAlmostEqual(ratio, 1.0)
+
+    def test_wide_row_band_selects_square_above_narrow_stem(self):
+        row_widths = [4, 80, 82, 81, 79, 22, 20, 19]
+
+        self.assertEqual(wide_row_band(row_widths, width_fraction=0.60), (1, 4))
 
     def test_front_facing_square_has_neutral_ratio(self):
         estimate = estimate_stand_axis_from_corners(
@@ -149,6 +155,8 @@ class StandAxisImageTest(unittest.TestCase):
                 "6",
                 "--min-boundary-line-length-px",
                 "42",
+                "--face-width-fraction",
+                "0.65",
             ]
         )
 
@@ -161,6 +169,7 @@ class StandAxisImageTest(unittest.TestCase):
         self.assertEqual(args.hough_min_line_length_px, 10)
         self.assertEqual(args.hough_max_line_gap_px, 6)
         self.assertEqual(args.min_boundary_line_length_px, 42)
+        self.assertAlmostEqual(args.face_width_fraction, 0.65)
 
 
 if __name__ == "__main__":

@@ -75,6 +75,7 @@ def estimate_stand_axis_from_edges(
     hough_min_line_length_px: int = 12,
     hough_max_line_gap_px: int = 8,
     min_boundary_line_length_px: float = 35.0,
+    face_width_fraction: float = 0.60,
     min_area_px: float = 250.0,
     min_edge_height_px: float = 8.0,
     min_aspect_ratio: float = 0.45,
@@ -123,6 +124,28 @@ def estimate_stand_axis_from_edges(
 
     if best is not None:
         return best, edges
+
+    silhouette_corners = _face_rectangle_from_silhouette(
+        cv2,
+        edges,
+        min_area_px=min_area_px,
+        min_edge_height_px=min_edge_height_px,
+        min_aspect_ratio=min_aspect_ratio,
+        max_aspect_ratio=max_aspect_ratio,
+        face_width_fraction=face_width_fraction,
+    )
+    if silhouette_corners is not None:
+        return (
+            estimate_stand_axis_from_corners(
+                silhouette_corners,
+                min_edge_height_px=min_edge_height_px,
+                stand_width_m=stand_width_m,
+                stand_distance_m=stand_distance_m,
+                contour_area_px=_polygon_area(silhouette_corners),
+                source="edge_silhouette",
+            ),
+            edges,
+        )
 
     line_corners = _quadrilateral_from_line_segments(
         cv2,
@@ -216,6 +239,105 @@ def score_quadrilateral_candidate(corners: Sequence[ImagePoint], area_px: float)
     aspect_ratio = quadrilateral_aspect_ratio(corners)
     aspect_score = max(0.0, 1.0 - abs(math.log(max(aspect_ratio, 1e-6))))
     return area_px * (0.5 + 0.5 * aspect_score)
+
+
+def wide_row_band(row_widths: Sequence[int], *, width_fraction: float = 0.60, max_gap: int = 3) -> tuple[int, int] | None:
+    if not row_widths:
+        return None
+    max_width = max(row_widths)
+    if max_width <= 0:
+        return None
+    threshold = max_width * width_fraction
+    best = None
+    best_length = -1
+    start = None
+    last_wide = None
+    gap = 0
+    for index, width in enumerate(row_widths):
+        if width >= threshold:
+            if start is None:
+                start = index
+            last_wide = index
+            gap = 0
+            continue
+        if start is not None:
+            gap += 1
+            if gap > max_gap:
+                end = last_wide if last_wide is not None else index - gap
+                length = end - start + 1
+                if length > best_length:
+                    best = (start, end)
+                    best_length = length
+                start = None
+                last_wide = None
+                gap = 0
+    if start is not None:
+        end = last_wide if last_wide is not None else len(row_widths) - 1
+        length = end - start + 1
+        if length > best_length:
+            best = (start, end)
+    return best
+
+
+def _face_rectangle_from_silhouette(
+    cv2,
+    edges,
+    *,
+    min_area_px: float,
+    min_edge_height_px: float,
+    min_aspect_ratio: float,
+    max_aspect_ratio: float,
+    face_width_fraction: float,
+) -> tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint] | None:
+    import numpy
+
+    contours, _hierarchy = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    for contour in sorted(contours, key=cv2.contourArea, reverse=True):
+        if float(cv2.contourArea(contour)) < min_area_px:
+            continue
+        x, y, width, height = cv2.boundingRect(contour)
+        if width < min_edge_height_px or height < min_edge_height_px:
+            continue
+
+        component = numpy.zeros(edges.shape[:2], dtype=numpy.uint8)
+        cv2.drawContours(component, [contour], -1, 255, thickness=cv2.FILLED)
+        crop = component[y : y + height, x : x + width]
+        row_widths = [int(cv2.countNonZero(crop[row_index, :])) for row_index in range(crop.shape[0])]
+        band = wide_row_band(row_widths, width_fraction=face_width_fraction)
+        if band is None:
+            continue
+        band_start, band_end = band
+        if band_start > 0.30 * height:
+            continue
+        if band_end - band_start + 1 < min_edge_height_px:
+            continue
+
+        band_crop = crop[band_start : band_end + 1, :]
+        ys, xs = numpy.where(band_crop > 0)
+        if len(xs) == 0 or len(ys) == 0:
+            continue
+        x_min = x + float(xs.min())
+        x_max = x + float(xs.max())
+        y_min = y + float(band_start + ys.min())
+        y_max = y + float(band_start + ys.max())
+        corners = order_corners(
+            (
+                ImagePoint(x_min, y_min),
+                ImagePoint(x_max, y_min),
+                ImagePoint(x_max, y_max),
+                ImagePoint(x_min, y_max),
+            )
+        )
+        aspect_ratio = quadrilateral_aspect_ratio(corners)
+        if aspect_ratio < min_aspect_ratio or aspect_ratio > max_aspect_ratio:
+            continue
+        if _polygon_area(corners) < min_area_px:
+            continue
+        return corners
+    return None
 
 
 def _edge_input_image(cv2, frame, *, edge_preprocess: str, blur_kernel: int):
