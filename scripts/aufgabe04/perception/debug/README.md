@@ -97,7 +97,7 @@ The frame overlay includes `age=...ms` when the incoming image has a ROS header 
 
 ## Stand Axis Viewer
 
-The stand-axis viewer uses grayscale edge detection by default, so the axis estimate does not depend on the stand color or on the QR-code side being visible. It has two interpretation modes:
+The stand-axis viewer uses edge detection by default, so the axis estimate does not depend on the stand color or on the QR-code side being visible. The default edge preprocessor is `outer-border`, which smooths QR/internal texture before Canny so the edge image is dominated by the stand outline rather than QR modules. It has two interpretation modes:
 
 1. Face visible: the outer square is detected as a quadrilateral and the tool reports the left/right edge-height ratio.
 2. Edge-on: the square face has collapsed to a thin vertical line and the tool reports approximate side-on / 90 degrees. In this mode it does not compute a height ratio.
@@ -126,6 +126,7 @@ Run it from the Apptainer workstation environment with:
 scripts/aufgabe04/perception/debug/run_stand_axis_viewer.sh \
   --compressed-image-topic /camera/image_raw/compressed \
   --axis-source edges \
+  --edge-preprocess outer-border \
   --max-display-fps 15 \
   --max-frame-age-sec 0.25 \
   --display-edges
@@ -137,6 +138,7 @@ Direct module form when the environment is already sourced:
 python3 -m scripts.aufgabe04.perception.debug.stand_axis_viewer \
   --compressed-image-topic /camera/image_raw/compressed \
   --axis-source edges \
+  --edge-preprocess outer-border \
   --max-display-fps 15 \
   --display-edges
 ```
@@ -159,13 +161,17 @@ Use these knobs when the outer square is not selected cleanly:
 python3 -m scripts.aufgabe04.perception.debug.stand_axis_viewer \
   --compressed-image-topic /camera/image_raw/compressed \
   --axis-source edges \
+  --edge-preprocess outer-border \
   --display-edges \
   --canny-low 40 \
   --canny-high 120 \
   --edge-close-kernel 7 \
   --edge-close-iterations 2 \
-  --min-area-px 300
+  --min-area-px 300 \
+  --min-boundary-line-length-px 45
 ```
+
+If the edge window is full of QR-code internals, keep `--edge-preprocess outer-border` and raise `--min-boundary-line-length-px` until short QR module edges stop being considered as square boundaries. Use `--edge-preprocess gray` only when you want to inspect the raw grayscale edge detector.
 
 If the square face and vertical stem are the same color and physically connected, the edge contour can become one T-shaped outline. The detector handles this by first searching all square-like edge contours and rejecting candidates with a lower appendage, then falling back to Hough line segments for the square's left and right outer edges. Tune the line fallback with:
 
@@ -173,10 +179,12 @@ If the square face and vertical stem are the same color and physically connected
 python3 -m scripts.aufgabe04.perception.debug.stand_axis_viewer \
   --compressed-image-topic /camera/image_raw/compressed \
   --axis-source edges \
+  --edge-preprocess outer-border \
   --display-edges \
   --hough-threshold 18 \
   --hough-min-line-length-px 10 \
-  --hough-max-line-gap-px 6
+  --hough-max-line-gap-px 6 \
+  --min-boundary-line-length-px 45
 ```
 
 When the line fallback is used, the overlay/console reports `source=edge_lines`; when a contour quadrilateral is used, it reports `source=edges`.

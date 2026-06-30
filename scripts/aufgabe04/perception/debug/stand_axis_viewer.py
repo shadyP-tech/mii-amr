@@ -65,6 +65,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--open-iterations", type=int, default=1)
     parser.add_argument("--min-area-px", type=float, default=250.0)
     parser.add_argument("--min-edge-height-px", type=float, default=8.0)
+    parser.add_argument(
+        "--edge-preprocess",
+        choices=("outer-border", "gray"),
+        default="outer-border",
+        help="outer-border smooths QR/internal texture before Canny; gray uses the raw grayscale edge path.",
+    )
     parser.add_argument("--canny-low", type=int, default=50)
     parser.add_argument("--canny-high", type=int, default=150)
     parser.add_argument("--edge-blur-kernel", type=int, default=5)
@@ -74,6 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hough-threshold", type=int, default=20)
     parser.add_argument("--hough-min-line-length-px", type=int, default=12)
     parser.add_argument("--hough-max-line-gap-px", type=int, default=8)
+    parser.add_argument("--min-boundary-line-length-px", type=float, default=35.0)
     parser.add_argument("--min-aspect-ratio", type=float, default=0.45)
     parser.add_argument("--max-aspect-ratio", type=float, default=1.80)
     parser.add_argument(
@@ -293,6 +300,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 estimate, edges = estimate_stand_axis_from_edges(
                     cv2,
                     frame,
+                    edge_preprocess=args.edge_preprocess.replace("-", "_"),
                     blur_kernel=args.edge_blur_kernel,
                     canny_low=args.canny_low,
                     canny_high=args.canny_high,
@@ -302,6 +310,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     hough_threshold=args.hough_threshold,
                     hough_min_line_length_px=args.hough_min_line_length_px,
                     hough_max_line_gap_px=args.hough_max_line_gap_px,
+                    min_boundary_line_length_px=args.min_boundary_line_length_px,
                     min_area_px=args.min_area_px,
                     min_edge_height_px=args.min_edge_height_px,
                     min_aspect_ratio=args.min_aspect_ratio,

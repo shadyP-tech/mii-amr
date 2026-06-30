@@ -64,6 +64,7 @@ def estimate_stand_axis_from_edges(
     cv2,
     frame,
     *,
+    edge_preprocess: str = "outer_border",
     blur_kernel: int = 5,
     canny_low: int = 50,
     canny_high: int = 150,
@@ -73,6 +74,7 @@ def estimate_stand_axis_from_edges(
     hough_threshold: int = 20,
     hough_min_line_length_px: int = 12,
     hough_max_line_gap_px: int = 8,
+    min_boundary_line_length_px: float = 35.0,
     min_area_px: float = 250.0,
     min_edge_height_px: float = 8.0,
     min_aspect_ratio: float = 0.45,
@@ -80,13 +82,8 @@ def estimate_stand_axis_from_edges(
     stand_width_m: float | None = None,
     stand_distance_m: float | None = None,
 ) -> tuple[StandAxisImageEstimate, object]:
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    if blur_kernel > 1:
-        if blur_kernel % 2 == 0:
-            blur_kernel += 1
-        gray = cv2.GaussianBlur(gray, (blur_kernel, blur_kernel), 0)
-
-    edges = cv2.Canny(gray, canny_low, canny_high)
+    edge_input = _edge_input_image(cv2, frame, edge_preprocess=edge_preprocess, blur_kernel=blur_kernel)
+    edges = cv2.Canny(edge_input, canny_low, canny_high)
     if dilate_iterations > 0:
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         edges = cv2.dilate(edges, kernel, iterations=dilate_iterations)
@@ -133,6 +130,7 @@ def estimate_stand_axis_from_edges(
         hough_threshold=hough_threshold,
         hough_min_line_length_px=hough_min_line_length_px,
         hough_max_line_gap_px=hough_max_line_gap_px,
+        min_boundary_line_length_px=min_boundary_line_length_px,
         min_edge_height_px=min_edge_height_px,
         min_area_px=min_area_px,
         min_aspect_ratio=min_aspect_ratio,
@@ -157,6 +155,7 @@ def estimate_stand_axis_from_edges(
         hough_threshold=hough_threshold,
         hough_min_line_length_px=hough_min_line_length_px,
         hough_max_line_gap_px=hough_max_line_gap_px,
+        min_boundary_line_length_px=min_boundary_line_length_px,
         min_edge_height_px=min_edge_height_px,
     )
     if edge_on is not None:
@@ -217,6 +216,27 @@ def score_quadrilateral_candidate(corners: Sequence[ImagePoint], area_px: float)
     aspect_ratio = quadrilateral_aspect_ratio(corners)
     aspect_score = max(0.0, 1.0 - abs(math.log(max(aspect_ratio, 1e-6))))
     return area_px * (0.5 + 0.5 * aspect_score)
+
+
+def _edge_input_image(cv2, frame, *, edge_preprocess: str, blur_kernel: int):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    if edge_preprocess == "outer_border":
+        return _outer_border_edge_input(cv2, gray)
+    if edge_preprocess == "gray":
+        if blur_kernel > 1:
+            if blur_kernel % 2 == 0:
+                blur_kernel += 1
+            gray = cv2.GaussianBlur(gray, (blur_kernel, blur_kernel), 0)
+        return gray
+    raise ValueError(f"unsupported edge preprocess mode: {edge_preprocess}")
+
+
+def _outer_border_edge_input(cv2, gray):
+    # Suppress QR-code texture before Canny. The square outline and stem are
+    # low-frequency structure; QR modules are high-frequency interior texture.
+    smoothed = cv2.GaussianBlur(gray, (9, 9), 0)
+    smoothed = cv2.medianBlur(smoothed, 7)
+    return cv2.bilateralFilter(smoothed, 9, 50, 50)
 
 
 @dataclass(frozen=True)
@@ -289,6 +309,7 @@ def _quadrilateral_from_line_segments(
     hough_threshold: int,
     hough_min_line_length_px: int,
     hough_max_line_gap_px: int,
+    min_boundary_line_length_px: float,
     min_edge_height_px: float,
     min_area_px: float,
     min_aspect_ratio: float,
@@ -307,12 +328,14 @@ def _quadrilateral_from_line_segments(
     verticals = [
         segment
         for segment in segments
-        if segment.length_px >= min_edge_height_px and abs(abs(segment.angle_deg) - 90.0) <= 25.0
+        if segment.length_px >= max(min_edge_height_px, min_boundary_line_length_px)
+        and abs(abs(segment.angle_deg) - 90.0) <= 25.0
     ]
     horizontals = [
         segment
         for segment in segments
-        if segment.length_px >= min_edge_height_px and abs(segment.angle_deg) <= 25.0
+        if segment.length_px >= max(min_edge_height_px, min_boundary_line_length_px * 0.55)
+        and abs(segment.angle_deg) <= 25.0
     ]
 
     best_corners = None
@@ -354,6 +377,7 @@ def _edge_on_from_line_segments(
     hough_threshold: int,
     hough_min_line_length_px: int,
     hough_max_line_gap_px: int,
+    min_boundary_line_length_px: float,
     min_edge_height_px: float,
 ) -> StandAxisImageEstimate | None:
     segments = _line_segments_from_edges(
@@ -366,7 +390,7 @@ def _edge_on_from_line_segments(
     verticals = [
         segment
         for segment in segments
-        if segment.length_px >= max(min_edge_height_px * 2.0, hough_min_line_length_px)
+        if segment.length_px >= max(min_edge_height_px * 2.0, hough_min_line_length_px, min_boundary_line_length_px)
         and abs(abs(segment.angle_deg) - 90.0) <= 15.0
     ]
     if not verticals:

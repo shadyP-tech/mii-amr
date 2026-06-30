@@ -139,12 +139,16 @@ class StandAxisImageTest(unittest.TestCase):
                 "40",
                 "--canny-high",
                 "120",
+                "--edge-preprocess",
+                "outer-border",
                 "--hough-threshold",
                 "18",
                 "--hough-min-line-length-px",
                 "10",
                 "--hough-max-line-gap-px",
                 "6",
+                "--min-boundary-line-length-px",
+                "42",
             ]
         )
 
@@ -152,9 +156,11 @@ class StandAxisImageTest(unittest.TestCase):
         self.assertTrue(args.display_edges)
         self.assertEqual(args.canny_low, 40)
         self.assertEqual(args.canny_high, 120)
+        self.assertEqual(args.edge_preprocess, "outer-border")
         self.assertEqual(args.hough_threshold, 18)
         self.assertEqual(args.hough_min_line_length_px, 10)
         self.assertEqual(args.hough_max_line_gap_px, 6)
+        self.assertEqual(args.min_boundary_line_length_px, 42)
 
 
 if __name__ == "__main__":
