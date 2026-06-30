@@ -1,6 +1,6 @@
 # Aufgabe 04 Perception Debug Viewer
 
-This tool is debug-only. It visualizes compressed camera frames, HSV masks, masked previews, and ROI color classification results for stand-color threshold tuning.
+These tools are debug-only. They visualize compressed camera frames, HSV masks, masked previews, ROI color classification results, and square-stand axis estimates.
 
 It does not command robot motion, does not publish `/cmd_vel`, does not send Nav2 goals, and does not execute station approach behavior.
 
@@ -94,3 +94,48 @@ The low-latency default is a single annotated frame window. Use `--display-mode 
 The ROS callback stores only the latest compressed frame bytes. JPEG decoding, masking, classification, and display happen outside the callback. The mask is built with vectorized OpenCV operations and ROI confidence is computed from `cv2.countNonZero(mask_roi)`. Lower `--max-display-fps` if the laptop is overloaded; the ROS subscriber still keeps only the latest received frame in a background thread. Duplicate-frame checks are disabled by default; enable `--detect-duplicates` only when diagnosing frozen input.
 
 The frame overlay includes `age=...ms` when the incoming image has a ROS header stamp. Incoming stamped frames older than `--max-frame-age-sec` are dropped in the callback before conversion; use `--max-frame-age-sec 0` to disable that guard. A large displayed age means frames are still stale before display, while a small age with laggy windows points to local rendering overhead.
+
+## Stand Axis Viewer
+
+The stand-axis viewer uses the selected HSV mask to find the largest four-corner stand face in the live camera frame. It overlays the detected quadrilateral and reports:
+
+- `L` / `R`: apparent pixel heights of the left and right stand edges.
+- `ratio`: `L / R`.
+- `closer`: the side with the larger apparent edge height.
+- `proxy`: `(ratio - 1) / (ratio + 1)`, a signed rotation cue.
+- `med_ratio` / `med_proxy`: median-filtered values over the recent usable frames.
+
+Run it from the Apptainer workstation environment with:
+
+```bash
+scripts/aufgabe04/perception/debug/run_stand_axis_viewer.sh \
+  --compressed-image-topic /camera/image_raw/compressed \
+  --color green \
+  --max-display-fps 15 \
+  --max-frame-age-sec 0.25 \
+  --display-mask \
+  --tune
+```
+
+Direct module form when the environment is already sourced:
+
+```bash
+python3 -m scripts.aufgabe04.perception.debug.stand_axis_viewer \
+  --compressed-image-topic /camera/image_raw/compressed \
+  --color green \
+  --max-display-fps 15 \
+  --display-mask \
+  --tune
+```
+
+Approximate yaw degrees require extra geometry:
+
+```bash
+python3 -m scripts.aufgabe04.perception.debug.stand_axis_viewer \
+  --compressed-image-topic /camera/image_raw/compressed \
+  --color green \
+  --stand-width-m 0.12 \
+  --stand-distance-m 0.45
+```
+
+Without `--stand-width-m` and `--stand-distance-m`, use the displayed ratio/proxy as a direction and relative-strength cue, not as a calibrated physical angle. At the lowest camera resolution, keep the stand face large enough that both vertical edges are at least about 8 to 10 pixels tall; otherwise the viewer will reject the estimate as `edge_too_short`.
