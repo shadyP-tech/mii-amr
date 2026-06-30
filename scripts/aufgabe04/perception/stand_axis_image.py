@@ -98,7 +98,7 @@ def estimate_stand_axis_from_edges(
         _largest_external_bounding_area(cv2, edges) * min_face_area_fraction,
     )
 
-    silhouette_corners = _face_rectangle_from_silhouette(
+    silhouette_corners = _face_quadrilateral_from_silhouette(
         cv2,
         edges,
         min_area_px=adaptive_min_area_px,
@@ -285,7 +285,7 @@ def wide_row_band(row_widths: Sequence[int], *, width_fraction: float = 0.60, ma
     return best
 
 
-def _face_rectangle_from_silhouette(
+def _face_quadrilateral_from_silhouette(
     cv2,
     edges,
     *,
@@ -321,22 +321,15 @@ def _face_rectangle_from_silhouette(
         if band_end - band_start + 1 < min_edge_height_px:
             continue
 
-        band_crop = crop[band_start : band_end + 1, :]
-        ys, xs = numpy.where(band_crop > 0)
-        if len(xs) == 0 or len(ys) == 0:
-            continue
-        x_min = x + float(xs.min())
-        x_max = x + float(xs.max())
-        y_min = y + float(band_start + ys.min())
-        y_max = y + float(band_start + ys.max())
-        corners = order_corners(
-            (
-                ImagePoint(x_min, y_min),
-                ImagePoint(x_max, y_min),
-                ImagePoint(x_max, y_max),
-                ImagePoint(x_min, y_max),
-            )
+        band_mask = crop[band_start : band_end + 1, :]
+        corners = _quadrilateral_from_mask_component(
+            cv2,
+            band_mask,
+            x_offset=float(x),
+            y_offset=float(y + band_start),
         )
+        if corners is None:
+            continue
         aspect_ratio = quadrilateral_aspect_ratio(corners)
         if aspect_ratio < min_aspect_ratio or aspect_ratio > max_aspect_ratio:
             continue
@@ -344,6 +337,32 @@ def _face_rectangle_from_silhouette(
             continue
         return corners
     return None
+
+
+def _quadrilateral_from_mask_component(
+    cv2,
+    mask,
+    *,
+    x_offset: float,
+    y_offset: float,
+) -> tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint] | None:
+    contours, _hierarchy = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    contour = max(contours, key=cv2.contourArea)
+    corners = _quadrilateral_corners(cv2, contour)
+    if corners is None:
+        rect = cv2.minAreaRect(contour)
+        box = cv2.boxPoints(rect)
+        corners = tuple(ImagePoint(float(point[0]), float(point[1])) for point in box)
+
+    return order_corners(
+        tuple(
+            ImagePoint(point.u_px + x_offset, point.v_px + y_offset)
+            for point in corners
+        )
+    )
 
 
 def _largest_external_bounding_area(cv2, edges) -> float:
