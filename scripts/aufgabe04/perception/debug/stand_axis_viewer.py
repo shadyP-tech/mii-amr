@@ -87,6 +87,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.60,
         help="Silhouette fallback: rows at this fraction of max width are treated as the broad square face.",
     )
+    parser.add_argument(
+        "--min-face-area-fraction",
+        type=float,
+        default=0.25,
+        help="Reject face candidates smaller than this fraction of the largest external silhouette bounding area.",
+    )
     parser.add_argument("--min-aspect-ratio", type=float, default=0.45)
     parser.add_argument("--max-aspect-ratio", type=float, default=1.80)
     parser.add_argument(
@@ -318,6 +324,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     hough_max_line_gap_px=args.hough_max_line_gap_px,
                     min_boundary_line_length_px=args.min_boundary_line_length_px,
                     face_width_fraction=args.face_width_fraction,
+                    min_face_area_fraction=args.min_face_area_fraction,
                     min_area_px=args.min_area_px,
                     min_edge_height_px=args.min_edge_height_px,
                     min_aspect_ratio=args.min_aspect_ratio,

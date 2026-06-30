@@ -76,6 +76,7 @@ def estimate_stand_axis_from_edges(
     hough_max_line_gap_px: int = 8,
     min_boundary_line_length_px: float = 35.0,
     face_width_fraction: float = 0.60,
+    min_face_area_fraction: float = 0.25,
     min_area_px: float = 250.0,
     min_edge_height_px: float = 8.0,
     min_aspect_ratio: float = 0.45,
@@ -92,12 +93,39 @@ def estimate_stand_axis_from_edges(
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (close_kernel, close_kernel))
         edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=close_iterations)
 
+    adaptive_min_area_px = max(
+        min_area_px,
+        _largest_external_bounding_area(cv2, edges) * min_face_area_fraction,
+    )
+
+    silhouette_corners = _face_rectangle_from_silhouette(
+        cv2,
+        edges,
+        min_area_px=adaptive_min_area_px,
+        min_edge_height_px=min_edge_height_px,
+        min_aspect_ratio=min_aspect_ratio,
+        max_aspect_ratio=max_aspect_ratio,
+        face_width_fraction=face_width_fraction,
+    )
+    if silhouette_corners is not None:
+        return (
+            estimate_stand_axis_from_corners(
+                silhouette_corners,
+                min_edge_height_px=min_edge_height_px,
+                stand_width_m=stand_width_m,
+                stand_distance_m=stand_distance_m,
+                contour_area_px=_polygon_area(silhouette_corners),
+                source="edge_silhouette",
+            ),
+            edges,
+        )
+
     contours, _hierarchy = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
     best: StandAxisImageEstimate | None = None
     best_score = -1.0
     for contour in contours:
         area = float(cv2.contourArea(contour))
-        if area < min_area_px:
+        if area < adaptive_min_area_px:
             continue
         corners = _quadrilateral_corners(cv2, contour)
         if corners is None or not cv2.isContourConvex(_points_to_cv2(corners)):
@@ -125,28 +153,6 @@ def estimate_stand_axis_from_edges(
     if best is not None:
         return best, edges
 
-    silhouette_corners = _face_rectangle_from_silhouette(
-        cv2,
-        edges,
-        min_area_px=min_area_px,
-        min_edge_height_px=min_edge_height_px,
-        min_aspect_ratio=min_aspect_ratio,
-        max_aspect_ratio=max_aspect_ratio,
-        face_width_fraction=face_width_fraction,
-    )
-    if silhouette_corners is not None:
-        return (
-            estimate_stand_axis_from_corners(
-                silhouette_corners,
-                min_edge_height_px=min_edge_height_px,
-                stand_width_m=stand_width_m,
-                stand_distance_m=stand_distance_m,
-                contour_area_px=_polygon_area(silhouette_corners),
-                source="edge_silhouette",
-            ),
-            edges,
-        )
-
     line_corners = _quadrilateral_from_line_segments(
         cv2,
         edges,
@@ -155,7 +161,7 @@ def estimate_stand_axis_from_edges(
         hough_max_line_gap_px=hough_max_line_gap_px,
         min_boundary_line_length_px=min_boundary_line_length_px,
         min_edge_height_px=min_edge_height_px,
-        min_area_px=min_area_px,
+        min_area_px=adaptive_min_area_px,
         min_aspect_ratio=min_aspect_ratio,
         max_aspect_ratio=max_aspect_ratio,
     )
@@ -296,9 +302,9 @@ def _face_rectangle_from_silhouette(
         return None
 
     for contour in sorted(contours, key=cv2.contourArea, reverse=True):
-        if float(cv2.contourArea(contour)) < min_area_px:
-            continue
         x, y, width, height = cv2.boundingRect(contour)
+        if width * height < min_area_px:
+            continue
         if width < min_edge_height_px or height < min_edge_height_px:
             continue
 
@@ -338,6 +344,15 @@ def _face_rectangle_from_silhouette(
             continue
         return corners
     return None
+
+
+def _largest_external_bounding_area(cv2, edges) -> float:
+    contours, _hierarchy = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    largest = 0.0
+    for contour in contours:
+        _x, _y, width, height = cv2.boundingRect(contour)
+        largest = max(largest, float(width * height))
+    return largest
 
 
 def _edge_input_image(cv2, frame, *, edge_preprocess: str, blur_kernel: int):

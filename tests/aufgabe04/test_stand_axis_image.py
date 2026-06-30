@@ -157,6 +157,8 @@ class StandAxisImageTest(unittest.TestCase):
                 "42",
                 "--face-width-fraction",
                 "0.65",
+                "--min-face-area-fraction",
+                "0.35",
             ]
         )
 
@@ -170,6 +172,7 @@ class StandAxisImageTest(unittest.TestCase):
         self.assertEqual(args.hough_max_line_gap_px, 6)
         self.assertEqual(args.min_boundary_line_length_px, 42)
         self.assertAlmostEqual(args.face_width_fraction, 0.65)
+        self.assertAlmostEqual(args.min_face_area_fraction, 0.35)
 
 
 if __name__ == "__main__":
