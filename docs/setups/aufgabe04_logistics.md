@@ -126,3 +126,26 @@ python3 scripts/aufgabe04/navigation/plan_first_detected_station.py \
 Physical motion remains a separate step through
 `scripts/aufgabe04/navigation/run_single_station_segment.py --dry-run` and then
 the bundle-wrapped real runner with typed `RUN`.
+
+## Offline Stand-Axis Analysis
+
+Stand-axis estimation is an analysis-only evidence path. It must not feed route
+generation or physical motion until exported-scan evidence shows that the axis is
+reliable.
+
+Use `scripts/aufgabe04/perception/stand_axis_analysis.py` from Python with plain
+JSON/CSV exports. The analyzer accepts point samples or range arrays, clusters
+them with the existing LiDAR stand detector, estimates an optional cluster axis,
+compares it with manually entered `truth_axis_rad`, and writes CSV metrics such
+as point count, width, estimated axis, angular error, confidence, and
+usable/not-usable reason.
+
+Keep this path offline:
+
+- no ROS bag parsing inside the analyzer
+- no `rclpy` or `sensor_msgs`
+- no `/cmd_vel`
+- no station planner or route-generation dependency
+
+If a ROS bag or `sensor_msgs/LaserScan` exporter is needed later, keep it as a
+separate adapter that writes plain JSON/CSV for the analyzer.

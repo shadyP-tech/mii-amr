@@ -153,6 +153,41 @@ class ProductionImportBoundaryTest(unittest.TestCase):
         self.assertNotIn("/cmd_vel", source)
         self.assertNotIn("Twist", source)
 
+    def test_stand_axis_analysis_stays_offline_and_motion_free(self):
+        module_path = ROOT / "scripts" / "aufgabe04" / "perception" / "stand_axis_analysis.py"
+        source = module_path.read_text()
+        tree = ast.parse(source, filename=str(module_path))
+        forbidden_prefixes = (
+            "rclpy",
+            "sensor_msgs",
+            "geometry_msgs",
+            "nav_msgs",
+            "nav2_msgs",
+            "rosbag2_py",
+            "scripts.aufgabe04.navigation",
+            "scripts.aufgabe04.logistics",
+            "scripts.aufgabe04.fleet",
+            "scripts.aufgabe04.stations",
+            "scripts.aufgabe04.task_client",
+            "scripts.aufgabe04.qr_scanning",
+        )
+        offenders = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported_modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                imported_modules = [node.module or ""]
+            else:
+                continue
+            for module in imported_modules:
+                if module.startswith(forbidden_prefixes):
+                    offenders.append(module)
+
+        self.assertEqual(offenders, [])
+        self.assertNotIn("/cmd_vel", source)
+        self.assertNotIn("Twist", source)
+        self.assertNotIn("Publisher", source)
+
 
 if __name__ == "__main__":
     unittest.main()
