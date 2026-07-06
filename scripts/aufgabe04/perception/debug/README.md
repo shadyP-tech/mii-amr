@@ -120,6 +120,14 @@ In edge-on mode it overlays the detected vertical line and reports:
 
 The console output mirrors this with either `camera_axis_rotation_proxy=...` or `camera_axis_edge_on_approx_90deg=true`.
 
+The viewer has three optional debug windows with different meanings:
+
+- `aufgabe04/stand-axis`: final annotated camera frame.
+- `aufgabe04/stand-axis-edges`: Canny/morphology edge image used by the edge path.
+- `aufgabe04/stand-axis-face-mask`: filled upper-face geometry mask from the edge/silhouette path.
+
+Enable the third window with `--display-face-mask`. This is a diagnostic view for checking whether the detector isolated the upper square face before fitting corners. It is not a second detector, not QR decoding input, not side-classification input, not route/navigation input, and not reportable run evidence. It is only shown when the edge/silhouette path produces the face-mask artifact.
+
 Run it from the Apptainer workstation environment with:
 
 ```bash
@@ -129,7 +137,8 @@ scripts/aufgabe04/perception/debug/run_stand_axis_viewer.sh \
   --edge-preprocess outer-border \
   --max-display-fps 15 \
   --max-frame-age-sec 0.25 \
-  --display-edges
+  --display-edges \
+  --display-face-mask
 ```
 
 Direct module form when the environment is already sourced:
@@ -140,7 +149,8 @@ python3 -m scripts.aufgabe04.perception.debug.stand_axis_viewer \
   --axis-source edges \
   --edge-preprocess outer-border \
   --max-display-fps 15 \
-  --display-edges
+  --display-edges \
+  --display-face-mask
 ```
 
 Approximate yaw degrees require extra geometry:

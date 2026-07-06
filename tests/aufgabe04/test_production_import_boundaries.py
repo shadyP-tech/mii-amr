@@ -188,6 +188,37 @@ class ProductionImportBoundaryTest(unittest.TestCase):
         self.assertNotIn("Twist", source)
         self.assertNotIn("Publisher", source)
 
+    def test_stand_axis_viewer_stays_motion_free(self):
+        module_path = ROOT / "scripts" / "aufgabe04" / "perception" / "debug" / "stand_axis_viewer.py"
+        source = module_path.read_text()
+        tree = ast.parse(source, filename=str(module_path))
+        forbidden_prefixes = (
+            "geometry_msgs",
+            "nav_msgs",
+            "nav2_msgs",
+            "scripts.aufgabe04.navigation",
+            "scripts.aufgabe04.logistics",
+            "scripts.aufgabe04.fleet",
+            "scripts.aufgabe04.stations",
+            "scripts.aufgabe04.task_client",
+        )
+        offenders = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported_modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                imported_modules = [node.module or ""]
+            else:
+                continue
+            for module in imported_modules:
+                if module.startswith(forbidden_prefixes):
+                    offenders.append(module)
+
+        self.assertEqual(offenders, [])
+        self.assertNotIn("--cmd-vel-topic", source)
+        self.assertNotIn("Twist", source)
+        self.assertNotIn("Publisher", source)
+
 
 if __name__ == "__main__":
     unittest.main()

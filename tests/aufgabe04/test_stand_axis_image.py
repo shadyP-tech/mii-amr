@@ -4,6 +4,13 @@ from contextlib import redirect_stderr
 from io import StringIO
 from pathlib import Path
 
+try:
+    import cv2
+    import numpy
+except ImportError:  # pragma: no cover - exercised only when local deps are missing
+    cv2 = None
+    numpy = None
+
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -11,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 from scripts.aufgabe04.perception.debug.stand_axis_viewer import build_parser  # noqa: E402
 from scripts.aufgabe04.perception.stand_axis_image import (  # noqa: E402
     ImagePoint,
+    _face_quadrilateral_from_silhouette,
     estimate_edge_on_axis_from_line,
     estimate_stand_axis_from_corners,
     order_corners,
@@ -46,6 +54,34 @@ class StandAxisImageTest(unittest.TestCase):
         row_widths = [4, 80, 82, 81, 79, 22, 20, 19]
 
         self.assertEqual(wide_row_band(row_widths, width_fraction=0.60), (1, 4))
+
+    @unittest.skipIf(numpy is None or cv2 is None, "numpy and OpenCV are required for silhouette tests")
+    def test_silhouette_face_mask_excludes_stem_and_fills_qr_holes(self):
+        silhouette = numpy.zeros((150, 160), dtype=numpy.uint8)
+        cv2.rectangle(silhouette, (30, 20), (110, 100), 255, thickness=cv2.FILLED)
+        cv2.rectangle(silhouette, (62, 100), (78, 135), 255, thickness=cv2.FILLED)
+        cv2.rectangle(silhouette, (45, 42), (55, 52), 0, thickness=cv2.FILLED)
+        cv2.rectangle(silhouette, (82, 65), (92, 75), 0, thickness=cv2.FILLED)
+
+        candidate = _face_quadrilateral_from_silhouette(
+            cv2,
+            silhouette,
+            min_area_px=250.0,
+            min_edge_height_px=8.0,
+            min_aspect_ratio=0.45,
+            max_aspect_ratio=1.80,
+            face_width_fraction=0.60,
+        )
+
+        self.assertIsNotNone(candidate)
+        face_mask = candidate.face_mask
+        self.assertEqual(face_mask.shape, silhouette.shape)
+        self.assertEqual(int(face_mask[47, 50]), 255)
+        self.assertEqual(int(face_mask[70, 87]), 255)
+        self.assertEqual(int(face_mask[120, 70]), 0)
+        self.assertEqual(int(face_mask[15, 70]), 0)
+        self.assertEqual(candidate.corners, order_corners(candidate.corners))
+        self.assertAlmostEqual(quadrilateral_aspect_ratio(candidate.corners), 1.0, delta=0.08)
 
     def test_front_facing_square_has_neutral_ratio(self):
         estimate = estimate_stand_axis_from_corners(
@@ -159,11 +195,14 @@ class StandAxisImageTest(unittest.TestCase):
                 "0.65",
                 "--min-face-area-fraction",
                 "0.35",
+                "--display-face-mask",
             ]
         )
 
         self.assertEqual(args.axis_source, "edges")
         self.assertTrue(args.display_edges)
+        self.assertTrue(args.display_face_mask)
+        self.assertFalse(args.display_mask)
         self.assertEqual(args.canny_low, 40)
         self.assertEqual(args.canny_high, 120)
         self.assertEqual(args.edge_preprocess, "outer-border")

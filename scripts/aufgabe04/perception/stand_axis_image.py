@@ -28,6 +28,18 @@ class StandAxisImageEstimate:
     source: str = "unknown"
 
 
+@dataclass(frozen=True)
+class StandAxisEdgeDebugArtifacts:
+    edges: object
+    face_mask: object | None = None
+
+
+@dataclass(frozen=True)
+class _SilhouetteFaceCandidate:
+    corners: tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint]
+    face_mask: object
+
+
 def estimate_stand_axis_from_mask(
     cv2,
     mask,
@@ -83,7 +95,7 @@ def estimate_stand_axis_from_edges(
     max_aspect_ratio: float = 1.80,
     stand_width_m: float | None = None,
     stand_distance_m: float | None = None,
-) -> tuple[StandAxisImageEstimate, object]:
+) -> tuple[StandAxisImageEstimate, StandAxisEdgeDebugArtifacts]:
     edge_input = _edge_input_image(cv2, frame, edge_preprocess=edge_preprocess, blur_kernel=blur_kernel)
     edges = cv2.Canny(edge_input, canny_low, canny_high)
     if dilate_iterations > 0:
@@ -98,7 +110,7 @@ def estimate_stand_axis_from_edges(
         _largest_external_bounding_area(cv2, edges) * min_face_area_fraction,
     )
 
-    silhouette_corners = _face_quadrilateral_from_silhouette(
+    silhouette_face = _face_quadrilateral_from_silhouette(
         cv2,
         edges,
         min_area_px=adaptive_min_area_px,
@@ -107,17 +119,17 @@ def estimate_stand_axis_from_edges(
         max_aspect_ratio=max_aspect_ratio,
         face_width_fraction=face_width_fraction,
     )
-    if silhouette_corners is not None:
+    if silhouette_face is not None:
         return (
             estimate_stand_axis_from_corners(
-                silhouette_corners,
+                silhouette_face.corners,
                 min_edge_height_px=min_edge_height_px,
                 stand_width_m=stand_width_m,
                 stand_distance_m=stand_distance_m,
-                contour_area_px=_polygon_area(silhouette_corners),
+                contour_area_px=_polygon_area(silhouette_face.corners),
                 source="edge_silhouette",
             ),
-            edges,
+            StandAxisEdgeDebugArtifacts(edges=edges, face_mask=silhouette_face.face_mask),
         )
 
     contours, _hierarchy = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
@@ -151,7 +163,7 @@ def estimate_stand_axis_from_edges(
             best_score = score
 
     if best is not None:
-        return best, edges
+        return best, StandAxisEdgeDebugArtifacts(edges=edges)
 
     line_corners = _quadrilateral_from_line_segments(
         cv2,
@@ -175,7 +187,7 @@ def estimate_stand_axis_from_edges(
                 contour_area_px=_polygon_area(line_corners),
                 source="edge_lines",
             ),
-            edges,
+            StandAxisEdgeDebugArtifacts(edges=edges),
         )
 
     edge_on = _edge_on_from_line_segments(
@@ -188,10 +200,10 @@ def estimate_stand_axis_from_edges(
         min_edge_height_px=min_edge_height_px,
     )
     if edge_on is not None:
-        return edge_on, edges
+        return edge_on, StandAxisEdgeDebugArtifacts(edges=edges)
 
     if best is None:
-        return _unusable("no_edge_quadrilateral", source="edges"), edges
+        return _unusable("no_edge_quadrilateral", source="edges"), StandAxisEdgeDebugArtifacts(edges=edges)
 
 
 def estimate_stand_axis_from_corners(
@@ -294,7 +306,7 @@ def _face_quadrilateral_from_silhouette(
     min_aspect_ratio: float,
     max_aspect_ratio: float,
     face_width_fraction: float,
-) -> tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint] | None:
+) -> _SilhouetteFaceCandidate | None:
     import numpy
 
     contours, _hierarchy = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -335,7 +347,9 @@ def _face_quadrilateral_from_silhouette(
             continue
         if _polygon_area(corners) < min_area_px:
             continue
-        return corners
+        face_mask = numpy.zeros(edges.shape[:2], dtype=numpy.uint8)
+        face_mask[y + band_start : y + band_end + 1, x : x + width] = band_mask
+        return _SilhouetteFaceCandidate(corners=corners, face_mask=face_mask)
     return None
 
 

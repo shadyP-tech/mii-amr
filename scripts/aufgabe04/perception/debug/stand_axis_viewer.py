@@ -36,6 +36,7 @@ from scripts.aufgabe04.qr_scanning.opencv_qr_detector import detect_qr_texts_bgr
 WINDOW_FRAME = "aufgabe04/stand-axis"
 WINDOW_MASK = "aufgabe04/stand-axis-mask"
 WINDOW_EDGES = "aufgabe04/stand-axis-edges"
+WINDOW_FACE_MASK = "aufgabe04/stand-axis-face-mask"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -165,6 +166,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--display-edges",
         action="store_true",
         help="Also show the Canny/morphology edge image used by --axis-source edges.",
+    )
+    parser.add_argument(
+        "--display-face-mask",
+        action="store_true",
+        help="Also show the filled upper-face geometry mask produced by the edge/silhouette path.",
     )
     return parser
 
@@ -418,6 +424,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             mask = None
             edges = None
+            face_mask = None
             active_ranges = selected_ranges
             if args.axis_source == "color-mask" or args.display_mask or args.tune:
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -433,7 +440,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
 
             if args.axis_source == "edges":
-                estimate, edges = estimate_stand_axis_from_edges(
+                estimate, edge_artifacts = estimate_stand_axis_from_edges(
                     cv2,
                     frame,
                     edge_preprocess=args.edge_preprocess.replace("-", "_"),
@@ -456,6 +463,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     stand_width_m=args.stand_width_m,
                     stand_distance_m=args.stand_distance_m,
                 )
+                edges = edge_artifacts.edges
+                face_mask = edge_artifacts.face_mask
             else:
                 estimate = estimate_stand_axis_from_mask(
                     cv2,
@@ -529,6 +538,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 cv2.imshow(WINDOW_MASK, mask)
             if args.display_edges and edges is not None:
                 cv2.imshow(WINDOW_EDGES, edges)
+            if args.display_face_mask and face_mask is not None:
+                cv2.imshow(WINDOW_FACE_MASK, face_mask)
 
             key = cv2.waitKey(1) & 0xFF
             if key in (27, ord("q")):
@@ -536,7 +547,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             if key == ord("p"):
                 print_palette(active_ranges)
             if key == ord("s") and args.save_snapshot is not None:
-                debug_image = edges if args.axis_source == "edges" and edges is not None else mask
+                if args.display_face_mask and face_mask is not None:
+                    debug_image = face_mask
+                else:
+                    debug_image = edges if args.axis_source == "edges" and edges is not None else mask
                 save_snapshot(cv2, args.save_snapshot, annotated, debug_image)
     finally:
         if qr_decoder is not None:
