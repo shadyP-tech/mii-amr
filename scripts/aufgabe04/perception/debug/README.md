@@ -173,6 +173,8 @@ python3 -m scripts.aufgabe04.perception.debug.stand_axis_viewer \
   --min-face-area-fraction 0.35
 ```
 
+The preferred color-agnostic path is `source=edge_silhouette`: the edge image is converted into a filled stand silhouette, the broad upper face is separated from the narrow stem, and the face quadrilateral is fitted from that filled silhouette. The detector intentionally does not refine this silhouette result with raw edge lines, because those lines can snap back to QR-code texture or paper edges.
+
 If the edge window is full of QR-code internals, keep `--edge-preprocess outer-border` and raise `--min-boundary-line-length-px` until short QR module edges stop being considered as square boundaries. If the overlay still locks onto a QR element, raise `--min-face-area-fraction` so candidates must be a larger fraction of the largest visible stand silhouette. Use `--edge-preprocess gray` only when you want to inspect the raw grayscale edge detector.
 
 If the square face and vertical stem are the same color and physically connected, the edge contour can become one T-shaped outline. The detector handles this by first searching square-like edge contours, then extracting the broad upper band from the filled silhouette to ignore the narrow stem, then falling back to Hough line segments for the square's left and right outer edges. Tune the silhouette fallback with `--face-width-fraction`: raise it if the stem is included, lower it if the side edges are incomplete.
@@ -206,4 +208,4 @@ python3 -m scripts.aufgabe04.perception.debug.stand_axis_viewer \
   --tune
 ```
 
-Use color-mask mode only for debugging color segmentation. For stand-axis rotation, prefer `--axis-source edges` because it can work on the QR side and the plain backside as long as the square's outer boundary has visible contrast.
+Use color-mask mode only for debugging color segmentation. For stand-axis rotation, prefer `--axis-source edges` with `source=edge_silhouette` because it stays color agnostic while using the filled outer stand shape rather than QR texture.

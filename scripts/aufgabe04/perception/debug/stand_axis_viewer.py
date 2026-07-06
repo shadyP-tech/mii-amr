@@ -53,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--axis-source",
         choices=("edges", "color-mask"),
         default="edges",
-        help="edges is color/QR agnostic and uses the outer square shape; color-mask keeps the old HSV contour mode.",
+        help="edges is color/QR agnostic and uses the filled outer silhouette; color-mask keeps the HSV contour mode.",
     )
     parser.add_argument("--tune", action="store_true", help="Show HSV trackbars for color-mask axis debugging.")
     parser.add_argument("--print-palette", action="store_true")
