@@ -174,6 +174,25 @@ class StandAxisImageTest(unittest.TestCase):
         self.assertAlmostEqual(args.face_width_fraction, 0.65)
         self.assertAlmostEqual(args.min_face_area_fraction, 0.35)
 
+    def test_stand_axis_viewer_exposes_nonblocking_qr_options(self):
+        parser = build_parser()
+
+        args = parser.parse_args(
+            [
+                "--compressed-image-topic",
+                "/camera/image_raw/compressed",
+                "--qr-decode-fps",
+                "1.5",
+                "--qr-result-ttl-sec",
+                "0.75",
+                "--no-qr-decode",
+            ]
+        )
+
+        self.assertAlmostEqual(args.qr_decode_fps, 1.5)
+        self.assertAlmostEqual(args.qr_result_ttl_sec, 0.75)
+        self.assertTrue(args.no_qr_decode)
+
 
 if __name__ == "__main__":
     unittest.main()

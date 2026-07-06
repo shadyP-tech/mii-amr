@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import statistics
+import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
@@ -19,7 +21,9 @@ from scripts.aufgabe04.perception.mask_processing import apply_morphology, build
 from scripts.aufgabe04.perception.ros_image_adapter import compressed_msg_to_bgr_frame
 from scripts.aufgabe04.perception.stand_side_classification import (
     StandSideClassification,
-    classify_stand_side_from_frame,
+    classify_stand_side,
+    color_confidence_for_estimate,
+    _qr_scan_frames_for_estimate,
 )
 from scripts.aufgabe04.perception.stand_axis_image import (
     StandAxisImageEstimate,
@@ -108,6 +112,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Pixel margin around the detected square crop used for QR side detection.",
     )
     parser.add_argument(
+        "--qr-decode-fps",
+        type=float,
+        default=2.0,
+        help="Maximum background QR decode attempts per second. Use 0 for unlimited submissions.",
+    )
+    parser.add_argument(
+        "--qr-result-ttl-sec",
+        type=float,
+        default=1.0,
+        help="How long the viewer may reuse the last background QR result.",
+    )
+    parser.add_argument(
+        "--no-qr-decode",
+        action="store_true",
+        help="Disable QR decoding in this debug viewer; color side classification still runs.",
+    )
+    parser.add_argument(
         "--median-window",
         type=int,
         default=7,
@@ -146,6 +167,101 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also show the Canny/morphology edge image used by --axis-source edges.",
     )
     return parser
+
+
+@dataclass(frozen=True)
+class _QrDecodeTask:
+    frame: object
+    estimate: StandAxisImageEstimate
+    sequence: int
+    submitted_sec: float
+
+
+@dataclass(frozen=True)
+class _QrDecodeResult:
+    qr_texts: tuple[str, ...]
+    sequence: int
+    completed_sec: float
+
+
+class BackgroundQrDecoder:
+    def __init__(
+        self,
+        *,
+        cv2,
+        numpy,
+        detector,
+        crop_margin_px: int,
+        max_decode_fps: float,
+        result_ttl_sec: float,
+    ) -> None:
+        self._cv2 = cv2
+        self._numpy = numpy
+        self._detector = detector
+        self._crop_margin_px = crop_margin_px
+        self._min_submit_period_sec = 0.0 if max_decode_fps <= 0.0 else 1.0 / max_decode_fps
+        self._result_ttl_sec = max(0.0, result_ttl_sec)
+        self._condition = threading.Condition()
+        self._task: _QrDecodeTask | None = None
+        self._result = _QrDecodeResult((), 0, 0.0)
+        self._busy = False
+        self._stopped = False
+        self._last_submit_sec = 0.0
+        self._thread = threading.Thread(target=self._run, name="stand-axis-qr-decoder", daemon=True)
+        self._thread.start()
+
+    def submit_latest(self, frame, estimate: StandAxisImageEstimate, sequence: int, now_sec: float) -> None:
+        if now_sec - self._last_submit_sec < self._min_submit_period_sec:
+            return
+        with self._condition:
+            if self._stopped or self._busy or self._task is not None:
+                return
+            self._task = _QrDecodeTask(frame.copy(), estimate, sequence, now_sec)
+            self._busy = True
+            self._last_submit_sec = now_sec
+            self._condition.notify()
+
+    def latest_texts(self, now_sec: float) -> tuple[str, ...]:
+        with self._condition:
+            result = self._result
+        if self._result_ttl_sec > 0.0 and now_sec - result.completed_sec > self._result_ttl_sec:
+            return ()
+        return result.qr_texts
+
+    def stop(self) -> None:
+        with self._condition:
+            self._stopped = True
+            self._condition.notify()
+        self._thread.join(timeout=1.0)
+
+    def _run(self) -> None:
+        while True:
+            with self._condition:
+                while self._task is None and not self._stopped:
+                    self._condition.wait()
+                if self._stopped:
+                    return
+                task = self._task
+                self._task = None
+
+            qr_texts: tuple[str, ...] = ()
+            if task is not None:
+                for qr_frame in _qr_scan_frames_for_estimate(
+                    self._cv2,
+                    self._numpy,
+                    task.frame,
+                    task.estimate,
+                    margin_px=self._crop_margin_px,
+                ):
+                    qr_texts = self._detector(qr_frame, self._cv2)
+                    if qr_texts:
+                        break
+
+            with self._condition:
+                if task is not None:
+                    self._result = _QrDecodeResult(qr_texts, task.sequence, time.time())
+                self._busy = False
+                self._condition.notify()
 
 
 def annotate_frame(
@@ -237,6 +353,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     frame_source = RosCompressedImageTopicFrameSource(args.compressed_image_topic, args.max_frame_age_sec)
     frame_source.start()
+    qr_decoder = None if args.no_qr_decode else BackgroundQrDecoder(
+        cv2=cv2,
+        numpy=numpy,
+        detector=detect_qr_texts_bgr,
+        crop_margin_px=args.qr_crop_margin_px,
+        max_decode_fps=args.qr_decode_fps,
+        result_ttl_sec=args.qr_result_ttl_sec,
+    )
     if args.tune:
         create_trackbars(cv2, selected_ranges[0])
 
@@ -353,15 +477,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                         close_iterations=args.close_iterations,
                         open_iterations=args.open_iterations,
                     )
-            side = classify_stand_side_from_frame(
-                cv2,
-                numpy,
-                frame,
-                mask,
-                estimate,
-                detect_qr_texts_bgr=detect_qr_texts_bgr,
+            color_confidence = color_confidence_for_estimate(cv2, numpy, mask, estimate)
+            if qr_decoder is not None:
+                qr_decoder.submit_latest(frame, estimate, read.sequence, time.time())
+                qr_texts = qr_decoder.latest_texts(time.time())
+            else:
+                qr_texts = ()
+            side = classify_stand_side(
+                qr_texts=qr_texts,
+                color_confidence=color_confidence,
                 min_color_confidence=args.side_color_confidence,
-                qr_crop_margin_px=args.qr_crop_margin_px,
             )
             if estimate.mode == "face_visible" and estimate.usable:
                 ratio_window.append(float(estimate.height_ratio))
@@ -414,6 +539,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 debug_image = edges if args.axis_source == "edges" and edges is not None else mask
                 save_snapshot(cv2, args.save_snapshot, annotated, debug_image)
     finally:
+        if qr_decoder is not None:
+            qr_decoder.stop()
         frame_source.release()
         cv2.destroyAllWindows()
     return 0
