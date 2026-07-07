@@ -26,6 +26,7 @@ results/**/*_bag.log
 results/**/latest_tracker_pose.csv
 results/**/latest_tracker_pose.sample.csv
 results/aufgabe03
+docs/screenshots
 .codex/
 .codex
 

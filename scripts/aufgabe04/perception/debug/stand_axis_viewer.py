@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import statistics
 import threading
 import time
@@ -37,6 +38,7 @@ WINDOW_FRAME = "aufgabe04/stand-axis"
 WINDOW_MASK = "aufgabe04/stand-axis-mask"
 WINDOW_EDGES = "aufgabe04/stand-axis-edges"
 WINDOW_FACE_MASK = "aufgabe04/stand-axis-face-mask"
+WINDOW_RECTANGLE_MASK = "aufgabe04/stand-axis-rectangle"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -130,6 +132,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable QR decoding in this debug viewer; color side classification still runs.",
     )
     parser.add_argument(
+        "--front-face-to-qr-width-ratio",
+        type=float,
+        default=None,
+        help="Known physical holder/front-face width divided by detected QR-code width. Enables QR-plane face expansion.",
+    )
+    parser.add_argument(
         "--median-window",
         type=int,
         default=7,
@@ -138,13 +146,78 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--stand-width-m",
         type=float,
-        help="Physical square width. Required together with --stand-distance-m for approximate yaw degrees.",
+        help="Physical square width in meters. Used with distance and optional camera intrinsics for yaw degrees.",
+    )
+    parser.add_argument(
+        "--stand-face-size-m",
+        type=float,
+        help="Alias for --stand-width-m for a square stand face, e.g. 0.078 for a 7.8 cm x 7.8 cm frame.",
     )
     parser.add_argument(
         "--stand-distance-m",
         type=float,
-        help="Approximate camera-to-stand center distance. Required with --stand-width-m for yaw degrees.",
+        help="Approximate camera-to-stand center distance. Used as fallback when LiDAR distance is unavailable.",
     )
+    parser.add_argument(
+        "--camera-fx-px",
+        type=float,
+        help="Camera focal length fx in pixels for the processed image. If --resize is used, provide the resized fx or let the viewer scale this value.",
+    )
+    parser.add_argument(
+        "--camera-fy-px",
+        type=float,
+        help="Camera focal length fy in pixels for the processed image. Defaults to --camera-fx-px.",
+    )
+    parser.add_argument(
+        "--camera-cx-px",
+        type=float,
+        help="Camera principal point cx in pixels for the processed image. Defaults to the image center.",
+    )
+    parser.add_argument(
+        "--camera-cy-px",
+        type=float,
+        help="Camera principal point cy in pixels for the processed image. Defaults to the image center.",
+    )
+    parser.add_argument(
+        "--camera-fx-is-full-resolution",
+        action="store_true",
+        help="Treat --camera-fx-px/--camera-fy-px/--camera-cx-px/--camera-cy-px as original camera values before --resize and scale them by --resize internally.",
+    )
+    parser.add_argument(
+        "--stand-head-depth-m",
+        type=float,
+        default=None,
+        help="Physical stand head thickness/depth in meters, e.g. 0.007 for 0.7 cm. Kept with the model for cuboid diagnostics.",
+    )
+    parser.add_argument(
+        "--stand-head-bottom-height-m",
+        type=float,
+        default=None,
+        help="Height of the bottom of the square head above the floor in meters, e.g. 0.135 for 13.5 cm.",
+    )
+    parser.add_argument(
+        "--scan-topic",
+        default=None,
+        help="Optional ROS 2 sensor_msgs/LaserScan topic used to estimate stand distance.",
+    )
+    parser.add_argument(
+        "--use-lidar-distance",
+        action="store_true",
+        help="Use the latest LaserScan range as --stand-distance-m when available.",
+    )
+    parser.add_argument(
+        "--lidar-bearing-rad",
+        type=float,
+        default=0.0,
+        help="LaserScan bearing used for the distance estimate. 0 is straight ahead in the scan frame.",
+    )
+    parser.add_argument(
+        "--lidar-cone-deg",
+        type=float,
+        default=10.0,
+        help="Half-width cone around --lidar-bearing-rad for median range selection.",
+    )
+    parser.add_argument("--max-scan-age-sec", type=float, default=0.5)
     parser.add_argument(
         "--max-display-fps",
         type=float,
@@ -270,6 +343,159 @@ class BackgroundQrDecoder:
                 self._condition.notify()
 
 
+class RosLaserScanRangeSource:
+    def __init__(
+        self,
+        *,
+        topic: str,
+        bearing_rad: float,
+        cone_half_angle_rad: float,
+        max_scan_age_sec: float,
+    ) -> None:
+        self.topic = topic
+        self.bearing_rad = bearing_rad
+        self.cone_half_angle_rad = max(0.0, cone_half_angle_rad)
+        self.max_scan_age_sec = max_scan_age_sec
+        self._lock = threading.Lock()
+        self._latest_range_m: float | None = None
+        self._latest_receipt_sec: float | None = None
+        self._running = False
+        self._spin_thread = None
+
+        try:
+            import rclpy
+            from rclpy.executors import SingleThreadedExecutor
+            from rclpy.node import Node
+            from rclpy.qos import QoSProfile, qos_profile_sensor_data
+            from sensor_msgs.msg import LaserScan
+        except ImportError as exc:
+            raise SystemExit(
+                "LaserScan distance mode requires rclpy and sensor_msgs. "
+                "Source the ROS 2 Humble and TurtleBot workspaces first."
+            ) from exc
+
+        self.rclpy = rclpy
+        self.owns_rclpy = not rclpy.ok()
+        if self.owns_rclpy:
+            rclpy.init(args=None)
+        self.executor = SingleThreadedExecutor()
+
+        class StandAxisScanNode(Node):
+            pass
+
+        self.node = StandAxisScanNode("aufgabe04_stand_axis_lidar_range")
+        qos_profile = QoSProfile(
+            reliability=qos_profile_sensor_data.reliability,
+            durability=qos_profile_sensor_data.durability,
+            history=qos_profile_sensor_data.history,
+            depth=1,
+        )
+        self.subscription = self.node.create_subscription(
+            LaserScan,
+            topic,
+            self._on_scan,
+            qos_profile,
+        )
+        self.executor.add_node(self.node)
+
+    def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        self._spin_thread = threading.Thread(target=self._spin_loop, daemon=True)
+        self._spin_thread.start()
+
+    def _spin_loop(self) -> None:
+        while self._running and self.rclpy.ok():
+            self.executor.spin_once(timeout_sec=0.05)
+
+    def _on_scan(self, msg) -> None:
+        selected = []
+        for index, raw_range in enumerate(msg.ranges):
+            try:
+                distance = float(raw_range)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(distance) or distance < float(msg.range_min) or distance > float(msg.range_max):
+                continue
+            bearing = float(msg.angle_min) + index * float(msg.angle_increment)
+            if abs(_normalize_angle(bearing - self.bearing_rad)) <= self.cone_half_angle_rad:
+                selected.append(distance)
+        if not selected:
+            return
+        selected.sort()
+        middle = len(selected) // 2
+        if len(selected) % 2:
+            distance = selected[middle]
+        else:
+            distance = (selected[middle - 1] + selected[middle]) / 2.0
+        with self._lock:
+            self._latest_range_m = distance
+            self._latest_receipt_sec = time.time()
+
+    def latest_range_m(self) -> float | None:
+        with self._lock:
+            distance = self._latest_range_m
+            receipt_sec = self._latest_receipt_sec
+        if distance is None or receipt_sec is None:
+            return None
+        if self.max_scan_age_sec > 0.0 and time.time() - receipt_sec > self.max_scan_age_sec:
+            return None
+        return distance
+
+    def release(self) -> None:
+        self._running = False
+        if self._spin_thread is not None:
+            self._spin_thread.join(timeout=1.0)
+        self.executor.remove_node(self.node)
+        self.node.destroy_node()
+        self.executor.shutdown()
+        if self.owns_rclpy and self.rclpy.ok():
+            self.rclpy.shutdown()
+
+
+def _normalize_angle(angle_rad: float) -> float:
+    return math.atan2(math.sin(angle_rad), math.cos(angle_rad))
+
+
+def display_side_label(side: StandSideClassification, estimate: StandAxisImageEstimate) -> str:
+    if side.side == "qr_code_side" or estimate.source == "edge_qr_scaled_front":
+        return "front"
+    if side.side == "basic_color_side" or estimate.source == "edge_plain_face_stem_anchor":
+        return "back"
+    return "unknown"
+
+
+def format_optional_float(value: float | None, *, precision: int = 3, suffix: str = "") -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.{precision}f}{suffix}"
+
+
+def print_status_line(
+    estimate: StandAxisImageEstimate,
+    side: StandSideClassification,
+    *,
+    lidar_distance_m: float | None,
+    stand_distance_m: float | None,
+    qr_texts: tuple[str, ...],
+) -> None:
+    side_label = display_side_label(side, estimate)
+    angle_text = format_optional_float(estimate.yaw_deg, precision=1, suffix="deg")
+    proxy_text = format_optional_float(estimate.yaw_proxy, precision=3)
+    lidar_text = format_optional_float(lidar_distance_m, precision=3, suffix="m")
+    distance_text = format_optional_float(stand_distance_m, precision=3, suffix="m")
+    ratio_text = format_optional_float(estimate.height_ratio, precision=3)
+    print(
+        f"stand_axis source={estimate.source} mode={estimate.mode} usable={estimate.usable} "
+        f"angle={angle_text} proxy={proxy_text} ratio={ratio_text} "
+        f"side={side_label} raw_side={side.side} reason={side.reason} "
+        f"lidar_distance={lidar_text} used_distance={distance_text} "
+        f"left_px={estimate.left_height_px:.1f} right_px={estimate.right_height_px:.1f} "
+        f"qr_texts={list(qr_texts)}"
+    )
+
+
 def annotate_frame(
     cv2,
     frame,
@@ -346,6 +572,19 @@ def save_snapshot(cv2, directory: Path, frame, mask) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    stand_width_m = args.stand_face_size_m if args.stand_face_size_m is not None else args.stand_width_m
+    camera_fx_px = args.camera_fx_px
+    camera_fy_px = args.camera_fy_px
+    camera_cx_px = args.camera_cx_px
+    camera_cy_px = args.camera_cy_px
+    if camera_fx_px is not None and args.camera_fx_is_full_resolution:
+        camera_fx_px *= args.resize
+    if camera_fy_px is not None and args.camera_fx_is_full_resolution:
+        camera_fy_px *= args.resize
+    if camera_cx_px is not None and args.camera_fx_is_full_resolution:
+        camera_cx_px *= args.resize
+    if camera_cy_px is not None and args.camera_fx_is_full_resolution:
+        camera_cy_px *= args.resize
 
     try:
         import cv2
@@ -359,6 +598,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     frame_source = RosCompressedImageTopicFrameSource(args.compressed_image_topic, args.max_frame_age_sec)
     frame_source.start()
+    lidar_source = None
+    if args.use_lidar_distance:
+        if not args.scan_topic:
+            raise SystemExit("--use-lidar-distance requires --scan-topic")
+        lidar_source = RosLaserScanRangeSource(
+            topic=args.scan_topic,
+            bearing_rad=args.lidar_bearing_rad,
+            cone_half_angle_rad=math.radians(args.lidar_cone_deg),
+            max_scan_age_sec=args.max_scan_age_sec,
+        )
+        lidar_source.start()
     qr_decoder = None if args.no_qr_decode else BackgroundQrDecoder(
         cv2=cv2,
         numpy=numpy,
@@ -425,6 +675,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             mask = None
             edges = None
             face_mask = None
+            rectangle_mask = None
+            lidar_distance_m = lidar_source.latest_range_m() if lidar_source is not None else None
+            stand_distance_m = lidar_distance_m if lidar_distance_m is not None else args.stand_distance_m
             active_ranges = selected_ranges
             if args.axis_source == "color-mask" or args.display_mask or args.tune:
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -460,19 +713,33 @@ def main(argv: Sequence[str] | None = None) -> int:
                     min_edge_height_px=args.min_edge_height_px,
                     min_aspect_ratio=args.min_aspect_ratio,
                     max_aspect_ratio=args.max_aspect_ratio,
-                    stand_width_m=args.stand_width_m,
-                    stand_distance_m=args.stand_distance_m,
+                    front_face_to_qr_width_ratio=args.front_face_to_qr_width_ratio,
+                    stand_width_m=stand_width_m,
+                    stand_distance_m=stand_distance_m,
+                    camera_fx_px=camera_fx_px,
+                    camera_fy_px=camera_fy_px,
+                    camera_cx_px=camera_cx_px,
+                    camera_cy_px=camera_cy_px,
+                    stand_depth_m=args.stand_head_depth_m,
+                    stand_head_bottom_height_m=args.stand_head_bottom_height_m,
                 )
                 edges = edge_artifacts.edges
                 face_mask = edge_artifacts.face_mask
+                rectangle_mask = edge_artifacts.rectangle_mask
             else:
                 estimate = estimate_stand_axis_from_mask(
                     cv2,
                     mask,
                     min_area_px=args.min_area_px,
                     min_edge_height_px=args.min_edge_height_px,
-                    stand_width_m=args.stand_width_m,
-                    stand_distance_m=args.stand_distance_m,
+                    stand_width_m=stand_width_m,
+                    stand_distance_m=stand_distance_m,
+                    camera_fx_px=camera_fx_px,
+                    camera_fy_px=camera_fy_px,
+                    camera_cx_px=camera_cx_px,
+                    camera_cy_px=camera_cy_px,
+                    stand_depth_m=args.stand_head_depth_m,
+                    stand_head_bottom_height_m=args.stand_head_bottom_height_m,
                 )
             if mask is None:
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -508,30 +775,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             frame_count += 1
             if args.print_every > 0 and frame_count % args.print_every == 0:
-                if estimate.mode == "face_visible" and estimate.usable:
-                    yaw_part = f" camera_yaw_deg={estimate.yaw_deg:.1f}" if estimate.yaw_deg is not None else ""
-                    print(
-                        f"camera_axis_rotation_proxy={estimate.yaw_proxy:+.3f}{yaw_part} "
-                        f"ratio={estimate.height_ratio:.3f} closer={estimate.closer_side} "
-                        f"left_px={estimate.left_height_px:.1f} right_px={estimate.right_height_px:.1f} "
-                        f"source={estimate.source} stand_side={side.side} side_reason={side.reason} "
-                        f"color_confidence={side.color_confidence:.3f} qr_texts={list(side.qr_texts)}"
-                    )
-                elif estimate.mode == "edge_on" and estimate.usable:
-                    print(
-                        f"camera_axis_edge_on_approx_90deg=true "
-                        f"line_height_px={estimate.left_height_px:.1f} "
-                        f"ratio=unavailable source={estimate.source} stand_side={side.side} "
-                        f"side_reason={side.reason} color_confidence={side.color_confidence:.3f} "
-                        f"qr_texts={list(side.qr_texts)}"
-                    )
-                else:
-                    print(
-                        f"camera_axis_rotation_unavailable reason={estimate.reason} "
-                        f"area_px={estimate.contour_area_px:.0f} source={estimate.source} "
-                        f"stand_side={side.side} side_reason={side.reason} "
-                        f"color_confidence={side.color_confidence:.3f} qr_texts={list(side.qr_texts)}"
-                    )
+                print_status_line(
+                    estimate,
+                    side,
+                    lidar_distance_m=lidar_distance_m,
+                    stand_distance_m=stand_distance_m,
+                    qr_texts=qr_texts,
+                )
 
             cv2.imshow(WINDOW_FRAME, annotated)
             if args.display_mask and mask is not None:
@@ -540,6 +790,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 cv2.imshow(WINDOW_EDGES, edges)
             if args.display_face_mask and face_mask is not None:
                 cv2.imshow(WINDOW_FACE_MASK, face_mask)
+            if args.display_face_mask and rectangle_mask is not None:
+                cv2.imshow(WINDOW_RECTANGLE_MASK, rectangle_mask)
 
             key = cv2.waitKey(1) & 0xFF
             if key in (27, ord("q")):
@@ -547,7 +799,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             if key == ord("p"):
                 print_palette(active_ranges)
             if key == ord("s") and args.save_snapshot is not None:
-                if args.display_face_mask and face_mask is not None:
+                if args.display_face_mask and rectangle_mask is not None:
+                    debug_image = rectangle_mask
+                elif args.display_face_mask and face_mask is not None:
                     debug_image = face_mask
                 else:
                     debug_image = edges if args.axis_source == "edges" and edges is not None else mask
@@ -555,6 +809,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     finally:
         if qr_decoder is not None:
             qr_decoder.stop()
+        if lidar_source is not None:
+            lidar_source.release()
         frame_source.release()
         cv2.destroyAllWindows()
     return 0
