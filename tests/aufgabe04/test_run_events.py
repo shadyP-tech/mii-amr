@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import logging
 import sys
@@ -14,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from scripts.aufgabe04.navigation import run_single_station_segment  # noqa: E402
+from scripts.aufgabe04.navigation.follower_models import FollowerResult  # noqa: E402
 from scripts.aufgabe04.navigation.ros_preflight import (  # noqa: E402
     RosObservation,
     RosPreflightResult,
@@ -257,6 +260,27 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
         self.assertEqual(rows[-1]["status"], "dry_run_ok")
         self.assertFalse(dry_run_event["motion_published"])
 
+    def test_initialpose_prompt_runs_before_preflight_when_requested(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            args = self.base_args(paths) + ["--dry-run", "--prompt-for-initialpose"]
+            prompts = []
+            with patch.object(
+                run_single_station_segment,
+                "run_ros_preflight",
+                return_value=passing_preflight(),
+            ) as preflight, patch(
+                "builtins.input",
+                side_effect=lambda prompt="": prompts.append(prompt) or "",
+            ), redirect_stdout(
+                StringIO()
+            ):
+                status = run_single_station_segment.main(args)
+
+        self.assertEqual(status, 0)
+        self.assertTrue(preflight.called)
+        self.assertEqual(prompts, ["Press Enter, then click 2D Pose Estimate immediately: "])
+
     def test_operator_abort_logs_no_motion_and_skips_follower(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = self.make_paths(Path(tmp))
@@ -282,6 +306,41 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
         self.assertEqual(len(finish_events), 1)
         self.assertEqual(rows[-1]["status"], "aborted")
         self.assertFalse(abort_event["motion_published"])
+
+    def test_real_run_passes_initial_sensor_wait_to_follower_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            args = self.base_args(paths) + [
+                "--initial-sensor-wait-sec",
+                "3.5",
+                "--allowed-cmd-vel-publisher",
+                "/behavior_server",
+            ]
+            with patch.object(
+                run_single_station_segment,
+                "run_ros_preflight",
+                return_value=passing_preflight(),
+            ), patch.object(
+                run_single_station_segment,
+                "run_simple_waypoint_follower",
+                return_value=FollowerResult("completed", "", 1.0, 0.2, True),
+            ) as follower, patch(
+                "builtins.input",
+                return_value="RUN",
+            ), redirect_stdout(
+                StringIO()
+            ):
+                status = run_single_station_segment.main(args)
+
+            events = read_events(paths["events"])
+            rows = read_result_rows(paths["results"])
+            follower_config = follower.call_args.args[2]
+
+        self.assertEqual(status, 0)
+        self.assertEqual(follower_config.initial_sensor_wait_sec, 3.5)
+        self.assertEqual(follower_config.allowed_cmd_vel_publishers, ("/behavior_server",))
+        self.assertIn("motion_started", [event["event"] for event in events])
+        self.assertEqual(rows[-1]["status"], "completed")
 
     def test_route_diagnostics_failure_writes_result_row_and_one_terminal_event(self):
         with tempfile.TemporaryDirectory() as tmp:

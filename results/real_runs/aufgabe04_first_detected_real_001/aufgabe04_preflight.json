@@ -1,0 +1,165 @@
+{
+  "failures": [
+    "amcl freshness: no message received",
+    "localization ownership: amcl data missing or stale"
+  ],
+  "observations": [
+    {
+      "data": {
+        "expected_type": "sensor_msgs/msg/LaserScan"
+      },
+      "detail": "types=['sensor_msgs/msg/LaserScan']",
+      "name": "/scan",
+      "ok": true
+    },
+    {
+      "data": {
+        "expected_type": "nav_msgs/msg/Odometry"
+      },
+      "detail": "types=['nav_msgs/msg/Odometry']",
+      "name": "/odom",
+      "ok": true
+    },
+    {
+      "data": {
+        "expected_type": "geometry_msgs/msg/PoseWithCovarianceStamped"
+      },
+      "detail": "types=['geometry_msgs/msg/PoseWithCovarianceStamped']",
+      "name": "/amcl_pose",
+      "ok": true
+    },
+    {
+      "data": {
+        "header_age_sec": 0.002281811,
+        "receipt_age_sec": 0.002155494
+      },
+      "detail": "receipt_age=0.002s header_age=0.002s",
+      "name": "scan freshness",
+      "ok": true
+    },
+    {
+      "data": {
+        "header_age_sec": 0.040771799,
+        "receipt_age_sec": 0.037728911
+      },
+      "detail": "receipt_age=0.038s header_age=0.041s",
+      "name": "odom freshness",
+      "ok": true
+    },
+    {
+      "data": {},
+      "detail": "no message received",
+      "name": "amcl freshness",
+      "ok": false
+    },
+    {
+      "data": {
+        "age_sec": 0.041070739,
+        "available": true
+      },
+      "detail": "age=0.041s",
+      "name": "tf map->base_footprint",
+      "ok": true
+    },
+    {
+      "data": {
+        "age_sec": 0.041246409,
+        "available": true
+      },
+      "detail": "age=0.041s",
+      "name": "tf odom->base_footprint",
+      "ok": true
+    },
+    {
+      "data": {
+        "ambiguous_owner_evidence": [],
+        "amcl": {
+          "received": false
+        },
+        "amcl_fresh": false,
+        "amcl_topic": "/amcl_pose",
+        "base_frame": "base_footprint",
+        "dynamic_tf_topics": [
+          "/tf"
+        ],
+        "external_tf_owner_candidates": [],
+        "localization_source": "amcl",
+        "map_frame": "map",
+        "map_to_odom_dynamic": {
+          "available": true,
+          "dynamic": true,
+          "header_age_sec": -0.90146841,
+          "receipt_age_sec": 0.08553066
+        },
+        "map_to_odom_dynamic_fresh": true,
+        "odom_frame": "odom",
+        "odom_to_base": {
+          "age_sec": 0.041246409,
+          "available": true
+        },
+        "odom_to_base_fresh": true,
+        "route_transform": {
+          "age_sec": 0.041070739,
+          "available": true
+        },
+        "route_transform_fresh": true
+      },
+      "detail": "localization ownership: amcl data missing or stale",
+      "name": "localization transform ownership",
+      "ok": false
+    },
+    {
+      "data": {
+        "value": false
+      },
+      "detail": "False",
+      "name": "use_sim_time",
+      "ok": true
+    },
+    {
+      "data": {
+        "active_nav2_goal": false,
+        "allowed_publishers": [
+          "/behavior_server",
+          "/velocity_smoother"
+        ],
+        "cmd_vel_topic": "/cmd_vel",
+        "nav2_status_observed": false,
+        "publishers": [
+          "/behavior_server",
+          "/velocity_smoother"
+        ]
+      },
+      "detail": "publishers=['/behavior_server', '/velocity_smoother'] active_nav2=False nav2_status_observed=False",
+      "name": "cmd_vel ownership",
+      "ok": true
+    }
+  ],
+  "ok": false,
+  "runtime_config": {
+    "amcl_topic": "/amcl_pose",
+    "base_frame": "base_footprint",
+    "cmd_vel_topic": "/cmd_vel",
+    "configured": {
+      "amcl_topic": "amcl_pose",
+      "base_frame": "base_footprint",
+      "cmd_vel_topic": "cmd_vel",
+      "localization_source": "amcl",
+      "map_frame": "map",
+      "namespace": "",
+      "odom_frame": "odom",
+      "odom_topic": "odom",
+      "ros_domain_id": "",
+      "scan_topic": "scan",
+      "use_sim_time": false
+    },
+    "localization_source": "amcl",
+    "map_frame": "map",
+    "namespace": "",
+    "odom_frame": "odom",
+    "odom_topic": "/odom",
+    "ros_domain_id": "30",
+    "scan_topic": "/scan",
+    "use_sim_time": false
+  }
+}

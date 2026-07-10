@@ -16,9 +16,6 @@ from scripts.aufgabe04.navigation.localization_ownership import (
     LocalizationOwnershipEvidence,
     evaluate_localization_ownership,
 )
-from scripts.aufgabe04.navigation.follower_safety import (
-    is_non_allowlistable_direct_cmd_vel_publisher,
-)
 from scripts.aufgabe04.navigation.localization_preflight_evidence import (
     build_dynamic_map_to_odom_freshness,
     build_localization_ownership_observation_data,
@@ -39,6 +36,7 @@ try:  # pragma: no cover - exercised on ROS hosts.
     from rclpy.duration import Duration
     from rclpy.node import Node
     from rclpy.parameter import Parameter
+    from rclpy.qos import qos_profile_sensor_data
     from rclpy.time import Time
     from sensor_msgs.msg import LaserScan
     from tf2_msgs.msg import TFMessage
@@ -53,6 +51,7 @@ except ImportError:  # pragma: no cover - keeps offline tests ROS-free.
     Duration = None
     Node = object
     Parameter = None
+    qos_profile_sensor_data = None
     Time = None
     Buffer = None
     TransformException = Exception
@@ -172,7 +171,12 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         self.dynamic_tf_topics = self._dynamic_tf_topic_candidates()
         for topic in self.dynamic_tf_topics:
             self.create_subscription(TFMessage, topic, self._dynamic_tf_callback, 10)
-        self.create_subscription(LaserScan, config.scan_topic, self._scan_callback, 10)
+        self.create_subscription(
+            LaserScan,
+            config.scan_topic,
+            self._scan_callback,
+            qos_profile_sensor_data,
+        )
         self.create_subscription(Odometry, config.odom_topic, self._odom_callback, 10)
         self.create_subscription(
             PoseWithCovarianceStamped,
@@ -412,9 +416,7 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             map_to_odom_dynamic_fresh=map_to_odom_fresh,
             route_transform_fresh=route_transform_fresh,
             odom_to_base_fresh=odom_to_base_fresh,
-            map_odom_identity=(
-                _frame_id(self.config.map_frame) == _frame_id(self.config.odom_frame)
-            ),
+            route_uses_odom_frame=self.config.map_frame == self.config.odom_frame,
             external_tf_owner_candidates=owner_candidates,
         )
         decision = evaluate_localization_ownership(evidence)
@@ -442,13 +444,6 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             failures.append(decision.failure)
 
     def _dynamic_map_to_odom_freshness(self) -> Tuple[bool, Dict[str, object]]:
-        if _frame_id(self.config.map_frame) == _frame_id(self.config.odom_frame):
-            return True, {
-                "available": True,
-                "dynamic": False,
-                "identity": True,
-                "detail": "map_frame and odom_frame are identical; dynamic transform not required",
-            }
         if self.latest_dynamic_map_to_odom is None or self.latest_dynamic_map_to_odom_receipt is None:
             return build_dynamic_map_to_odom_freshness(
                 has_dynamic_transform=False,
@@ -504,22 +499,12 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         active_nav2 = self._has_active_nav2_goal()
         nav2_status_observed = self.latest_nav2_status is not None
         allowed = set(self.allowed_cmd_vel_publishers)
-        unsafe_publishers = [
-            identity
-            for identity in publisher_identities
-            if is_non_allowlistable_direct_cmd_vel_publisher(identity)
-        ]
-        effective_allowed = {
-            identity
-            for identity in allowed
-            if not is_non_allowlistable_direct_cmd_vel_publisher(identity)
-        }
         unknown_publishers = [
             identity
             for identity in publisher_identities
-            if identity not in effective_allowed and identity not in unsafe_publishers
+            if identity not in allowed
         ]
-        ok = not active_nav2 and not unsafe_publishers and not unknown_publishers
+        ok = not active_nav2 and not unknown_publishers
         observations.append(
             RosObservation(
                 "cmd_vel ownership",
@@ -534,18 +519,11 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                     "active_nav2_goal": active_nav2,
                     "nav2_status_observed": nav2_status_observed,
                     "allowed_publishers": sorted(allowed),
-                    "effective_allowed_publishers": sorted(effective_allowed),
-                    "unsafe_direct_publishers": unsafe_publishers,
                 },
             )
         )
         if active_nav2:
             failures.append("active Nav2 goal/controller detected")
-        if unsafe_publishers:
-            failures.append(
-                "unsafe direct cmd_vel publishers cannot be allow-listed: "
-                + ", ".join(unsafe_publishers)
-            )
         if unknown_publishers:
             failures.append(f"unapproved cmd_vel publishers: {', '.join(unknown_publishers)}")
 

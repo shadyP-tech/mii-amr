@@ -1,0 +1,182 @@
+{
+  "legs": [
+    {
+      "diagnostics": {
+        "expanded_cells": 46,
+        "goal_cell": {
+          "x": 61,
+          "y": 44
+        },
+        "path_cell_count": 12,
+        "reason": "",
+        "route_length_m": 0.6535533905932737,
+        "snapped_goal_cell": {
+          "x": 61,
+          "y": 44
+        },
+        "snapped_start_cell": {
+          "x": 56,
+          "y": 33
+        },
+        "start_cell": {
+          "x": 56,
+          "y": 33
+        },
+        "status": "ok"
+      },
+      "failure": null,
+      "route_length_m": 0.6535533905932737,
+      "route_point_count": 12
+    }
+  ],
+  "metadata": {
+    "arena_bounds": {
+      "center_x_m": 0.0,
+      "center_y_m": 0.0,
+      "length_m": 3.9,
+      "margin_m": 0.0,
+      "width_m": 1.898,
+      "yaw_deg": 0.0
+    },
+    "coordinate_warning": "Static saved-map coordinates only; this overlay does not validate live TF, AMCL, Nav2, sensors, or cmd_vel ownership.",
+    "detected_station": {
+      "confirmation": {
+        "confirmation_source": "operator",
+        "created_at": "2026-07-07T15:51:23.928424+00:00",
+        "map_yaml": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+        "map_yaml_sha256": "ecee04cbed7ede8ec70f942790c01298ea368561d21393a561d1042c5f8c6d4d",
+        "observations_jsonl": "results/aufgabe04/detected_stations/sim_stand_observations_odom.jsonl",
+        "operator_confirmed": true,
+        "operator_note": "",
+        "required_base_frame": "base_footprint",
+        "required_map_frame": "odom",
+        "schema_version": 1,
+        "source_observation_ids": [
+          "stand_observation_000005",
+          "stand_observation_000014",
+          "stand_observation_000023",
+          "stand_observation_000032",
+          "stand_observation_000041",
+          "stand_observation_000050",
+          "stand_observation_000059",
+          "stand_observation_000068",
+          "stand_observation_000077",
+          "stand_observation_000086",
+          "stand_observation_000095",
+          "stand_observation_000104",
+          "stand_observation_000113",
+          "stand_observation_000122",
+          "stand_observation_000131",
+          "stand_observation_000140",
+          "stand_observation_000149",
+          "stand_observation_000157",
+          "stand_observation_000164",
+          "stand_observation_000171",
+          "stand_observation_000179"
+        ],
+        "stand_confidence": 0.9527195897304295,
+        "stand_hit_count": 21,
+        "stand_id": "detected_stand_02",
+        "stand_x_m": 0.5782130765546052,
+        "stand_y_m": 0.5315977941543997,
+        "station_id": "A"
+      },
+      "confirmation_json": "results/aufgabe04/detected_stations/sim_first_detected_station_confirmation.json",
+      "map_yaml": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+      "map_yaml_sha256": "ecee04cbed7ede8ec70f942790c01298ea368561d21393a561d1042c5f8c6d4d",
+      "required_base_frame": "base_footprint",
+      "required_map_frame": "odom",
+      "selected_observation_provenance": {
+        "provenance": {
+          "base_frame": "base_footprint",
+          "localization_source": "tf",
+          "map_frame": "odom",
+          "map_yaml": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+          "map_yaml_sha256": "ecee04cbed7ede8ec70f942790c01298ea368561d21393a561d1042c5f8c6d4d",
+          "observer_version": "aufgabe04-stand-explorer-observe-only-v1",
+          "resolved_scan_topic": "/scan",
+          "runtime_config": {
+            "amcl_topic": "/amcl_pose",
+            "base_frame": "base_footprint",
+            "cmd_vel_topic": "/cmd_vel",
+            "configured": {
+              "amcl_topic": "amcl_pose",
+              "base_frame": "base_footprint",
+              "cmd_vel_topic": "cmd_vel",
+              "localization_source": "tf",
+              "map_frame": "odom",
+              "namespace": "",
+              "odom_frame": "odom",
+              "odom_topic": "odom",
+              "ros_domain_id": "",
+              "scan_topic": "scan",
+              "use_sim_time": true
+            },
+            "localization_source": "tf",
+            "map_frame": "odom",
+            "namespace": "",
+            "odom_frame": "odom",
+            "odom_topic": "/odom",
+            "ros_domain_id": "31",
+            "scan_topic": "/scan",
+            "use_sim_time": true
+          },
+          "scan_frame": "base_scan",
+          "scan_stamp_sec": 516.184,
+          "schema_version": 1,
+          "tf_age_sec": -0.052,
+          "tf_lookup_stamp_sec": 516.152
+        },
+        "selected_observation": "stand_observation_000179"
+      },
+      "source": "lidar_detected_stand",
+      "source_observation_ids": [
+        "stand_observation_000005",
+        "stand_observation_000014",
+        "stand_observation_000023",
+        "stand_observation_000032",
+        "stand_observation_000041",
+        "stand_observation_000050",
+        "stand_observation_000059",
+        "stand_observation_000068",
+        "stand_observation_000077",
+        "stand_observation_000086",
+        "stand_observation_000095",
+        "stand_observation_000104",
+        "stand_observation_000113",
+        "stand_observation_000122",
+        "stand_observation_000131",
+        "stand_observation_000140",
+        "stand_observation_000149",
+        "stand_observation_000157",
+        "stand_observation_000164",
+        "stand_observation_000171",
+        "stand_observation_000179"
+      ],
+      "source_observation_path": "results/aufgabe04/detected_stations/sim_stand_observations_odom.jsonl",
+      "stand_confidence": 0.9527195897304295,
+      "stand_first_confirmed_at_sec": 1783439348.4497037,
+      "stand_first_seen_sec": 1783439348.0476067,
+      "stand_hit_count": 21,
+      "stand_id": "detected_stand_02",
+      "stand_last_seen_sec": 1783439352.0556977,
+      "stand_x_m": 0.5782130765546052,
+      "stand_y_m": 0.5315977941543997
+    },
+    "frame_id": "map",
+    "map": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+    "map_image": "maps/aufgabe03/arena_1p898x3p9_auto.pgm",
+    "map_image_sha256": "2430be49e6ab1d6f258ee018dadd1943b16349d6dd2a4a38036c9acba754e0d1",
+    "map_yaml": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+    "origin": [
+      -2.82,
+      -1.69,
+      0.0
+    ],
+    "resolution": 0.05,
+    "station_layout_json": "results/aufgabe04/detected_stations/first_detected_station_layout.json",
+    "stations": [
+      "A"
+    ]
+  }
+}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -20,11 +21,12 @@ from scripts.aufgabe04.navigation.artifacts import (
 from scripts.aufgabe04.navigation.models import Pose2D
 from scripts.aufgabe04.navigation.route_context import build_station_route_dry_run, file_sha256
 from scripts.aufgabe04.navigation.route_overlay import RouteOverlayInput, render_route_overlay_svg
-from scripts.aufgabe04.navigation.two_stage_approach import pre_approach_pose
 from scripts.aufgabe04.perception.stand_confirmation import (
     StandConfirmationAccumulator,
     StandConfirmationConfig,
-    select_first_confirmed_stand,
+    ConfirmedStand,
+    select_confirmed_stand_by_id,
+    select_unique_confirmed_stand,
 )
 from scripts.aufgabe04.perception.stand_observation import (
     OBSERVATION_SCHEMA_VERSION,
@@ -57,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-y", required=True, type=float)
     parser.add_argument("--start-yaw", type=float, default=0.0)
     parser.add_argument("--station-id", default="A")
+    parser.add_argument("--stand-yaw-rad", type=float, default=0.0)
     parser.add_argument("--approach-offset-m", type=float, default=0.30)
     parser.add_argument("--keepout-radius-m", type=float, default=0.20)
     parser.add_argument("--merge-distance-m", type=float, default=0.18)
@@ -67,7 +70,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--required-map-frame", default="map")
     parser.add_argument("--required-base-frame", default="base_footprint")
     parser.add_argument("--required-localization-source", default=None, choices=["amcl", "tf"])
-    parser.add_argument("--require-map-hash", action="store_true")
+    parser.add_argument(
+        "--require-map-hash",
+        action="store_true",
+        help="Deprecated: map hash/provenance is always required.",
+    )
+    parser.add_argument(
+        "--confirmation-json",
+        required=True,
+        type=Path,
+        help=(
+            "Operator/QR confirmation receipt. Must bind the selected detected stand "
+            "to --station-id before any route artifact is committed."
+        ),
+    )
     parser.add_argument("--inflation-radius-m", type=float, default=0.0)
     parser.add_argument("--snap-radius-m", type=float, default=0.30)
     parser.add_argument("--layout-json", type=Path, default=DEFAULT_LAYOUT_JSON)
@@ -81,12 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--arena-center-x-m", type=float, default=ArenaBounds.center_x_m)
     parser.add_argument("--arena-center-y-m", type=float, default=ArenaBounds.center_y_m)
     parser.add_argument("--arena-yaw-deg", type=float, default=ArenaBounds.yaw_deg)
-    parser.add_argument(
-        "--arena-margin-m",
-        type=float,
-        default=0.15,
-        help="Reject LiDAR stand candidates this close to arena walls (default: 0.15 m).",
-    )
+    parser.add_argument("--arena-margin-m", type=float, default=ArenaBounds.margin_m)
     return parser
 
 
@@ -98,7 +109,6 @@ def validate_observation_provenance(
     required_base_frame: str,
     required_localization_source: str | None,
     max_tf_age_sec: float,
-    require_map_hash: bool,
 ) -> None:
     provenance = observation.provenance
     if provenance.schema_version != OBSERVATION_SCHEMA_VERSION:
@@ -113,10 +123,9 @@ def validate_observation_provenance(
         raise ValueError(f"observation {observation.observation_id} missing scan_frame")
     if provenance.tf_age_sec > max_tf_age_sec:
         raise ValueError(f"observation {observation.observation_id} TF age exceeds limit")
-    if require_map_hash:
-        expected_hash = file_sha256(map_yaml)
-        if provenance.map_yaml_sha256 != expected_hash:
-            raise ValueError(f"observation {observation.observation_id} map hash mismatch")
+    expected_hash = file_sha256(map_yaml)
+    if provenance.map_yaml_sha256 != expected_hash:
+        raise ValueError(f"observation {observation.observation_id} map hash mismatch")
 
 
 def validated_observations(args) -> tuple[StandObservation, ...]:
@@ -131,9 +140,61 @@ def validated_observations(args) -> tuple[StandObservation, ...]:
             required_base_frame=args.required_base_frame,
             required_localization_source=args.required_localization_source,
             max_tf_age_sec=args.max_tf_age_sec,
-            require_map_hash=args.require_map_hash,
         )
     return observations
+
+
+def load_and_validate_confirmation_receipt(
+    path: Path,
+    *,
+    stand: ConfirmedStand,
+    station_id: str,
+) -> dict[str, object]:
+    try:
+        payload = json.loads(Path(path).read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid confirmation receipt: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("confirmation receipt must be a JSON object")
+
+    confirmed_stand_id = str(payload.get("stand_id", "")).strip()
+    if confirmed_stand_id != stand.stand_id:
+        raise ValueError(
+            f"confirmation stand_id mismatch: expected {stand.stand_id}, got {confirmed_stand_id or '(empty)'}"
+        )
+
+    confirmed_station_id = str(payload.get("station_id", "")).strip().upper()
+    expected_station_id = station_id.strip().upper()
+    if confirmed_station_id != expected_station_id:
+        raise ValueError(
+            f"confirmation station_id mismatch: expected {expected_station_id}, got {confirmed_station_id or '(empty)'}"
+        )
+
+    source = str(payload.get("confirmation_source", "")).strip().lower()
+    if source == "operator":
+        if payload.get("operator_confirmed") is not True:
+            raise ValueError("operator confirmation receipt requires operator_confirmed=true")
+    elif source == "qr":
+        resolved_station_id = str(payload.get("resolved_station_id", "")).strip().upper()
+        if resolved_station_id != expected_station_id:
+            raise ValueError(
+                "QR confirmation receipt requires resolved_station_id to match station_id"
+            )
+    else:
+        raise ValueError("confirmation_source must be 'operator' or 'qr'")
+
+    return payload
+
+
+def validate_route_commitment_ready(dry_run) -> None:
+    failures = [result.failure for result in dry_run.results if result.failure is not None]
+    if failures:
+        raise ValueError("route diagnostics contain failure before artifact commitment")
+    for index, result in enumerate(dry_run.results):
+        if result.route is None:
+            raise ValueError(f"route leg {index} has no route")
+        if result.route.length_m <= 0.0:
+            raise ValueError(f"route leg {index} has no positive final-corridor length")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -159,24 +220,31 @@ def main(argv: list[str] | None = None) -> int:
             arena_bounds=arena_bounds,
         )
         stands = accumulator.add_observations(observations)
-        selected = select_first_confirmed_stand(stands)
-        start_pose = Pose2D(args.start_x, args.start_y, args.start_yaw)
-        stand_pose = Pose2D(selected.x_m, selected.y_m)
-        pre_approach = pre_approach_pose(
-            stand_pose,
-            start_pose,
-            offset_m=args.approach_offset_m,
+        selected_stand_id = ""
+        if args.confirmation_json.exists():
+            try:
+                confirmation_preview = json.loads(args.confirmation_json.read_text())
+                if isinstance(confirmation_preview, dict):
+                    selected_stand_id = str(confirmation_preview.get("stand_id", "")).strip()
+            except (OSError, json.JSONDecodeError):
+                selected_stand_id = ""
+        selected = (
+            select_confirmed_stand_by_id(stands, selected_stand_id)
+            if selected_stand_id
+            else select_unique_confirmed_stand(stands)
         )
-        synthetic_pre_approach_yaw = pre_approach.yaw_rad
+        confirmation = load_and_validate_confirmation_receipt(
+            args.confirmation_json,
+            stand=selected,
+            station_id=args.station_id,
+        )
         station = station_from_confirmed_stand(
             selected,
             config=DetectedStationLayoutConfig(
                 station_id=args.station_id,
                 approach_offset_m=args.approach_offset_m,
                 keepout_radius_m=args.keepout_radius_m,
-                # This is deliberately the pre-approach bearing, not the
-                # hidden QR/stand yaw.  Camera evidence resolves that later.
-                stand_yaw_rad=synthetic_pre_approach_yaw,
+                stand_yaw_rad=args.stand_yaw_rad,
                 arena_length_m=args.arena_length_m,
                 arena_width_m=args.arena_width_m,
                 arena_center_x_m=args.arena_center_x_m,
@@ -193,28 +261,25 @@ def main(argv: list[str] | None = None) -> int:
                 "map_yaml_sha256": file_sha256(args.map),
                 "required_map_frame": args.required_map_frame,
                 "required_base_frame": args.required_base_frame,
-                "orientation_known": False,
-                "target_kind": "orientation_blind_pre_approach",
-                "pre_approach": {
-                    "x_m": pre_approach.x_m,
-                    "y_m": pre_approach.y_m,
-                    "yaw_rad": pre_approach.yaw_rad,
-                },
+                "confirmation_json": str(args.confirmation_json),
+                "confirmation": confirmation,
             },
         )
-        write_station_layout_json(args.layout_json, [station], metadata)
-        write_station_layout_csv(args.layout_csv, [station])
 
         dry_run = build_station_route_dry_run(
             args.map,
             [station.station_id],
             station_map={station.station_id: station},
             station_layout_json=args.layout_json,
-            start=start_pose,
+            start=Pose2D(args.start_x, args.start_y, args.start_yaw),
             inflation_radius_m=args.inflation_radius_m,
             snap_radius_m=args.snap_radius_m,
             arena_bounds=arena_bounds,
         )
+        validate_route_commitment_ready(dry_run)
+        write_station_layout_json(args.layout_json, [station], metadata)
+        write_station_layout_csv(args.layout_csv, [station])
+
         route_metadata = dict(dry_run.metadata)
         route_metadata["detected_station"] = metadata
         write_route_csv(args.route_csv, dry_run.results)

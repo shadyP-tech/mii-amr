@@ -3,6 +3,8 @@ import math
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
 
 
@@ -13,6 +15,7 @@ from scripts.aufgabe04.navigation.ros_runtime_config import (  # noqa: E402
     RuntimeConfig,
     resolve_runtime_config,
 )
+from scripts.aufgabe04.navigation.run_single_station_segment import build_parser  # noqa: E402
 from scripts.aufgabe04.navigation.safety_checks import (  # noqa: E402
     validate_route_diagnostics_json,
     validate_speed_limits,
@@ -150,6 +153,15 @@ class DiagnosticsGateTest(unittest.TestCase):
         self.assertTrue(validate_speed_limits(0.05, 0.10).ok)
         self.assertFalse(validate_speed_limits(0.20, 0.10).ok)
         self.assertFalse(validate_speed_limits(0.05, math.inf).ok)
+
+
+class SegmentRunnerCliGateTest(unittest.TestCase):
+    def test_yes_bypass_argument_is_rejected(self):
+        parser = build_parser()
+
+        with redirect_stderr(StringIO()):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(["--leg-index", "0", "--yes"])
 
 
 class RuntimeConfigTest(unittest.TestCase):

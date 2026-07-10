@@ -41,7 +41,20 @@ from scripts.aufgabe04.perception.stand_side_classification import (
     color_confidence_for_estimate,
     _qr_scan_frames_for_estimate,
 )
+from scripts.aufgabe04.perception.stand_axis_lidar_roi import (
+    DEFAULT_ROI_OBSERVATION_JSONL,
+    ROI_OBSERVATION_SCHEMA_VERSION,
+    ROI_OBSERVER_VERSION,
+    PlainLaserScan,
+    ScanConeRangeQuery,
+    StandAxisLidarRoiObservation,
+    camera_bearing_rad,
+    image_center_x_to_bearing_rad,
+    median_range_in_scan_cone,
+    write_observation_jsonl,
+)
 from scripts.aufgabe04.perception.stand_axis_image import (
+    ImagePoint,
     StandAxisImageEstimate,
     estimate_stand_axis_from_edges,
     estimate_stand_axis_from_mask,
@@ -232,10 +245,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="LaserScan bearing used for the distance estimate. 0 is straight ahead in the scan frame.",
     )
     parser.add_argument(
+        "--lidar-bearing-source",
+        choices=("fixed", "image-center"),
+        default="fixed",
+        help=(
+            "fixed keeps the --lidar-bearing-rad cone. image-center is an opt-in debug mode that maps "
+            "the detected stand rectangle center through camera intrinsics into an approximate LiDAR bearing."
+        ),
+    )
+    parser.add_argument(
+        "--camera-to-lidar-yaw-offset-rad",
+        type=float,
+        default=0.0,
+        help="Measured yaw offset added to the image-derived camera bearing before sampling the LiDAR scan.",
+    )
+    parser.add_argument(
         "--lidar-cone-deg",
         type=float,
         default=10.0,
         help="Half-width cone around --lidar-bearing-rad for median range selection.",
+    )
+    parser.add_argument(
+        "--lidar-min-samples",
+        type=int,
+        default=1,
+        help="Minimum valid LaserScan samples required inside the selected cone.",
+    )
+    parser.add_argument(
+        "--lidar-roi-log-jsonl",
+        type=Path,
+        default=DEFAULT_ROI_OBSERVATION_JSONL,
+        help="Debug-only JSONL artifact for LiDAR ROI provenance.",
+    )
+    parser.add_argument(
+        "--no-lidar-roi-log",
+        action="store_true",
+        help="Disable writing the debug LiDAR ROI JSONL artifact.",
     )
     parser.add_argument("--max-scan-age-sec", type=float, default=0.5)
     parser.add_argument(
@@ -456,17 +501,12 @@ class RosLaserScanRangeSource:
         self,
         *,
         topic: str,
-        bearing_rad: float,
-        cone_half_angle_rad: float,
         max_scan_age_sec: float,
     ) -> None:
         self.topic = topic
-        self.bearing_rad = bearing_rad
-        self.cone_half_angle_rad = max(0.0, cone_half_angle_rad)
         self.max_scan_age_sec = max_scan_age_sec
         self._lock = threading.Lock()
-        self._latest_range_m: float | None = None
-        self._latest_receipt_sec: float | None = None
+        self._latest_scan: PlainLaserScan | None = None
         self._running = False
         self._spin_thread = None
 
@@ -518,38 +558,26 @@ class RosLaserScanRangeSource:
             self.executor.spin_once(timeout_sec=0.05)
 
     def _on_scan(self, msg) -> None:
-        selected = []
-        for index, raw_range in enumerate(msg.ranges):
-            try:
-                distance = float(raw_range)
-            except (TypeError, ValueError):
-                continue
-            if not math.isfinite(distance) or distance < float(msg.range_min) or distance > float(msg.range_max):
-                continue
-            bearing = float(msg.angle_min) + index * float(msg.angle_increment)
-            if abs(_normalize_angle(bearing - self.bearing_rad)) <= self.cone_half_angle_rad:
-                selected.append(distance)
-        if not selected:
-            return
-        selected.sort()
-        middle = len(selected) // 2
-        if len(selected) % 2:
-            distance = selected[middle]
-        else:
-            distance = (selected[middle - 1] + selected[middle]) / 2.0
+        header = getattr(msg, "header", None)
+        frame_id = str(getattr(header, "frame_id", "") or "")
+        stamp = getattr(header, "stamp", None)
+        scan_stamp_sec = _stamp_to_sec(stamp)
+        scan = PlainLaserScan(
+            ranges=tuple(float(value) for value in msg.ranges),
+            angle_min=float(msg.angle_min),
+            angle_increment=float(msg.angle_increment),
+            range_min=float(msg.range_min),
+            range_max=float(msg.range_max),
+            scan_frame_id=frame_id,
+            scan_stamp_sec=scan_stamp_sec,
+            receipt_sec=time.time(),
+        )
         with self._lock:
-            self._latest_range_m = distance
-            self._latest_receipt_sec = time.time()
+            self._latest_scan = scan
 
-    def latest_range_m(self) -> float | None:
+    def latest_scan(self) -> PlainLaserScan | None:
         with self._lock:
-            distance = self._latest_range_m
-            receipt_sec = self._latest_receipt_sec
-        if distance is None or receipt_sec is None:
-            return None
-        if self.max_scan_age_sec > 0.0 and time.time() - receipt_sec > self.max_scan_age_sec:
-            return None
-        return distance
+            return self._latest_scan
 
     def release(self) -> None:
         self._running = False
@@ -564,6 +592,177 @@ class RosLaserScanRangeSource:
 
 def _normalize_angle(angle_rad: float) -> float:
     return math.atan2(math.sin(angle_rad), math.cos(angle_rad))
+
+
+def _stamp_to_sec(stamp) -> float | None:
+    if stamp is None:
+        return None
+    sec = getattr(stamp, "sec", None)
+    nanosec = getattr(stamp, "nanosec", None)
+    if sec is None or nanosec is None:
+        return None
+    return float(sec) + float(nanosec) / 1_000_000_000.0
+
+
+def _rectangle_center_x_px(corners: Sequence[ImagePoint] | None) -> float | None:
+    if not corners:
+        return None
+    return sum(point.u_px for point in corners) / len(corners)
+
+
+def _empty_scan_query(
+    *,
+    bearing_rad: float,
+    cone_half_angle_rad: float,
+    reason: str,
+) -> ScanConeRangeQuery:
+    return ScanConeRangeQuery(
+        distance_m=None,
+        selected_sample_count=0,
+        rejection_reason=reason,
+        bearing_rad=bearing_rad,
+        cone_half_angle_rad=cone_half_angle_rad,
+        scan_frame_id="",
+        scan_stamp_sec=None,
+        scan_age_sec=None,
+    )
+
+
+def _query_lidar_distance(
+    *,
+    lidar_source: RosLaserScanRangeSource | None,
+    bearing_source: str,
+    fixed_bearing_rad: float,
+    cone_half_angle_rad: float,
+    max_scan_age_sec: float,
+    min_sample_count: int,
+    estimate: StandAxisImageEstimate | None,
+    camera_fx_px: float | None,
+    camera_cx_px: float | None,
+    camera_to_lidar_yaw_offset_rad: float,
+    now_sec: float,
+) -> tuple[ScanConeRangeQuery | None, float | None, float | None, str]:
+    if lidar_source is None:
+        return None, None, None, "no_lidar_source"
+
+    scan = lidar_source.latest_scan()
+    camera_bearing = None
+    rect_center_x = None
+    query_bearing = fixed_bearing_rad
+    fallback_source = "fixed_bearing"
+
+    if bearing_source == "image-center":
+        rect_center_x = _rectangle_center_x_px(estimate.corners if estimate is not None else None)
+        if estimate is None or not estimate.usable:
+            return (
+                _empty_scan_query(
+                    bearing_rad=fixed_bearing_rad,
+                    cone_half_angle_rad=cone_half_angle_rad,
+                    reason="unusable_estimate",
+                ),
+                None,
+                rect_center_x,
+                "unusable_estimate",
+            )
+        if rect_center_x is None:
+            return (
+                _empty_scan_query(
+                    bearing_rad=fixed_bearing_rad,
+                    cone_half_angle_rad=cone_half_angle_rad,
+                    reason="missing_rectangle_center",
+                ),
+                None,
+                rect_center_x,
+                "missing_rectangle_center",
+            )
+        if camera_fx_px is None or camera_cx_px is None:
+            return (
+                _empty_scan_query(
+                    bearing_rad=fixed_bearing_rad,
+                    cone_half_angle_rad=cone_half_angle_rad,
+                    reason="missing_camera_intrinsics",
+                ),
+                None,
+                rect_center_x,
+                "missing_camera_intrinsics",
+            )
+        try:
+            camera_bearing = camera_bearing_rad(
+                rect_center_x,
+                camera_fx_px=camera_fx_px,
+                camera_cx_px=camera_cx_px,
+            )
+            query_bearing = image_center_x_to_bearing_rad(
+                rect_center_x,
+                camera_fx_px=camera_fx_px,
+                camera_cx_px=camera_cx_px,
+                camera_to_lidar_yaw_offset_rad=camera_to_lidar_yaw_offset_rad,
+            )
+        except ValueError as exc:
+            return (
+                _empty_scan_query(
+                    bearing_rad=fixed_bearing_rad,
+                    cone_half_angle_rad=cone_half_angle_rad,
+                    reason=str(exc),
+                ),
+                None,
+                rect_center_x,
+                "invalid_camera_intrinsics",
+            )
+        fallback_source = "image_center"
+
+    query = median_range_in_scan_cone(
+        scan,
+        bearing_rad=query_bearing,
+        cone_half_angle_rad=cone_half_angle_rad,
+        now_sec=now_sec,
+        max_scan_age_sec=max_scan_age_sec,
+        min_sample_count=min_sample_count,
+    )
+    return query, camera_bearing, rect_center_x, fallback_source
+
+
+def _write_lidar_roi_observation(
+    *,
+    path: Path,
+    image_topic: str,
+    image_stamp_sec: float | None,
+    scan_topic: str,
+    query: ScanConeRangeQuery,
+    rect_center_x_px: float | None,
+    camera_fx_px: float | None,
+    camera_cx_px: float | None,
+    camera_bearing_rad_value: float | None,
+    bearing_source: str,
+    fallback_source: str,
+    estimate: StandAxisImageEstimate,
+    observed_at_sec: float,
+) -> None:
+    observation = StandAxisLidarRoiObservation(
+        schema_version=ROI_OBSERVATION_SCHEMA_VERSION,
+        observer_version=ROI_OBSERVER_VERSION,
+        observed_at_sec=observed_at_sec,
+        image_topic=image_topic,
+        image_stamp_sec=image_stamp_sec,
+        scan_topic=scan_topic,
+        scan_frame_id=query.scan_frame_id,
+        scan_stamp_sec=query.scan_stamp_sec,
+        scan_age_sec=query.scan_age_sec,
+        rect_center_x_px=rect_center_x_px,
+        camera_fx_px=camera_fx_px,
+        camera_cx_px=camera_cx_px,
+        camera_bearing_rad=camera_bearing_rad_value,
+        lidar_bearing_rad=query.bearing_rad,
+        bearing_source=bearing_source,
+        cone_half_angle_rad=query.cone_half_angle_rad,
+        selected_sample_count=query.selected_sample_count,
+        used_distance_m=query.distance_m,
+        fallback_source=fallback_source,
+        rejection_reason=query.rejection_reason,
+        estimate_source=estimate.source,
+        estimate_usable=bool(estimate.usable),
+    )
+    write_observation_jsonl(path, (observation,))
 
 
 def display_side_label(side: StandSideClassification, estimate: StandAxisImageEstimate) -> str:
@@ -586,6 +785,8 @@ def print_status_line(
     *,
     lidar_distance_m: float | None,
     stand_distance_m: float | None,
+    lidar_query: ScanConeRangeQuery | None,
+    lidar_bearing_source: str,
     qr_texts: tuple[str, ...],
 ) -> None:
     side_label = display_side_label(side, estimate)
@@ -593,12 +794,21 @@ def print_status_line(
     proxy_text = format_optional_float(estimate.yaw_proxy, precision=3)
     lidar_text = format_optional_float(lidar_distance_m, precision=3, suffix="m")
     distance_text = format_optional_float(stand_distance_m, precision=3, suffix="m")
+    if lidar_query is None:
+        lidar_roi_text = "n/a"
+    else:
+        reason = lidar_query.rejection_reason or "ok"
+        lidar_roi_text = (
+            f"{lidar_bearing_source}:bearing={lidar_query.bearing_rad:.3f}rad "
+            f"samples={lidar_query.selected_sample_count} reason={reason}"
+        )
     ratio_text = format_optional_float(estimate.height_ratio, precision=3)
     print(
         f"stand_axis source={estimate.source} mode={estimate.mode} usable={estimate.usable} "
         f"angle={angle_text} proxy={proxy_text} ratio={ratio_text} "
         f"side={side_label} raw_side={side.side} reason={side.reason} "
         f"lidar_distance={lidar_text} used_distance={distance_text} "
+        f"lidar_roi={lidar_roi_text} "
         f"left_px={estimate.left_height_px:.1f} right_px={estimate.right_height_px:.1f} "
         f"qr_texts={list(qr_texts)}"
     )
@@ -729,8 +939,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise SystemExit("--use-lidar-distance requires --scan-topic")
         lidar_source = RosLaserScanRangeSource(
             topic=args.scan_topic,
-            bearing_rad=args.lidar_bearing_rad,
-            cone_half_angle_rad=math.radians(args.lidar_cone_deg),
             max_scan_age_sec=args.max_scan_age_sec,
         )
         lidar_source.start()
@@ -801,12 +1009,33 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             if args.resize != 1.0:
                 frame = cv2.resize(frame, None, fx=args.resize, fy=args.resize)
+            query_camera_cx_px = camera_cx_px if camera_cx_px is not None else float(frame.shape[1]) / 2.0
 
             mask = None
             edges = None
             face_mask = None
             rectangle_mask = None
-            lidar_distance_m = lidar_source.latest_range_m() if lidar_source is not None else None
+            lidar_query = None
+            lidar_camera_bearing_rad = None
+            lidar_rect_center_x_px = None
+            lidar_fallback_source = "none"
+            if args.lidar_bearing_source == "fixed":
+                lidar_query, lidar_camera_bearing_rad, lidar_rect_center_x_px, lidar_fallback_source = (
+                    _query_lidar_distance(
+                        lidar_source=lidar_source,
+                        bearing_source=args.lidar_bearing_source,
+                        fixed_bearing_rad=args.lidar_bearing_rad,
+                        cone_half_angle_rad=math.radians(args.lidar_cone_deg),
+                        max_scan_age_sec=args.max_scan_age_sec,
+                        min_sample_count=args.lidar_min_samples,
+                        estimate=None,
+                        camera_fx_px=camera_fx_px,
+                        camera_cx_px=query_camera_cx_px,
+                        camera_to_lidar_yaw_offset_rad=args.camera_to_lidar_yaw_offset_rad,
+                        now_sec=last_display_sec,
+                    )
+                )
+            lidar_distance_m = lidar_query.distance_m if lidar_query is not None else None
             stand_distance_m = lidar_distance_m if lidar_distance_m is not None else args.stand_distance_m
             active_ranges = selected_ranges
             if args.axis_source == "color-mask" or args.display_mask or args.tune:
@@ -883,6 +1112,45 @@ def main(argv: Sequence[str] | None = None) -> int:
                         close_iterations=args.close_iterations,
                         open_iterations=args.open_iterations,
                     )
+            if args.lidar_bearing_source == "image-center":
+                lidar_query, lidar_camera_bearing_rad, lidar_rect_center_x_px, lidar_fallback_source = (
+                    _query_lidar_distance(
+                        lidar_source=lidar_source,
+                        bearing_source=args.lidar_bearing_source,
+                        fixed_bearing_rad=args.lidar_bearing_rad,
+                        cone_half_angle_rad=math.radians(args.lidar_cone_deg),
+                        max_scan_age_sec=args.max_scan_age_sec,
+                        min_sample_count=args.lidar_min_samples,
+                        estimate=estimate,
+                        camera_fx_px=camera_fx_px,
+                        camera_cx_px=query_camera_cx_px,
+                        camera_to_lidar_yaw_offset_rad=args.camera_to_lidar_yaw_offset_rad,
+                        now_sec=last_display_sec,
+                    )
+                )
+                lidar_distance_m = lidar_query.distance_m if lidar_query is not None else None
+                stand_distance_m = lidar_distance_m if lidar_distance_m is not None else args.stand_distance_m
+            if (
+                lidar_query is not None
+                and args.use_lidar_distance
+                and not args.no_lidar_roi_log
+                and args.lidar_roi_log_jsonl is not None
+            ):
+                _write_lidar_roi_observation(
+                    path=args.lidar_roi_log_jsonl,
+                    image_topic=args.compressed_image_topic,
+                    image_stamp_sec=read.stamp_sec,
+                    scan_topic=args.scan_topic or "",
+                    query=lidar_query,
+                    rect_center_x_px=lidar_rect_center_x_px,
+                    camera_fx_px=camera_fx_px,
+                    camera_cx_px=query_camera_cx_px,
+                    camera_bearing_rad_value=lidar_camera_bearing_rad,
+                    bearing_source=args.lidar_bearing_source,
+                    fallback_source=lidar_fallback_source,
+                    estimate=estimate,
+                    observed_at_sec=last_display_sec,
+                )
             color_confidence = color_confidence_for_estimate(cv2, numpy, mask, estimate)
             sim_qr_detection = None
             if args.sim_raw_image_topic and not args.no_qr_decode:
@@ -990,6 +1258,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     side,
                     lidar_distance_m=lidar_distance_m,
                     stand_distance_m=stand_distance_m,
+                    lidar_query=lidar_query,
+                    lidar_bearing_source=args.lidar_bearing_source,
                     qr_texts=qr_texts,
                 )
 

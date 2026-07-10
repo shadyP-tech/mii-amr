@@ -10,8 +10,10 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from scripts.aufgabe04.qr_scanning.onboard_camera_node import (  # noqa: E402
+    COMPRESSED_IMAGE_TYPE,
     OnboardQRScanner,
     build_parser,
+    validate_compressed_image_topic_available,
 )
 from scripts.aufgabe04.qr_scanning.scan_processor import (  # noqa: E402
     QRScanProcessor,
@@ -60,6 +62,25 @@ class OnboardCameraNodeCliTest(unittest.TestCase):
                 parser.parse_args(["--ros-image-topic", "/camera/image_raw"])
 
 
+class CameraTopicPreflightTest(unittest.TestCase):
+    def test_accepts_resolved_compressed_image_topic(self):
+        validate_compressed_image_topic_available(
+            [("/camera/image_raw/compressed", [COMPRESSED_IMAGE_TYPE])],
+            "/camera/image_raw/compressed",
+        )
+
+    def test_rejects_missing_compressed_image_topic(self):
+        with self.assertRaisesRegex(ValueError, "missing compressed image topic"):
+            validate_compressed_image_topic_available([], "/camera/image_raw/compressed")
+
+    def test_rejects_wrong_topic_type(self):
+        with self.assertRaisesRegex(ValueError, "expected sensor_msgs/msg/CompressedImage"):
+            validate_compressed_image_topic_available(
+                [("/camera/image_raw/compressed", ["sensor_msgs/msg/Image"])],
+                "/camera/image_raw/compressed",
+            )
+
+
 class OnboardQRScannerCallbackTest(unittest.TestCase):
     def make_scanner(self, *, detector, converter=None, stamp_reader=None, times=None):
         rows = []
@@ -102,6 +123,7 @@ class OnboardQRScannerCallbackTest(unittest.TestCase):
 
         self.assertTrue(scanner.stop_requested)
         self.assertEqual(rows[0][1]["qr_id"], "QR_001")
+        self.assertEqual(rows[0][1]["resolved_station_id"], "QR_001")
         self.assertEqual(messages, ["QR scan: qr_id=QR_001 source=/camera/image_raw/compressed"])
 
     def test_callback_debounces_duplicate_scan(self):

@@ -33,6 +33,7 @@ try:  # pragma: no cover - exercised on ROS hosts.
     from rclpy.duration import Duration
     from rclpy.node import Node
     from rclpy.parameter import Parameter
+    from rclpy.qos import qos_profile_sensor_data
     from rclpy.time import Time
     from sensor_msgs.msg import LaserScan
     from tf2_ros import Buffer, TransformException, TransformListener
@@ -41,6 +42,7 @@ except ImportError:  # pragma: no cover - keeps offline tests ROS-free.
     Duration = None
     Node = object
     Parameter = None
+    qos_profile_sensor_data = None
     Time = None
     LaserScan = None
     Buffer = None
@@ -142,7 +144,12 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
         self.observation_count = 0
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
-        self.create_subscription(LaserScan, self.runtime.scan_topic, self._scan_callback, 10)
+        self.create_subscription(
+            LaserScan,
+            self.runtime.scan_topic,
+            self._scan_callback,
+            qos_profile_sensor_data,
+        )
         self.get_logger().info(
             "observe-only stand explorer listening on "
             f"{self.runtime.scan_topic}; output={self.output_jsonl}"
@@ -260,9 +267,12 @@ def main(argv: list[str] | None = None) -> int:
     node = StandExplorerNode(args)
     try:
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
     return 0
 
 

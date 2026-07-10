@@ -97,6 +97,20 @@ The observer uses `LaserScan.header.frame_id` as the source frame and requires a
 fresh timestamped TF transform into `map`. It drops observations when frame or TF
 provenance is missing or stale.
 
+Create an explicit confirmation receipt before route planning. This is the
+manual/QR gate that turns one unique confirmed LiDAR stand into a station
+identity; it does not move the robot:
+
+```bash
+python3 scripts/aufgabe04/navigation/create_detected_station_confirmation.py \
+  --observations-jsonl results/aufgabe04/detected_stations/stand_observations.jsonl \
+  --map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
+  --station-id A \
+  --confirmation-source operator \
+  --operator-confirmed \
+  --output-json results/aufgabe04/detected_stations/first_detected_station_confirmation.json
+```
+
 Create first-station layout and route artifacts from confirmed observations:
 
 ```bash
@@ -116,7 +130,7 @@ python3 scripts/aufgabe04/navigation/plan_first_detected_station.py \
   --start-x <amcl_x> \
   --start-y <amcl_y> \
   --start-yaw <amcl_yaw> \
-  --require-map-hash \
+  --confirmation-json results/aufgabe04/detected_stations/first_detected_station_confirmation.json \
   --layout-json results/aufgabe04/detected_stations/first_detected_station_layout.json \
   --layout-csv results/aufgabe04/detected_stations/first_detected_station_layout.csv \
   --route-csv results/aufgabe04/routes/first_detected_station_route.csv \
@@ -149,3 +163,24 @@ Keep this path offline:
 
 If a ROS bag or `sensor_msgs/LaserScan` exporter is needed later, keep it as a
 separate adapter that writes plain JSON/CSV for the analyzer.
+
+## Debug-Only Stand-Axis LiDAR ROI
+
+The live stand-axis viewer may optionally write observe-only LiDAR ROI debug
+rows to:
+
+```text
+results/aufgabe04/stand_axis_lidar_roi/stand_axis_lidar_roi_observations.jsonl
+```
+
+This artifact is for diagnosing camera-rectangle-to-LiDAR distance selection in
+`scripts/aufgabe04/perception/debug/stand_axis_viewer.py`. It is not real-parkour
+evidence and must not feed `plan_first_detected_station.py`,
+`run_single_station_segment.py`, station routing, collision stops, mission
+state, or physical motion.
+
+The default LiDAR mode remains the fixed scan-frame cone. The optional
+`--lidar-bearing-source image-center` mode maps the detected rectangle center
+through processed-image intrinsics and an optional measured camera-to-LiDAR yaw
+offset. Treat that mapping as a calibration assumption until it has been
+validated on the actual TurtleBot.
