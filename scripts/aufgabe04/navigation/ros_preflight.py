@@ -35,6 +35,7 @@ try:  # pragma: no cover - exercised on ROS hosts.
     from nav_msgs.msg import Odometry
     from rclpy.duration import Duration
     from rclpy.node import Node
+    from rclpy.parameter import Parameter
     from rclpy.time import Time
     from sensor_msgs.msg import LaserScan
     from tf2_msgs.msg import TFMessage
@@ -48,6 +49,7 @@ except ImportError:  # pragma: no cover - keeps offline tests ROS-free.
     TFMessage = None
     Duration = None
     Node = object
+    Parameter = None
     Time = None
     Buffer = None
     TransformException = Exception
@@ -98,6 +100,14 @@ def _require_ros() -> None:
         raise RuntimeError("ROS2 Python packages are not available in this environment")
 
 
+def _node_parameter_overrides(use_sim_time: bool):
+    """Provide the ROS clock parameter without redeclaring it in the node."""
+
+    if Parameter is None:
+        _require_ros()
+    return [Parameter("use_sim_time", Parameter.Type.BOOL, bool(use_sim_time))]
+
+
 def _stamp_to_seconds(stamp) -> float:
     return float(stamp.sec) + float(stamp.nanosec) / 1_000_000_000.0
 
@@ -131,7 +141,10 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         allowed_cmd_vel_publishers: Sequence[str],
         require_real_time: bool,
     ) -> None:
-        super().__init__("aufgabe04_ros_preflight")
+        super().__init__(
+            "aufgabe04_ros_preflight",
+            parameter_overrides=_node_parameter_overrides(config.use_sim_time),
+        )
         self.config = config
         self.max_scan_age_sec = max_scan_age_sec
         self.max_odom_age_sec = max_odom_age_sec
@@ -141,7 +154,6 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         self.allow_idle_nav2 = allow_idle_nav2
         self.allowed_cmd_vel_publishers = tuple(allowed_cmd_vel_publishers)
         self.require_real_time = require_real_time
-        self.declare_parameter("use_sim_time", False)
         self.latest_scan = None
         self.latest_scan_receipt = None
         self.latest_odom = None
