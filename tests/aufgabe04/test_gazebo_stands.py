@@ -10,7 +10,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.aufgabe04.simulation.generate_gazebo_world import (  # noqa: E402
+    BOARD_CENTER_Z_M,
+    BOARD_HEIGHT_M,
     QR_SIZE,
+    STAND_HEIGHT_M,
     qr_matrix,
     world_sdf,
 )
@@ -30,6 +33,12 @@ class GazeboStandsTest(unittest.TestCase):
     def test_different_station_ids_change_qr_data(self):
         self.assertNotEqual(qr_matrix("A"), qr_matrix("B"))
 
+    def test_stand_top_matches_burger_height_target(self):
+        self.assertAlmostEqual(
+            BOARD_CENTER_Z_M + BOARD_HEIGHT_M / 2.0,
+            STAND_HEIGHT_M,
+        )
+
     def test_world_contains_static_stands_and_qr_faces(self):
         world = world_sdf(
             [
@@ -44,6 +53,7 @@ class GazeboStandsTest(unittest.TestCase):
         self.assertIn('name="qr_white_panel"', world)
         self.assertIn('name="qr_00_00"', world)
         self.assertIn('name="head_board"', world)
+        self.assertIn("0.160000", world)
 
     def test_generator_uses_layout_json_and_creates_parent(self):
         from scripts.aufgabe04.simulation.generate_gazebo_world import main

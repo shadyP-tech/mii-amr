@@ -4,6 +4,11 @@ This directory contains a portable Gazebo Classic world with static station
 stands that match the physical green QR stands: four-foot green base, stem,
 green head board, white QR panel, and black QR modules.
 
+For Gazebo, the stand is intentionally scaled to the TurtleBot3 Burger
+envelope: its top is 0.20 m above the floor and the QR panel is centred at
+0.16 m. This is the robot-height simulation variant, not the metre-tall
+physical stand shown in the reference photos.
+
 The world is generated from the same station-layout JSON used by the offline
 route planner. This keeps stand poses, station IDs, and approach targets in one
 source of truth.

@@ -28,6 +28,15 @@ WHITE = "0.96 0.96 0.96 1"
 BLACK = "0.01 0.01 0.01 1"
 WALL = "0.55 0.55 0.55 1"
 
+# TurtleBot3 Burger-sized stand envelope.  The top of the board is 0.20 m
+# above the floor, with the QR panel centred at the robot's camera/LDS height
+# rather than using the metre-tall physical display stand.
+STAND_HEIGHT_M = 0.20
+BOARD_CENTER_Z_M = 0.16
+BOARD_HEIGHT_M = 0.08
+BOARD_WIDTH_M = 0.14
+QR_PANEL_SIZE_M = 0.11
+
 
 def _bch_remainder(value: int, polynomial: int) -> int:
     """Return the BCH remainder used by QR format information."""
@@ -216,21 +225,26 @@ def _box_collision(name: str, pose: str, size: tuple[float, float, float]) -> st
 
 def _qr_visuals(station_id: str) -> str:
     matrix = qr_matrix(station_id)
-    module = 0.38 / 29.0
+    module = QR_PANEL_SIZE_M / 29.0
     visuals = [
-        _box_visual("qr_white_panel", _pose(0.023, 0.0, 1.18), (0.004, 0.38, 0.38), WHITE)
+        _box_visual(
+            "qr_white_panel",
+            _pose(0.014, 0.0, BOARD_CENTER_Z_M),
+            (0.003, QR_PANEL_SIZE_M, QR_PANEL_SIZE_M),
+            WHITE,
+        )
     ]
     for row, values in enumerate(matrix):
         for col, value in enumerate(values):
             if not value:
                 continue
             y = (10.5 - (col + 4)) * module
-            z = 1.18 + (10.5 - (row + 4)) * module
+            z = BOARD_CENTER_Z_M + (10.5 - (row + 4)) * module
             visuals.append(
                 _box_visual(
                     f"qr_{row:02d}_{col:02d}",
-                    _pose(0.026, y, z),
-                    (0.002, module, module),
+                    _pose(0.016, y, z),
+                    (0.0015, module, module),
                     BLACK,
                 )
             )
@@ -243,19 +257,28 @@ def _station_model(station: Mapping[str, object]) -> str:
     y = float(station["y_m"])
     yaw = float(station["yaw_rad"])
     visuals = [
-        _box_visual("base_center", _pose(0, 0, 0.025), (0.30, 0.30, 0.05), GREEN),
-        _box_visual("neck", _pose(0, 0, 0.105), (0.16, 0.16, 0.16), GREEN_DARK),
-        _box_visual("stem", _pose(0, 0, 0.53), (0.065, 0.065, 0.82), GREEN),
-        _box_visual("head_board", _pose(0, 0, 1.18), (0.04, 0.50, 0.50), GREEN),
+        _box_visual("base_center", _pose(0, 0, 0.025), (0.28, 0.28, 0.05), GREEN),
+        _box_visual("neck", _pose(0, 0, 0.065), (0.12, 0.12, 0.08), GREEN_DARK),
+        _box_visual("stem", _pose(0, 0, 0.115), (0.045, 0.045, 0.12), GREEN),
+        _box_visual(
+            "head_board",
+            _pose(0, 0, BOARD_CENTER_Z_M),
+            (0.025, BOARD_WIDTH_M, BOARD_HEIGHT_M),
+            GREEN,
+        ),
     ]
     collisions = [
-        _box_collision("base_center", _pose(0, 0, 0.025), (0.30, 0.30, 0.05)),
-        _box_collision("stem", _pose(0, 0, 0.53), (0.065, 0.065, 0.82)),
-        _box_collision("head_board", _pose(0, 0, 1.18), (0.04, 0.50, 0.50)),
+        _box_collision("base_center", _pose(0, 0, 0.025), (0.28, 0.28, 0.05)),
+        _box_collision("stem", _pose(0, 0, 0.115), (0.045, 0.045, 0.12)),
+        _box_collision(
+            "head_board",
+            _pose(0, 0, BOARD_CENTER_Z_M),
+            (0.025, BOARD_WIDTH_M, BOARD_HEIGHT_M),
+        ),
     ]
     for index, arm_yaw in enumerate((0.785398, 2.356194, 3.926991, 5.497787)):
         arm_pose = _pose(0.0, 0.0, 0.025, arm_yaw)
-        arm_size = (0.68, 0.115, 0.05)
+        arm_size = (0.42, 0.075, 0.05)
         visuals.append(_box_visual(f"base_arm_{index}", arm_pose, arm_size, GREEN))
         collisions.append(_box_collision(f"base_arm_{index}", arm_pose, arm_size))
     visuals.append(_qr_visuals(station_id))
