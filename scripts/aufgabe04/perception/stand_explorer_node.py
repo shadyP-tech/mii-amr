@@ -46,7 +46,7 @@ except ImportError:  # pragma: no cover - keeps offline tests ROS-free.
     TransformListener = None
 
 
-OBSERVER_VERSION = "aufgabe04-stand-explorer-observe-only-v1"
+OBSERVER_VERSION = "aufgabe04-stand-explorer-observe-only-v2-latest-tf"
 DEFAULT_OUTPUT_JSONL = Path("results/aufgabe04/detected_stations/stand_observations.jsonl")
 
 
@@ -57,6 +57,29 @@ def _require_ros() -> None:
 
 def _stamp_to_sec(stamp) -> float:
     return float(stamp.sec) + float(stamp.nanosec) / 1_000_000_000.0
+
+
+def _latest_transform_time():
+    """Return the zero ROS time, which asks tf2 for the latest transform.
+
+    Looking up a transform at the exact LaserScan timestamp is fragile in
+    simulation: Gazebo can publish a scan a few milliseconds before the
+    corresponding odometry TF reaches this node.  The old exact-time lookup
+    also blocked the single-threaded executor for the full scan period, which
+    prevented the TransformListener from catching up.
+    """
+
+    if Time is None:
+        _require_ros()
+    return Time()
+
+
+def _transform_age_sec(now_sec: float, transform_stamp_sec: float) -> float:
+    """Return a non-negative TF age; timestamp-zero static TF is always valid."""
+
+    if transform_stamp_sec <= 0.0:
+        return 0.0
+    return max(0.0, now_sec - transform_stamp_sec)
 
 
 def _yaw_from_quaternion(q) -> float:
@@ -119,7 +142,7 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
             transform = self.tf_buffer.lookup_transform(
                 self.runtime.map_frame,
                 scan_frame,
-                Time.from_msg(msg.header.stamp),
+                _latest_transform_time(),
                 timeout=Duration(seconds=self.args.tf_timeout_sec),
             )
         except TransformException as exc:
@@ -127,8 +150,11 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
             return
 
         now = self.get_clock().now()
-        tf_stamp = Time.from_msg(transform.header.stamp)
-        tf_age_sec = (now - tf_stamp).nanoseconds / 1_000_000_000.0
+        tf_stamp_sec = _stamp_to_sec(transform.header.stamp)
+        tf_age_sec = _transform_age_sec(
+            _stamp_to_sec(now.to_msg()),
+            tf_stamp_sec,
+        )
         if tf_age_sec > self.args.max_tf_age_sec:
             self.get_logger().warn(f"dropping scan: TF age {tf_age_sec:.3f}s exceeds limit")
             return
@@ -192,7 +218,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-sim-time", action="store_true")
     parser.add_argument("--output-jsonl", type=Path, default=DEFAULT_OUTPUT_JSONL)
     parser.add_argument("--map-yaml", type=Path, default=None)
-    parser.add_argument("--tf-timeout-sec", type=float, default=0.2)
+    parser.add_argument(
+        "--tf-timeout-sec",
+        type=float,
+        default=0.05,
+        help="Maximum wait for the latest available TF; keep below the scan period.",
+    )
     parser.add_argument("--max-tf-age-sec", type=float, default=1.0)
     parser.add_argument("--min-range-m", type=float, default=0.08)
     parser.add_argument("--max-range-m", type=float, default=3.5)
