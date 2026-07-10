@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT))
 from scripts.aufgabe04.qr_scanning.scan_processor import (  # noqa: E402
     QRScanProcessor,
     ScanProcessorConfig,
+    resolve_station_id_for_qr,
 )
 
 
@@ -37,6 +38,29 @@ class QRScanProcessorTest(unittest.TestCase):
         self.assertEqual(outcome.row["timestamp"], 9.5)
         self.assertEqual(outcome.row["robot_id"], "Robot_Test_01")
         self.assertEqual(outcome.row["run_id"], "run-001")
+        self.assertEqual(outcome.row["resolved_station_id"], "QR_001")
+
+    def test_accepts_qr_id_with_explicit_station_binding(self):
+        processor = QRScanProcessor(
+            ScanProcessorConfig(
+                robot_id="Robot_Test_01",
+                run_id="run-001",
+                station_id_by_qr_id={"QR_001": "A"},
+            )
+        )
+
+        outcome = processor.process_texts(
+            ("qr_001",),
+            source="/camera/image_raw/compressed",
+            receipt_time_sec=10.0,
+        )[0]
+
+        self.assertTrue(outcome.accepted)
+        self.assertEqual(outcome.row["resolved_station_id"], "A")
+
+    def test_station_binding_rejects_empty_qr_id(self):
+        with self.assertRaisesRegex(ValueError, "must not be empty"):
+            resolve_station_id_for_qr("")
 
     def test_rejects_invalid_qr_id(self):
         outcome = self.make_processor().process_texts(

@@ -57,15 +57,27 @@ python3 scripts/aufgabe04/navigation/run_single_station_segment.py \
   --semantic-log results/real_runs/run_001/aufgabe04_events.jsonl
 ```
 
-The first physical validation requires typing `RUN` before motion. Do not use
-`--yes` for the first real run; reserve it for repeated runs only after the
-same dry-run/preflight sequence has already been validated and an operator
-remains beside the robot.
+Every physical validation requires typing `RUN` before motion. There is no
+`--yes` bypass for `run_single_station_segment.py`; repeated runs still require
+the same dry-run/preflight sequence and an operator beside the robot.
 
 Every physical run should also be wrapped in a real-run debug bundle. The
 bundle records evidence only; it does not replace the strict dry-run/preflight
 inside `run_single_station_segment.py` and it never publishes motion by itself.
 Keep the bundle topic options matched to the wrapped command topic options.
+
+For the detected-station route artifacts, use the dedicated wrapper after the
+dry run has passed. The wrapper first collects bundle diagnostics, then the
+inner runner pauses and explicitly prompts for `2D Pose Estimate` immediately
+before ROS preflight. Click the pose estimate at that prompt, press Enter, and
+type `RUN` only after the inner preflight passes:
+
+```bash
+scripts/aufgabe04/navigation/run_first_detected_station_segment_with_bundle.sh \
+  aufgabe04_first_detected_real_001 \
+  --allow-idle-nav2-publishers \
+  --operator-note "first detected station pre-approach"
+```
 
 Example namespaced real run:
 
@@ -100,6 +112,32 @@ scripts/common/run_with_bundle.sh \
 After the run, create the upload/debug archive printed in
 `results/real_runs/run_001/archive_hint.txt`. The same wrapper can be used for
 Aufgabe 03 real runs by wrapping the appropriate Aufgabe 03 command.
+
+## Scan Safety Evidence
+
+Before using a `safety_stop` as evidence that the robot was physically too
+close to an obstacle, inspect the semantic JSONL details for the stop. A valid
+`obstacle too close` claim must include a `nearest_valid_range_m` below the
+configured threshold and the reported `/scan` `range_min_m`/`range_max_m`.
+
+Invalid LiDAR samples are evidence too, but they are a different claim:
+
+- `no valid scan ranges` means the fresh scan had no globally valid ranges
+  after applying `range_min`/`range_max`; treat it as unsafe sensor data, not
+  as physical clearance.
+- `no valid front-sector scan ranges` means forward clearance was unknown in
+  the control sector; the follower must clamp forward velocity rather than
+  treat the front as clear.
+- Rejected below-min, above-max, and non-finite sample counts must be recorded
+  before concluding whether a near-zero reading was a real obstacle or a scan
+  artifact.
+
+For real TurtleBot3 runs, record live `/scan` diagnostics confirming
+`range_min`, `range_max`, invalid sample counts, and front-sector clamp behavior
+before making real-robot safety claims. Offline unit tests only prove the pure
+filtering logic; workstation/ROS validation must confirm that `safety_stop`
+JSONL carries the structured details while the CSV `stop_reason` remains
+compact.
 
 ## Preflight Gate
 

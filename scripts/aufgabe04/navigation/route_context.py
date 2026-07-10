@@ -75,6 +75,7 @@ def build_station_route_dry_run(
     start: Pose2D | None = None,
     inflation_radius_m: float = 0.0,
     snap_radius_m: float = 0.30,
+    transit_keepout_radius_m: float = 0.0,
     arena_bounds: ArenaBounds | None = None,
 ) -> StationRouteDryRun:
     selected_arena_bounds = arena_bounds if arena_bounds is not None else ArenaBounds()
@@ -84,9 +85,20 @@ def build_station_route_dry_run(
     base_costmap = Costmap.from_occupancy_grid(grid)
     selected_station_map = station_map if station_map is not None else DEFAULT_STATIONS
     visits = tuple(build_station_visits(selected_station_ids, selected_station_map))
-    planning_costmap = base_costmap.with_station_keepouts(selected_station_map.values())
+    planning_costmap = base_costmap
     if inflation_radius_m > 0.0:
         planning_costmap = planning_costmap.with_inflation(inflation_radius_m)
+    if transit_keepout_radius_m > 0.0:
+        transit_keepouts = tuple(
+            Station(
+                station.station_id,
+                station.pose,
+                station.approach_offset_m,
+                transit_keepout_radius_m,
+            )
+            for station in selected_station_map.values()
+        )
+        planning_costmap = planning_costmap.with_station_keepouts(transit_keepouts)
 
     target_costmap = base_costmap.with_inflation(inflation_radius_m) if inflation_radius_m > 0.0 else base_costmap
     targets = navigation_targets_from_visits(visits, target_costmap)

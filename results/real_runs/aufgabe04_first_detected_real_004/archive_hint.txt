@@ -1,0 +1,1 @@
+tar -czf results/real_runs/aufgabe04_first_detected_real_004_debug_bundle.tar.gz results/real_runs/aufgabe04_first_detected_real_004

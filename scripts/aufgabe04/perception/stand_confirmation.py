@@ -162,3 +162,30 @@ def select_first_confirmed_stand(stands: Iterable[ConfirmedStand]) -> ConfirmedS
     if not ordered:
         raise ValueError("no confirmed stand available")
     return ordered[0]
+
+
+def select_unique_confirmed_stand(stands: Iterable[ConfirmedStand]) -> ConfirmedStand:
+    ordered = sorted(
+        stands,
+        key=lambda stand: (stand.first_confirmed_at_sec, -stand.confidence, stand.stand_id),
+    )
+    if not ordered:
+        raise ValueError("no confirmed stand available")
+    if len(ordered) > 1:
+        stand_ids = ", ".join(stand.stand_id for stand in ordered)
+        raise ValueError(f"ambiguous confirmed stands: {stand_ids}")
+    return ordered[0]
+
+
+def select_confirmed_stand_by_id(
+    stands: Iterable[ConfirmedStand],
+    stand_id: str,
+) -> ConfirmedStand:
+    selected_id = stand_id.strip()
+    if not selected_id:
+        raise ValueError("stand_id must not be empty")
+    matches = [stand for stand in stands if stand.stand_id == selected_id]
+    if not matches:
+        available = ", ".join(stand.stand_id for stand in stands) or "(none)"
+        raise ValueError(f"confirmed stand {selected_id} not found; available: {available}")
+    return matches[0]

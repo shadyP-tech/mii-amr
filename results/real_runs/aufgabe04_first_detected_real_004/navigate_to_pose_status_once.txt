@@ -1,0 +1,2 @@
+$ timeout 4s ros2 topic echo --once /navigate_to_pose/_action/status 
+command failed with exit code 124

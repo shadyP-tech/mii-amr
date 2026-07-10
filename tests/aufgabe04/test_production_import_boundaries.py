@@ -188,6 +188,70 @@ class ProductionImportBoundaryTest(unittest.TestCase):
         self.assertNotIn("Twist", source)
         self.assertNotIn("Publisher", source)
 
+    def test_stand_axis_lidar_roi_stays_offline_and_motion_free(self):
+        module_path = ROOT / "scripts" / "aufgabe04" / "perception" / "stand_axis_lidar_roi.py"
+        source = module_path.read_text()
+        tree = ast.parse(source, filename=str(module_path))
+        forbidden_prefixes = (
+            "rclpy",
+            "sensor_msgs",
+            "geometry_msgs",
+            "nav_msgs",
+            "nav2_msgs",
+            "rosbag2_py",
+            "scripts.aufgabe04.navigation",
+            "scripts.aufgabe04.logistics",
+            "scripts.aufgabe04.fleet",
+            "scripts.aufgabe04.stations",
+            "scripts.aufgabe04.task_client",
+            "scripts.aufgabe04.qr_scanning",
+        )
+        offenders = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported_modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                imported_modules = [node.module or ""]
+            else:
+                continue
+            for module in imported_modules:
+                if module.startswith(forbidden_prefixes):
+                    offenders.append(module)
+
+        self.assertEqual(offenders, [])
+        self.assertNotIn("/cmd_vel", source)
+        self.assertNotIn("Twist", source)
+        self.assertNotIn("Publisher", source)
+
+    def test_navigation_runners_do_not_consume_stand_axis_lidar_roi_debug_artifact(self):
+        checked_paths = [
+            ROOT / "scripts" / "aufgabe04" / "navigation" / "plan_first_detected_station.py",
+            ROOT / "scripts" / "aufgabe04" / "navigation" / "run_single_station_segment.py",
+        ]
+        forbidden_snippets = (
+            "stand_axis_lidar_roi",
+            "stand_axis_lidar_roi_observations.jsonl",
+        )
+        offenders = []
+        for path in checked_paths:
+            source = path.read_text()
+            tree = ast.parse(source, filename=str(path))
+            for snippet in forbidden_snippets:
+                if snippet in source:
+                    offenders.append((path.relative_to(ROOT), snippet))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported_modules = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    imported_modules = [node.module or ""]
+                else:
+                    continue
+                for module in imported_modules:
+                    if module == "scripts.aufgabe04.perception.stand_axis_lidar_roi":
+                        offenders.append((path.relative_to(ROOT), module))
+
+        self.assertEqual(offenders, [])
+
     def test_stand_axis_viewer_stays_motion_free(self):
         module_path = ROOT / "scripts" / "aufgabe04" / "perception" / "debug" / "stand_axis_viewer.py"
         source = module_path.read_text()

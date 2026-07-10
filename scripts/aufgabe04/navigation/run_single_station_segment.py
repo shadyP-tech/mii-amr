@@ -58,21 +58,39 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-frame", default="base_footprint")
     parser.add_argument("--localization-source", default="amcl", choices=["amcl", "tf"])
     parser.add_argument("--allow-sim-time", action="store_true")
-    parser.add_argument("--max-linear-mps", type=float, default=0.05)
-    parser.add_argument("--max-angular-radps", type=float, default=0.15)
+    parser.add_argument("--max-linear-mps", type=float, default=0.055)
+    parser.add_argument("--max-angular-radps", type=float, default=0.18)
     parser.add_argument("--goal-tolerance-m", type=float, default=0.08)
     parser.add_argument("--heading-tolerance-rad", type=float, default=0.25)
+    parser.add_argument("--lookahead-distance-m", type=float, default=0.18)
+    parser.add_argument("--slow-heading-error-rad", type=float, default=0.75)
+    parser.add_argument("--stop-heading-error-rad", type=float, default=1.25)
+    parser.add_argument("--min-linear-speed-scale", type=float, default=0.35)
+    parser.add_argument("--max-progress-advance-m", type=float, default=0.45)
     parser.add_argument("--min-obstacle-distance-m", type=float, default=0.20)
+    parser.add_argument("--front-obstacle-slow-distance-m", type=float, default=0.38)
+    parser.add_argument("--front-obstacle-sector-rad", type=float, default=0.6108652381980153)
     parser.add_argument("--thinning-min-spacing-m", type=float, default=0.15)
     parser.add_argument("--max-scan-age-sec", type=float, default=1.0)
     parser.add_argument("--max-odom-age-sec", type=float, default=1.0)
     parser.add_argument("--max-tf-age-sec", type=float, default=1.0)
     parser.add_argument("--max-amcl-age-sec", type=float, default=2.0)
+    parser.add_argument("--preflight-observation-window-sec", type=float, default=2.0)
+    parser.add_argument("--initial-sensor-wait-sec", type=float, default=2.0)
     parser.add_argument("--waypoint-timeout-sec", type=float, default=45.0)
+    parser.add_argument("--stuck-timeout-sec", type=float, default=8.0)
+    parser.add_argument("--stuck-progress-epsilon-m", type=float, default=0.03)
     parser.add_argument("--initial-distance-limit-m", type=float, default=0.35)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--allow-noop", action="store_true")
-    parser.add_argument("--yes", action="store_true")
+    parser.add_argument(
+        "--prompt-for-initialpose",
+        action="store_true",
+        help=(
+            "Pause immediately before ROS preflight so the operator can click "
+            "RViz 2D Pose Estimate and refresh AMCL."
+        ),
+    )
     parser.add_argument("--operator-note", default="")
     parser.add_argument("--preflight-json", type=Path, default=None)
     parser.add_argument("--semantic-log", type=Path, default=None)
@@ -97,16 +115,29 @@ def _physical_checklist(args, resolved) -> None:
     print("  - verify scan, odom, TF, and configured localization data are fresh")
     print("  - verify exactly one AMCL or SLAM source owns the route localization transform")
     print("  - verify real-robot runtime nodes are not using simulated time")
+    print(f"  - after RUN, wait up to {args.initial_sensor_wait_sec:.1f}s for follower scan/odom/TF before motion")
     print(f"Run ID: {args.run_id}")
     print(f"Resolved cmd_vel: {resolved.cmd_vel_topic}")
 
 
 def _confirm_motion(args, resolved) -> bool:
-    if args.yes:
-        return True
     _physical_checklist(args, resolved)
     response = input("Type RUN to start station-segment following: ").strip()
     return response == "RUN"
+
+
+def _prompt_for_initialpose(args, resolved) -> None:
+    if not args.prompt_for_initialpose:
+        return
+    print("\nInitial-pose refresh required before ROS preflight.")
+    print("AMCL often publishes only once after RViz 2D Pose Estimate.")
+    print("The preflight subscriber must already be active, so do not click yet.")
+    print(f"AMCL topic: {resolved.amcl_topic}")
+    print(
+        "Press Enter here, then immediately click 2D Pose Estimate in RViz "
+        f"during the next {args.preflight_observation_window_sec:.1f}s."
+    )
+    input("Press Enter, then click 2D Pose Estimate immediately: ")
 
 
 def _base_log_row(args, resolved, leg, preflight_ok: bool) -> Dict[str, object]:
@@ -166,6 +197,18 @@ def _append_status_result(
         preflight_ok,
         FollowerResult(status, stop_reason, 0.0, 0.0, False),
     )
+
+
+def _observation_log_rows(observations) -> list[dict[str, object]]:
+    return [
+        {
+            **observation.data,
+            "name": observation.name,
+            "ok": observation.ok,
+            "detail": observation.detail,
+        }
+        for observation in observations
+    ]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -327,6 +370,8 @@ def main(argv: list[str] | None = None) -> int:
         print("No-op leg logged; no motion was published.")
         return 0
 
+    _prompt_for_initialpose(args, resolved)
+
     try:
         preflight = run_ros_preflight(
             resolved,
@@ -334,6 +379,7 @@ def main(argv: list[str] | None = None) -> int:
             max_odom_age_sec=args.max_odom_age_sec,
             max_tf_age_sec=args.max_tf_age_sec,
             max_amcl_age_sec=args.max_amcl_age_sec,
+            observation_window_sec=args.preflight_observation_window_sec,
             allowed_cmd_vel_publishers=args.allowed_cmd_vel_publisher,
             require_real_time=not args.allow_sim_time,
         )
@@ -379,7 +425,7 @@ def main(argv: list[str] | None = None) -> int:
             run_id=args.run_id,
             leg_index=leg.leg_index,
             failures=preflight.failures,
-            observations=[observation.data | {"name": observation.name, "ok": observation.ok, "detail": observation.detail} for observation in preflight.observations],
+            observations=_observation_log_rows(preflight.observations),
             runtime_config=preflight.runtime_config,
         )
         result = FollowerResult("preflight_failed", "; ".join(preflight.failures), 0.0, 0.0, False)
@@ -401,7 +447,7 @@ def main(argv: list[str] | None = None) -> int:
         run_id=args.run_id,
         leg_index=leg.leg_index,
         failures=[],
-        observations=[observation.data | {"name": observation.name, "ok": observation.ok, "detail": observation.detail} for observation in preflight.observations],
+        observations=_observation_log_rows(preflight.observations),
         runtime_config=preflight.runtime_config,
     )
     if args.dry_run:
@@ -456,13 +502,24 @@ def main(argv: list[str] | None = None) -> int:
             max_angular_radps=args.max_angular_radps,
             goal_tolerance_m=args.goal_tolerance_m,
             heading_tolerance_rad=args.heading_tolerance_rad,
+            lookahead_distance_m=args.lookahead_distance_m,
+            slow_heading_error_rad=args.slow_heading_error_rad,
+            stop_heading_error_rad=args.stop_heading_error_rad,
+            min_linear_speed_scale=args.min_linear_speed_scale,
+            max_progress_advance_m=args.max_progress_advance_m,
         ),
         min_obstacle_distance_m=args.min_obstacle_distance_m,
+        front_obstacle_slow_distance_m=args.front_obstacle_slow_distance_m,
+        front_obstacle_sector_rad=args.front_obstacle_sector_rad,
         max_scan_age_sec=args.max_scan_age_sec,
         max_odom_age_sec=args.max_odom_age_sec,
         max_tf_age_sec=args.max_tf_age_sec,
+        initial_sensor_wait_sec=args.initial_sensor_wait_sec,
         waypoint_timeout_sec=args.waypoint_timeout_sec,
+        stuck_timeout_sec=args.stuck_timeout_sec,
+        stuck_progress_epsilon_m=args.stuck_progress_epsilon_m,
         initial_distance_limit_m=args.initial_distance_limit_m,
+        allowed_cmd_vel_publishers=tuple(args.allowed_cmd_vel_publisher),
     )
     emit_event(
         event_logger,
@@ -477,16 +534,21 @@ def main(argv: list[str] | None = None) -> int:
         follower_config,
     )
     _append_result(args, resolved, leg, preflight_ok=True, result=result)
+    motion_event_fields = {
+        "run_id": args.run_id,
+        "leg_index": leg.leg_index,
+        "status": result.status,
+        "stop_reason": result.stop_reason,
+        "duration_sec": result.duration_sec,
+        "distance_estimate_m": result.distance_estimate_m,
+        "motion_published": result.motion_published,
+    }
+    if result.status != "completed":
+        motion_event_fields["stop_details"] = result.stop_details or {}
     emit_event(
         event_logger,
         "motion_completed" if result.status == "completed" else "safety_stop",
-        run_id=args.run_id,
-        leg_index=leg.leg_index,
-        status=result.status,
-        stop_reason=result.stop_reason,
-        duration_sec=result.duration_sec,
-        distance_estimate_m=result.distance_estimate_m,
-        motion_published=result.motion_published,
+        **motion_event_fields,
     )
     emit_event(
         event_logger,

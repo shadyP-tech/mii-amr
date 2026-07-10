@@ -31,6 +31,7 @@ from scripts.aufgabe04.navigation.map_io import (  # noqa: E402
     read_pgm,
 )
 from scripts.aufgabe04.navigation.models import GridCell, Pose2D  # noqa: E402
+from scripts.aufgabe04.navigation.route_context import build_station_route_dry_run  # noqa: E402
 from scripts.aufgabe04.navigation.route_overlay import (  # noqa: E402
     RouteOverlayInput,
     render_route_overlay_svg,
@@ -301,6 +302,42 @@ class StationDryRunTest(unittest.TestCase):
             Path("results/aufgabe04/routes/station_route_diagnostics.json"),
         )
         self.assertIsNone(args.overlay_svg)
+
+    def test_dry_run_does_not_apply_station_keepouts_as_transit_obstacles(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "map.pgm").write_text("P2\n7 3\n255\n" + " ".join(["255"] * 21) + "\n")
+            map_yaml = root / "map.yaml"
+            map_yaml.write_text(
+                "\n".join(
+                    [
+                        "image: map.pgm",
+                        "resolution: 1.0",
+                        "origin: [0.0, 0.0, 0.0]",
+                        "negate: 0",
+                        "occupied_thresh: 0.65",
+                        "free_thresh: 0.20",
+                        "mode: trinary",
+                    ]
+                )
+                + "\n"
+            )
+            station_map = {
+                "A": Station("A", StationPose(6.0, 1.5, 0.0), 0.5, 0.2),
+                "B": Station("B", StationPose(3.5, 1.5, 0.0), 0.0, 1.5),
+            }
+
+            dry_run = build_station_route_dry_run(
+                map_yaml,
+                ["A"],
+                station_map=station_map,
+                start=Pose2D(0.5, 1.5, 0.0),
+                inflation_radius_m=0.0,
+                snap_radius_m=0.0,
+            )
+
+            self.assertIsNone(dry_run.results[0].failure)
+            self.assertGreater(dry_run.results[0].route.length_m, 0.0)
 
     def test_station_target_validation_fails_closed_on_blocked_target(self):
         costmap = Costmap.from_occupancy_grid(grid_from_rows([[CELL_OCCUPIED]]))

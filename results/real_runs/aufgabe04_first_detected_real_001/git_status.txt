@@ -1,0 +1,31 @@
+$ git status --short 
+ M docs/setups/aufgabe04_logistics.md
+ M docs/setups/aufgabe04_real_parkour_checklist.md
+ M scripts/aufgabe04/navigation/plan_first_detected_station.py
+ M scripts/aufgabe04/navigation/ros_preflight.py
+ M scripts/aufgabe04/navigation/run_single_station_segment.py
+ M scripts/aufgabe04/perception/debug/stand_axis_viewer.py
+ M scripts/aufgabe04/perception/stand_confirmation.py
+ M scripts/aufgabe04/perception/stand_explorer_node.py
+ M scripts/aufgabe04/qr_scanning/onboard_camera_node.py
+ M scripts/aufgabe04/qr_scanning/scan_processor.py
+ M tests/aufgabe04/test_detected_station_exploration.py
+ M tests/aufgabe04/test_navigation_execution_gates.py
+ M tests/aufgabe04/test_onboard_camera_node.py
+ M tests/aufgabe04/test_production_import_boundaries.py
+ M tests/aufgabe04/test_run_events.py
+ M tests/aufgabe04/test_scan_processor.py
+?? results/aufgabe04/detected_stations/
+?? results/aufgabe04/first_detected_station_preflight.json
+?? results/aufgabe04/routes/first_detected_station_route.csv
+?? results/aufgabe04/routes/first_detected_station_route_diagnostics.json
+?? results/aufgabe04/run_events/
+?? results/aufgabe04/stand_axis_lidar_roi/
+?? results/aufgabe04/station_segment_runs.csv
+?? results/real_runs/
+?? scripts/aufgabe04/navigation/create_detected_station_confirmation.py
+?? scripts/aufgabe04/navigation/run_first_detected_station_segment_with_bundle.sh
+?? scripts/aufgabe04/perception/debug/scan_probe.py
+?? scripts/aufgabe04/perception/stand_axis_lidar_roi.py
+?? tests/aufgabe04/test_first_detected_bundle_wrapper.py
+?? tests/aufgabe04/test_stand_axis_lidar_roi.py

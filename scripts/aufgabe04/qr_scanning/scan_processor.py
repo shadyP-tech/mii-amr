@@ -15,6 +15,7 @@ class ScanProcessorConfig:
     min_repeat_sec: float = 2.0
     max_frame_age_sec: float = 1.0
     confidence: float = 1.0
+    station_id_by_qr_id: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -109,13 +110,17 @@ class QRScanProcessor:
             )
 
         self._last_accept_sec_by_qr_id[scanned.qr_id] = receipt_time_sec
+        resolved_station_id = resolve_station_id_for_qr(
+            scanned.qr_id,
+            self.config.station_id_by_qr_id,
+        )
         row = {
             "timestamp": evidence_timestamp,
             "run_id": self.config.run_id,
             "robot_id": self.config.robot_id,
             "raw_text": scanned.raw_text,
             "qr_id": scanned.qr_id,
-            "resolved_station_id": "",
+            "resolved_station_id": resolved_station_id,
             "source": scanned.source,
             "confidence": scanned.confidence,
             "status": "accepted",
@@ -169,3 +174,17 @@ class QRScanProcessor:
         if age_sec > self.config.max_frame_age_sec:
             return "stale_frame"
         return ""
+
+
+def resolve_station_id_for_qr(
+    qr_id: str,
+    station_id_by_qr_id: Mapping[str, str] | None = None,
+) -> str:
+    normalized_qr_id = qr_id.strip().upper()
+    if not normalized_qr_id:
+        raise ValueError("qr_id must not be empty")
+    mapping = {key.strip().upper(): value.strip().upper() for key, value in dict(station_id_by_qr_id or {}).items()}
+    resolved = mapping.get(normalized_qr_id, normalized_qr_id)
+    if not resolved:
+        raise ValueError(f"QR id {normalized_qr_id} did not resolve to a station id")
+    return resolved

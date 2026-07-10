@@ -35,6 +35,8 @@ try:  # pragma: no cover - exercised on ROS hosts.
     from nav_msgs.msg import Odometry
     from rclpy.duration import Duration
     from rclpy.node import Node
+    from rclpy.parameter import Parameter
+    from rclpy.qos import qos_profile_sensor_data
     from rclpy.time import Time
     from sensor_msgs.msg import LaserScan
     from tf2_msgs.msg import TFMessage
@@ -48,6 +50,8 @@ except ImportError:  # pragma: no cover - keeps offline tests ROS-free.
     TFMessage = None
     Duration = None
     Node = object
+    Parameter = None
+    qos_profile_sensor_data = None
     Time = None
     Buffer = None
     TransformException = Exception
@@ -141,7 +145,10 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         self.allow_idle_nav2 = allow_idle_nav2
         self.allowed_cmd_vel_publishers = tuple(allowed_cmd_vel_publishers)
         self.require_real_time = require_real_time
-        self.declare_parameter("use_sim_time", False)
+        if not self.has_parameter("use_sim_time"):
+            self.declare_parameter("use_sim_time", config.use_sim_time)
+        else:
+            self.set_parameters([Parameter("use_sim_time", Parameter.Type.BOOL, config.use_sim_time)])
         self.latest_scan = None
         self.latest_scan_receipt = None
         self.latest_odom = None
@@ -157,7 +164,12 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         self.dynamic_tf_topics = self._dynamic_tf_topic_candidates()
         for topic in self.dynamic_tf_topics:
             self.create_subscription(TFMessage, topic, self._dynamic_tf_callback, 10)
-        self.create_subscription(LaserScan, config.scan_topic, self._scan_callback, 10)
+        self.create_subscription(
+            LaserScan,
+            config.scan_topic,
+            self._scan_callback,
+            qos_profile_sensor_data,
+        )
         self.create_subscription(Odometry, config.odom_topic, self._odom_callback, 10)
         self.create_subscription(
             PoseWithCovarianceStamped,
@@ -397,6 +409,7 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             map_to_odom_dynamic_fresh=map_to_odom_fresh,
             route_transform_fresh=route_transform_fresh,
             odom_to_base_fresh=odom_to_base_fresh,
+            route_uses_odom_frame=self.config.map_frame == self.config.odom_frame,
             external_tf_owner_candidates=owner_candidates,
         )
         decision = evaluate_localization_ownership(evidence)

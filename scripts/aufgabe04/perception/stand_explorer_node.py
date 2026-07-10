@@ -32,6 +32,8 @@ try:  # pragma: no cover - exercised on ROS hosts.
     import rclpy
     from rclpy.duration import Duration
     from rclpy.node import Node
+    from rclpy.parameter import Parameter
+    from rclpy.qos import qos_profile_sensor_data
     from rclpy.time import Time
     from sensor_msgs.msg import LaserScan
     from tf2_ros import Buffer, TransformException, TransformListener
@@ -39,6 +41,8 @@ except ImportError:  # pragma: no cover - keeps offline tests ROS-free.
     rclpy = None
     Duration = None
     Node = object
+    Parameter = None
+    qos_profile_sensor_data = None
     Time = None
     LaserScan = None
     Buffer = None
@@ -83,6 +87,7 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
                 use_sim_time=args.allow_sim_time,
             )
         )
+        self._configure_sim_time(self.runtime.use_sim_time)
         self.output_jsonl = args.output_jsonl
         self.output_jsonl.parent.mkdir(parents=True, exist_ok=True)
         self.detector_config = LidarStandDetectorConfig(
@@ -104,11 +109,22 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
         self.observation_count = 0
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
-        self.create_subscription(LaserScan, self.runtime.scan_topic, self._scan_callback, 10)
+        self.create_subscription(
+            LaserScan,
+            self.runtime.scan_topic,
+            self._scan_callback,
+            qos_profile_sensor_data,
+        )
         self.get_logger().info(
             "observe-only stand explorer listening on "
             f"{self.runtime.scan_topic}; output={self.output_jsonl}"
         )
+
+    def _configure_sim_time(self, use_sim_time: bool) -> None:
+        if not self.has_parameter("use_sim_time"):
+            self.declare_parameter("use_sim_time", use_sim_time)
+            return
+        self.set_parameters([Parameter("use_sim_time", Parameter.Type.BOOL, use_sim_time)])
 
     def _scan_callback(self, msg) -> None:
         scan_frame = msg.header.frame_id
@@ -116,10 +132,11 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
             self.get_logger().warn("dropping scan without header.frame_id")
             return
         try:
+            lookup_time = Time() if self.args.use_latest_tf else Time.from_msg(msg.header.stamp)
             transform = self.tf_buffer.lookup_transform(
                 self.runtime.map_frame,
                 scan_frame,
-                Time.from_msg(msg.header.stamp),
+                lookup_time,
                 timeout=Duration(seconds=self.args.tf_timeout_sec),
             )
         except TransformException as exc:
@@ -192,6 +209,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-sim-time", action="store_true")
     parser.add_argument("--output-jsonl", type=Path, default=DEFAULT_OUTPUT_JSONL)
     parser.add_argument("--map-yaml", type=Path, default=None)
+    parser.add_argument(
+        "--use-scan-stamp-tf",
+        dest="use_latest_tf",
+        action="store_false",
+        help=(
+            "Use exact scan timestamps for TF lookup. Default uses latest available TF "
+            "because AMCL map transforms can lag LiDAR stamps during stationary observation."
+        ),
+    )
+    parser.set_defaults(use_latest_tf=True)
     parser.add_argument("--tf-timeout-sec", type=float, default=0.2)
     parser.add_argument("--max-tf-age-sec", type=float, default=1.0)
     parser.add_argument("--min-range-m", type=float, default=0.08)
@@ -214,9 +241,12 @@ def main(argv: list[str] | None = None) -> int:
     node = StandExplorerNode(args)
     try:
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
     return 0
 
 

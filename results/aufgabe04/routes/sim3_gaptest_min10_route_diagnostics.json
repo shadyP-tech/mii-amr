@@ -1,0 +1,743 @@
+{
+  "legs": [
+    {
+      "diagnostics": {
+        "expanded_cells": 52,
+        "goal_cell": {
+          "x": 51,
+          "y": 29
+        },
+        "path_cell_count": 14,
+        "reason": "",
+        "route_length_m": 0.8363961030678927,
+        "snapped_goal_cell": {
+          "x": 51,
+          "y": 29
+        },
+        "snapped_start_cell": {
+          "x": 42,
+          "y": 42
+        },
+        "start_cell": {
+          "x": 42,
+          "y": 42
+        },
+        "status": "ok"
+      },
+      "failure": null,
+      "route_length_m": 0.8363961030678927,
+      "route_point_count": 14
+    },
+    {
+      "diagnostics": {
+        "expanded_cells": 82,
+        "goal_cell": {
+          "x": 59,
+          "y": 44
+        },
+        "path_cell_count": 16,
+        "reason": "",
+        "route_length_m": 0.9156854249492379,
+        "snapped_goal_cell": {
+          "x": 59,
+          "y": 44
+        },
+        "snapped_start_cell": {
+          "x": 51,
+          "y": 29
+        },
+        "start_cell": {
+          "x": 51,
+          "y": 29
+        },
+        "status": "ok"
+      },
+      "failure": null,
+      "route_length_m": 0.9156854249492379,
+      "route_point_count": 16
+    },
+    {
+      "diagnostics": {
+        "expanded_cells": 92,
+        "goal_cell": {
+          "x": 77,
+          "y": 40
+        },
+        "path_cell_count": 19,
+        "reason": "",
+        "route_length_m": 0.982842712474619,
+        "snapped_goal_cell": {
+          "x": 77,
+          "y": 40
+        },
+        "snapped_start_cell": {
+          "x": 59,
+          "y": 44
+        },
+        "start_cell": {
+          "x": 59,
+          "y": 44
+        },
+        "status": "ok"
+      },
+      "failure": null,
+      "route_length_m": 0.982842712474619,
+      "route_point_count": 19
+    },
+    {
+      "diagnostics": {
+        "expanded_cells": 104,
+        "goal_cell": {
+          "x": 72,
+          "y": 22
+        },
+        "path_cell_count": 19,
+        "reason": "",
+        "route_length_m": 1.0035533905932736,
+        "snapped_goal_cell": {
+          "x": 72,
+          "y": 22
+        },
+        "snapped_start_cell": {
+          "x": 77,
+          "y": 40
+        },
+        "start_cell": {
+          "x": 77,
+          "y": 40
+        },
+        "status": "ok"
+      },
+      "failure": null,
+      "route_length_m": 1.0035533905932736,
+      "route_point_count": 19
+    },
+    {
+      "diagnostics": {
+        "expanded_cells": 82,
+        "goal_cell": {
+          "x": 30,
+          "y": 23
+        },
+        "path_cell_count": 43,
+        "reason": "",
+        "route_length_m": 2.1207106781186553,
+        "snapped_goal_cell": {
+          "x": 30,
+          "y": 23
+        },
+        "snapped_start_cell": {
+          "x": 72,
+          "y": 22
+        },
+        "start_cell": {
+          "x": 72,
+          "y": 22
+        },
+        "status": "ok"
+      },
+      "failure": null,
+      "route_length_m": 2.1207106781186553,
+      "route_point_count": 43
+    },
+    {
+      "diagnostics": {
+        "expanded_cells": 223,
+        "goal_cell": {
+          "x": 21,
+          "y": 47
+        },
+        "path_cell_count": 25,
+        "reason": "",
+        "route_length_m": 1.3863961030678928,
+        "snapped_goal_cell": {
+          "x": 21,
+          "y": 47
+        },
+        "snapped_start_cell": {
+          "x": 30,
+          "y": 23
+        },
+        "start_cell": {
+          "x": 30,
+          "y": 23
+        },
+        "status": "ok"
+      },
+      "failure": null,
+      "route_length_m": 1.3863961030678928,
+      "route_point_count": 25
+    }
+  ],
+  "metadata": {
+    "arena_bounds": {
+      "center_x_m": 0.0,
+      "center_y_m": 0.0,
+      "length_m": 3.9,
+      "margin_m": 0.0,
+      "width_m": 1.898,
+      "yaw_deg": 0.0
+    },
+    "coordinate_warning": "Static saved-map coordinates only; this overlay does not validate live TF, AMCL, Nav2, sensors, or cmd_vel ownership.",
+    "detected_stands": [
+      {
+        "map_yaml": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+        "map_yaml_sha256": "ecee04cbed7ede8ec70f942790c01298ea368561d21393a561d1042c5f8c6d4d",
+        "required_base_frame": "base_footprint",
+        "required_localization_source": "tf",
+        "required_map_frame": "odom",
+        "selected_observation_provenance": {
+          "provenance": {
+            "base_frame": "base_footprint",
+            "localization_source": "tf",
+            "map_frame": "odom",
+            "map_yaml": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+            "map_yaml_sha256": "ecee04cbed7ede8ec70f942790c01298ea368561d21393a561d1042c5f8c6d4d",
+            "observer_version": "aufgabe04-stand-explorer-observe-only-v1",
+            "resolved_scan_topic": "/scan",
+            "runtime_config": {
+              "amcl_topic": "/amcl_pose",
+              "base_frame": "base_footprint",
+              "cmd_vel_topic": "/cmd_vel",
+              "configured": {
+                "amcl_topic": "amcl_pose",
+                "base_frame": "base_footprint",
+                "cmd_vel_topic": "cmd_vel",
+                "localization_source": "tf",
+                "map_frame": "odom",
+                "namespace": "",
+                "odom_frame": "odom",
+                "odom_topic": "odom",
+                "ros_domain_id": "",
+                "scan_topic": "scan",
+                "use_sim_time": true
+              },
+              "localization_source": "tf",
+              "map_frame": "odom",
+              "namespace": "",
+              "odom_frame": "odom",
+              "odom_topic": "/odom",
+              "ros_domain_id": "31",
+              "scan_topic": "/scan",
+              "use_sim_time": true
+            },
+            "scan_frame": "base_scan",
+            "scan_stamp_sec": 364.363,
+            "schema_version": 1,
+            "tf_age_sec": -0.062,
+            "tf_lookup_stamp_sec": 364.362
+          },
+          "selected_observation": "stand_observation_000215"
+        },
+        "source": "lidar_detected_stand",
+        "source_observation_ids": [
+          "stand_observation_000008",
+          "stand_observation_000017",
+          "stand_observation_000025",
+          "stand_observation_000034",
+          "stand_observation_000043",
+          "stand_observation_000052",
+          "stand_observation_000061",
+          "stand_observation_000070",
+          "stand_observation_000079",
+          "stand_observation_000088",
+          "stand_observation_000095",
+          "stand_observation_000104",
+          "stand_observation_000113",
+          "stand_observation_000122",
+          "stand_observation_000131",
+          "stand_observation_000140",
+          "stand_observation_000149",
+          "stand_observation_000158",
+          "stand_observation_000167",
+          "stand_observation_000174",
+          "stand_observation_000181",
+          "stand_observation_000190",
+          "stand_observation_000199",
+          "stand_observation_000206",
+          "stand_observation_000215"
+        ],
+        "source_observation_path": "results/aufgabe04/detected_stations/sim2_stand_observations_odom.jsonl",
+        "stand_confidence": 0.8648699278746919,
+        "stand_first_confirmed_at_sec": 1783514012.7005284,
+        "stand_first_seen_sec": 1783514010.8979166,
+        "stand_hit_count": 25,
+        "stand_id": "detected_stand_06",
+        "stand_last_seen_sec": 1783514015.7018209,
+        "stand_x_m": 0.1371226207610499,
+        "stand_y_m": -0.20975417881886801,
+        "station_id": "D01",
+        "visit_index": 0
+      },
+      {
+        "map_yaml": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+        "map_yaml_sha256": "ecee04cbed7ede8ec70f942790c01298ea368561d21393a561d1042c5f8c6d4d",
+        "required_base_frame": "base_footprint",
+        "required_localization_source": "tf",
+        "required_map_frame": "odom",
+        "selected_observation_provenance": {
+          "provenance": {
+            "base_frame": "base_footprint",
+            "localization_source": "tf",
+            "map_frame": "odom",
+            "map_yaml": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+            "map_yaml_sha256": "ecee04cbed7ede8ec70f942790c01298ea368561d21393a561d1042c5f8c6d4d",
+            "observer_version": "aufgabe04-stand-explorer-observe-only-v1",
+            "resolved_scan_topic": "/scan",
+            "runtime_config": {
+              "amcl_topic": "/amcl_pose",
+              "base_frame": "base_footprint",
+              "cmd_vel_topic": "/cmd_vel",
+              "configured": {
+                "amcl_topic": "amcl_pose",
+                "base_frame": "base_footprint",
+                "cmd_vel_topic": "cmd_vel",
+                "localization_source": "tf",
+                "map_frame": "odom",
+                "namespace": "",
+                "odom_frame": "odom",
+                "odom_topic": "odom",
+                "ros_domain_id": "",
+                "scan_topic": "scan",
+                "use_sim_time": true
+              },
+              "localization_source": "tf",
+              "map_frame": "odom",
+              "namespace": "",
+              "odom_frame": "odom",
+              "odom_topic": "/odom",
+              "ros_domain_id": "31",
+              "scan_topic": "/scan",
+              "use_sim_time": true
+            },
+            "scan_frame": "base_scan",
+            "scan_stamp_sec": 364.363,
+            "schema_version": 1,
+            "tf_age_sec": -0.062,
+            "tf_lookup_stamp_sec": 364.362
+          },
+          "selected_observation": "stand_observation_000212"
+        },
+        "source": "lidar_detected_stand",
+        "source_observation_ids": [
+          "stand_observation_000005",
+          "stand_observation_000014",
+          "stand_observation_000022",
+          "stand_observation_000031",
+          "stand_observation_000040",
+          "stand_observation_000049",
+          "stand_observation_000058",
+          "stand_observation_000067",
+          "stand_observation_000076",
+          "stand_observation_000085",
+          "stand_observation_000092",
+          "stand_observation_000101",
+          "stand_observation_000110",
+          "stand_observation_000119",
+          "stand_observation_000128",
+          "stand_observation_000137",
+          "stand_observation_000146",
+          "stand_observation_000155",
+          "stand_observation_000164",
+          "stand_observation_000171",
+          "stand_observation_000178",
+          "stand_observation_000187",
+          "stand_observation_000196",
+          "stand_observation_000203",
+          "stand_observation_000212"
+        ],
+        "source_observation_path": "results/aufgabe04/detected_stations/sim2_stand_observations_odom.jsonl",
+        "stand_confidence": 0.9527314293021193,
+        "stand_first_confirmed_at_sec": 1783514012.7005284,
+        "stand_first_seen_sec": 1783514010.8979166,
+        "stand_hit_count": 25,
+        "stand_id": "detected_stand_03",
+        "stand_last_seen_sec": 1783514015.7018209,
+        "stand_x_m": 0.5790459706312575,
+        "stand_y_m": 0.5323068859225211,
+        "station_id": "D02",
+        "visit_index": 1
+      },
+      {
+        "map_yaml": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+        "map_yaml_sha256": "ecee04cbed7ede8ec70f942790c01298ea368561d21393a561d1042c5f8c6d4d",
+        "required_base_frame": "base_footprint",
+        "required_localization_source": "tf",
+        "required_map_frame": "odom",
+        "selected_observation_provenance": {
+          "provenance": {
+            "base_frame": "base_footprint",
+            "localization_source": "tf",
+            "map_frame": "odom",
+            "map_yaml": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+            "map_yaml_sha256": "ecee04cbed7ede8ec70f942790c01298ea368561d21393a561d1042c5f8c6d4d",
+            "observer_version": "aufgabe04-stand-explorer-observe-only-v1",
+            "resolved_scan_topic": "/scan",
+            "runtime_config": {
+              "amcl_topic": "/amcl_pose",
+              "base_frame": "base_footprint",
+              "cmd_vel_topic": "/cmd_vel",
+              "configured": {
+                "amcl_topic": "amcl_pose",
+                "base_frame": "base_footprint",
+                "cmd_vel_topic": "cmd_vel",
+                "localization_source": "tf",
+                "map_frame": "odom",
+                "namespace": "",
+                "odom_frame": "odom",
+                "odom_topic": "odom",
+                "ros_domain_id": "",
+                "scan_topic": "scan",
+                "use_sim_time": true
+              },
+              "localization_source": "tf",
+              "map_frame": "odom",
+              "namespace": "",
+              "odom_frame": "odom",
+              "odom_topic": "/odom",
+              "ros_domain_id": "31",
+              "scan_topic": "/scan",
+              "use_sim_time": true
+            },
+            "scan_frame": "base_scan",
+            "scan_stamp_sec": 364.363,
+            "schema_version": 1,
+            "tf_age_sec": -0.062,
+            "tf_lookup_stamp_sec": 364.362
+          },
+          "selected_observation": "stand_observation_000209"
+        },
+        "source": "lidar_detected_stand",
+        "source_observation_ids": [
+          "stand_observation_000002",
+          "stand_observation_000011",
+          "stand_observation_000020",
+          "stand_observation_000028",
+          "stand_observation_000037",
+          "stand_observation_000046",
+          "stand_observation_000055",
+          "stand_observation_000064",
+          "stand_observation_000073",
+          "stand_observation_000082",
+          "stand_observation_000091",
+          "stand_observation_000098",
+          "stand_observation_000107",
+          "stand_observation_000116",
+          "stand_observation_000125",
+          "stand_observation_000134",
+          "stand_observation_000143",
+          "stand_observation_000152",
+          "stand_observation_000161",
+          "stand_observation_000170",
+          "stand_observation_000177",
+          "stand_observation_000184",
+          "stand_observation_000193",
+          "stand_observation_000202",
+          "stand_observation_000209"
+        ],
+        "source_observation_path": "results/aufgabe04/detected_stations/sim2_stand_observations_odom.jsonl",
+        "stand_confidence": 0.8802094599937041,
+        "stand_first_confirmed_at_sec": 1783514012.7005284,
+        "stand_first_seen_sec": 1783514010.8979166,
+        "stand_hit_count": 25,
+        "stand_id": "detected_stand_01",
+        "stand_last_seen_sec": 1783514015.7018209,
+        "stand_x_m": 1.4588713237009359,
+        "stand_y_m": 0.3168451253297151,
+        "station_id": "D03",
+        "visit_index": 2
+      },
+      {
+        "map_yaml": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+        "map_yaml_sha256": "ecee04cbed7ede8ec70f942790c01298ea368561d21393a561d1042c5f8c6d4d",
+        "required_base_frame": "base_footprint",
+        "required_localization_source": "tf",
+        "required_map_frame": "odom",
+        "selected_observation_provenance": {
+          "provenance": {
+            "base_frame": "base_footprint",
+            "localization_source": "tf",
+            "map_frame": "odom",
+            "map_yaml": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+            "map_yaml_sha256": "ecee04cbed7ede8ec70f942790c01298ea368561d21393a561d1042c5f8c6d4d",
+            "observer_version": "aufgabe04-stand-explorer-observe-only-v1",
+            "resolved_scan_topic": "/scan",
+            "runtime_config": {
+              "amcl_topic": "/amcl_pose",
+              "base_frame": "base_footprint",
+              "cmd_vel_topic": "/cmd_vel",
+              "configured": {
+                "amcl_topic": "amcl_pose",
+                "base_frame": "base_footprint",
+                "cmd_vel_topic": "cmd_vel",
+                "localization_source": "tf",
+                "map_frame": "odom",
+                "namespace": "",
+                "odom_frame": "odom",
+                "odom_topic": "odom",
+                "ros_domain_id": "",
+                "scan_topic": "scan",
+                "use_sim_time": true
+              },
+              "localization_source": "tf",
+              "map_frame": "odom",
+              "namespace": "",
+              "odom_frame": "odom",
+              "odom_topic": "/odom",
+              "ros_domain_id": "31",
+              "scan_topic": "/scan",
+              "use_sim_time": true
+            },
+            "scan_frame": "base_scan",
+            "scan_stamp_sec": 364.363,
+            "schema_version": 1,
+            "tf_age_sec": -0.062,
+            "tf_lookup_stamp_sec": 364.362
+          },
+          "selected_observation": "stand_observation_000216"
+        },
+        "source": "lidar_detected_stand",
+        "source_observation_ids": [
+          "stand_observation_000009",
+          "stand_observation_000018",
+          "stand_observation_000026",
+          "stand_observation_000035",
+          "stand_observation_000044",
+          "stand_observation_000053",
+          "stand_observation_000062",
+          "stand_observation_000071",
+          "stand_observation_000080",
+          "stand_observation_000089",
+          "stand_observation_000096",
+          "stand_observation_000105",
+          "stand_observation_000114",
+          "stand_observation_000123",
+          "stand_observation_000132",
+          "stand_observation_000141",
+          "stand_observation_000150",
+          "stand_observation_000159",
+          "stand_observation_000168",
+          "stand_observation_000175",
+          "stand_observation_000182",
+          "stand_observation_000191",
+          "stand_observation_000200",
+          "stand_observation_000207",
+          "stand_observation_000216"
+        ],
+        "source_observation_path": "results/aufgabe04/detected_stations/sim2_stand_observations_odom.jsonl",
+        "stand_confidence": 0.7820054203101082,
+        "stand_first_confirmed_at_sec": 1783514012.7005284,
+        "stand_first_seen_sec": 1783514010.8979166,
+        "stand_hit_count": 25,
+        "stand_id": "detected_stand_07",
+        "stand_last_seen_sec": 1783514015.7018209,
+        "stand_x_m": 1.2146514391533116,
+        "stand_y_m": -0.5610128443388487,
+        "station_id": "D04",
+        "visit_index": 3
+      },
+      {
+        "map_yaml": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+        "map_yaml_sha256": "ecee04cbed7ede8ec70f942790c01298ea368561d21393a561d1042c5f8c6d4d",
+        "required_base_frame": "base_footprint",
+        "required_localization_source": "tf",
+        "required_map_frame": "odom",
+        "selected_observation_provenance": {
+          "provenance": {
+            "base_frame": "base_footprint",
+            "localization_source": "tf",
+            "map_frame": "odom",
+            "map_yaml": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+            "map_yaml_sha256": "ecee04cbed7ede8ec70f942790c01298ea368561d21393a561d1042c5f8c6d4d",
+            "observer_version": "aufgabe04-stand-explorer-observe-only-v1",
+            "resolved_scan_topic": "/scan",
+            "runtime_config": {
+              "amcl_topic": "/amcl_pose",
+              "base_frame": "base_footprint",
+              "cmd_vel_topic": "/cmd_vel",
+              "configured": {
+                "amcl_topic": "amcl_pose",
+                "base_frame": "base_footprint",
+                "cmd_vel_topic": "cmd_vel",
+                "localization_source": "tf",
+                "map_frame": "odom",
+                "namespace": "",
+                "odom_frame": "odom",
+                "odom_topic": "odom",
+                "ros_domain_id": "",
+                "scan_topic": "scan",
+                "use_sim_time": true
+              },
+              "localization_source": "tf",
+              "map_frame": "odom",
+              "namespace": "",
+              "odom_frame": "odom",
+              "odom_topic": "/odom",
+              "ros_domain_id": "31",
+              "scan_topic": "/scan",
+              "use_sim_time": true
+            },
+            "scan_frame": "base_scan",
+            "scan_stamp_sec": 364.363,
+            "schema_version": 1,
+            "tf_age_sec": -0.062,
+            "tf_lookup_stamp_sec": 364.362
+          },
+          "selected_observation": "stand_observation_000214"
+        },
+        "source": "lidar_detected_stand",
+        "source_observation_ids": [
+          "stand_observation_000007",
+          "stand_observation_000016",
+          "stand_observation_000024",
+          "stand_observation_000033",
+          "stand_observation_000042",
+          "stand_observation_000051",
+          "stand_observation_000060",
+          "stand_observation_000069",
+          "stand_observation_000078",
+          "stand_observation_000087",
+          "stand_observation_000094",
+          "stand_observation_000103",
+          "stand_observation_000112",
+          "stand_observation_000121",
+          "stand_observation_000130",
+          "stand_observation_000139",
+          "stand_observation_000148",
+          "stand_observation_000157",
+          "stand_observation_000166",
+          "stand_observation_000173",
+          "stand_observation_000180",
+          "stand_observation_000189",
+          "stand_observation_000198",
+          "stand_observation_000205",
+          "stand_observation_000214"
+        ],
+        "source_observation_path": "results/aufgabe04/detected_stations/sim2_stand_observations_odom.jsonl",
+        "stand_confidence": 0.860096684134612,
+        "stand_first_confirmed_at_sec": 1783514012.7005284,
+        "stand_first_seen_sec": 1783514010.8979166,
+        "stand_hit_count": 25,
+        "stand_id": "detected_stand_05",
+        "stand_last_seen_sec": 1783514015.7018209,
+        "stand_x_m": -0.8711709584773876,
+        "stand_y_m": -0.5029943456208048,
+        "station_id": "D05",
+        "visit_index": 4
+      },
+      {
+        "map_yaml": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+        "map_yaml_sha256": "ecee04cbed7ede8ec70f942790c01298ea368561d21393a561d1042c5f8c6d4d",
+        "required_base_frame": "base_footprint",
+        "required_localization_source": "tf",
+        "required_map_frame": "odom",
+        "selected_observation_provenance": {
+          "provenance": {
+            "base_frame": "base_footprint",
+            "localization_source": "tf",
+            "map_frame": "odom",
+            "map_yaml": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+            "map_yaml_sha256": "ecee04cbed7ede8ec70f942790c01298ea368561d21393a561d1042c5f8c6d4d",
+            "observer_version": "aufgabe04-stand-explorer-observe-only-v1",
+            "resolved_scan_topic": "/scan",
+            "runtime_config": {
+              "amcl_topic": "/amcl_pose",
+              "base_frame": "base_footprint",
+              "cmd_vel_topic": "/cmd_vel",
+              "configured": {
+                "amcl_topic": "amcl_pose",
+                "base_frame": "base_footprint",
+                "cmd_vel_topic": "cmd_vel",
+                "localization_source": "tf",
+                "map_frame": "odom",
+                "namespace": "",
+                "odom_frame": "odom",
+                "odom_topic": "odom",
+                "ros_domain_id": "",
+                "scan_topic": "scan",
+                "use_sim_time": true
+              },
+              "localization_source": "tf",
+              "map_frame": "odom",
+              "namespace": "",
+              "odom_frame": "odom",
+              "odom_topic": "/odom",
+              "ros_domain_id": "31",
+              "scan_topic": "/scan",
+              "use_sim_time": true
+            },
+            "scan_frame": "base_scan",
+            "scan_stamp_sec": 364.363,
+            "schema_version": 1,
+            "tf_age_sec": -0.062,
+            "tf_lookup_stamp_sec": 364.362
+          },
+          "selected_observation": "stand_observation_000213"
+        },
+        "source": "lidar_detected_stand",
+        "source_observation_ids": [
+          "stand_observation_000006",
+          "stand_observation_000015",
+          "stand_observation_000023",
+          "stand_observation_000032",
+          "stand_observation_000041",
+          "stand_observation_000050",
+          "stand_observation_000059",
+          "stand_observation_000068",
+          "stand_observation_000077",
+          "stand_observation_000086",
+          "stand_observation_000093",
+          "stand_observation_000102",
+          "stand_observation_000111",
+          "stand_observation_000120",
+          "stand_observation_000129",
+          "stand_observation_000138",
+          "stand_observation_000147",
+          "stand_observation_000156",
+          "stand_observation_000165",
+          "stand_observation_000172",
+          "stand_observation_000179",
+          "stand_observation_000188",
+          "stand_observation_000197",
+          "stand_observation_000204",
+          "stand_observation_000213"
+        ],
+        "source_observation_path": "results/aufgabe04/detected_stations/sim2_stand_observations_odom.jsonl",
+        "stand_confidence": 0.8811386654339338,
+        "stand_first_confirmed_at_sec": 1783514012.7005284,
+        "stand_first_seen_sec": 1783514010.8979166,
+        "stand_hit_count": 25,
+        "stand_id": "detected_stand_04",
+        "stand_last_seen_sec": 1783514015.7018209,
+        "stand_x_m": -1.358158340962988,
+        "stand_y_m": 0.6644325626229016,
+        "station_id": "D06",
+        "visit_index": 5
+      }
+    ],
+    "frame_id": "map",
+    "map": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+    "map_image": "maps/aufgabe03/arena_1p898x3p9_auto.pgm",
+    "map_image_sha256": "2430be49e6ab1d6f258ee018dadd1943b16349d6dd2a4a38036c9acba754e0d1",
+    "map_yaml": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+    "observations_jsonl": "results/aufgabe04/detected_stations/sim2_stand_observations_odom.jsonl",
+    "order": "nearest",
+    "origin": [
+      -2.82,
+      -1.69,
+      0.0
+    ],
+    "resolution": 0.05,
+    "source": "lidar_detected_stand_exploration",
+    "stand_count": 6,
+    "station_layout_json": "results/aufgabe04/detected_stations/sim3_gaptest_min10_layout.json",
+    "stations": [
+      "D01",
+      "D02",
+      "D03",
+      "D04",
+      "D05",
+      "D06"
+    ]
+  }
+}

@@ -28,6 +28,7 @@ from scripts.aufgabe04.qr_scanning.topic_resolution import (
 
 
 DEFAULT_QR_SCAN_LOG = Path("results/aufgabe04/qr_scans.csv")
+COMPRESSED_IMAGE_TYPE = "sensor_msgs/msg/CompressedImage"
 
 
 class WarningThrottle:
@@ -114,6 +115,21 @@ class OnboardQRScanner:
             self.printer(message)
 
 
+def validate_compressed_image_topic_available(
+    available_topics: Sequence[tuple[str, Sequence[str]]],
+    resolved_topic: str,
+) -> None:
+    types_by_topic = {topic: tuple(types) for topic, types in available_topics}
+    topic_types = types_by_topic.get(resolved_topic)
+    if topic_types is None:
+        raise ValueError(f"missing compressed image topic: {resolved_topic}")
+    if COMPRESSED_IMAGE_TYPE not in topic_types:
+        joined = ", ".join(topic_types) if topic_types else "(no types reported)"
+        raise ValueError(
+            f"topic {resolved_topic} has type(s) {joined}; expected {COMPRESSED_IMAGE_TYPE}"
+        )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Passive Aufgabe 04 ROS compressed-image QR scanner. Does not move the robot."
@@ -179,6 +195,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     rclpy.init(args=None)
     node = rclpy.create_node("aufgabe04_onboard_qr_scanner")
+    try:
+        validate_compressed_image_topic_available(
+            node.get_topic_names_and_types(),
+            resolved_topic,
+        )
+    except ValueError as exc:
+        node.get_logger().error(str(exc))
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+        return 2
+
     processor = QRScanProcessor(
         ScanProcessorConfig(
             robot_id=args.robot_id,
