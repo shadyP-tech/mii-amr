@@ -1,0 +1,4 @@
+interface:
+  display_name: "MII AMR Experiments"
+  short_description: "ROS2 TurtleBot Sim2Real and Nav2 experiments"
+  default_prompt: "Use $mii-amr-experiments to plan and verify the next TurtleBot experiment step."

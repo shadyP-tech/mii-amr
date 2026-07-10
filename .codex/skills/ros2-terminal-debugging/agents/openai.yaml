@@ -1,0 +1,4 @@
+interface:
+  display_name: "ROS2 Terminal Debugging"
+  short_description: "Diagnose ROS2 TurtleBot terminal errors"
+  default_prompt: "Use $ros2-terminal-debugging to diagnose this pasted ROS2 or TurtleBot terminal output."

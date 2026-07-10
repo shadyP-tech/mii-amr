@@ -1,0 +1,175 @@
+import json
+import math
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from scripts.aufgabe04.navigation.ros_runtime_config import (  # noqa: E402
+    RuntimeConfig,
+    resolve_runtime_config,
+)
+from scripts.aufgabe04.navigation.safety_checks import (  # noqa: E402
+    validate_route_diagnostics_json,
+    validate_speed_limits,
+)
+from scripts.aufgabe04.navigation.waypoint_csv import load_route_leg  # noqa: E402
+
+
+ROUTE_HEADER = (
+    "leg_index,point_index,grid_x,grid_y,world_x_m,world_y_m,"
+    "segment_length_m,cumulative_length_m\n"
+)
+
+
+def write_route(path, rows):
+    path.write_text(ROUTE_HEADER + "\n".join(rows) + "\n")
+
+
+def write_diagnostics(path, *, status="ok", failure=None, count=2, length=0.5):
+    path.write_text(
+        json.dumps(
+            {
+                "legs": [
+                    {
+                        "diagnostics": {"status": status, "route_length_m": length},
+                        "failure": failure,
+                        "route_length_m": length,
+                        "route_point_count": count,
+                    }
+                ]
+            }
+        )
+    )
+
+
+class WaypointCsvTest(unittest.TestCase):
+    def test_loads_selected_leg_and_thins_deterministically(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            route_csv = Path(tmpdir) / "route.csv"
+            write_route(
+                route_csv,
+                [
+                    "0,0,0,0,0.0,0.0,0.0,0.0",
+                    "0,1,1,0,0.05,0.0,0.05,0.05",
+                    "0,2,2,0,0.10,0.0,0.05,0.10",
+                    "0,3,3,0,0.20,0.0,0.10,0.20",
+                ],
+            )
+
+            leg = load_route_leg(route_csv, 0, thinning_min_spacing_m=0.11)
+
+        self.assertEqual(len(leg.raw_waypoints), 4)
+        self.assertEqual([wp.point_index for wp in leg.executable_waypoints], [0, 3])
+
+    def test_rejects_missing_header_column(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            route_csv = Path(tmpdir) / "route.csv"
+            route_csv.write_text("leg_index,point_index\n0,0\n")
+
+            with self.assertRaisesRegex(ValueError, "missing columns"):
+                load_route_leg(route_csv, 0)
+
+    def test_rejects_non_contiguous_points(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            route_csv = Path(tmpdir) / "route.csv"
+            write_route(
+                route_csv,
+                [
+                    "0,0,0,0,0.0,0.0,0.0,0.0",
+                    "0,2,2,0,0.10,0.0,0.10,0.10",
+                ],
+            )
+
+            with self.assertRaisesRegex(ValueError, "contiguous"):
+                load_route_leg(route_csv, 0)
+
+    def test_rejects_nan_coordinate_and_missing_leg(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            route_csv = Path(tmpdir) / "route.csv"
+            write_route(route_csv, ["0,0,0,0,nan,0.0,0.0,0.0"])
+
+            with self.assertRaisesRegex(ValueError, "finite"):
+                load_route_leg(route_csv, 0, require_motion=False)
+            with self.assertRaisesRegex(ValueError, "not found"):
+                load_route_leg(route_csv, 5, require_motion=False)
+
+    def test_rejects_zero_length_motion_but_allows_noop(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            route_csv = Path(tmpdir) / "route.csv"
+            write_route(route_csv, ["0,0,0,0,0.0,0.0,0.0,0.0"])
+
+            with self.assertRaisesRegex(ValueError, "fewer than two"):
+                load_route_leg(route_csv, 0)
+            leg = load_route_leg(route_csv, 0, require_motion=False)
+
+        self.assertEqual(leg.route_length_m, 0.0)
+
+
+class DiagnosticsGateTest(unittest.TestCase):
+    def test_accepts_matching_ok_diagnostics(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            diagnostics = Path(tmpdir) / "diagnostics.json"
+            write_diagnostics(diagnostics)
+
+            status = validate_route_diagnostics_json(diagnostics, 0, csv_point_count=2)
+
+        self.assertTrue(status.ok)
+
+    def test_rejects_failed_or_mismatched_diagnostics(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            diagnostics = Path(tmpdir) / "diagnostics.json"
+            write_diagnostics(diagnostics, status="failed", failure={"reason": "blocked"}, count=3)
+
+            status = validate_route_diagnostics_json(diagnostics, 0, csv_point_count=2)
+
+        self.assertFalse(status.ok)
+        self.assertGreaterEqual(len(status.failures), 3)
+
+    def test_rejects_zero_length_motion_diagnostics(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            diagnostics = Path(tmpdir) / "diagnostics.json"
+            write_diagnostics(diagnostics, count=1, length=0.0)
+
+            status = validate_route_diagnostics_json(diagnostics, 0, csv_point_count=1)
+            noop_status = validate_route_diagnostics_json(
+                diagnostics,
+                0,
+                csv_point_count=1,
+                require_motion=False,
+            )
+
+        self.assertFalse(status.ok)
+        self.assertTrue(noop_status.ok)
+
+    def test_rejects_unsafe_speed_caps(self):
+        self.assertTrue(validate_speed_limits(0.05, 0.10).ok)
+        self.assertFalse(validate_speed_limits(0.20, 0.10).ok)
+        self.assertFalse(validate_speed_limits(0.05, math.inf).ok)
+
+
+class RuntimeConfigTest(unittest.TestCase):
+    def test_namespaces_relative_topics_only(self):
+        resolved = resolve_runtime_config(
+            RuntimeConfig(
+                namespace="robot1",
+                scan_topic="scan",
+                odom_topic="/odom",
+                cmd_vel_topic="cmd_vel",
+                amcl_topic="/amcl_pose",
+            )
+        )
+
+        self.assertEqual(resolved.scan_topic, "/robot1/scan")
+        self.assertEqual(resolved.odom_topic, "/odom")
+        self.assertEqual(resolved.cmd_vel_topic, "/robot1/cmd_vel")
+        self.assertEqual(resolved.amcl_topic, "/amcl_pose")
+        self.assertEqual(resolved.base_frame, "base_footprint")
+
+
+if __name__ == "__main__":
+    unittest.main()

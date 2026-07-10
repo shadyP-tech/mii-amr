@@ -1,0 +1,326 @@
+{
+  "title": "Aufgabe 03 A* GIF frame deck",
+  "canvas": {
+    "width": 1920,
+    "height": 1080
+  },
+  "frame_count": 44,
+  "algorithm_notes": [
+    "Occupancy grid cells are free, blocked, or inflated blocked space.",
+    "Start and goal are snapped to traversable cells before planning.",
+    "A* expands 8-neighbors and prevents diagonal corner cutting.",
+    "g is travelled cost; h is Euclidean distance to the goal; f = g + h.",
+    "The dense path is simplified into waypoints at direction changes.",
+    "A temporary obstacle overlay can trigger the same A* loop again for replanning."
+  ],
+  "frames": [
+    {
+      "index": 0,
+      "file": "frames/frame_000_occupancy_grid.png",
+      "name": "occupancy_grid",
+      "phase": "Occupancy grid",
+      "duration_ms": 900
+    },
+    {
+      "index": 1,
+      "file": "frames/frame_001_inflated_clearance.png",
+      "name": "inflated_clearance",
+      "phase": "Inflate blocked space",
+      "duration_ms": 900
+    },
+    {
+      "index": 2,
+      "file": "frames/frame_002_snap_start_goal.png",
+      "name": "snap_start_goal",
+      "phase": "Snap start and goal",
+      "duration_ms": 900
+    },
+    {
+      "index": 3,
+      "file": "frames/frame_003_heuristic.png",
+      "name": "heuristic",
+      "phase": "Score cells",
+      "duration_ms": 900
+    },
+    {
+      "index": 4,
+      "file": "frames/frame_004_expand_start.png",
+      "name": "expand_start",
+      "phase": "Expand current cell",
+      "duration_ms": 800
+    },
+    {
+      "index": 5,
+      "file": "frames/frame_005_search_000.png",
+      "name": "search_000",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 6,
+      "file": "frames/frame_006_search_001.png",
+      "name": "search_001",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 7,
+      "file": "frames/frame_007_search_002.png",
+      "name": "search_002",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 8,
+      "file": "frames/frame_008_search_003.png",
+      "name": "search_003",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 9,
+      "file": "frames/frame_009_search_004.png",
+      "name": "search_004",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 10,
+      "file": "frames/frame_010_search_005.png",
+      "name": "search_005",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 11,
+      "file": "frames/frame_011_search_006.png",
+      "name": "search_006",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 12,
+      "file": "frames/frame_012_search_007.png",
+      "name": "search_007",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 13,
+      "file": "frames/frame_013_search_008.png",
+      "name": "search_008",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 14,
+      "file": "frames/frame_014_search_009.png",
+      "name": "search_009",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 15,
+      "file": "frames/frame_015_search_012.png",
+      "name": "search_012",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 16,
+      "file": "frames/frame_016_search_015.png",
+      "name": "search_015",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 17,
+      "file": "frames/frame_017_search_018.png",
+      "name": "search_018",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 18,
+      "file": "frames/frame_018_search_021.png",
+      "name": "search_021",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 19,
+      "file": "frames/frame_019_search_024.png",
+      "name": "search_024",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 20,
+      "file": "frames/frame_020_search_027.png",
+      "name": "search_027",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 21,
+      "file": "frames/frame_021_search_030.png",
+      "name": "search_030",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 22,
+      "file": "frames/frame_022_search_033.png",
+      "name": "search_033",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 23,
+      "file": "frames/frame_023_search_036.png",
+      "name": "search_036",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 24,
+      "file": "frames/frame_024_search_039.png",
+      "name": "search_039",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 25,
+      "file": "frames/frame_025_search_042.png",
+      "name": "search_042",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 26,
+      "file": "frames/frame_026_search_045.png",
+      "name": "search_045",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 27,
+      "file": "frames/frame_027_search_048.png",
+      "name": "search_048",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 28,
+      "file": "frames/frame_028_search_051.png",
+      "name": "search_051",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 29,
+      "file": "frames/frame_029_search_054.png",
+      "name": "search_054",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 30,
+      "file": "frames/frame_030_search_057.png",
+      "name": "search_057",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 31,
+      "file": "frames/frame_031_search_060.png",
+      "name": "search_060",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 32,
+      "file": "frames/frame_032_search_063.png",
+      "name": "search_063",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 33,
+      "file": "frames/frame_033_search_066.png",
+      "name": "search_066",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 34,
+      "file": "frames/frame_034_search_069.png",
+      "name": "search_069",
+      "phase": "Search loop",
+      "duration_ms": 150
+    },
+    {
+      "index": 35,
+      "file": "frames/frame_035_search_070.png",
+      "name": "search_070",
+      "phase": "Search loop",
+      "duration_ms": 700
+    },
+    {
+      "index": 36,
+      "file": "frames/frame_036_backtrack_00.png",
+      "name": "backtrack_00",
+      "phase": "Backtrack parents",
+      "duration_ms": 260
+    },
+    {
+      "index": 37,
+      "file": "frames/frame_037_backtrack_01.png",
+      "name": "backtrack_01",
+      "phase": "Backtrack parents",
+      "duration_ms": 260
+    },
+    {
+      "index": 38,
+      "file": "frames/frame_038_backtrack_02.png",
+      "name": "backtrack_02",
+      "phase": "Backtrack parents",
+      "duration_ms": 260
+    },
+    {
+      "index": 39,
+      "file": "frames/frame_039_backtrack_03.png",
+      "name": "backtrack_03",
+      "phase": "Backtrack parents",
+      "duration_ms": 850
+    },
+    {
+      "index": 40,
+      "file": "frames/frame_040_dense_path.png",
+      "name": "dense_path",
+      "phase": "Dense path",
+      "duration_ms": 950
+    },
+    {
+      "index": 41,
+      "file": "frames/frame_041_waypoints.png",
+      "name": "waypoints",
+      "phase": "Simplify path",
+      "duration_ms": 1200
+    },
+    {
+      "index": 42,
+      "file": "frames/frame_042_temporary_obstacle.png",
+      "name": "temporary_obstacle",
+      "phase": "Temporary obstacle",
+      "duration_ms": 950
+    },
+    {
+      "index": 43,
+      "file": "frames/frame_043_replanned_path.png",
+      "name": "replanned_path",
+      "phase": "Run A* again",
+      "duration_ms": 1300
+    }
+  ]
+}

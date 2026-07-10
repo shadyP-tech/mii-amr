@@ -1,0 +1,4 @@
+interface:
+  display_name: "Aufgabe 04 Logistics"
+  short_description: "QR, station routing, puck, and two-robot logistics"
+  default_prompt: "Use $aufgabe04-logistics to work on Aufgabe 04 logistics in the mii-amr repository."

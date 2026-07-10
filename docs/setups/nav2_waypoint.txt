@@ -1,0 +1,417 @@
+Below is the lab terminal setup for the arena-prior two-stage waypoint runner.
+
+**Safety First**
+Before running the robot: clear the arena, keep an operator next to the
+TurtleBot, keep `Ctrl+C` ready, and keep a physical stop option available.
+
+**Terminal A: Robot Bringup**
+Skip this if robot bringup is already running.
+
+```bash
+cd /workspace/mii-amr
+
+source /opt/ros/humble/setup.bash
+source /opt/tb3_src_ws/install/setup.bash
+
+export ROS_DOMAIN_ID=30
+export ROS_LOCALHOST_ONLY=0
+export TURTLEBOT3_MODEL=burger
+export LDS_MODEL=LDS-02
+
+ros2 launch turtlebot3_bringup robot.launch.py
+```
+
+**Terminal B: Nav2 With Saved Map**
+Start Nav2 with the saved arena map. The runner publishes the arena-derived
+pose prior to `/initialpose`; do not send a separate RViz 2D Pose Estimate for
+this automated run.
+
+```bash
+cd /workspace/mii-amr
+
+source /opt/ros/humble/setup.bash
+source /opt/tb3_src_ws/install/setup.bash
+
+export ROS_DOMAIN_ID=30
+export ROS_LOCALHOST_ONLY=0
+export TURTLEBOT3_MODEL=burger
+export LDS_MODEL=LDS-02
+
+ros2 launch turtlebot3_navigation2 navigation2.launch.py \
+  use_sim_time:=False \
+  map:=$PWD/maps/aufgabe03/arena_1p898x3p9_auto.yaml
+```
+
+Keep RViz open if you want to inspect `/scan`, particles, and map alignment.
+Do not send a Nav2 goal while using the custom follower.
+
+**Terminal S: Safety Stop**
+Keep this ready. Run it immediately if needed.
+
+```bash
+source /opt/ros/humble/setup.bash
+source /opt/tb3_src_ws/install/setup.bash
+
+export ROS_DOMAIN_ID=30
+export ROS_LOCALHOST_ONLY=0
+
+ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist \
+  "{linear: {x: 0.0}, angular: {z: 0.0}}"
+```
+
+**Terminal C: Pre-Run Checks**
+Run these before motion:
+
+```bash
+cd /workspace/mii-amr
+
+source /opt/ros/humble/setup.bash
+source /opt/tb3_src_ws/install/setup.bash
+
+export ROS_DOMAIN_ID=30
+export ROS_LOCALHOST_ONLY=0
+export TURTLEBOT3_MODEL=burger
+export LDS_MODEL=LDS-02
+
+ros2 topic echo --once /scan
+ros2 topic echo --once /odom
+ros2 topic echo --once /amcl_pose
+ros2 topic list | grep -E '^/(scan|odom|amcl_pose|initialpose)$'
+ros2 topic info /initialpose --verbose
+ros2 action list | grep navigate_to_pose
+```
+
+The runner checks `/initialpose` before the arena spin. If no AMCL/localization
+subscriber is listening there, it aborts before moving the robot.
+
+Check that no active Nav2 controller is intentionally competing on `/cmd_vel`:
+
+```bash
+ros2 topic info /cmd_vel --verbose
+```
+
+Nav2 nodes may appear as publishers while running. Make sure there is no active
+Nav2 goal before the custom follower handoff.
+
+**RViz Planned Route Displays**
+Keep RViz fixed frame set to `map`. The custom follower publishes its active
+route and run-local obstacle state while it is running. In RViz, add:
+
+```text
+Path: /mii_amr/planned_path
+MarkerArray: /mii_amr/planned_waypoints
+MarkerArray: /mii_amr/run_local_obstacles
+```
+
+The planned path starts at the current robot pose and then follows the remaining
+waypoints. Waypoint markers highlight the current target and final goal. The
+run-local obstacle markers show the confirmed temporary obstacle cells, inflated
+clearance cells, and any corridor cells that triggered a replan.
+By default, the live corridor recheck only tests the planned path cells against
+the already-inflated run-local obstacle cells. Set
+`--run-local-map-corridor-radius-m` only if you intentionally want an extra
+proactive clearance band around the replanned path.
+
+If the follower is not running yet and you want these route topics to appear in
+RViz before motion, start the standalone waypoint path debug publisher:
+
+```bash
+cd /workspace/mii-amr
+
+source /opt/ros/humble/setup.bash
+source /opt/tb3_src_ws/install/setup.bash
+
+export ROS_DOMAIN_ID=30
+export ROS_LOCALHOST_ONLY=0
+export TURTLEBOT3_MODEL=burger
+export LDS_MODEL=LDS-02
+
+python3 scripts/aufgabe03/waypoint_path_debug_viz.py \
+  --waypoints results/aufgabe03/aufgabe03_waypoints.csv
+```
+
+For a two-stage run after Nav2 has already moved to waypoint 0, add
+`--skip-first-waypoint` to preview only the custom follower route.
+
+**Arena-Active Temporary Map RViz Helper**
+Use the separate read-only helper for arena-active temporary map and path
+visualization. The two-stage motion runner intentionally does not publish these
+temporary-map/path RViz topics, so real runs keep the runner's ROS publishing
+surface minimal. The helper subscribes to `/scan` and `/odom`, publishes
+`odom`-frame RViz topics, and does not publish `/cmd_vel` or interact with Nav2.
+
+```bash
+cd /workspace/mii-amr
+
+source /opt/ros/humble/setup.bash
+source /opt/tb3_src_ws/install/setup.bash
+
+export ROS_DOMAIN_ID=30
+export ROS_LOCALHOST_ONLY=0
+export TURTLEBOT3_MODEL=burger
+export LDS_MODEL=LDS-02
+
+python3 scripts/aufgabe03/arena_active_temporary_map_debug_viz.py
+```
+
+In RViz, add a `Map` display for:
+
+```text
+/mii_amr/arena_active/temporary_map
+```
+
+This topic is the observed temporary map: free and occupied cells from the
+accumulated scan rays without planner inflation, so RViz keeps showing the
+actual visible free space. If you also want to inspect the hard-inflated A*
+planning grid, add a second `Map` display for:
+
+```text
+/mii_amr/arena_active/temporary_map_planning
+```
+
+Add these displays for the active-explore A* preview:
+
+```text
+Path: /mii_amr/arena_active/explore_path
+MarkerArray: /mii_amr/arena_active/explore_candidates
+```
+
+This helper reconstructs the map independently for visualization. During an
+actual two-stage active-explore recovery, the runner's internal recovery planner
+still uses its own accumulated scan map for motion decisions, but it no longer
+publishes that internal map or selected path to RViz.
+
+**Optional: Live LiDAR Obstacle Debug Markers**
+Run this in a separate terminal while RViz is open. It does not publish
+`/cmd_vel`; it only subscribes to `/scan`, reads TF/map state, and publishes
+diagnostic markers.
+
+```bash
+cd /workspace/mii-amr
+
+source /opt/ros/humble/setup.bash
+source /opt/tb3_src_ws/install/setup.bash
+
+export ROS_DOMAIN_ID=30
+export ROS_LOCALHOST_ONLY=0
+export TURTLEBOT3_MODEL=burger
+export LDS_MODEL=LDS-02
+
+python3 scripts/aufgabe03/lidar_obstacle_debug_viz.py \
+  --static-map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
+  --allow-latest-tf-fallback
+```
+
+In RViz, add a `MarkerArray` display for:
+
+```text
+/mii_amr/lidar_obstacle_debug/markers
+```
+
+Marker layers:
+
+```text
+gray points: raw valid /scan returns
+yellow points/box: points inside the obstacle ROI
+blue cells: current scan cells accepted by the map filter
+green cells: confirmed temporary obstacle cells after hit-count filtering
+purple cells: inflated obstacle cells used for clearance
+red/orange cells: scan hits rejected by static map or wall-band filtering
+```
+
+**Terminal D: Preview Arena-Prior Two-Stage Run**
+
+```bash
+cd /workspace/mii-amr
+
+source /opt/ros/humble/setup.bash
+source /opt/tb3_src_ws/install/setup.bash
+
+export ROS_DOMAIN_ID=30
+export ROS_LOCALHOST_ONLY=0
+export TURTLEBOT3_MODEL=burger
+export LDS_MODEL=LDS-02
+
+python3 scripts/aufgabe03/two_stage_waypoint_run.py \
+  --waypoints results/aufgabe03/aufgabe03_waypoints.csv \
+  --run-id arena_prior_two_stage_dry_001 \
+  --dry-run
+```
+
+Expected staging target from the current CSV:
+
+```text
+waypoint 0: x=0.005, y=-0.015
+computed staging yaw: 0.0 deg
+```
+
+**Terminal D: Run Arena-Prior Two-Stage Waypoint Following**
+Only run after bringup, Nav2, and pre-run checks pass.
+
+```bash
+python3 scripts/aufgabe03/two_stage_waypoint_run.py \
+  --waypoints results/aufgabe03/aufgabe03_waypoints.csv \
+  --run-id arena_prior_two_stage_001 \
+  --heater-wall-side=+x \
+  --arena-force-short-wall-side axis_positive \
+  --arena-force-short-wall-type clean \
+  --arena-active-allow-extra-cmd-vel-publishers \
+  --max-amcl-var-x 0.20 \
+  --max-stable-pose-jump-m 0.10 \
+  --stable-amcl-samples 3
+```
+
+When prompted, type:
+
+```text
+RUN
+```
+
+The coordinator will:
+
+```text
+arena spin localization -> publish arena prior -> AMCL validation -> Nav2 to waypoint 0 -> custom follower
+```
+
+By default, the two-stage runner uses only the initial `RUN` confirmation for
+arena-active spin and recovery repositioning. Add
+`--arena-active-require-operator-confirmation` only when you want the older
+extra prompts before spin/reposition motion.
+
+**Optional: LiDAR Obstacle Overlay And Active Replan**
+This is the Aufgabe 3 run-local map extension. It keeps the saved static map
+unchanged, adds confirmed LiDAR obstacle cells to a temporary overlay, writes
+map/path artifacts, and can replan the remaining route after a scan blockage.
+Use artifact-only mode first; it stops, writes the overlay/path artifacts, and
+does not resume motion.
+
+Offline synthetic artifact generation:
+
+```bash
+python3 scripts/aufgabe03/lidar_obstacle_map.py \
+  --static-map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
+  --synthetic-obstacle-base-x 0.45 \
+  --synthetic-obstacle-base-y 0.0 \
+  --robot-pose 1.0,1.0,0.0 \
+  --goal-pose 1.005,0.285,0.0 \
+  --run-id synthetic_lidar_overlay_test
+```
+
+Two-stage dry-run with obstacle-replan flags:
+
+```bash
+python3 scripts/aufgabe03/two_stage_waypoint_run.py \
+  --waypoints results/aufgabe03/aufgabe03_waypoints.csv \
+  --run-id lidar_replan_dry \
+  --dry-run \
+  --wait-before-follow \
+  --enable-lidar-map-replan \
+  --lidar-replan-artifact-only
+```
+
+Late-obstacle route dry-run:
+
+```bash
+python3 scripts/aufgabe03/two_stage_waypoint_run.py \
+  --waypoints results/aufgabe03/aufgabe03_late_obstacle_waypoints.csv \
+  --run-id late_obstacle_path_dry \
+  --dry-run \
+  --wait-before-follow \
+  --enable-lidar-map-replan \
+  --lidar-replan-artifact-only
+```
+
+This separate route keeps the same staging target and first 1.12 m as the
+default route, then continues to a middle return leg. It is 2.94 m long. For a
+delayed obstacle test, place the temporary obstacle on the return leg near
+`x=0.6, y=0.435` after the robot has left the initial straight segment.
+
+Bottom-left to top-right middle route dry-run:
+
+```bash
+python3 scripts/aufgabe03/two_stage_waypoint_run.py \
+  --waypoints results/aufgabe03/aufgabe03_bottom_left_to_top_right_waypoints.csv \
+  --run-id bottom_left_top_right_dry \
+  --dry-run
+```
+
+This separate route stages at the lower-left side of the usable map, drives
+through the center, and finishes at an upper-right target. It has 3 waypoints,
+is 2.89 m long, and starts with a staging yaw of -23.7 deg.
+
+Robot artifact-only validation after the normal arena-prior run is stable:
+
+```bash
+python3 scripts/aufgabe03/two_stage_waypoint_run.py \
+  --waypoints results/aufgabe03/aufgabe03_waypoints.csv \
+  --run-id lidar_replan_artifact_001 \
+  --heater-wall-side=+x \
+  --arena-force-short-wall-side axis_positive \
+  --arena-force-short-wall-type clean \
+  --arena-active-allow-extra-cmd-vel-publishers \
+  --max-amcl-var-x 0.20 \
+  --max-stable-pose-jump-m 0.10 \
+  --stable-amcl-samples 3 \
+  --wait-before-follow \
+  --enable-lidar-map-replan \
+  --lidar-replan-artifact-only \
+  --allow-latest-tf-replan-fallback
+```
+
+Check the generated files before enabling resume behavior:
+
+```bash
+ls -1 results/aufgabe03/lidar_replan_artifact_001_run_local*
+tail -n 1 results/aufgabe03/aufgabe03_waypoint_follow_runs.csv
+```
+
+Active temporary-obstacle validation removes `--lidar-replan-artifact-only`.
+Place a temporary obstacle on the planned route, keep the safety stop terminal
+ready, and use a small replan limit. With `--wait-before-follow`, the robot
+stops after Nav2 reaches waypoint 0 and waits for `RUN` before the custom
+follower starts:
+
+```bash
+python3 scripts/aufgabe03/two_stage_waypoint_run.py \
+  --waypoints results/aufgabe03/aufgabe03_waypoints.csv \
+  --run-id lidar_replan_active_001 \
+  --heater-wall-side=+x \
+  --arena-force-short-wall-side axis_positive \
+  --arena-force-short-wall-type clean \
+  --arena-active-allow-extra-cmd-vel-publishers \
+  --max-amcl-var-x 0.20 \
+  --max-stable-pose-jump-m 0.10 \
+  --stable-amcl-samples 3 \
+  --wait-before-follow \
+  --enable-lidar-map-replan \
+  --run-local-map-initial-scan-mode none \
+  --max-replans 2 \
+  --allow-latest-tf-replan-fallback
+```
+
+With `--run-local-map-initial-scan-mode none`, the follower does not front-load
+temporary obstacle knowledge before the custom follower starts. A later forward
+scan blockage triggers the run-local map update, A* replan, and bounded
+post-replan recovery gate during motion.
+
+**After The Run**
+Check the coordinator log:
+
+```bash
+tail -n 3 results/aufgabe03/aufgabe03_arena_prior_two_stage_runs.csv
+```
+
+Also check the follower log:
+
+```bash
+tail -n 3 results/aufgabe03/aufgabe03_waypoint_follow_runs.csv
+```
+
+The successful run should show:
+
+```text
+status=completed
+reached_count=3
+follower_return_code=0
+nav2_result_status=SUCCEEDED
+```

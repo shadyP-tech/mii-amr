@@ -26,9 +26,17 @@ results/
 results/**/*_bag.log
 results/**/latest_tracker_pose.csv
 results/**/latest_tracker_pose.sample.csv
+results/aufgabe03
+docs/screenshots
 .codex/
 .codex
 
-tests/
-docs/
-
+tests/*
+!tests/aufgabe03/
+tests/aufgabe03/*
+!tests/aufgabe03/test_post_replan_route_clearance.py
+!tests/aufgabe03/test_tracking_path_smoothing.py
+!tests/aufgabe04/
+tests/aufgabe04/*
+!tests/aufgabe04/*.py
+!tests/test_run_with_bundle.py

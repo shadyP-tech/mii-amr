@@ -1,0 +1,14 @@
+name = "qr_camera_auditor"
+description = "Read-only auditor for Aufgabe 04 onboard camera QR-code scanning design and integration."
+model = "gpt-5.4-mini"
+model_reasoning_effort = "medium"
+sandbox_mode = "read-only"
+
+developer_instructions = """
+Stay read-only.
+Determine whether existing vision_tracker code is reusable or external-only.
+Audit scripts/aufgabe04/qr_scanning, especially qr_decoder.py, station_order.py, models.py, and onboard_camera_node.py.
+Check camera source assumptions, decoder dependency risks, stale detections, retry behavior, station-order parsing, and QR scan logs in results/aufgabe04/qr_scans.csv.
+Prefer small ROS/OpenCV integration points.
+Return gaps, likely files to add, and testable pure functions.
+"""

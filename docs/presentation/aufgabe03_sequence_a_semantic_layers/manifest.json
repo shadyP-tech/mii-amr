@@ -1,0 +1,488 @@
+{
+  "title": "Aufgabe 03 Sequence A semantic layers",
+  "map": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+  "canvas": {
+    "width": 1920,
+    "height": 1080
+  },
+  "map_size_cells": {
+    "width": 113,
+    "height": 71
+  },
+  "resolution_m_per_cell": 0.05,
+  "start_requested_world_m": [
+    0.005,
+    -0.015
+  ],
+  "goal_requested_world_m": [
+    1.005,
+    0.285
+  ],
+  "start_cell": [
+    56,
+    33
+  ],
+  "goal_cell": [
+    76,
+    39
+  ],
+  "path_cells": 21,
+  "waypoint_count": 4,
+  "path_length_m": 1.1242640687119283,
+  "search_frame_count": 107,
+  "search_gif": "astar_search_animation.gif",
+  "frames": [
+    {
+      "index": 1,
+      "file": "frames/001_slam_map.png"
+    },
+    {
+      "index": 2,
+      "file": "frames/002_occupancy_mask.png"
+    },
+    {
+      "index": 3,
+      "file": "frames/003_inflated_clearance_mask.png"
+    },
+    {
+      "index": 4,
+      "file": "frames/004_start_goal_snap.png"
+    },
+    {
+      "index": 5,
+      "file": "frames/005_astar_search_000.png"
+    },
+    {
+      "index": 6,
+      "file": "frames/006_astar_search_001.png"
+    },
+    {
+      "index": 7,
+      "file": "frames/007_astar_search_002.png"
+    },
+    {
+      "index": 8,
+      "file": "frames/008_astar_search_003.png"
+    },
+    {
+      "index": 9,
+      "file": "frames/009_astar_search_004.png"
+    },
+    {
+      "index": 10,
+      "file": "frames/010_astar_search_005.png"
+    },
+    {
+      "index": 11,
+      "file": "frames/011_astar_search_006.png"
+    },
+    {
+      "index": 12,
+      "file": "frames/012_astar_search_007.png"
+    },
+    {
+      "index": 13,
+      "file": "frames/013_astar_search_008.png"
+    },
+    {
+      "index": 14,
+      "file": "frames/014_astar_search_009.png"
+    },
+    {
+      "index": 15,
+      "file": "frames/015_astar_search_010.png"
+    },
+    {
+      "index": 16,
+      "file": "frames/016_astar_search_011.png"
+    },
+    {
+      "index": 17,
+      "file": "frames/017_astar_search_012.png"
+    },
+    {
+      "index": 18,
+      "file": "frames/018_astar_search_013.png"
+    },
+    {
+      "index": 19,
+      "file": "frames/019_astar_search_014.png"
+    },
+    {
+      "index": 20,
+      "file": "frames/020_astar_search_015.png"
+    },
+    {
+      "index": 21,
+      "file": "frames/021_astar_search_016.png"
+    },
+    {
+      "index": 22,
+      "file": "frames/022_astar_search_017.png"
+    },
+    {
+      "index": 23,
+      "file": "frames/023_astar_search_018.png"
+    },
+    {
+      "index": 24,
+      "file": "frames/024_astar_search_019.png"
+    },
+    {
+      "index": 25,
+      "file": "frames/025_astar_search_020.png"
+    },
+    {
+      "index": 26,
+      "file": "frames/026_astar_search_021.png"
+    },
+    {
+      "index": 27,
+      "file": "frames/027_astar_search_022.png"
+    },
+    {
+      "index": 28,
+      "file": "frames/028_astar_search_023.png"
+    },
+    {
+      "index": 29,
+      "file": "frames/029_astar_search_024.png"
+    },
+    {
+      "index": 30,
+      "file": "frames/030_astar_search_025.png"
+    },
+    {
+      "index": 31,
+      "file": "frames/031_astar_search_026.png"
+    },
+    {
+      "index": 32,
+      "file": "frames/032_astar_search_027.png"
+    },
+    {
+      "index": 33,
+      "file": "frames/033_astar_search_028.png"
+    },
+    {
+      "index": 34,
+      "file": "frames/034_astar_search_029.png"
+    },
+    {
+      "index": 35,
+      "file": "frames/035_astar_search_030.png"
+    },
+    {
+      "index": 36,
+      "file": "frames/036_astar_search_031.png"
+    },
+    {
+      "index": 37,
+      "file": "frames/037_astar_search_032.png"
+    },
+    {
+      "index": 38,
+      "file": "frames/038_astar_search_033.png"
+    },
+    {
+      "index": 39,
+      "file": "frames/039_astar_search_034.png"
+    },
+    {
+      "index": 40,
+      "file": "frames/040_astar_search_035.png"
+    },
+    {
+      "index": 41,
+      "file": "frames/041_astar_search_036.png"
+    },
+    {
+      "index": 42,
+      "file": "frames/042_astar_search_037.png"
+    },
+    {
+      "index": 43,
+      "file": "frames/043_astar_search_038.png"
+    },
+    {
+      "index": 44,
+      "file": "frames/044_astar_search_039.png"
+    },
+    {
+      "index": 45,
+      "file": "frames/045_astar_search_040.png"
+    },
+    {
+      "index": 46,
+      "file": "frames/046_astar_search_041.png"
+    },
+    {
+      "index": 47,
+      "file": "frames/047_astar_search_042.png"
+    },
+    {
+      "index": 48,
+      "file": "frames/048_astar_search_043.png"
+    },
+    {
+      "index": 49,
+      "file": "frames/049_astar_search_044.png"
+    },
+    {
+      "index": 50,
+      "file": "frames/050_astar_search_045.png"
+    },
+    {
+      "index": 51,
+      "file": "frames/051_astar_search_046.png"
+    },
+    {
+      "index": 52,
+      "file": "frames/052_astar_search_047.png"
+    },
+    {
+      "index": 53,
+      "file": "frames/053_astar_search_048.png"
+    },
+    {
+      "index": 54,
+      "file": "frames/054_astar_search_049.png"
+    },
+    {
+      "index": 55,
+      "file": "frames/055_astar_search_050.png"
+    },
+    {
+      "index": 56,
+      "file": "frames/056_astar_search_051.png"
+    },
+    {
+      "index": 57,
+      "file": "frames/057_astar_search_052.png"
+    },
+    {
+      "index": 58,
+      "file": "frames/058_astar_search_053.png"
+    },
+    {
+      "index": 59,
+      "file": "frames/059_astar_search_054.png"
+    },
+    {
+      "index": 60,
+      "file": "frames/060_astar_search_055.png"
+    },
+    {
+      "index": 61,
+      "file": "frames/061_astar_search_056.png"
+    },
+    {
+      "index": 62,
+      "file": "frames/062_astar_search_057.png"
+    },
+    {
+      "index": 63,
+      "file": "frames/063_astar_search_058.png"
+    },
+    {
+      "index": 64,
+      "file": "frames/064_astar_search_059.png"
+    },
+    {
+      "index": 65,
+      "file": "frames/065_astar_search_060.png"
+    },
+    {
+      "index": 66,
+      "file": "frames/066_astar_search_061.png"
+    },
+    {
+      "index": 67,
+      "file": "frames/067_astar_search_062.png"
+    },
+    {
+      "index": 68,
+      "file": "frames/068_astar_search_063.png"
+    },
+    {
+      "index": 69,
+      "file": "frames/069_astar_search_064.png"
+    },
+    {
+      "index": 70,
+      "file": "frames/070_astar_search_065.png"
+    },
+    {
+      "index": 71,
+      "file": "frames/071_astar_search_066.png"
+    },
+    {
+      "index": 72,
+      "file": "frames/072_astar_search_067.png"
+    },
+    {
+      "index": 73,
+      "file": "frames/073_astar_search_068.png"
+    },
+    {
+      "index": 74,
+      "file": "frames/074_astar_search_069.png"
+    },
+    {
+      "index": 75,
+      "file": "frames/075_astar_search_070.png"
+    },
+    {
+      "index": 76,
+      "file": "frames/076_astar_search_071.png"
+    },
+    {
+      "index": 77,
+      "file": "frames/077_astar_search_072.png"
+    },
+    {
+      "index": 78,
+      "file": "frames/078_astar_search_073.png"
+    },
+    {
+      "index": 79,
+      "file": "frames/079_astar_search_074.png"
+    },
+    {
+      "index": 80,
+      "file": "frames/080_astar_search_075.png"
+    },
+    {
+      "index": 81,
+      "file": "frames/081_astar_search_076.png"
+    },
+    {
+      "index": 82,
+      "file": "frames/082_astar_search_077.png"
+    },
+    {
+      "index": 83,
+      "file": "frames/083_astar_search_078.png"
+    },
+    {
+      "index": 84,
+      "file": "frames/084_astar_search_079.png"
+    },
+    {
+      "index": 85,
+      "file": "frames/085_astar_search_080.png"
+    },
+    {
+      "index": 86,
+      "file": "frames/086_astar_search_081.png"
+    },
+    {
+      "index": 87,
+      "file": "frames/087_astar_search_082.png"
+    },
+    {
+      "index": 88,
+      "file": "frames/088_astar_search_083.png"
+    },
+    {
+      "index": 89,
+      "file": "frames/089_astar_search_084.png"
+    },
+    {
+      "index": 90,
+      "file": "frames/090_astar_search_085.png"
+    },
+    {
+      "index": 91,
+      "file": "frames/091_astar_search_086.png"
+    },
+    {
+      "index": 92,
+      "file": "frames/092_astar_search_087.png"
+    },
+    {
+      "index": 93,
+      "file": "frames/093_astar_search_088.png"
+    },
+    {
+      "index": 94,
+      "file": "frames/094_astar_search_089.png"
+    },
+    {
+      "index": 95,
+      "file": "frames/095_astar_search_090.png"
+    },
+    {
+      "index": 96,
+      "file": "frames/096_astar_search_091.png"
+    },
+    {
+      "index": 97,
+      "file": "frames/097_astar_search_092.png"
+    },
+    {
+      "index": 98,
+      "file": "frames/098_astar_search_093.png"
+    },
+    {
+      "index": 99,
+      "file": "frames/099_astar_search_094.png"
+    },
+    {
+      "index": 100,
+      "file": "frames/100_astar_search_095.png"
+    },
+    {
+      "index": 101,
+      "file": "frames/101_astar_search_096.png"
+    },
+    {
+      "index": 102,
+      "file": "frames/102_astar_search_097.png"
+    },
+    {
+      "index": 103,
+      "file": "frames/103_astar_search_098.png"
+    },
+    {
+      "index": 104,
+      "file": "frames/104_astar_search_099.png"
+    },
+    {
+      "index": 105,
+      "file": "frames/105_astar_search_100.png"
+    },
+    {
+      "index": 106,
+      "file": "frames/106_astar_search_101.png"
+    },
+    {
+      "index": 107,
+      "file": "frames/107_astar_search_102.png"
+    },
+    {
+      "index": 108,
+      "file": "frames/108_astar_search_103.png"
+    },
+    {
+      "index": 109,
+      "file": "frames/109_astar_search_104.png"
+    },
+    {
+      "index": 110,
+      "file": "frames/110_astar_search_105.png"
+    },
+    {
+      "index": 111,
+      "file": "frames/111_astar_search_106.png"
+    },
+    {
+      "index": 112,
+      "file": "frames/112_dense_path.png"
+    },
+    {
+      "index": 113,
+      "file": "frames/113_simplified_waypoints.png"
+    }
+  ]
+}

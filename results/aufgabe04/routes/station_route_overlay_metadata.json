@@ -1,0 +1,28 @@
+{
+  "arena_bounds": {
+    "center_x_m": 0.0,
+    "center_y_m": 0.0,
+    "length_m": 3.9,
+    "margin_m": 0.05,
+    "width_m": 1.898,
+    "yaw_deg": 0.0
+  },
+  "coordinate_warning": "Static saved-map coordinates only; this overlay does not validate live TF, AMCL, Nav2, sensors, or cmd_vel ownership.",
+  "frame_id": "map",
+  "map": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+  "map_image": "maps/aufgabe03/arena_1p898x3p9_auto.pgm",
+  "map_image_sha256": "2430be49e6ab1d6f258ee018dadd1943b16349d6dd2a4a38036c9acba754e0d1",
+  "map_yaml": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+  "origin": [
+    -2.82,
+    -1.69,
+    0.0
+  ],
+  "resolution": 0.05,
+  "station_layout_json": "results/aufgabe04/layouts/random_station_layout.json",
+  "stations": [
+    "A",
+    "B",
+    "C"
+  ]
+}

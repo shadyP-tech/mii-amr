@@ -1,0 +1,64 @@
+{
+  "metadata": {
+    "approach_offset_m": 0.3,
+    "arena_bounds": {
+      "center_x_m": 0.0,
+      "center_y_m": 0.0,
+      "length_m": 3.9,
+      "margin_m": 0.05,
+      "width_m": 1.898,
+      "yaw_deg": 0.0
+    },
+    "clearance_radius_m": 0.1,
+    "keepout_radius_m": 0.2,
+    "map_height": 71,
+    "map_image_sha256": "2430be49e6ab1d6f258ee018dadd1943b16349d6dd2a4a38036c9acba754e0d1",
+    "map_origin": [
+      -2.82,
+      -1.69,
+      0.0
+    ],
+    "map_resolution": 0.05,
+    "map_width": 113,
+    "map_yaml": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+    "map_yaml_sha256": "ecee04cbed7ede8ec70f942790c01298ea368561d21393a561d1042c5f8c6d4d",
+    "max_attempts": 5000,
+    "min_start_distance_m": 0.4,
+    "min_station_distance_m": 0.4,
+    "seed": 42,
+    "start": null,
+    "station_ids": [
+      "A",
+      "B",
+      "C"
+    ],
+    "yaw_mode": "toward-center"
+  },
+  "schema_version": 1,
+  "stations": [
+    {
+      "approach_offset_m": 0.3,
+      "keepout_radius_m": 0.2,
+      "station_id": "A",
+      "x_m": -0.3949999999999996,
+      "y_m": -0.4149999999999998,
+      "yaw_rad": 0.810084505453048
+    },
+    {
+      "approach_offset_m": 0.3,
+      "keepout_radius_m": 0.2,
+      "station_id": "B",
+      "x_m": -0.6449999999999996,
+      "y_m": 0.18500000000000005,
+      "yaw_rad": -0.27932320010110734
+    },
+    {
+      "approach_offset_m": 0.3,
+      "keepout_radius_m": 0.2,
+      "station_id": "C",
+      "x_m": 0.40500000000000025,
+      "y_m": 0.28500000000000014,
+      "yaw_rad": -2.528385304715284
+    }
+  ]
+}
