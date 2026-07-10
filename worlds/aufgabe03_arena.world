@@ -1,0 +1,62 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <world name="aufgabe03_arena">
+    <include><uri>model://sun</uri></include>
+    <include><uri>model://ground_plane</uri></include>
+    
+    <model name="wall_north">
+      <static>true</static>
+      <pose>0 0.949 0.175 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>3.9 0.06 0.35</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.9 0.06 0.35</size></box></geometry>
+          <material><ambient>0.02 0.02 0.02 1</ambient><diffuse>0.02 0.02 0.02 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    
+    <model name="wall_south">
+      <static>true</static>
+      <pose>0 -0.949 0.175 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>3.9 0.06 0.35</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.9 0.06 0.35</size></box></geometry>
+          <material><ambient>0.02 0.02 0.02 1</ambient><diffuse>0.02 0.02 0.02 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    
+    <model name="wall_east">
+      <static>true</static>
+      <pose>1.95 0 0.175 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.06 1.898 0.35</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.06 1.898 0.35</size></box></geometry>
+          <material><ambient>0.02 0.02 0.02 1</ambient><diffuse>0.02 0.02 0.02 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    
+    <model name="wall_west">
+      <static>true</static>
+      <pose>-1.95 0 0.175 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.06 1.898 0.35</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.06 1.898 0.35</size></box></geometry>
+          <material><ambient>0.02 0.02 0.02 1</ambient><diffuse>0.02 0.02 0.02 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    
+    <model name="unmapped_obstacle">
+      <static>true</static>
+      <pose>0.45 0.0 0.225 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><cylinder><radius>0.13</radius><length>0.45</length></cylinder></geometry></collision>
+        <visual name="visual"><geometry><cylinder><radius>0.13</radius><length>0.45</length></cylinder></geometry>
+          <material><ambient>0.9 0.9 0.9 1</ambient><diffuse>0.9 0.9 0.9 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+  </world>
+</sdf>

@@ -50,7 +50,7 @@ except ImportError:  # pragma: no cover - keeps offline tests ROS-free.
     TransformListener = None
 
 
-OBSERVER_VERSION = "aufgabe04-stand-explorer-observe-only-v1"
+OBSERVER_VERSION = "aufgabe04-stand-explorer-observe-only-v3-latest-tf-sim-time"
 DEFAULT_OUTPUT_JSONL = Path("results/aufgabe04/detected_stations/stand_observations.jsonl")
 
 
@@ -63,6 +63,39 @@ def _stamp_to_sec(stamp) -> float:
     return float(stamp.sec) + float(stamp.nanosec) / 1_000_000_000.0
 
 
+def _latest_transform_time():
+    """Return the zero ROS time, which asks tf2 for the latest transform.
+
+    Looking up a transform at the exact LaserScan timestamp is fragile in
+    simulation: Gazebo can publish a scan a few milliseconds before the
+    corresponding odometry TF reaches this node.  The old exact-time lookup
+    also blocked the single-threaded executor for the full scan period, which
+    prevented the TransformListener from catching up.
+    """
+
+    if Time is None:
+        _require_ros()
+    return Time()
+
+
+def _transform_age_sec(now_sec: float, transform_stamp_sec: float) -> float:
+    """Return a non-negative TF age; timestamp-zero static TF is always valid."""
+
+    if transform_stamp_sec <= 0.0:
+        return 0.0
+    return max(0.0, now_sec - transform_stamp_sec)
+
+
+def _node_parameter_overrides(allow_sim_time: bool):
+    """Apply the CLI simulation-time switch to the actual ROS node clock."""
+
+    if not allow_sim_time:
+        return []
+    if Parameter is None:
+        _require_ros()
+    return [Parameter("use_sim_time", Parameter.Type.BOOL, True)]
+
+
 def _yaw_from_quaternion(q) -> float:
     siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
     cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
@@ -71,7 +104,10 @@ def _yaw_from_quaternion(q) -> float:
 
 class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
     def __init__(self, args) -> None:
-        super().__init__("aufgabe04_stand_explorer_observer")
+        super().__init__(
+            "aufgabe04_stand_explorer_observer",
+            parameter_overrides=_node_parameter_overrides(args.allow_sim_time),
+        )
         self.args = args
         self.runtime = resolve_runtime_config(
             RuntimeConfig(
@@ -87,7 +123,6 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
                 use_sim_time=args.allow_sim_time,
             )
         )
-        self._configure_sim_time(self.runtime.use_sim_time)
         self.output_jsonl = args.output_jsonl
         self.output_jsonl.parent.mkdir(parents=True, exist_ok=True)
         self.detector_config = LidarStandDetectorConfig(
@@ -120,23 +155,16 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
             f"{self.runtime.scan_topic}; output={self.output_jsonl}"
         )
 
-    def _configure_sim_time(self, use_sim_time: bool) -> None:
-        if not self.has_parameter("use_sim_time"):
-            self.declare_parameter("use_sim_time", use_sim_time)
-            return
-        self.set_parameters([Parameter("use_sim_time", Parameter.Type.BOOL, use_sim_time)])
-
     def _scan_callback(self, msg) -> None:
         scan_frame = msg.header.frame_id
         if not scan_frame:
             self.get_logger().warn("dropping scan without header.frame_id")
             return
         try:
-            lookup_time = Time() if self.args.use_latest_tf else Time.from_msg(msg.header.stamp)
             transform = self.tf_buffer.lookup_transform(
                 self.runtime.map_frame,
                 scan_frame,
-                lookup_time,
+                _latest_transform_time(),
                 timeout=Duration(seconds=self.args.tf_timeout_sec),
             )
         except TransformException as exc:
@@ -144,8 +172,11 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
             return
 
         now = self.get_clock().now()
-        tf_stamp = Time.from_msg(transform.header.stamp)
-        tf_age_sec = (now - tf_stamp).nanoseconds / 1_000_000_000.0
+        tf_stamp_sec = _stamp_to_sec(transform.header.stamp)
+        tf_age_sec = _transform_age_sec(
+            _stamp_to_sec(now.to_msg()),
+            tf_stamp_sec,
+        )
         if tf_age_sec > self.args.max_tf_age_sec:
             self.get_logger().warn(f"dropping scan: TF age {tf_age_sec:.3f}s exceeds limit")
             return
@@ -210,16 +241,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-jsonl", type=Path, default=DEFAULT_OUTPUT_JSONL)
     parser.add_argument("--map-yaml", type=Path, default=None)
     parser.add_argument(
-        "--use-scan-stamp-tf",
-        dest="use_latest_tf",
-        action="store_false",
-        help=(
-            "Use exact scan timestamps for TF lookup. Default uses latest available TF "
-            "because AMCL map transforms can lag LiDAR stamps during stationary observation."
-        ),
+        "--tf-timeout-sec",
+        type=float,
+        default=0.05,
+        help="Maximum wait for the latest available TF; keep below the scan period.",
     )
-    parser.set_defaults(use_latest_tf=True)
-    parser.add_argument("--tf-timeout-sec", type=float, default=0.2)
     parser.add_argument("--max-tf-age-sec", type=float, default=1.0)
     parser.add_argument("--min-range-m", type=float, default=0.08)
     parser.add_argument("--max-range-m", type=float, default=3.5)

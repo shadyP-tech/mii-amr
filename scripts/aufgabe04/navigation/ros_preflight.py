@@ -102,6 +102,14 @@ def _require_ros() -> None:
         raise RuntimeError("ROS2 Python packages are not available in this environment")
 
 
+def _node_parameter_overrides(use_sim_time: bool):
+    """Provide the ROS clock parameter without redeclaring it in the node."""
+
+    if Parameter is None:
+        _require_ros()
+    return [Parameter("use_sim_time", Parameter.Type.BOOL, bool(use_sim_time))]
+
+
 def _stamp_to_seconds(stamp) -> float:
     return float(stamp.sec) + float(stamp.nanosec) / 1_000_000_000.0
 
@@ -135,7 +143,10 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         allowed_cmd_vel_publishers: Sequence[str],
         require_real_time: bool,
     ) -> None:
-        super().__init__("aufgabe04_ros_preflight")
+        super().__init__(
+            "aufgabe04_ros_preflight",
+            parameter_overrides=_node_parameter_overrides(config.use_sim_time),
+        )
         self.config = config
         self.max_scan_age_sec = max_scan_age_sec
         self.max_odom_age_sec = max_odom_age_sec
@@ -145,10 +156,6 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         self.allow_idle_nav2 = allow_idle_nav2
         self.allowed_cmd_vel_publishers = tuple(allowed_cmd_vel_publishers)
         self.require_real_time = require_real_time
-        if not self.has_parameter("use_sim_time"):
-            self.declare_parameter("use_sim_time", config.use_sim_time)
-        else:
-            self.set_parameters([Parameter("use_sim_time", Parameter.Type.BOOL, config.use_sim_time)])
         self.latest_scan = None
         self.latest_scan_receipt = None
         self.latest_odom = None
