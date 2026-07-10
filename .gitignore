@@ -22,6 +22,7 @@ bags/
 scripts/bags/
 
 # experiment runtime outputs
+results/
 results/**/*_bag.log
 results/**/latest_tracker_pose.csv
 results/**/latest_tracker_pose.sample.csv
@@ -30,3 +31,4 @@ results/**/latest_tracker_pose.sample.csv
 
 tests/
 docs/
+

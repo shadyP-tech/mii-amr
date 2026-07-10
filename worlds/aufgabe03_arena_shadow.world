@@ -1,0 +1,64 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <world name="arena_shadow">
+
+    <include>
+      <uri>model://ground_plane</uri>
+    </include>
+
+    <include>
+      <uri>model://sun</uri>
+    </include>
+
+    <!-- Arena walls, centered around map/world origin -->
+    <model name="arena_walls">
+      <static>true</static>
+
+      <!-- north wall -->
+      <link name="north_wall">
+        <pose>0 0.949 0.25 0 0 0</pose>
+        <collision name="collision">
+          <geometry><box><size>3.90 0.05 0.50</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>3.90 0.05 0.50</size></box></geometry>
+        </visual>
+      </link>
+
+      <!-- south wall -->
+      <link name="south_wall">
+        <pose>0 -0.949 0.25 0 0 0</pose>
+        <collision name="collision">
+          <geometry><box><size>3.90 0.05 0.50</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>3.90 0.05 0.50</size></box></geometry>
+        </visual>
+      </link>
+
+      <!-- east wall -->
+      <link name="east_wall">
+        <pose>1.95 0 0.25 0 0 0</pose>
+        <collision name="collision">
+          <geometry><box><size>0.05 1.898 0.50</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.05 1.898 0.50</size></box></geometry>
+        </visual>
+      </link>
+
+      <!-- west wall -->
+      <link name="west_wall">
+        <pose>-1.95 0 0.25 0 0 0</pose>
+        <collision name="collision">
+          <geometry><box><size>0.05 1.898 0.50</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.05 1.898 0.50</size></box></geometry>
+        </visual>
+      </link>
+
+    </model>
+  </world>
+</sdf>
+
