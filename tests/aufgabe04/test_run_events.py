@@ -131,6 +131,19 @@ def failing_preflight() -> RosPreflightResult:
 
 
 class RunEventsTest(unittest.TestCase):
+    def test_runner_rejects_nav2_direct_publisher_allowlist(self):
+        with self.assertRaises(SystemExit) as raised, redirect_stdout(StringIO()):
+            run_single_station_segment.main(
+                [
+                    "--leg-index",
+                    "0",
+                    "--allowed-cmd-vel-publisher",
+                    "/behavior_server",
+                ]
+            )
+
+        self.assertEqual(raised.exception.code, 2)
+
     def test_event_json_is_deterministic_and_contains_core_fields(self):
         event = build_event(
             "runtime_resolved",

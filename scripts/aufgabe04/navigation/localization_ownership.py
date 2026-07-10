@@ -25,6 +25,7 @@ class LocalizationOwnershipEvidence:
     map_to_odom_dynamic_fresh: bool
     route_transform_fresh: bool
     odom_to_base_fresh: bool = False
+    map_odom_identity: bool = False
     external_tf_owner_candidates: Sequence[str] = field(default_factory=tuple)
     ambiguous_owner_evidence: Sequence[str] = field(default_factory=tuple)
 
@@ -50,6 +51,7 @@ def evaluate_localization_ownership(
         "map_to_odom_dynamic_fresh": evidence.map_to_odom_dynamic_fresh,
         "route_transform_fresh": evidence.route_transform_fresh,
         "odom_to_base_fresh": evidence.odom_to_base_fresh,
+        "map_odom_identity": evidence.map_odom_identity,
         "external_tf_owner_candidates": external_candidates,
         "ambiguous_owner_evidence": ambiguous_evidence,
     }
@@ -59,6 +61,7 @@ def evaluate_localization_ownership(
         amcl_fresh=evidence.amcl_fresh,
         map_to_odom_dynamic_fresh=evidence.map_to_odom_dynamic_fresh,
         route_transform_fresh=evidence.route_transform_fresh,
+        map_odom_identity=evidence.map_odom_identity,
         external_tf_owner_candidates=external_candidates,
         ambiguous_owner_evidence=ambiguous_evidence,
     )
@@ -71,6 +74,7 @@ def _localization_ownership_failure(
     amcl_fresh: bool,
     map_to_odom_dynamic_fresh: bool,
     route_transform_fresh: bool,
+    map_odom_identity: bool,
     external_tf_owner_candidates: Sequence[str],
     ambiguous_owner_evidence: Sequence[str],
 ) -> str:
@@ -80,6 +84,11 @@ def _localization_ownership_failure(
         return FAIL_AMBIGUOUS
     if not route_transform_fresh:
         return FAIL_ROUTE_TRANSFORM
+    # An odom-frame route needs no localization owner between map and odom:
+    # they are the same frame, so the relationship is the identity.  AMCL or
+    # SLAM freshness must not be required merely to prove that identity.
+    if map_odom_identity and source == LOCALIZATION_SOURCE_TF:
+        return ""
     if not map_to_odom_dynamic_fresh:
         return FAIL_MAP_TO_ODOM
     if source == LOCALIZATION_SOURCE_AMCL:

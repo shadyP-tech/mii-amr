@@ -20,6 +20,7 @@ def classify_stand_side(
     qr_texts: Sequence[str],
     color_confidence: float,
     min_color_confidence: float = 0.20,
+    allow_color_only: bool = True,
 ) -> StandSideClassification:
     clean_qr_texts = tuple(text.strip() for text in qr_texts if str(text).strip())
     if clean_qr_texts:
@@ -30,7 +31,7 @@ def classify_stand_side(
             color_confidence=color_confidence,
             reason="qr_detected",
         )
-    if color_confidence >= min_color_confidence:
+    if allow_color_only and color_confidence >= min_color_confidence:
         return StandSideClassification(
             side="basic_color_side",
             confidence=min(1.0, color_confidence / max(min_color_confidence, 1e-9)),
@@ -43,7 +44,11 @@ def classify_stand_side(
         confidence=0.0,
         qr_texts=(),
         color_confidence=color_confidence,
-        reason="no_qr_and_low_color_confidence",
+        reason=(
+            "color_only_evidence_not_allowed"
+            if not allow_color_only and color_confidence >= min_color_confidence
+            else "no_qr_and_low_color_confidence"
+        ),
     )
 
 
@@ -57,6 +62,7 @@ def classify_stand_side_from_frame(
     detect_qr_texts_bgr,
     min_color_confidence: float = 0.20,
     qr_crop_margin_px: int = 8,
+    allow_color_only: bool = True,
 ) -> StandSideClassification:
     qr_texts = ()
     for qr_frame in _qr_scan_frames_for_estimate(
@@ -74,6 +80,7 @@ def classify_stand_side_from_frame(
         qr_texts=qr_texts,
         color_confidence=color_confidence,
         min_color_confidence=min_color_confidence,
+        allow_color_only=allow_color_only,
     )
 
 

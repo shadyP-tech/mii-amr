@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import math
 import statistics
+import sys
 import threading
 import time
 from collections import deque
@@ -10,7 +11,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+ROOT = Path(__file__).resolve().parents[4]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from scripts.aufgabe04.perception.debug.color_mask_viewer import (
+    FrameRead,
     RosCompressedImageTopicFrameSource,
     create_trackbars,
     current_track_range,
@@ -19,7 +25,16 @@ from scripts.aufgabe04.perception.debug.color_mask_viewer import (
     ranges_for_label,
 )
 from scripts.aufgabe04.perception.mask_processing import apply_morphology, build_mask_for_ranges
-from scripts.aufgabe04.perception.ros_image_adapter import compressed_msg_to_bgr_frame
+from scripts.aufgabe04.perception.camera_stand_observation import (
+    CameraStandObservation,
+    stand_axis_from_camera_yaw,
+    write_camera_observation,
+)
+from scripts.aufgabe04.perception.ros_image_adapter import (
+    compressed_msg_stamp_sec,
+    compressed_msg_to_bgr_frame,
+    raw_msg_to_bgr_frame,
+)
 from scripts.aufgabe04.perception.stand_side_classification import (
     StandSideClassification,
     classify_stand_side,
@@ -32,6 +47,7 @@ from scripts.aufgabe04.perception.stand_axis_image import (
     estimate_stand_axis_from_mask,
 )
 from scripts.aufgabe04.qr_scanning.opencv_qr_detector import detect_qr_texts_bgr
+from scripts.aufgabe04.simulation.sim_qr_detector import detect_simulated_station_qr_bgr
 
 
 WINDOW_FRAME = "aufgabe04/stand-axis"
@@ -49,10 +65,14 @@ def build_parser() -> argparse.ArgumentParser:
             "Subscribes to compressed camera frames and does not move the robot."
         )
     )
-    parser.add_argument(
+    image_topics = parser.add_mutually_exclusive_group(required=True)
+    image_topics.add_argument(
         "--compressed-image-topic",
-        required=True,
         help="ROS 2 sensor_msgs/CompressedImage topic, e.g. /camera/image_raw/compressed.",
+    )
+    image_topics.add_argument(
+        "--sim-raw-image-topic",
+        help="Simulation only: Gazebo sensor_msgs/Image topic, e.g. /camera/image_raw.",
     )
     parser.add_argument("--resize", type=float, default=1.0)
     parser.add_argument("--color", choices=labels, default="green")
@@ -225,10 +245,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Limit display/render rate while keeping only the newest ROS frame. Use 0 for unlimited.",
     )
     parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Process and write observations without OpenCV windows (useful in headless simulation).",
+    )
+    parser.add_argument(
         "--max-frame-age-sec",
         type=float,
         default=0.25,
         help="Drop incoming ROS image messages older than this. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--observation-output-json",
+        type=Path,
+        help="Continuously replace this JSON with the latest valid camera stand observation.",
+    )
+    parser.add_argument("--map-frame", default="odom")
+    parser.add_argument("--camera-frame", default="camera_link")
+    parser.add_argument("--robot-x", type=float, help="Map-frame robot x at the stationary pre-approach pose.")
+    parser.add_argument("--robot-y", type=float, help="Map-frame robot y at the stationary pre-approach pose.")
+    parser.add_argument("--stand-x", type=float, help="Detected map-frame stand center x.")
+    parser.add_argument("--stand-y", type=float, help="Detected map-frame stand center y.")
+    parser.add_argument(
+        "--observation-write-hz",
+        type=float,
+        default=2.0,
+        help="Maximum rate for replacing the latest valid observation JSON.",
     )
     parser.add_argument(
         "--display-mask",
@@ -261,6 +303,72 @@ class _QrDecodeResult:
     qr_texts: tuple[str, ...]
     sequence: int
     completed_sec: float
+
+
+class RosSimulationRawImageTopicFrameSource:
+    """Latest-frame source deliberately restricted to the explicit simulation CLI."""
+
+    def __init__(self, topic: str, max_frame_age_sec: float):
+        self.topic = topic
+        self.max_frame_age_sec = max_frame_age_sec
+        self.latest_message = None
+        self.latest_stamp_sec = None
+        self.latest_sequence = 0
+        self._lock = threading.Lock()
+        self._running = False
+        self._spin_thread = None
+        try:
+            import rclpy
+            from rclpy.node import Node
+            from rclpy.qos import QoSProfile, qos_profile_sensor_data
+            from sensor_msgs.msg import Image
+        except ImportError as exc:
+            raise SystemExit("Simulation raw image mode requires ROS 2 sensor_msgs.") from exc
+        self.rclpy = rclpy
+        self.owns_rclpy = not rclpy.ok()
+        if self.owns_rclpy:
+            rclpy.init(args=None)
+        self.node = Node("aufgabe04_sim_raw_stand_axis_viewer")
+        qos = QoSProfile(
+            reliability=qos_profile_sensor_data.reliability,
+            durability=qos_profile_sensor_data.durability,
+            history=qos_profile_sensor_data.history,
+            depth=1,
+        )
+        self.subscription = self.node.create_subscription(Image, topic, self._on_image, qos)
+
+    def _on_image(self, msg) -> None:
+        stamp_sec = compressed_msg_stamp_sec(msg)
+        with self._lock:
+            self.latest_message = msg
+            self.latest_stamp_sec = stamp_sec
+            self.latest_sequence += 1
+
+    def start(self) -> None:
+        self._running = True
+        self._spin_thread = threading.Thread(target=self._spin_loop, daemon=True)
+        self._spin_thread.start()
+
+    def _spin_loop(self) -> None:
+        while self._running and self.rclpy.ok():
+            self.rclpy.spin_once(self.node, timeout_sec=0.05)
+
+    def read(self) -> FrameRead:
+        with self._lock:
+            message = self.latest_message
+            stamp_sec = self.latest_stamp_sec
+            sequence = self.latest_sequence
+        if message is None:
+            return FrameRead(False, message=f"waiting for first frame on {self.topic}", waiting=True)
+        return FrameRead(True, frame=message, stamp_sec=stamp_sec, sequence=sequence)
+
+    def release(self) -> None:
+        self._running = False
+        if self._spin_thread is not None:
+            self._spin_thread.join(timeout=1.0)
+        self.node.destroy_node()
+        if self.owns_rclpy and self.rclpy.ok():
+            self.rclpy.shutdown()
 
 
 class BackgroundQrDecoder:
@@ -572,6 +680,14 @@ def save_snapshot(cv2, directory: Path, frame, mask) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.observation_output_json is not None:
+        required_geometry = (args.robot_x, args.robot_y, args.stand_x, args.stand_y)
+        if any(value is None for value in required_geometry):
+            raise SystemExit(
+                "--observation-output-json requires --robot-x, --robot-y, --stand-x, and --stand-y"
+            )
+        if args.observation_write_hz <= 0.0:
+            raise SystemExit("--observation-write-hz must be positive")
     stand_width_m = args.stand_face_size_m if args.stand_face_size_m is not None else args.stand_width_m
     camera_fx_px = args.camera_fx_px
     camera_fy_px = args.camera_fy_px
@@ -596,7 +712,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.print_palette:
         print_palette(selected_ranges)
 
-    frame_source = RosCompressedImageTopicFrameSource(args.compressed_image_topic, args.max_frame_age_sec)
+    if args.sim_raw_image_topic:
+        frame_source = RosSimulationRawImageTopicFrameSource(
+            args.sim_raw_image_topic, args.max_frame_age_sec
+        )
+        image_topic = args.sim_raw_image_topic
+    else:
+        frame_source = RosCompressedImageTopicFrameSource(
+            args.compressed_image_topic, args.max_frame_age_sec
+        )
+        image_topic = args.compressed_image_topic
     frame_source.start()
     lidar_source = None
     if args.use_lidar_distance:
@@ -609,7 +734,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_scan_age_sec=args.max_scan_age_sec,
         )
         lidar_source.start()
-    qr_decoder = None if args.no_qr_decode else BackgroundQrDecoder(
+    qr_decoder = None if args.no_qr_decode or args.sim_raw_image_topic else BackgroundQrDecoder(
         cv2=cv2,
         numpy=numpy,
         detector=detect_qr_texts_bgr,
@@ -631,6 +756,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     last_processed_sequence = 0
     last_display_sec = 0.0
     last_waiting_message_sec = 0.0
+    last_observation_write_sec = 0.0
 
     try:
         while True:
@@ -648,21 +774,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if now - last_waiting_message_sec >= 1.0:
                         print(f"WARNING: {read.message}")
                         last_waiting_message_sec = now
-                    key = cv2.waitKey(1) & 0xFF
+                    key = 0 if args.headless else cv2.waitKey(1) & 0xFF
                     if key in (27, ord("q")):
                         break
                     continue
                 print(f"WARNING: {read.message}")
                 break
             if read.sequence == last_processed_sequence:
-                key = cv2.waitKey(1) & 0xFF
+                key = 0 if args.headless else cv2.waitKey(1) & 0xFF
                 if key in (27, ord("q")):
                     break
                 continue
             last_processed_sequence = read.sequence
 
             try:
-                frame = compressed_msg_to_bgr_frame(read.frame, cv2, numpy)
+                frame = (
+                    raw_msg_to_bgr_frame(read.frame, cv2, numpy)
+                    if args.sim_raw_image_topic
+                    else compressed_msg_to_bgr_frame(read.frame, cv2, numpy)
+                )
             except ValueError as exc:
                 print(f"WARNING: {exc}")
                 continue
@@ -754,16 +884,93 @@ def main(argv: Sequence[str] | None = None) -> int:
                         open_iterations=args.open_iterations,
                     )
             color_confidence = color_confidence_for_estimate(cv2, numpy, mask, estimate)
-            if qr_decoder is not None:
+            sim_qr_detection = None
+            if args.sim_raw_image_topic and not args.no_qr_decode:
+                sim_qr_detection = detect_simulated_station_qr_bgr(
+                    frame,
+                    cv2,
+                    camera_fx_px=camera_fx_px,
+                    camera_fy_px=camera_fy_px,
+                    camera_cx_px=camera_cx_px,
+                    camera_cy_px=camera_cy_px,
+                )
+                qr_texts = () if sim_qr_detection is None else (sim_qr_detection.station_id,)
+            elif qr_decoder is not None:
                 qr_decoder.submit_latest(frame, estimate, read.sequence, time.time())
                 qr_texts = qr_decoder.latest_texts(time.time())
             else:
                 qr_texts = ()
+            observation_distance_m = None
+            if args.observation_output_json is not None:
+                observation_distance_m = math.hypot(
+                    args.stand_x - args.robot_x,
+                    args.stand_y - args.robot_y,
+                )
+            allow_color_only = (
+                not args.sim_raw_image_topic
+                or (
+                    observation_distance_m is not None
+                    and observation_distance_m <= 0.33
+                )
+            )
             side = classify_stand_side(
                 qr_texts=qr_texts,
                 color_confidence=color_confidence,
                 min_color_confidence=args.side_color_confidence,
+                allow_color_only=allow_color_only,
             )
+            qr_face_yaw_rad = (
+                None if sim_qr_detection is None else sim_qr_detection.face_yaw_rad
+            )
+            orientation_yaw_rad = (
+                qr_face_yaw_rad
+                if side.side == "qr_code_side" and qr_face_yaw_rad is not None
+                else (None if estimate.yaw_deg is None else math.radians(estimate.yaw_deg))
+            )
+            if (
+                args.observation_output_json is not None
+                and estimate.usable
+                and estimate.mode == "face_visible"
+                and orientation_yaw_rad is not None
+                and side.side in ("qr_code_side", "basic_color_side")
+                and side.confidence >= 0.60
+                and time.time() - last_observation_write_sec >= 1.0 / args.observation_write_hz
+            ):
+                pnp_calibrated = all(value is not None for value in (
+                    stand_width_m, camera_fx_px, camera_fy_px,
+                ))
+                metric_fallback = stand_width_m is not None and stand_distance_m is not None
+                if pnp_calibrated or metric_fallback:
+                    # Staleness checks use the workstation wall clock, not Gazebo's /clock epoch.
+                    observed_at_sec = time.time()
+                    observation = CameraStandObservation(
+                        schema_version=1,
+                        observed_at_sec=observed_at_sec,
+                        image_topic=image_topic,
+                        camera_frame=args.camera_frame,
+                        map_frame=args.map_frame,
+                        robot_x_m=args.robot_x,
+                        robot_y_m=args.robot_y,
+                        stand_x_m=args.stand_x,
+                        stand_y_m=args.stand_y,
+                        stand_axis_rad=stand_axis_from_camera_yaw(
+                            robot_x_m=args.robot_x,
+                            robot_y_m=args.robot_y,
+                            stand_x_m=args.stand_x,
+                            stand_y_m=args.stand_y,
+                            camera_yaw_rad=orientation_yaw_rad,
+                        ),
+                        axis_confidence=(
+                            max(0.85, 1.0 - sim_qr_detection.mismatch_fraction)
+                            if sim_qr_detection is not None and qr_face_yaw_rad is not None
+                            else (0.85 if pnp_calibrated else 0.65)
+                        ),
+                        side=side.side,
+                        side_confidence=side.confidence,
+                        qr_texts=tuple(qr_texts),
+                    )
+                    write_camera_observation(args.observation_output_json, observation)
+                    last_observation_write_sec = time.time()
             if estimate.mode == "face_visible" and estimate.usable:
                 ratio_window.append(float(estimate.height_ratio))
                 proxy_window.append(float(estimate.yaw_proxy))
@@ -774,6 +981,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             annotate_frame(cv2, annotated, estimate, side, filtered_ratio, filtered_proxy, age_ms)
 
             frame_count += 1
+            if args.headless and args.save_snapshot is not None and frame_count == 1:
+                debug_image = edges if args.axis_source == "edges" and edges is not None else mask
+                save_snapshot(cv2, args.save_snapshot, frame, debug_image)
             if args.print_every > 0 and frame_count % args.print_every == 0:
                 print_status_line(
                     estimate,
@@ -783,17 +993,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                     qr_texts=qr_texts,
                 )
 
-            cv2.imshow(WINDOW_FRAME, annotated)
-            if args.display_mask and mask is not None:
-                cv2.imshow(WINDOW_MASK, mask)
-            if args.display_edges and edges is not None:
-                cv2.imshow(WINDOW_EDGES, edges)
-            if args.display_face_mask and face_mask is not None:
-                cv2.imshow(WINDOW_FACE_MASK, face_mask)
-            if args.display_face_mask and rectangle_mask is not None:
-                cv2.imshow(WINDOW_RECTANGLE_MASK, rectangle_mask)
+            if not args.headless:
+                cv2.imshow(WINDOW_FRAME, annotated)
+                if args.display_mask and mask is not None:
+                    cv2.imshow(WINDOW_MASK, mask)
+                if args.display_edges and edges is not None:
+                    cv2.imshow(WINDOW_EDGES, edges)
+                if args.display_face_mask and face_mask is not None:
+                    cv2.imshow(WINDOW_FACE_MASK, face_mask)
+                if args.display_face_mask and rectangle_mask is not None:
+                    cv2.imshow(WINDOW_RECTANGLE_MASK, rectangle_mask)
 
-            key = cv2.waitKey(1) & 0xFF
+            key = 0 if args.headless else cv2.waitKey(1) & 0xFF
             if key in (27, ord("q")):
                 break
             if key == ord("p"):

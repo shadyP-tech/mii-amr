@@ -12,8 +12,10 @@ if str(ROOT) not in sys.path:
 from scripts.aufgabe04.simulation.generate_gazebo_world import (  # noqa: E402
     BOARD_CENTER_Z_M,
     BOARD_HEIGHT_M,
+    PHYSICAL_STAND_HEIGHT_M,
     QR_SIZE,
     STAND_HEIGHT_M,
+    STAND_SCALE,
     qr_matrix,
     world_sdf,
 )
@@ -39,6 +41,22 @@ class GazeboStandsTest(unittest.TestCase):
             STAND_HEIGHT_M,
         )
 
+    def test_complete_stand_uses_one_uniform_scale(self):
+        self.assertAlmostEqual(STAND_SCALE, STAND_HEIGHT_M / PHYSICAL_STAND_HEIGHT_M)
+        world = world_sdf(
+            [{"station_id": "A", "x_m": 0, "y_m": 0, "yaw_rad": 0}]
+        )
+        self.assertIn(
+            f"<size>{0.68 * STAND_SCALE:.6f} {0.115 * STAND_SCALE:.6f} "
+            f"{0.05 * STAND_SCALE:.6f}</size>",
+            world,
+        )
+        self.assertIn(
+            f"<size>{0.04 * STAND_SCALE:.6f} {0.50 * STAND_SCALE:.6f} "
+            f"{0.50 * STAND_SCALE:.6f}</size>",
+            world,
+        )
+
     def test_world_contains_static_stands_and_qr_faces(self):
         world = world_sdf(
             [
@@ -53,7 +71,7 @@ class GazeboStandsTest(unittest.TestCase):
         self.assertIn('name="qr_white_panel"', world)
         self.assertIn('name="qr_00_00"', world)
         self.assertIn('name="head_board"', world)
-        self.assertIn("0.160000", world)
+        self.assertIn(f"{BOARD_CENTER_Z_M:.6f}", world)
 
     def test_generator_uses_layout_json_and_creates_parent(self):
         from scripts.aufgabe04.simulation.generate_gazebo_world import main

@@ -26,6 +26,9 @@ from scripts.aufgabe04.navigation.safety_checks import (
 )
 from scripts.aufgabe04.navigation.segment_run_logger import append_segment_run
 from scripts.aufgabe04.navigation.follower_models import FollowerResult
+from scripts.aufgabe04.navigation.follower_safety import (
+    is_non_allowlistable_direct_cmd_vel_publisher,
+)
 from scripts.aufgabe04.navigation.simple_waypoint_follower import (
     FollowerConfig,
     run_simple_waypoint_follower,
@@ -60,7 +63,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-sim-time", action="store_true")
     parser.add_argument("--max-linear-mps", type=float, default=0.05)
     parser.add_argument("--max-angular-radps", type=float, default=0.15)
-    parser.add_argument("--goal-tolerance-m", type=float, default=0.08)
+    parser.add_argument(
+        "--goal-tolerance-m",
+        type=float,
+        default=None,
+        help="Position tolerance; defaults to 0.02 m in simulation and 0.08 m otherwise.",
+    )
     parser.add_argument("--heading-tolerance-rad", type=float, default=0.25)
     parser.add_argument("--min-obstacle-distance-m", type=float, default=0.20)
     parser.add_argument("--thinning-min-spacing-m", type=float, default=0.15)
@@ -69,6 +77,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-tf-age-sec", type=float, default=1.0)
     parser.add_argument("--max-amcl-age-sec", type=float, default=2.0)
     parser.add_argument("--waypoint-timeout-sec", type=float, default=45.0)
+    parser.add_argument("--startup-timeout-sec", type=float, default=3.0)
+    parser.add_argument("--max-rotation-sec", type=float, default=25.0)
+    parser.add_argument("--max-rotation-no-progress-sec", type=float, default=3.0)
+    parser.add_argument("--min-heading-progress-rad", type=float, default=0.03)
     parser.add_argument("--initial-distance-limit-m", type=float, default=0.35)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--allow-noop", action="store_true")
@@ -171,6 +183,20 @@ def _append_status_result(
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.goal_tolerance_m is None:
+        args.goal_tolerance_m = 0.02 if args.allow_sim_time else 0.08
+    unsafe_allowlist = sorted(
+        {
+            identity
+            for identity in args.allowed_cmd_vel_publisher
+            if is_non_allowlistable_direct_cmd_vel_publisher(identity)
+        }
+    )
+    if unsafe_allowlist:
+        parser.error(
+            "direct Nav2 cmd_vel publishers cannot be allow-listed; stop Nav2 or use a "
+            "velocity mux: " + ", ".join(unsafe_allowlist)
+        )
     args.run_id = args.run_id or f"aufgabe04-segment-{uuid.uuid4().hex[:8]}"
     args.semantic_log = args.semantic_log or DEFAULT_EVENT_LOG_DIR / f"{args.run_id}.jsonl"
     event_logger = configure_event_logger(args.semantic_log)
@@ -462,7 +488,12 @@ def main(argv: list[str] | None = None) -> int:
         max_odom_age_sec=args.max_odom_age_sec,
         max_tf_age_sec=args.max_tf_age_sec,
         waypoint_timeout_sec=args.waypoint_timeout_sec,
+        startup_timeout_sec=args.startup_timeout_sec,
+        max_rotation_sec=args.max_rotation_sec,
+        max_rotation_no_progress_sec=args.max_rotation_no_progress_sec,
+        min_heading_progress_rad=args.min_heading_progress_rad,
         initial_distance_limit_m=args.initial_distance_limit_m,
+        allowed_cmd_vel_publishers=tuple(args.allowed_cmd_vel_publisher),
     )
     emit_event(
         event_logger,
@@ -487,6 +518,11 @@ def main(argv: list[str] | None = None) -> int:
         duration_sec=result.duration_sec,
         distance_estimate_m=result.distance_estimate_m,
         motion_published=result.motion_published,
+        target_index=result.target_index,
+        remaining_distance_m=result.remaining_distance_m,
+        final_x_m=result.final_x_m,
+        final_y_m=result.final_y_m,
+        final_yaw_rad=result.final_yaw_rad,
     )
     emit_event(
         event_logger,

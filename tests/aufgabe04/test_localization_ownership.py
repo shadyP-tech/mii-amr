@@ -25,6 +25,7 @@ def decide(**overrides):
         "map_to_odom_dynamic_fresh": True,
         "route_transform_fresh": True,
         "odom_to_base_fresh": True,
+        "map_odom_identity": False,
         "external_tf_owner_candidates": (),
         "ambiguous_owner_evidence": (),
     }
@@ -61,6 +62,17 @@ class LocalizationOwnershipTest(unittest.TestCase):
         decision = decide(localization_source="tf", amcl_fresh=False)
 
         self.assertTrue(decision.ok)
+
+    def test_tf_source_accepts_identical_map_and_odom_without_dynamic_tf(self):
+        decision = decide(
+            localization_source="tf",
+            amcl_fresh=True,
+            map_to_odom_dynamic_fresh=False,
+            map_odom_identity=True,
+        )
+
+        self.assertTrue(decision.ok)
+        self.assertTrue(decision.data["map_odom_identity"])
 
     def test_tf_source_fails_when_fresh_amcl_is_present(self):
         decision = decide(localization_source="tf", amcl_fresh=True)

@@ -8,6 +8,17 @@ from typing import Iterable, Sequence
 from scripts.aufgabe04.navigation.models import Pose2D
 
 
+NON_ALLOWLISTABLE_DIRECT_CMD_VEL_NODES = {
+    "behavior_server",
+    "controller_server",
+    "velocity_smoother",
+}
+
+
+def is_non_allowlistable_direct_cmd_vel_publisher(identity: str) -> bool:
+    return identity.rstrip("/").rsplit("/", 1)[-1] in NON_ALLOWLISTABLE_DIRECT_CMD_VEL_NODES
+
+
 def message_freshness_failure(
     name: str,
     *,
@@ -56,11 +67,53 @@ def waypoint_timeout_failure(elapsed_sec: float, timeout_sec: float) -> str:
     return ""
 
 
+def startup_readiness_failure(
+    *,
+    scan_ready: bool,
+    odom_ready: bool,
+    pose_ready: bool,
+) -> str:
+    missing = [
+        name
+        for name, ready in (("scan", scan_ready), ("odom", odom_ready), ("pose", pose_ready))
+        if not ready
+    ]
+    if missing:
+        return f"startup timeout waiting for {', '.join(missing)}"
+    return ""
+
+
+def rotation_progress_failure(
+    *,
+    rotation_elapsed_sec: float,
+    no_progress_elapsed_sec: float,
+    max_rotation_sec: float,
+    max_no_progress_sec: float,
+) -> str:
+    if rotation_elapsed_sec > max_rotation_sec:
+        return "rotation timeout"
+    if no_progress_elapsed_sec > max_no_progress_sec:
+        return "rotation stalled: heading error not decreasing"
+    return ""
+
+
 def cmd_vel_ownership_failure(
     publisher_identities: Sequence[str],
     self_identity: str,
+    allowed_external_identities: Sequence[str] = (),
 ) -> str:
-    external = sorted({identity for identity in publisher_identities if identity != self_identity})
+    allowed = {
+        identity
+        for identity in allowed_external_identities
+        if not is_non_allowlistable_direct_cmd_vel_publisher(identity)
+    }
+    external = sorted(
+        {
+            identity
+            for identity in publisher_identities
+            if identity != self_identity and identity not in allowed
+        }
+    )
     if external:
         return f"external cmd_vel publisher during run: {', '.join(external)}"
     return ""

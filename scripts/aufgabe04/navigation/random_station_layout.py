@@ -13,10 +13,8 @@ from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds
 from scripts.aufgabe04.navigation.costmap import Costmap
 from scripts.aufgabe04.navigation.map_io import OccupancyGrid, load_occupancy_grid
 from scripts.aufgabe04.navigation.models import GridCell, Pose2D
-from scripts.aufgabe04.navigation.station_approach import pose_from_approach_target
 from scripts.aufgabe04.stations.models import Station, StationPose
 from scripts.aufgabe04.stations.station_map import build_station_map, normalize_station_id
-from scripts.aufgabe04.stations.station_positioning import approach_target_for_station
 
 
 YAW_MODE_TOWARD_CENTER = "toward-center"
@@ -139,15 +137,27 @@ def _validate_config(config: RandomStationLayoutConfig, grid: OccupancyGrid) -> 
 
 
 def _target_is_traversable(costmap: Costmap, station: Station) -> bool:
-    target = approach_target_for_station(station)
-    pose = pose_from_approach_target(target)
+    pose = _qr_face_clearance_pose(station)
     cell = costmap.world_to_grid(pose)
     return costmap.in_bounds(cell) and costmap.is_traversable(cell)
 
 
+def _qr_face_clearance_pose(station: Station) -> Pose2D:
+    """Return the hidden QR-side clearance point (Gazebo local +x)."""
+
+    return Pose2D(
+        station.pose.x_m + math.cos(station.pose.yaw_rad) * station.approach_offset_m,
+        station.pose.y_m + math.sin(station.pose.yaw_rad) * station.approach_offset_m,
+        math.atan2(
+            math.sin(station.pose.yaw_rad + math.pi),
+            math.cos(station.pose.yaw_rad + math.pi),
+        ),
+    )
+
+
 def _station_and_target_inside_arena(station: Station, bounds: ArenaBounds) -> bool:
     station_pose = Pose2D(station.pose.x_m, station.pose.y_m, station.pose.yaw_rad)
-    target_pose = pose_from_approach_target(approach_target_for_station(station))
+    target_pose = _qr_face_clearance_pose(station)
     return bounds.contains(station_pose) and bounds.contains(target_pose)
 
 
@@ -164,12 +174,11 @@ def _candidate_is_valid(
     station_cell = target_costmap.world_to_grid(station_pose)
     if not target_costmap.in_bounds(station_cell) or not target_costmap.is_traversable(station_cell):
         return False
-    target = approach_target_for_station(station)
-    target_pose = pose_from_approach_target(target)
+    target_pose = _qr_face_clearance_pose(station)
     target_cell = target_costmap.world_to_grid(target_pose)
     if not target_costmap.in_bounds(target_cell) or not target_costmap.is_traversable(target_cell):
         return False
-    if _distance(station.pose, target.pose) <= station.keepout_radius_m:
+    if _distance(station.pose, target_pose) <= station.keepout_radius_m:
         return False
     if config.start is not None and _distance(station.pose, config.start) < config.min_start_distance_m:
         return False

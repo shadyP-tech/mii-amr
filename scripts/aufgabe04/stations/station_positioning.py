@@ -18,4 +18,3 @@ def approach_target_for_station(station: Station) -> ApproachTarget:
         pose=pose,
         stop_distance_m=station.approach_offset_m,
     )
-

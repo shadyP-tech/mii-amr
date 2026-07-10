@@ -73,6 +73,15 @@ class StandSideClassificationTest(unittest.TestCase):
         self.assertEqual(side.reason, "no_qr_and_low_color_confidence")
         self.assertEqual(side.confidence, 0.0)
 
+    def test_color_only_can_be_forced_to_fail_closed(self):
+        side = classify_stand_side(
+            qr_texts=(),
+            color_confidence=0.9,
+            allow_color_only=False,
+        )
+        self.assertEqual(side.side, "unknown_side")
+        self.assertEqual(side.reason, "color_only_evidence_not_allowed")
+
     def test_frame_classifier_tries_rectified_crop_before_full_frame(self):
         estimate = StandAxisImageEstimate(
             usable=True,

@@ -106,6 +106,7 @@ def build_station_route_dry_run(
         station_layout_json=station_layout_json,
         arena_bounds=selected_arena_bounds,
     )
+    metadata["inflation_radius_m"] = inflation_radius_m
     return StationRouteDryRun(
         grid=grid,
         station_map=selected_station_map,

@@ -20,6 +20,7 @@ from scripts.aufgabe04.navigation.artifacts import (
 from scripts.aufgabe04.navigation.models import Pose2D
 from scripts.aufgabe04.navigation.route_context import build_station_route_dry_run, file_sha256
 from scripts.aufgabe04.navigation.route_overlay import RouteOverlayInput, render_route_overlay_svg
+from scripts.aufgabe04.navigation.two_stage_approach import pre_approach_pose
 from scripts.aufgabe04.perception.stand_confirmation import (
     StandConfirmationAccumulator,
     StandConfirmationConfig,
@@ -56,7 +57,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-y", required=True, type=float)
     parser.add_argument("--start-yaw", type=float, default=0.0)
     parser.add_argument("--station-id", default="A")
-    parser.add_argument("--stand-yaw-rad", type=float, default=0.0)
     parser.add_argument("--approach-offset-m", type=float, default=0.30)
     parser.add_argument("--keepout-radius-m", type=float, default=0.20)
     parser.add_argument("--merge-distance-m", type=float, default=0.18)
@@ -81,7 +81,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--arena-center-x-m", type=float, default=ArenaBounds.center_x_m)
     parser.add_argument("--arena-center-y-m", type=float, default=ArenaBounds.center_y_m)
     parser.add_argument("--arena-yaw-deg", type=float, default=ArenaBounds.yaw_deg)
-    parser.add_argument("--arena-margin-m", type=float, default=ArenaBounds.margin_m)
+    parser.add_argument(
+        "--arena-margin-m",
+        type=float,
+        default=0.15,
+        help="Reject LiDAR stand candidates this close to arena walls (default: 0.15 m).",
+    )
     return parser
 
 
@@ -155,13 +160,23 @@ def main(argv: list[str] | None = None) -> int:
         )
         stands = accumulator.add_observations(observations)
         selected = select_first_confirmed_stand(stands)
+        start_pose = Pose2D(args.start_x, args.start_y, args.start_yaw)
+        stand_pose = Pose2D(selected.x_m, selected.y_m)
+        pre_approach = pre_approach_pose(
+            stand_pose,
+            start_pose,
+            offset_m=args.approach_offset_m,
+        )
+        synthetic_pre_approach_yaw = pre_approach.yaw_rad
         station = station_from_confirmed_stand(
             selected,
             config=DetectedStationLayoutConfig(
                 station_id=args.station_id,
                 approach_offset_m=args.approach_offset_m,
                 keepout_radius_m=args.keepout_radius_m,
-                stand_yaw_rad=args.stand_yaw_rad,
+                # This is deliberately the pre-approach bearing, not the
+                # hidden QR/stand yaw.  Camera evidence resolves that later.
+                stand_yaw_rad=synthetic_pre_approach_yaw,
                 arena_length_m=args.arena_length_m,
                 arena_width_m=args.arena_width_m,
                 arena_center_x_m=args.arena_center_x_m,
@@ -178,6 +193,13 @@ def main(argv: list[str] | None = None) -> int:
                 "map_yaml_sha256": file_sha256(args.map),
                 "required_map_frame": args.required_map_frame,
                 "required_base_frame": args.required_base_frame,
+                "orientation_known": False,
+                "target_kind": "orientation_blind_pre_approach",
+                "pre_approach": {
+                    "x_m": pre_approach.x_m,
+                    "y_m": pre_approach.y_m,
+                    "yaw_rad": pre_approach.yaw_rad,
+                },
             },
         )
         write_station_layout_json(args.layout_json, [station], metadata)
@@ -188,7 +210,7 @@ def main(argv: list[str] | None = None) -> int:
             [station.station_id],
             station_map={station.station_id: station},
             station_layout_json=args.layout_json,
-            start=Pose2D(args.start_x, args.start_y, args.start_yaw),
+            start=start_pose,
             inflation_radius_m=args.inflation_radius_m,
             snap_radius_m=args.snap_radius_m,
             arena_bounds=arena_bounds,

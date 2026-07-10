@@ -21,7 +21,12 @@ def _json_default(value):
     raise TypeError(f"{type(value)!r} is not JSON serializable")
 
 
-def write_route_csv(path: Path, leg_results: Iterable[PlanRouteResult]) -> None:
+def write_route_csv(
+    path: Path,
+    leg_results: Iterable[PlanRouteResult],
+    *,
+    final_yaw_by_leg: Mapping[int, float] | None = None,
+) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as file:
@@ -34,6 +39,7 @@ def write_route_csv(path: Path, leg_results: Iterable[PlanRouteResult]) -> None:
                 "grid_y",
                 "world_x_m",
                 "world_y_m",
+                "yaw_rad",
                 "segment_length_m",
                 "cumulative_length_m",
             ]
@@ -42,6 +48,9 @@ def write_route_csv(path: Path, leg_results: Iterable[PlanRouteResult]) -> None:
             if result.route is None:
                 continue
             for point in result.route.points:
+                final_yaw = None
+                if final_yaw_by_leg and point.index == len(result.route.points) - 1:
+                    final_yaw = final_yaw_by_leg.get(leg_index)
                 writer.writerow(
                     [
                         leg_index,
@@ -50,6 +59,7 @@ def write_route_csv(path: Path, leg_results: Iterable[PlanRouteResult]) -> None:
                         point.cell.y,
                         point.pose.x_m,
                         point.pose.y_m,
+                        "" if final_yaw is None else final_yaw,
                         point.segment_length_m,
                         point.cumulative_length_m,
                     ]

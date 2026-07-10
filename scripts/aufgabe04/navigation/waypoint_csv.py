@@ -105,6 +105,12 @@ def load_route_leg(
             point_index = _parse_int(row["point_index"], "point_index", row_number)
             x_m = _parse_finite_float(row["world_x_m"], "world_x_m", row_number)
             y_m = _parse_finite_float(row["world_y_m"], "world_y_m", row_number)
+            yaw_text = row.get("yaw_rad", "").strip()
+            yaw_rad = (
+                _parse_finite_float(yaw_text, "yaw_rad", row_number)
+                if yaw_text
+                else float("nan")
+            )
             cumulative_length_m = _parse_finite_float(
                 row["cumulative_length_m"],
                 "cumulative_length_m",
@@ -114,7 +120,7 @@ def load_route_leg(
                 RouteWaypoint(
                     leg_index=row_leg_index,
                     point_index=point_index,
-                    pose=Pose2D(x_m, y_m, 0.0),
+                    pose=Pose2D(x_m, y_m, yaw_rad),
                     cumulative_length_m=cumulative_length_m,
                 )
             )

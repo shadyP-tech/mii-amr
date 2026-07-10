@@ -30,6 +30,8 @@ class ControllerStep:
     target_index: int
     reached_goal: bool
     distance_to_target_m: float
+    target_heading_rad: float
+    heading_error_rad: float
 
 
 def normalize_angle(angle_rad: float) -> float:
@@ -44,6 +46,16 @@ def distance(a: Pose2D, b: Pose2D) -> float:
     return math.hypot(a.x_m - b.x_m, a.y_m - b.y_m)
 
 
+def forward_resume_target(pose: Pose2D, waypoints: Sequence[Pose2D]) -> tuple[int, float]:
+    """Return the waypoint after the closest route point and route proximity."""
+
+    if not waypoints:
+        return 0, math.inf
+    nearest_index = min(range(len(waypoints)), key=lambda index: distance(pose, waypoints[index]))
+    nearest_distance = distance(pose, waypoints[nearest_index])
+    return min(nearest_index + 1, len(waypoints) - 1), nearest_distance
+
+
 def compute_waypoint_command(
     pose: Pose2D,
     waypoints: Sequence[Pose2D],
@@ -51,7 +63,7 @@ def compute_waypoint_command(
     config: ControllerConfig,
 ) -> ControllerStep:
     if not waypoints:
-        return ControllerStep(VelocityCommand(0.0, 0.0), 0, True, 0.0)
+        return ControllerStep(VelocityCommand(0.0, 0.0), 0, True, 0.0, 0.0, 0.0)
     index = min(max(target_index, 0), len(waypoints) - 1)
     target = waypoints[index]
     target_distance = distance(pose, target)
@@ -62,7 +74,25 @@ def compute_waypoint_command(
 
     reached_goal = index == len(waypoints) - 1 and target_distance <= config.goal_tolerance_m
     if reached_goal:
-        return ControllerStep(VelocityCommand(0.0, 0.0), index, True, target_distance)
+        if math.isfinite(target.yaw_rad):
+            final_heading_error = normalize_angle(target.yaw_rad - pose.yaw_rad)
+            if abs(final_heading_error) > config.heading_tolerance_rad:
+                angular = max(
+                    -config.max_angular_radps,
+                    min(config.max_angular_radps, final_heading_error * config.rotate_gain),
+                )
+                return ControllerStep(
+                    VelocityCommand(0.0, angular), index, False, target_distance,
+                    target.yaw_rad, final_heading_error,
+                )
+        return ControllerStep(
+            VelocityCommand(0.0, 0.0),
+            index,
+            True,
+            target_distance,
+            pose.yaw_rad,
+            0.0,
+        )
 
     heading = math.atan2(target.y_m - pose.y_m, target.x_m - pose.x_m)
     heading_error = normalize_angle(heading - pose.yaw_rad)
@@ -71,4 +101,11 @@ def compute_waypoint_command(
         min(config.max_angular_radps, heading_error * config.rotate_gain),
     )
     linear = 0.0 if abs(heading_error) > config.heading_tolerance_rad else config.max_linear_mps
-    return ControllerStep(VelocityCommand(linear, angular), index, False, target_distance)
+    return ControllerStep(
+        VelocityCommand(linear, angular),
+        index,
+        False,
+        target_distance,
+        heading,
+        heading_error,
+    )

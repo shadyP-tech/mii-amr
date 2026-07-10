@@ -12,6 +12,9 @@ from scripts.aufgabe04.navigation.follower_safety import (  # noqa: E402
     initial_pose_failure,
     message_freshness_failure,
     obstacle_failure,
+    rotation_progress_failure,
+    is_non_allowlistable_direct_cmd_vel_publisher,
+    startup_readiness_failure,
     waypoint_timeout_failure,
 )
 from scripts.aufgabe04.navigation.models import Pose2D  # noqa: E402
@@ -67,6 +70,45 @@ class FollowerSafetyTest(unittest.TestCase):
         self.assertEqual(waypoint_timeout_failure(44.9, 45.0), "")
         self.assertEqual(waypoint_timeout_failure(45.1, 45.0), "waypoint timeout")
 
+    def test_startup_readiness_reports_only_missing_inputs(self):
+        self.assertEqual(
+            startup_readiness_failure(scan_ready=False, odom_ready=True, pose_ready=False),
+            "startup timeout waiting for scan, pose",
+        )
+
+    def test_rotation_watchdog_stops_timeout_and_no_progress(self):
+        self.assertEqual(
+            rotation_progress_failure(
+                rotation_elapsed_sec=25.1,
+                no_progress_elapsed_sec=0.2,
+                max_rotation_sec=25.0,
+                max_no_progress_sec=3.0,
+            ),
+            "rotation timeout",
+        )
+        self.assertEqual(
+            rotation_progress_failure(
+                rotation_elapsed_sec=5.0,
+                no_progress_elapsed_sec=3.1,
+                max_rotation_sec=25.0,
+                max_no_progress_sec=3.0,
+            ),
+            "rotation stalled: heading error not decreasing",
+        )
+        self.assertEqual(
+            rotation_progress_failure(
+                rotation_elapsed_sec=5.0,
+                no_progress_elapsed_sec=0.5,
+                max_rotation_sec=25.0,
+                max_no_progress_sec=3.0,
+            ),
+            "",
+        )
+        self.assertEqual(
+            startup_readiness_failure(scan_ready=True, odom_ready=True, pose_ready=True),
+            "",
+        )
+
     def test_cmd_vel_ownership_is_exclusive_at_runtime(self):
         self_identity = "/aufgabe04_simple_waypoint_follower"
 
@@ -78,6 +120,33 @@ class FollowerSafetyTest(unittest.TestCase):
             ),
             "external cmd_vel publisher during run: /controller_server, /teleop_keyboard",
         )
+
+    def test_cmd_vel_ownership_never_allows_direct_nav2_publishers(self):
+        self_identity = "/aufgabe04_simple_waypoint_follower"
+
+        self.assertEqual(
+            cmd_vel_ownership_failure(
+                [self_identity, "/behavior_server", "/velocity_smoother"],
+                self_identity,
+                ["/behavior_server", "/velocity_smoother"],
+            ),
+            "external cmd_vel publisher during run: /behavior_server, /velocity_smoother",
+        )
+        self.assertEqual(
+            cmd_vel_ownership_failure(
+                [self_identity, "/behavior_server", "/teleop_keyboard"],
+                self_identity,
+                ["/behavior_server"],
+            ),
+            "external cmd_vel publisher during run: /behavior_server, /teleop_keyboard",
+        )
+
+    def test_nav2_direct_publishers_are_never_allowlistable(self):
+        self.assertTrue(is_non_allowlistable_direct_cmd_vel_publisher("/behavior_server"))
+        self.assertTrue(
+            is_non_allowlistable_direct_cmd_vel_publisher("/robot1/velocity_smoother")
+        )
+        self.assertFalse(is_non_allowlistable_direct_cmd_vel_publisher("/robot1/cmd_vel_mux"))
 
 
 if __name__ == "__main__":
