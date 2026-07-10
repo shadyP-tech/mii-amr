@@ -32,6 +32,7 @@ try:  # pragma: no cover - exercised on ROS hosts.
     import rclpy
     from rclpy.duration import Duration
     from rclpy.node import Node
+    from rclpy.parameter import Parameter
     from rclpy.time import Time
     from sensor_msgs.msg import LaserScan
     from tf2_ros import Buffer, TransformException, TransformListener
@@ -39,6 +40,7 @@ except ImportError:  # pragma: no cover - keeps offline tests ROS-free.
     rclpy = None
     Duration = None
     Node = object
+    Parameter = None
     Time = None
     LaserScan = None
     Buffer = None
@@ -46,7 +48,7 @@ except ImportError:  # pragma: no cover - keeps offline tests ROS-free.
     TransformListener = None
 
 
-OBSERVER_VERSION = "aufgabe04-stand-explorer-observe-only-v2-latest-tf"
+OBSERVER_VERSION = "aufgabe04-stand-explorer-observe-only-v3-latest-tf-sim-time"
 DEFAULT_OUTPUT_JSONL = Path("results/aufgabe04/detected_stations/stand_observations.jsonl")
 
 
@@ -82,6 +84,16 @@ def _transform_age_sec(now_sec: float, transform_stamp_sec: float) -> float:
     return max(0.0, now_sec - transform_stamp_sec)
 
 
+def _node_parameter_overrides(allow_sim_time: bool):
+    """Apply the CLI simulation-time switch to the actual ROS node clock."""
+
+    if not allow_sim_time:
+        return []
+    if Parameter is None:
+        _require_ros()
+    return [Parameter("use_sim_time", Parameter.Type.BOOL, True)]
+
+
 def _yaw_from_quaternion(q) -> float:
     siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
     cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
@@ -90,7 +102,10 @@ def _yaw_from_quaternion(q) -> float:
 
 class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
     def __init__(self, args) -> None:
-        super().__init__("aufgabe04_stand_explorer_observer")
+        super().__init__(
+            "aufgabe04_stand_explorer_observer",
+            parameter_overrides=_node_parameter_overrides(args.allow_sim_time),
+        )
         self.args = args
         self.runtime = resolve_runtime_config(
             RuntimeConfig(

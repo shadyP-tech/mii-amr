@@ -29,6 +29,28 @@ class StandExplorerTfTest(unittest.TestCase):
         finally:
             stand_explorer_node.Time = original_time
 
+    def test_sim_time_override_sets_ros_node_clock_parameter(self):
+        class FakeParameter:
+            class Type:
+                BOOL = "bool"
+
+            def __init__(self, name, parameter_type, value):
+                self.name = name
+                self.parameter_type = parameter_type
+                self.value = value
+
+        original_parameter = stand_explorer_node.Parameter
+        try:
+            stand_explorer_node.Parameter = FakeParameter
+            overrides = stand_explorer_node._node_parameter_overrides(True)
+            self.assertEqual(len(overrides), 1)
+            self.assertEqual(overrides[0].name, "use_sim_time")
+            self.assertEqual(overrides[0].parameter_type, "bool")
+            self.assertTrue(overrides[0].value)
+            self.assertEqual(stand_explorer_node._node_parameter_overrides(False), [])
+        finally:
+            stand_explorer_node.Parameter = original_parameter
+
 
 if __name__ == "__main__":
     unittest.main()
