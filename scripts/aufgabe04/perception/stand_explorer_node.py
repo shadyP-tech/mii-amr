@@ -139,6 +139,7 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
                 min_hits=args.min_hits,
                 max_age_sec=args.max_observation_age_sec,
                 min_confidence=args.min_confidence,
+                min_boundary_clearance_m=args.min_boundary_clearance_m,
             )
         )
         self.observation_count = 0
@@ -207,7 +208,7 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
             map_yaml=str(self.args.map_yaml or ""),
             map_yaml_sha256=file_sha256(self.args.map_yaml) if self.args.map_yaml else "",
         )
-        observations = observations_from_candidates(
+        candidate_observations = observations_from_candidates(
             candidates,
             transform_scan_to_map=PlanarTransform(
                 translation.x,
@@ -218,11 +219,23 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
             provenance=provenance,
             start_index=self.observation_count + 1,
         )
-        self.observation_count += len(observations)
+        self.observation_count += len(candidate_observations)
+        observations = tuple(
+            observation
+            for observation in candidate_observations
+            if self.accumulator.accepts_observation(observation)
+        )
+        rejected_count = len(candidate_observations) - len(observations)
+        if not observations:
+            self.get_logger().info(
+                f"rejected {rejected_count} candidate observations at perception gates"
+            )
+            return
         write_observation_jsonl(self.output_jsonl, observations)
         confirmed = self.accumulator.add_observations(observations)
         self.get_logger().info(
-            f"wrote {len(observations)} observations; confirmed_stands={len(confirmed)}"
+            f"wrote {len(observations)} observations; rejected={rejected_count}; "
+            f"confirmed_stands={len(confirmed)}"
         )
 
 
@@ -250,13 +263,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-range-m", type=float, default=0.08)
     parser.add_argument("--max-range-m", type=float, default=3.5)
     parser.add_argument("--max-cluster-gap-m", type=float, default=0.08)
-    parser.add_argument("--min-cluster-points", type=int, default=3)
+    parser.add_argument("--min-cluster-points", type=int, default=2)
     parser.add_argument("--min-width-m", type=float, default=0.03)
     parser.add_argument("--max-width-m", type=float, default=0.45)
     parser.add_argument("--merge-distance-m", type=float, default=0.18)
     parser.add_argument("--min-hits", type=int, default=3)
     parser.add_argument("--max-observation-age-sec", type=float, default=8.0)
     parser.add_argument("--min-confidence", type=float, default=0.55)
+    parser.add_argument("--min-boundary-clearance-m", type=float, default=0.10)
     return parser
 
 

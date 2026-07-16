@@ -17,6 +17,10 @@ class StandConfirmationConfig:
     min_hits: int = 3
     max_age_sec: float = 8.0
     min_confidence: float = 0.55
+    # Gazebo wall faces are measured about 2 cm inside the nominal arena
+    # boundary.  Real stand centers must leave room for their footprint, so a
+    # 10 cm center clearance cleanly separates the two geometries.
+    min_boundary_clearance_m: float = 0.10
 
 
 @dataclass(frozen=True)
@@ -58,6 +62,8 @@ class StandConfirmationAccumulator:
         arena_bounds: ArenaBounds | None = None,
     ) -> None:
         self.config = config or StandConfirmationConfig()
+        if self.config.min_boundary_clearance_m < 0.0:
+            raise ValueError("minimum boundary clearance must be non-negative")
         self.arena_bounds = arena_bounds or ArenaBounds()
         self.arena_bounds.validate()
         self._tracks: list[_Track] = []
@@ -68,9 +74,7 @@ class StandConfirmationAccumulator:
         return self.confirmed_stands()
 
     def add_observation(self, observation: StandObservation) -> tuple[ConfirmedStand, ...]:
-        if observation.confidence < self.config.min_confidence:
-            return self.confirmed_stands()
-        if not self.arena_bounds.contains(Pose2D(observation.x_m, observation.y_m, 0.0)):
+        if not self.accepts_observation(observation):
             return self.confirmed_stands()
 
         self._expire_before(observation.observed_at_sec - self.config.max_age_sec)
@@ -80,6 +84,19 @@ class StandConfirmationAccumulator:
         else:
             self._tracks[track_index] = _merge_track(self._tracks[track_index], observation, self.config)
         return self.confirmed_stands()
+
+    def accepts_observation(self, observation: StandObservation) -> bool:
+        """Return whether an observation is eligible to enter a stand track."""
+
+        if observation.confidence < self.config.min_confidence:
+            return False
+        pose = Pose2D(observation.x_m, observation.y_m, 0.0)
+        if not self.arena_bounds.contains(pose):
+            return False
+        return (
+            self.arena_bounds.boundary_clearance_m(pose)
+            >= self.config.min_boundary_clearance_m
+        )
 
     def confirmed_stands(self) -> tuple[ConfirmedStand, ...]:
         confirmed = []

@@ -10,6 +10,9 @@ from scripts.aufgabe04.navigation.models import Pose2D
 
 QR_SIDE = "qr_code_side"
 BASIC_SIDE = "basic_color_side"
+DEFAULT_INSPECTION_ANGLE_OFFSETS_RAD = tuple(
+    math.radians(value) for value in (0.0, 45.0, -45.0, 90.0, -90.0, 135.0, -135.0, 180.0)
+)
 
 
 @dataclass(frozen=True)
@@ -41,6 +44,33 @@ def pre_approach_pose(
         stand.y_m + offset_m * math.sin(bearing),
         normalize_angle(bearing + math.pi),
     )
+
+
+def pre_approach_candidates(
+    stand: Pose2D,
+    reference: Pose2D,
+    *,
+    offset_m: float,
+    angle_offsets_rad: tuple[float, ...] = DEFAULT_INSPECTION_ANGLE_OFFSETS_RAD,
+) -> tuple[Pose2D, ...]:
+    """Sample stand-facing inspection poses without using the hidden stand yaw."""
+
+    if offset_m <= 0.0:
+        raise ValueError("pre-approach offset must be positive")
+    if not angle_offsets_rad:
+        raise ValueError("at least one inspection angle offset is required")
+    base_bearing = math.atan2(reference.y_m - stand.y_m, reference.x_m - stand.x_m)
+    candidates = []
+    for angle_offset in angle_offsets_rad:
+        if not math.isfinite(angle_offset):
+            raise ValueError("inspection angle offsets must be finite")
+        bearing = normalize_angle(base_bearing + angle_offset)
+        candidates.append(Pose2D(
+            stand.x_m + offset_m * math.cos(bearing),
+            stand.y_m + offset_m * math.sin(bearing),
+            normalize_angle(bearing + math.pi),
+        ))
+    return tuple(candidates)
 
 
 def qr_facing_pose_from_camera(

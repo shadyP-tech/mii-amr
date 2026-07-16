@@ -38,14 +38,25 @@ class ArenaBounds:
             raise ValueError("arena margin leaves no usable arena width")
 
     def contains(self, pose: Pose2D) -> bool:
+        return self.boundary_clearance_m(pose) >= self.margin_m
+
+    def boundary_clearance_m(self, pose: Pose2D) -> float:
+        """Return signed clearance from a pose to the nearest arena wall.
+
+        Positive values are inside the measured arena, zero is on its
+        boundary, and negative values are outside.  Keeping this independent
+        of ``margin_m`` lets perception reject wall returns while route
+        planning can continue to apply its own placement margin.
+        """
+
         yaw = math.radians(self.yaw_deg)
         dx = pose.x_m - self.center_x_m
         dy = pose.y_m - self.center_y_m
         local_x = math.cos(yaw) * dx + math.sin(yaw) * dy
         local_y = -math.sin(yaw) * dx + math.cos(yaw) * dy
-        half_length = self.length_m / 2.0 - self.margin_m
-        half_width = self.width_m / 2.0 - self.margin_m
-        return abs(local_x) <= half_length and abs(local_y) <= half_width
+        x_clearance = self.length_m / 2.0 - abs(local_x)
+        y_clearance = self.width_m / 2.0 - abs(local_y)
+        return min(x_clearance, y_clearance)
 
     def to_metadata(self) -> dict[str, float]:
         return {

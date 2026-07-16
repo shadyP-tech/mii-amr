@@ -40,13 +40,70 @@ source /opt/ros/humble/setup.bash
 source /opt/tb3_src_ws/install/setup.bash
 scripts/aufgabe04/simulation/spawn_burger_camera.sh
 ros2 topic list | grep -E 'image_raw|camera_info'
+ros2 topic echo /gazebo_ground_truth --once
 ```
 
 The spawn helper generates a simulation-only SDF under `/tmp` with a valid
-80-degree pinhole horizontal field of view. It does not edit the installed
+80-degree pinhole horizontal field of view and a stamped, noise-free Gazebo
+world pose on `/gazebo_ground_truth`. The standalone edge viewer combines that
+pose with the image-nearest `/scan`: only map-wall rays confirmed by LiDAR are
+removed, while closer foreground returns and a geometrically plausible raw
+stand-head probe protect the selected stand corridor. Missing or stale evidence
+disables suppression for that frame. This does not edit the installed
 TurtleBot model or affect the real robot camera configuration. Gazebo publishes
 an uncompressed image, so use the explicitly simulation-only raw-image option
 below; real-robot commands continue to use `--compressed-image-topic`.
+
+## GPT-oriented simulation debug bundles
+
+Use the passive simulation wrapper when a navigation command should produce a
+timestamp-aligned evidence bundle. Gazebo must already be running and `/clock`
+must be visible. The wrapper itself never publishes motion; it only executes
+the command supplied after `--`, captures evidence around it, and returns the
+same exit status.
+
+```bash
+export ROS_DOMAIN_ID=31
+
+RUN_ID=sim_debug_001
+SEMANTIC_LOG=results/aufgabe04/run_events/${RUN_ID}.jsonl
+
+scripts/aufgabe04/simulation/run_with_debug_bundle.sh "$RUN_ID" \
+  --expected "follow leg 0, stop at the pre-approach pose, and face the stand" \
+  --observed "" \
+  --semantic-log "$SEMANTIC_LOG" \
+  --perception-dir results/aufgabe04/debug/e2e_017_dynamic \
+  -- python3 scripts/aufgabe04/navigation/run_single_station_segment.py \
+    --run-id "$RUN_ID" \
+    --semantic-log "$SEMANTIC_LOG" \
+    --allow-sim-time \
+    --localization-source tf \
+    --map-frame odom \
+    --leg-index 0 \
+    --route-csv results/aufgabe04/routes/detected_stand_exploration_route.csv \
+    --diagnostics-json results/aufgabe04/routes/detected_stand_exploration_route_diagnostics.json
+```
+
+The default output is
+`results/aufgabe04/simulation_debug_runs/<run_id>/` and contains:
+
+- `manifest.json`: run intent, world, Git state, counts, paths, and warnings.
+- `summary.md`: compact debugging question and evidence index for a GPT model.
+- `timeline.jsonl`: merged telemetry, runner events, and conservative derived
+  observations such as obstacle-threshold crossings and angular oscillation.
+- `telemetry.jsonl`: 5 Hz odometry, commanded velocity, minimum LiDAR range,
+  and Gazebo model ground truth when `/gazebo/model_states` is available.
+- `frames/`: timestamped onboard frames and an automatically generated contact
+  sheet. Pass `--overview-image-topic` to capture a second Gazebo camera.
+- `perception/`: copied annotated frames, edges, face masks, rectangles, and
+  ROI artifacts supplied with one or more `--perception-dir` options.
+- `plots/trajectory.png` and `plots/velocity.png`.
+- `rosbag/`, terminal output, capture logs, and before/after ROS graph
+  snapshots for raw diagnosis.
+
+Use `--frame-fps 0` or `--no-camera` when only telemetry is needed. Use
+`--no-bag` for a lightweight exploratory run. Existing bundle directories are
+never overwritten.
 
 The two-stage contract is:
 
@@ -58,19 +115,35 @@ LiDAR stand centre + current robot pose
   -> final collision-aware route
 ```
 
-At the stationary pre-approach pose, have the camera viewer continuously write
-validated evidence (replace the four coordinates with the detected stand centre
-and reached pre-approach pose):
+During the simulated approach, have the camera viewer continuously project the
+selected stand from synchronized odometry and write validated evidence. Replace
+the two stand coordinates with the detected candidate; the robot pose comes
+from `/odom` and must not be copied into static command-line arguments:
 
 ```bash
 python3 scripts/aufgabe04/perception/debug/stand_axis_viewer.py \
   --sim-raw-image-topic /camera/image_raw \
-  --axis-source edges --stand-face-size-m 0.078 \
-  --camera-fx-px <fx> --camera-fy-px <fy> \
-  --robot-x <preapproach_x> --robot-y <preapproach_y> \
+  --axis-source edges --stand-face-size-m 0.06993 \
+  --camera-fx-px 381.36246688 --camera-fy-px 381.36246688 \
+  --camera-cx-px 320.5 --camera-cy-px 240.5 \
+  --camera-forward-offset-m 0.076 \
+  --odom-topic /odom --map-frame odom --base-frame base_footprint \
+  --scan-topic /scan --use-lidar-distance \
+  --lidar-bearing-source map-target \
   --stand-x <detected_x> --stand-y <detected_y> \
   --observation-output-json results/aufgabe04/detected_stations/latest_camera_observation.json
 ```
+
+The cyan rectangle in the full camera view marks the exact projected ROI used
+by the edge, face-mask, and rectangle diagnostics.
+
+The measured Gazebo angle-estimation range is documented beside the standalone
+viewer command in the
+[perception debug runbook](../../scripts/aufgabe04/perception/debug/README.md#gazebo-exploratory-angle-estimation-range).
+The exploratory sweep's low-error operating window is approximately
+`0.224-0.374 m` camera optical depth with the stand face within
+`+/-40 degrees`; this is a single-session simulated perception result, not a
+navigation-safe standoff distance or real-camera validation.
 
 Then consume that artifact to compute the final pose and yaw-aware route,
 without reading the hidden layout yaw:

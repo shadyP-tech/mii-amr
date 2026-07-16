@@ -26,6 +26,7 @@ class RouteWaypoint:
     point_index: int
     pose: Pose2D
     cumulative_length_m: float
+    protected: bool = False
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,12 @@ class SelectedRouteLeg:
     executable_waypoints: Tuple[RouteWaypoint, ...]
     route_length_m: float
     thinning_min_spacing_m: float
+    simulation_only: bool = False
+    route_kind: str = ""
+    stream_id: str = ""
+    route_revision: int | None = None
+    target_revision: int | None = None
+    manifest_path: Path | None = None
 
 
 def _parse_int(value: str, field: str, row_number: int) -> int:
@@ -55,6 +62,24 @@ def _parse_finite_float(value: str, field: str, row_number: int) -> float:
     return parsed
 
 
+def _parse_optional_bool(value: str, field: str, row_number: int) -> bool:
+    normalized = value.strip().lower()
+    if normalized in ("", "false", "0", "no"):
+        return False
+    if normalized in ("true", "1", "yes"):
+        return True
+    raise ValueError(f"row {row_number}: {field} must be true or false")
+
+
+def _parse_optional_int(value: str, field: str, row_number: int) -> int | None:
+    if not value.strip():
+        return None
+    parsed = _parse_int(value, field, row_number)
+    if parsed < 0:
+        raise ValueError(f"row {row_number}: {field} must be non-negative")
+    return parsed
+
+
 def _distance(a: RouteWaypoint, b: RouteWaypoint) -> float:
     return math.hypot(a.pose.x_m - b.pose.x_m, a.pose.y_m - b.pose.y_m)
 
@@ -69,7 +94,7 @@ def thin_waypoints(
         return tuple(waypoints)
     thinned: List[RouteWaypoint] = [waypoints[0]]
     for waypoint in waypoints[1:-1]:
-        if _distance(thinned[-1], waypoint) >= min_spacing_m:
+        if waypoint.protected or _distance(thinned[-1], waypoint) >= min_spacing_m:
             thinned.append(waypoint)
     if thinned[-1] != waypoints[-1]:
         thinned.append(waypoints[-1])
@@ -89,6 +114,7 @@ def load_route_leg(
     if thinning_min_spacing_m < 0.0:
         raise ValueError("thinning_min_spacing_m must be non-negative")
     selected: List[RouteWaypoint] = []
+    selected_metadata: List[tuple[bool, str, str, int | None, int | None, str]] = []
     seen_leg_indexes = set()
     with path.open(newline="") as file:
         reader = csv.DictReader(file)
@@ -116,12 +142,38 @@ def load_route_leg(
                 "cumulative_length_m",
                 row_number,
             )
+            protected = _parse_optional_bool(
+                row.get("protected", ""), "protected", row_number
+            )
+            simulation_only = _parse_optional_bool(
+                row.get("simulation_only", ""), "simulation_only", row_number
+            )
+            route_kind = row.get("route_kind", "").strip()
+            stream_id = row.get("stream_id", "").strip()
+            route_revision = _parse_optional_int(
+                row.get("route_revision", ""), "route_revision", row_number
+            )
+            target_revision = _parse_optional_int(
+                row.get("target_revision", ""), "target_revision", row_number
+            )
+            manifest_path = row.get("manifest_path", "").strip()
             selected.append(
                 RouteWaypoint(
                     leg_index=row_leg_index,
                     point_index=point_index,
                     pose=Pose2D(x_m, y_m, yaw_rad),
                     cumulative_length_m=cumulative_length_m,
+                    protected=protected,
+                )
+            )
+            selected_metadata.append(
+                (
+                    simulation_only,
+                    route_kind,
+                    stream_id,
+                    route_revision,
+                    target_revision,
+                    manifest_path,
                 )
             )
 
@@ -138,6 +190,17 @@ def load_route_leg(
             )
 
     route_length_m = selected[-1].cumulative_length_m
+    unique_metadata = set(selected_metadata)
+    if len(unique_metadata) != 1:
+        raise ValueError(f"leg_index {leg_index} has inconsistent route provenance metadata")
+    (
+        simulation_only,
+        route_kind,
+        stream_id,
+        route_revision,
+        target_revision,
+        manifest_text,
+    ) = next(iter(unique_metadata))
     if require_motion:
         if len(selected) < 2:
             raise ValueError(f"leg_index {leg_index} has fewer than two points for motion")
@@ -155,6 +218,12 @@ def load_route_leg(
         executable_waypoints=executable,
         route_length_m=route_length_m,
         thinning_min_spacing_m=thinning_min_spacing_m,
+        simulation_only=simulation_only,
+        route_kind=route_kind,
+        stream_id=stream_id,
+        route_revision=route_revision,
+        target_revision=target_revision,
+        manifest_path=Path(manifest_text) if manifest_text else None,
     )
 
 

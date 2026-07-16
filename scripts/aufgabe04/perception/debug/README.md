@@ -120,13 +120,40 @@ In edge-on mode it overlays the detected vertical line and reports:
 
 The console output mirrors this with either `camera_axis_rotation_proxy=...` or `camera_axis_edge_on_approx_90deg=true`.
 
-The viewer has three optional debug windows with different meanings:
+The viewer can open up to five OpenCV windows. They all come from one process
+and one camera subscription:
 
-- `aufgabe04/stand-axis`: final annotated camera frame.
-- `aufgabe04/stand-axis-edges`: Canny/morphology edge image used by the edge path.
-- `aufgabe04/stand-axis-face-mask`: filled upper-face geometry mask from the edge/silhouette path.
+| Window | Enabling option | Meaning |
+| --- | --- | --- |
+| `aufgabe04/stand-axis` | always shown unless `--headless` is used | Final annotated camera frame. |
+| `aufgabe04/stand-axis-mask` | `--display-mask` | HSV/color segmentation mask. |
+| `aufgabe04/stand-axis-edges` | `--display-edges` | Canny/morphology edge image used by the edge path. |
+| `aufgabe04/stand-axis-side-evidence` | `--display-face-mask` | Native-pixel cutout of untouched, color-agnostic Canny pixels selected independently near the four topology-proposed head sides. The historical option name remains for command compatibility. |
+| `aufgabe04/stand-axis-rectangle` | `--display-rectangle-mask` | Native-pixel cutout of the quadrilateral derived from four independent raw-edge side fits; unsupported fits remain empty. |
 
-Enable the third window with `--display-face-mask`. This is a diagnostic view for checking whether the detector isolated the upper square face before fitting corners. It is not a second detector, not QR decoding input, not side-classification input, not route/navigation input, and not reportable run evidence. It is only shown when the edge/silhouette path produces the face-mask artifact.
+The side evidence and fitted rectangle are independently selectable, so similar
+diagnostic views do not have to be opened together. These are not additional
+detectors, camera subscriptions, QR inputs, navigation inputs, or reportable
+run evidence. To show only the annotated camera frame, omit `--display-mask`,
+`--display-edges`, `--display-face-mask`, and `--display-rectangle-mask`.
+
+In standalone raw-simulation edge mode (`--lidar-bearing-source fixed`), Canny
+is applied to the complete camera frame and `stand-axis-edges` displays that
+complete edge image. The stem-anchored detector then derives a head ROI from
+the detected silhouette; only `stand-axis-side-evidence` and
+`stand-axis-rectangle` are cropped to that dynamic head ROI. In `map-target`
+mode, the synchronized projected target crop remains the input to the edge
+pipeline. The mask and full-edge windows preserve their aspect ratio and are
+capped by `--diagnostic-window-size-px`. The side-evidence and rectangle
+cutouts use OpenCV `WINDOW_AUTOSIZE` at native pixel size; processed pixels are
+never resampled.
+
+Because the simulated camera has zero roll/pitch and every stand head is
+upright, the silhouette fit constrains the left and right head sides to the
+same vertical image direction. Non-simulation edge callers jointly estimate a
+single tolerant side direction instead. Top and bottom remain independently
+sloped under perspective. Only sufficiently covered, outermost raw-Canny side
+fits are accepted; a morphology-only rough rectangle cannot become a pose.
 
 Run it from the Apptainer workstation environment with:
 
@@ -152,6 +179,152 @@ python3 -m scripts.aufgabe04.perception.debug.stand_axis_viewer \
   --display-edges \
   --display-face-mask
 ```
+
+For the standalone Gazebo silhouette viewer, no stand coordinates or odometry
+are required. `fixed` selects the standalone/debug path; it no longer creates a
+fixed projected crop for edge detection. If `/scan` is supplied, the viewer
+queries it at the detected head centre only after the full-frame silhouette is
+available. The last validated head is held for up to 0.35 seconds across a
+brief detector or temporal-outlier gap, preventing a one-frame
+`detected head ROI unavailable` flash. Held estimates are labeled
+`temporal_hold_after_<reason>` in status output and are not counted as fresh
+axis-consensus samples. Set `--head-hold-sec 0` to disable the hold or tune the
+duration explicitly:
+
+```bash
+scripts/aufgabe04/perception/debug/run_stand_axis_viewer.sh \
+  --sim-raw-image-topic /camera/image_raw \
+  --axis-source edges \
+  --stand-face-size-m 0.06993 \
+  --camera-fx-px 381.36246688 \
+  --camera-fy-px 381.36246688 \
+  --camera-cx-px 320.5 \
+  --camera-cy-px 240.5 \
+  --camera-forward-offset-m 0.076 \
+  --scan-topic /scan \
+  --use-lidar-distance \
+  --lidar-bearing-source fixed \
+  --head-hold-sec 0.35 \
+  --edge-dilate-iterations 0 \
+  --edge-close-kernel 3 \
+  --edge-close-iterations 1 \
+  --max-scan-age-sec 1.0 \
+  --max-frame-age-sec 0 \
+  --max-display-fps 15 \
+  --diagnostic-window-size-px 320 \
+  --display-edges \
+  --display-face-mask \
+  --display-rectangle-mask
+```
+
+### Gazebo exploratory angle-estimation range
+
+A 2026-07-16, single-session, 112-frame Gazebo regression sweep exercised the
+current color-agnostic raw edge estimator at four
+robot/base-centre-to-stand-centre ground-plane distances (`0.30`, `0.45`,
+`0.70`, and `0.95 m`) and seven stand-face yaw angles (`-60` through
+`+60 degrees` in `20-degree` steps). It sampled four temporally adjacent frames
+after each simulated pose change. A `0-degree` view was frontal to the stand
+face, and the robot camera yaw was aimed at the head-centre bearing. The sweep
+used the generated `0.06993 m` square head, the `640 x 480` simulated image,
+and the intrinsics and thin-edge settings in the command above.
+
+The camera distance below is camera-frame forward projection depth, not a
+LaserScan range. Because the robot was aimed at the head and the simulated
+camera has a `0.076 m` forward offset, it is
+`robot-centre distance - 0.076 m` for these sweep poses. The head centre is
+`0.072035 m` above the camera centre, so the corresponding full 3D
+camera-centre-to-head-centre range for the recommended depth interval is
+approximately `0.235-0.381 m`.
+
+| Robot centre to stand | Camera optical depth to head | Frontal projected head width | Fresh usable estimates within +/-40 degrees | Mean absolute yaw error of usable estimates |
+| ---: | ---: | ---: | ---: | ---: |
+| `0.30 m` | `0.224 m` | `120.6 px` | `19/20` (`95%`) | `2.65 degrees` |
+| `0.45 m` | `0.374 m` | `71.9 px` | `20/20` (`100%`) | `2.43 degrees` |
+| `0.70 m` | `0.624 m` | `42.9 px` | `18/20` (`90%`) | `8.63 degrees` |
+| `0.95 m` | `0.874 m` | `30.6 px` | `15/20` (`75%`) | `10.16 degrees` |
+
+For conservative angle measurement in this simulation, this sweep supports
+keeping the camera forward depth approximately between `0.224` and `0.374 m`,
+keeping the stand-face yaw within `+/-40 degrees`, and keeping the projected
+head width near `70 px` or larger. The pixel-width value is an empirical
+transition seen in this sweep, not a hard detector threshold. The best tested
+pose was `0.45 m` from the robot centre
+(`0.374 m` camera depth): all 20 frames within `+/-40 degrees` produced fresh
+usable estimates, with `2.43 degrees` mean absolute yaw error. At `0.624 m`
+camera depth the detector still acquired the head in 90% of the tested frames,
+but the `8.63-degree` mean error makes that a detection range rather than a
+reliable angle-measurement range. The `0.874 m` result is not suitable for
+precise axis estimation; even a frontal pose produced one `35.91-degree`
+outlier.
+
+These numbers characterize only the current Gazebo camera, model geometry, and
+edge settings. They do not validate the physical TurtleBot camera. Also do not
+compare the table directly with the viewer's displayed LiDAR distance: camera
+projection depth and a scan ray have different origins and can intersect
+different parts of the stand. The error column is computed only from accepted
+frames and must be read together with the acceptance column. The sweep called
+the raw estimator directly, so it did not test the viewer's temporal gate or
+`0.35 s` hold. With only four adjacent frames at each exact pose, the rates are
+descriptive results rather than independent-trial statistics, a reliability
+guarantee, or a navigation-safe standoff recommendation. The temporary sweep
+harness and data were not recorded with a repository manifest, so repeat and
+persist the experiment before treating these numbers as release evidence.
+
+For synchronized tracking of a known Gazebo stand candidate, this command
+opens four distinct views:
+the full annotated frame, full-frame topology edges, a native-pixel side-evidence
+cutout, and a native-pixel fitted-rectangle cutout. The edge window is capped by
+`--diagnostic-window-size-px`; the two cutouts are never resized. The viewer's
+simulation defaults project the 0.165035 m stand-head centre from the 0.093 m
+camera height. The generated Gazebo head is 0.06993 m square; 0.078 m is the
+physical-stand value and biases simulation PnP.
+Gazebo, the `burger` camera model, `/camera/image_raw`, `/scan`, and `/odom`
+must already be running on ROS domain 31. Replace the stand coordinates below
+with the selected LiDAR candidate. `map-target` synchronizes each camera frame
+with odometry, computes the scan-frame bearing separately from the camera
+bearing, and projects the moving target with the camera extrinsics. The cyan
+rectangle in the full camera view is the exact ROI processed by every
+diagnostic window. Missing/stale odometry or a target outside the camera FOV
+fails closed instead of reverting to a fixed forward wall range:
+
+```bash
+cd /workspace/mii-amr
+
+export ROS_DOMAIN_ID=31
+export TURTLEBOT3_MODEL=burger
+
+scripts/aufgabe04/perception/debug/run_stand_axis_viewer.sh \
+  --sim-raw-image-topic /camera/image_raw \
+  --axis-source edges \
+  --stand-face-size-m 0.06993 \
+  --camera-fx-px 381.36246688 \
+  --camera-fy-px 381.36246688 \
+  --camera-cx-px 320.5 \
+  --camera-cy-px 240.5 \
+  --camera-forward-offset-m 0.076 \
+  --camera-lateral-offset-m 0.0 \
+  --camera-yaw-offset-rad 0.0 \
+  --odom-topic /odom \
+  --map-frame odom \
+  --base-frame base_footprint \
+  --stand-x -0.395 \
+  --stand-y -0.415 \
+  --scan-topic /scan \
+  --use-lidar-distance \
+  --lidar-bearing-source map-target \
+  --max-scan-age-sec 1.0 \
+  --max-frame-age-sec 0 \
+  --max-display-fps 15 \
+  --diagnostic-window-size-px 320 \
+  --display-mask \
+  --display-edges \
+  --display-face-mask
+```
+
+Use standalone `fixed` mode for stationary/manual full-frame silhouette
+debugging. Use `map-target` when the simulated robot translates or rotates
+toward a known candidate.
 
 Approximate yaw degrees require extra geometry:
 

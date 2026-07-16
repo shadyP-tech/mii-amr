@@ -18,6 +18,7 @@ from scripts.aufgabe04.perception.stand_axis_lidar_roi import (  # noqa: E402
     image_center_x_to_bearing_rad,
     load_observation_jsonl,
     median_range_in_scan_cone,
+    nearest_scan_to_stamp,
     write_observation_jsonl,
 )
 
@@ -88,6 +89,36 @@ class StandAxisLidarRoiTest(unittest.TestCase):
         self.assertEqual(query.selected_sample_count, 0)
         self.assertEqual(query.rejection_reason, "too_few_valid_samples")
 
+    def test_nearest_scan_uses_image_header_timestamp(self):
+        scans = (
+            self.make_scan(),
+            PlainLaserScan(
+                ranges=(1.0,),
+                angle_min=0.0,
+                angle_increment=0.1,
+                range_min=0.1,
+                range_max=3.5,
+                scan_frame_id="base_scan",
+                scan_stamp_sec=10.09,
+                receipt_sec=20.0,
+            ),
+        )
+
+        selected = nearest_scan_to_stamp(
+            scans,
+            image_stamp_sec=10.08,
+            tolerance_sec=0.05,
+        )
+
+        self.assertIs(selected, scans[1])
+        self.assertIsNone(
+            nearest_scan_to_stamp(
+                scans,
+                image_stamp_sec=11.0,
+                tolerance_sec=0.05,
+            )
+        )
+
     def test_scan_cone_fails_closed_when_scan_is_stale(self):
         query = median_range_in_scan_cone(
             self.make_scan(),
@@ -138,7 +169,7 @@ class StandAxisLidarRoiTest(unittest.TestCase):
         parser = build_parser()
 
         fixed_args = parser.parse_args(["--compressed-image-topic", "/camera/image_raw/compressed"])
-        dynamic_args = parser.parse_args(
+        image_center_args = parser.parse_args(
             [
                 "--compressed-image-topic",
                 "/camera/image_raw/compressed",
@@ -146,9 +177,18 @@ class StandAxisLidarRoiTest(unittest.TestCase):
                 "image-center",
             ]
         )
+        map_target_args = parser.parse_args(
+            [
+                "--sim-raw-image-topic",
+                "/camera/image_raw",
+                "--lidar-bearing-source",
+                "map-target",
+            ]
+        )
 
         self.assertEqual(fixed_args.lidar_bearing_source, "fixed")
-        self.assertEqual(dynamic_args.lidar_bearing_source, "image-center")
+        self.assertEqual(image_center_args.lidar_bearing_source, "image-center")
+        self.assertEqual(map_target_args.lidar_bearing_source, "map-target")
 
 
 if __name__ == "__main__":

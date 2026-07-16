@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 from scripts.aufgabe04.simulation.generate_gazebo_world import QR_SIZE, qr_matrix
@@ -13,29 +12,45 @@ class SimulatedQrDetection:
     station_id: str
     corners_px: tuple[tuple[float, float], ...]
     mismatch_fraction: float
-    face_yaw_rad: float | None
 
 
 def detect_simulated_station_qr_bgr(
     frame,
     cv2,
     *,
-    camera_fx_px: float | None = None,
-    camera_fy_px: float | None = None,
-    camera_cx_px: float | None = None,
-    camera_cy_px: float | None = None,
+    roi: tuple[int, int, int, int] | None = None,
     station_ids: tuple[str, ...] = ("A", "B", "C"),
     max_mismatch_fraction: float = 0.12,
 ) -> SimulatedQrDetection | None:
-    """Match a simulated QR and recover its face-normal yaw with square PnP."""
+    """Match a simulated QR inside an optional target ROI.
+
+    Returned corners always use full-frame coordinates.  Callers with a known
+    LiDAR stand must pass its projected ROI instead of searching the complete
+    multi-stand image.
+    """
 
     try:
         import numpy
     except ImportError:
         return None
+    x_offset = 0
+    y_offset = 0
+    detection_frame = frame
+    if roi is not None:
+        x0, y0, x1, y1 = roi
+        height, width = frame.shape[:2]
+        x0 = max(0, min(width, int(x0)))
+        x1 = max(0, min(width, int(x1)))
+        y0 = max(0, min(height, int(y0)))
+        y1 = max(0, min(height, int(y1)))
+        if x1 <= x0 or y1 <= y0:
+            return None
+        x_offset, y_offset = x0, y0
+        detection_frame = frame[y0:y1, x0:x1]
+
     detector = cv2.QRCodeDetector()
     try:
-        found, points = detector.detect(frame)
+        found, points = detector.detect(detection_frame)
     except Exception:
         return None
     if not found or points is None:
@@ -44,24 +59,19 @@ def detect_simulated_station_qr_bgr(
     if corners.shape != (4, 2):
         return None
     station_id, mismatch = _match_sampled_qr(
-        frame, cv2, numpy, corners, station_ids=station_ids
+        detection_frame, cv2, numpy, corners, station_ids=station_ids
     )
     if station_id is None or mismatch > max_mismatch_fraction:
         return None
-    face_yaw_rad = _square_face_yaw_rad(
-        cv2,
-        numpy,
-        corners,
-        camera_fx_px=camera_fx_px,
-        camera_fy_px=camera_fy_px,
-        camera_cx_px=camera_cx_px,
-        camera_cy_px=camera_cy_px,
+    full_frame_corners = corners + numpy.asarray(
+        [x_offset, y_offset], dtype=numpy.float32
     )
     return SimulatedQrDetection(
         station_id=station_id,
-        corners_px=tuple((float(point[0]), float(point[1])) for point in corners),
+        corners_px=tuple(
+            (float(point[0]), float(point[1])) for point in full_frame_corners
+        ),
         mismatch_fraction=mismatch,
-        face_yaw_rad=face_yaw_rad,
     )
 
 
@@ -110,41 +120,3 @@ def _match_sampled_qr(frame, cv2, numpy, corners, *, station_ids):
             if mismatch < best_mismatch:
                 best_id, best_mismatch = station_id, mismatch
     return best_id, best_mismatch
-
-
-def _square_face_yaw_rad(
-    cv2,
-    numpy,
-    corners,
-    *,
-    camera_fx_px,
-    camera_fy_px,
-    camera_cx_px,
-    camera_cy_px,
-):
-    values = (camera_fx_px, camera_fy_px, camera_cx_px, camera_cy_px)
-    if any(value is None or not math.isfinite(value) for value in values):
-        return None
-    object_points = numpy.array(
-        [[-0.5, -0.5, 0.0], [0.5, -0.5, 0.0], [0.5, 0.5, 0.0], [-0.5, 0.5, 0.0]],
-        dtype=numpy.float64,
-    )
-    camera_matrix = numpy.array(
-        [[camera_fx_px, 0.0, camera_cx_px], [0.0, camera_fy_px, camera_cy_px], [0.0, 0.0, 1.0]],
-        dtype=numpy.float64,
-    )
-    try:
-        ok, rvec, _tvec = cv2.solvePnP(
-            object_points,
-            corners.astype(numpy.float64),
-            camera_matrix,
-            numpy.zeros((4, 1), dtype=numpy.float64),
-            flags=cv2.SOLVEPNP_ITERATIVE,
-        )
-        if not ok:
-            return None
-        rotation, _jacobian = cv2.Rodrigues(rvec)
-    except Exception:
-        return None
-    normal = rotation @ numpy.array([[0.0], [0.0], [1.0]])
-    return math.atan2(float(normal[0, 0]), abs(float(normal[2, 0])))

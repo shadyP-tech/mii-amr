@@ -81,18 +81,30 @@ def stand_axis_from_camera_yaw(
     stand_x_m: float,
     stand_y_m: float,
     camera_yaw_rad: float,
+    camera_heading_rad: float | None = None,
 ) -> float:
-    """Convert a camera-relative visible-face normal into a map-frame stand axis."""
+    """Convert a camera-relative visible-face normal into a map-frame stand axis.
+
+    ``camera_heading_rad`` is the synchronized optical-axis heading in the map
+    frame.  Callers that do not have camera pose retain the legacy centered-
+    target fallback based on the robot-to-stand line of sight.
+    """
 
     values = (robot_x_m, robot_y_m, stand_x_m, stand_y_m, camera_yaw_rad)
     if not all(math.isfinite(value) for value in values):
         raise ValueError("camera-to-map geometry must be finite")
+    if camera_heading_rad is not None and not math.isfinite(camera_heading_rad):
+        raise ValueError("camera heading must be finite when supplied")
     dx = stand_x_m - robot_x_m
     dy = stand_y_m - robot_y_m
     if math.hypot(dx, dy) <= 1e-6:
         raise ValueError("robot and stand positions must differ")
-    camera_heading_rad = math.atan2(dy, dx)
-    visible_normal_rad = camera_heading_rad + camera_yaw_rad
+    optical_heading_rad = (
+        math.atan2(dy, dx)
+        if camera_heading_rad is None
+        else camera_heading_rad
+    )
+    visible_normal_rad = optical_heading_rad + camera_yaw_rad
     return math.atan2(
         math.sin(visible_normal_rad - math.pi / 2.0),
         math.cos(visible_normal_rad - math.pi / 2.0),

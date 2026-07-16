@@ -21,6 +21,12 @@ from scripts.aufgabe04.navigation.artifacts import (
 from scripts.aufgabe04.navigation.models import Pose2D
 from scripts.aufgabe04.navigation.route_context import build_station_route_dry_run, file_sha256
 from scripts.aufgabe04.navigation.route_overlay import RouteOverlayInput, render_route_overlay_svg
+from scripts.aufgabe04.navigation.two_stage_approach import pre_approach_candidates
+from scripts.aufgabe04.navigation.pre_approach_sampling_state import (
+    initial_sampling_state,
+    load_sampling_state,
+    write_sampling_state,
+)
 from scripts.aufgabe04.perception.stand_confirmation import (
     StandConfirmationAccumulator,
     StandConfirmationConfig,
@@ -58,6 +64,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-x", required=True, type=float)
     parser.add_argument("--start-y", required=True, type=float)
     parser.add_argument("--start-yaw", type=float, default=0.0)
+    parser.add_argument("--pre-approach-reference-x", type=float, default=None)
+    parser.add_argument("--pre-approach-reference-y", type=float, default=None)
+    parser.add_argument(
+        "--pre-approach-candidate-index",
+        type=int,
+        default=None,
+        help="Orientation-blind sampled inspection pose index; advance after an unusable camera view.",
+    )
+    parser.add_argument("--pre-approach-sampling-state-json", type=Path, default=None)
+    parser.add_argument(
+        "--camera-observation-status-json",
+        type=Path,
+        default=None,
+        help="Consume a rejected viewer conditioning status and automatically advance.",
+    )
+    parser.add_argument(
+        "--reject-current-pre-approach",
+        default=None,
+        help="Record why the current camera view was unusable and advance the sampling state.",
+    )
     parser.add_argument("--station-id", default="A")
     parser.add_argument("--stand-yaw-rad", type=float, default=0.0)
     parser.add_argument("--approach-offset-m", type=float, default=0.30)
@@ -66,6 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-hits", type=int, default=3)
     parser.add_argument("--max-observation-age-sec", type=float, default=8.0)
     parser.add_argument("--min-confidence", type=float, default=0.55)
+    parser.add_argument("--min-boundary-clearance-m", type=float, default=0.10)
     parser.add_argument("--max-tf-age-sec", type=float, default=1.0)
     parser.add_argument("--required-map-frame", default="map")
     parser.add_argument("--required-base-frame", default="base_footprint")
@@ -216,6 +243,7 @@ def main(argv: list[str] | None = None) -> int:
                 min_hits=args.min_hits,
                 max_age_sec=args.max_observation_age_sec,
                 min_confidence=args.min_confidence,
+                min_boundary_clearance_m=args.min_boundary_clearance_m,
             ),
             arena_bounds=arena_bounds,
         )
@@ -238,13 +266,80 @@ def main(argv: list[str] | None = None) -> int:
             stand=selected,
             station_id=args.station_id,
         )
+        start_pose = Pose2D(args.start_x, args.start_y, args.start_yaw)
+        if (args.pre_approach_reference_x is None) != (args.pre_approach_reference_y is None):
+            raise ValueError(
+                "--pre-approach-reference-x and --pre-approach-reference-y must be provided together"
+            )
+        inspection_reference = (
+            start_pose
+            if args.pre_approach_reference_x is None
+            else Pose2D(args.pre_approach_reference_x, args.pre_approach_reference_y)
+        )
+        inspection_candidates = pre_approach_candidates(
+            Pose2D(selected.x_m, selected.y_m),
+            inspection_reference,
+            offset_m=args.approach_offset_m,
+        )
+        sampling_state = None
+        if args.pre_approach_sampling_state_json is not None:
+            if args.pre_approach_sampling_state_json.exists():
+                sampling_state = load_sampling_state(args.pre_approach_sampling_state_json)
+                if sampling_state.stand_id != selected.stand_id:
+                    raise ValueError("pre-approach sampling state stand_id mismatch")
+            else:
+                sampling_state = initial_sampling_state(
+                    stand_id=selected.stand_id,
+                    reference_x_m=inspection_reference.x_m,
+                    reference_y_m=inspection_reference.y_m,
+                    candidate_count=len(inspection_candidates),
+                )
+            rejection_reason = args.reject_current_pre_approach
+            if args.camera_observation_status_json is not None:
+                status_payload = json.loads(
+                    args.camera_observation_status_json.read_text()
+                )
+                if status_payload.get("accepted") is True:
+                    raise ValueError(
+                        "camera observation is accepted; do not plan another pre-approach"
+                    )
+                rejection_reason = str(
+                    status_payload.get("reason", "no_usable_observation")
+                )
+            if rejection_reason is not None:
+                sampling_state = sampling_state.reject_current(
+                    rejection_reason
+                )
+            selected_candidate_index = sampling_state.candidate_index
+        else:
+            if (
+                args.reject_current_pre_approach is not None
+                or args.camera_observation_status_json is not None
+            ):
+                raise ValueError(
+                    "camera rejection inputs require --pre-approach-sampling-state-json"
+                )
+            selected_candidate_index = (
+                0
+                if args.pre_approach_candidate_index is None
+                else args.pre_approach_candidate_index
+            )
+        if not 0 <= selected_candidate_index < len(inspection_candidates):
+            raise ValueError(
+                f"--pre-approach-candidate-index must be in [0, {len(inspection_candidates) - 1}]"
+            )
+        inspection_pose = inspection_candidates[selected_candidate_index]
         station = station_from_confirmed_stand(
             selected,
             config=DetectedStationLayoutConfig(
                 station_id=args.station_id,
                 approach_offset_m=args.approach_offset_m,
                 keepout_radius_m=args.keepout_radius_m,
-                stand_yaw_rad=args.stand_yaw_rad,
+                # This yaw describes the orientation-blind inspection target,
+                # not the unknown physical stand/QR orientation.  The regular
+                # station target convention places the robot opposite this
+                # heading and therefore at inspection_pose.
+                stand_yaw_rad=inspection_pose.yaw_rad,
                 arena_length_m=args.arena_length_m,
                 arena_width_m=args.arena_width_m,
                 arena_center_x_m=args.arena_center_x_m,
@@ -263,6 +358,21 @@ def main(argv: list[str] | None = None) -> int:
                 "required_base_frame": args.required_base_frame,
                 "confirmation_json": str(args.confirmation_json),
                 "confirmation": confirmation,
+                "pre_approach": {
+                    "x_m": inspection_pose.x_m,
+                    "y_m": inspection_pose.y_m,
+                    "yaw_rad": inspection_pose.yaw_rad,
+                    "orientation_source": "robot_to_detected_stand_bearing",
+                    "hidden_stand_yaw_used": False,
+                    "reference_x_m": inspection_reference.x_m,
+                    "reference_y_m": inspection_reference.y_m,
+                    "candidate_index": selected_candidate_index,
+                    "candidate_count": len(inspection_candidates),
+                    "candidate_poses": [
+                        {"x_m": pose.x_m, "y_m": pose.y_m, "yaw_rad": pose.yaw_rad}
+                        for pose in inspection_candidates
+                    ],
+                },
             },
         )
 
@@ -271,7 +381,7 @@ def main(argv: list[str] | None = None) -> int:
             [station.station_id],
             station_map={station.station_id: station},
             station_layout_json=args.layout_json,
-            start=Pose2D(args.start_x, args.start_y, args.start_yaw),
+            start=start_pose,
             inflation_radius_m=args.inflation_radius_m,
             snap_radius_m=args.snap_radius_m,
             arena_bounds=arena_bounds,
@@ -282,8 +392,14 @@ def main(argv: list[str] | None = None) -> int:
 
         route_metadata = dict(dry_run.metadata)
         route_metadata["detected_station"] = metadata
-        write_route_csv(args.route_csv, dry_run.results)
+        write_route_csv(
+            args.route_csv,
+            dry_run.results,
+            final_yaw_by_leg={0: inspection_pose.yaw_rad},
+        )
         write_diagnostics_json(args.diagnostics_json, dry_run.results, metadata=route_metadata)
+        if args.pre_approach_sampling_state_json is not None:
+            write_sampling_state(args.pre_approach_sampling_state_json, sampling_state)
         failed = any(result.failure is not None for result in dry_run.results)
         if args.overlay_svg is not None:
             overlay_input = RouteOverlayInput(

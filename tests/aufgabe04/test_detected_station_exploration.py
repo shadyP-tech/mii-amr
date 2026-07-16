@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import math
 import sys
@@ -216,6 +217,34 @@ class DetectedStationExplorationTest(unittest.TestCase):
         confirmed = accumulator.add_observation(observation(3, observed_at=12.0))
 
         self.assertEqual(confirmed, ())
+
+    def test_accumulator_rejects_repeated_wall_returns_by_boundary_clearance(self):
+        accumulator = StandConfirmationAccumulator(
+            config=StandConfirmationConfig(min_hits=3, min_confidence=0.5)
+        )
+        wall_returns = [
+            observation(index, x=-1.93 + offset, y=-0.40, observed_at=float(index))
+            for index, offset in enumerate((0.0, 0.01, -0.005), start=1)
+        ]
+
+        confirmed = accumulator.add_observations(wall_returns)
+
+        self.assertEqual(confirmed, ())
+        self.assertFalse(accumulator.accepts_observation(wall_returns[0]))
+
+    def test_accumulator_keeps_legitimate_stand_clear_of_boundary(self):
+        accumulator = StandConfirmationAccumulator(
+            config=StandConfirmationConfig(min_hits=3, min_confidence=0.5)
+        )
+        stand_returns = [
+            observation(index, x=0.405 + offset, y=0.685, observed_at=float(index))
+            for index, offset in enumerate((0.0, 0.01, -0.005), start=1)
+        ]
+
+        confirmed = accumulator.add_observations(stand_returns)
+
+        self.assertEqual(len(confirmed), 1)
+        self.assertTrue(accumulator.accepts_observation(stand_returns[0]))
 
     def test_confirmed_stand_converts_to_station_layout(self):
         accumulator = StandConfirmationAccumulator(
@@ -508,6 +537,18 @@ class DetectedStationExplorationTest(unittest.TestCase):
             self.assertEqual(
                 diagnostics["metadata"]["detected_station"]["confirmation"]["station_id"],
                 "A",
+            )
+            pre_approach = diagnostics["metadata"]["detected_station"]["pre_approach"]
+            self.assertFalse(pre_approach["hidden_stand_yaw_used"])
+            self.assertEqual(
+                pre_approach["orientation_source"],
+                "robot_to_detected_stand_bearing",
+            )
+            with route_csv.open(newline="") as route_file:
+                route_rows = list(csv.DictReader(route_file))
+            self.assertAlmostEqual(
+                float(route_rows[-1]["yaw_rad"]),
+                float(pre_approach["yaw_rad"]),
             )
 
     def test_plan_first_detected_station_rejects_missing_confirmation(self):

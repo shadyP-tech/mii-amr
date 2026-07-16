@@ -25,6 +25,55 @@ def main() -> int:
     )
     if count != 1:
         raise SystemExit("source SDF does not contain exactly one camera horizontal_fov")
+    patched, sensor_count = re.subn(
+        r'<sensor name="camera" type="wideanglecamera">',
+        '<sensor name="camera" type="camera">',
+        patched,
+        count=1,
+    )
+    if sensor_count != 1:
+        raise SystemExit("source SDF does not contain the expected wide-angle camera sensor")
+    patched, visualize_count = re.subn(
+        r'(<sensor name="camera" type="camera">.*?<visualize>)true(</visualize>)',
+        r"\1false\2",
+        patched,
+        count=1,
+        flags=re.DOTALL,
+    )
+    if visualize_count != 1:
+        raise SystemExit("source SDF does not contain the expected camera visualize flag")
+    patched, lens_count = re.subn(
+        r"\s*<lens>.*?</lens>",
+        "",
+        patched,
+        count=1,
+        flags=re.DOTALL,
+    )
+    if lens_count != 1:
+        raise SystemExit("source SDF does not contain the expected custom lens block")
+    patched, width_count = re.subn(r"<width>320</width>", "<width>640</width>", patched, count=1)
+    patched, height_count = re.subn(r"<height>240</height>", "<height>480</height>", patched, count=1)
+    if width_count != 1 or height_count != 1:
+        raise SystemExit("source SDF does not contain the expected 320x240 camera image")
+    ground_truth_plugin = """
+    <plugin name="aufgabe04_gazebo_ground_truth" filename="libgazebo_ros_p3d.so">
+      <ros><remapping>odom:=/gazebo_ground_truth</remapping></ros>
+      <body_name>base_footprint</body_name>
+      <frame_name>world</frame_name>
+      <update_rate>30</update_rate>
+      <xyz_offset>0 0 0</xyz_offset>
+      <rpy_offset>0 0 0</rpy_offset>
+      <gaussian_noise>0</gaussian_noise>
+    </plugin>
+"""
+    patched, model_count = re.subn(
+        r"</model>",
+        ground_truth_plugin + "  </model>",
+        patched,
+        count=1,
+    )
+    if model_count != 1:
+        raise SystemExit("source SDF does not contain exactly one model closing tag")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(patched)
     print(args.output)

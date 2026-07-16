@@ -184,3 +184,9 @@ The default LiDAR mode remains the fixed scan-frame cone. The optional
 through processed-image intrinsics and an optional measured camera-to-LiDAR yaw
 offset. Treat that mapping as a calibration assumption until it has been
 validated on the actual TurtleBot.
+
+Gazebo additionally supports `--lidar-bearing-source map-target`. That mode is
+simulation-only: it synchronizes `/camera/image_raw` with `/odom`, derives the
+LaserScan bearing from the selected stand's map coordinates, and projects the
+camera ROI with the simulated camera extrinsics. It fails closed on stale or
+mismatched odometry and never changes the real-camera fixed/image-center path.

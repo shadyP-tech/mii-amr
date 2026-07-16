@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -20,6 +21,13 @@ from scripts.aufgabe04.navigation.ros_runtime_config import (
     resolve_runtime_config,
 )
 from scripts.aufgabe04.navigation.run_events import configure_event_logger, emit_event
+from scripts.aufgabe04.navigation.dynamic_route_handoff import DynamicRouteSource
+from scripts.aufgabe04.navigation.route_revision_store import (
+    LoadedRouteRevision,
+    RouteRevisionError,
+    read_committed_revision,
+    read_route_revision,
+)
 from scripts.aufgabe04.navigation.safety_checks import (
     validate_route_diagnostics_json,
     validate_speed_limits,
@@ -27,6 +35,7 @@ from scripts.aufgabe04.navigation.safety_checks import (
 from scripts.aufgabe04.navigation.segment_run_logger import append_segment_run
 from scripts.aufgabe04.navigation.follower_models import FollowerResult
 from scripts.aufgabe04.navigation.simple_waypoint_follower import (
+    DYNAMIC_VIEWPOINT_ROUTE_KINDS,
     FollowerConfig,
     run_simple_waypoint_follower,
 )
@@ -61,6 +70,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-linear-mps", type=float, default=0.055)
     parser.add_argument("--max-angular-radps", type=float, default=0.18)
     parser.add_argument("--goal-tolerance-m", type=float, default=0.08)
+    parser.add_argument(
+        "--physical-goal-tolerance-m",
+        type=float,
+        default=0.03,
+        help=(
+            "Simulation dynamic physical-face routes use at most this terminal "
+            "position tolerance; acquisition and sampling retain --goal-tolerance-m."
+        ),
+    )
     parser.add_argument("--heading-tolerance-rad", type=float, default=0.25)
     parser.add_argument("--lookahead-distance-m", type=float, default=0.18)
     parser.add_argument("--slow-heading-error-rad", type=float, default=0.75)
@@ -78,9 +96,79 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--preflight-observation-window-sec", type=float, default=2.0)
     parser.add_argument("--initial-sensor-wait-sec", type=float, default=2.0)
     parser.add_argument("--waypoint-timeout-sec", type=float, default=45.0)
+    parser.add_argument(
+        "--axis-acquisition-wait-timeout-sec",
+        type=float,
+        default=12.0,
+        help=(
+            "Simulation-only stationary hold at an axis_acquisition goal while "
+            "waiting for a committed physical-face route revision."
+        ),
+    )
+    parser.add_argument(
+        "--viewpoint-sampling-timeout-sec",
+        type=float,
+        default=30.0,
+        help=(
+            "Simulation-only total budget for the viewpoint-sampling phase, "
+            "including travel and stationary observation."
+        ),
+    )
+    parser.add_argument(
+        "--viewpoint-sampling-goal-tolerance-m",
+        type=float,
+        default=0.01,
+        help=(
+            "Simulation-only position tolerance for tangential camera samples; "
+            "kept tighter than generic transit so angular viewpoint corrections "
+            "are not consumed by position tolerance."
+        ),
+    )
+    parser.add_argument(
+        "--viewpoint-sampling-heading-tolerance-rad",
+        type=float,
+        default=math.radians(5.0),
+        help=(
+            "Simulation-only terminal heading tolerance for camera sampling; "
+            "kept tight enough for the stand to satisfy the image-centering gate."
+        ),
+    )
     parser.add_argument("--stuck-timeout-sec", type=float, default=8.0)
     parser.add_argument("--stuck-progress-epsilon-m", type=float, default=0.03)
     parser.add_argument("--initial-distance-limit-m", type=float, default=0.35)
+    parser.add_argument(
+        "--dynamic-route-refresh-sec",
+        type=float,
+        default=0.0,
+        help="Simulation-only: hot-reload an atomically replaced A* route at this interval.",
+    )
+    parser.add_argument(
+        "--route-manifest",
+        type=Path,
+        default=None,
+        help="Authoritative simulation route-revision manifest (required for dynamic viewpoint routes).",
+    )
+    parser.add_argument("--max-route-manifest-age-sec", type=float, default=7.0)
+    parser.add_argument("--max-route-observation-age-sec", type=float, default=6.0)
+    parser.add_argument("--max-route-join-distance-m", type=float, default=0.35)
+    parser.add_argument(
+        "--dynamic-route-join-tolerance-m",
+        type=float,
+        default=0.02,
+        help=(
+            "Simulation-only tolerance for completing the certified join anchor "
+            "after a live route revision."
+        ),
+    )
+    parser.add_argument(
+        "--dynamic-route-terminal-lock-distance-m",
+        type=float,
+        default=0.42,
+        help=(
+            "Simulation-only distance at which the installed terminal route remains "
+            "valid while newer target revisions continue to be polled."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--allow-noop", action="store_true")
     parser.add_argument(
@@ -121,6 +209,9 @@ def _physical_checklist(args, resolved) -> None:
 
 
 def _confirm_motion(args, resolved) -> bool:
+    if args.allow_sim_time:
+        print("Simulation run detected (--allow-sim-time); starting without a blocking RUN prompt.")
+        return True
     _physical_checklist(args, resolved)
     response = input("Type RUN to start station-segment following: ").strip()
     return response == "RUN"
@@ -211,9 +302,116 @@ def _observation_log_rows(observations) -> list[dict[str, object]]:
     ]
 
 
+def _authoritative_route_paths(
+    args,
+) -> tuple[Path, Path, LoadedRouteRevision | None]:
+    manifest_path = args.route_manifest
+    if manifest_path is None:
+        candidate = args.route_csv.with_suffix(".manifest.json")
+        if candidate.exists():
+            manifest_path = candidate
+    if manifest_path is None:
+        return args.route_csv, args.diagnostics_json, None
+    manifest_path = Path(manifest_path)
+    if not manifest_path.exists():
+        raise ValueError(f"route manifest does not exist: {manifest_path}")
+    committed = read_committed_revision(
+        manifest_path,
+        now_unix_sec=datetime.now(timezone.utc).timestamp(),
+        # A one-shot synchronized camera/LiDAR route is no safer to execute
+        # stale than a hot-reloaded one.  Every authoritative simulation
+        # revision is freshness-gated before preflight or motion.
+        max_manifest_age_sec=args.max_route_manifest_age_sec,
+        max_observation_age_sec=args.max_route_observation_age_sec,
+    )
+    if committed.status != "active" or committed.route_path is None:
+        raise ValueError(f"authoritative route is withdrawn: {committed.reason}")
+    if committed.diagnostics_path is None:
+        raise ValueError("authoritative route manifest has no diagnostics artifact")
+    args.route_manifest = manifest_path
+    return committed.route_path, committed.diagnostics_path, committed
+
+
+def _revalidate_authoritative_route_before_motion(
+    args, committed: LoadedRouteRevision
+) -> None:
+    """Require the exact initially validated revision to remain live."""
+
+    latest = read_route_revision(
+        committed.manifest_path,
+        expected_stream_id=str(committed.manifest["stream_id"]),
+        expected_writer_id=committed.writer_id,
+        last_route_revision=committed.route_revision,
+        last_manifest_sha256=committed.manifest_sha256,
+        max_manifest_age_sec=args.max_route_manifest_age_sec,
+        max_observation_age_sec=args.max_route_observation_age_sec,
+        now_unix_sec=datetime.now(timezone.utc).timestamp(),
+    )
+    same_authorized_route = (
+        latest.status == "active"
+        and latest.route_hash == committed.route_hash
+        and latest.target_revision == committed.target_revision
+        and latest.writer_id == committed.writer_id
+        and latest.writer_generation == committed.writer_generation
+    )
+    if not latest.duplicate and not same_authorized_route:
+        raise RouteRevisionError(
+            "route_changed_before_motion",
+            "authoritative route changed or was withdrawn before motion authorization",
+        )
+    if latest.status != "active" or latest.route_hash != committed.route_hash:
+        raise RouteRevisionError(
+            "route_changed_before_motion",
+            "authoritative route artifact changed before motion authorization",
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.dynamic_route_refresh_sec < 0.0:
+        parser.error("--dynamic-route-refresh-sec must be non-negative")
+    if args.dynamic_route_refresh_sec > 0.0 and not args.allow_sim_time:
+        parser.error("dynamic route hot-reload is simulation-only and requires --allow-sim-time")
+    if args.max_route_manifest_age_sec <= 0.0 or args.max_route_observation_age_sec <= 0.0:
+        parser.error("dynamic route freshness limits must be positive")
+    if args.max_route_join_distance_m <= 0.0:
+        parser.error("--max-route-join-distance-m must be positive")
+    if (
+        not math.isfinite(args.axis_acquisition_wait_timeout_sec)
+        or args.axis_acquisition_wait_timeout_sec <= 0.0
+    ):
+        parser.error("--axis-acquisition-wait-timeout-sec must be positive")
+    if (
+        not math.isfinite(args.viewpoint_sampling_timeout_sec)
+        or args.viewpoint_sampling_timeout_sec <= 0.0
+    ):
+        parser.error("--viewpoint-sampling-timeout-sec must be positive")
+    if (
+        not math.isfinite(args.physical_goal_tolerance_m)
+        or args.physical_goal_tolerance_m <= 0.0
+    ):
+        parser.error("--physical-goal-tolerance-m must be positive")
+    if (
+        not math.isfinite(args.viewpoint_sampling_goal_tolerance_m)
+        or args.viewpoint_sampling_goal_tolerance_m <= 0.0
+    ):
+        parser.error("--viewpoint-sampling-goal-tolerance-m must be positive")
+    if (
+        not math.isfinite(args.viewpoint_sampling_heading_tolerance_rad)
+        or args.viewpoint_sampling_heading_tolerance_rad <= 0.0
+    ):
+        parser.error("--viewpoint-sampling-heading-tolerance-rad must be positive")
+    if (
+        not math.isfinite(args.dynamic_route_join_tolerance_m)
+        or args.dynamic_route_join_tolerance_m <= 0.0
+    ):
+        parser.error("--dynamic-route-join-tolerance-m must be positive")
+    if (
+        not math.isfinite(args.dynamic_route_terminal_lock_distance_m)
+        or args.dynamic_route_terminal_lock_distance_m <= 0.0
+    ):
+        parser.error("--dynamic-route-terminal-lock-distance-m must be positive")
     args.run_id = args.run_id or f"aufgabe04-segment-{uuid.uuid4().hex[:8]}"
     args.semantic_log = args.semantic_log or DEFAULT_EVENT_LOG_DIR / f"{args.run_id}.jsonl"
     event_logger = configure_event_logger(args.semantic_log)
@@ -231,6 +429,22 @@ def main(argv: list[str] | None = None) -> int:
         use_sim_time=args.allow_sim_time,
     )
     resolved = resolve_runtime_config(runtime_config)
+    try:
+        route_csv_path, diagnostics_json_path, committed_route = _authoritative_route_paths(args)
+    except (OSError, ValueError, RouteRevisionError) as exc:
+        emit_event(
+            event_logger,
+            "route_manifest_rejected",
+            run_id=args.run_id,
+            status="failed",
+            stop_reason=str(exc),
+            route_manifest=str(args.route_manifest or ""),
+        )
+        parser.exit(2, f"error: authoritative route validation failed: {exc}\n")
+    if committed_route is not None and not args.allow_sim_time:
+        parser.exit(2, "error: authoritative dynamic route is simulation-only\n")
+    if args.dynamic_route_refresh_sec > 0.0 and committed_route is None:
+        parser.exit(2, "error: dynamic route refresh requires an authoritative route manifest\n")
     emit_event(
         event_logger,
         "run_started",
@@ -238,6 +452,9 @@ def main(argv: list[str] | None = None) -> int:
         robot_id=args.robot_id,
         route_csv=str(args.route_csv),
         diagnostics_json=str(args.diagnostics_json),
+        authoritative_route_csv=str(route_csv_path),
+        authoritative_diagnostics_json=str(diagnostics_json_path),
+        route_manifest=str(args.route_manifest or ""),
         leg_index=args.leg_index,
         results_csv=str(args.results_csv),
         semantic_log_path=str(args.semantic_log),
@@ -260,12 +477,36 @@ def main(argv: list[str] | None = None) -> int:
         ros_domain_id=resolved.ros_domain_id,
         allow_sim_time=args.allow_sim_time,
     )
+    if committed_route is not None:
+        manifest = committed_route.manifest
+        emit_event(
+            event_logger,
+            "authoritative_route_resolved",
+            run_id=args.run_id,
+            leg_index=args.leg_index,
+            route_manifest=str(committed_route.manifest_path),
+            manifest_sha256=committed_route.manifest_sha256,
+            stream_id=manifest["stream_id"],
+            writer_id=committed_route.writer_id,
+            writer_generation=committed_route.writer_generation,
+            route_revision=committed_route.route_revision,
+            target_revision=committed_route.target_revision,
+            route_sha256=committed_route.route_hash,
+            published_unix_sec=manifest["published_unix_sec"],
+            observation_unix_sec=manifest["observation_unix_sec"],
+            source_robot_pose=manifest.get("source_robot_pose", {}),
+            target=manifest.get("target", {}),
+            previous_route_length_m=manifest.get("previous_route_length_m"),
+            new_route_length_m=manifest.get("new_route_length_m"),
+        )
     try:
         leg = load_route_leg(
-            args.route_csv,
+            route_csv_path,
             args.leg_index,
             require_motion=require_motion,
-            thinning_min_spacing_m=args.thinning_min_spacing_m,
+            thinning_min_spacing_m=(
+                0.0 if committed_route is not None else args.thinning_min_spacing_m
+            ),
         )
     except (OSError, ValueError) as exc:
         emit_event(
@@ -288,8 +529,23 @@ def main(argv: list[str] | None = None) -> int:
         )
         parser.exit(2, f"error: route validation failed: {exc}\n")
 
+    if leg.route_kind in DYNAMIC_VIEWPOINT_ROUTE_KINDS and not leg.simulation_only:
+        parser.exit(2, "error: dynamic viewpoint route is missing simulation_only provenance\n")
+    if leg.route_kind in DYNAMIC_VIEWPOINT_ROUTE_KINDS and committed_route is None:
+        parser.exit(2, "error: dynamic viewpoint route requires its authoritative manifest\n")
+    if leg.simulation_only and not args.allow_sim_time:
+        parser.exit(
+            2,
+            "error: simulation-only synchronized-viewpoint routes require --allow-sim-time\n",
+        )
+    if committed_route is not None and leg.route_kind not in DYNAMIC_VIEWPOINT_ROUTE_KINDS:
+        parser.exit(
+            2,
+            f"error: authoritative route has unknown dynamic route kind: {leg.route_kind!r}\n",
+        )
+
     diagnostics_status = validate_route_diagnostics_json(
-        args.diagnostics_json,
+        diagnostics_json_path,
         args.leg_index,
         csv_point_count=len(leg.raw_waypoints),
         require_motion=require_motion,
@@ -496,6 +752,55 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    if committed_route is not None:
+        try:
+            _revalidate_authoritative_route_before_motion(args, committed_route)
+        except (OSError, RouteRevisionError) as exc:
+            stop_reason = f"authoritative route revalidation failed: {exc}"
+            emit_event(
+                event_logger,
+                "route_manifest_rejected",
+                run_id=args.run_id,
+                leg_index=leg.leg_index,
+                status="stopped",
+                phase="immediately_before_motion",
+                stop_reason=stop_reason,
+                route_manifest=str(committed_route.manifest_path),
+            )
+            result = FollowerResult(
+                "stopped",
+                stop_reason,
+                0.0,
+                0.0,
+                False,
+                {
+                    "fault_code": getattr(exc, "code", "route_revalidation_io"),
+                    "fail_closed": True,
+                },
+            )
+            _append_result(args, resolved, leg, preflight_ok=True, result=result)
+            emit_event(
+                event_logger,
+                "safety_stop",
+                run_id=args.run_id,
+                leg_index=leg.leg_index,
+                status=result.status,
+                stop_reason=result.stop_reason,
+                motion_published=False,
+                stop_details=result.stop_details,
+            )
+            emit_event(
+                event_logger,
+                "run_finished",
+                run_id=args.run_id,
+                final_status=result.status,
+                stop_reason=result.stop_reason,
+                results_csv=str(args.results_csv),
+                semantic_log_path=str(args.semantic_log),
+                preflight_json_path=str(args.preflight_json or ""),
+            )
+            return 1
+
     follower_config = FollowerConfig(
         controller=ControllerConfig(
             max_linear_mps=args.max_linear_mps,
@@ -507,6 +812,14 @@ def main(argv: list[str] | None = None) -> int:
             stop_heading_error_rad=args.stop_heading_error_rad,
             min_linear_speed_scale=args.min_linear_speed_scale,
             max_progress_advance_m=args.max_progress_advance_m,
+            enforce_heading_corridor=(
+                committed_route is not None
+                and leg.route_kind
+                in {
+                    "synchronized_viewpoint",
+                    "synchronized_face_approach",
+                }
+            ),
         ),
         min_obstacle_distance_m=args.min_obstacle_distance_m,
         front_obstacle_slow_distance_m=args.front_obstacle_slow_distance_m,
@@ -520,7 +833,59 @@ def main(argv: list[str] | None = None) -> int:
         stuck_progress_epsilon_m=args.stuck_progress_epsilon_m,
         initial_distance_limit_m=args.initial_distance_limit_m,
         allowed_cmd_vel_publishers=tuple(args.allowed_cmd_vel_publisher),
+        dynamic_route_refresh_sec=args.dynamic_route_refresh_sec,
+        dynamic_join_tolerance_m=args.dynamic_route_join_tolerance_m,
+        initial_route_kind=leg.route_kind,
+        axis_acquisition_wait_timeout_sec=args.axis_acquisition_wait_timeout_sec,
+        viewpoint_sampling_timeout_sec=args.viewpoint_sampling_timeout_sec,
+        viewpoint_sampling_goal_tolerance_m=(
+            args.viewpoint_sampling_goal_tolerance_m
+        ),
+        viewpoint_sampling_heading_tolerance_rad=(
+            args.viewpoint_sampling_heading_tolerance_rad
+        ),
+        physical_goal_tolerance_m=args.physical_goal_tolerance_m,
     )
+    waypoint_provider = None
+    route_update_callback = None
+    if committed_route is not None:
+        assert committed_route is not None and args.route_manifest is not None
+        route_source = DynamicRouteSource(
+            args.route_manifest,
+            stream_id=str(committed_route.manifest["stream_id"]),
+            leg_index=args.leg_index,
+            expected_writer_id=committed_route.writer_id,
+            max_manifest_age_sec=args.max_route_manifest_age_sec,
+            max_observation_age_sec=args.max_route_observation_age_sec,
+            max_join_distance_m=args.max_route_join_distance_m,
+            terminal_route_lock_distance_m=(
+                args.dynamic_route_terminal_lock_distance_m
+            ),
+            # The dynamic planner already emitted a collision-checked,
+            # shortcut route. Generic thinning could create an unchecked
+            # chord, so authoritative dynamic revisions are never re-thinned.
+            thinning_min_spacing_m=0.0,
+        )
+
+        def waypoint_provider(pose):
+            return route_source.poll(pose)
+
+        def route_update_callback(update):
+            event_name = {
+                "dynamic_route_adopted": "route_reloaded",
+                "dynamic_route_withdrawn": "route_withdrawn",
+                "dynamic_route_rejected": "route_reload_rejected",
+                "dynamic_route_stopped": "route_reload_rejected",
+            }.get(update.event_name, update.event_name)
+            if event_name is None:
+                return
+            emit_event(
+                event_logger,
+                event_name,
+                run_id=args.run_id,
+                leg_index=args.leg_index,
+                **dict(update.event_fields),
+            )
     emit_event(
         event_logger,
         "motion_started",
@@ -532,6 +897,8 @@ def main(argv: list[str] | None = None) -> int:
         resolved,
         poses_from_waypoints(leg.executable_waypoints),
         follower_config,
+        waypoint_provider,
+        route_update_callback,
     )
     _append_result(args, resolved, leg, preflight_ok=True, result=result)
     motion_event_fields = {

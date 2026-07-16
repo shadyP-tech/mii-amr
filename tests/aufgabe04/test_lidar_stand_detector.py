@@ -81,7 +81,21 @@ class LidarStandDetectorTest(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0].point_count, 3)
 
+    def test_default_detector_accepts_two_beam_distant_stand_head(self):
+        ranges = scan_with_returns([], total=360, default_range=5.0)
+        ranges[27] = 1.65
+        ranges[28] = 1.64
+
+        candidates = detect_stand_candidates_from_scan(
+            ranges,
+            angle_min_rad=0.0,
+            angle_increment_rad=0.01749303564429283,
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].point_count, 2)
+        self.assertGreater(candidates[0].confidence, 0.55)
+
 
 if __name__ == "__main__":
     unittest.main()
-

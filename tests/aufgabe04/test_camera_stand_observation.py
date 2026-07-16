@@ -25,6 +25,24 @@ def observation(**changes):
 
 
 class CameraStandObservationTest(unittest.TestCase):
+    def test_explicit_camera_heading_is_invariant_to_off_center_target(self):
+        axis = stand_axis_from_camera_yaw(
+            robot_x_m=math.cos(math.radians(60.0)),
+            robot_y_m=math.sin(math.radians(60.0)),
+            stand_x_m=0.0,
+            stand_y_m=0.0,
+            camera_yaw_rad=math.radians(-1.586),
+            camera_heading_rad=math.radians(-132.0),
+        )
+
+        axial_error = 0.5 * abs(
+            math.atan2(
+                math.sin(2.0 * (axis - math.radians(136.414))),
+                math.cos(2.0 * (axis - math.radians(136.414))),
+            )
+        )
+        self.assertAlmostEqual(math.degrees(axial_error), 0.0, places=6)
+
     def test_camera_face_normal_is_converted_to_map_stand_axis(self):
         axis = stand_axis_from_camera_yaw(
             robot_x_m=0.0,
@@ -34,6 +52,17 @@ class CameraStandObservationTest(unittest.TestCase):
             camera_yaw_rad=0.0,
         )
         self.assertAlmostEqual(axis, -math.pi / 2.0)
+
+    def test_positive_left_camera_yaw_rotates_map_axis_counterclockwise(self):
+        axis = stand_axis_from_camera_yaw(
+            robot_x_m=0.0,
+            robot_y_m=0.0,
+            stand_x_m=1.0,
+            stand_y_m=0.0,
+            camera_yaw_rad=math.radians(30.0),
+        )
+
+        self.assertAlmostEqual(axis, math.radians(-60.0), places=7)
 
     def test_round_trip_and_validation(self):
         with tempfile.TemporaryDirectory() as tmp:

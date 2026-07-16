@@ -227,6 +227,7 @@ def front_sector_decision(
     *,
     range_min_m: float | None = None,
     range_max_m: float | None = None,
+    source: str = "front_sector",
 ) -> ObstacleDecision:
     if not ranges or angle_increment_rad == 0.0:
         sector_ranges: list[float] = []
@@ -260,7 +261,7 @@ def front_sector_decision(
         threshold_m=stop_distance_m,
         range_min_m=summary.range_min_m,
         range_max_m=summary.range_max_m,
-        source="front_sector",
+        source=source,
     )
 
 

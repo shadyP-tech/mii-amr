@@ -189,6 +189,31 @@ def median_range_in_scan_cone(
     )
 
 
+def nearest_scan_to_stamp(
+    scans: Sequence[PlainLaserScan],
+    *,
+    image_stamp_sec: float | None,
+    tolerance_sec: float,
+) -> PlainLaserScan | None:
+    """Select a LaserScan synchronized to an image using ROS header stamps."""
+
+    if not scans or not math.isfinite(tolerance_sec) or tolerance_sec <= 0.0:
+        return None
+    if image_stamp_sec is None or not math.isfinite(image_stamp_sec):
+        return scans[-1]
+    stamped = [
+        scan
+        for scan in scans
+        if scan.scan_stamp_sec is not None and math.isfinite(scan.scan_stamp_sec)
+    ]
+    if not stamped:
+        return None
+    nearest = min(stamped, key=lambda scan: abs(scan.scan_stamp_sec - image_stamp_sec))
+    if abs(nearest.scan_stamp_sec - image_stamp_sec) > tolerance_sec:
+        return None
+    return nearest
+
+
 def observation_to_payload(observation: StandAxisLidarRoiObservation) -> dict[str, object]:
     return asdict(observation)
 

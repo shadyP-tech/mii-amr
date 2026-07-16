@@ -258,7 +258,6 @@ class ProductionImportBoundaryTest(unittest.TestCase):
         tree = ast.parse(source, filename=str(module_path))
         forbidden_prefixes = (
             "geometry_msgs",
-            "nav_msgs",
             "nav2_msgs",
             "scripts.aufgabe04.navigation",
             "scripts.aufgabe04.logistics",
@@ -280,6 +279,8 @@ class ProductionImportBoundaryTest(unittest.TestCase):
 
         self.assertEqual(offenders, [])
         self.assertNotIn("--cmd-vel-topic", source)
+        self.assertNotIn("/cmd_vel", source)
+        self.assertNotIn("create_publisher", source)
         self.assertNotIn("Twist", source)
         self.assertNotIn("Publisher", source)
 

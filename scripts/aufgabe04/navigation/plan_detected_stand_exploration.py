@@ -95,6 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-hits", type=int, default=3)
     parser.add_argument("--max-observation-age-sec", type=float, default=8.0)
     parser.add_argument("--min-confidence", type=float, default=0.55)
+    parser.add_argument("--min-boundary-clearance-m", type=float, default=0.10)
     parser.add_argument("--max-stands", type=int, default=0, help="0 means all confirmed stands")
     parser.add_argument(
         "--order",
@@ -140,6 +141,7 @@ def _validated_confirmed_stands(args, arena_bounds: ArenaBounds) -> tuple[Confir
             min_hits=args.min_hits,
             max_age_sec=args.max_observation_age_sec,
             min_confidence=args.min_confidence,
+            min_boundary_clearance_m=args.min_boundary_clearance_m,
         ),
         arena_bounds=arena_bounds,
     )

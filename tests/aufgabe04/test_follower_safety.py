@@ -160,6 +160,36 @@ class FollowerSafetyTest(unittest.TestCase):
         self.assertEqual(decision.stop_reason, OBSTACLE_TOO_CLOSE)
         self.assertEqual(decision.nearest_valid_range_m, 0.19)
 
+    def test_sector_decision_supports_fail_closed_rear_motion_source(self):
+        # 0 rad is index 2 and pi/-pi is index 0/4 for this synthetic scan.
+        ranges = [0.19, 0.80, 0.25, 0.80, 0.19]
+        rear = front_sector_decision(
+            ranges,
+            -math.pi,
+            math.pi / 2.0,
+            math.pi,
+            0.1,
+            0.20,
+            range_min_m=0.12,
+            range_max_m=3.5,
+            source="rear_sector",
+        )
+        front = front_sector_decision(
+            ranges,
+            -math.pi,
+            math.pi / 2.0,
+            0.0,
+            0.1,
+            0.20,
+            range_min_m=0.12,
+            range_max_m=3.5,
+        )
+
+        self.assertEqual(rear.stop_reason, OBSTACLE_TOO_CLOSE)
+        self.assertEqual(rear.source, "rear_sector")
+        self.assertEqual(front.stop_reason, "")
+        self.assertEqual(front.nearest_valid_range_m, 0.25)
+
     def test_initial_pose_and_waypoint_timeout_fail_closed(self):
         first = Pose2D(0.0, 0.0, 0.0)
 

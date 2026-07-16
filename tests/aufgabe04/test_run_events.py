@@ -4,9 +4,10 @@ import json
 import logging
 import sys
 import tempfile
+import time
 import unittest
 import csv
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -16,7 +17,12 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from scripts.aufgabe04.navigation import run_single_station_segment  # noqa: E402
+from scripts.aufgabe04.navigation.dynamic_route_handoff import (  # noqa: E402
+    RouteUpdate,
+    RouteUpdateKind,
+)
 from scripts.aufgabe04.navigation.follower_models import FollowerResult  # noqa: E402
+from scripts.aufgabe04.navigation.models import Pose2D  # noqa: E402
 from scripts.aufgabe04.navigation.ros_preflight import (  # noqa: E402
     RosObservation,
     RosPreflightResult,
@@ -26,6 +32,10 @@ from scripts.aufgabe04.navigation.run_events import (  # noqa: E402
     configure_event_logger,
     emit_event,
     event_to_json,
+)
+from scripts.aufgabe04.navigation.route_revision_store import (  # noqa: E402
+    RouteRevisionStore,
+    read_committed_revision,
 )
 
 
@@ -46,6 +56,38 @@ def write_route(path: Path) -> None:
         )
         + "\n"
     )
+
+
+def write_dynamic_route_manifest(
+    paths: dict[str, Path], *, published_at: float | None = None
+) -> Path:
+    route_text = (
+        "leg_index,point_index,grid_x,grid_y,world_x_m,world_y_m,"
+        "segment_length_m,cumulative_length_m,simulation_only,route_kind,stream_id\n"
+        "0,0,0,0,0.0,0.0,0.0,0.0,true,synchronized_viewpoint,sim-stream\n"
+        "0,1,1,0,0.2,0.0,0.2,0.2,true,synchronized_viewpoint,sim-stream\n"
+    )
+    now = time.time() if published_at is None else published_at
+    manifest = paths["route"].with_suffix(".manifest.json")
+    store = RouteRevisionStore(
+        manifest, stream_id="sim-stream", writer_id="planner", now_fn=lambda: now
+    )
+    store.publish_active(
+        route_text,
+        json.loads(paths["diagnostics"].read_text()),
+        target_revision=1,
+        observation_unix_sec=now,
+        source_robot_pose={"x_m": 0.0, "y_m": 0.0, "yaw_rad": 0.0},
+        target={"x_m": 0.2, "y_m": 0.0, "yaw_rad": 0.0},
+        evidence={"kind": "none"},
+        previous_route_length_m=0.0,
+        new_route_length_m=0.2,
+        safety_diagnostics={
+            "corridor_clear": True,
+            "start_join_clearance_m": 0.5,
+        },
+    )
+    return manifest
 
 
 def write_diagnostics(path: Path) -> None:
@@ -134,6 +176,14 @@ def failing_preflight() -> RosPreflightResult:
 
 
 class RunEventsTest(unittest.TestCase):
+    def test_simulation_motion_confirmation_does_not_block_for_input(self):
+        args = type("Args", (), {"allow_sim_time": True})()
+        with patch("builtins.input") as prompt, redirect_stdout(StringIO()):
+            confirmed = run_single_station_segment._confirm_motion(args, object())
+
+        self.assertTrue(confirmed)
+        prompt.assert_not_called()
+
     def test_runner_rejects_nav2_direct_publisher_allowlist(self):
         with self.assertRaises(SystemExit) as raised, redirect_stdout(StringIO()):
             run_single_station_segment.main(
@@ -232,6 +282,289 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
         self.assertIn("preflight_failed", [event["event"] for event in events])
         self.assertEqual(len(finish_events), 1)
         self.assertIn("unapproved cmd_vel publishers", results)
+
+    def test_rejects_simulation_only_route_without_sim_time_even_one_shot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            manifest = write_dynamic_route_manifest(paths)
+
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    run_single_station_segment.main(
+                        self.base_args(paths)
+                        + ["--route-manifest", str(manifest)]
+                    )
+
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_dynamic_manifest_handoff_callback_logs_route_reload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            manifest = write_dynamic_route_manifest(paths)
+            args = self.base_args(paths) + [
+                "--allow-sim-time",
+                "--route-manifest",
+                str(manifest),
+                "--dynamic-route-refresh-sec",
+                "0.1",
+            ]
+
+            def fake_follower(_resolved, _waypoints, _config, _provider, callback):
+                callback(
+                    RouteUpdate(
+                        kind=RouteUpdateKind.ADOPT,
+                        event_name="dynamic_route_adopted",
+                        route_revision=2,
+                        target_revision=1,
+                        route_hash="abc",
+                        event_fields={
+                            "stream_id": "sim-stream",
+                            "route_revision": 2,
+                            "target_revision": 1,
+                            "route_sha256": "abc",
+                        },
+                    )
+                )
+                return FollowerResult("completed", "", 1.0, 0.2, True)
+
+            with patch.object(
+                run_single_station_segment,
+                "run_ros_preflight",
+                return_value=passing_preflight(),
+            ), patch.object(
+                run_single_station_segment,
+                "run_simple_waypoint_follower",
+                side_effect=fake_follower,
+            ), redirect_stdout(StringIO()):
+                status = run_single_station_segment.main(args)
+
+            events = read_events(paths["events"])
+            reloaded = next(event for event in events if event["event"] == "route_reloaded")
+            resolved = next(
+                event
+                for event in events
+                if event["event"] == "authoritative_route_resolved"
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(reloaded["route_revision"], 2)
+        self.assertEqual(reloaded["route_sha256"], "abc")
+        self.assertEqual(resolved["route_revision"], 1)
+        self.assertEqual(resolved["target_revision"], 1)
+        self.assertEqual(resolved["source_robot_pose"]["x_m"], 0.0)
+        self.assertEqual(resolved["previous_route_length_m"], 0.0)
+        self.assertEqual(resolved["new_route_length_m"], 0.2)
+        self.assertEqual(len(resolved["route_sha256"]), 64)
+
+    def test_stale_one_shot_authoritative_route_is_rejected_before_preflight(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            manifest = write_dynamic_route_manifest(
+                paths, published_at=time.time() - 30.0
+            )
+            args = self.base_args(paths) + [
+                "--allow-sim-time",
+                "--route-manifest",
+                str(manifest),
+            ]
+
+            with patch.object(
+                run_single_station_segment, "run_ros_preflight"
+            ) as preflight, redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    run_single_station_segment.main(args)
+
+            events = read_events(paths["events"])
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertFalse(preflight.called)
+        rejected = next(
+            event for event in events if event["event"] == "route_manifest_rejected"
+        )
+        self.assertIn("age", rejected["stop_reason"])
+
+    def test_one_shot_authoritative_route_still_uses_verified_handoff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            manifest = write_dynamic_route_manifest(paths)
+            args = self.base_args(paths) + [
+                "--allow-sim-time",
+                "--route-manifest",
+                str(manifest),
+            ]
+            observed = {}
+
+            def fake_follower(_resolved, _waypoints, config, provider, _callback):
+                observed["refresh_sec"] = config.dynamic_route_refresh_sec
+                observed["provider"] = provider
+                observed["update"] = provider(Pose2D(0.0, 0.0, 0.0))
+                return FollowerResult("completed", "", 1.0, 0.2, True)
+
+            with patch.object(
+                run_single_station_segment,
+                "run_ros_preflight",
+                return_value=passing_preflight(),
+            ), patch.object(
+                run_single_station_segment,
+                "run_simple_waypoint_follower",
+                side_effect=fake_follower,
+            ), redirect_stdout(StringIO()):
+                status = run_single_station_segment.main(args)
+
+        self.assertEqual(status, 0)
+        self.assertEqual(observed["refresh_sec"], 0.0)
+        self.assertIsNotNone(observed["provider"])
+        self.assertEqual(observed["update"].kind, RouteUpdateKind.ADOPT)
+        self.assertEqual(observed["update"].target_index, 0)
+        self.assertGreater(
+            observed["update"].event_fields["effective_join_limit_m"], 0.0
+        )
+
+    def test_manifest_change_during_preflight_is_rejected_before_motion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            manifest = write_dynamic_route_manifest(paths)
+            args = self.base_args(paths) + [
+                "--allow-sim-time",
+                "--route-manifest",
+                str(manifest),
+            ]
+
+            def mutate_manifest(*_args, **_kwargs):
+                RouteRevisionStore(
+                    manifest,
+                    stream_id="sim-stream",
+                    writer_id="planner",
+                ).withdraw("planner stopped before motion")
+                return passing_preflight()
+
+            with patch.object(
+                run_single_station_segment,
+                "run_ros_preflight",
+                side_effect=mutate_manifest,
+            ), patch.object(
+                run_single_station_segment,
+                "run_simple_waypoint_follower",
+            ) as follower, redirect_stdout(StringIO()):
+                status = run_single_station_segment.main(args)
+            events = read_events(paths["events"])
+
+        self.assertEqual(status, 1)
+        self.assertFalse(follower.called)
+        rejected = next(
+            event for event in events if event["event"] == "route_manifest_rejected"
+        )
+        self.assertEqual(rejected["phase"], "immediately_before_motion")
+        self.assertIn("changed or was withdrawn", rejected["stop_reason"])
+
+    def test_same_geometry_heartbeat_during_preflight_is_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            manifest = write_dynamic_route_manifest(paths)
+            args = self.base_args(paths) + [
+                "--allow-sim-time",
+                "--route-manifest",
+                str(manifest),
+            ]
+
+            def publish_heartbeat(*_args, **_kwargs):
+                current = read_committed_revision(manifest)
+                assert current.route_path is not None
+                assert current.diagnostics_path is not None
+                payload = current.manifest
+                RouteRevisionStore(
+                    manifest,
+                    stream_id="sim-stream",
+                    writer_id="planner",
+                ).publish_active(
+                    current.route_path.read_text(),
+                    json.loads(current.diagnostics_path.read_text()),
+                    target_revision=current.target_revision,
+                    observation_unix_sec=time.time(),
+                    source_robot_pose=payload["source_robot_pose"],
+                    target=payload["target"],
+                    evidence=payload["evidence"],
+                    previous_route_length_m=payload["new_route_length_m"],
+                    new_route_length_m=payload["new_route_length_m"],
+                    safety_diagnostics=payload["safety_diagnostics"],
+                )
+                return passing_preflight()
+
+            with patch.object(
+                run_single_station_segment,
+                "run_ros_preflight",
+                side_effect=publish_heartbeat,
+            ), patch.object(
+                run_single_station_segment,
+                "run_simple_waypoint_follower",
+                return_value=FollowerResult("completed", "", 1.0, 0.2, True),
+            ) as follower, redirect_stdout(StringIO()):
+                status = run_single_station_segment.main(args)
+
+        self.assertEqual(status, 0)
+        self.assertTrue(follower.called)
+
+    def test_runner_maps_dynamic_withdrawal_rejection_and_stop_events(self):
+        cases = (
+            (
+                RouteUpdateKind.STOP,
+                "dynamic_route_withdrawn",
+                "route_withdrawn",
+            ),
+            (
+                RouteUpdateKind.REJECT,
+                "dynamic_route_rejected",
+                "route_reload_rejected",
+            ),
+            (
+                RouteUpdateKind.STOP,
+                "dynamic_route_stopped",
+                "route_reload_rejected",
+            ),
+        )
+        for kind, source_event, expected_event in cases:
+            with self.subTest(source_event=source_event), tempfile.TemporaryDirectory() as tmp:
+                paths = self.make_paths(Path(tmp))
+                manifest = write_dynamic_route_manifest(paths)
+                args = self.base_args(paths) + [
+                    "--allow-sim-time",
+                    "--route-manifest",
+                    str(manifest),
+                ]
+
+                def fake_follower(
+                    _resolved,
+                    _waypoints,
+                    _config,
+                    _provider,
+                    callback,
+                ):
+                    callback(
+                        RouteUpdate(
+                            kind=kind,
+                            reason=source_event,
+                            event_name=source_event,
+                            event_fields={"fault_code": source_event},
+                        )
+                    )
+                    return FollowerResult("stopped", source_event, 0.1, 0.0, False)
+
+                with patch.object(
+                    run_single_station_segment,
+                    "run_ros_preflight",
+                    return_value=passing_preflight(),
+                ), patch.object(
+                    run_single_station_segment,
+                    "run_simple_waypoint_follower",
+                    side_effect=fake_follower,
+                ), redirect_stdout(StringIO()):
+                    status = run_single_station_segment.main(args)
+                events = read_events(paths["events"])
+
+            self.assertEqual(status, 1)
+            mapped = [event for event in events if event["event"] == expected_event]
+            self.assertEqual(len(mapped), 1)
+            self.assertEqual(mapped[0]["fault_code"], source_event)
 
     def test_dry_run_logs_no_motion_and_skips_follower(self):
         with tempfile.TemporaryDirectory() as tmp:
