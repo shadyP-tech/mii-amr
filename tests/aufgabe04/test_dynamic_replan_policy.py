@@ -135,8 +135,17 @@ class DynamicReplanPolicyTest(unittest.TestCase):
         self.assertTrue(heartbeat.should_replan)
         self.assertEqual(heartbeat.reasons, ("refresh_timeout",))
 
-    def test_terminal_corridor_suppresses_start_and_timeout_replans(self):
+    def test_terminal_corridor_suppresses_start_replan_but_emits_heartbeat(self):
         state = self.first_planned_state()
+        state, before_deadline = self.policy.evaluate(
+            state,
+            target=target(),
+            robot_pose=Pose2D(0.70, 2.0, 0.0),
+            now_sec=2.0,
+        )
+        self.assertFalse(before_deadline.should_replan)
+        self.assertEqual(before_deadline.reasons, ())
+
         state, decision = self.policy.evaluate(
             state,
             target=target(),
@@ -144,9 +153,9 @@ class DynamicReplanPolicyTest(unittest.TestCase):
             now_sec=5.0,
         )
         self.assertFalse(decision.target_changed)
-        self.assertFalse(decision.should_replan)
+        self.assertTrue(decision.should_replan)
         self.assertNotIn("material_start_deviation", decision.reasons)
-        self.assertNotIn("refresh_timeout", decision.reasons)
+        self.assertEqual(decision.reasons, ("refresh_timeout",))
 
     def test_material_target_change_overrides_terminal_corridor_lock(self):
         state = self.first_planned_state()

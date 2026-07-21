@@ -41,6 +41,12 @@ class FollowerModelsTest(unittest.TestCase):
             front_clearance_scale=0.0,
             effective_linear_x_mps=0.0,
             front_clearance_details={"source": "front_sector", "nearest_valid_range_m": 0.21},
+            pursuit_index=3,
+            controlled_heading_error_rad=0.72,
+            last_progress_heading_error_rad=0.85,
+            heading_progress_epsilon_rad=0.10,
+            last_progress_target_index=2,
+            last_progress_pursuit_index=3,
         )
 
         self.assertEqual(details["stop_reason"], "stuck no progress")
@@ -49,6 +55,9 @@ class FollowerModelsTest(unittest.TestCase):
         self.assertEqual(details["commanded_linear_x_mps"], 0.05)
         self.assertEqual(details["front_clearance_scale"], 0.0)
         self.assertEqual(details["effective_linear_x_mps"], 0.0)
+        self.assertEqual(details["pursuit_index"], 3)
+        self.assertEqual(details["controlled_heading_error_rad"], 0.72)
+        self.assertEqual(details["heading_progress_epsilon_rad"], 0.10)
         self.assertEqual(details["front_clearance"]["source"], "front_sector")
 
     def test_tf_lookup_failure_details_distinguish_exception_and_stale(self):

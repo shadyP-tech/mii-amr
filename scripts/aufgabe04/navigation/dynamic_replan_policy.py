@@ -140,9 +140,11 @@ class DynamicReplanPolicy:
             )
             if deviation > 0.0 and deviation >= self.start_deviation_threshold_m:
                 reasons.append("material_start_deviation")
+        # Terminal locking protects immutable route geometry; it must not stop
+        # the planner from publishing a freshness heartbeat for that geometry.
+        # The planner recognizes a lone refresh_timeout as heartbeat-only and
+        # therefore never runs live-start A* for this decision.
         if (
-            not terminal_route_locked
-            and
             updated.last_route_plan_time_sec is not None
             and now - updated.last_route_plan_time_sec >= self.refresh_timeout_sec
         ):

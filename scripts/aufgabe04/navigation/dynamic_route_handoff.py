@@ -24,6 +24,7 @@ class RouteUpdateKind(str, enum.Enum):
     UNCHANGED = "unchanged"
     REJECT = "reject"
     STOP = "stop"
+    COMPLETE = "complete"
 
 
 @dataclass(frozen=True)
@@ -42,11 +43,164 @@ class RouteUpdate:
     event_fields: Mapping[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class StartEgressCertificate:
+    required: bool
+    waypoint_index: int | None = None
+    minimum_route_clearance_m: float | None = None
+
+
 def _finite_nonnegative(value: float, field_name: str) -> float:
     value = float(value)
     if not math.isfinite(value) or value < 0.0:
         raise ValueError(f"{field_name} must be finite and non-negative")
     return value
+
+
+def _point_to_segment_distance_m(
+    point: Pose2D,
+    start: Pose2D,
+    end: Pose2D,
+) -> float:
+    dx = end.x_m - start.x_m
+    dy = end.y_m - start.y_m
+    denominator = dx * dx + dy * dy
+    if denominator <= 1.0e-20:
+        return math.hypot(point.x_m - start.x_m, point.y_m - start.y_m)
+    fraction = max(
+        0.0,
+        min(
+            1.0,
+            (
+                (point.x_m - start.x_m) * dx
+                + (point.y_m - start.y_m) * dy
+            )
+            / denominator,
+        ),
+    )
+    return math.hypot(
+        point.x_m - (start.x_m + fraction * dx),
+        point.y_m - (start.y_m + fraction * dy),
+    )
+
+
+def validate_start_egress_certificate(
+    safety: Mapping[str, Any],
+    waypoints: Tuple[Pose2D, ...],
+    planned_start: Pose2D,
+) -> StartEgressCertificate:
+    """Validate the planner evidence required for one-cell raster egress."""
+
+    raw_required = safety.get("known_stand_start_cell_exempted", False)
+    if not isinstance(raw_required, bool):
+        raise ValueError("known_stand_start_cell_exempted must be boolean")
+    if not raw_required:
+        return StartEgressCertificate(False)
+
+    if len(waypoints) < 2:
+        raise ValueError("start-cell exemption route lacks waypoint 1")
+    if math.hypot(
+        waypoints[1].x_m - waypoints[0].x_m,
+        waypoints[1].y_m - waypoints[0].y_m,
+    ) <= 1.0e-9:
+        raise ValueError("start-cell exemption waypoint 1 is not an egress vertex")
+
+    start_cell = safety.get("known_stand_start_cell")
+    if not isinstance(start_cell, Mapping):
+        raise ValueError("known_stand_start_cell is missing")
+    for coordinate in ("x", "y"):
+        value = start_cell.get(coordinate)
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError(f"known_stand_start_cell.{coordinate} must be integer")
+
+    rasterized_count = safety.get("known_stand_keepout_rasterized_cell_count")
+    blocked_count = safety.get("known_stand_keepout_cell_count")
+    if (
+        not isinstance(rasterized_count, int)
+        or isinstance(rasterized_count, bool)
+        or rasterized_count <= 0
+    ):
+        raise ValueError("known stand rasterized cell count must be positive")
+    if (
+        not isinstance(blocked_count, int)
+        or isinstance(blocked_count, bool)
+        or blocked_count < 0
+        or blocked_count != rasterized_count - 1
+    ):
+        raise ValueError("start-cell exemption must remove exactly one raster cell")
+
+    keepouts = safety.get("known_stand_keepouts")
+    evidence = safety.get("known_stand_keepout_clearances")
+    if not isinstance(keepouts, (list, tuple)) or not keepouts:
+        raise ValueError("start-cell exemption has no known stand keepouts")
+    if not isinstance(evidence, (list, tuple)) or len(evidence) != len(keepouts):
+        raise ValueError("continuous keepout-clearance evidence is incomplete")
+
+    route_minimum = math.inf
+    for index, (keepout, clearance) in enumerate(zip(keepouts, evidence)):
+        if not isinstance(keepout, Mapping) or not isinstance(clearance, Mapping):
+            raise ValueError(f"known stand clearance {index} must be an object")
+        try:
+            x_m = float(keepout["x_m"])
+            y_m = float(keepout["y_m"])
+            radius_m = float(keepout["radius_m"])
+            evidence_x_m = float(clearance["x_m"])
+            evidence_y_m = float(clearance["y_m"])
+            evidence_radius_m = float(clearance["radius_m"])
+            reported_minimum_m = float(clearance["minimum_route_clearance_m"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"known stand clearance {index} is malformed: {exc}"
+            ) from exc
+        values = (
+            x_m,
+            y_m,
+            radius_m,
+            evidence_x_m,
+            evidence_y_m,
+            evidence_radius_m,
+            reported_minimum_m,
+        )
+        if not all(math.isfinite(value) for value in values) or radius_m <= 0.0:
+            raise ValueError(f"known stand clearance {index} is not finite")
+        if not (
+            math.isclose(x_m, evidence_x_m, abs_tol=1.0e-9)
+            and math.isclose(y_m, evidence_y_m, abs_tol=1.0e-9)
+            and math.isclose(radius_m, evidence_radius_m, abs_tol=1.0e-9)
+        ):
+            raise ValueError(f"known stand clearance {index} identity mismatch")
+        if reported_minimum_m <= radius_m + 1.0e-10:
+            raise ValueError(f"known stand clearance {index} is not outside its disk")
+
+        center = Pose2D(x_m, y_m)
+        exact_start_clearance_m = math.hypot(
+            planned_start.x_m - x_m,
+            planned_start.y_m - y_m,
+        )
+        if exact_start_clearance_m <= radius_m + 1.0e-10:
+            raise ValueError(f"route start lies inside known stand keepout {index}")
+        measured_minimum_m = min(
+            _point_to_segment_distance_m(center, segment_start, segment_end)
+            for segment_start, segment_end in zip(waypoints, waypoints[1:])
+        )
+        if measured_minimum_m <= radius_m + 1.0e-10:
+            raise ValueError(f"adopted route crosses known stand keepout {index}")
+        if not math.isclose(
+            measured_minimum_m,
+            reported_minimum_m,
+            rel_tol=1.0e-7,
+            abs_tol=1.0e-7,
+        ):
+            raise ValueError(
+                f"known stand clearance {index} does not match adopted route"
+            )
+        route_minimum = min(route_minimum, measured_minimum_m)
+
+    return StartEgressCertificate(
+        required=True,
+        waypoint_index=1,
+        minimum_route_clearance_m=route_minimum,
+    )
 
 
 def forward_splice_waypoints(
@@ -269,7 +423,7 @@ class DynamicRouteSource:
         self.last_writer_generation = loaded.writer_generation
 
     def poll(self, current_pose: Pose2D, now_unix_sec: float | None = None) -> RouteUpdate:
-        """Return ADOPT, UNCHANGED, REJECT, or fail-closed STOP."""
+        """Return ADOPT, UNCHANGED, COMPLETE, REJECT, or fail-closed STOP."""
 
         if not all(
             math.isfinite(value)
@@ -341,6 +495,34 @@ class DynamicRouteSource:
                     reason=f"withdrawn:{reason}",
                     revision=loaded.route_revision,
                     event_name="dynamic_route_withdrawn",
+                ),
+                event_fields=fields,
+            )
+
+        if loaded.status == "survey_complete":
+            self._remember_seen(loaded)
+            self.last_target_revision = loaded.target_revision
+            reason = loaded.reason
+            fields = self._base_fields(loaded)
+            fields.update(
+                {
+                    "reason": reason,
+                    "completion": loaded.manifest.get("completion", {}),
+                    "fail_closed": False,
+                }
+            )
+            return RouteUpdate(
+                kind=RouteUpdateKind.COMPLETE,
+                reason=reason,
+                route_revision=loaded.route_revision,
+                target_revision=loaded.target_revision,
+                route_hash=loaded.route_hash,
+                requires_zero_cycle=True,
+                event_name=self._event_name_once(
+                    kind=RouteUpdateKind.COMPLETE,
+                    reason=f"survey_complete:{reason}",
+                    revision=loaded.route_revision,
+                    event_name="dynamic_survey_completed",
                 ),
                 event_fields=fields,
             )
@@ -463,6 +645,19 @@ class DynamicRouteSource:
                 loaded=loaded,
                 stop=True,
             )
+        try:
+            egress_certificate = validate_start_egress_certificate(
+                safety,
+                tuple(full_waypoints),
+                planned_start,
+            )
+        except ValueError as exc:
+            return self._fault(
+                f"start egress certificate is invalid: {exc}",
+                code="invalid_egress_certificate",
+                loaded=loaded,
+                stop=True,
+            )
         if same_installed_geometry:
             self.last_adopted_revision = loaded.route_revision
             fields = self._base_fields(loaded)
@@ -513,7 +708,10 @@ class DynamicRouteSource:
             )
 
         splice_forward_distance = 0.0
-        if join_distance > self.forward_splice_min_offset_m:
+        if (
+            not egress_certificate.required
+            and join_distance > self.forward_splice_min_offset_m
+        ):
             suffix, splice_forward_distance = forward_splice_waypoints(
                 current_pose,
                 tuple(full_waypoints),
@@ -534,8 +732,21 @@ class DynamicRouteSource:
                 "full_waypoint_count": len(full_waypoints),
                 "adopted_waypoint_count": len(suffix),
                 "adopted_target_index": 0,
-                "forward_splice": join_distance > self.forward_splice_min_offset_m,
+                "forward_splice": (
+                    not egress_certificate.required
+                    and join_distance > self.forward_splice_min_offset_m
+                ),
                 "splice_forward_distance_m": splice_forward_distance,
+                "start_egress_vertex_lock": egress_certificate.required,
+                "start_egress_waypoint_index": (
+                    egress_certificate.waypoint_index
+                ),
+                "start_egress_continuous_clearance_validated": (
+                    egress_certificate.required
+                ),
+                "start_egress_minimum_route_clearance_m": (
+                    egress_certificate.minimum_route_clearance_m
+                ),
                 "adoption_robot_pose": {
                     "x_m": current_pose.x_m,
                     "y_m": current_pose.y_m,

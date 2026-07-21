@@ -10,6 +10,7 @@ from scripts.aufgabe04.navigation.dynamic_approach_planner import (
     greedy_line_of_sight_shortcut,
     plan_axis_acquisition,
     plan_dynamic_approach,
+    plan_fixed_approach,
     segment_is_collision_free,
     supercover_segment_cells,
     with_dynamic_stand_keepout,
@@ -91,6 +92,54 @@ class KeepoutRasterizationTest(unittest.TestCase):
         # Cell 12 begins at x=1.20, exactly radius 0.15 from the center.
         self.assertIn(GridCell(12, 10), cells)
         self.assertNotIn(GridCell(13, 10), cells)
+
+
+class FixedArrivalPlanningTest(unittest.TestCase):
+    def test_plans_exact_stored_face_without_substitution(self):
+        costmap = costmap_from_blocked(width=50, height=50)
+        stand = Pose2D(2.5, 2.5)
+        config = DynamicApproachConfig(standoff_distance_m=0.32)
+        face = face_normal_candidates(stand, 0.3, config)[1]
+
+        result = plan_fixed_approach(
+            costmap,
+            Pose2D(0.25, 0.25),
+            stand,
+            face,
+            config=config,
+        )
+
+        self.assertIsNotNone(result.plan)
+        assert result.plan is not None
+        self.assertEqual(result.plan.selected_face_id, 1)
+        self.assertEqual(result.plan.target, face.target)
+        self.assertEqual(result.plan.entry, face.entry)
+
+    def test_rejects_mutated_target_instead_of_recomputing_it(self):
+        costmap = costmap_from_blocked(width=50, height=50)
+        stand = Pose2D(2.5, 2.5)
+        config = DynamicApproachConfig(standoff_distance_m=0.32)
+        face = face_normal_candidates(stand, 0.3, config)[0]
+        malformed = face.__class__(
+            face_id=face.face_id,
+            normal_rad=face.normal_rad,
+            target=Pose2D(face.target.x_m + 0.02, face.target.y_m, face.target.yaw_rad),
+            entry=face.entry,
+        )
+
+        result = plan_fixed_approach(
+            costmap,
+            Pose2D(0.25, 0.25),
+            stand,
+            malformed,
+            config=config,
+        )
+
+        self.assertIsNone(result.plan)
+        self.assertIn(
+            "fixed_target_standoff_mismatch",
+            result.diagnostics.candidates[0].rejection_reasons,
+        )
 
 
 class SupercoverTest(unittest.TestCase):

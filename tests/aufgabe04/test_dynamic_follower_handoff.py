@@ -14,12 +14,18 @@ from scripts.aufgabe04.navigation.simple_waypoint_follower import (
     FollowerConfig,
     SimpleWaypointFollowerNode,
     acquisition_goal_action,
+    certified_startup_join_action,
+    certified_startup_route_state,
     controller_config_for_route_kind,
     dynamic_route_kind_transition_failure,
     dynamic_join_envelope_failure,
     viewpoint_sampling_timeout_failure,
 )
-from scripts.aufgabe04.navigation.waypoint_controller import ControllerConfig
+from scripts.aufgabe04.navigation.waypoint_controller import (
+    ControllerConfig,
+    compute_join_anchor_command,
+    compute_start_egress_vertex_command,
+)
 
 
 def bare_follower(update: RouteUpdate, callback):
@@ -36,11 +42,15 @@ def bare_follower(update: RouteUpdate, callback):
     node.target_index = 1
     node.target_started_at = 0.0
     node.last_progress_distance_m = 0.0
+    node.last_progress_heading_error_rad = math.inf
+    node.last_progress_target_index = None
+    node.last_progress_pursuit_index = None
     node.last_progress_at = 0.0
     node.last_pose = None
     node.latest_stop_details = None
     node.dynamic_join_pending = False
     node.dynamic_join_limit_m = None
+    node.start_egress_lock_index = None
     node.current_route_kind = "axis_acquisition"
     node.reverse_staging = False
     node.axis_acquisition_hold_started_at = None
@@ -49,6 +59,184 @@ def bare_follower(update: RouteUpdate, callback):
 
 
 class DynamicFollowerHandoffTest(unittest.TestCase):
+    def test_static_catalog_startup_is_anchor_zero_then_egress_vertex(self):
+        waypoints = (
+            Pose2D(-0.18491188596302915, -0.200843551718869, float("nan")),
+            Pose2D(-0.19499999999999984, -0.11499999999999977, float("nan")),
+            Pose2D(-0.6449999999999996, -0.11499999999999977, float("nan")),
+        )
+        join_limit_m = 0.03508711403697043
+        join_tolerance_m = 0.02
+        startup = certified_startup_route_state(
+            FollowerConfig(
+                controller=ControllerConfig(),
+                initial_start_egress_waypoint_index=1,
+                initial_start_join_clearance_m=join_limit_m,
+            ),
+            len(waypoints),
+        )
+        self.assertTrue(startup.join_pending)
+        self.assertEqual(startup.join_limit_m, join_limit_m)
+        self.assertEqual(startup.egress_lock_index, 1)
+
+        outside_action, outside_failure = certified_startup_join_action(
+            Pose2D(waypoints[0].x_m + 0.036, waypoints[0].y_m, 0.0),
+            waypoints[0],
+            join_limit_m,
+            join_tolerance_m,
+        )
+        self.assertEqual(outside_action, "stop")
+        self.assertEqual(outside_failure["fault_code"], "join_envelope_exceeded")
+
+        live_pose = Pose2D(
+            waypoints[0].x_m + 0.025,
+            waypoints[0].y_m,
+            math.pi,
+        )
+        action, failure = certified_startup_join_action(
+            live_pose,
+            waypoints[0],
+            join_limit_m,
+            join_tolerance_m,
+        )
+        self.assertEqual((action, failure), ("anchor", None))
+        anchor_step = compute_join_anchor_command(
+            live_pose,
+            waypoints[0],
+            ControllerConfig(),
+            join_tolerance_m=join_tolerance_m,
+        )
+        self.assertEqual(anchor_step.pursuit_index, 0)
+
+        anchored_pose = Pose2D(waypoints[0].x_m, waypoints[0].y_m, 0.0)
+        action, failure = certified_startup_join_action(
+            anchored_pose,
+            waypoints[0],
+            join_limit_m,
+            join_tolerance_m,
+        )
+        self.assertEqual((action, failure), ("zero", None))
+        egress_step = compute_start_egress_vertex_command(
+            anchored_pose,
+            waypoints,
+            1,
+            ControllerConfig(),
+        )
+        self.assertEqual(egress_step.pursuit_index, 1)
+        self.assertNotEqual(egress_step.pursuit_index, 2)
+
+    def test_heading_convergence_resets_progress_but_wrong_rotation_times_out(self):
+        node = bare_follower(
+            RouteUpdate(kind=RouteUpdateKind.UNCHANGED),
+            None,
+        )
+        node.last_progress_distance_m = math.inf
+        node.last_progress_heading_error_rad = math.inf
+
+        self.assertEqual(
+            node._progress_failure(0.365, 1.20, 2, 2, 0.0, True),
+            "",
+        )
+        # Distance improved only 7 mm, but the necessary post-egress turn made
+        # more than 0.10 rad of controlled-heading progress before 8 seconds.
+        self.assertEqual(
+            node._progress_failure(0.358, 1.08, 2, 2, 7.0, True),
+            "",
+        )
+        self.assertEqual(
+            node._progress_failure(0.351, 0.96, 2, 2, 14.0, True),
+            "",
+        )
+        self.assertEqual(node.last_progress_at, 14.0)
+
+        # Rotation that stalls or increases the error still fails closed.
+        self.assertEqual(
+            node._progress_failure(0.350, 1.02, 2, 2, 22.1, True),
+            "stuck no progress",
+        )
+
+        node._reset_progress_watchdog(30.0)
+        self.assertEqual(
+            node._progress_failure(0.35, 0.80, 2, 2, 30.0, True),
+            "",
+        )
+        self.assertEqual(
+            node._progress_failure(0.35, 1.00, 2, 2, 38.1, True),
+            "stuck no progress",
+        )
+
+    def test_adopted_start_egress_lock_targets_vertex_one_then_releases(self):
+        waypoints = (
+            Pose2D(-0.131011, -0.270103, float("nan")),
+            Pose2D(-0.195, -0.115, float("nan")),
+            Pose2D(-0.595, -0.115, float("nan")),
+        )
+        update = RouteUpdate(
+            kind=RouteUpdateKind.ADOPT,
+            waypoints=waypoints,
+            target_index=0,
+            event_fields={
+                "effective_join_limit_m": 0.20,
+                "route_kind": "axis_acquisition",
+                "start_egress_vertex_lock": True,
+                "start_egress_waypoint_index": 1,
+                "start_egress_continuous_clearance_validated": True,
+            },
+        )
+        node = bare_follower(update, None)
+        node.publish_zero = lambda: None
+        start = Pose2D(-0.131011, -0.270103, -2.702)
+
+        with patch(
+            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            return_value=10.0,
+        ):
+            self.assertEqual(node._refresh_dynamic_route(start), "adopted")
+            node.dynamic_join_pending = False
+            step = node._start_egress_command(
+                start,
+                node.follower_config.controller,
+            )
+
+        self.assertEqual(node.start_egress_lock_index, 1)
+        self.assertEqual(step.target_index, 1)
+        self.assertEqual(step.pursuit_index, 1)
+        self.assertEqual(step.command.linear_x_mps, 0.0)
+
+        with patch(
+            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            return_value=11.0,
+        ):
+            released = node._start_egress_command(
+                Pose2D(-0.195, -0.115, 1.9),
+                node.follower_config.controller,
+            )
+        self.assertIsNone(released)
+        self.assertIsNone(node.start_egress_lock_index)
+        self.assertEqual(node.target_index, 1)
+
+        node.start_egress_lock_index = 1
+        ordinary = RouteUpdate(
+            kind=RouteUpdateKind.ADOPT,
+            waypoints=(Pose2D(-0.195, -0.115), Pose2D(-0.8, -0.1)),
+            target_index=0,
+            event_fields={
+                "effective_join_limit_m": 0.20,
+                "route_kind": "axis_acquisition",
+            },
+        )
+        node.waypoint_provider = lambda _pose: ordinary
+        node.initial_route_refresh_pending = True
+        with patch(
+            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            return_value=12.0,
+        ):
+            self.assertEqual(
+                node._refresh_dynamic_route(Pose2D(-0.195, -0.115, 1.9)),
+                "adopted",
+            )
+        self.assertIsNone(node.start_egress_lock_index)
+
     def test_sensor_receipts_use_monotonic_time_not_uninitialized_ros_time(self):
         node = object.__new__(SimpleWaypointFollowerNode)
         scan = object()
@@ -133,6 +321,13 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
                 configured, "synchronized_viewpoint"
             ).enforce_heading_corridor
         )
+        catalog = controller_config_for_route_kind(
+            configured,
+            "catalog_face_approach",
+            physical_goal_tolerance_m=0.03,
+        )
+        self.assertTrue(catalog.enforce_heading_corridor)
+        self.assertEqual(catalog.goal_tolerance_m, 0.03)
 
     def test_non_dynamic_route_preserves_explicit_corridor_setting(self):
         configured = ControllerConfig(enforce_heading_corridor=True)
@@ -220,6 +415,32 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
             self.assertEqual(node._refresh_dynamic_route(Pose2D(0.03, 0.0)), "")
 
         self.assertEqual(calls, [Pose2D(0.02, 0.0)])
+
+    def test_survey_completion_stops_with_success(self):
+        update = RouteUpdate(
+            kind=RouteUpdateKind.COMPLETE,
+            reason="arrival pose recorded",
+            event_name="dynamic_survey_completed",
+            event_fields={
+                "candidate_uid": "candidate-a",
+                "fail_closed": False,
+            },
+        )
+        events = []
+        node = bare_follower(update, events.append)
+        zero_calls = []
+        node.publish_zero = lambda: zero_calls.append(True)
+
+        with patch(
+            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            return_value=10.0,
+        ):
+            result = node._refresh_dynamic_route(Pose2D(0.02, 0.0))
+
+        self.assertEqual(result, "completed")
+        self.assertEqual(len(zero_calls), 1)
+        self.assertEqual(events, [update])
+        self.assertFalse(node.latest_stop_details["fail_closed"])
 
     def test_sampling_phase_deadline_is_total(self):
         self.assertEqual(

@@ -23,6 +23,7 @@ scripts/bags/
 
 # experiment runtime outputs
 results/
+/results/aufgabe04/stand_axis_lidar_roi/stand_axis_lidar_roi_observations.jsonl
 results/**/*_bag.log
 results/**/latest_tracker_pose.csv
 results/**/latest_tracker_pose.sample.csv

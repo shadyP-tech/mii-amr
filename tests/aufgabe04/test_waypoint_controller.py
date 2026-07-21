@@ -10,12 +10,132 @@ sys.path.insert(0, str(ROOT))
 from scripts.aufgabe04.navigation.models import Pose2D  # noqa: E402
 from scripts.aufgabe04.navigation.waypoint_controller import (  # noqa: E402
     ControllerConfig,
+    StartEgressControlConfig,
+    compute_start_egress_vertex_command,
     compute_waypoint_command,
+    normalize_angle,
     reverse_staging_is_preferred,
 )
 
 
 class WaypointControllerTest(unittest.TestCase):
+    def test_start_egress_lock_pursues_first_vertex_without_lookahead(self):
+        config = ControllerConfig(
+            goal_tolerance_m=0.08,
+            lookahead_distance_m=0.18,
+            max_progress_advance_m=0.45,
+        )
+        waypoints = (
+            Pose2D(-0.131011, -0.270103, float("nan")),
+            Pose2D(-0.195, -0.115, float("nan")),
+            Pose2D(-0.595, -0.115, float("nan")),
+        )
+        start = Pose2D(-0.131011, -0.270103, -2.702)
+
+        ordinary = compute_waypoint_command(start, waypoints, 0, config)
+        locked = compute_start_egress_vertex_command(
+            start,
+            waypoints,
+            1,
+            config,
+            reach_tolerance_m=0.02,
+        )
+
+        self.assertEqual(ordinary.pursuit_index, 2)
+        self.assertIsNotNone(locked)
+        self.assertEqual(locked.pursuit_index, 1)
+        self.assertEqual(locked.target_index, 1)
+        self.assertEqual(locked.command.linear_x_mps, 0.0)
+        self.assertIsNone(
+            compute_start_egress_vertex_command(
+                Pose2D(-0.195, -0.115, 1.9),
+                waypoints,
+                1,
+                config,
+                reach_tolerance_m=0.02,
+            )
+        )
+
+        post_egress_pose = Pose2D(-0.2297, -0.0940, 2.4126)
+        turn = compute_waypoint_command(
+            post_egress_pose,
+            waypoints,
+            2,
+            config,
+        )
+        expected_error = normalize_angle(
+            math.atan2(
+                waypoints[2].y_m - post_egress_pose.y_m,
+                waypoints[2].x_m - post_egress_pose.x_m,
+            )
+            - post_egress_pose.yaw_rad
+        )
+        self.assertEqual(turn.pursuit_index, 2)
+        self.assertAlmostEqual(turn.controlled_heading_error_rad, expected_error)
+        self.assertGreater(abs(turn.controlled_heading_error_rad), 0.70)
+
+    def test_exact_keepout_egress_rotates_tightly_before_translation(self):
+        """A->B egress must not cut the 0.30 m clearance certificate."""
+
+        config = ControllerConfig(
+            max_linear_mps=0.055,
+            stop_heading_error_rad=1.25,
+        )
+        egress = StartEgressControlConfig(
+            alignment_tolerance_rad=0.10,
+            max_linear_mps=0.03,
+        )
+        waypoints = (
+            Pose2D(-0.13217920580955628, -0.2693999965268561, float("nan")),
+            Pose2D(-0.19499999999999984, -0.11499999999999977, float("nan")),
+            Pose2D(-0.5949999999999998, -0.11499999999999977, float("nan")),
+        )
+        segment_heading = math.atan2(
+            waypoints[1].y_m - waypoints[0].y_m,
+            waypoints[1].x_m - waypoints[0].x_m,
+        )
+
+        large_error = compute_start_egress_vertex_command(
+            Pose2D(waypoints[0].x_m, waypoints[0].y_m, -2.702412021176897),
+            waypoints,
+            1,
+            config,
+            egress_config=egress,
+        )
+        moderate_error = compute_start_egress_vertex_command(
+            Pose2D(
+                waypoints[0].x_m,
+                waypoints[0].y_m,
+                normalize_angle(segment_heading + 0.44),
+            ),
+            waypoints,
+            1,
+            config,
+            egress_config=egress,
+        )
+        aligned = compute_start_egress_vertex_command(
+            Pose2D(
+                waypoints[0].x_m,
+                waypoints[0].y_m,
+                normalize_angle(segment_heading + 0.05),
+            ),
+            waypoints,
+            1,
+            config,
+            egress_config=egress,
+        )
+
+        self.assertIsNotNone(large_error)
+        self.assertIsNotNone(moderate_error)
+        self.assertIsNotNone(aligned)
+        self.assertEqual(large_error.command.linear_x_mps, 0.0)
+        self.assertEqual(moderate_error.command.linear_x_mps, 0.0)
+        self.assertGreater(aligned.command.linear_x_mps, 0.0)
+        self.assertLessEqual(aligned.command.linear_x_mps, 0.03)
+        self.assertEqual(large_error.pursuit_index, 1)
+        self.assertEqual(moderate_error.pursuit_index, 1)
+        self.assertEqual(aligned.pursuit_index, 1)
+
     def test_blends_forward_motion_through_corner(self):
         config = ControllerConfig(
             max_linear_mps=0.055,
@@ -34,6 +154,7 @@ class WaypointControllerTest(unittest.TestCase):
         self.assertFalse(step.reached_goal)
         self.assertGreater(step.command.linear_x_mps, 0.0)
         self.assertGreater(step.command.angular_z_radps, 0.0)
+        self.assertEqual(step.target_index, 2)
         self.assertEqual(step.pursuit_index, 2)
 
     def test_large_heading_error_rotates_in_place(self):
@@ -67,6 +188,118 @@ class WaypointControllerTest(unittest.TestCase):
 
         self.assertEqual(step.target_index, 2)
         self.assertLess(step.target_index, 3)
+
+    def test_long_leg_progress_latches_without_lookahead_reversal(self):
+        """Exact e2e_006 leg 2 geometry must keep pursuing waypoint 3."""
+
+        config = ControllerConfig(
+            goal_tolerance_m=0.08,
+            lookahead_distance_m=0.18,
+            max_progress_advance_m=0.45,
+        )
+        waypoint_2 = Pose2D(-0.6449999999999996, -0.11499999999999977)
+        waypoint_3 = Pose2D(
+            -1.0323535974295406,
+            -0.38939028132540787,
+        )
+        waypoints = (
+            Pose2D(-0.19499999999999984, -0.11499999999999977),
+            waypoint_2,
+            waypoint_3,
+        )
+        segment_length = math.hypot(
+            waypoint_3.x_m - waypoint_2.x_m,
+            waypoint_3.y_m - waypoint_2.y_m,
+        )
+        self.assertAlmostEqual(segment_length, 0.47469235924695846)
+        unit_x = (waypoint_3.x_m - waypoint_2.x_m) / segment_length
+        unit_y = (waypoint_3.y_m - waypoint_2.y_m) / segment_length
+        segment_yaw = math.atan2(unit_y, unit_x)
+
+        inside_lookahead = Pose2D(
+            waypoint_2.x_m + 0.179 * unit_x,
+            waypoint_2.y_m + 0.179 * unit_y,
+            segment_yaw,
+        )
+        outside_lookahead = Pose2D(
+            waypoint_2.x_m + 0.195 * unit_x,
+            waypoint_2.y_m + 0.195 * unit_y,
+            segment_yaw,
+        )
+
+        first = compute_waypoint_command(
+            inside_lookahead,
+            waypoints,
+            1,
+            config,
+        )
+        second = compute_waypoint_command(
+            outside_lookahead,
+            waypoints,
+            first.target_index,
+            config,
+        )
+
+        self.assertEqual(first.target_index, 2)
+        self.assertEqual(first.pursuit_index, 2)
+        self.assertEqual(second.target_index, 2)
+        self.assertEqual(second.pursuit_index, 2)
+        self.assertAlmostEqual(
+            first.distance_to_target_m,
+            segment_length - 0.179,
+        )
+        self.assertAlmostEqual(
+            second.distance_to_target_m,
+            segment_length - 0.195,
+        )
+        self.assertGreater(first.command.linear_x_mps, 0.0)
+        self.assertGreater(second.command.linear_x_mps, 0.0)
+        self.assertAlmostEqual(first.command.angular_z_radps, 0.0, places=9)
+        self.assertAlmostEqual(second.command.angular_z_radps, 0.0, places=9)
+
+    def test_long_immediate_successor_is_eligible_but_cap_blocks_later_skip(self):
+        config = ControllerConfig(
+            goal_tolerance_m=0.02,
+            lookahead_distance_m=0.0,
+            max_progress_advance_m=0.45,
+        )
+        waypoints = (
+            Pose2D(0.0, 0.0),
+            Pose2D(0.47469235924695846, 0.0),
+            Pose2D(0.5746923592469585, 0.0),
+        )
+
+        step = compute_waypoint_command(
+            Pose2D(0.55, 0.0, 0.0),
+            waypoints,
+            0,
+            config,
+        )
+
+        self.assertEqual(step.target_index, 1)
+        self.assertEqual(step.pursuit_index, 1)
+
+    def test_long_segment_latch_never_crosses_heading_handoff(self):
+        config = ControllerConfig(
+            goal_tolerance_m=0.08,
+            lookahead_distance_m=0.18,
+            max_progress_advance_m=0.45,
+            enforce_heading_corridor=False,
+        )
+        waypoints = (
+            Pose2D(0.0, 0.0, float("nan")),
+            Pose2D(0.50, 0.0, math.pi),
+        )
+
+        step = compute_waypoint_command(
+            Pose2D(0.179, 0.0, 0.0),
+            waypoints,
+            0,
+            config,
+        )
+
+        self.assertEqual(step.target_index, 0)
+        self.assertEqual(step.pursuit_index, 1)
 
     def test_final_waypoint_with_yaw_rotates_before_completion(self):
         config = ControllerConfig(goal_tolerance_m=0.03, heading_tolerance_rad=0.10)

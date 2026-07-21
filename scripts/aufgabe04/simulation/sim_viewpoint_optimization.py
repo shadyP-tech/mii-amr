@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from typing import Generic, Sequence, TypeVar
 
 from scripts.aufgabe04.navigation.models import Pose2D
+from scripts.aufgabe04.stations.arrival_pose_geometry import (
+    ArrivalGeometryConfig,
+    arrival_face_candidates,
+)
 
 
 T = TypeVar("T")
@@ -67,14 +71,23 @@ class ViewpointSamplingUpdate:
 
 
 class ViewpointSamplingLatch:
-    """Hold one tangential camera target until it is safely sampled.
+    """Hold one closer camera target until it is safely sampled.
 
     The raw silhouette yaw is deliberately used only by
     :func:`refined_viewpoint_pose` to choose a bounded tangential step.  This
     latch prevents the step from becoming a per-frame moving carrot while the
-    follower is driving.  A new step is accepted only after the current one is
-    reached, the robot is stationary, and the view remains oblique.
+    follower is driving.  At the initial, deliberately distant acquisition
+    pose, either an oblique silhouette or a well-conditioned silhouette can
+    seed the closer sampling target.  The latter is still only viewpoint
+    evidence: the physical stand axis remains uncommitted until the robot
+    reaches the final observation band and passes the complete settle gate.
+
+    A later tangential step is accepted only after the current one is reached,
+    the robot is stationary, and the view remains oblique.  Missing,
+    undersized, or non-face silhouette evidence can never start sampling.
     """
+
+    _START_REASONS = frozenset({"oblique_silhouette", "well_conditioned"})
 
     def __init__(self, *, arrival_tolerance_m: float = 0.10) -> None:
         if not math.isfinite(arrival_tolerance_m) or arrival_tolerance_m <= 0.0:
@@ -111,9 +124,9 @@ class ViewpointSamplingLatch:
             raise ValueError("sampling state flags must be boolean")
 
         if self.target_pose is None:
-            if axis_input_reason != "oblique_silhouette":
+            if axis_input_reason not in self._START_REASONS:
                 return ViewpointSamplingUpdate(
-                    False, None, False, "axis_not_oblique"
+                    False, None, False, "axis_not_sampleable"
                 )
             if (
                 not stationary
@@ -411,14 +424,17 @@ class AxialAngleFilter:
 def face_normal_candidates(stand: Pose2D, axis_rad: float, offset_m: float) -> tuple[Pose2D, Pose2D]:
     if offset_m <= 0.0:
         raise ValueError("approach offset must be positive")
-    normals = (axis_rad + math.pi / 2.0, axis_rad - math.pi / 2.0)
     return tuple(
         Pose2D(
-            stand.x_m + offset_m * math.cos(normal),
-            stand.y_m + offset_m * math.sin(normal),
-            normalize_angle(normal + math.pi),
+            face.target_pose.x_m,
+            face.target_pose.y_m,
+            face.target_pose.yaw_rad,
         )
-        for normal in normals
+        for face in arrival_face_candidates(
+            stand,
+            axis_rad,
+            ArrivalGeometryConfig(standoff_distance_m=offset_m),
+        )
     )
 
 

@@ -15,6 +15,10 @@ from typing import Iterable, Sequence
 from scripts.aufgabe04.navigation.costmap import CELL_SOURCE_RUN_LOCAL, Costmap
 from scripts.aufgabe04.navigation.global_planner import plan_route
 from scripts.aufgabe04.navigation.models import GridCell, Pose2D
+from scripts.aufgabe04.stations.arrival_pose_geometry import (
+    ArrivalGeometryConfig,
+    arrival_face_candidates,
+)
 
 
 _EPSILON = 1.0e-10
@@ -92,6 +96,12 @@ class DynamicApproachConfig:
             + self.lidar_clearance_margin_m
         )
 
+    @property
+    def non_target_stand_keepout_radius_m(self) -> float:
+        """Robot-center exclusion radius for stands crossed in transit."""
+
+        return max(self.stand_keepout_radius_m, self.minimum_lidar_standoff_m)
+
 
 @dataclass(frozen=True)
 class FaceNormalCandidate:
@@ -165,16 +175,6 @@ def _finite_pose(pose: Pose2D, *, name: str) -> None:
         raise ValueError(f"{name} position must be finite")
 
 
-def _canonical_axial_angle(axis_rad: float) -> float:
-    """Map a 180-degree-symmetric axis to a stable half-open interval."""
-
-    if not math.isfinite(axis_rad):
-        raise ValueError("stand axis must be finite")
-    canonical = (axis_rad + math.pi / 2.0) % math.pi - math.pi / 2.0
-    # Prevent floating-point representations of +pi/2 from changing face IDs.
-    return -math.pi / 2.0 if canonical >= math.pi / 2.0 - _EPSILON else canonical
-
-
 def _normalize_angle(angle_rad: float) -> float:
     return math.atan2(math.sin(angle_rad), math.cos(angle_rad))
 
@@ -191,33 +191,31 @@ def face_normal_candidates(
     """
 
     _finite_pose(stand, name="stand")
-    axis = _canonical_axial_angle(stand_axis_rad)
-    normals = (axis + math.pi / 2.0, axis - math.pi / 2.0)
-    candidates = []
-    for face_id, normal in enumerate(normals):
-        normal = _normalize_angle(normal)
-        yaw = _normalize_angle(normal + math.pi)
-        candidates.append(
-            FaceNormalCandidate(
-                face_id=face_id,
-                normal_rad=normal,
-                target=Pose2D(
-                    stand.x_m + config.standoff_distance_m * math.cos(normal),
-                    stand.y_m + config.standoff_distance_m * math.sin(normal),
-                    yaw,
-                ),
-                entry=Pose2D(
-                    stand.x_m
-                    + (config.standoff_distance_m + config.terminal_corridor_length_m)
-                    * math.cos(normal),
-                    stand.y_m
-                    + (config.standoff_distance_m + config.terminal_corridor_length_m)
-                    * math.sin(normal),
-                    yaw,
-                ),
-            )
+    geometry = arrival_face_candidates(
+        stand,
+        stand_axis_rad,
+        ArrivalGeometryConfig(
+            standoff_distance_m=config.standoff_distance_m,
+            terminal_corridor_length_m=config.terminal_corridor_length_m,
+        ),
+    )
+    return tuple(
+        FaceNormalCandidate(
+            face_id=face.face_id,
+            normal_rad=face.outward_normal_rad,
+            target=Pose2D(
+                face.target_pose.x_m,
+                face.target_pose.y_m,
+                face.target_pose.yaw_rad,
+            ),
+            entry=Pose2D(
+                face.corridor_entry_pose.x_m,
+                face.corridor_entry_pose.y_m,
+                face.corridor_entry_pose.yaw_rad,
+            ),
         )
-    return candidates[0], candidates[1]
+        for face in geometry
+    )
 
 
 def _distance_point_to_cell_square(costmap: Costmap, pose: Pose2D, cell: GridCell) -> float:
@@ -741,3 +739,111 @@ def plan_dynamic_approach(
         diagnostics=diagnostics,
     )
     return DynamicApproachPlanResult(plan=plan, diagnostics=diagnostics)
+
+
+def plan_fixed_approach(
+    costmap: Costmap,
+    start: Pose2D,
+    stand: Pose2D,
+    candidate: FaceNormalCandidate,
+    *,
+    config: DynamicApproachConfig = DynamicApproachConfig(),
+) -> DynamicApproachPlanResult:
+    """Plan to one already-selected arrival face without substitution.
+
+    Unlike :func:`plan_dynamic_approach`, this entry point never derives a new
+    face from the live robot pose, compares the opposite side, or snaps the
+    stored target.  It is used when an arrival-pose catalog has frozen the
+    semantic decision and only collision-safe path generation remains.
+    """
+
+    _finite_pose(start, name="start")
+    _finite_pose(stand, name="stand")
+    _finite_pose(candidate.target, name="fixed target")
+    _finite_pose(candidate.entry, name="fixed corridor entry")
+    if type(candidate.face_id) is not int or candidate.face_id < 0:
+        raise ValueError("fixed candidate face_id must be a non-negative integer")
+    if not math.isfinite(candidate.normal_rad):
+        raise ValueError("fixed candidate normal must be finite")
+
+    target_dx = candidate.target.x_m - stand.x_m
+    target_dy = candidate.target.y_m - stand.y_m
+    entry_dx = candidate.entry.x_m - stand.x_m
+    entry_dy = candidate.entry.y_m - stand.y_m
+    target_radius = math.hypot(target_dx, target_dy)
+    entry_radius = math.hypot(entry_dx, entry_dy)
+    expected_yaw = _normalize_angle(candidate.normal_rad + math.pi)
+    geometry_reasons = []
+    if target_radius <= _EPSILON:
+        geometry_reasons.append("fixed_target_at_stand_center")
+    else:
+        target_normal = math.atan2(target_dy, target_dx)
+        if abs(_normalize_angle(target_normal - candidate.normal_rad)) > 1.0e-6:
+            geometry_reasons.append("fixed_target_not_on_normal")
+    if entry_radius <= _EPSILON:
+        geometry_reasons.append("fixed_entry_at_stand_center")
+    else:
+        entry_normal = math.atan2(entry_dy, entry_dx)
+        if abs(_normalize_angle(entry_normal - candidate.normal_rad)) > 1.0e-6:
+            geometry_reasons.append("fixed_entry_not_on_normal")
+    if abs(target_radius - config.standoff_distance_m) > 1.0e-6:
+        geometry_reasons.append("fixed_target_standoff_mismatch")
+    if abs(
+        entry_radius
+        - (config.standoff_distance_m + config.terminal_corridor_length_m)
+    ) > 1.0e-6:
+        geometry_reasons.append("fixed_entry_corridor_length_mismatch")
+    if abs(_normalize_angle(candidate.target.yaw_rad - expected_yaw)) > 1.0e-6:
+        geometry_reasons.append("fixed_target_yaw_mismatch")
+    if abs(_normalize_angle(candidate.entry.yaw_rad - expected_yaw)) > 1.0e-6:
+        geometry_reasons.append("fixed_entry_yaw_mismatch")
+
+    planning_costmap, keepout_cells = with_dynamic_stand_keepout(
+        costmap, stand, config
+    )
+    start_join_clearance = point_clearance_to_blocked_m(planning_costmap, start)
+    if config.standoff_distance_m <= config.stand_keepout_radius_m + _EPSILON:
+        geometry_reasons.append("standoff_inside_stand_keepout")
+    if config.standoff_distance_m < config.minimum_lidar_standoff_m - _EPSILON:
+        geometry_reasons.append("standoff_incompatible_with_lidar_stop")
+
+    selected, candidate_diagnostics = _validate_candidate(
+        planning_costmap,
+        start,
+        candidate,
+        config,
+        geometry_reasons,
+    )
+    failure_reason = (
+        None
+        if selected is not None
+        else (
+            candidate_diagnostics.rejection_reasons[0]
+            if candidate_diagnostics.rejection_reasons
+            else "fixed_arrival_invalid"
+        )
+    )
+    diagnostics = DynamicApproachDiagnostics(
+        keepout_radius_m=config.stand_keepout_radius_m,
+        keepout_cell_count=len(keepout_cells),
+        minimum_lidar_standoff_m=config.minimum_lidar_standoff_m,
+        start_join_clearance_m=start_join_clearance,
+        requested_hard_face_id=candidate.face_id,
+        selected_face_id=(candidate.face_id if selected is not None else None),
+        failure_reason=failure_reason,
+        candidates=(candidate_diagnostics,),
+    )
+    if selected is None:
+        return DynamicApproachPlanResult(None, diagnostics)
+    return DynamicApproachPlanResult(
+        DynamicApproachPlan(
+            waypoints=selected.waypoints,
+            selected_face_id=candidate.face_id,
+            stand=stand,
+            target=candidate.target,
+            entry=candidate.entry,
+            length_m=selected.length_m,
+            diagnostics=diagnostics,
+        ),
+        diagnostics,
+    )

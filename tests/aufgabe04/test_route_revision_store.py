@@ -119,6 +119,44 @@ class TestRouteRevisionStore(unittest.TestCase):
             self.assertEqual(committed.status, "withdrawn")
             self.assertEqual(committed.reason, "camera evidence expired")
 
+    def test_survey_completion_is_success_terminal_and_preserves_route_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest = Path(temp_dir) / "route_manifest.json"
+            store = RouteRevisionStore(
+                manifest,
+                stream_id="sim",
+                writer_id="planner",
+                now_fn=lambda: 100.0,
+            )
+            active = _publish(store)
+
+            completed = store.complete_survey(
+                "arrival pose recorded",
+                completion={
+                    "candidate_uid": "candidate-a",
+                    "catalog_revision": 1,
+                    "catalog_sha256": "a" * 64,
+                },
+            )
+
+            self.assertEqual(completed.status, "survey_complete")
+            self.assertEqual(completed.reason, "arrival pose recorded")
+            self.assertEqual(completed.route_revision, active.route_revision + 1)
+            self.assertEqual(completed.route_hash, active.route_hash)
+            self.assertIsNone(completed.route_path)
+            self.assertFalse(completed.manifest["completion"].get("fail_closed", False))
+            self.assertEqual(
+                store.complete_survey(
+                    "arrival pose recorded",
+                    completion={
+                        "candidate_uid": "candidate-a",
+                        "catalog_revision": 1,
+                        "catalog_sha256": "a" * 64,
+                    },
+                ).route_revision,
+                completed.route_revision,
+            )
+
     def test_initial_withdrawal_commits_fail_closed_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)

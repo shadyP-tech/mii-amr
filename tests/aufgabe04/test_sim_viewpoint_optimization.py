@@ -519,6 +519,100 @@ class SimViewpointOptimizationTest(unittest.TestCase):
         self.assertFalse(held_moving.advanced)
         self.assertFalse(held_missing.advanced)
 
+    def test_well_conditioned_acquisition_starts_closer_sampling_target(self):
+        """Regression for station B in gazebo_arrival_e2e_006.
+
+        The initial acquisition pose is intentionally outside the final camera
+        observation band.  A usable frontal silhouette there must move the
+        robot to the closer diagnostic viewpoint rather than leave the
+        follower holding the acquisition route until timeout.
+        """
+
+        latch = ViewpointSamplingLatch(arrival_tolerance_m=0.10)
+        robot = Pose2D(
+            -1.0943829462328813,
+            -0.4616802455957303,
+            -2.7385960874576867,
+        )
+        closer_viewpoint = Pose2D(
+            -1.414758041920721,
+            -0.5079278517452288,
+            -2.7766377581748034,
+        )
+
+        update = latch.update(
+            robot_pose=robot,
+            stationary=True,
+            axis_input_reason="well_conditioned",
+            candidate_pose=closer_viewpoint,
+            allow_start=True,
+            view_centered=True,
+            view_settled=True,
+        )
+
+        stand = Pose2D(-1.695, -0.615)
+        self.assertTrue(update.active)
+        self.assertTrue(update.advanced)
+        self.assertEqual(update.reason, "sampling_started")
+        self.assertEqual(update.target_pose, closer_viewpoint)
+        self.assertLess(
+            math.hypot(
+                closer_viewpoint.x_m - stand.x_m,
+                closer_viewpoint.y_m - stand.y_m,
+            ),
+            math.hypot(robot.x_m - stand.x_m, robot.y_m - stand.y_m),
+        )
+
+    def test_well_conditioned_acquisition_keeps_settle_gates_fail_closed(self):
+        latch = ViewpointSamplingLatch(arrival_tolerance_m=0.10)
+        robot = Pose2D(0.55, 0.0, math.pi)
+        candidate = Pose2D(0.30, 0.0, math.pi)
+        rejected_cases = (
+            {"allow_start": False, "stationary": True, "view_centered": True, "view_settled": True},
+            {"allow_start": True, "stationary": False, "view_centered": True, "view_settled": True},
+            {"allow_start": True, "stationary": True, "view_centered": False, "view_settled": True},
+            {"allow_start": True, "stationary": True, "view_centered": True, "view_settled": False},
+        )
+
+        for flags in rejected_cases:
+            with self.subTest(flags=flags):
+                update = latch.update(
+                    robot_pose=robot,
+                    axis_input_reason="well_conditioned",
+                    candidate_pose=candidate,
+                    **flags,
+                )
+                self.assertFalse(update.active)
+                self.assertFalse(update.advanced)
+                self.assertIsNone(update.target_pose)
+                self.assertEqual(update.reason, "acquisition_not_settled")
+
+    def test_unusable_acquisition_cannot_start_closer_sampling_target(self):
+        robot = Pose2D(0.55, 0.0, math.pi)
+        candidate = Pose2D(0.30, 0.0, math.pi)
+
+        for reason in (
+            "camera_yaw_unavailable",
+            "silhouette_unavailable",
+            "silhouette_not_face_visible",
+            "projected_head_too_small",
+        ):
+            with self.subTest(reason=reason):
+                latch = ViewpointSamplingLatch(arrival_tolerance_m=0.10)
+                update = latch.update(
+                    robot_pose=robot,
+                    stationary=True,
+                    axis_input_reason=reason,
+                    candidate_pose=candidate,
+                    allow_start=True,
+                    view_centered=True,
+                    view_settled=True,
+                )
+                self.assertFalse(update.active)
+                self.assertFalse(update.advanced)
+                self.assertIsNone(update.target_pose)
+                self.assertEqual(update.reason, "axis_not_sampleable")
+
     def test_sampling_target_advances_only_when_reached_stationary_and_oblique(self):
         latch = ViewpointSamplingLatch(arrival_tolerance_m=0.10)
         first = Pose2D(0.30, 0.0, math.pi)

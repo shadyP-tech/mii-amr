@@ -12,7 +12,11 @@ Initial implementation order:
 4. Navigation adapter around Aufgabe 03 planning.
 5. Single-segment station-route execution behind strict preflight.
 6. ROS camera integration, multi-segment missions, and two-robot operation only
-   after single-robot dry-run and real-run evidence exists.
+after single-robot dry-run and real-run evidence exists.
+
+The simulation-only workflow that surveys future perpendicular stand-arrival
+poses without immediately driving to them is documented in
+[`aufgabe04_arrival_pose_survey.md`](aufgabe04_arrival_pose_survey.md).
 
 Dry-run artifact layout:
 

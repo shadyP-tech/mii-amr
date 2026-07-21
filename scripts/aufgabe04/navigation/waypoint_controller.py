@@ -32,12 +32,40 @@ class ControllerConfig:
 
 
 @dataclass(frozen=True)
+class StartEgressControlConfig:
+    """Conservative controls for leaving a certified keepout start cell.
+
+    The ordinary controller deliberately blends translation into fairly large
+    heading errors so it can follow smooth routes.  A start-egress segment is
+    different: its clearance certificate applies to the exact segment leading
+    to the locked first vertex.  Translating before the robot is aligned with
+    that segment can consume the certificate's small clearance margin.
+    """
+
+    alignment_tolerance_rad: float = 0.10
+    max_linear_mps: float = 0.03
+
+    def __post_init__(self) -> None:
+        if (
+            not math.isfinite(self.alignment_tolerance_rad)
+            or self.alignment_tolerance_rad <= 0.0
+            or self.alignment_tolerance_rad > math.pi / 2.0
+        ):
+            raise ValueError(
+                "alignment_tolerance_rad must be finite and in (0, pi/2]"
+            )
+        if not math.isfinite(self.max_linear_mps) or self.max_linear_mps <= 0.0:
+            raise ValueError("max_linear_mps must be finite and positive")
+
+
+@dataclass(frozen=True)
 class ControllerStep:
     command: VelocityCommand
     target_index: int
     reached_goal: bool
     distance_to_target_m: float
     pursuit_index: int = 0
+    controlled_heading_error_rad: float = math.nan
 
 
 def normalize_angle(angle_rad: float) -> float:
@@ -121,12 +149,22 @@ def _closest_index_from(
             ):
                 break
         cumulative += distance(waypoints[index - 1], waypoints[index])
-        if max_advance_m > 0.0 and cumulative > max_advance_m:
+        advance_limit_exceeded = (
+            max_advance_m > 0.0 and cumulative > max_advance_m
+        )
+        is_immediate_successor = index == start_index + 1
+        if advance_limit_exceeded and not is_immediate_successor:
             break
         candidate_distance = distance(pose, waypoints[index])
         if candidate_distance < closest_distance:
             closest_index = index
             closest_distance = candidate_distance
+        if advance_limit_exceeded:
+            # ``max_advance_m`` is an anti-skip window, not a maximum legal
+            # route-segment length.  The immediate successor must remain
+            # eligible even when a sparse, collision-certified segment is
+            # longer than the window, but no waypoint beyond it may be used.
+            break
     return closest_index
 
 
@@ -161,6 +199,40 @@ def _lookahead_index(
     return len(waypoints) - 1
 
 
+def _should_latch_pursuit_progress(
+    waypoints: Sequence[Pose2D],
+    target_index: int,
+    pursuit_index: int,
+) -> bool:
+    """Make ordinary pure-pursuit progress monotonic.
+
+    The pursuit waypoint is the point the controller already commands toward.
+    Persisting it as progress ensures the next cycle cannot revert to an older
+    waypoint merely because the robot left that waypoint's lookahead circle.
+    This is essential when a segment is longer than twice the lookahead radius:
+    the radius boundary is crossed before the Euclidean-nearest midpoint.
+
+    Free/constrained and changed-heading boundaries remain explicit handoffs
+    and are never latched across, independent of the caller's corridor mode.
+    """
+
+    if pursuit_index <= target_index:
+        return False
+    for index in range(target_index + 1, pursuit_index + 1):
+        previous_yaw = waypoints[index - 1].yaw_rad
+        candidate_yaw = waypoints[index].yaw_rad
+        previous_has_heading = math.isfinite(previous_yaw)
+        candidate_has_heading = math.isfinite(candidate_yaw)
+        if previous_has_heading != candidate_has_heading:
+            return False
+        if (
+            previous_has_heading
+            and abs(normalize_angle(candidate_yaw - previous_yaw)) > 1.0e-6
+        ):
+            return False
+    return True
+
+
 def _linear_speed_for_heading(
     heading_error_abs: float,
     target_distance_m: float,
@@ -189,20 +261,35 @@ def compute_waypoint_command(
     waypoints: Sequence[Pose2D],
     target_index: int,
     config: ControllerConfig,
+    *,
+    locked_pursuit_index: int | None = None,
 ) -> ControllerStep:
     if not waypoints:
         return ControllerStep(VelocityCommand(0.0, 0.0), 0, True, 0.0)
-    index = min(max(target_index, 0), len(waypoints) - 1)
-    index = _closest_index_from(
-        pose,
-        waypoints,
-        index,
-        config.max_progress_advance_m,
-        config.enforce_heading_corridor,
-    )
+    if locked_pursuit_index is not None:
+        if not isinstance(locked_pursuit_index, int) or isinstance(
+            locked_pursuit_index, bool
+        ):
+            raise ValueError("locked_pursuit_index must be an integer")
+        if not 0 <= locked_pursuit_index < len(waypoints):
+            raise ValueError("locked_pursuit_index is outside the route")
+        index = locked_pursuit_index
+    else:
+        index = min(max(target_index, 0), len(waypoints) - 1)
+        index = _closest_index_from(
+            pose,
+            waypoints,
+            index,
+            config.max_progress_advance_m,
+            config.enforce_heading_corridor,
+        )
     target = waypoints[index]
     target_distance = distance(pose, target)
-    while target_distance <= config.goal_tolerance_m and index < len(waypoints) - 1:
+    while (
+        locked_pursuit_index is None
+        and target_distance <= config.goal_tolerance_m
+        and index < len(waypoints) - 1
+    ):
         next_index = index + 1
         next_target = waypoints[next_index]
         if math.isfinite(target.yaw_rad) != math.isfinite(next_target.yaw_rad):
@@ -235,7 +322,12 @@ def compute_waypoint_command(
                     config.max_angular_radps,
                 )
                 return ControllerStep(
-                    VelocityCommand(0.0, angular), index, False, target_distance, index
+                    VelocityCommand(0.0, angular),
+                    index,
+                    False,
+                    target_distance,
+                    index,
+                    final_heading_error,
                 )
         return ControllerStep(VelocityCommand(0.0, 0.0), index, True, target_distance, index)
 
@@ -248,16 +340,35 @@ def compute_waypoint_command(
                 config.max_angular_radps,
             )
             return ControllerStep(
-                VelocityCommand(0.0, angular), index, False, target_distance, index
+                VelocityCommand(0.0, angular),
+                index,
+                False,
+                target_distance,
+                index,
+                corridor_heading_error,
             )
 
-    pursuit_index = _lookahead_index(
-        pose,
+    pursuit_index = (
+        index
+        if locked_pursuit_index is not None
+        else _lookahead_index(
+            pose,
+            waypoints,
+            index,
+            config.lookahead_distance_m,
+            config.enforce_heading_corridor,
+        )
+    )
+    if _should_latch_pursuit_progress(
         waypoints,
         index,
-        config.lookahead_distance_m,
-        config.enforce_heading_corridor,
-    )
+        pursuit_index,
+    ):
+        # The waypoint is already the certified pursuit vertex.  Report it as
+        # progress now so the follower persists it on the next control cycle.
+        index = pursuit_index
+        target = waypoints[index]
+        target_distance = distance(pose, target)
     pursuit = waypoints[pursuit_index]
     heading = math.atan2(pursuit.y_m - pose.y_m, pursuit.x_m - pose.x_m)
     corridor_index = first_heading_corridor_index(waypoints)
@@ -278,7 +389,69 @@ def compute_waypoint_command(
     linear = _linear_speed_for_heading(abs(heading_error), target_distance, config)
     if reversing_stage:
         linear = -linear
-    return ControllerStep(VelocityCommand(linear, angular), index, False, target_distance, pursuit_index)
+    return ControllerStep(
+        VelocityCommand(linear, angular),
+        index,
+        False,
+        target_distance,
+        pursuit_index,
+        heading_error,
+    )
+
+
+def compute_start_egress_vertex_command(
+    pose: Pose2D,
+    waypoints: Sequence[Pose2D],
+    waypoint_index: int,
+    config: ControllerConfig,
+    *,
+    reach_tolerance_m: float = 0.02,
+    egress_config: StartEgressControlConfig = StartEgressControlConfig(),
+) -> ControllerStep | None:
+    """Pursue one certified egress vertex without lookahead or advancement.
+
+    ``None`` means the exact vertex is inside the tight release tolerance. The
+    caller owns clearing the route-scoped lock and issuing a zero cycle before
+    returning to ordinary pure-pursuit behavior.
+    """
+
+    if not math.isfinite(reach_tolerance_m) or reach_tolerance_m <= 0.0:
+        raise ValueError("reach_tolerance_m must be finite and positive")
+    if not isinstance(waypoint_index, int) or isinstance(waypoint_index, bool):
+        raise ValueError("waypoint_index must be an integer")
+    if not 0 <= waypoint_index < len(waypoints):
+        raise ValueError("waypoint_index is outside the route")
+    if distance(pose, waypoints[waypoint_index]) <= reach_tolerance_m:
+        return None
+    step = compute_waypoint_command(
+        pose,
+        waypoints,
+        waypoint_index,
+        replace(
+            config,
+            goal_tolerance_m=min(config.goal_tolerance_m, reach_tolerance_m),
+            lookahead_distance_m=0.0,
+            max_progress_advance_m=0.0,
+            reverse_staging=False,
+        ),
+        locked_pursuit_index=waypoint_index,
+    )
+    # The generic controller starts tapering forward motion only at its broad
+    # stop-heading threshold (1.25 rad by default).  For a keepout egress that
+    # would let the robot cut diagonally away from the continuously certified
+    # segment.  Hold position until the locked vertex is tightly aligned, then
+    # translate slowly while retaining the normal angular correction.
+    heading_error = abs(step.controlled_heading_error_rad)
+    linear = 0.0
+    if (
+        math.isfinite(heading_error)
+        and heading_error <= egress_config.alignment_tolerance_rad
+    ):
+        linear = min(step.command.linear_x_mps, egress_config.max_linear_mps)
+    return replace(
+        step,
+        command=VelocityCommand(linear, step.command.angular_z_radps),
+    )
 
 
 def compute_join_anchor_command(

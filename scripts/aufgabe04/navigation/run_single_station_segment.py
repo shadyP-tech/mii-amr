@@ -29,6 +29,8 @@ from scripts.aufgabe04.navigation.route_revision_store import (
     read_route_revision,
 )
 from scripts.aufgabe04.navigation.safety_checks import (
+    catalog_start_egress_certificate,
+    validate_catalog_route_binding_json,
     validate_route_diagnostics_json,
     validate_speed_limits,
 )
@@ -37,6 +39,8 @@ from scripts.aufgabe04.navigation.follower_models import FollowerResult
 from scripts.aufgabe04.navigation.simple_waypoint_follower import (
     DYNAMIC_VIEWPOINT_ROUTE_KINDS,
     FollowerConfig,
+    PHYSICAL_ROUTE_KINDS,
+    STATIC_PHYSICAL_ROUTE_KINDS,
     run_simple_waypoint_follower,
 )
 from scripts.aufgabe04.navigation.waypoint_controller import ControllerConfig
@@ -47,6 +51,59 @@ DEFAULT_ROUTE_CSV = Path("results/aufgabe04/routes/station_route.csv")
 DEFAULT_DIAGNOSTICS_JSON = Path("results/aufgabe04/routes/station_route_diagnostics.json")
 DEFAULT_RUN_LOG = Path("results/aufgabe04/station_segment_runs.csv")
 DEFAULT_EVENT_LOG_DIR = Path("results/aufgabe04/run_events")
+_CATALOG_ROUTE_INITIAL_DISTANCE_LIMIT_M = 0.15
+
+
+def _execution_initial_distance_limit(requested_m: float, route_kind: str) -> float:
+    """Prevent an unchecked long join onto a frozen catalog route."""
+
+    if route_kind in STATIC_PHYSICAL_ROUTE_KINDS:
+        return min(requested_m, _CATALOG_ROUTE_INITIAL_DISTANCE_LIMIT_M)
+    return requested_m
+
+
+def _load_execution_route_leg(
+    route_csv_path: Path,
+    leg_index: int,
+    *,
+    require_motion: bool,
+    requested_thinning_min_spacing_m: float,
+    authoritative_dynamic_route: bool,
+):
+    """Load a leg without weakening a collision-certified physical route.
+
+    Generic CSV thinning is useful for legacy dense grid routes, but it joins
+    retained points with unchecked straight chords.  Dynamic manifest routes
+    already disable it.  Frozen catalog routes are likewise prevalidated and
+    must retain their exact A* polyline plus protected terminal corridor.
+
+    Route kind is stored in the CSV itself, so a non-authoritative route is
+    first parsed normally and then reloaded without thinning when it identifies
+    itself as a static physical catalog route.  No motion can occur between
+    those pure reads.
+    """
+
+    initial_spacing = (
+        0.0 if authoritative_dynamic_route else requested_thinning_min_spacing_m
+    )
+    leg = load_route_leg(
+        route_csv_path,
+        leg_index,
+        require_motion=require_motion,
+        thinning_min_spacing_m=initial_spacing,
+    )
+    if (
+        not authoritative_dynamic_route
+        and initial_spacing > 0.0
+        and leg.route_kind in STATIC_PHYSICAL_ROUTE_KINDS
+    ):
+        leg = load_route_leg(
+            route_csv_path,
+            leg_index,
+            require_motion=require_motion,
+            thinning_min_spacing_m=0.0,
+        )
+    return leg
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -135,6 +192,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--stuck-timeout-sec", type=float, default=8.0)
     parser.add_argument("--stuck-progress-epsilon-m", type=float, default=0.03)
+    parser.add_argument(
+        "--stuck-heading-progress-epsilon-rad",
+        type=float,
+        default=0.10,
+        help=(
+            "Minimum controlled-heading improvement that resets the stuck "
+            "watchdog while turning toward the active pursuit waypoint."
+        ),
+    )
     parser.add_argument("--initial-distance-limit-m", type=float, default=0.35)
     parser.add_argument(
         "--dynamic-route-refresh-sec",
@@ -158,6 +224,33 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Simulation-only tolerance for completing the certified join anchor "
             "after a live route revision."
+        ),
+    )
+    parser.add_argument(
+        "--start-egress-waypoint-tolerance-m",
+        type=float,
+        default=0.02,
+        help=(
+            "Simulation-only release tolerance for waypoint 1 when a route "
+            "uses a certified start-cell raster exemption."
+        ),
+    )
+    parser.add_argument(
+        "--start-egress-alignment-tolerance-rad",
+        type=float,
+        default=0.10,
+        help=(
+            "Simulation-only heading error below which translation may begin "
+            "toward a certified start-egress vertex."
+        ),
+    )
+    parser.add_argument(
+        "--start-egress-max-linear-mps",
+        type=float,
+        default=0.03,
+        help=(
+            "Simulation-only linear-speed cap while pursuing a certified "
+            "start-egress vertex."
         ),
     )
     parser.add_argument(
@@ -408,6 +501,29 @@ def main(argv: list[str] | None = None) -> int:
     ):
         parser.error("--dynamic-route-join-tolerance-m must be positive")
     if (
+        not math.isfinite(args.start_egress_waypoint_tolerance_m)
+        or args.start_egress_waypoint_tolerance_m <= 0.0
+    ):
+        parser.error("--start-egress-waypoint-tolerance-m must be positive")
+    if (
+        not math.isfinite(args.start_egress_alignment_tolerance_rad)
+        or args.start_egress_alignment_tolerance_rad <= 0.0
+        or args.start_egress_alignment_tolerance_rad > math.pi / 2.0
+    ):
+        parser.error(
+            "--start-egress-alignment-tolerance-rad must be in (0, pi/2]"
+        )
+    if (
+        not math.isfinite(args.start_egress_max_linear_mps)
+        or args.start_egress_max_linear_mps <= 0.0
+    ):
+        parser.error("--start-egress-max-linear-mps must be positive")
+    if (
+        not math.isfinite(args.stuck_heading_progress_epsilon_rad)
+        or args.stuck_heading_progress_epsilon_rad <= 0.0
+    ):
+        parser.error("--stuck-heading-progress-epsilon-rad must be positive")
+    if (
         not math.isfinite(args.dynamic_route_terminal_lock_distance_m)
         or args.dynamic_route_terminal_lock_distance_m <= 0.0
     ):
@@ -500,13 +616,12 @@ def main(argv: list[str] | None = None) -> int:
             new_route_length_m=manifest.get("new_route_length_m"),
         )
     try:
-        leg = load_route_leg(
+        leg = _load_execution_route_leg(
             route_csv_path,
             args.leg_index,
             require_motion=require_motion,
-            thinning_min_spacing_m=(
-                0.0 if committed_route is not None else args.thinning_min_spacing_m
-            ),
+            requested_thinning_min_spacing_m=args.thinning_min_spacing_m,
+            authoritative_dynamic_route=committed_route is not None,
         )
     except (OSError, ValueError) as exc:
         emit_event(
@@ -550,8 +665,30 @@ def main(argv: list[str] | None = None) -> int:
         csv_point_count=len(leg.raw_waypoints),
         require_motion=require_motion,
     )
+    catalog_binding_status = (
+        validate_catalog_route_binding_json(diagnostics_json_path, leg)
+        if leg.route_kind in STATIC_PHYSICAL_ROUTE_KINDS
+        else None
+    )
+    catalog_egress_certificate = None
+    catalog_egress_failures = []
+    if leg.route_kind in STATIC_PHYSICAL_ROUTE_KINDS:
+        try:
+            catalog_egress_certificate = catalog_start_egress_certificate(
+                diagnostics_json_path,
+                leg,
+            )
+        except ValueError as exc:
+            catalog_egress_failures.append(
+                f"catalog start-egress certificate is invalid: {exc}"
+            )
     speed_status = validate_speed_limits(args.max_linear_mps, args.max_angular_radps)
-    pure_failures = diagnostics_status.failures + speed_status.failures
+    pure_failures = (
+        diagnostics_status.failures
+        + ([] if catalog_binding_status is None else catalog_binding_status.failures)
+        + catalog_egress_failures
+        + speed_status.failures
+    )
     if pure_failures:
         stop_reason = "; ".join(pure_failures)
         emit_event(
@@ -801,6 +938,20 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
 
+    execution_initial_distance_limit_m = _execution_initial_distance_limit(
+        args.initial_distance_limit_m,
+        leg.route_kind,
+    )
+    static_start_join_clearance_m = (
+        None
+        if catalog_egress_certificate is None
+        or not catalog_egress_certificate.required
+        or catalog_egress_certificate.start_join_clearance_m is None
+        else min(
+            execution_initial_distance_limit_m,
+            catalog_egress_certificate.start_join_clearance_m,
+        )
+    )
     follower_config = FollowerConfig(
         controller=ControllerConfig(
             max_linear_mps=args.max_linear_mps,
@@ -812,14 +963,7 @@ def main(argv: list[str] | None = None) -> int:
             stop_heading_error_rad=args.stop_heading_error_rad,
             min_linear_speed_scale=args.min_linear_speed_scale,
             max_progress_advance_m=args.max_progress_advance_m,
-            enforce_heading_corridor=(
-                committed_route is not None
-                and leg.route_kind
-                in {
-                    "synchronized_viewpoint",
-                    "synchronized_face_approach",
-                }
-            ),
+            enforce_heading_corridor=leg.route_kind in PHYSICAL_ROUTE_KINDS,
         ),
         min_obstacle_distance_m=args.min_obstacle_distance_m,
         front_obstacle_slow_distance_m=args.front_obstacle_slow_distance_m,
@@ -831,10 +975,26 @@ def main(argv: list[str] | None = None) -> int:
         waypoint_timeout_sec=args.waypoint_timeout_sec,
         stuck_timeout_sec=args.stuck_timeout_sec,
         stuck_progress_epsilon_m=args.stuck_progress_epsilon_m,
-        initial_distance_limit_m=args.initial_distance_limit_m,
+        stuck_heading_progress_epsilon_rad=(
+            args.stuck_heading_progress_epsilon_rad
+        ),
+        initial_distance_limit_m=execution_initial_distance_limit_m,
         allowed_cmd_vel_publishers=tuple(args.allowed_cmd_vel_publisher),
         dynamic_route_refresh_sec=args.dynamic_route_refresh_sec,
         dynamic_join_tolerance_m=args.dynamic_route_join_tolerance_m,
+        start_egress_waypoint_tolerance_m=(
+            args.start_egress_waypoint_tolerance_m
+        ),
+        start_egress_alignment_tolerance_rad=(
+            args.start_egress_alignment_tolerance_rad
+        ),
+        start_egress_max_linear_mps=args.start_egress_max_linear_mps,
+        initial_start_egress_waypoint_index=(
+            None
+            if catalog_egress_certificate is None
+            else catalog_egress_certificate.waypoint_index
+        ),
+        initial_start_join_clearance_m=static_start_join_clearance_m,
         initial_route_kind=leg.route_kind,
         axis_acquisition_wait_timeout_sec=args.axis_acquisition_wait_timeout_sec,
         viewpoint_sampling_timeout_sec=args.viewpoint_sampling_timeout_sec,
@@ -876,6 +1036,7 @@ def main(argv: list[str] | None = None) -> int:
                 "dynamic_route_withdrawn": "route_withdrawn",
                 "dynamic_route_rejected": "route_reload_rejected",
                 "dynamic_route_stopped": "route_reload_rejected",
+                "dynamic_survey_completed": "survey_completed",
             }.get(update.event_name, update.event_name)
             if event_name is None:
                 return

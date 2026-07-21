@@ -15,8 +15,13 @@ from scripts.aufgabe04.navigation.ros_runtime_config import (  # noqa: E402
     RuntimeConfig,
     resolve_runtime_config,
 )
-from scripts.aufgabe04.navigation.run_single_station_segment import build_parser  # noqa: E402
+from scripts.aufgabe04.navigation.run_single_station_segment import (  # noqa: E402
+    _execution_initial_distance_limit,
+    _load_execution_route_leg,
+    build_parser,
+)
 from scripts.aufgabe04.navigation.safety_checks import (  # noqa: E402
+    catalog_start_egress_certificate,
     validate_route_diagnostics_json,
     validate_speed_limits,
 )
@@ -178,6 +183,130 @@ class DiagnosticsGateTest(unittest.TestCase):
 
 
 class SegmentRunnerCliGateTest(unittest.TestCase):
+    def test_exact_e2e_006_leg2_activates_certified_vertex_one_lock(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            route_csv = Path(tmpdir) / "route.csv"
+            route_csv.write_text(
+                "leg_index,point_index,world_x_m,world_y_m,yaw_rad,"
+                "cumulative_length_m,protected,corridor,simulation_only,route_kind,"
+                "source_arrival_id,target_arrival_id,catalog_sha256\n"
+                f"2,0,-0.18491188596302915,-0.200843551718869,,0.0,false,false,true,"
+                f"catalog_face_approach,station_A::face_b,station_B::face_b,{'a' * 64}\n"
+                f"2,1,-0.19499999999999984,-0.11499999999999977,,0.08643428380297428,"
+                f"false,false,true,catalog_face_approach,station_A::face_b,station_B::face_b,{'a' * 64}\n"
+                f"2,2,-0.6449999999999996,-0.11499999999999977,,0.536434283802974,"
+                f"false,false,true,catalog_face_approach,station_A::face_b,station_B::face_b,{'a' * 64}\n"
+            )
+            diagnostics = Path(tmpdir) / "diagnostics.json"
+            diagnostics.write_text(
+                json.dumps(
+                    {
+                        "legs": [{}, {}, {
+                            "diagnostics": {
+                                "fixed_arrival": {
+                                    "start_join_clearance_m": 0.03508711403697043,
+                                },
+                            },
+                            "non_target_keepout_overlay": {
+                                "rasterized_cell_count": 218,
+                                "blocked_cell_count": 217,
+                                "start_cell": {"x": 52, "y": 29},
+                                "start_cell_was_rasterized": True,
+                                "start_cell_exempted": True,
+                                "exact_start_minimum_margin_m": 0.04,
+                                "cell_center_minimum_margin_m": 0.02284271247461922,
+                                "start_connector_minimum_margin_m": 0.02284271247461922,
+                            },
+                            "non_target_stand_clearances": [{
+                                "station_id": "station_A",
+                                "x_m": -0.395,
+                                "y_m": -0.415,
+                                "radius_m": 0.26,
+                                "minimum_route_clearance_m": 0.3,
+                            }],
+                        }],
+                    }
+                )
+            )
+            leg = load_route_leg(route_csv, 2)
+
+            certificate = catalog_start_egress_certificate(diagnostics, leg)
+            malformed = json.loads(diagnostics.read_text())
+            malformed["legs"][2]["non_target_keepout_overlay"][
+                "blocked_cell_count"
+            ] = 218
+            diagnostics.write_text(json.dumps(malformed))
+            with self.assertRaisesRegex(ValueError, "remove exactly one"):
+                catalog_start_egress_certificate(diagnostics, leg)
+
+        self.assertTrue(certificate.required)
+        self.assertEqual(certificate.waypoint_index, 1)
+        self.assertAlmostEqual(certificate.minimum_route_clearance_m, 0.3)
+        self.assertAlmostEqual(
+            certificate.start_join_clearance_m,
+            0.03508711403697043,
+        )
+
+    def test_static_catalog_route_tightens_unchecked_initial_join(self):
+        self.assertEqual(
+            _execution_initial_distance_limit(0.35, "catalog_face_approach"),
+            0.15,
+        )
+        self.assertEqual(_execution_initial_distance_limit(0.35, ""), 0.35)
+
+    def test_static_catalog_route_is_never_rethinned_into_unchecked_chords(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            route_csv = Path(tmpdir) / "route.csv"
+            route_csv.write_text(
+                "leg_index,point_index,world_x_m,world_y_m,yaw_rad,"
+                "cumulative_length_m,protected,simulation_only,route_kind\n"
+                "0,0,0.0,0.0,,0.0,false,true,catalog_face_approach\n"
+                "0,1,0.05,0.0,,0.05,false,true,catalog_face_approach\n"
+                "0,2,0.10,0.0,,0.10,false,true,catalog_face_approach\n"
+                "0,3,0.20,0.0,0.0,0.20,true,true,catalog_face_approach\n"
+            )
+
+            leg = _load_execution_route_leg(
+                route_csv,
+                0,
+                require_motion=True,
+                requested_thinning_min_spacing_m=0.15,
+                authoritative_dynamic_route=False,
+            )
+
+        self.assertEqual(leg.thinning_min_spacing_m, 0.0)
+        self.assertEqual(
+            [waypoint.point_index for waypoint in leg.executable_waypoints],
+            [0, 1, 2, 3],
+        )
+
+    def test_ordinary_static_route_retains_requested_legacy_thinning(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            route_csv = Path(tmpdir) / "route.csv"
+            write_route(
+                route_csv,
+                [
+                    "0,0,0,0,0.0,0.0,0.0,0.0",
+                    "0,1,1,0,0.05,0.0,0.05,0.05",
+                    "0,2,2,0,0.10,0.0,0.05,0.10",
+                    "0,3,3,0,0.20,0.0,0.10,0.20",
+                ],
+            )
+
+            leg = _load_execution_route_leg(
+                route_csv,
+                0,
+                require_motion=True,
+                requested_thinning_min_spacing_m=0.15,
+                authoritative_dynamic_route=False,
+            )
+
+        self.assertEqual(leg.thinning_min_spacing_m, 0.15)
+        self.assertEqual(
+            [waypoint.point_index for waypoint in leg.executable_waypoints],
+            [0, 3],
+        )
+
     def test_physical_face_route_has_tighter_default_goal_tolerance(self):
         args = build_parser().parse_args(["--leg-index", "0"])
 

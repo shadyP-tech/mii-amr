@@ -77,7 +77,12 @@ class LoadedRouteRevision:
 
     @property
     def reason(self) -> str:
-        return str(self.manifest.get("withdrawal_reason", ""))
+        return str(
+            self.manifest.get(
+                "withdrawal_reason",
+                self.manifest.get("completion_reason", ""),
+            )
+        )
 
 
 def validate_safe_component(value: str, *, field: str) -> str:
@@ -231,12 +236,25 @@ def _validate_manifest_shape(payload: Mapping[str, Any]) -> None:
     _integer(payload.get("target_revision"), "target_revision", minimum=0)
     _integer(payload.get("route_revision"), "route_revision", minimum=1)
     status = payload.get("status")
-    if status not in {"active", "withdrawn"}:
-        raise RouteRevisionError("invalid_manifest", "status must be active or withdrawn")
+    if status not in {"active", "withdrawn", "survey_complete"}:
+        raise RouteRevisionError(
+            "invalid_manifest",
+            "status must be active, withdrawn, or survey_complete",
+        )
     _finite_timestamp(payload.get("published_unix_sec"), "published_unix_sec")
     _finite_timestamp(payload.get("observation_unix_sec"), "observation_unix_sec")
     if status == "withdrawn" and not str(payload.get("withdrawal_reason", "")).strip():
         raise RouteRevisionError("invalid_manifest", "withdrawn manifest lacks a reason")
+    if status == "survey_complete":
+        if not str(payload.get("completion_reason", "")).strip():
+            raise RouteRevisionError(
+                "invalid_manifest", "survey_complete manifest lacks a reason"
+            )
+        completion = payload.get("completion")
+        if not isinstance(completion, Mapping):
+            raise RouteRevisionError(
+                "invalid_manifest", "survey_complete manifest lacks completion metadata"
+            )
 
 
 def _check_age(
@@ -636,6 +654,88 @@ class RouteRevisionStore:
                 "safety_diagnostics": (
                     current.manifest.get("safety_diagnostics", {}) if current is not None else {}
                 ),
+            }
+        )
+        _atomic_replace(self.manifest_path, _json_bytes(payload))
+        return read_route_revision(
+            self.manifest_path,
+            expected_stream_id=self.stream_id,
+            expected_writer_id=self.writer_id,
+            verify_artifacts=False,
+        )
+
+    def complete_survey(
+        self,
+        reason: str,
+        *,
+        completion: Mapping[str, Any],
+        target_revision: int | None = None,
+        observation_unix_sec: float | None = None,
+        takeover: bool = False,
+    ) -> LoadedRouteRevision:
+        """Publish a successful survey terminal without changing route geometry.
+
+        The terminal manifest retains the last active route descriptors and
+        hashes as provenance, but consumers must not execute them after seeing
+        ``survey_complete``.  This lets a motion-side follower distinguish a
+        successful measurement hand-off from a fail-closed withdrawal.
+        """
+
+        reason = str(reason).strip()
+        if not reason:
+            raise RouteRevisionError("invalid_payload", "completion reason must be non-empty")
+        if not isinstance(completion, Mapping) or not completion:
+            raise RouteRevisionError(
+                "invalid_payload", "survey completion metadata must be non-empty"
+            )
+        current = self._current()
+        if current is None or current.status not in {"active", "survey_complete"}:
+            raise RouteRevisionError(
+                "completion_without_active_route",
+                "survey completion requires an active survey route",
+            )
+        if current.status == "survey_complete":
+            # Idempotent restarts may rediscover the same terminal catalog
+            # record.  Never create an unbounded stream of completion revisions.
+            if (
+                current.reason == reason
+                and dict(current.manifest.get("completion", {})) == dict(completion)
+            ):
+                return current
+            raise RouteRevisionError(
+                "completion_conflict", "survey was already completed differently"
+            )
+        if target_revision is None:
+            target_revision = current.target_revision
+        if observation_unix_sec is None:
+            observation_unix_sec = float(current.manifest["observation_unix_sec"])
+        payload = self._base_manifest(
+            current=current,
+            takeover=takeover,
+            target_revision=target_revision,
+            observation_unix_sec=observation_unix_sec,
+        )
+        payload.update(
+            {
+                "status": "survey_complete",
+                "completion_reason": reason,
+                "completion": dict(completion),
+                "source_robot_pose": current.manifest.get("source_robot_pose", {}),
+                "target": current.manifest.get("target", {}),
+                "evidence": current.manifest.get("evidence", {}),
+                "previous_route_length_m": current.manifest.get(
+                    "new_route_length_m", 0.0
+                ),
+                "new_route_length_m": current.manifest.get(
+                    "new_route_length_m", 0.0
+                ),
+                "safety_diagnostics": current.manifest.get(
+                    "safety_diagnostics", {}
+                ),
+                # Preserve the installed geometry digest for auditability.  A
+                # terminal reader intentionally does not reopen these artifacts.
+                "route": current.manifest.get("route"),
+                "diagnostics": current.manifest.get("diagnostics"),
             }
         )
         _atomic_replace(self.manifest_path, _json_bytes(payload))

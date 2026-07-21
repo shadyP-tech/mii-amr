@@ -41,7 +41,15 @@ def _publish(
     start_join_clearance_m: float = 1.0,
     takeover: bool = False,
     route_kind: str = "",
+    safety_diagnostics: dict | None = None,
 ):
+    safety = {
+        "keepout_clear": True,
+        "corridor_clear": True,
+        "start_join_clearance_m": start_join_clearance_m,
+    }
+    if safety_diagnostics is not None:
+        safety.update(safety_diagnostics)
     return store.publish_active(
         _route_csv(points, route_kind=route_kind),
         {"status": "planned"},
@@ -52,11 +60,7 @@ def _publish(
         evidence={"axis_rad": 0.2, "confidence": 0.91},
         previous_route_length_m=0.0,
         new_route_length_m=max(0.0, 0.1 * (len(points) - 1)),
-        safety_diagnostics={
-            "keepout_clear": True,
-            "corridor_clear": True,
-            "start_join_clearance_m": start_join_clearance_m,
-        },
+        safety_diagnostics=safety,
         takeover=takeover,
     )
 
@@ -66,6 +70,89 @@ class TestDynamicRouteHandoff(unittest.TestCase):
         self._temporary_directory = TemporaryDirectory()
         self.addCleanup(self._temporary_directory.cleanup)
         self.tmp_path = Path(self._temporary_directory.name)
+
+    @staticmethod
+    def _egress_safety(*, minimum_clearance_m: float = 0.30) -> dict:
+        return {
+            "known_stand_start_cell_exempted": True,
+            "known_stand_start_cell": {"x": 53, "y": 28},
+            "known_stand_keepout_rasterized_cell_count": 100,
+            "known_stand_keepout_cell_count": 99,
+            "known_stand_keepouts": [
+                {"x_m": -0.395, "y_m": -0.415, "radius_m": 0.26}
+            ],
+            "known_stand_keepout_clearances": [
+                {
+                    "x_m": -0.395,
+                    "y_m": -0.415,
+                    "radius_m": 0.26,
+                    "minimum_route_clearance_m": minimum_clearance_m,
+                }
+            ],
+        }
+
+    def test_start_cell_exemption_adopts_unspliced_egress_vertex_lock(self) -> None:
+        manifest = self.tmp_path / "dynamic_manifest.json"
+        store = RouteRevisionStore(
+            manifest, stream_id="sim", writer_id="planner", now_fn=lambda: 100.0
+        )
+        points = [
+            (-0.131011, -0.270103),
+            (-0.195, -0.115),
+            (-0.595, -0.115),
+        ]
+        _publish(
+            store,
+            points,
+            route_kind="axis_acquisition",
+            safety_diagnostics=self._egress_safety(),
+        )
+        source = DynamicRouteSource(
+            manifest,
+            stream_id="sim",
+            forward_splice_min_offset_m=0.01,
+        )
+
+        update = source.poll(Pose2D(-0.125, -0.270103, -2.702), 100.0)
+
+        self.assertIs(update.kind, RouteUpdateKind.ADOPT)
+        self.assertEqual(
+            [(pose.x_m, pose.y_m) for pose in update.waypoints],
+            points,
+        )
+        self.assertFalse(update.event_fields["forward_splice"])
+        self.assertTrue(update.event_fields["start_egress_vertex_lock"])
+        self.assertEqual(update.event_fields["start_egress_waypoint_index"], 1)
+        self.assertTrue(
+            update.event_fields["start_egress_continuous_clearance_validated"]
+        )
+
+    def test_start_cell_exemption_with_malformed_clearance_fails_closed(self) -> None:
+        manifest = self.tmp_path / "dynamic_manifest.json"
+        store = RouteRevisionStore(
+            manifest, stream_id="sim", writer_id="planner", now_fn=lambda: 100.0
+        )
+        _publish(
+            store,
+            [
+                (-0.131011, -0.270103),
+                (-0.195, -0.115),
+                (-0.595, -0.115),
+            ],
+            route_kind="axis_acquisition",
+            safety_diagnostics=self._egress_safety(minimum_clearance_m=0.25),
+        )
+
+        update = DynamicRouteSource(manifest, stream_id="sim").poll(
+            Pose2D(-0.131011, -0.270103, -2.702),
+            100.0,
+        )
+
+        self.assertIs(update.kind, RouteUpdateKind.STOP)
+        self.assertEqual(
+            update.event_fields["fault_code"],
+            "invalid_egress_certificate",
+        )
 
     def test_adopt_splices_forward_inside_certified_start_disk(self) -> None:
         manifest = self.tmp_path / "dynamic_manifest.json"
@@ -127,6 +214,34 @@ class TestDynamicRouteHandoff(unittest.TestCase):
         self.assertIs(duplicate.kind, RouteUpdateKind.UNCHANGED)
         self.assertEqual(duplicate.waypoints, ())
         self.assertFalse(duplicate.requires_zero_cycle)
+
+    def test_survey_completion_is_success_not_withdrawal(self) -> None:
+        manifest = self.tmp_path / "dynamic_manifest.json"
+        store = RouteRevisionStore(
+            manifest, stream_id="sim", writer_id="planner", now_fn=lambda: 100.0
+        )
+        active = _publish(
+            store,
+            [(0.0, 0.0), (0.1, 0.0), (0.2, 0.0)],
+            route_kind="axis_acquisition",
+        )
+        source = DynamicRouteSource(manifest, stream_id="sim")
+        self.assertIs(
+            source.poll(Pose2D(0.0, 0.0), 100.0).kind,
+            RouteUpdateKind.ADOPT,
+        )
+        store.complete_survey(
+            "arrival pose recorded",
+            completion={"candidate_uid": "A", "catalog_revision": 1},
+        )
+
+        update = source.poll(Pose2D(0.05, 0.0), 100.0)
+
+        self.assertIs(update.kind, RouteUpdateKind.COMPLETE)
+        self.assertTrue(update.requires_zero_cycle)
+        self.assertEqual(update.route_hash, active.route_hash)
+        self.assertEqual(update.event_name, "dynamic_survey_completed")
+        self.assertFalse(update.event_fields["fail_closed"])
 
     def test_fresh_same_geometry_revision_is_heartbeat_not_rejoin(self) -> None:
         manifest = self.tmp_path / "dynamic_manifest.json"

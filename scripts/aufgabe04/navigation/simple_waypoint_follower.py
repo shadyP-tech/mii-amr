@@ -28,7 +28,9 @@ from scripts.aufgabe04.navigation.models import Pose2D
 from scripts.aufgabe04.navigation.ros_runtime_config import ResolvedRuntimeConfig
 from scripts.aufgabe04.navigation.waypoint_controller import (
     ControllerConfig,
+    StartEgressControlConfig,
     compute_join_anchor_command,
+    compute_start_egress_vertex_command,
     compute_waypoint_command,
     reverse_staging_is_preferred,
 )
@@ -72,11 +74,17 @@ class FollowerConfig:
     waypoint_timeout_sec: float = 45.0
     stuck_timeout_sec: float = 8.0
     stuck_progress_epsilon_m: float = 0.03
+    stuck_heading_progress_epsilon_rad: float = 0.10
     initial_distance_limit_m: float = 0.35
     control_rate_hz: float = 10.0
     allowed_cmd_vel_publishers: Sequence[str] = ()
     dynamic_route_refresh_sec: float = 0.0
     dynamic_join_tolerance_m: float = 0.01
+    start_egress_waypoint_tolerance_m: float = 0.02
+    start_egress_alignment_tolerance_rad: float = 0.10
+    start_egress_max_linear_mps: float = 0.03
+    initial_start_egress_waypoint_index: int | None = None
+    initial_start_join_clearance_m: float | None = None
     initial_route_kind: str = ""
     axis_acquisition_wait_timeout_sec: float = 12.0
     viewpoint_sampling_timeout_sec: float = 30.0
@@ -90,6 +98,47 @@ class FollowerConfig:
             or self.dynamic_join_tolerance_m <= 0.0
         ):
             raise ValueError("dynamic_join_tolerance_m must be finite and positive")
+        if (
+            not math.isfinite(self.start_egress_waypoint_tolerance_m)
+            or self.start_egress_waypoint_tolerance_m <= 0.0
+        ):
+            raise ValueError(
+                "start_egress_waypoint_tolerance_m must be finite and positive"
+            )
+        # Validate the paired egress controls through their pure value object
+        # so the ROS wrapper and offline controller tests share one contract.
+        StartEgressControlConfig(
+            alignment_tolerance_rad=self.start_egress_alignment_tolerance_rad,
+            max_linear_mps=self.start_egress_max_linear_mps,
+        )
+        if self.initial_start_egress_waypoint_index is not None and (
+            not isinstance(self.initial_start_egress_waypoint_index, int)
+            or isinstance(self.initial_start_egress_waypoint_index, bool)
+            or self.initial_start_egress_waypoint_index <= 0
+        ):
+            raise ValueError(
+                "initial_start_egress_waypoint_index must be a positive integer"
+            )
+        if self.initial_start_join_clearance_m is not None and (
+            not math.isfinite(self.initial_start_join_clearance_m)
+            or self.initial_start_join_clearance_m <= 0.0
+        ):
+            raise ValueError(
+                "initial_start_join_clearance_m must be finite and positive"
+            )
+        if (self.initial_start_egress_waypoint_index is None) != (
+            self.initial_start_join_clearance_m is None
+        ):
+            raise ValueError(
+                "initial start-egress lock and start-join clearance must be paired"
+            )
+        if (
+            not math.isfinite(self.stuck_heading_progress_epsilon_rad)
+            or self.stuck_heading_progress_epsilon_rad <= 0.0
+        ):
+            raise ValueError(
+                "stuck_heading_progress_epsilon_rad must be finite and positive"
+            )
         if (
             not math.isfinite(self.axis_acquisition_wait_timeout_sec)
             or self.axis_acquisition_wait_timeout_sec <= 0.0
@@ -125,13 +174,41 @@ class FollowerConfig:
             raise ValueError("physical_goal_tolerance_m must be finite and positive")
 
 
+@dataclass(frozen=True)
+class CertifiedStartupRouteState:
+    join_pending: bool
+    join_limit_m: float | None
+    egress_lock_index: int | None
+
+
+def certified_startup_route_state(
+    config: FollowerConfig,
+    waypoint_count: int,
+) -> CertifiedStartupRouteState:
+    """Create the immutable startup ordering for a certified static leg."""
+
+    index = config.initial_start_egress_waypoint_index
+    if index is not None and index >= waypoint_count:
+        raise ValueError("initial start-egress waypoint is outside the route")
+    join_limit = config.initial_start_join_clearance_m
+    return CertifiedStartupRouteState(
+        join_pending=join_limit is not None,
+        join_limit_m=join_limit,
+        egress_lock_index=index,
+    )
+
+
 INTERMEDIATE_ROUTE_KINDS = frozenset(
     {"axis_acquisition", "viewpoint_sampling"}
 )
-PHYSICAL_ROUTE_KINDS = frozenset(
+DYNAMIC_PHYSICAL_ROUTE_KINDS = frozenset(
     {"synchronized_face_approach", "synchronized_viewpoint"}
 )
-DYNAMIC_VIEWPOINT_ROUTE_KINDS = INTERMEDIATE_ROUTE_KINDS | PHYSICAL_ROUTE_KINDS
+STATIC_PHYSICAL_ROUTE_KINDS = frozenset({"catalog_face_approach"})
+PHYSICAL_ROUTE_KINDS = DYNAMIC_PHYSICAL_ROUTE_KINDS | STATIC_PHYSICAL_ROUTE_KINDS
+DYNAMIC_VIEWPOINT_ROUTE_KINDS = (
+    INTERMEDIATE_ROUTE_KINDS | DYNAMIC_PHYSICAL_ROUTE_KINDS
+)
 
 
 def controller_config_for_route_kind(
@@ -151,7 +228,7 @@ def controller_config_for_route_kind(
     enforces the yaw once the sampling point has actually been reached.
     """
 
-    if route_kind not in DYNAMIC_VIEWPOINT_ROUTE_KINDS:
+    if route_kind not in DYNAMIC_VIEWPOINT_ROUTE_KINDS | STATIC_PHYSICAL_ROUTE_KINDS:
         return config
     physical = route_kind in PHYSICAL_ROUTE_KINDS
     goal_tolerance = config.goal_tolerance_m
@@ -193,12 +270,18 @@ def dynamic_route_kind_transition_failure(
     if current_route_kind == next_route_kind:
         return ""
     if current_route_kind == "axis_acquisition" and next_route_kind in (
-        {"viewpoint_sampling"} | PHYSICAL_ROUTE_KINDS
+        {"viewpoint_sampling"} | DYNAMIC_PHYSICAL_ROUTE_KINDS
     ):
         return ""
-    if current_route_kind == "viewpoint_sampling" and next_route_kind in PHYSICAL_ROUTE_KINDS:
+    if (
+        current_route_kind == "viewpoint_sampling"
+        and next_route_kind in DYNAMIC_PHYSICAL_ROUTE_KINDS
+    ):
         return ""
-    if current_route_kind in PHYSICAL_ROUTE_KINDS and next_route_kind in PHYSICAL_ROUTE_KINDS:
+    if (
+        current_route_kind in DYNAMIC_PHYSICAL_ROUTE_KINDS
+        and next_route_kind in DYNAMIC_PHYSICAL_ROUTE_KINDS
+    ):
         return ""
     return (
         "backward dynamic route phase transition: "
@@ -335,6 +418,31 @@ def dynamic_join_envelope_failure(
     return None
 
 
+def certified_startup_join_action(
+    pose: Pose2D,
+    anchor: Pose2D,
+    effective_join_limit_m: float | None,
+    join_tolerance_m: float,
+) -> tuple[str, dict[str, object] | None]:
+    """Select only stop, anchor pursuit, or the anchor-complete zero cycle."""
+
+    failure = dynamic_join_envelope_failure(
+        pose,
+        anchor,
+        effective_join_limit_m,
+    )
+    if failure is not None:
+        return "stop", failure
+    if not math.isfinite(join_tolerance_m) or join_tolerance_m <= 0.0:
+        return "stop", {
+            "reason": "dynamic-route join tolerance is invalid",
+            "fault_code": "invalid_route_update",
+            "fail_closed": True,
+        }
+    distance_m = math.hypot(pose.x_m - anchor.x_m, pose.y_m - anchor.y_m)
+    return ("zero", None) if distance_m <= join_tolerance_m else ("anchor", None)
+
+
 def stuck_progress_details(
     *,
     target_index: int,
@@ -348,6 +456,12 @@ def stuck_progress_details(
     front_clearance_scale: float,
     effective_linear_x_mps: float,
     front_clearance_details: dict[str, object] | None = None,
+    pursuit_index: int | None = None,
+    controlled_heading_error_rad: float | None = None,
+    last_progress_heading_error_rad: float | None = None,
+    heading_progress_epsilon_rad: float | None = None,
+    last_progress_target_index: int | None = None,
+    last_progress_pursuit_index: int | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "stop_reason": "stuck no progress",
@@ -362,6 +476,12 @@ def stuck_progress_details(
         "commanded_angular_z_radps": commanded_angular_z_radps,
         "front_clearance_scale": front_clearance_scale,
         "effective_linear_x_mps": effective_linear_x_mps,
+        "pursuit_index": pursuit_index,
+        "controlled_heading_error_rad": controlled_heading_error_rad,
+        "last_progress_heading_error_rad": last_progress_heading_error_rad,
+        "heading_progress_epsilon_rad": heading_progress_epsilon_rad,
+        "last_progress_target_index": last_progress_target_index,
+        "last_progress_pursuit_index": last_progress_pursuit_index,
     }
     if front_clearance_details is not None:
         payload["front_clearance"] = front_clearance_details
@@ -385,8 +505,13 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         self.route_update_callback = route_update_callback
         self.last_route_refresh_at = 0.0
         self.initial_route_refresh_pending = waypoint_provider is not None
-        self.dynamic_join_pending = False
-        self.dynamic_join_limit_m: float | None = None
+        startup_state = certified_startup_route_state(
+            follower_config,
+            len(self.waypoints),
+        )
+        self.dynamic_join_pending = startup_state.join_pending
+        self.dynamic_join_limit_m = startup_state.join_limit_m
+        self.start_egress_lock_index = startup_state.egress_lock_index
         self.current_route_kind = follower_config.initial_route_kind
         self.reverse_staging = False
         self.axis_acquisition_hold_started_at: float | None = None
@@ -400,6 +525,9 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         self.distance_estimate_m = 0.0
         self.last_pose = None
         self.last_progress_distance_m = math.inf
+        self.last_progress_heading_error_rad = math.inf
+        self.last_progress_target_index: int | None = None
+        self.last_progress_pursuit_index: int | None = None
         self.last_progress_at = time.monotonic()
         self.target_started_at = time.monotonic()
         self.latest_stop_details = None
@@ -454,6 +582,46 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         for _ in range(max_callbacks):
             rclpy.spin_once(self, timeout_sec=0.0)
 
+    def _start_egress_command(
+        self,
+        pose: Pose2D,
+        controller_config: ControllerConfig,
+    ):
+        """Return a locked command, or release the lock at its exact vertex."""
+
+        waypoint_index = self.start_egress_lock_index
+        if waypoint_index is None:
+            raise ValueError("start egress command requested without an active lock")
+        step = compute_start_egress_vertex_command(
+            pose,
+            self.waypoints,
+            waypoint_index,
+            controller_config,
+            reach_tolerance_m=(
+                self.follower_config.start_egress_waypoint_tolerance_m
+            ),
+            egress_config=StartEgressControlConfig(
+                alignment_tolerance_rad=(
+                    self.follower_config.start_egress_alignment_tolerance_rad
+                ),
+                max_linear_mps=self.follower_config.start_egress_max_linear_mps,
+            ),
+        )
+        if step is not None:
+            return step
+        self.start_egress_lock_index = None
+        self.target_index = waypoint_index
+        self.target_started_at = time.monotonic()
+        self._reset_progress_watchdog(time.monotonic())
+        return None
+
+    def _reset_progress_watchdog(self, now_monotonic: float) -> None:
+        self.last_progress_distance_m = math.inf
+        self.last_progress_heading_error_rad = math.inf
+        self.last_progress_target_index = None
+        self.last_progress_pursuit_index = None
+        self.last_progress_at = now_monotonic
+
     def run(self) -> FollowerResult:
         if len(self.waypoints) < 2:
             return FollowerResult("noop", "fewer than two waypoints", 0.0, 0.0, False)
@@ -504,6 +672,16 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                     return FollowerResult(
                         "stopped",
                         str((self.latest_stop_details or {}).get("reason", "dynamic route withdrawn")),
+                        time.monotonic() - started_at,
+                        self.distance_estimate_m,
+                        self.motion_published,
+                        self.latest_stop_details,
+                    )
+                if route_refresh == "completed":
+                    self.publish_repeated_zero()
+                    return FollowerResult(
+                        "completed",
+                        "",
                         time.monotonic() - started_at,
                         self.distance_estimate_m,
                         self.motion_published,
@@ -565,12 +743,14 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                             self.motion_published,
                         )
                 if self.dynamic_join_pending:
-                    join_failure = dynamic_join_envelope_failure(
+                    join_action, join_failure = certified_startup_join_action(
                         pose,
                         self.waypoints[0],
                         self.dynamic_join_limit_m,
+                        self.follower_config.dynamic_join_tolerance_m,
                     )
-                    if join_failure is not None:
+                    if join_action == "stop":
+                        assert join_failure is not None
                         self.latest_stop_details = join_failure
                         self.publish_repeated_zero()
                         return FollowerResult(
@@ -581,17 +761,12 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                             self.motion_published,
                             self.latest_stop_details,
                         )
-                    join_distance = math.hypot(
-                        pose.x_m - self.waypoints[0].x_m,
-                        pose.y_m - self.waypoints[0].y_m,
-                    )
-                    if join_distance <= self.follower_config.dynamic_join_tolerance_m:
+                    if join_action == "zero":
                         self.dynamic_join_pending = False
                         self.dynamic_join_limit_m = None
                         self.target_index = 0
                         self.target_started_at = time.monotonic()
-                        self.last_progress_distance_m = math.inf
-                        self.last_progress_at = time.monotonic()
+                        self._reset_progress_watchdog(time.monotonic())
                         self.publish_zero()
                         time.sleep(loop_sleep_sec)
                         continue
@@ -618,30 +793,42 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                         join_tolerance_m=self.follower_config.dynamic_join_tolerance_m,
                     )
                 else:
-                    step = compute_waypoint_command(
-                        pose,
-                        self.waypoints,
-                        self.target_index,
-                        controller_config_for_route_kind(
-                            self.follower_config.controller,
-                            self.current_route_kind,
-                            reverse_staging=self.reverse_staging,
-                            viewpoint_sampling_goal_tolerance_m=(
-                                self.follower_config.viewpoint_sampling_goal_tolerance_m
-                            ),
-                            viewpoint_sampling_heading_tolerance_rad=(
-                                self.follower_config.viewpoint_sampling_heading_tolerance_rad
-                            ),
-                            physical_goal_tolerance_m=(
-                                self.follower_config.physical_goal_tolerance_m
-                            ),
+                    route_controller_config = controller_config_for_route_kind(
+                        self.follower_config.controller,
+                        self.current_route_kind,
+                        reverse_staging=self.reverse_staging,
+                        viewpoint_sampling_goal_tolerance_m=(
+                            self.follower_config.viewpoint_sampling_goal_tolerance_m
+                        ),
+                        viewpoint_sampling_heading_tolerance_rad=(
+                            self.follower_config.viewpoint_sampling_heading_tolerance_rad
+                        ),
+                        physical_goal_tolerance_m=(
+                            self.follower_config.physical_goal_tolerance_m
                         ),
                     )
+                    if self.start_egress_lock_index is not None:
+                        step = self._start_egress_command(
+                            pose,
+                            route_controller_config,
+                        )
+                        if step is None:
+                            # Make the lock-to-normal transition explicit; the
+                            # next control tick may resume ordinary lookahead.
+                            self.publish_zero()
+                            time.sleep(loop_sleep_sec)
+                            continue
+                    else:
+                        step = compute_waypoint_command(
+                            pose,
+                            self.waypoints,
+                            self.target_index,
+                            route_controller_config,
+                        )
                 if step.target_index != self.target_index:
                     self.target_index = step.target_index
                     self.target_started_at = time.monotonic()
-                    self.last_progress_distance_m = math.inf
-                    self.last_progress_at = time.monotonic()
+                    self._reset_progress_watchdog(time.monotonic())
                 if step.reached_goal:
                     now_monotonic = time.monotonic()
                     if self.axis_acquisition_hold_started_at is None:
@@ -711,8 +898,14 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                 effective_linear_x_mps = step.command.linear_x_mps * front_clearance_scale
                 progress_failure = self._progress_failure(
                     step.distance_to_target_m,
+                    step.controlled_heading_error_rad,
+                    step.target_index,
+                    step.pursuit_index,
                     now_monotonic,
-                    abs(step.command.linear_x_mps) > 0.0,
+                    (
+                        abs(step.command.linear_x_mps) > 0.0
+                        or abs(step.command.angular_z_radps) > 0.0
+                    ),
                 )
                 if progress_failure:
                     self.latest_stop_details = stuck_progress_details(
@@ -727,6 +920,22 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                         front_clearance_scale=front_clearance_scale,
                         effective_linear_x_mps=effective_linear_x_mps,
                         front_clearance_details=self.latest_front_clearance_details,
+                        pursuit_index=step.pursuit_index,
+                        controlled_heading_error_rad=(
+                            step.controlled_heading_error_rad
+                        ),
+                        last_progress_heading_error_rad=(
+                            self.last_progress_heading_error_rad
+                        ),
+                        heading_progress_epsilon_rad=(
+                            self.follower_config.stuck_heading_progress_epsilon_rad
+                        ),
+                        last_progress_target_index=(
+                            self.last_progress_target_index
+                        ),
+                        last_progress_pursuit_index=(
+                            self.last_progress_pursuit_index
+                        ),
                     )
                     self.publish_repeated_zero()
                     return FollowerResult(
@@ -798,6 +1007,19 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                 "reason": update.reason or "dynamic route withdrawn",
             }
             return "stopped"
+        if update.kind is RouteUpdateKind.COMPLETE:
+            # A committed arrival estimate is the successful terminal event
+            # for a survey leg.  Stop before logging so a slow callback can
+            # never leave a previous non-zero Twist active.
+            self.publish_zero()
+            if not self._emit_route_update(update):
+                return "stopped"
+            self.latest_stop_details = {
+                **dict(update.event_fields),
+                "reason": update.reason or "survey completed",
+                "fail_closed": False,
+            }
+            return "completed"
         replacement = tuple(update.waypoints)
         if update.kind is not RouteUpdateKind.ADOPT or len(replacement) < 2:
             self.publish_zero()
@@ -847,9 +1069,47 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                 "fail_closed": True,
             }
             return "stopped"
+        raw_egress_lock = update.event_fields.get(
+            "start_egress_vertex_lock",
+            False,
+        )
+        if not isinstance(raw_egress_lock, bool):
+            self.publish_zero()
+            self.latest_stop_details = {
+                "reason": "dynamic route start-egress lock flag is not boolean",
+                "fault_code": "invalid_route_update",
+                "fail_closed": True,
+            }
+            return "stopped"
+        next_egress_lock_index = None
+        if raw_egress_lock:
+            raw_lock_index = update.event_fields.get(
+                "start_egress_waypoint_index"
+            )
+            clearance_validated = update.event_fields.get(
+                "start_egress_continuous_clearance_validated"
+            )
+            if (
+                not isinstance(raw_lock_index, int)
+                or isinstance(raw_lock_index, bool)
+                or raw_lock_index != 1
+                or raw_lock_index >= len(replacement)
+                or clearance_validated is not True
+            ):
+                self.publish_zero()
+                self.latest_stop_details = {
+                    "reason": "dynamic route start-egress certificate is malformed",
+                    "fault_code": "invalid_route_update",
+                    "fail_closed": True,
+                }
+                return "stopped"
+            next_egress_lock_index = raw_lock_index
         previous_route_kind = self.current_route_kind
         self.publish_zero()
         self.waypoints = replacement
+        # Every route replacement owns a fresh lock decision. Ordinary routes
+        # explicitly clear any lock retained from the previous revision.
+        self.start_egress_lock_index = next_egress_lock_index
         self.current_route_kind = next_route_kind
         self.reverse_staging = (
             next_route_kind in PHYSICAL_ROUTE_KINDS
@@ -875,8 +1135,7 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
             )
         self.target_index = update.target_index
         self.target_started_at = now
-        self.last_progress_distance_m = math.inf
-        self.last_progress_at = now
+        self._reset_progress_watchdog(now)
         self.last_pose = pose
         self.dynamic_join_pending = True
         self.dynamic_join_limit_m = join_limit
@@ -1041,17 +1300,47 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
     def _progress_failure(
         self,
         distance_to_target_m: float,
+        controlled_heading_error_rad: float,
+        target_index: int,
+        pursuit_index: int,
         now_monotonic: float,
-        forward_motion_commanded: bool,
+        motion_commanded: bool,
     ) -> str:
-        if distance_to_target_m + self.follower_config.stuck_progress_epsilon_m < self.last_progress_distance_m:
+        heading_error_abs = abs(controlled_heading_error_rad)
+        indices_changed = (
+            target_index != self.last_progress_target_index
+            or pursuit_index != self.last_progress_pursuit_index
+        )
+        if indices_changed:
             self.last_progress_distance_m = distance_to_target_m
+            self.last_progress_heading_error_rad = (
+                heading_error_abs if math.isfinite(heading_error_abs) else math.inf
+            )
+            self.last_progress_target_index = target_index
+            self.last_progress_pursuit_index = pursuit_index
+            self.last_progress_at = now_monotonic
+            return ""
+        distance_improved = (
+            distance_to_target_m + self.follower_config.stuck_progress_epsilon_m
+            < self.last_progress_distance_m
+        )
+        heading_improved = (
+            math.isfinite(heading_error_abs)
+            and heading_error_abs
+            + self.follower_config.stuck_heading_progress_epsilon_rad
+            < self.last_progress_heading_error_rad
+        )
+        if distance_improved:
+            self.last_progress_distance_m = distance_to_target_m
+        if heading_improved:
+            self.last_progress_heading_error_rad = heading_error_abs
+        if distance_improved or heading_improved:
             self.last_progress_at = now_monotonic
             return ""
         return stuck_progress_failure(
             now_monotonic - self.last_progress_at,
             self.follower_config.stuck_timeout_sec,
-            forward_motion_commanded,
+            motion_commanded,
         )
 
     def _cmd_vel_ownership_failure(self) -> str:
