@@ -399,6 +399,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Simulation only: Gazebo sensor_msgs/Image topic, e.g. /camera/image_raw.",
     )
     parser.add_argument("--resize", type=float, default=1.0)
+    parser.add_argument(
+        "--candidate-center-width-fraction",
+        type=float,
+        default=1.0,
+        help=(
+            "Real compressed-camera debug only: restrict all head-candidate "
+            "estimation to this centered fraction of the image width. "
+            "Use 1.0 to keep the full width."
+        ),
+    )
+    parser.add_argument(
+        "--candidate-center-height-fraction",
+        type=float,
+        default=1.0,
+        help=(
+            "Real compressed-camera debug only: restrict all head-candidate "
+            "estimation to this centered fraction of the image height. "
+            "Use 1.0 to keep the full height."
+        ),
+    )
     parser.add_argument("--color", choices=labels, default="green")
     parser.add_argument(
         "--axis-source",
@@ -1556,6 +1576,30 @@ def annotate_simulation_target_roi(
     )
 
 
+def annotate_candidate_search_roi(cv2, frame, target_roi: HeadRoi | None) -> None:
+    """Show the real-camera pixel domain allowed to produce head candidates."""
+
+    if target_roi is None:
+        return
+    color = (255, 0, 255)
+    cv2.rectangle(
+        frame,
+        (target_roi.x0, target_roi.y0),
+        (target_roi.x1 - 1, target_roi.y1 - 1),
+        color,
+        2,
+    )
+    cv2.putText(
+        frame,
+        "candidate search ROI",
+        (target_roi.x0, max(14, target_roi.y0 - 6)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.42,
+        color,
+        1,
+    )
+
+
 def annotate_frame(
     cv2,
     frame,
@@ -1717,6 +1761,47 @@ def _diagnostic_roi_image(image, target_roi):
     ]
 
 
+def _centered_candidate_roi(
+    *,
+    frame_width: int,
+    frame_height: int,
+    width_fraction: float,
+    height_fraction: float,
+) -> HeadRoi | None:
+    """Return an image-centred real-camera search crop, or None for full frame."""
+
+    if frame_width <= 0 or frame_height <= 0:
+        raise ValueError("candidate ROI frame dimensions must be positive")
+    if (
+        not math.isfinite(width_fraction)
+        or not 0.0 < width_fraction <= 1.0
+        or not math.isfinite(height_fraction)
+        or not 0.0 < height_fraction <= 1.0
+    ):
+        raise ValueError("candidate ROI fractions must be finite and in (0, 1]")
+    if width_fraction == 1.0 and height_fraction == 1.0:
+        return None
+
+    roi_width = min(
+        frame_width,
+        max(16, int(round(frame_width * width_fraction))),
+    )
+    roi_height = min(
+        frame_height,
+        max(16, int(round(frame_height * height_fraction))),
+    )
+    x0 = (frame_width - roi_width) // 2
+    y0 = (frame_height - roi_height) // 2
+    return HeadRoi(
+        x0=x0,
+        y0=y0,
+        x1=x0 + roi_width,
+        y1=y0 + roi_height,
+        source="candidate_center",
+        expected_head_px=float(min(roi_width, roi_height)),
+    )
+
+
 def _simulation_full_frame_edge_mode(args) -> bool:
     """Use edge-first discovery for the standalone raw simulation viewer."""
 
@@ -1823,6 +1908,23 @@ def _validate_runtime_args(args) -> None:
         raise ValueError("--sim-wall-range-tolerance-m must be positive")
     if args.sim_wall_mask_line_width_px <= 0:
         raise ValueError("--sim-wall-mask-line-width-px must be positive")
+    candidate_roi_fractions = (
+        args.candidate_center_width_fraction,
+        args.candidate_center_height_fraction,
+    )
+    if not all(
+        math.isfinite(value) and 0.0 < value <= 1.0
+        for value in candidate_roi_fractions
+    ):
+        raise ValueError(
+            "--candidate-center-width-fraction and "
+            "--candidate-center-height-fraction must be finite and in (0, 1]"
+        )
+    if args.sim_raw_image_topic and candidate_roi_fractions != (1.0, 1.0):
+        raise ValueError(
+            "centered candidate ROI options are available only with "
+            "--compressed-image-topic"
+        )
 
     simulation_map_target = bool(
         args.sim_raw_image_topic and args.lidar_bearing_source == "map-target"
@@ -2058,6 +2160,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             axis_camera_cx_px = camera_cx_px
             axis_camera_cy_px = camera_cy_px
             target_roi = None
+            candidate_search_roi = None
             detected_head_roi = None
             diagnostic_head_roi = None
             simulation_pose = None
@@ -2221,6 +2324,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ]
                 axis_camera_cx_px = query_camera_cx_px - target_roi.x0
                 axis_camera_cy_px = query_camera_cy_px - target_roi.y0
+            elif not args.sim_raw_image_topic:
+                candidate_search_roi = _centered_candidate_roi(
+                    frame_width=frame.shape[1],
+                    frame_height=frame.shape[0],
+                    width_fraction=args.candidate_center_width_fraction,
+                    height_fraction=args.candidate_center_height_fraction,
+                )
+                if candidate_search_roi is not None:
+                    target_roi = candidate_search_roi
+                    axis_frame = frame[
+                        target_roi.y0 : target_roi.y1,
+                        target_roi.x0 : target_roi.x1,
+                    ]
+                    axis_camera_cx_px = query_camera_cx_px - target_roi.x0
+                    axis_camera_cy_px = query_camera_cy_px - target_roi.y0
             if simulation_wall_suppression:
                 # The scan identifies which image columns contain a foreground
                 # obstacle. Protect camera edges in those columns without
@@ -2407,8 +2525,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     stand_distance_m=stand_distance_m,
                     camera_fx_px=camera_fx_px,
                     camera_fy_px=camera_fy_px,
-                    camera_cx_px=camera_cx_px,
-                    camera_cy_px=camera_cy_px,
+                    camera_cx_px=axis_camera_cx_px,
+                    camera_cy_px=axis_camera_cy_px,
                     stand_depth_m=args.stand_head_depth_m,
                     stand_head_bottom_height_m=args.stand_head_bottom_height_m,
                 )
@@ -2817,6 +2935,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             annotated = display_frame.copy()
             annotate_frame(cv2, annotated, estimate, side, filtered_ratio, filtered_proxy, age_ms)
+            annotate_candidate_search_roi(cv2, annotated, candidate_search_roi)
             if args.sim_raw_image_topic:
                 annotate_simulation_target_roi(
                     cv2,

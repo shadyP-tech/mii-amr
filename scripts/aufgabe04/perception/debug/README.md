@@ -168,6 +168,33 @@ scripts/aufgabe04/perception/debug/run_stand_axis_viewer.sh \
   --display-face-mask
 ```
 
+For a real camera without usable calibration, candidate search can be limited
+to a centered pixel window. This is an image-space diagnostic gate, not a
+metric camera projection: every edge, silhouette, color-mask, and QR-geometry
+head candidate is estimated from the crop, then accepted corners are translated
+back onto the full displayed frame. The magenta rectangle shows the active
+search boundary. Defaults are `1.0`/`1.0`, so existing commands still process
+the full frame.
+
+For the current 800 x 600 camera view, this keeps columns 160 through 639 and
+rows 90 through 509 while excluding the upper-right window candidate:
+
+```bash
+scripts/aufgabe04/perception/debug/run_stand_axis_viewer.sh \
+  --compressed-image-topic /camera/image_raw/compressed \
+  --axis-source edges \
+  --edge-preprocess outer-border \
+  --candidate-center-width-fraction 0.60 \
+  --candidate-center-height-fraction 0.70 \
+  --stand-face-size-m 0.078 \
+  --max-frame-age-sec 0 \
+  --max-display-fps 10 \
+  --display-edges \
+  --display-face-mask \
+  --display-rectangle-mask \
+  --save-snapshot results/aufgabe04/real_camera_debug
+```
+
 Direct module form when the environment is already sourced:
 
 ```bash

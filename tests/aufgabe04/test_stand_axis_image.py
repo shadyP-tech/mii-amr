@@ -26,6 +26,7 @@ from scripts.aufgabe04.perception.debug.stand_axis_viewer import (  # noqa: E402
     WINDOW_MASK,
     WINDOW_RECTANGLE_MASK,
     _capture_head_display_snapshot,
+    _centered_candidate_roi,
     _detected_head_roi,
     _diagnostic_roi_image,
     _head_display_snapshot_for_selection,
@@ -103,6 +104,37 @@ class StandAxisImageTest(unittest.TestCase):
 
         self.assertEqual(cropped.shape, (40, 40))
         self.assertIs(_diagnostic_roi_image(full_mask, None), full_mask)
+
+    def test_centered_candidate_roi_crops_both_image_axes(self):
+        roi = _centered_candidate_roi(
+            frame_width=800,
+            frame_height=600,
+            width_fraction=0.60,
+            height_fraction=0.70,
+        )
+
+        self.assertIsNotNone(roi)
+        self.assertEqual((roi.x0, roi.y0, roi.x1, roi.y1), (160, 90, 640, 510))
+        self.assertEqual(roi.source, "candidate_center")
+
+    def test_centered_candidate_roi_is_disabled_at_full_frame_defaults(self):
+        roi = _centered_candidate_roi(
+            frame_width=800,
+            frame_height=600,
+            width_fraction=1.0,
+            height_fraction=1.0,
+        )
+
+        self.assertIsNone(roi)
+
+    def test_centered_candidate_roi_rejects_invalid_fraction(self):
+        with self.assertRaisesRegex(ValueError, r"fractions.*\(0, 1\]"):
+            _centered_candidate_roi(
+                frame_width=800,
+                frame_height=600,
+                width_fraction=0.0,
+                height_fraction=0.70,
+            )
 
     def test_standalone_simulation_edges_use_full_frame_before_dynamic_roi(self):
         args = build_parser().parse_args(
@@ -2427,6 +2459,35 @@ class StandAxisImageTest(unittest.TestCase):
         self.assertAlmostEqual(args.max_scan_age_sec, 0.8)
         self.assertAlmostEqual(args.sim_lidar_forward_offset_m, -0.032)
         self.assertTrue(args.no_qr_decode)
+
+    def test_stand_axis_viewer_exposes_real_camera_center_candidate_roi(self):
+        args = build_parser().parse_args(
+            [
+                "--compressed-image-topic",
+                "/camera/image_raw/compressed",
+                "--candidate-center-width-fraction",
+                "0.60",
+                "--candidate-center-height-fraction",
+                "0.70",
+            ]
+        )
+
+        _validate_runtime_args(args)
+        self.assertAlmostEqual(args.candidate_center_width_fraction, 0.60)
+        self.assertAlmostEqual(args.candidate_center_height_fraction, 0.70)
+
+    def test_stand_axis_viewer_rejects_center_candidate_roi_in_simulation(self):
+        args = build_parser().parse_args(
+            [
+                "--sim-raw-image-topic",
+                "/camera/image_raw",
+                "--candidate-center-width-fraction",
+                "0.60",
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "compressed-image-topic"):
+            _validate_runtime_args(args)
 
 
 if __name__ == "__main__":
