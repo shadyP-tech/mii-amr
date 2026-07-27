@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Sequence
+
+from scripts.aufgabe04.perception.stand_structure_hypothesis import (
+    StandStructureEvidence,
+    evaluate_stand_structure,
+)
 
 
 @dataclass(frozen=True)
@@ -38,6 +43,7 @@ class StandAxisEdgeDebugArtifacts:
     # small gap closures used to discover topology; raw_edges is the only edge
     # domain allowed to validate and refit the measured head rectangle.
     raw_edges: object | None = None
+    structure_evidence: StandStructureEvidence | None = None
 
 
 @dataclass(frozen=True)
@@ -80,6 +86,7 @@ class _SilhouetteFaceCandidate:
     face_mask: object
     rectangle_fit_reliable: bool = True
     rectangle_fit_reason: str = "rectangle_fit_supported"
+    structure_evidence: StandStructureEvidence | None = None
 
 
 def _quadrilateral_edge_support(
@@ -372,6 +379,7 @@ def estimate_stand_axis_from_edges(
     stand_depth_m: float | None = None,
     stand_head_bottom_height_m: float | None = None,
     silhouette_only: bool = False,
+    structural_diagnostic: bool = False,
     edge_exclusion_mask=None,
 ) -> tuple[StandAxisImageEstimate, StandAxisEdgeDebugArtifacts]:
     frame_height, frame_width = frame.shape[:2]
@@ -563,6 +571,29 @@ def estimate_stand_axis_from_edges(
         max_aspect_ratio=max_aspect_ratio,
     )
     if plain_face is not None:
+        structure = plain_face.structure_evidence
+        if structural_diagnostic and (
+            structure is None or not structure.tracking_supported
+        ):
+            reason = (
+                "structure_evidence_unavailable"
+                if structure is None
+                else structure.reason
+            )
+            return (
+                _unusable(
+                    reason,
+                    corners=plain_face.corners,
+                    contour_area_px=_polygon_area(plain_face.corners),
+                    source="edge_structure_diagnostic",
+                ),
+                StandAxisEdgeDebugArtifacts(
+                    edges=edges,
+                    face_mask=plain_face.face_mask,
+                    raw_edges=raw_edges,
+                    structure_evidence=structure,
+                ),
+            )
         if not plain_face.rectangle_fit_reliable:
             return (
                 _unusable(
@@ -575,7 +606,21 @@ def estimate_stand_axis_from_edges(
                     edges=edges,
                     face_mask=plain_face.face_mask,
                     raw_edges=raw_edges,
+                    structure_evidence=structure,
                 ),
+            )
+        if structural_diagnostic:
+            estimate_source = (
+                "edge_structure_owned_head"
+                if structure is not None and structure.accepted
+                else "edge_structure_tracking_candidate"
+            )
+        else:
+            estimate_source = (
+                "edge_structure_owned_head"
+                if plain_face.rectangle_fit_reason
+                == "structure_owned_three_side_supported"
+                else "edge_plain_face_stem_anchor"
             )
         return (
             estimate_stand_axis_from_corners(
@@ -591,7 +636,7 @@ def estimate_stand_axis_from_edges(
                 stand_head_bottom_height_m=stand_head_bottom_height_m,
                 cv2=cv2,
                 contour_area_px=_polygon_area(plain_face.corners),
-                source="edge_plain_face_stem_anchor",
+                source=estimate_source,
             ),
             StandAxisEdgeDebugArtifacts(
                 edges=edges,
@@ -604,7 +649,19 @@ def estimate_stand_axis_from_edges(
                     plain_face.face_mask,
                 ),
                 raw_edges=raw_edges,
+                structure_evidence=structure,
             ),
+        )
+
+    if structural_diagnostic:
+        # Generic contour and line fallbacks remain diagnostic proposal tools;
+        # they cannot independently accept a target in structure-owned mode.
+        return (
+            _unusable(
+                "structure_head_unavailable",
+                source="edge_structure_diagnostic",
+            ),
+            StandAxisEdgeDebugArtifacts(edges=edges, raw_edges=raw_edges),
         )
 
     stem_face = _stem_anchored_face_from_edges(
@@ -2499,6 +2556,47 @@ def _stem_owned_head_from_line_segments(
     return best
 
 
+def _attach_structure_evidence(
+    cv2,
+    candidate: _SilhouetteFaceCandidate,
+    *,
+    measurement_edges,
+    stem_center_x: float,
+    stem_top_y: float,
+    min_aspect_ratio: float,
+    max_aspect_ratio: float,
+) -> _SilhouetteFaceCandidate:
+    """Validate a candidate against a current raw head-stem-base structure."""
+
+    evidence = evaluate_stand_structure(
+        cv2,
+        measurement_edges,
+        tuple((point.u_px, point.v_px) for point in candidate.corners),
+        stem_center_x=stem_center_x,
+        stem_top_y=stem_top_y,
+        min_aspect_ratio=min_aspect_ratio,
+        max_aspect_ratio=max_aspect_ratio,
+    )
+    if candidate.rectangle_fit_reliable or not evidence.tracking_supported:
+        return replace(candidate, structure_evidence=evidence)
+    recovered = tuple(
+        ImagePoint(float(u_px), float(v_px))
+        for u_px, v_px in evidence.corners
+    )
+    return replace(
+        candidate,
+        corners=order_corners(recovered),
+        face_mask=evidence.evidence_mask,
+        rectangle_fit_reliable=True,
+        rectangle_fit_reason=(
+            "structure_owned_three_side_supported"
+            if evidence.accepted
+            else "structure_tracking_three_side_supported"
+        ),
+        structure_evidence=evidence,
+    )
+
+
 def _plain_face_from_stem_cropped_edges(
     cv2,
     edges,
@@ -2541,14 +2639,15 @@ def _plain_face_from_stem_cropped_edges(
 
         diagnostic_candidate = None
         best_reliable_candidate = None
-        best_reliable_score = -math.inf
+        best_reliable_rank = (-1, -math.inf)
         for stem_center_x, stem_top_y in stem_anchors:
             # Hough pairs commonly yield half-pixel centers. All following
             # evidence is rasterized, so carrying a subpixel center into
             # rounded ROI bounds made one seam column appear/disappear between
             # adjacent frames. Try both neighboring pixel anchors for each
-            # ranked stem hypothesis. A candidate is returned only after the
-            # untouched-Canny four-side gate accepts its rectangle.
+            # ranked stem hypothesis. A candidate is returned only after
+            # untouched Canny accepts all four sides or a current raw
+            # head/stem/base structure owns the missing-bottom recovery.
             raster_centers = []
             for center in (
                 round(stem_center_x),
@@ -2575,6 +2674,15 @@ def _plain_face_from_stem_cropped_edges(
                 )
                 if candidate is None:
                     continue
+                candidate = _attach_structure_evidence(
+                    cv2,
+                    candidate,
+                    measurement_edges=measurement_edges,
+                    stem_center_x=raster_center_x,
+                    stem_top_y=stem_top_y,
+                    min_aspect_ratio=min_aspect_ratio,
+                    max_aspect_ratio=max_aspect_ratio,
+                )
                 if candidate.rectangle_fit_reliable:
                     score = _stem_owned_head_candidate_score(
                         cv2,
@@ -2582,9 +2690,21 @@ def _plain_face_from_stem_cropped_edges(
                         stem_center_x=raster_center_x,
                         stem_top_y=stem_top_y,
                     )
-                    if score > best_reliable_score:
+                    structure = candidate.structure_evidence
+                    structure_rank = (
+                        2
+                        if structure is not None and structure.accepted
+                        else (
+                            1
+                            if structure is not None
+                            and structure.tracking_supported
+                            else 0
+                        )
+                    )
+                    rank = (structure_rank, score)
+                    if rank > best_reliable_rank:
                         best_reliable_candidate = candidate
-                        best_reliable_score = score
+                        best_reliable_rank = rank
                     continue
                 if diagnostic_candidate is None:
                     diagnostic_candidate = candidate

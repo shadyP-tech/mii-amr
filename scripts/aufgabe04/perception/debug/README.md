@@ -222,6 +222,52 @@ scripts/aufgabe04/perception/debug/run_stand_axis_viewer.sh \
   --save-snapshot results/aufgabe04/real_camera_debug
 ```
 
+For the expanded real-camera ROI that includes the complete stand base, enable
+the observe-only structural gate. It accepts a missing lower head edge only
+when immutable raw edges currently support the head top, both head sides, a
+paired centred stem, and a bounded centred base. The base establishes target
+ownership only; the displayed ratio/proxy still comes exclusively from the
+head sides. Generic contour and line fallbacks cannot independently accept in
+this mode.
+
+`--structural-diagnostic` is deliberately incompatible with
+`--observation-output-json` and `--observation-status-json`. Its console and
+capture metadata state `observe_only=true` and `authoritative=false`; it is not
+an approach, navigation, or motion input.
+
+```bash
+scripts/aufgabe04/perception/debug/run_stand_axis_viewer.sh \
+  --compressed-image-topic /camera/image_raw/compressed \
+  --axis-source edges \
+  --structural-diagnostic \
+  --edge-preprocess channel-union \
+  --canny-low 20 \
+  --canny-high 60 \
+  --edge-dilate-iterations 0 \
+  --edge-close-iterations 0 \
+  --front-face-to-qr-width-ratio 1.0 \
+  --no-qr-decode \
+  --candidate-center-width-fraction 0.40 \
+  --candidate-center-height-fraction 0.62 \
+  --candidate-center-y-fraction 0.68 \
+  --stand-face-size-m 0.078 \
+  --head-hold-sec 1.5 \
+  --axis-consensus-frames 7 \
+  --print-every 1 \
+  --max-frame-age-sec 0 \
+  --max-display-fps 10 \
+  --display-edges \
+  --display-face-mask \
+  --display-rectangle-mask \
+  --save-snapshot results/aufgabe04/real_camera_debug/structural_base_roi
+```
+
+Pressing `s` in structural mode saves content-separated artifacts: original
+compressed bytes, the unannotated decoded frame, candidate ROI, immutable raw
+edges, localization edges, side/structure evidence, rectangle, annotated
+display, and a JSON ledger with sensor and measurement status. This replaces
+the older ambiguous two-PNG snapshot semantics for structural audits.
+
 Direct module form when the environment is already sourced:
 
 ```bash

@@ -25,6 +25,10 @@ from scripts.aufgabe04.perception.debug.color_mask_viewer import (
     print_palette,
     ranges_for_label,
 )
+from scripts.aufgabe04.perception.debug.stand_axis_capture_store import (
+    save_structural_capture,
+    sensor_frame_status,
+)
 from scripts.aufgabe04.perception.mask_processing import apply_morphology, build_mask_for_ranges
 from scripts.aufgabe04.perception.camera_stand_observation import (
     CameraStandObservation,
@@ -65,6 +69,11 @@ from scripts.aufgabe04.perception.stand_axis_image import (
     StandAxisImageEstimate,
     estimate_stand_axis_from_edges,
     estimate_stand_axis_from_mask,
+)
+from scripts.aufgabe04.perception.stand_axis_tracking import (
+    HeadCandidateTemporalGate,
+    HeadTemporalSelection,
+    _head_candidate_signature,
 )
 from scripts.aufgabe04.perception.stand_axis_consensus import (
     AxisConsensusAccumulator,
@@ -114,25 +123,6 @@ class SimulationMapTargetProjection:
     scan_bearing_rad: float
     camera: CameraTargetProjection
     roi: HeadRoi | None
-
-
-@dataclass(frozen=True)
-class _HeadCandidateSignature:
-    center_x_px: float
-    center_y_px: float
-    extent_px: float
-    yaw_deg: float | None
-    source: str
-
-
-@dataclass(frozen=True)
-class HeadTemporalSelection:
-    """One temporally stabilized head decision for the current frame."""
-
-    estimate: StandAxisImageEstimate | None
-    current_accepted: bool
-    held: bool
-    reason: str
 
 
 @dataclass(frozen=True)
@@ -199,199 +189,6 @@ def _head_display_snapshot_for_selection(
     return current
 
 
-def _head_candidate_signature(
-    estimate: StandAxisImageEstimate,
-) -> _HeadCandidateSignature | None:
-    if not estimate.usable or estimate.corners is None:
-        return None
-    xs = [point.u_px for point in estimate.corners]
-    ys = [point.v_px for point in estimate.corners]
-    values = (*xs, *ys)
-    if not all(math.isfinite(value) for value in values):
-        return None
-    extent = max(max(xs) - min(xs), max(ys) - min(ys))
-    if extent <= 0.0:
-        return None
-    yaw_deg = estimate.yaw_deg
-    if yaw_deg is not None and not math.isfinite(yaw_deg):
-        yaw_deg = None
-    return _HeadCandidateSignature(
-        center_x_px=(min(xs) + max(xs)) / 2.0,
-        center_y_px=(min(ys) + max(ys)) / 2.0,
-        extent_px=extent,
-        yaw_deg=yaw_deg,
-        source=estimate.source,
-    )
-
-
-class HeadCandidateTemporalGate:
-    """Reject one-frame head jumps while allowing deliberate reacquisition."""
-
-    def __init__(
-        self,
-        *,
-        max_center_jump_scale: float = 0.45,
-        max_size_ratio: float = 1.60,
-        max_axis_jump_deg: float = 35.0,
-        reacquire_frames: int = 3,
-        hold_sec: float = 0.35,
-    ) -> None:
-        if not math.isfinite(hold_sec) or hold_sec < 0.0:
-            raise ValueError("hold_sec must be finite and non-negative")
-        self.max_center_jump_scale = max_center_jump_scale
-        self.max_size_ratio = max_size_ratio
-        self.max_axis_jump_deg = max_axis_jump_deg
-        self.reacquire_frames = max(1, int(reacquire_frames))
-        self.hold_sec = hold_sec
-        self._accepted: _HeadCandidateSignature | None = None
-        self._pending: _HeadCandidateSignature | None = None
-        self._pending_count = 0
-        self._last_accepted_estimate: StandAxisImageEstimate | None = None
-        self._last_accepted_at_sec: float | None = None
-
-    def _clear_pending(self) -> None:
-        self._pending = None
-        self._pending_count = 0
-
-    def _compatible(
-        self,
-        previous: _HeadCandidateSignature,
-        current: _HeadCandidateSignature,
-    ) -> bool:
-        minimum_extent = max(1.0, min(previous.extent_px, current.extent_px))
-        center_jump = math.hypot(
-            current.center_x_px - previous.center_x_px,
-            current.center_y_px - previous.center_y_px,
-        )
-        if center_jump > max(18.0, self.max_center_jump_scale * minimum_extent):
-            return False
-        size_ratio = max(previous.extent_px, current.extent_px) / minimum_extent
-        if size_ratio > self.max_size_ratio:
-            return False
-        if previous.yaw_deg is not None and current.yaw_deg is not None:
-            axis_delta = abs(
-                (current.yaw_deg - previous.yaw_deg + 90.0) % 180.0 - 90.0
-            )
-            if axis_delta > self.max_axis_jump_deg:
-                return False
-        return True
-
-    def _size_compatible(
-        self,
-        previous: _HeadCandidateSignature,
-        current: _HeadCandidateSignature,
-    ) -> bool:
-        minimum_extent = max(1.0, min(previous.extent_px, current.extent_px))
-        return (
-            max(previous.extent_px, current.extent_px) / minimum_extent
-            <= self.max_size_ratio
-        )
-
-    def accept(self, estimate: StandAxisImageEstimate) -> tuple[bool, str]:
-        signature = _head_candidate_signature(estimate)
-        if signature is None:
-            # Reacquisition requires consecutive usable candidates. A missed
-            # silhouette must not advance a stale pending track.
-            self._clear_pending()
-            return False, estimate.reason
-        if self._accepted is None:
-            self._accepted = signature
-            self._clear_pending()
-            return True, "accepted"
-        if signature.source == "edge_qr_scaled_front":
-            # QR geometry is a stronger target identity cue than an arbitrary
-            # rectangular silhouette. Re-lock immediately when it returns.
-            self._accepted = signature
-            self._clear_pending()
-            return True, "accepted_qr_anchor"
-        if self._compatible(self._accepted, signature):
-            if self._accepted.source != "edge_qr_scaled_front":
-                self._accepted = signature
-                self._clear_pending()
-                return True, "accepted"
-            # A momentary QR miss must not hand the track directly to a
-            # similarly positioned heater/radiator rectangle.
-
-        # A connected wall edge typically makes the fitted head roughly twice
-        # as large in a single frame.  Never promote that failure through the
-        # reacquisition path.  Real camera motion changes projected size
-        # gradually, so valid candidates remain within this bound frame to
-        # frame even when their center moves enough to require reacquisition.
-        if not self._size_compatible(self._accepted, signature):
-            self._clear_pending()
-            return False, "temporal_head_outlier"
-
-        if self._pending is not None and self._compatible(self._pending, signature):
-            self._pending = signature
-            self._pending_count += 1
-        else:
-            self._pending = signature
-            self._pending_count = 1
-        if self._pending_count >= self.reacquire_frames:
-            self._accepted = signature
-            self._clear_pending()
-            return True, "reacquired"
-        return False, "temporal_head_outlier"
-
-    def stabilize(
-        self,
-        estimate: StandAxisImageEstimate,
-        *,
-        now_sec: float,
-        rejection_reason: str | None = None,
-    ) -> HeadTemporalSelection:
-        """Return a fresh head, a bounded hold, or no safe head estimate.
-
-        The current outlier remains rejected. During a short rejection gap,
-        only the last accepted estimate is reused so a one-frame detector jump
-        does not flash an unavailable ROI. The elapsed-time bound prevents a
-        disappeared head from remaining detected indefinitely.
-        """
-
-        if not math.isfinite(now_sec):
-            raise ValueError("now_sec must be finite")
-        if rejection_reason is None:
-            current_accepted, decision_reason = self.accept(estimate)
-        else:
-            self._clear_pending()
-            current_accepted = False
-            decision_reason = rejection_reason
-
-        if current_accepted:
-            self._last_accepted_estimate = estimate
-            self._last_accepted_at_sec = now_sec
-            return HeadTemporalSelection(
-                estimate=estimate,
-                current_accepted=True,
-                held=False,
-                reason=decision_reason,
-            )
-
-        if (
-            self.hold_sec > 0.0
-            and self._last_accepted_estimate is not None
-            and self._last_accepted_at_sec is not None
-        ):
-            age_sec = now_sec - self._last_accepted_at_sec
-            if 0.0 <= age_sec <= self.hold_sec:
-                return HeadTemporalSelection(
-                    estimate=replace(
-                        self._last_accepted_estimate,
-                        reason=f"temporal_hold_after_{decision_reason}",
-                    ),
-                    current_accepted=False,
-                    held=True,
-                    reason=decision_reason,
-                )
-
-        return HeadTemporalSelection(
-            estimate=None,
-            current_accepted=False,
-            held=False,
-            reason=decision_reason,
-        )
-
-
 def build_parser() -> argparse.ArgumentParser:
     labels = palette_labels()
     parser = argparse.ArgumentParser(
@@ -446,6 +243,15 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("edges", "color-mask"),
         default="edges",
         help="edges is color/QR agnostic and uses the filled outer silhouette; color-mask keeps the HSV contour mode.",
+    )
+    parser.add_argument(
+        "--structural-diagnostic",
+        action="store_true",
+        help=(
+            "Observe-only real-camera mode: require a raw-edge head over a "
+            "paired stem and bounded base. Generic fallbacks cannot accept, "
+            "and operational observation outputs are disabled."
+        ),
     )
     parser.add_argument("--tune", action="store_true", help="Show HSV trackbars for color-mask axis debugging.")
     parser.add_argument("--print-palette", action="store_true")
@@ -1699,6 +1505,89 @@ def save_snapshot(cv2, directory: Path, frame, mask) -> None:
     print(f"saved snapshot: {frame_path} {mask_path}")
 
 
+def _save_structural_viewer_capture(
+    cv2,
+    *,
+    args,
+    read: FrameRead,
+    decoded_source_frame,
+    axis_frame,
+    edge_artifacts: StandAxisEdgeDebugArtifacts,
+    annotated,
+    detector_estimate: StandAxisImageEstimate,
+    temporal_selection: HeadTemporalSelection | None,
+    target_roi: HeadRoi | None,
+    decode_duration_sec: float,
+    detector_duration_sec: float,
+    processed_monotonic_sec: float,
+) -> None:
+    compressed = getattr(read.frame, "data", None)
+    compressed_format = getattr(read.frame, "format", "")
+    structure = edge_artifacts.structure_evidence
+    if temporal_selection is None:
+        measurement_status = "fresh" if detector_estimate.usable else "unavailable"
+        held_age_sec = None
+    else:
+        measurement_status = temporal_selection.measurement_status
+        held_age_sec = temporal_selection.held_age_sec
+    roi_payload = (
+        None
+        if target_roi is None
+        else {
+            "x0": target_roi.x0,
+            "y0": target_roi.y0,
+            "x1": target_roi.x1,
+            "y1": target_roi.y1,
+        }
+    )
+    save_structural_capture(
+        cv2,
+        args.save_snapshot,
+        original_compressed=compressed,
+        compressed_format=compressed_format,
+        decoded_frame=decoded_source_frame,
+        candidate_roi_frame=axis_frame,
+        raw_edges=edge_artifacts.raw_edges,
+        localization_edges=edge_artifacts.edges,
+        side_evidence=edge_artifacts.face_mask,
+        rectangle_mask=edge_artifacts.rectangle_mask,
+        annotated_frame=annotated,
+        metadata={
+            "topic": args.compressed_image_topic or "",
+            "frame_id": read.frame_id,
+            "source_frame_stamp_sec": read.stamp_sec,
+            "received_wall_sec": read.received_wall_sec,
+            "received_monotonic_sec": read.received_monotonic_sec,
+            "processed_monotonic_sec": processed_monotonic_sec,
+            "timings_sec": {
+                "decode": decode_duration_sec,
+                "detector": detector_duration_sec,
+                "receipt_to_processed": (
+                    None
+                    if read.received_monotonic_sec is None
+                    else processed_monotonic_sec - read.received_monotonic_sec
+                ),
+            },
+            "sensor_status": sensor_frame_status(
+                source_stamp_sec=read.stamp_sec,
+                received_wall_sec=read.received_wall_sec,
+                max_frame_age_sec=args.max_frame_age_sec,
+            ),
+            "measurement_status": measurement_status,
+            "held_age_sec": held_age_sec,
+            "detector_reason": detector_estimate.reason,
+            "detector_source": detector_estimate.source,
+            "detector_usable": detector_estimate.usable,
+            "candidate_roi": roi_payload,
+            "decoded_image_size": {
+                "width": int(decoded_source_frame.shape[1]),
+                "height": int(decoded_source_frame.shape[0]),
+            },
+            "structure": None if structure is None else structure.status_dict(),
+        },
+    )
+
+
 def _initialize_display_windows(cv2, args) -> None:
     """Create windows; diagnostic content sizing follows the live ROI later."""
     if args.headless:
@@ -2004,6 +1893,20 @@ def _validate_runtime_args(args) -> None:
         if args.observation_write_hz <= 0.0:
             raise ValueError("--observation-write-hz must be positive")
 
+    if args.structural_diagnostic:
+        if args.sim_raw_image_topic:
+            raise ValueError("--structural-diagnostic is real-camera-only")
+        if args.axis_source != "edges":
+            raise ValueError("--structural-diagnostic requires --axis-source edges")
+        if (
+            args.observation_output_json is not None
+            or args.observation_status_json is not None
+        ):
+            raise ValueError(
+                "--structural-diagnostic is observe-only and cannot be combined "
+                "with operational observation output"
+            )
+
     if not args.sim_raw_image_topic:
         return
 
@@ -2066,6 +1969,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         _validate_runtime_args(args)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
+    if args.structural_diagnostic:
+        print(
+            "Structural diagnostic mode: observe_only=true authoritative=false "
+            "metric_pose=false pnp=false"
+        )
     simulation_full_frame_edges = _simulation_full_frame_edge_mode(args)
     simulation_wall_suppression = _simulation_wall_suppression_mode(args)
     stand_width_m = args.stand_face_size_m if args.stand_face_size_m is not None else args.stand_width_m
@@ -2195,6 +2103,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 continue
             last_processed_sequence = read.sequence
 
+            decode_started_monotonic = time.monotonic()
             try:
                 frame = (
                     raw_msg_to_bgr_frame(read.frame, cv2, numpy)
@@ -2204,6 +2113,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             except ValueError as exc:
                 print(f"WARNING: {exc}")
                 continue
+            decode_duration_sec = time.monotonic() - decode_started_monotonic
+            decoded_source_frame = frame.copy()
             last_display_sec = time.time()
             age_ms = (
                 None
@@ -2239,6 +2150,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             face_mask = None
             rectangle_mask = None
             rectangle_overlay = None
+            edge_artifacts = StandAxisEdgeDebugArtifacts(edges=None)
+            detector_estimate = None
             wall_edge_mask = None
             wall_edge_mask_result = None
             lidar_query = None
@@ -2329,6 +2242,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     else args.stand_distance_m
                 )
             )
+            detector_started_monotonic = time.monotonic()
             if (
                 args.sim_raw_image_topic
                 and args.lidar_bearing_source != "map-target"
@@ -2551,15 +2465,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                     min_aspect_ratio=args.min_aspect_ratio,
                     max_aspect_ratio=args.max_aspect_ratio,
                     front_face_to_qr_width_ratio=args.front_face_to_qr_width_ratio,
-                    stand_width_m=stand_width_m,
-                    stand_distance_m=stand_distance_m,
-                    camera_fx_px=camera_fx_px,
-                    camera_fy_px=camera_fy_px,
+                    stand_width_m=(
+                        None if args.structural_diagnostic else stand_width_m
+                    ),
+                    stand_distance_m=(
+                        None if args.structural_diagnostic else stand_distance_m
+                    ),
+                    camera_fx_px=(
+                        None if args.structural_diagnostic else camera_fx_px
+                    ),
+                    camera_fy_px=(
+                        None if args.structural_diagnostic else camera_fy_px
+                    ),
                     camera_cx_px=axis_camera_cx_px,
                     camera_cy_px=axis_camera_cy_px,
                     stand_depth_m=args.stand_head_depth_m,
                     stand_head_bottom_height_m=args.stand_head_bottom_height_m,
                     silhouette_only=bool(args.sim_raw_image_topic),
+                    structural_diagnostic=args.structural_diagnostic,
                 )
                 estimate, edge_artifacts = estimate_stand_axis_from_edges(
                     cv2,
@@ -2591,6 +2514,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     stand_depth_m=args.stand_head_depth_m,
                     stand_head_bottom_height_m=args.stand_head_bottom_height_m,
                 )
+            detector_duration_sec = time.monotonic() - detector_started_monotonic
             if estimate.corners is not None and target_roi is not None:
                 estimate = replace(
                     estimate,
@@ -2602,6 +2526,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         for point in estimate.corners
                     ),
                 )
+            detector_estimate = estimate
             if simulation_full_frame_edges:
                 rejected_fit_diagnostic_roi = (
                     _detected_head_roi(
@@ -3042,12 +2967,29 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             frame_count += 1
             if args.headless and args.save_snapshot is not None and frame_count == 1:
-                debug_image = (
-                    display_edges
-                    if args.axis_source == "edges" and display_edges is not None
-                    else display_mask
-                )
-                save_snapshot(cv2, args.save_snapshot, annotated, debug_image)
+                if args.structural_diagnostic:
+                    _save_structural_viewer_capture(
+                        cv2,
+                        args=args,
+                        read=read,
+                        decoded_source_frame=decoded_source_frame,
+                        axis_frame=axis_frame,
+                        edge_artifacts=edge_artifacts,
+                        annotated=annotated,
+                        detector_estimate=detector_estimate,
+                        temporal_selection=temporal_selection,
+                        target_roi=target_roi,
+                        decode_duration_sec=decode_duration_sec,
+                        detector_duration_sec=detector_duration_sec,
+                        processed_monotonic_sec=time.monotonic(),
+                    )
+                else:
+                    debug_image = (
+                        display_edges
+                        if args.axis_source == "edges" and display_edges is not None
+                        else display_mask
+                    )
+                    save_snapshot(cv2, args.save_snapshot, annotated, debug_image)
             if args.print_every > 0 and frame_count % args.print_every == 0:
                 print_status_line(
                     estimate,
@@ -3059,6 +3001,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                     qr_texts=qr_texts,
                     wall_edge_mask_result=wall_edge_mask_result,
                 )
+                if args.structural_diagnostic:
+                    measurement_status = (
+                        "fresh"
+                        if temporal_selection is None and detector_estimate.usable
+                        else (
+                            "unavailable"
+                            if temporal_selection is None
+                            else temporal_selection.measurement_status
+                        )
+                    )
+                    print(
+                        "stand_structure "
+                        "observe_only=true authoritative=false "
+                        f"sensor_status={sensor_frame_status(source_stamp_sec=read.stamp_sec, received_wall_sec=read.received_wall_sec, max_frame_age_sec=args.max_frame_age_sec)} "
+                        f"measurement_status={measurement_status} "
+                        f"detector_reason={detector_estimate.reason}"
+                    )
 
             if not args.headless:
                 cv2.imshow(WINDOW_FRAME, annotated)
@@ -3155,20 +3114,38 @@ def main(argv: Sequence[str] | None = None) -> int:
             if key == ord("p"):
                 print_palette(active_ranges)
             if key == ord("s") and args.save_snapshot is not None:
-                if (
-                    args.display_rectangle_mask
-                    and display_rectangle_mask is not None
-                ):
-                    debug_image = display_rectangle_mask
-                elif args.display_face_mask and display_face_mask is not None:
-                    debug_image = display_face_mask
-                else:
-                    debug_image = (
-                        display_edges
-                        if args.axis_source == "edges" and display_edges is not None
-                        else display_mask
+                if args.structural_diagnostic:
+                    _save_structural_viewer_capture(
+                        cv2,
+                        args=args,
+                        read=read,
+                        decoded_source_frame=decoded_source_frame,
+                        axis_frame=axis_frame,
+                        edge_artifacts=edge_artifacts,
+                        annotated=annotated,
+                        detector_estimate=detector_estimate,
+                        temporal_selection=temporal_selection,
+                        target_roi=target_roi,
+                        decode_duration_sec=decode_duration_sec,
+                        detector_duration_sec=detector_duration_sec,
+                        processed_monotonic_sec=time.monotonic(),
                     )
-                save_snapshot(cv2, args.save_snapshot, annotated, debug_image)
+                else:
+                    if (
+                        args.display_rectangle_mask
+                        and display_rectangle_mask is not None
+                    ):
+                        debug_image = display_rectangle_mask
+                    elif args.display_face_mask and display_face_mask is not None:
+                        debug_image = display_face_mask
+                    else:
+                        debug_image = (
+                            display_edges
+                            if args.axis_source == "edges"
+                            and display_edges is not None
+                            else display_mask
+                        )
+                    save_snapshot(cv2, args.save_snapshot, annotated, debug_image)
     except KeyboardInterrupt:
         pass
     finally:

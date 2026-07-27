@@ -320,6 +320,45 @@ class StandAxisImageTest(unittest.TestCase):
         self.assertIsNone(expired.estimate)
         self.assertEqual(expired.reason, "silhouette_head_unavailable")
 
+    def test_structure_tracking_requires_a_recent_strict_owner(self):
+        gate = HeadCandidateTemporalGate(
+            hold_sec=0.1,
+            structure_owner_memory_sec=0.5,
+        )
+        base = estimate_stand_axis_from_corners(
+            self.make_corners([(150, 90), (250, 92), (248, 192), (152, 190)])
+        )
+        tracking = replace(base, source="edge_structure_tracking_candidate")
+
+        initial = gate.stabilize(tracking, now_sec=10.0)
+
+        self.assertFalse(initial.current_accepted)
+        self.assertFalse(initial.held)
+        self.assertEqual(initial.reason, "structure_owner_unavailable")
+
+    def test_structure_tracking_is_fresh_only_while_owner_memory_is_valid(self):
+        gate = HeadCandidateTemporalGate(
+            hold_sec=0.1,
+            structure_owner_memory_sec=0.5,
+        )
+        base = estimate_stand_axis_from_corners(
+            self.make_corners([(150, 90), (250, 92), (248, 192), (152, 190)])
+        )
+        strict = replace(base, source="edge_structure_owned_head")
+        tracking = replace(base, source="edge_structure_tracking_candidate")
+
+        acquired = gate.stabilize(strict, now_sec=20.0)
+        tracked = gate.stabilize(tracking, now_sec=20.2)
+        expired = gate.stabilize(tracking, now_sec=20.7)
+
+        self.assertTrue(acquired.current_accepted)
+        self.assertTrue(tracked.current_accepted)
+        self.assertFalse(tracked.held)
+        self.assertEqual(tracked.reason, "accepted_structure_tracking")
+        self.assertFalse(expired.current_accepted)
+        self.assertFalse(expired.held)
+        self.assertEqual(expired.reason, "structure_owner_expired")
+
     @unittest.skipIf(numpy is None, "numpy is required for display snapshot tests")
     def test_temporal_hold_reuses_one_atomic_accepted_display_frame(self):
         gate = HeadCandidateTemporalGate(reacquire_frames=3, hold_sec=0.35)
@@ -2633,6 +2672,56 @@ class StandAxisImageTest(unittest.TestCase):
         self.assertAlmostEqual(args.candidate_center_width_fraction, 0.60)
         self.assertAlmostEqual(args.candidate_center_height_fraction, 0.50)
         self.assertAlmostEqual(args.candidate_center_y_fraction, 0.62)
+
+    def test_structural_diagnostic_is_observe_only(self):
+        args = build_parser().parse_args(
+            [
+                "--compressed-image-topic",
+                "/camera/image_raw/compressed",
+                "--structural-diagnostic",
+                "--observation-output-json",
+                "latest.json",
+                "--robot-x",
+                "0.0",
+                "--robot-y",
+                "0.0",
+                "--stand-x",
+                "1.0",
+                "--stand-y",
+                "1.0",
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "observe-only"):
+            _validate_runtime_args(args)
+
+    def test_structural_diagnostic_requires_edge_source(self):
+        args = build_parser().parse_args(
+            [
+                "--compressed-image-topic",
+                "/camera/image_raw/compressed",
+                "--axis-source",
+                "color-mask",
+                "--structural-diagnostic",
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "axis-source edges"):
+            _validate_runtime_args(args)
+
+    def test_structural_diagnostic_rejects_operational_status_output(self):
+        args = build_parser().parse_args(
+            [
+                "--compressed-image-topic",
+                "/camera/image_raw/compressed",
+                "--structural-diagnostic",
+                "--observation-status-json",
+                "status.json",
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "observe-only"):
+            _validate_runtime_args(args)
 
     def test_stand_axis_viewer_rejects_center_candidate_roi_in_simulation(self):
         args = build_parser().parse_args(

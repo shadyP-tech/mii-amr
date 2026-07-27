@@ -40,6 +40,9 @@ class FrameRead:
     waiting: bool = False
     stamp_sec: float | None = None
     sequence: int = 0
+    frame_id: str = ""
+    received_wall_sec: float | None = None
+    received_monotonic_sec: float | None = None
 
 
 @dataclass(frozen=True)
@@ -166,6 +169,9 @@ class RosCompressedImageTopicFrameSource:
         self.latest_data = None
         self.latest_format = None
         self.latest_stamp_sec = None
+        self.latest_frame_id = ""
+        self.latest_received_wall_sec = None
+        self.latest_received_monotonic_sec = None
         self.latest_sequence = 0
         self.received_count = 0
         self.last_received_sec = None
@@ -212,6 +218,7 @@ class RosCompressedImageTopicFrameSource:
     def _on_image(self, msg) -> None:
         stamp_sec = compressed_msg_stamp_sec(msg)
         now = time.time()
+        now_monotonic = time.monotonic()
         if (
             self.max_frame_age_sec > 0.0
             and stamp_sec is not None
@@ -220,10 +227,15 @@ class RosCompressedImageTopicFrameSource:
             return
         data = bytes(msg.data)
         image_format = str(getattr(msg, "format", ""))
+        header = getattr(msg, "header", None)
+        frame_id = str(getattr(header, "frame_id", "") or "")
         with self._lock:
             self.latest_data = data
             self.latest_format = image_format
             self.latest_stamp_sec = stamp_sec
+            self.latest_frame_id = frame_id
+            self.latest_received_wall_sec = now
+            self.latest_received_monotonic_sec = now_monotonic
             self.latest_sequence += 1
             self.received_count += 1
             self.last_received_sec = now
@@ -252,6 +264,9 @@ class RosCompressedImageTopicFrameSource:
             data = self.latest_data
             image_format = self.latest_format
             stamp_sec = self.latest_stamp_sec
+            frame_id = self.latest_frame_id
+            received_wall_sec = self.latest_received_wall_sec
+            received_monotonic_sec = self.latest_received_monotonic_sec
             sequence = self.latest_sequence
         if data is None:
             return FrameRead(
@@ -264,6 +279,9 @@ class RosCompressedImageTopicFrameSource:
             frame=CompressedFrame(data, image_format or ""),
             stamp_sec=stamp_sec,
             sequence=sequence,
+            frame_id=frame_id,
+            received_wall_sec=received_wall_sec,
+            received_monotonic_sec=received_monotonic_sec,
         )
 
     def release(self) -> None:

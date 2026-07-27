@@ -1,0 +1,257 @@
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, replace
+
+from scripts.aufgabe04.perception.stand_axis_image import StandAxisImageEstimate
+
+
+@dataclass(frozen=True)
+class _HeadCandidateSignature:
+    center_x_px: float
+    center_y_px: float
+    extent_px: float
+    yaw_deg: float | None
+    source: str
+
+
+@dataclass(frozen=True)
+class HeadTemporalSelection:
+    """A fresh, bounded-held, or unavailable head decision."""
+
+    estimate: StandAxisImageEstimate | None
+    current_accepted: bool
+    held: bool
+    reason: str
+    held_age_sec: float | None = None
+
+    @property
+    def measurement_status(self) -> str:
+        if self.current_accepted:
+            return "fresh"
+        if self.held:
+            return "held"
+        return "unavailable"
+
+
+def _head_candidate_signature(
+    estimate: StandAxisImageEstimate,
+) -> _HeadCandidateSignature | None:
+    if not estimate.usable or estimate.corners is None:
+        return None
+    xs = [point.u_px for point in estimate.corners]
+    ys = [point.v_px for point in estimate.corners]
+    if not all(math.isfinite(value) for value in (*xs, *ys)):
+        return None
+    extent = max(max(xs) - min(xs), max(ys) - min(ys))
+    if extent <= 0.0:
+        return None
+    yaw_deg = estimate.yaw_deg
+    if yaw_deg is not None and not math.isfinite(yaw_deg):
+        yaw_deg = None
+    return _HeadCandidateSignature(
+        center_x_px=(min(xs) + max(xs)) / 2.0,
+        center_y_px=(min(ys) + max(ys)) / 2.0,
+        extent_px=extent,
+        yaw_deg=yaw_deg,
+        source=estimate.source,
+    )
+
+
+class HeadCandidateTemporalGate:
+    """Reject head jumps and expose bounded holds without creating evidence."""
+
+    def __init__(
+        self,
+        *,
+        max_center_jump_scale: float = 0.45,
+        max_size_ratio: float = 1.60,
+        max_axis_jump_deg: float = 35.0,
+        reacquire_frames: int = 3,
+        hold_sec: float = 0.35,
+        structure_owner_memory_sec: float | None = None,
+    ) -> None:
+        if not math.isfinite(hold_sec) or hold_sec < 0.0:
+            raise ValueError("hold_sec must be finite and non-negative")
+        self.max_center_jump_scale = max_center_jump_scale
+        self.max_size_ratio = max_size_ratio
+        self.max_axis_jump_deg = max_axis_jump_deg
+        self.reacquire_frames = max(1, int(reacquire_frames))
+        self.hold_sec = hold_sec
+        self.structure_owner_memory_sec = (
+            max(0.75, hold_sec)
+            if structure_owner_memory_sec is None
+            else float(structure_owner_memory_sec)
+        )
+        if (
+            not math.isfinite(self.structure_owner_memory_sec)
+            or self.structure_owner_memory_sec < 0.0
+        ):
+            raise ValueError(
+                "structure_owner_memory_sec must be finite and non-negative"
+            )
+        self._accepted: _HeadCandidateSignature | None = None
+        self._pending: _HeadCandidateSignature | None = None
+        self._pending_count = 0
+        self._last_accepted_estimate: StandAxisImageEstimate | None = None
+        self._last_accepted_at_sec: float | None = None
+        self._last_structure_owner_at_sec: float | None = None
+
+    def _clear_pending(self) -> None:
+        self._pending = None
+        self._pending_count = 0
+
+    def _compatible(
+        self,
+        previous: _HeadCandidateSignature,
+        current: _HeadCandidateSignature,
+    ) -> bool:
+        minimum_extent = max(1.0, min(previous.extent_px, current.extent_px))
+        center_jump = math.hypot(
+            current.center_x_px - previous.center_x_px,
+            current.center_y_px - previous.center_y_px,
+        )
+        if center_jump > max(18.0, self.max_center_jump_scale * minimum_extent):
+            return False
+        size_ratio = max(previous.extent_px, current.extent_px) / minimum_extent
+        if size_ratio > self.max_size_ratio:
+            return False
+        if previous.yaw_deg is not None and current.yaw_deg is not None:
+            axis_delta = abs(
+                (current.yaw_deg - previous.yaw_deg + 90.0) % 180.0 - 90.0
+            )
+            if axis_delta > self.max_axis_jump_deg:
+                return False
+        return True
+
+    def _size_compatible(
+        self,
+        previous: _HeadCandidateSignature,
+        current: _HeadCandidateSignature,
+    ) -> bool:
+        minimum_extent = max(1.0, min(previous.extent_px, current.extent_px))
+        return (
+            max(previous.extent_px, current.extent_px) / minimum_extent
+            <= self.max_size_ratio
+        )
+
+    def accept(self, estimate: StandAxisImageEstimate) -> tuple[bool, str]:
+        signature = _head_candidate_signature(estimate)
+        if signature is None:
+            self._clear_pending()
+            return False, estimate.reason
+        if self._accepted is None:
+            self._accepted = signature
+            self._clear_pending()
+            return True, "accepted"
+        if signature.source == "edge_qr_scaled_front":
+            self._accepted = signature
+            self._clear_pending()
+            return True, "accepted_qr_anchor"
+        if self._compatible(self._accepted, signature):
+            if self._accepted.source != "edge_qr_scaled_front":
+                self._accepted = signature
+                self._clear_pending()
+                return True, "accepted"
+
+        if not self._size_compatible(self._accepted, signature):
+            self._clear_pending()
+            return False, "temporal_head_outlier"
+
+        if self._pending is not None and self._compatible(self._pending, signature):
+            self._pending = signature
+            self._pending_count += 1
+        else:
+            self._pending = signature
+            self._pending_count = 1
+        if self._pending_count >= self.reacquire_frames:
+            self._accepted = signature
+            self._clear_pending()
+            return True, "reacquired"
+        return False, "temporal_head_outlier"
+
+    def _accept_structure_tracking(
+        self,
+        estimate: StandAxisImageEstimate,
+        *,
+        now_sec: float,
+    ) -> tuple[bool, str]:
+        signature = _head_candidate_signature(estimate)
+        if (
+            signature is None
+            or self._accepted is None
+            or self._last_structure_owner_at_sec is None
+        ):
+            self._clear_pending()
+            return False, "structure_owner_unavailable"
+        owner_age_sec = now_sec - self._last_structure_owner_at_sec
+        if not 0.0 <= owner_age_sec <= self.structure_owner_memory_sec:
+            self._clear_pending()
+            return False, "structure_owner_expired"
+        if not self._compatible(self._accepted, signature):
+            self._clear_pending()
+            return False, "structure_tracking_outlier"
+        self._accepted = signature
+        self._clear_pending()
+        return True, "accepted_structure_tracking"
+
+    def stabilize(
+        self,
+        estimate: StandAxisImageEstimate,
+        *,
+        now_sec: float,
+        rejection_reason: str | None = None,
+    ) -> HeadTemporalSelection:
+        if not math.isfinite(now_sec):
+            raise ValueError("now_sec must be finite")
+        if rejection_reason is None:
+            if estimate.source == "edge_structure_tracking_candidate":
+                current_accepted, decision_reason = (
+                    self._accept_structure_tracking(
+                        estimate,
+                        now_sec=now_sec,
+                    )
+                )
+            else:
+                current_accepted, decision_reason = self.accept(estimate)
+        else:
+            self._clear_pending()
+            current_accepted = False
+            decision_reason = rejection_reason
+
+        if current_accepted:
+            if estimate.source == "edge_structure_owned_head":
+                self._last_structure_owner_at_sec = now_sec
+            self._last_accepted_estimate = estimate
+            self._last_accepted_at_sec = now_sec
+            return HeadTemporalSelection(
+                estimate=estimate,
+                current_accepted=True,
+                held=False,
+                reason=decision_reason,
+            )
+
+        if (
+            self.hold_sec > 0.0
+            and self._last_accepted_estimate is not None
+            and self._last_accepted_at_sec is not None
+        ):
+            age_sec = now_sec - self._last_accepted_at_sec
+            if 0.0 <= age_sec <= self.hold_sec:
+                return HeadTemporalSelection(
+                    estimate=replace(
+                        self._last_accepted_estimate,
+                        reason=f"temporal_hold_after_{decision_reason}",
+                    ),
+                    current_accepted=False,
+                    held=True,
+                    reason=decision_reason,
+                    held_age_sec=age_sec,
+                )
+
+        return HeadTemporalSelection(
+            estimate=None,
+            current_accepted=False,
+            held=False,
+            reason=decision_reason,
+        )

@@ -284,6 +284,67 @@ class ProductionImportBoundaryTest(unittest.TestCase):
         self.assertNotIn("Twist", source)
         self.assertNotIn("Publisher", source)
 
+    def test_structural_detection_and_tracking_modules_stay_pure(self):
+        checked_paths = [
+            ROOT
+            / "scripts"
+            / "aufgabe04"
+            / "perception"
+            / "stand_structure_hypothesis.py",
+            ROOT
+            / "scripts"
+            / "aufgabe04"
+            / "perception"
+            / "stand_axis_tracking.py",
+        ]
+        forbidden_prefixes = (
+            "rclpy",
+            "sensor_msgs",
+            "geometry_msgs",
+            "nav2_msgs",
+            "scripts.aufgabe04.perception.debug",
+            "scripts.aufgabe04.navigation",
+            "scripts.aufgabe04.logistics",
+            "scripts.aufgabe04.fleet",
+            "scripts.aufgabe03",
+        )
+        offenders = []
+        for path in checked_paths:
+            source = path.read_text()
+            tree = ast.parse(source, filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported_modules = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    imported_modules = [node.module or ""]
+                else:
+                    continue
+                for module in imported_modules:
+                    if module.startswith(forbidden_prefixes):
+                        offenders.append((path.name, module))
+            self.assertNotIn("create_publisher", source)
+            self.assertNotIn("/cmd_vel", source)
+
+        self.assertEqual(offenders, [])
+
+    def test_navigation_runners_do_not_consume_structural_diagnostics(self):
+        checked_paths = [
+            ROOT / "scripts" / "aufgabe04" / "navigation" / "plan_first_detected_station.py",
+            ROOT / "scripts" / "aufgabe04" / "navigation" / "run_single_station_segment.py",
+        ]
+        offenders = []
+        for path in checked_paths:
+            source = path.read_text()
+            for snippet in (
+                "stand_structure_hypothesis",
+                "stand_structure ",
+                "structural-diagnostic",
+            ):
+                if snippet in source:
+                    offenders.append((path.relative_to(ROOT), snippet))
+
+        self.assertEqual(offenders, [])
+
 
 if __name__ == "__main__":
     unittest.main()
