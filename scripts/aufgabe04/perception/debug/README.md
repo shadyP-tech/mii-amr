@@ -173,19 +173,21 @@ to a centered pixel window. This is an image-space diagnostic gate, not a
 metric camera projection: every edge, silhouette, color-mask, and QR-geometry
 head candidate is estimated from the crop, then accepted corners are translated
 back onto the full displayed frame. The magenta rectangle shows the active
-search boundary. Defaults are `1.0`/`1.0`, so existing commands still process
-the full frame.
+search boundary. Width and height default to `1.0`, and its vertical center
+defaults to `0.5`, so existing commands still process the full frame.
 
-For the current 800 x 600 camera view, this keeps columns 160 through 639 and
-rows 90 through 509 while excluding the upper-right window candidate:
+For the current 800 x 600 camera view, this keeps columns 180 through 619 and
+rows 221 through 520. Moving the vertical center down to `0.62` excludes the
+room windows while retaining the stand head and upper stem:
 
 ```bash
 scripts/aufgabe04/perception/debug/run_stand_axis_viewer.sh \
   --compressed-image-topic /camera/image_raw/compressed \
   --axis-source edges \
   --edge-preprocess outer-border \
-  --candidate-center-width-fraction 0.60 \
-  --candidate-center-height-fraction 0.70 \
+  --candidate-center-width-fraction 0.55 \
+  --candidate-center-height-fraction 0.50 \
+  --candidate-center-y-fraction 0.62 \
   --stand-face-size-m 0.078 \
   --max-frame-age-sec 0 \
   --max-display-fps 10 \

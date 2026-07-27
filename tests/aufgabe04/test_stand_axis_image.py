@@ -127,6 +127,18 @@ class StandAxisImageTest(unittest.TestCase):
 
         self.assertIsNone(roi)
 
+    def test_centered_candidate_roi_can_shift_downward(self):
+        roi = _centered_candidate_roi(
+            frame_width=800,
+            frame_height=600,
+            width_fraction=0.55,
+            height_fraction=0.50,
+            center_y_fraction=0.62,
+        )
+
+        self.assertIsNotNone(roi)
+        self.assertEqual((roi.x0, roi.y0, roi.x1, roi.y1), (180, 221, 620, 521))
+
     def test_centered_candidate_roi_rejects_invalid_fraction(self):
         with self.assertRaisesRegex(ValueError, r"fractions.*\(0, 1\]"):
             _centered_candidate_roi(
@@ -2468,13 +2480,16 @@ class StandAxisImageTest(unittest.TestCase):
                 "--candidate-center-width-fraction",
                 "0.60",
                 "--candidate-center-height-fraction",
-                "0.70",
+                "0.50",
+                "--candidate-center-y-fraction",
+                "0.62",
             ]
         )
 
         _validate_runtime_args(args)
         self.assertAlmostEqual(args.candidate_center_width_fraction, 0.60)
-        self.assertAlmostEqual(args.candidate_center_height_fraction, 0.70)
+        self.assertAlmostEqual(args.candidate_center_height_fraction, 0.50)
+        self.assertAlmostEqual(args.candidate_center_y_fraction, 0.62)
 
     def test_stand_axis_viewer_rejects_center_candidate_roi_in_simulation(self):
         args = build_parser().parse_args(

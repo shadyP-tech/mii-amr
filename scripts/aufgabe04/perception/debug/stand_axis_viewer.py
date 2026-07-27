@@ -419,6 +419,16 @@ def build_parser() -> argparse.ArgumentParser:
             "Use 1.0 to keep the full height."
         ),
     )
+    parser.add_argument(
+        "--candidate-center-y-fraction",
+        type=float,
+        default=0.5,
+        help=(
+            "Real compressed-camera debug only: vertical location of the "
+            "candidate ROI center as a fraction of image height, where 0.0 "
+            "is the top and 1.0 is the bottom. Default: 0.5."
+        ),
+    )
     parser.add_argument("--color", choices=labels, default="green")
     parser.add_argument(
         "--axis-source",
@@ -1767,8 +1777,9 @@ def _centered_candidate_roi(
     frame_height: int,
     width_fraction: float,
     height_fraction: float,
+    center_y_fraction: float = 0.5,
 ) -> HeadRoi | None:
-    """Return an image-centred real-camera search crop, or None for full frame."""
+    """Return a horizontally centred real-camera search crop."""
 
     if frame_width <= 0 or frame_height <= 0:
         raise ValueError("candidate ROI frame dimensions must be positive")
@@ -1779,7 +1790,13 @@ def _centered_candidate_roi(
         or not 0.0 < height_fraction <= 1.0
     ):
         raise ValueError("candidate ROI fractions must be finite and in (0, 1]")
-    if width_fraction == 1.0 and height_fraction == 1.0:
+    if not math.isfinite(center_y_fraction) or not 0.0 <= center_y_fraction <= 1.0:
+        raise ValueError("candidate ROI vertical center must be finite and in [0, 1]")
+    if (
+        width_fraction == 1.0
+        and height_fraction == 1.0
+        and center_y_fraction == 0.5
+    ):
         return None
 
     roi_width = min(
@@ -1791,7 +1808,14 @@ def _centered_candidate_roi(
         max(16, int(round(frame_height * height_fraction))),
     )
     x0 = (frame_width - roi_width) // 2
-    y0 = (frame_height - roi_height) // 2
+    desired_center_y = int(round((frame_height - 1) * center_y_fraction))
+    y0 = max(
+        0,
+        min(
+            frame_height - roi_height,
+            desired_center_y - roi_height // 2,
+        ),
+    )
     return HeadRoi(
         x0=x0,
         y0=y0,
@@ -1920,7 +1944,18 @@ def _validate_runtime_args(args) -> None:
             "--candidate-center-width-fraction and "
             "--candidate-center-height-fraction must be finite and in (0, 1]"
         )
-    if args.sim_raw_image_topic and candidate_roi_fractions != (1.0, 1.0):
+    if (
+        not math.isfinite(args.candidate_center_y_fraction)
+        or not 0.0 <= args.candidate_center_y_fraction <= 1.0
+    ):
+        raise ValueError(
+            "--candidate-center-y-fraction must be finite and in [0, 1]"
+        )
+    candidate_roi_is_default = (
+        candidate_roi_fractions == (1.0, 1.0)
+        and args.candidate_center_y_fraction == 0.5
+    )
+    if args.sim_raw_image_topic and not candidate_roi_is_default:
         raise ValueError(
             "centered candidate ROI options are available only with "
             "--compressed-image-topic"
@@ -2330,6 +2365,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     frame_height=frame.shape[0],
                     width_fraction=args.candidate_center_width_fraction,
                     height_fraction=args.candidate_center_height_fraction,
+                    center_y_fraction=args.candidate_center_y_fraction,
                 )
                 if candidate_search_roi is not None:
                     target_roi = candidate_search_roi
