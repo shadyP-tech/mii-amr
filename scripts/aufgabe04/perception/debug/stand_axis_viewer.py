@@ -122,6 +122,7 @@ class _HeadCandidateSignature:
     center_y_px: float
     extent_px: float
     yaw_deg: float | None
+    source: str
 
 
 @dataclass(frozen=True)
@@ -219,11 +220,12 @@ def _head_candidate_signature(
         center_y_px=(min(ys) + max(ys)) / 2.0,
         extent_px=extent,
         yaw_deg=yaw_deg,
+        source=estimate.source,
     )
 
 
 class HeadCandidateTemporalGate:
-    """Reject one-frame silhouette jumps while allowing deliberate reacquisition."""
+    """Reject one-frame head jumps while allowing deliberate reacquisition."""
 
     def __init__(
         self,
@@ -296,10 +298,19 @@ class HeadCandidateTemporalGate:
             self._accepted = signature
             self._clear_pending()
             return True, "accepted"
-        if self._compatible(self._accepted, signature):
+        if signature.source == "edge_qr_scaled_front":
+            # QR geometry is a stronger target identity cue than an arbitrary
+            # rectangular silhouette. Re-lock immediately when it returns.
             self._accepted = signature
             self._clear_pending()
-            return True, "accepted"
+            return True, "accepted_qr_anchor"
+        if self._compatible(self._accepted, signature):
+            if self._accepted.source != "edge_qr_scaled_front":
+                self._accepted = signature
+                self._clear_pending()
+                return True, "accepted"
+            # A momentary QR miss must not hand the track directly to a
+            # similarly positioned heater/radiator rectangle.
 
         # A connected wall edge typically makes the fitted head roughly twice
         # as large in a single frame.  Never promote that failure through the
@@ -513,8 +524,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--front-face-to-qr-width-ratio",
         type=float,
-        default=None,
-        help="Known physical holder/front-face width divided by detected QR-code width. Enables QR-plane face expansion.",
+        default=1.30,
+        help=(
+            "Known physical holder/front-face width divided by detected "
+            "QR-code width. The Aufgabe 04 real stand default is 1.30; "
+            "use 1.0 to disable QR-anchored head geometry."
+        ),
     )
     parser.add_argument(
         "--median-window",
@@ -598,8 +613,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.35,
         help=(
-            "Standalone simulation only: retain the last validated head during "
-            "brief detector/outlier gaps (default: 0.35 s; 0 disables)."
+            "Retain the last validated edge/QR head during brief detector or "
+            "outlier gaps (default: 0.35 s; 0 disables)."
         ),
     )
     parser.add_argument(
@@ -1932,6 +1947,16 @@ def _validate_runtime_args(args) -> None:
         raise ValueError("--sim-wall-range-tolerance-m must be positive")
     if args.sim_wall_mask_line_width_px <= 0:
         raise ValueError("--sim-wall-mask-line-width-px must be positive")
+    if (
+        args.front_face_to_qr_width_ratio is not None
+        and (
+            not math.isfinite(args.front_face_to_qr_width_ratio)
+            or args.front_face_to_qr_width_ratio < 1.0
+        )
+    ):
+        raise ValueError(
+            "--front-face-to-qr-width-ratio must be finite and at least 1.0"
+        )
     candidate_roi_fractions = (
         args.candidate_center_width_fraction,
         args.candidate_center_height_fraction,
@@ -2709,6 +2734,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                             )
                         ):
                             sim_qr_detection = None
+            elif not args.sim_raw_image_topic and args.axis_source == "edges":
+                temporal_selection = head_candidate_temporal_gate.stabilize(
+                    estimate,
+                    now_sec=time.monotonic(),
+                )
+                head_measurement_fresh = temporal_selection.current_accepted
+                head_estimate_held = temporal_selection.held
+                if (
+                    not temporal_selection.current_accepted
+                    and not temporal_selection.held
+                ):
+                    face_mask = None
+                    rectangle_mask = None
+                    rectangle_overlay = None
+                estimate = (
+                    temporal_selection.estimate
+                    if temporal_selection.estimate is not None
+                    else _unavailable_target_estimate(temporal_selection.reason)
+                )
             if mask is None:
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
                 active_ranges = [current_track_range(cv2, args.color)] if args.tune else selected_ranges
@@ -2729,7 +2773,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             display_rectangle_overlay = rectangle_overlay
             display_detected_head_roi = detected_head_roi
             display_diagnostic_head_roi = diagnostic_head_roi
-            if simulation_full_frame_edges and temporal_selection is not None:
+            if temporal_selection is not None:
                 current_head_display_snapshot = HeadDisplaySnapshot(
                     frame=frame,
                     mask=mask,

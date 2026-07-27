@@ -46,6 +46,7 @@ from scripts.aufgabe04.perception.stand_axis_image import (  # noqa: E402
     _expanded_head_edge_roi,
     _face_quadrilateral_from_silhouette,
     _level_camera_endpoint_perspective_consistent,
+    _largest_qr_quad,
     _plain_face_from_stem_cropped_edges,
     _quadrilateral_edge_support,
     _raw_side_evidence_and_corners,
@@ -54,6 +55,7 @@ from scripts.aufgabe04.perception.stand_axis_image import (  # noqa: E402
     _stem_anchor_from_edges,
     _stem_anchor_candidates_from_edges,
     _stem_anchored_face_from_edges,
+    _stem_owned_head_from_line_segments,
     _validated_refitted_head_corners,
     estimate_edge_on_axis_from_line,
     estimate_stand_axis_from_edges,
@@ -214,6 +216,27 @@ class StandAxisImageTest(unittest.TestCase):
         self.assertEqual(gate.accept(good), (True, "accepted"))
         self.assertEqual(gate.accept(wall), (False, "temporal_head_outlier"))
         self.assertEqual(gate.accept(good), (True, "accepted"))
+
+    def test_temporal_gate_does_not_switch_directly_from_qr_head_to_silhouette(self):
+        gate = HeadCandidateTemporalGate(reacquire_frames=3)
+        qr_head = replace(
+            estimate_stand_axis_from_corners(
+                self.make_corners([(150, 90), (250, 90), (250, 190), (150, 190)])
+            ),
+            source="edge_qr_scaled_front",
+        )
+        heater = replace(
+            estimate_stand_axis_from_corners(
+                self.make_corners([(145, 88), (255, 88), (255, 198), (145, 198)])
+            ),
+            source="edge_lines",
+        )
+
+        self.assertEqual(gate.accept(qr_head), (True, "accepted"))
+        self.assertEqual(gate.accept(heater), (False, "temporal_head_outlier"))
+        self.assertEqual(gate.accept(heater), (False, "temporal_head_outlier"))
+        self.assertEqual(gate.accept(heater), (True, "reacquired"))
+        self.assertEqual(gate.accept(qr_head), (True, "accepted_qr_anchor"))
 
     def test_temporal_gate_reacquires_a_consistent_new_view(self):
         gate = HeadCandidateTemporalGate(reacquire_frames=3)
@@ -591,6 +614,40 @@ class StandAxisImageTest(unittest.TestCase):
             [(round(point.u_px), round(point.v_px)) for point in corners],
             [(30, 20), (90, 20), (90, 80), (30, 80)],
         )
+
+    def test_largest_qr_quad_selects_nearest_visible_station_marker(self):
+        small = self.make_corners([(10, 10), (30, 10), (30, 30), (10, 30)])
+        large = self.make_corners([(50, 20), (130, 20), (130, 100), (50, 100)])
+
+        selected = _largest_qr_quad((small, large))
+
+        self.assertEqual(selected, large)
+
+    @unittest.skipIf(numpy is None or cv2 is None, "numpy and OpenCV are required for QR tests")
+    def test_qr_head_area_gate_is_not_inflated_by_background_rectangle(self):
+        frame = numpy.zeros((300, 440, 3), dtype=numpy.uint8)
+        cv2.rectangle(frame, (2, 2), (437, 297), (255, 255, 255), thickness=3)
+        qr_corners = self.make_corners(
+            [(150, 32), (238, 33), (238, 121), (149, 119)]
+        )
+
+        with patch(
+            "scripts.aufgabe04.perception.stand_axis_image._detect_qr_quad_corners",
+            return_value=qr_corners,
+        ):
+            estimate, _artifacts = estimate_stand_axis_from_edges(
+                cv2,
+                frame,
+                edge_preprocess="channel_union",
+                canny_low=20,
+                canny_high=60,
+                front_face_to_qr_width_ratio=1.30,
+                min_area_px=250.0,
+                min_face_area_fraction=0.25,
+            )
+
+        self.assertTrue(estimate.usable)
+        self.assertEqual(estimate.source, "edge_qr_scaled_front")
 
     @unittest.skipIf(numpy is None or cv2 is None, "numpy and OpenCV are required for silhouette tests")
     def test_silhouette_face_mask_shows_selected_head_outline_only(self):
@@ -1820,6 +1877,91 @@ class StandAxisImageTest(unittest.TestCase):
         self.assertGreaterEqual(max(point.v_px for point in candidate.corners), 140)
 
     @unittest.skipIf(numpy is None or cv2 is None, "numpy and OpenCV are required for silhouette tests")
+    def test_stem_owned_line_cycle_ignores_qr_and_background_branches(self):
+        edges = numpy.zeros((220, 320), dtype=numpy.uint8)
+        outer = numpy.array(
+            [[(92, 34), (194, 40), (190, 140), (96, 134)]],
+            dtype=numpy.int32,
+        )
+        cv2.polylines(edges, outer, True, 255, thickness=2)
+        cv2.line(edges, (132, 136), (132, 207), 255, thickness=2)
+        cv2.line(edges, (150, 137), (150, 207), 255, thickness=2)
+
+        # Dense front-side QR texture must not become a smaller head rectangle.
+        cv2.rectangle(edges, (112, 58), (174, 119), 255, thickness=2)
+        cv2.rectangle(edges, (118, 64), (136, 82), 255, thickness=2)
+        cv2.rectangle(edges, (151, 92), (169, 113), 255, thickness=2)
+        cv2.line(edges, (119, 105), (162, 68), 255, thickness=2)
+
+        # Reproduce the real capture: a separate slanted edge on the left and
+        # a long radiator/window branch leaving the head's top-right corner.
+        cv2.line(edges, (38, 18), (68, 139), 255, thickness=2)
+        cv2.line(edges, (194, 40), (315, 29), 255, thickness=2)
+        cv2.rectangle(edges, (224, 78), (305, 151), 255, thickness=2)
+
+        candidate = _stem_owned_head_from_line_segments(
+            cv2,
+            edges,
+            measurement_edges=edges,
+            stem_center_x=141.0,
+            stem_top_y=137.0,
+            min_area_px=250.0,
+            min_edge_height_px=8.0,
+            min_aspect_ratio=0.45,
+            max_aspect_ratio=1.80,
+        )
+
+        self.assertIsNotNone(candidate)
+        self.assertTrue(candidate.rectangle_fit_reliable, candidate.rectangle_fit_reason)
+        top_left, top_right, bottom_right, bottom_left = candidate.corners
+        self.assertAlmostEqual(top_left.u_px, 92.0, delta=6.0)
+        self.assertAlmostEqual(top_right.u_px, 194.0, delta=6.0)
+        self.assertAlmostEqual(bottom_left.u_px, 96.0, delta=6.0)
+        self.assertAlmostEqual(bottom_right.u_px, 190.0, delta=6.0)
+        self.assertLess(top_left.v_px, 45.0)
+        self.assertGreater(bottom_right.v_px, 130.0)
+
+        integrated = _plain_face_from_stem_cropped_edges(
+            cv2,
+            edges,
+            measurement_edges=edges,
+            min_area_px=250.0,
+            min_edge_height_px=8.0,
+            min_aspect_ratio=0.45,
+            max_aspect_ratio=1.80,
+        )
+        self.assertIsNotNone(integrated)
+        self.assertTrue(
+            integrated.rectangle_fit_reliable,
+            integrated.rectangle_fit_reason,
+        )
+        integrated_left = min(point.u_px for point in integrated.corners)
+        integrated_right = max(point.u_px for point in integrated.corners)
+        self.assertGreater(integrated_left, 85.0)
+        self.assertLess(integrated_right, 202.0)
+
+    @unittest.skipIf(numpy is None or cv2 is None, "numpy and OpenCV are required for silhouette tests")
+    def test_stem_owned_line_cycle_rejects_background_rectangle_without_neck(self):
+        edges = numpy.zeros((220, 320), dtype=numpy.uint8)
+        cv2.rectangle(edges, (185, 42), (302, 151), 255, thickness=2)
+        for x_px in range(198, 292, 13):
+            cv2.line(edges, (x_px, 68), (x_px, 143), 255, thickness=1)
+
+        candidate = _stem_owned_head_from_line_segments(
+            cv2,
+            edges,
+            measurement_edges=edges,
+            stem_center_x=141.0,
+            stem_top_y=137.0,
+            min_area_px=250.0,
+            min_edge_height_px=8.0,
+            min_aspect_ratio=0.45,
+            max_aspect_ratio=1.80,
+        )
+
+        self.assertIsNone(candidate)
+
+    @unittest.skipIf(numpy is None or cv2 is None, "numpy and OpenCV are required for silhouette tests")
     def test_connected_border_uses_outer_points_not_internal_edges(self):
         cutout = numpy.zeros((180, 220), dtype=numpy.uint8)
         outer = numpy.array([[(62, 30), (162, 24), (154, 124), (70, 118)]], dtype=numpy.int32)
@@ -2225,6 +2367,7 @@ class StandAxisImageTest(unittest.TestCase):
         self.assertEqual(args.axis_source, "edges")
         self.assertEqual(args.diagnostic_window_size_px, 320)
         self.assertAlmostEqual(args.head_hold_sec, 0.35)
+        self.assertAlmostEqual(args.front_face_to_qr_width_ratio, 1.30)
 
     def test_stand_axis_viewer_has_no_motion_arguments(self):
         parser = build_parser()

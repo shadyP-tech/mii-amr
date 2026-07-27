@@ -161,7 +161,9 @@ Run it from the Apptainer workstation environment with:
 scripts/aufgabe04/perception/debug/run_stand_axis_viewer.sh \
   --compressed-image-topic /camera/image_raw/compressed \
   --axis-source edges \
-  --edge-preprocess outer-border \
+  --edge-preprocess channel-union \
+  --canny-low 20 \
+  --canny-high 60 \
   --max-display-fps 15 \
   --max-frame-age-sec 0.25 \
   --display-edges \
@@ -180,14 +182,37 @@ For the current 800 x 600 camera view, this keeps columns 180 through 619 and
 rows 221 through 520. Moving the vertical center down to `0.62` excludes the
 room windows while retaining the stand head and upper stem:
 
+On the QR-facing side, the viewer now prefers the largest detected QR plane
+and expands it by the task fixture's configured `1.30` front-face/QR-width
+ratio. This prevents the small distant stand from winning by detector return
+order. If QR detection drops for a frame, the temporal gate holds the last
+QR-anchored head briefly instead of switching immediately to a heater or
+radiator rectangle. A stable non-QR silhouette can still be reacquired for the
+plain-color side. Set the ratio to `1.0` only when explicitly testing the
+silhouette fallback by itself.
+
+The silhouette fallback does not treat every Canny pixel in this crop as part
+of the stand. It ranks neck hypotheses, pairs outer head-side segments which
+straddle the neck and terminate at the head-to-neck transition, and accepts a
+head only when untouched raw Canny pixels independently support all four
+sides. QR modules, radiator slats, window seams, and branches leaving a head
+corner may remain visible in `stand-axis-edges`; they are excluded from the
+stand-owned rectangle rather than globally erased. Keep global edge dilation
+and closing at zero for the real-camera clutter test:
+
 ```bash
 scripts/aufgabe04/perception/debug/run_stand_axis_viewer.sh \
   --compressed-image-topic /camera/image_raw/compressed \
   --axis-source edges \
-  --edge-preprocess outer-border \
+  --edge-preprocess channel-union \
+  --canny-low 20 \
+  --canny-high 60 \
+  --edge-dilate-iterations 0 \
+  --edge-close-iterations 0 \
   --candidate-center-width-fraction 0.55 \
   --candidate-center-height-fraction 0.50 \
   --candidate-center-y-fraction 0.62 \
+  --front-face-to-qr-width-ratio 1.30 \
   --stand-face-size-m 0.078 \
   --max-frame-age-sec 0 \
   --max-display-fps 10 \

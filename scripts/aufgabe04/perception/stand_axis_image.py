@@ -515,7 +515,9 @@ def estimate_stand_axis_from_edges(
         frame,
         edges,
         width_ratio=front_face_to_qr_width_ratio,
-        min_area_px=adaptive_min_area_px,
+        # A valid QR plane is already strong target-specific evidence. Do not
+        # let an unrelated heater/radiator contour inflate its area threshold.
+        min_area_px=min_area_px,
         min_edge_height_px=min_edge_height_px,
         min_aspect_ratio=min_aspect_ratio,
         max_aspect_ratio=max_aspect_ratio,
@@ -928,25 +930,61 @@ def _front_face_from_qr_geometry(
 def _detect_qr_quad_corners(cv2, frame) -> tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint] | None:
     detector = cv2.QRCodeDetector()
     try:
+        ok, points = detector.detectMulti(frame)
+    except Exception:
+        ok, points = False, None
+    candidates = _qr_quad_candidates(points) if ok else ()
+    if candidates:
+        return _largest_qr_quad(candidates)
+
+    try:
         ok, points = detector.detect(frame)
     except Exception:
         ok, points = False, None
-    if not ok or points is None:
+    candidates = _qr_quad_candidates(points) if ok else ()
+    if candidates:
+        return _largest_qr_quad(candidates)
+
+    if not candidates:
         try:
             multi_result = detector.detectAndDecodeMulti(frame)
         except Exception:
             multi_result = ()
         points = multi_result[2] if len(multi_result) > 2 else None
-        if points is None or len(points) == 0:
-            return None
-        points = points[0]
+        candidates = _qr_quad_candidates(points)
+    return _largest_qr_quad(candidates)
+
+
+def _qr_quad_candidates(
+    points,
+) -> tuple[tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint], ...]:
+    if points is None:
+        return ()
     try:
-        flat_points = points.reshape(-1, 2)
+        quadrilaterals = points.reshape(-1, 4, 2)
     except Exception:
+        return ()
+    return tuple(
+        order_corners(
+            tuple(
+                ImagePoint(float(point[0]), float(point[1]))
+                for point in quadrilateral
+            )
+        )
+        for quadrilateral in quadrilaterals
+    )
+
+
+def _largest_qr_quad(
+    candidates: Sequence[
+        tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint]
+    ],
+) -> tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint] | None:
+    """Select the nearest/largest visible QR instead of detector return order."""
+
+    if not candidates:
         return None
-    if len(flat_points) < 4:
-        return None
-    return order_corners(tuple(ImagePoint(float(point[0]), float(point[1])) for point in flat_points[:4]))
+    return max(candidates, key=_polygon_area)
 
 
 def _scale_quadrilateral_about_center(
@@ -2206,6 +2244,261 @@ def _stem_local_x_bounds(
     return x_min, x_max
 
 
+def _line_segment_x_at_y(segment, y_px: float) -> float | None:
+    """Evaluate a non-horizontal Hough segment's infinite line at ``y_px``."""
+
+    dy = segment.end.v_px - segment.start.v_px
+    if abs(dy) <= 1e-6:
+        return None
+    fraction = (y_px - segment.start.v_px) / dy
+    return segment.start.u_px + fraction * (
+        segment.end.u_px - segment.start.u_px
+    )
+
+
+def _stem_owned_head_candidate_score(
+    cv2,
+    candidate: _SilhouetteFaceCandidate,
+    *,
+    stem_center_x: float,
+    stem_top_y: float,
+) -> float:
+    """Rank accepted heads by raw support, square shape, and neck ownership."""
+
+    corners = order_corners(candidate.corners)
+    support = _quadrilateral_edge_support(cv2, candidate.face_mask, corners)
+    xs = [point.u_px for point in corners]
+    ys = [point.v_px for point in corners]
+    width = max(max(xs) - min(xs), 1.0)
+    height = max(max(ys) - min(ys), 1.0)
+    center_x = (min(xs) + max(xs)) / 2.0
+    bottom_y = max(ys)
+    aspect_ratio = width / height
+    square_score = 1.0 / (
+        1.0 + abs(math.log(max(aspect_ratio, 1e-6)))
+    )
+    center_score = max(
+        0.0,
+        1.0 - abs(stem_center_x - center_x) / width,
+    )
+    bottom_score = max(
+        0.0,
+        1.0 - abs(stem_top_y - bottom_y) / height,
+    )
+    return (
+        5.0 * support.mean
+        + 1.5 * square_score
+        + center_score
+        + bottom_score
+    )
+
+
+def _stem_owned_head_from_line_segments(
+    cv2,
+    edges,
+    *,
+    measurement_edges,
+    stem_center_x: float,
+    stem_top_y: float,
+    min_area_px: float,
+    min_edge_height_px: float,
+    min_aspect_ratio: float,
+    max_aspect_ratio: float,
+) -> _SilhouetteFaceCandidate | None:
+    """Select a closed outer head cycle owned by one detected stand stem.
+
+    Canny legitimately retains QR modules, radiator slats, and window seams.
+    Taking the first and last pixel of every row therefore lets unrelated
+    components become head boundaries.  This proposal path instead pairs long
+    side segments which straddle the stem and end at its head-to-neck
+    transition.  The existing immutable-raw-edge gate still has to recover and
+    support all four sides, so Hough lines are localization evidence only.
+    """
+
+    frame_height, frame_width = edges.shape[:2]
+    x_min, x_max = _stem_local_x_bounds(
+        frame_width,
+        stem_center_x=stem_center_x,
+        min_edge_height_px=min_edge_height_px,
+    )
+    search_height = max(35.0, 0.62 * frame_height)
+    y_min = max(0.0, stem_top_y - search_height)
+    y_max = min(
+        float(frame_height - 1),
+        stem_top_y + max(8.0, 0.75 * min_edge_height_px),
+    )
+    if x_max <= x_min or y_max <= y_min:
+        return None
+
+    segments = _line_segments_from_edges(
+        cv2,
+        edges,
+        hough_threshold=12,
+        hough_min_line_length_px=max(
+            8,
+            int(round(1.75 * min_edge_height_px)),
+        ),
+        hough_max_line_gap_px=max(
+            4,
+            int(round(0.75 * min_edge_height_px)),
+        ),
+    )
+    minimum_side_length = max(
+        2.0 * min_edge_height_px,
+        0.16 * (y_max - y_min),
+    )
+    verticals = [
+        segment
+        for segment in segments
+        if segment.length_px >= minimum_side_length
+        and abs(abs(segment.angle_deg) - 90.0) <= 18.0
+        and x_min <= segment.x_mid < x_max
+        and segment.y_min >= y_min - min_edge_height_px
+        and segment.y_min <= stem_top_y - min_edge_height_px
+        and segment.y_max >= stem_top_y
+        - max(12.0, 0.28 * segment.length_px)
+        and segment.y_max <= y_max + min_edge_height_px
+    ]
+    if len(verticals) < 2:
+        return None
+
+    best = None
+    best_score = -math.inf
+    local_width = max(1.0, float(x_max - x_min))
+    for left in verticals:
+        if left.x_mid >= stem_center_x:
+            continue
+        for right in verticals:
+            if right.x_mid <= stem_center_x:
+                continue
+
+            width = right.x_mid - left.x_mid
+            if width < 2.0 * min_edge_height_px or width > 0.95 * local_width:
+                continue
+            center_margin = 0.12 * width
+            if not (
+                left.x_mid + center_margin
+                <= stem_center_x
+                <= right.x_mid - center_margin
+            ):
+                continue
+
+            overlap = _overlap_length(
+                left.y_min,
+                left.y_max,
+                right.y_min,
+                right.y_max,
+            )
+            minimum_length = min(left.length_px, right.length_px)
+            average_length = (left.length_px + right.length_px) / 2.0
+            if overlap < 0.45 * minimum_length:
+                continue
+            if (
+                abs(left.length_px - right.length_px)
+                > 0.55 * average_length
+            ):
+                continue
+            if abs(left.y_min - right.y_min) > 0.35 * average_length:
+                continue
+            if abs(left.y_max - right.y_max) > 0.35 * average_length:
+                continue
+
+            top_y = (left.y_min + right.y_min) / 2.0
+            bottom_y = (left.y_max + right.y_max) / 2.0
+            height = bottom_y - top_y
+            if height < 2.0 * min_edge_height_px:
+                continue
+            if abs(bottom_y - stem_top_y) > max(14.0, 0.22 * height):
+                continue
+
+            left_at_top = _line_segment_x_at_y(left, top_y)
+            left_at_bottom = _line_segment_x_at_y(left, bottom_y)
+            right_at_top = _line_segment_x_at_y(right, top_y)
+            right_at_bottom = _line_segment_x_at_y(right, bottom_y)
+            if None in (
+                left_at_top,
+                left_at_bottom,
+                right_at_top,
+                right_at_bottom,
+            ):
+                continue
+            rough_corners = order_corners(
+                (
+                    ImagePoint(float(left_at_top), top_y),
+                    ImagePoint(float(right_at_top), top_y),
+                    ImagePoint(float(right_at_bottom), bottom_y),
+                    ImagePoint(float(left_at_bottom), bottom_y),
+                )
+            )
+            aspect_ratio = quadrilateral_aspect_ratio(rough_corners)
+            if (
+                aspect_ratio < min_aspect_ratio
+                or aspect_ratio > max_aspect_ratio
+            ):
+                continue
+            area = _polygon_area(rough_corners)
+            if area < min_area_px:
+                continue
+
+            face_mask, refitted_corners = _raw_side_evidence_and_corners(
+                cv2,
+                measurement_edges,
+                rough_corners,
+            )
+            selected_corners, fit_reason, support = (
+                _select_supported_head_corners(
+                    cv2,
+                    face_mask,
+                    rough_corners,
+                    refitted_corners,
+                    image_shape=measurement_edges.shape,
+                    stem_center_x=stem_center_x,
+                    stem_top_y=stem_top_y,
+                    min_aspect_ratio=min_aspect_ratio,
+                    max_aspect_ratio=max_aspect_ratio,
+                    allow_rough_fallback=False,
+                )
+            )
+            if selected_corners is None or support is None:
+                continue
+
+            selected_aspect = quadrilateral_aspect_ratio(selected_corners)
+            square_score = 1.0 / (
+                1.0 + abs(math.log(max(selected_aspect, 1e-6)))
+            )
+            center_x = (
+                min(point.u_px for point in selected_corners)
+                + max(point.u_px for point in selected_corners)
+            ) / 2.0
+            selected_width = max(
+                1.0,
+                max(point.u_px for point in selected_corners)
+                - min(point.u_px for point in selected_corners),
+            )
+            center_score = max(
+                0.0,
+                1.0 - abs(stem_center_x - center_x) / selected_width,
+            )
+            overlap_score = min(1.0, overlap / max(average_length, 1.0))
+            extent_score = min(1.0, selected_width / local_width)
+            score = (
+                5.0 * support.mean
+                + 1.5 * square_score
+                + center_score
+                + overlap_score
+                + 0.5 * extent_score
+            )
+            if score > best_score:
+                best = _SilhouetteFaceCandidate(
+                    corners=selected_corners,
+                    face_mask=face_mask,
+                    rectangle_fit_reliable=True,
+                    rectangle_fit_reason=fit_reason,
+                )
+                best_score = score
+    return best
+
+
 def _plain_face_from_stem_cropped_edges(
     cv2,
     edges,
@@ -2247,6 +2540,8 @@ def _plain_face_from_stem_cropped_edges(
             return None
 
         diagnostic_candidate = None
+        best_reliable_candidate = None
+        best_reliable_score = -math.inf
         for stem_center_x, stem_top_y in stem_anchors:
             # Hough pairs commonly yield half-pixel centers. All following
             # evidence is rasterized, so carrying a subpixel center into
@@ -2281,12 +2576,39 @@ def _plain_face_from_stem_cropped_edges(
                 if candidate is None:
                     continue
                 if candidate.rectangle_fit_reliable:
-                    return candidate
+                    score = _stem_owned_head_candidate_score(
+                        cv2,
+                        candidate,
+                        stem_center_x=raster_center_x,
+                        stem_top_y=stem_top_y,
+                    )
+                    if score > best_reliable_score:
+                        best_reliable_candidate = candidate
+                        best_reliable_score = score
+                    continue
                 if diagnostic_candidate is None:
                     diagnostic_candidate = candidate
-        return diagnostic_candidate
+        return (
+            best_reliable_candidate
+            if best_reliable_candidate is not None
+            else diagnostic_candidate
+        )
 
     stem_center_x, stem_top_y = _raster_stem_anchor
+    line_face = _stem_owned_head_from_line_segments(
+        cv2,
+        edges,
+        measurement_edges=measurement_edges,
+        stem_center_x=stem_center_x,
+        stem_top_y=stem_top_y,
+        min_area_px=min_area_px,
+        min_edge_height_px=min_edge_height_px,
+        min_aspect_ratio=min_aspect_ratio,
+        max_aspect_ratio=max_aspect_ratio,
+    )
+    if line_face is not None:
+        return line_face
+
     contour_face = _plain_face_from_stem_head_contour(
         cv2,
         edges,
