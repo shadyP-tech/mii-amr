@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Dict, Sequence, Tuple
 
 
@@ -35,16 +36,32 @@ def build_dynamic_map_to_odom_freshness(
     receipt_age_sec: float | None,
     header_age_sec: float | None,
     max_age_sec: float,
+    max_future_sec: float = 0.25,
 ) -> tuple[bool, Dict[str, object]]:
     """Evaluate dynamic /tf map->odom evidence from primitive age values."""
     if not has_dynamic_transform or receipt_age_sec is None or header_age_sec is None:
         return False, {"available": False, "dynamic": False}
-    ok = receipt_age_sec <= max_age_sec and header_age_sec <= max_age_sec
+    timestamps_valid = math.isfinite(receipt_age_sec) and math.isfinite(
+        header_age_sec
+    )
+    ok = (
+        timestamps_valid
+        and -max_future_sec <= receipt_age_sec <= max_age_sec
+        and -max_future_sec <= header_age_sec <= max_age_sec
+    )
     return ok, {
         "available": True,
         "dynamic": True,
         "receipt_age_sec": receipt_age_sec,
         "header_age_sec": header_age_sec,
+        "max_future_sec": max_future_sec,
+        "future_dated": (
+            timestamps_valid
+            and (
+                receipt_age_sec < -max_future_sec
+                or header_age_sec < -max_future_sec
+            )
+        ),
     }
 
 

@@ -25,6 +25,8 @@ class SimCameraAdapterTest(unittest.TestCase):
         self.assertIn("--frame-id base_footprint --child-frame-id base_link", script)
         self.assertIn("--frame-id base_link --child-frame-id base_scan", script)
         self.assertIn("--frame-id base_link --child-frame-id camera_link", script)
+        self.assertIn("--model-resource-root", script)
+        self.assertIn("BURGER_CAMERA_MODEL_RESOURCE_ROOT", script)
 
     def test_sim_raw_topic_is_explicit_and_exclusive(self):
         args = build_parser().parse_args(["--sim-raw-image-topic", "/camera/image_raw"])
@@ -269,6 +271,85 @@ class SimCameraAdapterTest(unittest.TestCase):
         self.assertIn("libgazebo_ros_p3d.so", generated)
         self.assertIn("odom:=/gazebo_ground_truth", generated)
         self.assertIn("<frame_name>world</frame_name>", generated)
+
+    def test_generated_sdf_resolves_turtlebot_meshes_without_server_model_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.sdf"
+            output = root / "generated.sdf"
+            models = root / "models"
+            mesh = (
+                models
+                / "turtlebot3_common"
+                / "meshes"
+                / "bases"
+                / "burger_base.stl"
+            )
+            mesh.parent.mkdir(parents=True)
+            mesh.write_bytes(b"solid burger\nendsolid burger\n")
+            source.write_text(
+                '<sdf><model name="burger"><link name="base"><visual name="base">'
+                "<geometry><mesh><uri>"
+                "model://turtlebot3_common/meshes/bases/burger_base.stl"
+                "</uri></mesh></geometry></visual></link>"
+                '<sensor name="camera" type="wideanglecamera"><visualize>true</visualize>'
+                "<camera><horizontal_fov>3.183</horizontal_fov>"
+                "<image><width>320</width><height>240</height></image>"
+                "<lens><type>custom</type></lens></camera></sensor></model></sdf>"
+            )
+            from unittest.mock import patch
+            with patch(
+                "sys.argv",
+                [
+                    "prepare",
+                    "--source",
+                    str(source),
+                    "--output",
+                    str(output),
+                    "--model-resource-root",
+                    str(models),
+                ],
+            ):
+                self.assertEqual(main(), 0)
+
+            generated = output.read_text()
+        self.assertIn(f"<uri>{mesh.resolve().as_uri()}</uri>", generated)
+        self.assertNotIn("model://turtlebot3_common", generated)
+
+    def test_model_resource_resolution_fails_when_mesh_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.sdf"
+            models = root / "models"
+            (models / "turtlebot3_common").mkdir(parents=True)
+            source.write_text(
+                '<sdf><model name="burger"><link name="base"><visual name="base">'
+                "<geometry><mesh><uri>"
+                "model://turtlebot3_common/meshes/bases/missing.stl"
+                "</uri></mesh></geometry></visual></link>"
+                '<sensor name="camera" type="wideanglecamera"><visualize>true</visualize>'
+                "<camera><horizontal_fov>3.183</horizontal_fov>"
+                "<image><width>320</width><height>240</height></image>"
+                "<lens><type>custom</type></lens></camera></sensor></model></sdf>"
+            )
+            from unittest.mock import patch
+            with patch(
+                "sys.argv",
+                [
+                    "prepare",
+                    "--source",
+                    str(source),
+                    "--output",
+                    str(root / "generated.sdf"),
+                    "--model-resource-root",
+                    str(models),
+                ],
+            ):
+                with self.assertRaisesRegex(
+                    SystemExit,
+                    "model resource does not exist",
+                ):
+                    main()
 
 
 if __name__ == "__main__":

@@ -161,6 +161,31 @@ class CostmapTest(unittest.TestCase):
         self.assertFalse(costmap.is_blocked(GridCell(0, 0)))
         self.assertEqual(run_local.cell_sources[GridCell(0, 0)], CELL_SOURCE_RUN_LOCAL)
 
+    def test_inflation_uses_continuous_cell_square_clearance_at_diagonal(self):
+        rows = [[CELL_FREE] * 9 for _ in range(9)]
+        rows[1][1] = CELL_OCCUPIED
+        costmap = Costmap.from_occupancy_grid(
+            grid_from_rows(rows, resolution=0.05)
+        )
+
+        inflated = costmap.with_inflation(0.23)
+
+        # Offset (4, 4) has centres 0.283 m apart, but the two cell squares
+        # are only hypot(0.15, 0.15)=0.212 m apart and must be blocked.
+        self.assertTrue(inflated.is_blocked(GridCell(5, 5)))
+        # Offset (6, 6) has 0.354 m square-to-square clearance and remains
+        # available, demonstrating that this is not a rectangular halo.
+        self.assertFalse(inflated.is_blocked(GridCell(7, 7)))
+
+    def test_inflation_rejects_nonfinite_or_negative_radius(self):
+        costmap = Costmap.from_occupancy_grid(
+            grid_from_rows([[CELL_FREE]], resolution=0.05)
+        )
+        for radius in (float("nan"), float("inf"), -0.01):
+            with self.subTest(radius=radius):
+                with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+                    costmap.with_inflation(radius)
+
     def test_world_grid_conversion_uses_cell_centers(self):
         costmap = Costmap.from_occupancy_grid(grid_from_rows([[CELL_FREE]], resolution=0.5))
 
@@ -334,6 +359,12 @@ class StationDryRunTest(unittest.TestCase):
                 start=Pose2D(0.5, 1.5, 0.0),
                 inflation_radius_m=0.0,
                 snap_radius_m=0.0,
+                arena_bounds=ArenaBounds(
+                    length_m=7.0,
+                    width_m=3.0,
+                    center_x_m=3.5,
+                    center_y_m=1.5,
+                ),
             )
 
             self.assertIsNone(dry_run.results[0].failure)
@@ -539,6 +570,14 @@ class StationDryRunTest(unittest.TestCase):
                 "--start-x",
                 "0.5",
                 "--start-y",
+                "1.5",
+                "--arena-length-m",
+                "5.0",
+                "--arena-width-m",
+                "3.0",
+                "--arena-center-x-m",
+                "2.5",
+                "--arena-center-y-m",
                 "1.5",
                 "--route-csv",
                 str(root / "route.csv"),

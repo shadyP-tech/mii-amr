@@ -20,11 +20,13 @@ from scripts.aufgabe04.navigation.simple_waypoint_follower import (
     dynamic_route_kind_transition_failure,
     dynamic_join_envelope_failure,
     viewpoint_sampling_timeout_failure,
+    viewpoint_sampling_target_timeout_failure,
 )
 from scripts.aufgabe04.navigation.waypoint_controller import (
     ControllerConfig,
     compute_join_anchor_command,
     compute_start_egress_vertex_command,
+    compute_waypoint_command,
 )
 
 
@@ -45,6 +47,9 @@ def bare_follower(update: RouteUpdate, callback):
     node.last_progress_heading_error_rad = math.inf
     node.last_progress_target_index = None
     node.last_progress_pursuit_index = None
+    node.last_progress_mode = None
+    node.progress_heading_modes_seen = set()
+    node.progress_heading_error_by_mode = {}
     node.last_progress_at = 0.0
     node.last_pose = None
     node.latest_stop_details = None
@@ -54,7 +59,10 @@ def bare_follower(update: RouteUpdate, callback):
     node.current_route_kind = "axis_acquisition"
     node.reverse_staging = False
     node.axis_acquisition_hold_started_at = None
+    node.axis_acquisition_target_revision = None
     node.viewpoint_sampling_started_at = None
+    node.viewpoint_sampling_target_started_at = None
+    node.viewpoint_sampling_target_revision = None
     return node
 
 
@@ -164,6 +172,109 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
             node._progress_failure(0.35, 1.00, 2, 2, 38.1, True),
             "stuck no progress",
         )
+
+    def test_terminal_heading_handoff_resets_path_progress_baseline_once(self):
+        node = bare_follower(RouteUpdate(kind=RouteUpdateKind.UNCHANGED), None)
+
+        self.assertEqual(
+            node._progress_failure(
+                0.105,
+                0.021,
+                1,
+                1,
+                0.0,
+                True,
+                "path_tracking",
+            ),
+            "",
+        )
+        self.assertEqual(
+            node._progress_failure(
+                0.076,
+                0.726,
+                1,
+                1,
+                8.01,
+                True,
+                "terminal_heading",
+            ),
+            "",
+        )
+        self.assertEqual(node.last_progress_at, 8.01)
+        self.assertEqual(node.last_progress_mode, "terminal_heading")
+        self.assertEqual(
+            node._progress_failure(
+                0.076,
+                0.60,
+                1,
+                1,
+                12.0,
+                True,
+                "terminal_heading",
+            ),
+            "",
+        )
+
+    def test_terminal_heading_mode_chatter_cannot_reset_watchdog_forever(self):
+        node = bare_follower(RouteUpdate(kind=RouteUpdateKind.UNCHANGED), None)
+
+        samples = (
+            (0.0, "path_tracking", 0.02, ""),
+            (4.0, "terminal_heading", 0.72, ""),
+            (8.0, "path_tracking", 0.02, ""),
+            (12.0, "terminal_heading", 0.72, ""),
+            (16.1, "path_tracking", 0.02, "stuck no progress"),
+        )
+        for now, mode, heading_error, expected in samples:
+            with self.subTest(now=now, mode=mode):
+                self.assertEqual(
+                    node._progress_failure(
+                        0.076,
+                        heading_error,
+                        1,
+                        1,
+                        now,
+                        True,
+                        mode,
+                    ),
+                    expected,
+                )
+
+    def test_terminal_heading_reentry_uses_its_own_progress_baseline(self):
+        node = bare_follower(RouteUpdate(kind=RouteUpdateKind.UNCHANGED), None)
+
+        # Live retry 06 crossed the 3 cm position tolerance once, briefly
+        # returned to point pursuit, and then re-entered terminal yaw.  The
+        # small point-bearing error must not replace the terminal-yaw baseline.
+        samples = (
+            (0.0, "path_tracking", 0.56, ""),
+            (1.0, "terminal_heading", 2.33, ""),
+            (2.0, "path_tracking", 0.44, ""),
+            (5.0, "terminal_heading", 2.10, ""),
+            (10.0, "terminal_heading", 1.85, ""),
+        )
+        for now, mode, heading_error, expected in samples:
+            with self.subTest(now=now, mode=mode):
+                self.assertEqual(
+                    node._progress_failure(
+                        0.029,
+                        heading_error,
+                        1,
+                        1,
+                        now,
+                        True,
+                        mode,
+                    ),
+                    expected,
+                )
+
+        self.assertAlmostEqual(
+            node.progress_heading_error_by_mode["path_tracking"], 0.44
+        )
+        self.assertAlmostEqual(
+            node.progress_heading_error_by_mode["terminal_heading"], 1.85
+        )
+        self.assertEqual(node.last_progress_at, 10.0)
 
     def test_adopted_start_egress_lock_targets_vertex_one_then_releases(self):
         waypoints = (
@@ -300,11 +411,26 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         self.assertEqual(sampling.goal_tolerance_m, 0.01)
         self.assertAlmostEqual(sampling.heading_tolerance_rad, math.radians(5.0))
         self.assertFalse(sampling.reverse_staging)
+        acquisition = controller_config_for_route_kind(
+            configured,
+            "axis_acquisition",
+            viewpoint_sampling_goal_tolerance_m=0.01,
+            viewpoint_sampling_heading_tolerance_rad=math.radians(5.0),
+        )
+        # Retry 08 reached its first acquisition pose with 0.224 rad heading
+        # error.  Position was valid, but that heading was outside the camera
+        # centering gate and must not start the stationary wait timer.
+        self.assertEqual(acquisition.goal_tolerance_m, 0.01)
+        self.assertAlmostEqual(
+            acquisition.heading_tolerance_rad,
+            math.radians(5.0),
+        )
         self.assertTrue(
             controller_config_for_route_kind(
                 configured,
                 "synchronized_face_approach",
                 reverse_staging=True,
+                physical_waypoint_tolerance_m=0.02,
                 physical_goal_tolerance_m=0.03,
             ).enforce_heading_corridor
         )
@@ -312,10 +438,12 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
             configured,
             "synchronized_face_approach",
             reverse_staging=True,
+            physical_waypoint_tolerance_m=0.02,
             physical_goal_tolerance_m=0.03,
         )
         self.assertTrue(physical.reverse_staging)
-        self.assertEqual(physical.goal_tolerance_m, 0.03)
+        self.assertEqual(physical.goal_tolerance_m, 0.02)
+        self.assertEqual(physical.terminal_goal_tolerance_m, 0.03)
         self.assertTrue(
             controller_config_for_route_kind(
                 configured, "synchronized_viewpoint"
@@ -324,10 +452,78 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         catalog = controller_config_for_route_kind(
             configured,
             "catalog_face_approach",
+            physical_waypoint_tolerance_m=0.02,
             physical_goal_tolerance_m=0.03,
         )
         self.assertTrue(catalog.enforce_heading_corridor)
-        self.assertEqual(catalog.goal_tolerance_m, 0.03)
+        self.assertEqual(catalog.goal_tolerance_m, 0.02)
+        self.assertEqual(catalog.terminal_goal_tolerance_m, 0.03)
+
+    def test_exact_vertex_alignment_has_its_own_progress_baseline(self):
+        node = bare_follower(RouteUpdate(kind=RouteUpdateKind.UNCHANGED), None)
+
+        self.assertEqual(
+            node._progress_failure(
+                0.04,
+                0.02,
+                2,
+                2,
+                0.0,
+                True,
+                "path_tracking",
+            ),
+            "",
+        )
+        self.assertEqual(
+            node._progress_failure(
+                0.04,
+                0.46,
+                2,
+                2,
+                7.9,
+                True,
+                "exact_vertex_alignment",
+            ),
+            "",
+        )
+        self.assertEqual(node.last_progress_at, 7.9)
+
+    def test_retry08_acquisition_pose_keeps_correcting_before_hold(self):
+        pose = Pose2D(
+            -1.0190934638169666,
+            -0.4629104883592975,
+            0.27879300289087416,
+        )
+        target = Pose2D(
+            -0.9434690364310175,
+            -0.4415727854644216,
+            0.0552268781046199,
+        )
+        waypoints = (Pose2D(-1.3974097814674362, -0.46666806006977657), target)
+
+        old_step = compute_waypoint_command(
+            pose,
+            waypoints,
+            1,
+            ControllerConfig(),
+        )
+        corrected_step = compute_waypoint_command(
+            pose,
+            waypoints,
+            1,
+            controller_config_for_route_kind(
+                ControllerConfig(),
+                "axis_acquisition",
+                viewpoint_sampling_goal_tolerance_m=0.03,
+                viewpoint_sampling_heading_tolerance_rad=math.radians(5.0),
+            ),
+        )
+
+        self.assertTrue(old_step.reached_goal)
+        self.assertFalse(corrected_step.reached_goal)
+        self.assertEqual(corrected_step.progress_mode, "path_tracking")
+        self.assertGreater(corrected_step.distance_to_target_m, 0.03)
+        self.assertNotEqual(corrected_step.command.linear_x_mps, 0.0)
 
     def test_non_dynamic_route_preserves_explicit_corridor_setting(self):
         configured = ControllerConfig(enforce_heading_corridor=True)
@@ -453,6 +649,15 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
             "",
         )
         self.assertEqual(
+            viewpoint_sampling_target_timeout_failure(
+                route_kind="viewpoint_sampling",
+                target_started_at=20.0,
+                now_monotonic=50.0,
+                timeout_sec=30.0,
+            ),
+            "viewpoint_sampling_target_timeout",
+        )
+        self.assertEqual(
             viewpoint_sampling_timeout_failure(
                 route_kind="viewpoint_sampling",
                 phase_started_at=10.0,
@@ -506,6 +711,7 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
             kind=RouteUpdateKind.ADOPT,
             waypoints=(Pose2D(0.02, 0.0), Pose2D(0.2, 0.0)),
             target_index=0,
+            target_revision=1,
             event_fields={
                 "effective_join_limit_m": 0.2,
                 "route_kind": "axis_acquisition",
@@ -513,6 +719,7 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         )
         node = bare_follower(same_axis, None)
         node.axis_acquisition_hold_started_at = 4.0
+        node.axis_acquisition_target_revision = 1
         node.publish_zero = lambda: None
         with patch(
             "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
@@ -522,12 +729,36 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
                 node._refresh_dynamic_route(Pose2D(0.02, 0.0)), "adopted"
             )
         self.assertEqual(node.axis_acquisition_hold_started_at, 4.0)
+        self.assertEqual(node.axis_acquisition_target_revision, 1)
         self.assertIsNone(node.viewpoint_sampling_started_at)
+
+        next_acquisition_ray = RouteUpdate(
+            kind=RouteUpdateKind.ADOPT,
+            waypoints=(Pose2D(0.02, 0.0), Pose2D(0.25, 0.15)),
+            target_index=0,
+            target_revision=2,
+            event_fields={
+                "effective_join_limit_m": 0.2,
+                "route_kind": "axis_acquisition",
+            },
+        )
+        node.waypoint_provider = lambda _pose: next_acquisition_ray
+        node.initial_route_refresh_pending = True
+        with patch(
+            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            return_value=11.0,
+        ):
+            self.assertEqual(
+                node._refresh_dynamic_route(Pose2D(0.02, 0.0)), "adopted"
+            )
+        self.assertIsNone(node.axis_acquisition_hold_started_at)
+        self.assertEqual(node.axis_acquisition_target_revision, 2)
 
         sampling = RouteUpdate(
             kind=RouteUpdateKind.ADOPT,
             waypoints=(Pose2D(0.02, 0.0), Pose2D(0.25, 0.1)),
             target_index=0,
+            target_revision=2,
             event_fields={
                 "effective_join_limit_m": 0.2,
                 "route_kind": "viewpoint_sampling",
@@ -544,6 +775,8 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
             )
         self.assertIsNone(node.axis_acquisition_hold_started_at)
         self.assertEqual(node.viewpoint_sampling_started_at, 12.0)
+        self.assertEqual(node.viewpoint_sampling_target_started_at, 12.0)
+        self.assertEqual(node.viewpoint_sampling_target_revision, 2)
 
         node.initial_route_refresh_pending = True
         with patch(
@@ -554,6 +787,30 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
                 node._refresh_dynamic_route(Pose2D(0.02, 0.0)), "adopted"
             )
         self.assertEqual(node.viewpoint_sampling_started_at, 12.0)
+        self.assertEqual(node.viewpoint_sampling_target_started_at, 12.0)
+
+        newer_sampling_target = RouteUpdate(
+            kind=RouteUpdateKind.ADOPT,
+            waypoints=(Pose2D(0.02, 0.0), Pose2D(0.27, 0.12)),
+            target_index=0,
+            target_revision=3,
+            event_fields={
+                "effective_join_limit_m": 0.2,
+                "route_kind": "viewpoint_sampling",
+            },
+        )
+        node.waypoint_provider = lambda _pose: newer_sampling_target
+        node.initial_route_refresh_pending = True
+        with patch(
+            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            return_value=25.0,
+        ):
+            self.assertEqual(
+                node._refresh_dynamic_route(Pose2D(0.02, 0.0)), "adopted"
+            )
+        self.assertEqual(node.viewpoint_sampling_started_at, 12.0)
+        self.assertEqual(node.viewpoint_sampling_target_started_at, 25.0)
+        self.assertEqual(node.viewpoint_sampling_target_revision, 3)
 
         physical = RouteUpdate(
             kind=RouteUpdateKind.ADOPT,
@@ -575,6 +832,8 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
             )
         self.assertEqual(node.current_route_kind, "synchronized_face_approach")
         self.assertIsNone(node.viewpoint_sampling_started_at)
+        self.assertIsNone(node.viewpoint_sampling_target_started_at)
+        self.assertIsNone(node.viewpoint_sampling_target_revision)
         self.assertIsNone(node.axis_acquisition_hold_started_at)
 
     def test_physical_route_adoption_locks_reverse_staging_and_logs_it(self):

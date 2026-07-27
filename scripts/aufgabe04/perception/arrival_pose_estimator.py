@@ -37,6 +37,7 @@ def arrival_pose_record_from_recommendation(
     validated_unix_sec: float,
     axis_sample_count: int = 1,
     estimator: str = "simulation/silhouette_head_rectangle",
+    source: str = "simulation/synchronized_viewpoint",
     source_observation_ids: tuple[str, ...] | None = None,
 ) -> ArrivalPoseRecord:
     """Build one explicit record from a committed synchronized estimate."""
@@ -151,5 +152,5 @@ def arrival_pose_record_from_recommendation(
         ),
         source_observation_ids=tuple(sorted(observation_ids)),
         sensor_stamp_sec=recommendation.sensor_stamp_sec,
-        source="simulation/synchronized_viewpoint",
+        source=source,
     )

@@ -8,6 +8,7 @@ from scripts.aufgabe04.navigation.dynamic_approach_planner import (
     circular_keepout_cells,
     face_normal_candidates,
     greedy_line_of_sight_shortcut,
+    minimum_static_obstacle_inflation_m,
     plan_axis_acquisition,
     plan_dynamic_approach,
     plan_fixed_approach,
@@ -71,6 +72,28 @@ def costmap_from_blocked(
 
 
 class KeepoutRasterizationTest(unittest.TestCase):
+    def test_static_inflation_covers_live_lidar_stop_and_tracking_tube(self):
+        self.assertAlmostEqual(
+            minimum_static_obstacle_inflation_m(
+                robot_radius_m=0.105,
+                tracking_margin_m=0.03,
+                lidar_stop_distance_m=0.18,
+                scan_origin_to_base_offset_m=0.0,
+                lidar_clearance_margin_m=0.02,
+            ),
+            0.23,
+        )
+        self.assertAlmostEqual(
+            minimum_static_obstacle_inflation_m(
+                robot_radius_m=0.30,
+                tracking_margin_m=0.03,
+                lidar_stop_distance_m=0.18,
+                scan_origin_to_base_offset_m=-0.04,
+                lidar_clearance_margin_m=0.02,
+            ),
+            0.33,
+        )
+
     def test_radius_is_physical_sum_and_static_costmap_is_not_reinflated(self):
         config = DynamicApproachConfig(
             stand_radius_m=0.06,
@@ -85,6 +108,22 @@ class KeepoutRasterizationTest(unittest.TestCase):
         self.assertIn(GridCell(0, 0), overlaid.blocked_cells)
         self.assertNotIn(GridCell(1, 0), overlaid.blocked_cells)
         self.assertGreater(len(cells), 0)
+
+    def test_tracking_tube_expands_each_robot_center_envelope_once(self):
+        config = DynamicApproachConfig(
+            stand_radius_m=0.06,
+            stand_position_uncertainty_m=0.03,
+            robot_radius_m=0.10,
+            collision_margin_m=0.02,
+            tracking_margin_m=0.03,
+            minimum_non_target_keepout_radius_m=0.40,
+        )
+
+        self.assertAlmostEqual(config.stand_keepout_radius_m, 0.24)
+        self.assertAlmostEqual(config.minimum_lidar_standoff_m, 0.29)
+        self.assertAlmostEqual(config.non_target_stand_keepout_radius_m, 0.43)
+        with self.assertRaisesRegex(ValueError, "tracking_margin_m must be non-negative"):
+            DynamicApproachConfig(tracking_margin_m=-0.001)
 
     def test_closed_disk_includes_boundary_touching_cell_but_not_next_cell(self):
         costmap = costmap_from_blocked()
@@ -357,6 +396,31 @@ class CorridorSafetyTest(unittest.TestCase):
             )
         )
 
+    def test_standoff_outside_body_envelope_but_inside_execution_tube_is_rejected(self):
+        config = DynamicApproachConfig(
+            stand_radius_m=0.06,
+            stand_position_uncertainty_m=0.02,
+            robot_radius_m=0.105,
+            collision_margin_m=0.02,
+            tracking_margin_m=0.03,
+            standoff_distance_m=0.22,
+            lidar_stop_distance_m=0.10,
+            lidar_clearance_margin_m=0.0,
+        )
+        self.assertAlmostEqual(config.stand_keepout_radius_m, 0.235)
+
+        result = plan_dynamic_approach(
+            costmap_from_blocked(), self.start, self.stand, 0.0, config=config
+        )
+
+        self.assertIsNone(result.plan)
+        self.assertTrue(
+            all(
+                "standoff_inside_stand_keepout" in item.rejection_reasons
+                for item in result.diagnostics.candidates
+            )
+        )
+
     def test_standoff_must_be_compatible_with_lidar_stop_geometry(self):
         config = DynamicApproachConfig(
             stand_radius_m=0.06,
@@ -427,9 +491,10 @@ class CorridorSafetyTest(unittest.TestCase):
 
     def test_every_route_segment_avoids_dynamic_stand_keepout(self):
         base = costmap_from_blocked()
-        config = DynamicApproachConfig()
+        config = DynamicApproachConfig(tracking_margin_m=0.03)
         result = plan_dynamic_approach(base, self.start, self.stand, 0.0, config=config)
         self.assertIsNotNone(result.plan)
+        self.assertAlmostEqual(result.diagnostics.keepout_radius_m, 0.235)
         augmented, keepout = with_dynamic_stand_keepout(base, self.stand, config)
         poses = [item.pose for item in result.plan.waypoints]
         for first, second in zip(poses, poses[1:]):

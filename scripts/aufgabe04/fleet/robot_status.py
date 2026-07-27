@@ -12,4 +12,9 @@ class RobotStatus:
     y_m: Optional[float] = None
     yaw_rad: Optional[float] = None
     phase: str = "unknown"
-
+    timestamp_sec: Optional[float] = None
+    velocity_x_mps: Optional[float] = None
+    velocity_y_mps: Optional[float] = None
+    footprint_radius_m: Optional[float] = None
+    loaded_footprint_radius_m: Optional[float] = None
+    payload_loaded: bool = False

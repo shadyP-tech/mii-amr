@@ -18,7 +18,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 python3 "$SCRIPT_DIR/prepare_burger_camera_model.py" \
   --source "$SOURCE_MODEL_SDF" \
   --output "$MODEL_SDF" \
-  --horizontal-fov-rad "${BURGER_CAMERA_HFOV_RAD:-1.3962634}"
+  --horizontal-fov-rad "${BURGER_CAMERA_HFOV_RAD:-1.3962634}" \
+  --model-resource-root \
+  "${BURGER_CAMERA_MODEL_RESOURCE_ROOT:-/opt/tb3_src_ws/install/turtlebot3_gazebo/share/turtlebot3_gazebo/models}"
 
 export TURTLEBOT3_MODEL=burger
 ros2 run gazebo_ros spawn_entity.py \

@@ -58,6 +58,17 @@ class FollowerSafetyTest(unittest.TestCase):
             ),
             "",
         )
+        self.assertEqual(
+            message_freshness_failure(
+                "tf",
+                has_message=True,
+                receipt_age_sec=0.1,
+                header_age_sec=-0.6,
+                max_age_sec=1.0,
+                max_future_sec=0.25,
+            ),
+            "future-dated tf",
+        )
 
     def test_scan_obstacle_decision_filters_laser_scan_bounds(self):
         self.assertEqual(finite_positive_min([float("inf"), -1.0, 0.0, 0.35]), 0.35)

@@ -1,4 +1,9 @@
-"""Plan a route to the latest simulation synchronized-viewpoint recommendation."""
+"""Plan or validate a synchronized-viewpoint recommendation.
+
+Dynamic acquisition routes remain simulation-only.  A real-robot observer may
+use ``--environment real --workflow-mode survey-only`` to validate a committed,
+passively collected recommendation and append it to a real survey catalog.
+"""
 
 from __future__ import annotations
 
@@ -18,12 +23,24 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds
+from scripts.aufgabe04.navigation.axis_acquisition_feedback import (
+    AXIS_ACQUISITION_FEEDBACK_CONTRACT,
+    AXIS_ACQUISITION_FEEDBACK_SCHEMA_VERSION,
+    AXIS_ACQUISITION_STATIC_TARGET_FAILURES,
+    axis_acquisition_feedback_binding,
+    canonical_json_sha256,
+    finite_feedback_pose,
+    load_axis_acquisition_feedback,
+    write_axis_acquisition_feedback,
+)
 from scripts.aufgabe04.navigation.costmap import Costmap
 from scripts.aufgabe04.navigation.dynamic_approach_planner import (
     DynamicApproachConfig,
     FaceNormalCandidate,
     circular_keepout_cells,
     face_normal_candidates as planner_face_candidates,
+    minimum_static_obstacle_inflation_m,
     plan_axis_acquisition,
     plan_dynamic_approach,
     plan_fixed_approach,
@@ -35,7 +52,10 @@ from scripts.aufgabe04.navigation.dynamic_replan_policy import (
     DynamicReplanPolicy,
     DynamicReplanState,
 )
-from scripts.aufgabe04.navigation.map_io import load_occupancy_grid
+from scripts.aufgabe04.navigation.map_io import (
+    FrozenMapBundle,
+    load_occupancy_grid_with_bundle,
+)
 from scripts.aufgabe04.navigation.models import GridCell, Pose2D
 from scripts.aufgabe04.navigation.route_revision_store import (
     RouteRevisionError,
@@ -72,6 +92,104 @@ WORKFLOW_SURVEY_ONLY = "survey-only"
 _WORKFLOW_MODES = (WORKFLOW_IMMEDIATE_APPROACH, WORKFLOW_SURVEY_ONLY)
 _KNOWN_STAND_KEEPOUT_EPSILON_M = 1.0e-10
 _KNOWN_STAND_EGRESS_SEARCH_RADIUS_CELLS = 4
+
+
+def _point_approach_targets(
+    recommendation,
+    active_publication: Mapping[str, object] | None,
+) -> tuple[MaterialTarget, MaterialTarget]:
+    """Order unresolved antipodes, retaining an installed safe side first.
+
+    Point-acquisition face IDs carry no physical side identity.  Until the
+    observer commits an axis, either antipode is therefore an admissible
+    observation target.  Once one has an active route, keep that provisional
+    side stable while it remains present in the recommendation.
+    """
+
+    if recommendation.material_target.evidence_state != recommendation.axis_state:
+        raise ValueError("point_approach_evidence_state_mismatch")
+    if any(face.identity_resolved for face in recommendation.face_candidates):
+        raise ValueError("point_approach_has_resolved_face_identity")
+    if recommendation.side_evidence.hard or recommendation.side_evidence.valid:
+        raise ValueError("point_approach_has_side_evidence")
+    evidence_state = recommendation.material_target.evidence_state
+    targets = [
+        MaterialTarget(face.face_id, face.pose, evidence_state)
+        for face in recommendation.face_candidates
+    ]
+    preferred_id = recommendation.material_target.face_id
+    targets.sort(key=lambda target: target.face_id != preferred_id)
+    if active_publication is not None:
+        active_target = active_publication.get("target")
+        active_x = active_y = None
+        if isinstance(active_target, Mapping):
+            try:
+                active_x = float(active_target.get("x_m"))
+                active_y = float(active_target.get("y_m"))
+            except (TypeError, ValueError):
+                active_x = active_y = None
+        if (
+            active_x is not None
+            and active_y is not None
+            and math.isfinite(active_x)
+            and math.isfinite(active_y)
+        ):
+            # Provisional near/far IDs are regenerated from the observer's
+            # current robot-relative view and can swap physical hemispheres.
+            # Preserve the installed target geometrically, not by that
+            # unstable label, so a heartbeat cannot ping-pong antipodes.
+            targets.sort(
+                key=lambda target: math.hypot(
+                    target.pose.x_m - active_x,
+                    target.pose.y_m - active_y,
+                )
+            )
+        else:
+            active_id = (
+                active_target.get("face_id")
+                if isinstance(active_target, Mapping)
+                else None
+            )
+            targets.sort(key=lambda target: target.face_id != active_id)
+    if len(targets) != 2:
+        raise ValueError("point approach requires exactly two antipodal targets")
+    return targets[0], targets[1]
+
+
+def _plan_point_approach(
+    costmap: Costmap,
+    start: Pose2D,
+    stand: Pose2D,
+    targets: Sequence[MaterialTarget],
+    *,
+    config: DynamicApproachConfig,
+):
+    """Try the preferred unresolved viewpoint, then its safe antipode."""
+
+    attempts = []
+    last_result = None
+    for index, target in enumerate(targets):
+        result = plan_axis_acquisition(
+            costmap,
+            start,
+            stand,
+            target.pose,
+            config=config,
+        )
+        attempts.append(
+            {
+                "face_id": target.face_id,
+                "pose": asdict(target.pose),
+                "priority": index,
+                "valid": result.plan is not None,
+                "diagnostics": asdict(result.diagnostics),
+            }
+        )
+        last_result = result
+        if result.plan is not None:
+            return result, target, tuple(attempts)
+    assert last_result is not None
+    return last_result, None, tuple(attempts)
 
 
 @dataclass(frozen=True)
@@ -432,6 +550,7 @@ def _record_survey_arrival(
     known_stand_overlay: KnownStandKeepoutOverlay,
     config: DynamicApproachConfig,
     known_stand_keepouts: Sequence[Mapping[str, float]],
+    map_bundle: FrozenMapBundle,
     now: float,
 ) -> tuple[dict[str, object], object]:
     """Validate and atomically persist one committed arrival estimate."""
@@ -484,14 +603,22 @@ def _record_survey_arrival(
         known_stand_keepouts,
     )
 
-    map_sha256 = _file_sha256(args.map)
+    map_sha256 = map_bundle.yaml_sha256
     provenance = CatalogProvenance(
         planning_frame=args.map_frame,
         map_yaml_sha256=map_sha256,
         world_id=args.world_id,
         world_sha256=args.world_sha256,
         session_id=args.session_id,
-        environment="simulation",
+        environment=args.environment,
+        map_bundle_sha256=args.expected_map_bundle_sha256,
+        candidate_snapshot_sha256=args.candidate_snapshot_sha256,
+        station_identity_registry_sha256=(
+            args.station_identity_registry_sha256
+        ),
+        survey_config_sha256=args.survey_config_sha256,
+        calibration_profile_sha256=args.calibration_profile_sha256,
+        survey_input_binding_sha256=args.survey_input_binding_sha256,
     )
     candidate_uid = args.candidate_uid
     if args.arrival_pose_catalog.exists():
@@ -512,6 +639,11 @@ def _record_survey_arrival(
             expected_candidate_uids=args.expected_candidate_uid,
             created_unix_sec=now,
         )
+    if recommendation.axis_sample_count < args.axis_sample_count:
+        raise ValueError(
+            "measured axis evidence has fewer stable inlier samples than "
+            f"required: {recommendation.axis_sample_count} < {args.axis_sample_count}"
+        )
     record = arrival_pose_record_from_recommendation(
         recommendation,
         candidate_uid=candidate_uid,
@@ -520,7 +652,17 @@ def _record_survey_arrival(
         # Use the immutable observation time in the record so replaying the
         # same sensor evidence is an idempotent catalog upsert.
         validated_unix_sec=recommendation.observation_unix_sec,
-        axis_sample_count=args.axis_sample_count,
+        axis_sample_count=recommendation.axis_sample_count,
+        estimator=(
+            "simulation/silhouette_head_rectangle"
+            if args.environment == "simulation"
+            else "real/silhouette_head_rectangle_camera_info_tf"
+        ),
+        source=(
+            "simulation/synchronized_viewpoint"
+            if args.environment == "simulation"
+            else "real/synchronized_viewpoint"
+        ),
     )
     catalog = upsert_arrival_pose(catalog, record, updated_unix_sec=now)
     catalog_sha256 = write_arrival_pose_catalog(args.arrival_pose_catalog, catalog)
@@ -535,6 +677,11 @@ def _record_survey_arrival(
         "face_id": record.face.face_id,
         "axis_rad": record.axis.axis_rad,
         "axis_confidence": record.axis.confidence,
+        "axis_sample_count": record.axis.sample_count,
+        "map_yaml_sha256": map_bundle.yaml_sha256,
+        "map_image_sha256": map_bundle.image_sha256,
+        "map_bundle_sha256": map_bundle.bundle_sha256,
+        "candidate_snapshot_sha256": args.candidate_snapshot_sha256,
         "known_stand_keepout_clearances": list(known_stand_clearances),
     }
     # Assert the in-memory digest agrees with the bytes we just published.
@@ -604,10 +751,11 @@ def _route_csv_text(
     *,
     stream_id: str,
     target_revision: int,
+    simulation_only: bool = True,
     route_kind: str = "synchronized_viewpoint",
 ) -> str:
     output = io.StringIO(newline="")
-    writer = csv.writer(output)
+    writer = csv.writer(output, lineterminator="\n")
     writer.writerow(
         [
             "leg_index",
@@ -651,7 +799,7 @@ def _route_csv_text(
                 cumulative,
                 str(waypoint.protected).lower(),
                 str(waypoint.corridor).lower(),
-                "true",
+                str(simulation_only).lower(),
                 route_kind,
                 stream_id,
                 "",
@@ -663,18 +811,35 @@ def _route_csv_text(
     return output.getvalue()
 
 
-def _diagnostics_payload(plan_result, recommendation, target_revision: int) -> dict:
+def _diagnostics_payload(
+    plan_result,
+    recommendation,
+    target_revision: int,
+    *,
+    map_bundle: FrozenMapBundle | None = None,
+    candidate_snapshot_sha256: str = "",
+) -> dict:
     plan = plan_result.plan
     return {
         "metadata": {
             "stage": "dynamic_synchronized_viewpoint_refinement",
-            "simulation_only": True,
+            "simulation_only": recommendation.simulation_only,
             "stream_id": recommendation.stream_id,
             "stand_id": recommendation.stand_id,
             "planning_frame": recommendation.planning_frame,
             "target_revision": target_revision,
             "source": recommendation.source,
             "approach_phase": recommendation.axis_state,
+            **(
+                {}
+                if map_bundle is None
+                else {
+                    "map_yaml_sha256": map_bundle.yaml_sha256,
+                    "map_image_sha256": map_bundle.image_sha256,
+                    "map_bundle_sha256": map_bundle.bundle_sha256,
+                    "candidate_snapshot_sha256": candidate_snapshot_sha256,
+                }
+            ),
         },
         "legs": [
             {
@@ -783,20 +948,176 @@ def _active_publication(existing) -> dict | None:
     diagnostics = json.loads(existing.diagnostics_path.read_text())
     if not isinstance(diagnostics, dict):
         raise ValueError("existing route diagnostics must be an object")
+    with existing.route_path.open("r", newline="") as route_file:
+        route_text = route_file.read()
     return {
-        "route_text": existing.route_path.read_text(),
+        "route_text": route_text,
         "diagnostics": diagnostics,
         **required_mappings,
         "route_length_m": float(manifest.get("new_route_length_m", 0.0)),
     }
 
 
+def _axis_acquisition_rejection_feedback(
+    *,
+    path: Path,
+    recommendation,
+    active_publication: Mapping[str, object],
+    point_approach_attempts: Sequence[Mapping[str, object]],
+    arrival_tolerance_m: float,
+    max_search_targets: int,
+    now_unix_sec: float,
+    max_age_sec: float,
+) -> dict[str, object]:
+    """Write or retain one exact, monotonic, observer-only rejection event.
+
+    This function deliberately does not publish a route heartbeat. The motion
+    side can therefore adopt no geometry from this sidecar: the previously
+    certified active manifest remains byte-for-byte untouched while the
+    observer advances to the next bounded survey-only ray.
+    """
+
+    binding = axis_acquisition_feedback_binding(recommendation)
+    search_index = int(binding["search_index"])
+    if search_index + 1 >= max_search_targets:
+        raise ValueError(
+            "axis_acquisition_search_exhausted:"
+            + ",".join(
+                f"{attempt.get('face_id')}="
+                f"{dict(attempt.get('diagnostics', {})).get('failure_reason')}"
+                for attempt in point_approach_attempts
+            )
+        )
+    if not math.isfinite(arrival_tolerance_m) or arrival_tolerance_m <= 0.0:
+        raise ValueError("axis acquisition arrival tolerance is invalid")
+    if not math.isfinite(max_age_sec) or max_age_sec <= 0.0:
+        raise ValueError("axis acquisition feedback max age is invalid")
+
+    active_target = active_publication.get("target")
+    active_evidence = active_publication.get("evidence")
+    if not isinstance(active_target, Mapping) or not isinstance(
+        active_evidence, Mapping
+    ):
+        raise ValueError("axis acquisition feedback active route is malformed")
+    if active_target.get("evidence_state") != "axis_acquisition":
+        raise ValueError("axis acquisition feedback active route is not unresolved")
+    active_face_id = active_target.get("face_id")
+    if (
+        not isinstance(active_face_id, str)
+        or not active_face_id.startswith(
+            ("acquisition_near_", "acquisition_far_")
+        )
+        or active_evidence.get("hard") is True
+        or active_evidence.get("valid") is True
+    ):
+        raise ValueError("axis acquisition feedback active route has side identity")
+    active_pose = finite_feedback_pose(
+        active_target,
+        name="axis acquisition feedback active target",
+    )
+    hold_distance_m = math.hypot(
+        recommendation.robot_pose.x_m - active_pose["x_m"],
+        recommendation.robot_pose.y_m - active_pose["y_m"],
+    )
+    if (
+        not math.isfinite(hold_distance_m)
+        or hold_distance_m > arrival_tolerance_m
+    ):
+        raise ValueError("axis acquisition feedback active target is not safely held")
+
+    candidates = binding["face_candidates"]
+    if len(point_approach_attempts) != 2:
+        raise ValueError("axis acquisition feedback requires two planner attempts")
+    rejections = []
+    for attempt, candidate in zip(point_approach_attempts, candidates):
+        if not isinstance(attempt, Mapping):
+            raise ValueError("axis acquisition planner attempt is malformed")
+        diagnostics = attempt.get("diagnostics")
+        if not isinstance(diagnostics, Mapping):
+            raise ValueError("axis acquisition planner diagnostics are malformed")
+        reason = diagnostics.get("failure_reason")
+        if (
+            attempt.get("face_id") != candidate["face_id"]
+            or reason not in AXIS_ACQUISITION_STATIC_TARGET_FAILURES
+        ):
+            raise ValueError(
+                "axis acquisition rejection is not an allowlisted static target failure"
+            )
+        rejections.append(
+            {
+                "face_id": str(attempt["face_id"]),
+                "failure_reason": str(reason),
+            }
+        )
+
+    binding_sha256 = canonical_json_sha256(binding)
+    if path.exists():
+        existing = load_axis_acquisition_feedback(
+            path,
+            now_unix_sec=now_unix_sec,
+            max_age_sec=max_age_sec,
+        )
+        existing_index = int(existing["binding"]["search_index"])
+        if existing_index > search_index:
+            raise ValueError("axis acquisition feedback index moved backwards")
+        if existing_index == search_index:
+            if existing["binding_sha256"] != binding_sha256:
+                raise ValueError("axis acquisition feedback binding mismatch")
+            # Pending duplicate polls and the short consumed-to-next-observation
+            # race retain the exact same event without rewriting or revisioning.
+            return existing
+        if existing["state"] != "consumed":
+            raise ValueError(
+                "older axis acquisition feedback was not consumed monotonically"
+            )
+
+    payload = {
+        "schema_version": AXIS_ACQUISITION_FEEDBACK_SCHEMA_VERSION,
+        "contract": AXIS_ACQUISITION_FEEDBACK_CONTRACT,
+        "simulation_only": True,
+        "state": "pending",
+        "created_unix_sec": now_unix_sec,
+        "source_observation_unix_sec": (
+            recommendation.observation_unix_sec
+        ),
+        "source_sensor_stamp_sec": recommendation.sensor_stamp_sec,
+        "arrival_tolerance_m": arrival_tolerance_m,
+        "binding": binding,
+        "binding_sha256": binding_sha256,
+        "held_active_target": {
+            "face_id": active_face_id,
+            "evidence_state": "axis_acquisition",
+            "pose": active_pose,
+        },
+        "held_distance_m": hold_distance_m,
+        "rejections": rejections,
+    }
+    return write_axis_acquisition_feedback(path, payload)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--map", required=True, type=Path)
+    parser.add_argument(
+        "--environment",
+        choices=("simulation", "real"),
+        default="simulation",
+        help=(
+            "Evidence environment. Real mode is observe-only and supports only "
+            "--workflow-mode survey-only without --watch."
+        ),
+    )
     parser.add_argument("--start-x", required=True, type=float)
     parser.add_argument("--start-y", required=True, type=float)
     parser.add_argument("--start-yaw", type=float, default=0.0)
+    parser.add_argument(
+        "--start-from-recommendation",
+        action="store_true",
+        help=(
+            "Use the exact passively observed map-frame robot pose as the "
+            "one-shot validation start. Required for real survey evidence."
+        ),
+    )
     parser.add_argument("--recommended-pose-json", required=True, type=Path)
     parser.add_argument("--route-csv", required=True, type=Path)
     parser.add_argument("--diagnostics-json", required=True, type=Path)
@@ -835,8 +1156,37 @@ def main(argv=None) -> int:
         help="SHA-256 of the randomized world/layout artifact.",
     )
     parser.add_argument("--session-id", default="")
-    parser.add_argument("--axis-sample-count", type=int, default=1)
+    parser.add_argument("--axis-sample-count", type=int, default=7)
     parser.add_argument("--map-frame", default="odom")
+    parser.add_argument("--semantic-map-id", default="")
+    parser.add_argument(
+        "--expected-map-bundle-sha256",
+        default="",
+        help="Fail if the map YAML+image snapshot differs from this digest.",
+    )
+    parser.add_argument(
+        "--candidate-snapshot-sha256",
+        default="",
+        help="Immutable candidate snapshot bound to this survey attempt.",
+    )
+    parser.add_argument("--station-identity-registry-sha256", default="")
+    parser.add_argument("--survey-config-sha256", default="")
+    parser.add_argument("--calibration-profile-sha256", default="")
+    parser.add_argument("--survey-input-binding-sha256", default="")
+    parser.add_argument("--arena-length-m", type=float, default=ArenaBounds.length_m)
+    parser.add_argument("--arena-width-m", type=float, default=ArenaBounds.width_m)
+    parser.add_argument(
+        "--arena-center-x-m",
+        type=float,
+        default=ArenaBounds.center_x_m,
+    )
+    parser.add_argument(
+        "--arena-center-y-m",
+        type=float,
+        default=ArenaBounds.center_y_m,
+    )
+    parser.add_argument("--arena-yaw-deg", type=float, default=ArenaBounds.yaw_deg)
+    parser.add_argument("--arena-margin-m", type=float, default=ArenaBounds.margin_m)
     parser.add_argument("--robot-radius-m", type=float, default=0.105)
     parser.add_argument("--tracking-margin-m", type=float, default=0.03)
     parser.add_argument("--collision-margin-m", type=float, default=0.02)
@@ -861,6 +1211,30 @@ def main(argv=None) -> int:
     parser.add_argument("--scan-origin-to-base-offset-m", type=float, default=0.0)
     parser.add_argument("--lidar-clearance-margin-m", type=float, default=0.02)
     parser.add_argument("--max-recommendation-age-sec", type=float, default=3.0)
+    parser.add_argument(
+        "--axis-acquisition-feedback-json",
+        type=Path,
+        default=None,
+        help=(
+            "Simulation survey observer/planner sidecar for one exact static "
+            "axis-acquisition target rejection. It is never a motion input."
+        ),
+    )
+    parser.add_argument(
+        "--axis-acquisition-feedback-max-age-sec",
+        type=float,
+        default=3.0,
+    )
+    parser.add_argument(
+        "--axis-acquisition-arrival-tolerance-m",
+        type=float,
+        default=0.10,
+    )
+    parser.add_argument(
+        "--axis-acquisition-search-max-targets",
+        type=int,
+        default=7,
+    )
     parser.add_argument("--target-position-threshold-m", type=float, default=0.06)
     parser.add_argument("--target-yaw-threshold-deg", type=float, default=10.0)
     parser.add_argument("--start-deviation-threshold-m", type=float, default=0.15)
@@ -887,6 +1261,20 @@ def main(argv=None) -> int:
     parser.add_argument("--replan-rate-hz", type=float, default=0.75)
     parser.add_argument("--max-replans", type=int, default=0, help="Stop after N plans; zero means run until interrupted.")
     args = parser.parse_args(argv)
+    if args.environment == "real":
+        if args.workflow_mode != WORKFLOW_SURVEY_ONLY:
+            parser.error("real environment supports only --workflow-mode survey-only")
+        if args.watch:
+            parser.error("real survey validation is one-shot; --watch is simulation-only")
+        if args.axis_acquisition_feedback_json is not None:
+            parser.error(
+                "--axis-acquisition-feedback-json is simulation-only and cannot "
+                "be used for a real survey"
+            )
+        if not args.start_from_recommendation:
+            parser.error(
+                "real survey validation requires --start-from-recommendation"
+            )
     if args.snap_radius_m != 0.0:
         parser.error("dynamic corridor entry snapping is forbidden; --snap-radius-m must be 0")
     if args.max_replans < 0:
@@ -894,6 +1282,8 @@ def main(argv=None) -> int:
     if args.axis_sample_count < 1:
         parser.error("--axis-sample-count must be positive")
     if args.workflow_mode == WORKFLOW_SURVEY_ONLY:
+        if args.axis_sample_count < 7:
+            parser.error("survey-only requires --axis-sample-count >= 7")
         required_survey_values = {
             "--candidate-uid": args.candidate_uid,
             "--world-id": args.world_id,
@@ -916,22 +1306,93 @@ def main(argv=None) -> int:
             character not in "0123456789abcdef" for character in args.world_sha256
         ):
             parser.error("--world-sha256 must be 64 lowercase hexadecimal characters")
+        for option, digest in (
+            ("--expected-map-bundle-sha256", args.expected_map_bundle_sha256),
+            ("--candidate-snapshot-sha256", args.candidate_snapshot_sha256),
+        ):
+            if not digest or len(digest) != 64 or any(
+                character not in "0123456789abcdef" for character in digest
+            ):
+                parser.error(
+                    f"survey-only requires {option} as 64 lowercase hexadecimal characters"
+                )
     if (
-        args.max_recommendation_age_sec <= 0.0
-        or args.refresh_timeout_sec <= 0.0
-        or args.terminal_route_lock_distance_m <= 0.0
+        any(
+            not math.isfinite(value) or value <= 0.0
+            for value in (
+                args.max_recommendation_age_sec,
+                args.refresh_timeout_sec,
+                args.terminal_route_lock_distance_m,
+                args.axis_acquisition_feedback_max_age_sec,
+                args.axis_acquisition_arrival_tolerance_m,
+            )
+        )
     ):
         parser.error("freshness and refresh timeouts must be positive")
+    if args.axis_acquisition_search_max_targets < 1:
+        parser.error("--axis-acquisition-search-max-targets must be positive")
     args.route_manifest = args.route_manifest or args.route_csv.with_suffix(".manifest.json")
+    if args.axis_acquisition_feedback_json is not None:
+        feedback_path = args.axis_acquisition_feedback_json.resolve()
+        protected_paths = {
+            args.recommended_pose_json.resolve(),
+            args.route_csv.resolve(),
+            args.diagnostics_json.resolve(),
+            args.route_manifest.resolve(),
+            args.arrival_pose_catalog.resolve(),
+        }
+        if feedback_path in protected_paths:
+            parser.error(
+                "--axis-acquisition-feedback-json must be a distinct "
+                "observer/planner-only sidecar"
+            )
     try:
-        base_costmap = Costmap.from_occupancy_grid(load_occupancy_grid(args.map))
+        arena_bounds = ArenaBounds(
+            length_m=args.arena_length_m,
+            width_m=args.arena_width_m,
+            center_x_m=args.arena_center_x_m,
+            center_y_m=args.arena_center_y_m,
+            yaw_deg=args.arena_yaw_deg,
+            margin_m=args.arena_margin_m,
+        )
+        arena_bounds.validate()
+        frozen_grid, map_bundle = load_occupancy_grid_with_bundle(
+            args.map,
+            semantic_map_id=args.semantic_map_id or args.map.stem,
+            planning_frame=args.map_frame,
+        )
+        if (
+            args.expected_map_bundle_sha256
+            and map_bundle.bundle_sha256 != args.expected_map_bundle_sha256
+        ):
+            raise ValueError("occupancy map bundle differs from survey manifest")
+        base_costmap = Costmap.from_occupancy_grid(
+            frozen_grid
+        ).with_arena_bounds(arena_bounds)
+        required_static_inflation = minimum_static_obstacle_inflation_m(
+            robot_radius_m=args.robot_radius_m,
+            tracking_margin_m=args.tracking_margin_m,
+            lidar_stop_distance_m=args.lidar_stop_distance_m,
+            scan_origin_to_base_offset_m=args.scan_origin_to_base_offset_m,
+            lidar_clearance_margin_m=args.lidar_clearance_margin_m,
+        )
         static_inflation = (
-            args.robot_radius_m + args.tracking_margin_m
+            required_static_inflation
             if args.inflation_radius_m is None
             else args.inflation_radius_m
         )
-        if static_inflation <= 0.0:
-            raise ValueError("configuration-space inflation radius must be positive")
+        if not math.isfinite(static_inflation) or static_inflation <= 0.0:
+            raise ValueError(
+                "configuration-space inflation radius must be finite and positive"
+            )
+        if (
+            static_inflation + 1.0e-12
+            < required_static_inflation
+        ):
+            raise ValueError(
+                "configuration-space inflation must cover both the robot body "
+                "and live LiDAR stop distance along the certified tracking tube"
+            )
         base_costmap = base_costmap.with_inflation(static_inflation)
         # Validate once up front, but delay the raster overlay until the exact
         # recommendation start is known inside the watch loop.
@@ -962,13 +1423,49 @@ def main(argv=None) -> int:
         )
         state = _restart_state(existing)
         active_publication = _active_publication(existing)
+        invalid_active_clearance_reason = None
+        if active_publication is not None:
+            active_safety = active_publication["safety_diagnostics"]
+            try:
+                active_static_inflation = float(
+                    active_safety["static_inflation_radius_m"]
+                )
+            except (KeyError, TypeError, ValueError):
+                active_static_inflation = float("nan")
+            if active_safety.get("arena_bounds") != arena_bounds.to_metadata():
+                invalid_active_clearance_reason = (
+                    "active_route_arena_bounds_differ_from_current_requirement"
+                )
+            elif (
+                not math.isfinite(active_static_inflation)
+                or active_static_inflation + 1.0e-12
+                < static_inflation
+            ):
+                invalid_active_clearance_reason = (
+                    "active_route_static_clearance_below_current_requirement"
+                )
+            if invalid_active_clearance_reason is not None:
+                withdrawn = store.withdraw(
+                    invalid_active_clearance_reason,
+                    target_revision=state.target_revision,
+                    observation_unix_sec=time.time(),
+                    takeover=args.writer_takeover,
+                )
+                _publish_compatibility_aliases(args, withdrawn)
+                active_publication = None
+                state = replace(
+                    state,
+                    last_route_plan_time_sec=None,
+                    last_planned_start=None,
+                    last_planned_target_revision=0,
+                )
         plans = 0
         previous_route_length = (
             0.0
             if existing is None
             else float(existing.manifest.get("new_route_length_m", 0.0))
         )
-        last_withdrawal_reason = None
+        last_withdrawal_reason = invalid_active_clearance_reason
         while True:
             now = time.time()
             try:
@@ -976,6 +1473,7 @@ def main(argv=None) -> int:
                     args.recommended_pose_json,
                     expected_frame=args.map_frame,
                     expected_source="synchronized_lidar_camera_viewpoint",
+                    expected_simulation_only=args.environment == "simulation",
                     now_unix_sec=now,
                     max_age_sec=args.max_recommendation_age_sec,
                 )
@@ -989,14 +1487,22 @@ def main(argv=None) -> int:
                 )
                 start = (
                     recommendation.robot_pose
-                    if args.watch
+                    if args.watch or args.start_from_recommendation
                     else Pose2D(args.start_x, args.start_y, args.start_yaw)
                 )
+                point_targets = None
+                point_policy_target = None
+                state_before_preplan = state
                 preplan_decision = None
                 if (
                     recommendation.axis_state in _POINT_APPROACH_AXIS_STATES
                     and active_publication is not None
                 ):
+                    point_targets = _point_approach_targets(
+                        recommendation,
+                        active_publication,
+                    )
+                    point_policy_target = point_targets[0]
                     # A stable point-acquisition target owns immutable route
                     # geometry between material target changes.  Decide
                     # whether geometry is needed before attempting a live-pose
@@ -1005,7 +1511,7 @@ def main(argv=None) -> int:
                     # route remains continuously certified and executable.
                     state, preplan_decision = policy.evaluate(
                         state,
-                        target=recommendation.material_target,
+                        target=point_policy_target,
                         robot_pose=start,
                         now_sec=now,
                     )
@@ -1089,6 +1595,7 @@ def main(argv=None) -> int:
                     stand_position_uncertainty_m=recommendation.stand.uncertainty_m,
                     robot_radius_m=args.robot_radius_m,
                     collision_margin_m=args.collision_margin_m,
+                    tracking_margin_m=args.tracking_margin_m,
                     standoff_distance_m=(
                         observed_standoff
                         if args.standoff_distance_m is None
@@ -1100,15 +1607,21 @@ def main(argv=None) -> int:
                     scan_origin_to_base_offset_m=args.scan_origin_to_base_offset_m,
                     lidar_clearance_margin_m=args.lidar_clearance_margin_m,
                 )
+                point_approach_attempts = None
                 if recommendation.axis_state in _POINT_APPROACH_AXIS_STATES:
-                    result = plan_axis_acquisition(
+                    if point_targets is None:
+                        point_targets = _point_approach_targets(
+                            recommendation,
+                            active_publication,
+                        )
+                        point_policy_target = point_targets[0]
+                    result, effective_target, point_approach_attempts = _plan_point_approach(
                         planning_costmap,
                         planning_start,
                         recommendation.stand.center,
-                        recommendation.material_target.pose,
+                        point_targets,
                         config=config,
                     )
-                    effective_target = recommendation.material_target
                 elif args.workflow_mode == WORKFLOW_SURVEY_ONLY:
                     completion, _catalog = _record_survey_arrival(
                         args=args,
@@ -1119,6 +1632,7 @@ def main(argv=None) -> int:
                         known_stand_overlay=known_stand_overlay,
                         config=config,
                         known_stand_keepouts=known_stand_keepouts,
+                        map_bundle=map_bundle,
                         now=now,
                     )
                     current = (
@@ -1200,6 +1714,64 @@ def main(argv=None) -> int:
                     target_keepout_radius_m=config.stand_keepout_radius_m,
                 )
                 if result.plan is None:
+                    if point_approach_attempts is not None:
+                        failures = ",".join(
+                            f"{attempt['face_id']}="
+                            f"{attempt['diagnostics']['failure_reason']}"
+                            for attempt in point_approach_attempts
+                        )
+                        if (
+                            recommendation.axis_state == "axis_acquisition"
+                            and args.workflow_mode == WORKFLOW_SURVEY_ONLY
+                            and args.watch
+                            and args.axis_acquisition_feedback_json is not None
+                            and active_publication is not None
+                        ):
+                            try:
+                                _axis_acquisition_rejection_feedback(
+                                    path=args.axis_acquisition_feedback_json,
+                                    recommendation=recommendation,
+                                    active_publication=active_publication,
+                                    point_approach_attempts=point_approach_attempts,
+                                    arrival_tolerance_m=(
+                                        args
+                                        .axis_acquisition_arrival_tolerance_m
+                                    ),
+                                    max_search_targets=(
+                                        args
+                                        .axis_acquisition_search_max_targets
+                                    ),
+                                    now_unix_sec=now,
+                                    max_age_sec=(
+                                        args
+                                        .axis_acquisition_feedback_max_age_sec
+                                    ),
+                                )
+                            except ValueError as feedback_error:
+                                feedback_reason = str(feedback_error)
+                                if feedback_reason.startswith(
+                                    "axis_acquisition_search_exhausted:"
+                                ):
+                                    raise
+                                raise ValueError(
+                                    "point_approach_candidates_exhausted:"
+                                    + failures
+                                    + ";axis_acquisition_feedback_rejected:"
+                                    + feedback_reason
+                                ) from feedback_error
+                            # Policy evaluation tentatively revisioned the
+                            # rejected target. Restore it exactly and leave the
+                            # active route manifest untouched: the follower can
+                            # neither adopt the sidecar nor mistake it for an
+                            # unchanged-geometry heartbeat.
+                            state = state_before_preplan
+                            time.sleep(
+                                1.0 / max(args.replan_rate_hz, 0.1)
+                            )
+                            continue
+                        raise ValueError(
+                            "point_approach_candidates_exhausted:" + failures
+                        )
                     raise ValueError(result.diagnostics.failure_reason or "dynamic planning failed")
                 known_stand_clearances = _validate_known_stand_route_clearance(
                     result.plan,
@@ -1208,9 +1780,17 @@ def main(argv=None) -> int:
                 # Revision the target the collision-aware planner actually
                 # selected.  With ambiguous evidence the shortest valid face
                 # may differ from the observer's provisional preference.
-                if preplan_decision is None:
+                if (
+                    preplan_decision is None
+                    or effective_target != point_policy_target
+                ):
+                    evaluation_state = (
+                        state
+                        if preplan_decision is None
+                        else state_before_preplan
+                    )
                     state, decision = policy.evaluate(
-                        state,
+                        evaluation_state,
                         target=effective_target,
                         robot_pose=start,
                         now_sec=now,
@@ -1263,12 +1843,17 @@ def main(argv=None) -> int:
                     result.plan,
                     stream_id=recommendation.stream_id,
                     target_revision=decision.target_revision,
+                    simulation_only=recommendation.simulation_only,
                     route_kind=(
                         route_kind
                     ),
                 )
                 diagnostics = _diagnostics_payload(
-                    result, recommendation, decision.target_revision
+                    result,
+                    recommendation,
+                    decision.target_revision,
+                    map_bundle=map_bundle,
+                    candidate_snapshot_sha256=args.candidate_snapshot_sha256,
                 )
                 target_payload = {
                     **asdict(effective_target.pose),
@@ -1277,7 +1862,14 @@ def main(argv=None) -> int:
                 }
                 safety_payload = {
                     **asdict(result.diagnostics),
+                    "arena_bounds": arena_bounds.to_metadata(),
+                    "arena_boundary_overlay": True,
                     "static_inflation_radius_m": static_inflation,
+                    "required_static_inflation_radius_m": (
+                        required_static_inflation
+                    ),
+                    "map_bundle_sha256": map_bundle.bundle_sha256,
+                    "candidate_snapshot_sha256": args.candidate_snapshot_sha256,
                     "known_stand_keepouts": list(known_stand_keepouts),
                     "known_stand_keepout_cell_count": (
                         known_stand_overlay.blocked_cell_count
@@ -1308,6 +1900,10 @@ def main(argv=None) -> int:
                         known_stand_clearances
                     ),
                 }
+                if point_approach_attempts is not None:
+                    safety_payload["point_approach_attempts"] = list(
+                        point_approach_attempts
+                    )
                 committed = store.publish_active(
                     route_text,
                     diagnostics,

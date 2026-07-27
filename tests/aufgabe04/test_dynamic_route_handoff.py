@@ -47,6 +47,15 @@ def _publish(
         "keepout_clear": True,
         "corridor_clear": True,
         "start_join_clearance_m": start_join_clearance_m,
+        "arena_bounds": {
+            "length_m": 3.9,
+            "width_m": 1.898,
+            "center_x_m": 0.0,
+            "center_y_m": 0.0,
+            "yaw_deg": 0.0,
+            "margin_m": 0.0,
+        },
+        "arena_boundary_overlay": True,
     }
     if safety_diagnostics is not None:
         safety.update(safety_diagnostics)
@@ -126,6 +135,38 @@ class TestDynamicRouteHandoff(unittest.TestCase):
         self.assertTrue(
             update.event_fields["start_egress_continuous_clearance_validated"]
         )
+
+    def test_missing_arena_boundary_evidence_stops_before_adoption(self) -> None:
+        manifest = self.tmp_path / "dynamic_manifest.json"
+        store = RouteRevisionStore(
+            manifest, stream_id="sim", writer_id="planner", now_fn=lambda: 100.0
+        )
+        _publish(
+            store,
+            [(0.0, 0.0), (0.2, 0.0)],
+            route_kind="axis_acquisition",
+            safety_diagnostics={"arena_bounds": None},
+        )
+
+        source = DynamicRouteSource(manifest, stream_id="sim")
+        update = source.poll(
+            Pose2D(0.0, 0.0, 0.0),
+            100.0,
+        )
+
+        self.assertIs(update.kind, RouteUpdateKind.STOP)
+        self.assertEqual(
+            update.event_fields["fault_code"],
+            "invalid_arena_boundary_evidence",
+        )
+        repeated = source.poll(Pose2D(0.0, 0.0, 0.0), 100.1)
+        self.assertIs(repeated.kind, RouteUpdateKind.STOP)
+        self.assertTrue(repeated.requires_zero_cycle)
+        self.assertEqual(
+            repeated.event_fields["fault_code"],
+            "invalid_arena_boundary_evidence",
+        )
+        self.assertIsNone(repeated.event_name)
 
     def test_start_cell_exemption_with_malformed_clearance_fails_closed(self) -> None:
         manifest = self.tmp_path / "dynamic_manifest.json"
@@ -285,10 +326,12 @@ class TestDynamicRouteHandoff(unittest.TestCase):
         self.assertTrue(rejected.requires_zero_cycle)
         self.assertEqual(rejected.event_name, "dynamic_route_stopped")
         self.assertEqual(rejected.event_fields["fault_code"], "unsafe_route_join")
-        # The same immutable rejection is consumed once and does not spam another
-        # semantic rejection event on every controller poll.
+        # The same immutable rejection remains fail-closed, while the semantic
+        # event itself is de-duplicated on subsequent controller polls.
         repeated = source.poll(Pose2D(2.0, 2.0), 100.1)
-        self.assertIs(repeated.kind, RouteUpdateKind.UNCHANGED)
+        self.assertIs(repeated.kind, RouteUpdateKind.STOP)
+        self.assertTrue(repeated.requires_zero_cycle)
+        self.assertIsNone(repeated.event_name)
         self.assertIsNone(repeated.event_name)
 
     def test_non_finite_live_pose_fails_closed_before_adoption(self) -> None:

@@ -20,6 +20,7 @@ class PuckState(str, Enum):
     NOT_HELD = "not_held"
     HELD = "held"
     DELIVERED = "delivered"
+    LOST = "lost"
 
 
 @dataclass(frozen=True)
@@ -28,4 +29,3 @@ class VisitResult:
     status: str
     message: str = ""
     timestamp_sec: Optional[float] = None
-

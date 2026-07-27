@@ -1,3 +1,4 @@
+import copy
 import json
 import sys
 import tempfile
@@ -6,6 +7,7 @@ from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -90,6 +92,8 @@ class TaskClientFastApiFlowTest(unittest.TestCase):
 
         self.assertEqual(snapshot.resolved_station_id, "DEPOT_01")
         self.assertEqual(validated.target_station, "DEPOT_01")
+        self.assertEqual(validated.ordered_station_ids, ("DEPOT_01", "PROC_08", "START"))
+        self.assertEqual(len(validated.order_sha256), 64)
         self.assertEqual(validated.to_navigation_request().target_station_id, "DEPOT_01")
 
     def test_rejects_unknown_qr(self):
@@ -165,6 +169,145 @@ class TaskClientFastApiFlowTest(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertIn("QR_001", qr_log.read_text())
             self.assertIn("task_validated", event_log.read_text())
+
+    def test_report_scan_refetches_live_state_before_persisting_task(self):
+        now = datetime.now(timezone.utc)
+        pre_status, pre_plans = _sample_payloads(now)
+        post_status = copy.deepcopy(pre_status)
+        post_plans = copy.deepcopy(pre_plans)
+        post_status[0]["state"] = "GO_TO_PROCESSING"
+        post_status[0]["target"] = "PROC_04"
+        post_status[0]["last_qr"] = "QR_001"
+        post_plans[0]["next_step_index"] = 1
+        call_order = []
+
+        def report_scan(*args, **kwargs):
+            call_order.append("report")
+            return {"accepted": True}
+
+        def fetch_status(*args, **kwargs):
+            call_order.append("status")
+            return post_status
+
+        def fetch_plans(*args, **kwargs):
+            call_order.append("plans")
+            return post_plans
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            status_path = tmp_path / "status.json"
+            plans_path = tmp_path / "plans.json"
+            task_path = tmp_path / "validated_task.json"
+            qr_log = tmp_path / "qr_scans.csv"
+            event_log = tmp_path / "events.jsonl"
+            status_path.write_text(json.dumps(pre_status))
+            plans_path.write_text(json.dumps(pre_plans))
+
+            with patch(
+                "scripts.aufgabe04.run_logistics_mission.report_scanned_qr",
+                side_effect=report_scan,
+            ):
+                with patch(
+                    "scripts.aufgabe04.run_logistics_mission.fetch_admin_status",
+                    side_effect=fetch_status,
+                ):
+                    with patch(
+                        "scripts.aufgabe04.run_logistics_mission.fetch_robot_plans",
+                        side_effect=fetch_plans,
+                    ):
+                        with redirect_stdout(StringIO()):
+                            exit_code = run_logistics_main(
+                                [
+                                    "--robot-id",
+                                    "Robot_Test_01",
+                                    "--qr-id",
+                                    "QR_001",
+                                    "--status-json",
+                                    str(status_path),
+                                    "--plans-json",
+                                    str(plans_path),
+                                    "--scan-endpoint-template",
+                                    "/robots/{robot_id}/scan",
+                                    "--report-scan",
+                                    "--dry-run",
+                                    "--local-station",
+                                    "DEPOT_01",
+                                    "--local-station",
+                                    "PROC_04",
+                                    "--local-station",
+                                    "PROC_08",
+                                    "--local-station",
+                                    "START",
+                                    "--validated-task-json",
+                                    str(task_path),
+                                    "--qr-scan-log",
+                                    str(qr_log),
+                                    "--task-event-log",
+                                    str(event_log),
+                                ]
+                            )
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(call_order, ["report", "status", "plans"])
+            persisted = json.loads(task_path.read_text())
+            self.assertEqual(persisted["task"]["state"], "GO_TO_PROCESSING")
+            self.assertEqual(persisted["task"]["target_station"], "PROC_04")
+            self.assertNotEqual(
+                persisted["task"]["target_station"],
+                pre_status[0]["target"],
+            )
+            events = [json.loads(line)["event_type"] for line in event_log.read_text().splitlines()]
+            self.assertLess(events.index("scan_reported"), events.index("post_scan_task_refetched"))
+            self.assertLess(events.index("post_scan_task_refetched"), events.index("task_validated"))
+
+    def test_report_scan_refetch_failure_does_not_persist_task(self):
+        now = datetime.now(timezone.utc)
+        pre_status, pre_plans = _sample_payloads(now)
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            status_path = tmp_path / "status.json"
+            plans_path = tmp_path / "plans.json"
+            task_path = tmp_path / "validated_task.json"
+            status_path.write_text(json.dumps(pre_status))
+            plans_path.write_text(json.dumps(pre_plans))
+
+            with patch(
+                "scripts.aufgabe04.run_logistics_mission.report_scanned_qr",
+                return_value={"accepted": True},
+            ):
+                with patch(
+                    "scripts.aufgabe04.run_logistics_mission.fetch_admin_status",
+                    side_effect=RuntimeError("status refresh failed"),
+                ):
+                    with redirect_stdout(StringIO()):
+                        with self.assertRaisesRegex(
+                            RuntimeError,
+                            "status refresh failed",
+                        ):
+                            run_logistics_main(
+                                [
+                                    "--robot-id",
+                                    "Robot_Test_01",
+                                    "--qr-id",
+                                    "QR_001",
+                                    "--status-json",
+                                    str(status_path),
+                                    "--plans-json",
+                                    str(plans_path),
+                                    "--scan-endpoint-template",
+                                    "/robots/{robot_id}/scan",
+                                    "--report-scan",
+                                    "--dry-run",
+                                    "--validated-task-json",
+                                    str(task_path),
+                                    "--qr-scan-log",
+                                    str(tmp_path / "qr_scans.csv"),
+                                    "--task-event-log",
+                                    str(tmp_path / "events.jsonl"),
+                                ]
+                            )
+
+            self.assertFalse(task_path.exists())
 
 
 if __name__ == "__main__":

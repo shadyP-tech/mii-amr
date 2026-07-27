@@ -181,6 +181,18 @@ class LocalizationPreflightEvidenceTest(unittest.TestCase):
         self.assertTrue(data["available"])
         self.assertTrue(data["dynamic"])
 
+    def test_dynamic_map_to_odom_rejects_future_timestamp(self):
+        ok, data = build_dynamic_map_to_odom_freshness(
+            has_dynamic_transform=True,
+            receipt_age_sec=0.1,
+            header_age_sec=-0.8,
+            max_age_sec=0.5,
+            max_future_sec=0.25,
+        )
+
+        self.assertFalse(ok)
+        self.assertTrue(data["future_dated"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Tuple
 
+from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds
 from scripts.aufgabe04.navigation.models import Pose2D
 from scripts.aufgabe04.navigation.route_revision_store import (
     LoadedRouteRevision,
@@ -48,6 +49,53 @@ class StartEgressCertificate:
     required: bool
     waypoint_index: int | None = None
     minimum_route_clearance_m: float | None = None
+
+
+def validate_arena_boundary_evidence(
+    evidence: Mapping[str, Any],
+) -> ArenaBounds:
+    """Require normalized proof that planning included the physical arena.
+
+    Saved occupancy maps may extend beyond, or entirely omit, the physical
+    arena walls.  Both static routes and live dynamic revisions must therefore
+    carry the exact bounds that were rasterized before obstacle inflation.
+    """
+
+    if not isinstance(evidence, Mapping):
+        raise ValueError("arena boundary evidence must be an object")
+    if evidence.get("arena_boundary_overlay") is not True:
+        raise ValueError("arena_boundary_overlay must be true")
+    raw_bounds = evidence.get("arena_bounds")
+    expected_fields = frozenset(
+        {
+            "length_m",
+            "width_m",
+            "center_x_m",
+            "center_y_m",
+            "yaw_deg",
+            "margin_m",
+        }
+    )
+    if (
+        not isinstance(raw_bounds, Mapping)
+        or frozenset(raw_bounds) != expected_fields
+    ):
+        raise ValueError(
+            "arena_bounds must contain exactly length_m, width_m, "
+            "center_x_m, center_y_m, yaw_deg, margin_m"
+        )
+    values = {}
+    for field_name in expected_fields:
+        raw_value = raw_bounds.get(field_name)
+        if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+            raise ValueError(f"arena_bounds.{field_name} must be numeric")
+        value = float(raw_value)
+        if not math.isfinite(value):
+            raise ValueError(f"arena_bounds.{field_name} must be finite")
+        values[field_name] = value
+    arena_bounds = ArenaBounds(**values)
+    arena_bounds.validate()
+    return arena_bounds
 
 
 def _finite_nonnegative(value: float, field_name: str) -> float:
@@ -115,18 +163,26 @@ def validate_start_egress_certificate(
 
     rasterized_count = safety.get("known_stand_keepout_rasterized_cell_count")
     blocked_count = safety.get("known_stand_keepout_cell_count")
+    anchor_mode = safety.get("known_stand_egress_anchor_mode", False)
+    if not isinstance(anchor_mode, bool):
+        raise ValueError("known_stand_egress_anchor_mode must be boolean")
     if (
         not isinstance(rasterized_count, int)
         or isinstance(rasterized_count, bool)
         or rasterized_count <= 0
     ):
         raise ValueError("known stand rasterized cell count must be positive")
+    expected_blocked_count = (
+        rasterized_count if anchor_mode else rasterized_count - 1
+    )
     if (
         not isinstance(blocked_count, int)
         or isinstance(blocked_count, bool)
         or blocked_count < 0
-        or blocked_count != rasterized_count - 1
+        or blocked_count != expected_blocked_count
     ):
+        if anchor_mode:
+            raise ValueError("egress-anchor mode must preserve the full raster")
         raise ValueError("start-cell exemption must remove exactly one raster cell")
 
     keepouts = safety.get("known_stand_keepouts")
@@ -321,6 +377,7 @@ class DynamicRouteSource:
         self.last_writer_generation: int | None = None
         self.last_adopted_target: Pose2D | None = None
         self._last_event_signature: tuple[str, str, int | None] | None = None
+        self._latched_stop: tuple[str, str, str, dict[str, Any]] | None = None
 
     def _event_name_once(
         self,
@@ -376,6 +433,23 @@ class DynamicRouteSource:
         fields.update({"reason": reason, "fault_code": code, "fail_closed": stop})
         if extra_fields is not None:
             fields.update(dict(extra_fields))
+        if (
+            stop
+            and loaded is not None
+            and self.last_seen_manifest_hash == loaded.manifest_sha256
+        ):
+            # Once an active revision has been inspected and rejected, a
+            # duplicate poll must remain fail-closed.  Treating the same
+            # unadmitted revision as UNCHANGED would otherwise let a reusable
+            # caller continue after the first STOP.  A newly published
+            # revision has a different manifest hash and can supersede this
+            # latch.
+            self._latched_stop = (
+                loaded.manifest_sha256,
+                reason,
+                code,
+                dict(extra_fields or {}),
+            )
         return RouteUpdate(
             kind=kind,
             reason=reason,
@@ -528,6 +602,18 @@ class DynamicRouteSource:
             )
 
         if loaded.duplicate:
+            if (
+                self._latched_stop is not None
+                and self._latched_stop[0] == loaded.manifest_sha256
+            ):
+                _, reason, code, extra_fields = self._latched_stop
+                return self._fault(
+                    reason,
+                    code=code,
+                    loaded=loaded,
+                    stop=True,
+                    extra_fields=extra_fields,
+                )
             return RouteUpdate(
                 kind=RouteUpdateKind.UNCHANGED,
                 reason="route revision unchanged",
@@ -627,9 +713,23 @@ class DynamicRouteSource:
                 stop=True,
             )
         safety = loaded.manifest.get("safety_diagnostics")
+        if not isinstance(safety, Mapping):
+            return self._fault(
+                "safety_diagnostics is missing",
+                code="invalid_join_certificate",
+                loaded=loaded,
+                stop=True,
+            )
         try:
-            if not isinstance(safety, Mapping):
-                raise ValueError("safety_diagnostics is missing")
+            validate_arena_boundary_evidence(safety)
+        except ValueError as exc:
+            return self._fault(
+                f"arena boundary evidence is invalid: {exc}",
+                code="invalid_arena_boundary_evidence",
+                loaded=loaded,
+                stop=True,
+            )
+        try:
             certified_clearance = float(safety["start_join_clearance_m"])
         except (KeyError, TypeError, ValueError) as exc:
             return self._fault(

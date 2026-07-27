@@ -367,6 +367,17 @@ def validate_catalog_provenance(provenance: CatalogProvenance) -> None:
         raise ArrivalPoseCatalogError(
             "invalid_catalog", "provenance.environment must be 'simulation' or 'real'"
         )
+    for field in (
+        "map_bundle_sha256",
+        "candidate_snapshot_sha256",
+        "station_identity_registry_sha256",
+        "survey_config_sha256",
+        "calibration_profile_sha256",
+        "survey_input_binding_sha256",
+    ):
+        digest = getattr(provenance, field)
+        if digest:
+            _validate_sha256(digest, f"provenance.{field}")
 
 
 def validate_arrival_pose_record(
@@ -594,6 +605,14 @@ def _provenance_payload(provenance: CatalogProvenance) -> dict[str, object]:
         "world_sha256": provenance.world_sha256,
         "session_id": provenance.session_id,
         "environment": provenance.environment,
+        "map_bundle_sha256": provenance.map_bundle_sha256,
+        "candidate_snapshot_sha256": provenance.candidate_snapshot_sha256,
+        "station_identity_registry_sha256": (
+            provenance.station_identity_registry_sha256
+        ),
+        "survey_config_sha256": provenance.survey_config_sha256,
+        "calibration_profile_sha256": provenance.calibration_profile_sha256,
+        "survey_input_binding_sha256": provenance.survey_input_binding_sha256,
     }
 
 
@@ -698,7 +717,7 @@ def _catalog_from_payload(payload: Mapping[str, object]) -> ArrivalPoseCatalog:
 
 def _provenance_from_payload(payload: object) -> CatalogProvenance:
     item = _require_mapping(payload, "provenance")
-    fields = frozenset(
+    legacy_fields = frozenset(
         {
             "planning_frame",
             "map_yaml_sha256",
@@ -708,7 +727,18 @@ def _provenance_from_payload(payload: object) -> CatalogProvenance:
             "environment",
         }
     )
-    _require_exact_fields(item, fields, "provenance")
+    bound_fields = legacy_fields | frozenset(
+        {
+            "map_bundle_sha256",
+            "candidate_snapshot_sha256",
+            "station_identity_registry_sha256",
+            "survey_config_sha256",
+            "calibration_profile_sha256",
+            "survey_input_binding_sha256",
+        }
+    )
+    if frozenset(item) not in (legacy_fields, bound_fields):
+        _require_exact_fields(item, bound_fields, "provenance")
     return CatalogProvenance(
         planning_frame=_require_string(item["planning_frame"], "provenance.planning_frame"),
         map_yaml_sha256=_require_string(
@@ -718,6 +748,29 @@ def _provenance_from_payload(payload: object) -> CatalogProvenance:
         world_sha256=_require_string(item["world_sha256"], "provenance.world_sha256"),
         session_id=_require_string(item["session_id"], "provenance.session_id"),
         environment=_require_string(item["environment"], "provenance.environment"),
+        map_bundle_sha256=_require_string(
+            item.get("map_bundle_sha256", ""), "provenance.map_bundle_sha256"
+        ),
+        candidate_snapshot_sha256=_require_string(
+            item.get("candidate_snapshot_sha256", ""),
+            "provenance.candidate_snapshot_sha256",
+        ),
+        station_identity_registry_sha256=_require_string(
+            item.get("station_identity_registry_sha256", ""),
+            "provenance.station_identity_registry_sha256",
+        ),
+        survey_config_sha256=_require_string(
+            item.get("survey_config_sha256", ""),
+            "provenance.survey_config_sha256",
+        ),
+        calibration_profile_sha256=_require_string(
+            item.get("calibration_profile_sha256", ""),
+            "provenance.calibration_profile_sha256",
+        ),
+        survey_input_binding_sha256=_require_string(
+            item.get("survey_input_binding_sha256", ""),
+            "provenance.survey_input_binding_sha256",
+        ),
     )
 
 

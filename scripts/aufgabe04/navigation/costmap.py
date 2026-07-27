@@ -6,6 +6,7 @@ import math
 from dataclasses import dataclass, replace
 from typing import Iterable, Mapping, Tuple
 
+from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds
 from scripts.aufgabe04.navigation.map_io import (
     CELL_FREE,
     CELL_OCCUPIED,
@@ -21,6 +22,7 @@ CELL_SOURCE_FREE = "free"
 CELL_SOURCE_STATIC_OCCUPIED = "static_occupied"
 CELL_SOURCE_UNKNOWN = "unknown"
 CELL_SOURCE_INFLATED = "inflated"
+CELL_SOURCE_ARENA_BOUNDARY = "arena_boundary"
 CELL_SOURCE_STATION_KEEPOUT = "station_keepout"
 CELL_SOURCE_RUN_LOCAL = "run_local"
 
@@ -111,15 +113,66 @@ class Costmap:
             sources[cell] = source
         return replace(self, blocked_cells=frozenset(blocked), cell_sources=sources)
 
+    def with_arena_bounds(self, arena_bounds: ArenaBounds) -> "Costmap":
+        """Block map cells whose centres are outside the navigable arena.
+
+        ``ArenaBounds.contains`` includes the configured arena margin.  Only
+        previously traversable cells receive the arena-boundary source so an
+        occupied or blocked-unknown cell keeps its original provenance.
+        Apply this overlay before :meth:`with_inflation` to turn the physical
+        arena edge into an interior clearance band.
+        """
+
+        arena_bounds.validate()
+        if not all(
+            math.isfinite(value)
+            for value in (
+                arena_bounds.length_m,
+                arena_bounds.width_m,
+                arena_bounds.center_x_m,
+                arena_bounds.center_y_m,
+                arena_bounds.yaw_deg,
+                arena_bounds.margin_m,
+            )
+        ):
+            raise ValueError("arena bounds values must be finite")
+
+        outside_cells = (
+            cell
+            for y in range(self.height)
+            for x in range(self.width)
+            if (cell := GridCell(x, y)) not in self.blocked_cells
+            and not arena_bounds.contains(self.grid_to_world(cell))
+        )
+        return self.with_blocked_cells(
+            outside_cells,
+            source=CELL_SOURCE_ARENA_BOUNDARY,
+        )
+
     def with_inflation(self, radius_m: float) -> "Costmap":
-        inflation_cells = int(math.ceil(max(0.0, radius_m) / self.metadata.resolution))
-        if inflation_cells <= 0:
+        if not math.isfinite(radius_m) or radius_m < 0.0:
+            raise ValueError("inflation radius must be finite and non-negative")
+        radius = radius_m
+        if radius <= 0.0:
             return self
+        # Occupied grid cells represent areas, not point obstacles at their
+        # centres.  Block every candidate cell whose axis-aligned square can
+        # come within ``radius`` of an occupied/unknown cell square.  A
+        # centre-distance disk under-inflates diagonal cell boundaries.
+        inflation_cells = int(math.ceil(radius / self.metadata.resolution)) + 1
         inflated = set()
         for blocked in self.blocked_cells:
             for dy in range(-inflation_cells, inflation_cells + 1):
                 for dx in range(-inflation_cells, inflation_cells + 1):
-                    if dx * dx + dy * dy > inflation_cells * inflation_cells:
+                    clearance_x_m = (
+                        max(abs(dx) - 1, 0) * self.metadata.resolution
+                    )
+                    clearance_y_m = (
+                        max(abs(dy) - 1, 0) * self.metadata.resolution
+                    )
+                    if math.hypot(clearance_x_m, clearance_y_m) > (
+                        radius + 1.0e-12
+                    ):
                         continue
                     cell = GridCell(blocked.x + dx, blocked.y + dy)
                     if self.in_bounds(cell) and cell not in self.blocked_cells:
@@ -156,4 +209,3 @@ def occupancy_counts(costmap: Costmap) -> dict[int, int]:
         for value in row:
             counts[value] += 1
     return counts
-

@@ -157,6 +157,145 @@ class WaypointControllerTest(unittest.TestCase):
         self.assertEqual(step.target_index, 2)
         self.assertEqual(step.pursuit_index, 2)
 
+    def test_certified_route_pursues_each_vertex_without_corner_shortcut(self):
+        config = ControllerConfig(
+            goal_tolerance_m=0.03,
+            lookahead_distance_m=0.18,
+            exact_vertex_pursuit=True,
+        )
+        waypoints = (
+            Pose2D(0.0, 0.0),
+            Pose2D(0.10, 0.0),
+            Pose2D(0.10, 0.10),
+        )
+
+        step = compute_waypoint_command(
+            Pose2D(0.05, 0.0, 0.0), waypoints, 1, config
+        )
+
+        self.assertFalse(step.reached_goal)
+        self.assertEqual(step.target_index, 1)
+        self.assertEqual(step.pursuit_index, 1)
+        self.assertAlmostEqual(step.command.angular_z_radps, 0.0)
+
+    def test_certified_route_aligns_at_exact_vertex_before_translating(self):
+        """Retry-10 C egress must not arc outside its 3 cm route tube."""
+
+        waypoints = (
+            Pose2D(0.257876, 0.420872, float("nan")),
+            Pose2D(0.255000, 0.385000, float("nan")),
+            Pose2D(0.083339, 0.100503, float("nan")),
+        )
+        previous_segment_heading = math.atan2(
+            waypoints[1].y_m - waypoints[0].y_m,
+            waypoints[1].x_m - waypoints[0].x_m,
+        )
+        config = ControllerConfig(
+            goal_tolerance_m=0.005,
+            heading_tolerance_rad=0.25,
+            exact_vertex_pursuit=True,
+        )
+
+        turn = compute_waypoint_command(
+            Pose2D(
+                waypoints[1].x_m,
+                waypoints[1].y_m,
+                previous_segment_heading,
+            ),
+            waypoints,
+            1,
+            config,
+        )
+        aligned = compute_waypoint_command(
+            Pose2D(
+                waypoints[1].x_m,
+                waypoints[1].y_m,
+                math.atan2(
+                    waypoints[2].y_m - waypoints[1].y_m,
+                    waypoints[2].x_m - waypoints[1].x_m,
+                )
+                + 0.10,
+            ),
+            waypoints,
+            1,
+            config,
+        )
+
+        self.assertEqual(turn.target_index, 2)
+        self.assertEqual(turn.pursuit_index, 2)
+        self.assertAlmostEqual(abs(turn.controlled_heading_error_rad), 0.4629, places=3)
+        self.assertEqual(turn.command.linear_x_mps, 0.0)
+        self.assertNotEqual(turn.command.angular_z_radps, 0.0)
+        self.assertEqual(turn.progress_mode, "exact_vertex_alignment")
+        self.assertGreater(aligned.command.linear_x_mps, 0.0)
+        self.assertEqual(aligned.progress_mode, "path_tracking")
+
+    def test_ordinary_route_retains_blended_motion_for_same_turn(self):
+        waypoints = (
+            Pose2D(0.255000, 0.385000, float("nan")),
+            Pose2D(0.083339, 0.100503, float("nan")),
+        )
+        segment_heading = math.atan2(
+            waypoints[1].y_m - waypoints[0].y_m,
+            waypoints[1].x_m - waypoints[0].x_m,
+        )
+        step = compute_waypoint_command(
+            Pose2D(
+                waypoints[0].x_m,
+                waypoints[0].y_m,
+                segment_heading + 0.4629,
+            ),
+            waypoints,
+            1,
+            ControllerConfig(
+                goal_tolerance_m=0.005,
+                heading_tolerance_rad=0.25,
+                lookahead_distance_m=0.0,
+                exact_vertex_pursuit=False,
+            ),
+        )
+
+        self.assertGreater(step.command.linear_x_mps, 0.0)
+        self.assertEqual(step.progress_mode, "path_tracking")
+
+    def test_intermediate_and_terminal_physical_tolerances_are_separate(self):
+        config = ControllerConfig(
+            goal_tolerance_m=0.02,
+            terminal_goal_tolerance_m=0.005,
+            heading_tolerance_rad=0.25,
+            enforce_heading_corridor=True,
+            exact_vertex_pursuit=True,
+        )
+        waypoints = (
+            Pose2D(0.00, 0.0, 0.0),
+            Pose2D(0.05, 0.0, 0.0),
+            Pose2D(0.10, 0.0, 0.0),
+        )
+
+        passed_intermediate = compute_waypoint_command(
+            Pose2D(0.0608, 0.0, 0.0),
+            waypoints,
+            1,
+            config,
+        )
+        near_terminal = compute_waypoint_command(
+            Pose2D(0.094, 0.0, 0.0),
+            waypoints,
+            2,
+            config,
+        )
+        at_terminal = compute_waypoint_command(
+            Pose2D(0.096, 0.0, 0.0),
+            waypoints,
+            2,
+            config,
+        )
+
+        self.assertEqual(passed_intermediate.target_index, 2)
+        self.assertGreater(passed_intermediate.command.linear_x_mps, 0.0)
+        self.assertFalse(near_terminal.reached_goal)
+        self.assertTrue(at_terminal.reached_goal)
+
     def test_large_heading_error_rotates_in_place(self):
         config = ControllerConfig(max_linear_mps=0.055, stop_heading_error_rad=1.0)
         waypoints = (Pose2D(0.0, 0.0), Pose2D(0.30, 0.0))
@@ -299,7 +438,56 @@ class WaypointControllerTest(unittest.TestCase):
         )
 
         self.assertEqual(step.target_index, 0)
-        self.assertEqual(step.pursuit_index, 1)
+        self.assertEqual(step.pursuit_index, 0)
+
+    def test_retry09_route_reaches_exact_vertex_before_finite_yaw_handoff(self):
+        config = ControllerConfig(
+            goal_tolerance_m=0.03,
+            lookahead_distance_m=0.18,
+            max_progress_advance_m=0.45,
+            enforce_heading_corridor=False,
+        )
+        waypoints = (
+            Pose2D(-0.971168, -0.440402, float("nan")),
+            Pose2D(-0.495, -0.115, float("nan")),
+            Pose2D(-0.021299, -0.00703, -2.316),
+        )
+        segment_length = math.hypot(
+            waypoints[1].x_m - waypoints[0].x_m,
+            waypoints[1].y_m - waypoints[0].y_m,
+        )
+        unit_x = (waypoints[1].x_m - waypoints[0].x_m) / segment_length
+        unit_y = (waypoints[1].y_m - waypoints[0].y_m) / segment_length
+        before_handoff = Pose2D(
+            waypoints[1].x_m - 0.179 * unit_x,
+            waypoints[1].y_m - 0.179 * unit_y,
+            math.atan2(unit_y, unit_x),
+        )
+
+        approach = compute_waypoint_command(
+            before_handoff,
+            waypoints,
+            1,
+            config,
+        )
+        handoff = compute_waypoint_command(
+            Pose2D(
+                waypoints[1].x_m,
+                waypoints[1].y_m,
+                before_handoff.yaw_rad,
+            ),
+            waypoints,
+            approach.target_index,
+            config,
+        )
+
+        self.assertEqual(approach.target_index, 1)
+        self.assertEqual(approach.pursuit_index, 1)
+        self.assertEqual(handoff.target_index, 2)
+        self.assertEqual(handoff.pursuit_index, 2)
+        self.assertEqual(handoff.progress_mode, "mode_handoff")
+        self.assertEqual(handoff.command.linear_x_mps, 0.0)
+        self.assertEqual(handoff.command.angular_z_radps, 0.0)
 
     def test_final_waypoint_with_yaw_rotates_before_completion(self):
         config = ControllerConfig(goal_tolerance_m=0.03, heading_tolerance_rad=0.10)
@@ -311,12 +499,43 @@ class WaypointControllerTest(unittest.TestCase):
         self.assertEqual(step.command.linear_x_mps, 0.0)
         self.assertGreater(step.command.angular_z_radps, 0.0)
 
+    def test_sim_sampling_tolerance_enters_terminal_yaw_before_circling(self):
+        # Regression from the live Gazebo survey: the base was 1.69 cm from
+        # the latched sampling point. A 1 cm gate kept translating and turned
+        # left toward the point, away from the required camera-facing yaw.
+        pose = Pose2D(0.2740, 0.4240, -2.3000)
+        target = Pose2D(0.2806, 0.4089, 1.1295)
+
+        tight = compute_waypoint_command(
+            pose,
+            (target,),
+            0,
+            ControllerConfig(
+                goal_tolerance_m=0.01,
+                heading_tolerance_rad=math.radians(5.0),
+            ),
+        )
+        survey = compute_waypoint_command(
+            pose,
+            (target,),
+            0,
+            ControllerConfig(
+                goal_tolerance_m=0.03,
+                heading_tolerance_rad=math.radians(5.0),
+            ),
+        )
+
+        self.assertGreater(tight.command.linear_x_mps, 0.0)
+        self.assertGreater(tight.command.angular_z_radps, 0.0)
+        self.assertEqual(survey.command.linear_x_mps, 0.0)
+        self.assertLess(survey.command.angular_z_radps, 0.0)
+
     def test_final_waypoint_with_yaw_completes_inside_heading_tolerance(self):
         config = ControllerConfig(goal_tolerance_m=0.03, heading_tolerance_rad=0.10)
         waypoints = (Pose2D(0.0, 0.0), Pose2D(0.10, 0.0, math.pi / 2.0))
 
         step = compute_waypoint_command(
-            Pose2D(0.10, 0.0, math.pi / 2.0 - 0.05), waypoints, 0, config
+            Pose2D(0.10, 0.0, math.pi / 2.0 - 0.05), waypoints, 1, config
         )
 
         self.assertTrue(step.reached_goal)
@@ -327,7 +546,7 @@ class WaypointControllerTest(unittest.TestCase):
         config = ControllerConfig(goal_tolerance_m=0.03, heading_tolerance_rad=0.10)
         waypoints = (Pose2D(0.0, 0.0), Pose2D(0.10, 0.0, float("nan")))
 
-        step = compute_waypoint_command(Pose2D(0.10, 0.0, math.pi), waypoints, 0, config)
+        step = compute_waypoint_command(Pose2D(0.10, 0.0, math.pi), waypoints, 1, config)
 
         self.assertTrue(step.reached_goal)
 

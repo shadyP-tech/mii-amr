@@ -24,6 +24,46 @@ from scripts.aufgabe04.stations.arrival_pose_geometry import (
 _EPSILON = 1.0e-10
 
 
+def minimum_static_obstacle_inflation_m(
+    *,
+    robot_radius_m: float,
+    tracking_margin_m: float,
+    lidar_stop_distance_m: float,
+    scan_origin_to_base_offset_m: float,
+    lidar_clearance_margin_m: float,
+) -> float:
+    """Return the nominal map clearance required by body and LiDAR gates.
+
+    Static map inflation protects the robot body and must also make the
+    executor's live scan stop unreachable along the certified tracking tube.
+    Dynamic stand keepouts are handled separately by ``DynamicApproachConfig``.
+    """
+
+    values = {
+        "robot_radius_m": robot_radius_m,
+        "tracking_margin_m": tracking_margin_m,
+        "lidar_stop_distance_m": lidar_stop_distance_m,
+        "scan_origin_to_base_offset_m": scan_origin_to_base_offset_m,
+        "lidar_clearance_margin_m": lidar_clearance_margin_m,
+    }
+    for name, value in values.items():
+        if not math.isfinite(value):
+            raise ValueError(f"{name} must be finite")
+    for name in ("robot_radius_m", "lidar_stop_distance_m"):
+        if values[name] <= 0.0:
+            raise ValueError(f"{name} must be positive")
+    for name in ("tracking_margin_m", "lidar_clearance_margin_m"):
+        if values[name] < 0.0:
+            raise ValueError(f"{name} must be non-negative")
+    return max(
+        robot_radius_m + tracking_margin_m,
+        lidar_stop_distance_m
+        + abs(scan_origin_to_base_offset_m)
+        + lidar_clearance_margin_m
+        + tracking_margin_m,
+    )
+
+
 @dataclass(frozen=True)
 class DynamicApproachConfig:
     """Physical and geometric constraints for one stand approach."""
@@ -32,12 +72,21 @@ class DynamicApproachConfig:
     stand_position_uncertainty_m: float = 0.02
     robot_radius_m: float = 0.105
     collision_margin_m: float = 0.02
+    # Maximum certified deviation of the executed robot centre from the
+    # nominal planned polyline.  Dynamic stand obstacles are not part of the
+    # statically inflated occupancy grid, so their nominal keepouts must carry
+    # this tube explicitly.
+    tracking_margin_m: float = 0.0
     standoff_distance_m: float = 0.32
     terminal_corridor_length_m: float = 0.40
     corridor_sample_spacing_m: float = 0.05
     lidar_stop_distance_m: float = 0.18
     scan_origin_to_base_offset_m: float = 0.0
     lidar_clearance_margin_m: float = 0.02
+    # Optional externally measured robot-centre exclusion radius. Candidate
+    # snapshots use this to carry a conservative keepout across pipeline
+    # stages without weakening the body/LiDAR-derived minimums above.
+    minimum_non_target_keepout_radius_m: float = 0.0
 
     def __post_init__(self) -> None:
         finite_values = {
@@ -45,12 +94,16 @@ class DynamicApproachConfig:
             "stand_position_uncertainty_m": self.stand_position_uncertainty_m,
             "robot_radius_m": self.robot_radius_m,
             "collision_margin_m": self.collision_margin_m,
+            "tracking_margin_m": self.tracking_margin_m,
             "standoff_distance_m": self.standoff_distance_m,
             "terminal_corridor_length_m": self.terminal_corridor_length_m,
             "corridor_sample_spacing_m": self.corridor_sample_spacing_m,
             "lidar_stop_distance_m": self.lidar_stop_distance_m,
             "scan_origin_to_base_offset_m": self.scan_origin_to_base_offset_m,
             "lidar_clearance_margin_m": self.lidar_clearance_margin_m,
+            "minimum_non_target_keepout_radius_m": (
+                self.minimum_non_target_keepout_radius_m
+            ),
         }
         for name, value in finite_values.items():
             if not math.isfinite(value):
@@ -68,7 +121,9 @@ class DynamicApproachConfig:
         for name in (
             "stand_position_uncertainty_m",
             "collision_margin_m",
+            "tracking_margin_m",
             "lidar_clearance_margin_m",
+            "minimum_non_target_keepout_radius_m",
         ):
             if finite_values[name] < 0.0:
                 raise ValueError(f"{name} must be non-negative")
@@ -77,11 +132,14 @@ class DynamicApproachConfig:
 
     @property
     def stand_keepout_radius_m(self) -> float:
+        """Nominal robot-centre exclusion around the active target stand."""
+
         return (
             self.stand_radius_m
             + self.stand_position_uncertainty_m
             + self.robot_radius_m
             + self.collision_margin_m
+            + self.tracking_margin_m
         )
 
     @property
@@ -94,13 +152,21 @@ class DynamicApproachConfig:
             + self.lidar_stop_distance_m
             + abs(self.scan_origin_to_base_offset_m)
             + self.lidar_clearance_margin_m
+            + self.tracking_margin_m
         )
 
     @property
     def non_target_stand_keepout_radius_m(self) -> float:
         """Robot-center exclusion radius for stands crossed in transit."""
 
-        return max(self.stand_keepout_radius_m, self.minimum_lidar_standoff_m)
+        return max(
+            self.stand_keepout_radius_m,
+            self.minimum_lidar_standoff_m,
+            # Frozen candidate keepouts describe the required clearance of the
+            # actual robot centre.  Expand that envelope by the execution tube
+            # exactly once for the nominal route.
+            self.minimum_non_target_keepout_radius_m + self.tracking_margin_m,
+        )
 
 
 @dataclass(frozen=True)

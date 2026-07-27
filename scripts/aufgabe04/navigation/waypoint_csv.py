@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import io
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +49,8 @@ class SelectedRouteLeg:
     source_arrival_id: str = ""
     target_arrival_id: str = ""
     catalog_sha256: str = ""
+    source_sha256: str = ""
+    source_waypoint_count: int = 0
 
 
 def _parse_int(value: str, field: str, row_number: int) -> int:
@@ -132,7 +136,14 @@ def load_route_leg(
         ]
     ] = []
     seen_leg_indexes = set()
-    with path.open(newline="") as file:
+    raw = path.read_bytes()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ValueError("route CSV must be UTF-8 text") from exc
+    source_sha256 = hashlib.sha256(raw).hexdigest()
+    source_waypoint_count = 0
+    with io.StringIO(text, newline="") as file:
         reader = csv.DictReader(file)
         if reader.fieldnames is None:
             raise ValueError("route CSV is missing a header")
@@ -140,6 +151,7 @@ def load_route_leg(
         if missing:
             raise ValueError(f"route CSV missing columns: {', '.join(sorted(missing))}")
         for row_number, row in enumerate(reader, start=2):
+            source_waypoint_count += 1
             row_leg_index = _parse_int(row["leg_index"], "leg_index", row_number)
             seen_leg_indexes.add(row_leg_index)
             if row_leg_index != leg_index:
@@ -256,6 +268,8 @@ def load_route_leg(
         source_arrival_id=source_arrival_id,
         target_arrival_id=target_arrival_id,
         catalog_sha256=catalog_sha256,
+        source_sha256=source_sha256,
+        source_waypoint_count=source_waypoint_count,
     )
 
 

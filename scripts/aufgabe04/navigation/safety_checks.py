@@ -12,6 +12,9 @@ from typing import Iterable, List, Mapping
 from scripts.aufgabe04.navigation.dynamic_route_handoff import (
     validate_start_egress_certificate,
 )
+from scripts.aufgabe04.navigation.mission_execution_gate import (
+    load_diagnostics_snapshot,
+)
 from scripts.aufgabe04.navigation.waypoint_csv import SelectedRouteLeg
 from scripts.aufgabe04.navigation.waypoint_csv import poses_from_waypoints
 from scripts.aufgabe04.stations.arrival_pose_catalog import (
@@ -54,11 +57,12 @@ def validate_route_diagnostics_json(
     *,
     csv_point_count: int,
     require_motion: bool = True,
+    diagnostics_payload: Mapping[str, object] | None = None,
 ) -> PreflightStatus:
     failures: List[str] = []
     try:
-        payload = json.loads(Path(path).read_text())
-    except (OSError, json.JSONDecodeError) as exc:
+        payload = _diagnostics_payload(path, diagnostics_payload)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
         return PreflightStatus(ok=False, failures=[f"invalid diagnostics JSON: {exc}"])
 
     legs = payload.get("legs")
@@ -68,10 +72,10 @@ def validate_route_diagnostics_json(
         return PreflightStatus(ok=False, failures=[f"diagnostics missing leg_index {leg_index}"])
 
     leg = legs[leg_index]
-    if not isinstance(leg, dict):
+    if not isinstance(leg, Mapping):
         return PreflightStatus(ok=False, failures=[f"diagnostics leg {leg_index} must be an object"])
     diagnostics = leg.get("diagnostics")
-    if not isinstance(diagnostics, dict):
+    if not isinstance(diagnostics, Mapping):
         failures.append(f"diagnostics leg {leg_index} missing diagnostics object")
     elif diagnostics.get("status") != "ok":
         failures.append(f"diagnostics leg {leg_index} status is not ok")
@@ -79,13 +83,20 @@ def validate_route_diagnostics_json(
         failures.append(f"diagnostics leg {leg_index} has failure")
 
     route_point_count = leg.get("route_point_count")
-    if route_point_count != csv_point_count:
+    if (
+        type(route_point_count) is not int
+        or route_point_count != csv_point_count
+    ):
         failures.append(
             f"diagnostics leg {leg_index} route_point_count {route_point_count} "
             f"does not match CSV count {csv_point_count}"
         )
     route_length = leg.get("route_length_m")
-    if not isinstance(route_length, (int, float)) or not math.isfinite(route_length):
+    if (
+        isinstance(route_length, bool)
+        or not isinstance(route_length, (int, float))
+        or not math.isfinite(route_length)
+    ):
         failures.append(f"diagnostics leg {leg_index} route_length_m must be finite")
     elif require_motion and route_length <= 0.0:
         failures.append(f"diagnostics leg {leg_index} route_length_m must be positive for motion")
@@ -99,6 +110,8 @@ def validate_catalog_route_binding_json(
     *,
     position_tolerance_m: float = 1.0e-9,
     angle_tolerance_rad: float = 1.0e-9,
+    catalog_path_override: Path | None = None,
+    diagnostics_payload: Mapping[str, object] | None = None,
 ) -> PreflightStatus:
     """Bind one frozen catalog CSV leg to its planning diagnostics.
 
@@ -136,12 +149,12 @@ def validate_catalog_route_binding_json(
             failures.append("catalog route final point is not the corridor target")
 
     try:
-        payload = json.loads(Path(path).read_text())
-    except (OSError, json.JSONDecodeError) as exc:
+        payload = _diagnostics_payload(path, diagnostics_payload)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
         failures.append(f"invalid diagnostics JSON: {exc}")
         return PreflightStatus(ok=False, failures=failures)
     metadata = payload.get("metadata")
-    if not isinstance(metadata, dict):
+    if not isinstance(metadata, Mapping):
         failures.append("catalog diagnostics missing metadata object")
     else:
         if metadata.get("route_kind") != leg.route_kind:
@@ -159,19 +172,22 @@ def validate_catalog_route_binding_json(
         ):
             failures.append("catalog diagnostics have invalid route_csv_sha256")
         else:
-            try:
-                actual_route_hash = _file_sha256(leg.source_path)
-            except OSError as exc:
-                failures.append(f"catalog route CSV hash unavailable: {exc}")
-            else:
-                if actual_route_hash != expected_route_hash:
-                    failures.append("catalog route CSV SHA-256 does not match diagnostics")
+            actual_route_hash = leg.source_sha256
+            if not actual_route_hash:
+                failures.append("catalog route CSV snapshot SHA-256 is missing")
+            elif actual_route_hash != expected_route_hash:
+                failures.append("catalog route CSV SHA-256 does not match diagnostics")
         catalog_path_value = metadata.get("catalog_path")
         if not isinstance(catalog_path_value, str) or not catalog_path_value.strip():
             failures.append("catalog diagnostics are missing catalog_path")
         else:
+            catalog_path = (
+                Path(catalog_path_value)
+                if catalog_path_override is None
+                else Path(catalog_path_override)
+            )
             try:
-                catalog = load_arrival_pose_catalog(Path(catalog_path_value))
+                catalog = load_arrival_pose_catalog(catalog_path)
             except (OSError, ValueError) as exc:
                 failures.append(f"catalog snapshot validation failed: {exc}")
             else:
@@ -185,7 +201,7 @@ def validate_catalog_route_binding_json(
         failures.append(f"catalog diagnostics missing leg_index {leg.leg_index}")
         return PreflightStatus(ok=False, failures=failures)
     diagnostics_leg = legs[leg.leg_index]
-    if not isinstance(diagnostics_leg, dict):
+    if not isinstance(diagnostics_leg, Mapping):
         failures.append(f"catalog diagnostics leg {leg.leg_index} must be an object")
         return PreflightStatus(ok=False, failures=failures)
     if diagnostics_leg.get("source_arrival_id") != leg.source_arrival_id:
@@ -207,6 +223,7 @@ def validate_catalog_route_binding_json(
             actual = value.get(coordinate)
             if (
                 not isinstance(actual, (int, float))
+                or isinstance(actual, bool)
                 or not math.isfinite(actual)
                 or not math.isfinite(expected)
                 or abs(float(actual) - expected) > tolerance
@@ -220,7 +237,11 @@ def validate_catalog_route_binding_json(
     if corridor:
         compare_pose("corridor_entry", corridor[0].pose)
     try:
-        catalog_start_egress_certificate(path, leg)
+        catalog_start_egress_certificate(
+            path,
+            leg,
+            diagnostics_payload=payload,
+        )
     except ValueError as exc:
         failures.append(f"catalog start-egress certificate is invalid: {exc}")
     return PreflightStatus(ok=not failures, failures=failures)
@@ -229,6 +250,8 @@ def validate_catalog_route_binding_json(
 def catalog_start_egress_certificate(
     path: Path,
     leg: SelectedRouteLeg,
+    *,
+    diagnostics_payload: Mapping[str, object] | None = None,
 ) -> CatalogStartEgressCertificate:
     """Validate and expose a frozen catalog leg's source-egress lock.
 
@@ -242,7 +265,7 @@ def catalog_start_egress_certificate(
     if leg.route_kind != "catalog_face_approach":
         raise ValueError("catalog start-egress requires catalog_face_approach")
     try:
-        payload = json.loads(Path(path).read_text())
+        payload = _diagnostics_payload(path, diagnostics_payload)
         diagnostics_leg = payload["legs"][leg.leg_index]
         overlay = diagnostics_leg["non_target_keepout_overlay"]
         clearances = diagnostics_leg["non_target_stand_clearances"]
@@ -253,19 +276,35 @@ def catalog_start_egress_certificate(
     raw_exempted = overlay.get("start_cell_exempted")
     if not isinstance(raw_exempted, bool):
         raise ValueError("start_cell_exempted must be boolean")
+    raw_anchor = overlay.get("egress_anchor")
+    anchor_required = raw_anchor is not None
+    if anchor_required and not isinstance(raw_anchor, Mapping):
+        raise ValueError("egress_anchor must be an object or null")
+    if raw_exempted and anchor_required:
+        raise ValueError("catalog egress cannot mix exemption and anchor modes")
     if leg.source_arrival_id == "mission_start":
-        if raw_exempted:
-            raise ValueError("mission-start leg must not claim a source-arrival exemption")
+        if raw_exempted or anchor_required:
+            raise ValueError(
+                "mission-start leg must not claim a source-arrival egress"
+            )
         return CatalogStartEgressCertificate(False)
-    if not raw_exempted:
+    if not raw_exempted and not anchor_required:
         return CatalogStartEgressCertificate(False)
     if overlay.get("start_cell_was_rasterized") is not True:
-        raise ValueError("exempted source cell was not recorded as rasterized")
-    for field in (
-        "exact_start_minimum_margin_m",
-        "cell_center_minimum_margin_m",
-        "start_connector_minimum_margin_m",
-    ):
+        raise ValueError("catalog source egress was not recorded as rasterized")
+    required_positive_fields = ["exact_start_minimum_margin_m"]
+    if raw_exempted:
+        required_positive_fields.extend(
+            (
+                "cell_center_minimum_margin_m",
+                "start_connector_minimum_margin_m",
+            )
+        )
+    else:
+        required_positive_fields.append(
+            "egress_connector_minimum_margin_m"
+        )
+    for field in required_positive_fields:
         value = overlay.get(field)
         if (
             not isinstance(value, (int, float))
@@ -274,13 +313,41 @@ def catalog_start_egress_certificate(
             or value <= 0.0
         ):
             raise ValueError(f"{field} must be finite and positive")
+    if anchor_required:
+        if overlay.get("egress_continuous_clearance_validated") is not True:
+            raise ValueError("egress anchor lacks continuous-clearance validation")
+        if overlay.get("egress_failure_reason") is not None:
+            raise ValueError("egress anchor carries a failure reason")
+        anchor_x = _strict_finite_number(raw_anchor.get("x_m"), "egress_anchor.x_m")
+        anchor_y = _strict_finite_number(raw_anchor.get("y_m"), "egress_anchor.y_m")
+        anchor_cell = overlay.get("egress_anchor_cell")
+        if not isinstance(anchor_cell, Mapping):
+            raise ValueError("egress_anchor_cell is missing")
+        for coordinate in ("x", "y"):
+            value = anchor_cell.get(coordinate)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ValueError(
+                    f"egress_anchor_cell.{coordinate} must be integer"
+                )
+        egress_cells = overlay.get("egress_cells")
+        if not isinstance(egress_cells, list) or not egress_cells:
+            raise ValueError("egress_cells must be a non-empty list")
+        if len(leg.raw_waypoints) < 2:
+            raise ValueError("egress anchor route lacks waypoint 1")
+        waypoint_one = leg.raw_waypoints[1].pose
+        if (
+            abs(waypoint_one.x_m - anchor_x) > 1.0e-9
+            or abs(waypoint_one.y_m - anchor_y) > 1.0e-9
+        ):
+            raise ValueError("egress anchor does not match route waypoint 1")
     if not isinstance(clearances, list) or not clearances:
         raise ValueError("continuous non-target stand clearances are missing")
     try:
-        start_join_clearance_m = float(
+        start_join_clearance_m = _strict_finite_number(
             diagnostics_leg["diagnostics"]["fixed_arrival"][
                 "start_join_clearance_m"
-            ]
+            ],
+            "start_join_clearance_m",
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"start_join_clearance_m is unavailable: {exc}") from exc
@@ -288,6 +355,7 @@ def catalog_start_egress_certificate(
         raise ValueError("start_join_clearance_m must be finite and positive")
     safety = {
         "known_stand_start_cell_exempted": True,
+        "known_stand_egress_anchor_mode": anchor_required,
         "known_stand_start_cell": overlay.get("start_cell"),
         "known_stand_keepout_rasterized_cell_count": overlay.get(
             "rasterized_cell_count"
@@ -311,6 +379,26 @@ def catalog_start_egress_certificate(
         minimum_route_clearance_m=geometric.minimum_route_clearance_m,
         start_join_clearance_m=start_join_clearance_m,
     )
+
+
+def _diagnostics_payload(
+    path: Path,
+    supplied: Mapping[str, object] | None,
+) -> Mapping[str, object]:
+    if supplied is not None:
+        if not isinstance(supplied, Mapping):
+            raise ValueError("diagnostics payload must be an object")
+        return supplied
+    return load_diagnostics_snapshot(path, require_metadata=False).payload
+
+
+def _strict_finite_number(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be numeric")
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"{name} must be finite")
+    return result
 
 
 def validate_speed_limits(

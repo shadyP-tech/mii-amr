@@ -2,12 +2,23 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections import deque
 from dataclasses import dataclass
 from typing import Generic, Sequence, TypeVar
 
 from scripts.aufgabe04.navigation.models import Pose2D
+from scripts.aufgabe04.navigation.viewpoint_sampling_contract import (
+    DEFAULT_VIEWPOINT_SAMPLING_STRICT_ARRIVAL_TOLERANCE_M,
+    DEFAULT_VIEWPOINT_SAMPLING_TARGET_DISTANCE_M,
+    INTERMEDIATE_TERMINAL_HEADING_HOLD_TOLERANCE_M,
+    INTERMEDIATE_TERMINAL_HEADING_TARGET_ENVELOPE_RADIUS_M,
+    ViewpointSamplingArrivalLatch,
+    ViewpointSamplingHoldConfig,
+    ViewpointSamplingMaterialTarget,
+)
 from scripts.aufgabe04.stations.arrival_pose_geometry import (
     ArrivalGeometryConfig,
     arrival_face_candidates,
@@ -15,12 +26,312 @@ from scripts.aufgabe04.stations.arrival_pose_geometry import (
 
 
 T = TypeVar("T")
+DEFAULT_SAMPLING_ARRIVAL_TOLERANCE_M = (
+    DEFAULT_VIEWPOINT_SAMPLING_STRICT_ARRIVAL_TOLERANCE_M
+)
+DEFAULT_TANGENTIAL_CORRECTION_GAIN = 0.5
+VIEWPOINT_SAMPLING_ODOM_QUATERNION_NORM_TOLERANCE = 1.0e-3
 
 
 @dataclass(frozen=True)
 class TimedSample(Generic[T]):
     stamp_sec: float
     value: T
+
+
+@dataclass(frozen=True)
+class ViewpointSamplingOdomSample:
+    """ROS-free odometry evidence retained between image-processing ticks."""
+
+    stamp_sec: float
+    pose: Pose2D
+    parent_frame: str
+    child_frame: str
+    quaternion_xyzw: tuple[float, float, float, float]
+
+
+@dataclass(frozen=True)
+class ViewpointSamplingOdomReplayBatch:
+    """Chronological, target-bounded odometry accepted for latch replay."""
+
+    samples: tuple[ViewpointSamplingOdomSample, ...]
+    diagnostics: dict[str, object]
+
+
+def viewpoint_sampling_history_identity(
+    stream_id: str,
+    target: ViewpointSamplingMaterialTarget,
+) -> dict[str, object]:
+    """Return the persisted stream-and-material-target cursor identity."""
+
+    if not isinstance(stream_id, str) or not stream_id.strip():
+        raise ValueError("stream_id must be a non-empty string")
+    payload = {
+        "stream_id": stream_id,
+        "material_target": target.to_status_dict(),
+    }
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return {
+        **payload,
+        "sha256": hashlib.sha256(canonical).hexdigest(),
+    }
+
+
+def viewpoint_sampling_history_identity_changed(
+    *,
+    previous_stream_id: str | None,
+    previous_target: ViewpointSamplingMaterialTarget | None,
+    current_stream_id: str,
+    current_target: ViewpointSamplingMaterialTarget | None,
+) -> bool:
+    """Return whether all buffered evidence must be discarded."""
+
+    return (
+        previous_stream_id != current_stream_id
+        or previous_target != current_target
+    )
+
+
+def select_viewpoint_sampling_odom_replay(
+    samples: Sequence[ViewpointSamplingOdomSample],
+    *,
+    target_pose: Pose2D,
+    target_activation_stamp_sec: float,
+    last_checked_odom_stamp_sec: float,
+    current_image_stamp_sec: float,
+    current_pose_stamp_sec: float | None = None,
+    expected_parent_frame: str,
+    expected_child_frame: str,
+    strict_entry_tolerance_m: float,
+    quaternion_norm_tolerance: float = (
+        VIEWPOINT_SAMPLING_ODOM_QUATERNION_NORM_TOLERANCE
+    ),
+) -> ViewpointSamplingOdomReplayBatch:
+    """Select new exact-frame samples without weakening strict arrival.
+
+    Only odometry observed after both target activation and the previous
+    high-water mark, and no later than the image currently being processed,
+    may contribute arrival evidence. Any malformed sample inside that window
+    rejects the complete batch so partial sensor evidence cannot arm the
+    latch.
+    """
+
+    scalar_inputs = {
+        "target_activation_stamp_sec": target_activation_stamp_sec,
+        "last_checked_odom_stamp_sec": last_checked_odom_stamp_sec,
+        "current_image_stamp_sec": current_image_stamp_sec,
+        "strict_entry_tolerance_m": strict_entry_tolerance_m,
+        "quaternion_norm_tolerance": quaternion_norm_tolerance,
+    }
+    if current_pose_stamp_sec is not None:
+        if not math.isfinite(current_pose_stamp_sec):
+            raise ValueError("current_pose_stamp_sec must be finite or None")
+        scalar_inputs["current_pose_stamp_sec"] = current_pose_stamp_sec
+    for name, value in scalar_inputs.items():
+        if not math.isfinite(value):
+            raise ValueError(f"{name} must be finite")
+    if strict_entry_tolerance_m <= 0.0:
+        raise ValueError("strict_entry_tolerance_m must be positive")
+    if quaternion_norm_tolerance <= 0.0:
+        raise ValueError("quaternion_norm_tolerance must be positive")
+    if not expected_parent_frame or not expected_child_frame:
+        raise ValueError("expected odometry frames must be non-empty")
+    if not all(
+        math.isfinite(value)
+        for value in (target_pose.x_m, target_pose.y_m, target_pose.yaw_rad)
+    ):
+        raise ValueError("target_pose must be finite")
+
+    lower_bound_sec = max(
+        target_activation_stamp_sec,
+        last_checked_odom_stamp_sec,
+    )
+    diagnostics: dict[str, object] = {
+        "state": "no_new_samples",
+        "fail_closed": False,
+        "reason": "no_new_odom_in_target_window",
+        "target_activation_stamp_sec": target_activation_stamp_sec,
+        "last_checked_odom_stamp_sec_before": last_checked_odom_stamp_sec,
+        "current_image_stamp_sec": current_image_stamp_sec,
+        "history_replay_upper_bound_stamp_sec": (
+            current_image_stamp_sec
+            if current_pose_stamp_sec is None
+            else min(current_image_stamp_sec, current_pose_stamp_sec)
+        ),
+        "history_lower_bound_stamp_sec": lower_bound_sec,
+        "expected_parent_frame": expected_parent_frame,
+        "expected_child_frame": expected_child_frame,
+        "strict_entry_tolerance_m": strict_entry_tolerance_m,
+        "quaternion_norm_tolerance": quaternion_norm_tolerance,
+        "buffered_sample_count": len(samples),
+        "eligible_window_sample_count": 0,
+        "processed_sample_count": 0,
+        "excluded_at_or_before_activation_count": 0,
+        "excluded_at_or_before_last_checked_count": 0,
+        "excluded_after_image_count": 0,
+        "excluded_at_or_after_current_pose_count": 0,
+        "invalid_stamp_count": 0,
+        "frame_mismatch_count": 0,
+        "nonfinite_pose_count": 0,
+        "invalid_quaternion_count": 0,
+        "nonmonotonic_stamp_count": 0,
+        "first_processed_stamp_sec": None,
+        "last_processed_stamp_sec": None,
+        "minimum_target_distance_m": None,
+        "minimum_target_distance_stamp_sec": None,
+        "strict_entry_sample_count": 0,
+        "first_strict_entry_stamp_sec": None,
+        "last_strict_entry_stamp_sec": None,
+    }
+
+    eligible: list[ViewpointSamplingOdomSample] = []
+    previous_eligible_stamp = -math.inf
+    invalid_reasons: list[str] = []
+    for sample in samples:
+        stamp_sec = sample.stamp_sec
+        if not math.isfinite(stamp_sec):
+            diagnostics["invalid_stamp_count"] = (
+                int(diagnostics["invalid_stamp_count"]) + 1
+            )
+            invalid_reasons.append("nonfinite_odom_stamp")
+            continue
+        if stamp_sec <= target_activation_stamp_sec:
+            diagnostics["excluded_at_or_before_activation_count"] = (
+                int(diagnostics["excluded_at_or_before_activation_count"]) + 1
+            )
+            continue
+        if stamp_sec <= last_checked_odom_stamp_sec:
+            diagnostics["excluded_at_or_before_last_checked_count"] = (
+                int(diagnostics["excluded_at_or_before_last_checked_count"]) + 1
+            )
+            continue
+        if stamp_sec > current_image_stamp_sec:
+            diagnostics["excluded_after_image_count"] = (
+                int(diagnostics["excluded_after_image_count"]) + 1
+            )
+            continue
+        if (
+            current_pose_stamp_sec is not None
+            and stamp_sec >= current_pose_stamp_sec
+        ):
+            diagnostics["excluded_at_or_after_current_pose_count"] = (
+                int(
+                    diagnostics[
+                        "excluded_at_or_after_current_pose_count"
+                    ]
+                )
+                + 1
+            )
+            continue
+
+        diagnostics["eligible_window_sample_count"] = (
+            int(diagnostics["eligible_window_sample_count"]) + 1
+        )
+        if stamp_sec <= previous_eligible_stamp:
+            diagnostics["nonmonotonic_stamp_count"] = (
+                int(diagnostics["nonmonotonic_stamp_count"]) + 1
+            )
+            invalid_reasons.append("nonmonotonic_odom_stamp")
+        previous_eligible_stamp = max(previous_eligible_stamp, stamp_sec)
+
+        if (
+            sample.parent_frame != expected_parent_frame
+            or sample.child_frame != expected_child_frame
+        ):
+            diagnostics["frame_mismatch_count"] = (
+                int(diagnostics["frame_mismatch_count"]) + 1
+            )
+            invalid_reasons.append("odom_frame_mismatch")
+
+        pose_values = (
+            sample.pose.x_m,
+            sample.pose.y_m,
+            sample.pose.yaw_rad,
+        )
+        if not all(math.isfinite(value) for value in pose_values):
+            diagnostics["nonfinite_pose_count"] = (
+                int(diagnostics["nonfinite_pose_count"]) + 1
+            )
+            invalid_reasons.append("nonfinite_odom_pose")
+
+        quaternion = sample.quaternion_xyzw
+        quaternion_valid = (
+            len(quaternion) == 4
+            and all(math.isfinite(value) for value in quaternion)
+        )
+        if quaternion_valid:
+            quaternion_norm = math.sqrt(
+                sum(value * value for value in quaternion)
+            )
+            quaternion_valid = (
+                math.isfinite(quaternion_norm)
+                and abs(quaternion_norm - 1.0)
+                <= quaternion_norm_tolerance
+            )
+        if not quaternion_valid:
+            diagnostics["invalid_quaternion_count"] = (
+                int(diagnostics["invalid_quaternion_count"]) + 1
+            )
+            invalid_reasons.append("invalid_odom_quaternion")
+
+        eligible.append(sample)
+
+    if invalid_reasons:
+        diagnostics.update(
+            {
+                "state": "rejected",
+                "fail_closed": True,
+                "reason": sorted(set(invalid_reasons))[0],
+                "rejection_reasons": sorted(set(invalid_reasons)),
+            }
+        )
+        return ViewpointSamplingOdomReplayBatch((), diagnostics)
+
+    if not eligible:
+        return ViewpointSamplingOdomReplayBatch((), diagnostics)
+
+    distances = tuple(
+        math.hypot(
+            sample.pose.x_m - target_pose.x_m,
+            sample.pose.y_m - target_pose.y_m,
+        )
+        for sample in eligible
+    )
+    minimum_distance_index = min(
+        range(len(distances)),
+        key=distances.__getitem__,
+    )
+    strict_samples = tuple(
+        sample
+        for sample, distance_m in zip(eligible, distances)
+        if distance_m <= strict_entry_tolerance_m
+    )
+    diagnostics.update(
+        {
+            "state": "replay_ready",
+            "reason": "new_exact_frame_odom_selected",
+            "processed_sample_count": len(eligible),
+            "first_processed_stamp_sec": eligible[0].stamp_sec,
+            "last_processed_stamp_sec": eligible[-1].stamp_sec,
+            "minimum_target_distance_m": min(distances),
+            "minimum_target_distance_stamp_sec": (
+                eligible[minimum_distance_index].stamp_sec
+            ),
+            "strict_entry_sample_count": len(strict_samples),
+            "first_strict_entry_stamp_sec": (
+                None if not strict_samples else strict_samples[0].stamp_sec
+            ),
+            "last_strict_entry_stamp_sec": (
+                None if not strict_samples else strict_samples[-1].stamp_sec
+            ),
+        }
+    )
+    return ViewpointSamplingOdomReplayBatch(tuple(eligible), diagnostics)
 
 
 @dataclass(frozen=True)
@@ -33,7 +344,15 @@ class ViewpointConfig:
     max_linear_speed_mps: float = 0.01
     max_angular_speed_radps: float = 0.05
     max_tangential_step_rad: float = math.radians(20.0)
+    tangential_correction_gain: float = DEFAULT_TANGENTIAL_CORRECTION_GAIN
     settle_time_sec: float = 0.40
+
+    def __post_init__(self) -> None:
+        if (
+            not math.isfinite(self.tangential_correction_gain)
+            or not 0.0 < self.tangential_correction_gain <= 1.0
+        ):
+            raise ValueError("tangential correction gain must be in (0, 1]")
 
 
 @dataclass(frozen=True)
@@ -68,6 +387,7 @@ class ViewpointSamplingUpdate:
     target_pose: Pose2D | None
     advanced: bool
     reason: str
+    arrival_status: dict[str, object]
 
 
 class ViewpointSamplingLatch:
@@ -82,21 +402,116 @@ class ViewpointSamplingLatch:
     evidence: the physical stand axis remains uncommitted until the robot
     reaches the final observation band and passes the complete settle gate.
 
-    A later tangential step is accepted only after the current one is reached,
-    the robot is stationary, and the view remains oblique.  Missing,
-    undersized, or non-face silhouette evidence can never start sampling.
+    A later tangential step is accepted only after the current one has first
+    entered the strict arrival gate and then remains inside the follower's
+    shared target tube and inferred-stand annulus while the robot is
+    stationary and the view remains oblique.  Missing, undersized, or
+    non-face silhouette evidence can never start sampling.  An explicitly
+    supplied observer-side recenter pose may revise an arrived target while
+    the image remains off-center; the raw per-frame candidate is never used
+    for that revision.
     """
 
     _START_REASONS = frozenset({"oblique_silhouette", "well_conditioned"})
 
-    def __init__(self, *, arrival_tolerance_m: float = 0.10) -> None:
-        if not math.isfinite(arrival_tolerance_m) or arrival_tolerance_m <= 0.0:
-            raise ValueError("sampling arrival tolerance must be finite and positive")
+    def __init__(
+        self,
+        *,
+        arrival_tolerance_m: float = DEFAULT_SAMPLING_ARRIVAL_TOLERANCE_M,
+        hold_tolerance_m: float = (
+            INTERMEDIATE_TERMINAL_HEADING_HOLD_TOLERANCE_M
+        ),
+        target_distance_m: float = (
+            DEFAULT_VIEWPOINT_SAMPLING_TARGET_DISTANCE_M
+        ),
+        target_envelope_radius_m: float = (
+            INTERMEDIATE_TERMINAL_HEADING_TARGET_ENVELOPE_RADIUS_M
+        ),
+    ) -> None:
         self.arrival_tolerance_m = arrival_tolerance_m
         self.target_pose: Pose2D | None = None
+        self._arrival_target: ViewpointSamplingMaterialTarget | None = None
+        self._arrival_latch = ViewpointSamplingArrivalLatch(
+            strict_entry_tolerance_m=arrival_tolerance_m,
+            hold_config=ViewpointSamplingHoldConfig(
+                entry_tolerance_m=arrival_tolerance_m,
+                hold_tolerance_m=hold_tolerance_m,
+                target_distance_m=target_distance_m,
+                target_envelope_radius_m=target_envelope_radius_m,
+            ),
+        )
 
-    def reset(self) -> None:
+    def reset(self, *, reason: str = "explicit_reset") -> None:
         self.target_pose = None
+        self._arrival_target = None
+        self._arrival_latch.reset(reason=reason)
+
+    def invalidate_arrival_evidence(self, *, reason: str) -> None:
+        """Fail closed without changing the observer-owned material target."""
+
+        self._arrival_latch.reset(reason=reason)
+
+    def arrival_status(self) -> dict[str, object]:
+        return self._arrival_latch.to_status_dict()
+
+    @property
+    def arrival_target_pose(self) -> Pose2D | None:
+        """Return the exact material target currently checked for arrival."""
+
+        if self._arrival_target is None:
+            return None
+        return self._arrival_target.pose
+
+    @property
+    def arrival_material_target(
+        self,
+    ) -> ViewpointSamplingMaterialTarget | None:
+        """Return the complete identity currently owning arrival evidence."""
+
+        return self._arrival_target
+
+    def observe_arrival_pose(
+        self,
+        robot_pose: Pose2D,
+    ) -> dict[str, object] | None:
+        """Replay one odometry pose through only the strict-arrival latch.
+
+        Perception, recentering, sampling advancement, and settle gates remain
+        owned by :meth:`update`; buffered odometry may recover only positional
+        evidence for the already-active exact material target.
+        """
+
+        if self._arrival_target is None:
+            return None
+        arrival = self._arrival_latch.update(
+            pose=robot_pose,
+            target=self._arrival_target,
+        )
+        return arrival.to_status_dict()
+
+    @staticmethod
+    def _target_changed(first: Pose2D, second: Pose2D) -> bool:
+        return (
+            math.hypot(
+                first.x_m - second.x_m,
+                first.y_m - second.y_m,
+            )
+            > 1.0e-6
+            or abs(normalize_angle(first.yaw_rad - second.yaw_rad))
+            > 1.0e-6
+        )
+
+    @staticmethod
+    def _finite_pose(pose: object) -> bool:
+        if not isinstance(pose, Pose2D):
+            return False
+        try:
+            return all(
+                math.isfinite(value)
+                for value in (pose.x_m, pose.y_m, pose.yaw_rad)
+            )
+        except TypeError:
+            return False
 
     def update(
         self,
@@ -108,8 +523,22 @@ class ViewpointSamplingLatch:
         allow_start: bool,
         view_centered: bool = True,
         view_settled: bool = True,
+        recenter_pose: Pose2D | None = None,
+        equivalent_target_poses: Sequence[Pose2D] = (),
+        target_face_id: str = "sampling_near",
+        target_revision: int | None = None,
+        equivalent_target_face_ids: Sequence[str] = (),
+        equivalent_target_revisions: Sequence[int | None] = (),
     ) -> ViewpointSamplingUpdate:
-        for name, pose in (("robot", robot_pose), ("candidate", candidate_pose)):
+        poses_to_validate = (
+            ("robot", robot_pose),
+            ("candidate", candidate_pose),
+            *(
+                (f"equivalent_target_poses[{index}]", pose)
+                for index, pose in enumerate(equivalent_target_poses)
+            ),
+        )
+        for name, pose in poses_to_validate:
             if not all(
                 math.isfinite(value)
                 for value in (pose.x_m, pose.y_m, pose.yaw_rad)
@@ -122,11 +551,27 @@ class ViewpointSamplingLatch:
             or type(view_settled) is not bool
         ):
             raise ValueError("sampling state flags must be boolean")
+        if equivalent_target_face_ids and (
+            len(equivalent_target_face_ids) != len(equivalent_target_poses)
+        ):
+            raise ValueError(
+                "equivalent target face IDs must match equivalent target poses"
+            )
+        if equivalent_target_revisions and (
+            len(equivalent_target_revisions) != len(equivalent_target_poses)
+        ):
+            raise ValueError(
+                "equivalent target revisions must match equivalent target poses"
+            )
 
         if self.target_pose is None:
             if axis_input_reason not in self._START_REASONS:
                 return ViewpointSamplingUpdate(
-                    False, None, False, "axis_not_sampleable"
+                    False,
+                    None,
+                    False,
+                    "axis_not_sampleable",
+                    self.arrival_status(),
                 )
             if (
                 not stationary
@@ -135,40 +580,134 @@ class ViewpointSamplingLatch:
                 or not view_settled
             ):
                 return ViewpointSamplingUpdate(
-                    False, None, False, "acquisition_not_settled"
+                    False,
+                    None,
+                    False,
+                    "acquisition_not_settled",
+                    self.arrival_status(),
                 )
             self.target_pose = candidate_pose
+            self._arrival_target = ViewpointSamplingMaterialTarget(
+                pose=candidate_pose,
+                face_id=target_face_id,
+                target_revision=target_revision,
+            )
+            arrival = self._arrival_latch.update(
+                pose=robot_pose,
+                target=self._arrival_target,
+            )
             return ViewpointSamplingUpdate(
-                True, self.target_pose, True, "sampling_started"
+                True,
+                self.target_pose,
+                True,
+                "sampling_started",
+                arrival.to_status_dict(),
             )
 
-        reached = math.hypot(
-            robot_pose.x_m - self.target_pose.x_m,
-            robot_pose.y_m - self.target_pose.y_m,
-        ) <= self.arrival_tolerance_m
+        target_candidates = [
+            ViewpointSamplingMaterialTarget(
+                pose=self.target_pose,
+                face_id=target_face_id,
+                target_revision=target_revision,
+            )
+        ]
+        for index, pose in enumerate(equivalent_target_poses):
+            face_id = (
+                equivalent_target_face_ids[index]
+                if equivalent_target_face_ids
+                else f"sampling_equivalent_{index}"
+            )
+            revision = (
+                equivalent_target_revisions[index]
+                if equivalent_target_revisions
+                else target_revision
+            )
+            target = ViewpointSamplingMaterialTarget(
+                pose=pose,
+                face_id=face_id,
+                target_revision=revision,
+            )
+            if target not in target_candidates:
+                target_candidates.append(target)
+        if self._arrival_latch.arrived and self._arrival_target in target_candidates:
+            selected_target = self._arrival_target
+        else:
+            selected_target = min(
+                target_candidates,
+                key=lambda target: math.hypot(
+                    robot_pose.x_m - target.pose.x_m,
+                    robot_pose.y_m - target.pose.y_m,
+                ),
+            )
+        self._arrival_target = selected_target
+        arrival = self._arrival_latch.update(
+            pose=robot_pose,
+            target=selected_target,
+        )
+        if arrival.arrived and stationary and not view_centered:
+            recenter_available = (
+                axis_input_reason in self._START_REASONS
+                and self._finite_pose(recenter_pose)
+                and self._target_changed(recenter_pose, selected_target.pose)
+            )
+            if recenter_available:
+                assert recenter_pose is not None
+                self.target_pose = recenter_pose
+                self._arrival_target = ViewpointSamplingMaterialTarget(
+                    pose=recenter_pose,
+                    face_id=target_face_id,
+                    target_revision=target_revision,
+                )
+                arrival = self._arrival_latch.update(
+                    pose=robot_pose,
+                    target=self._arrival_target,
+                )
+                return ViewpointSamplingUpdate(
+                    True,
+                    self.target_pose,
+                    True,
+                    "sampling_recentered_after_uncentered_arrival",
+                    arrival.to_status_dict(),
+                )
+            return ViewpointSamplingUpdate(
+                True,
+                self.target_pose,
+                False,
+                "sampling_recenter_unavailable",
+                arrival.to_status_dict(),
+            )
         if (
             axis_input_reason == "oblique_silhouette"
             and stationary
-            and reached
+            and arrival.arrived
             and view_centered
             and view_settled
         ):
-            changed = (
-                math.hypot(
-                    candidate_pose.x_m - self.target_pose.x_m,
-                    candidate_pose.y_m - self.target_pose.y_m,
-                )
-                > 1.0e-6
-                or abs(normalize_angle(candidate_pose.yaw_rad - self.target_pose.yaw_rad))
-                > 1.0e-6
-            )
+            changed = self._target_changed(candidate_pose, self.target_pose)
             if changed:
                 self.target_pose = candidate_pose
+                self._arrival_target = ViewpointSamplingMaterialTarget(
+                    pose=candidate_pose,
+                    face_id=target_face_id,
+                    target_revision=target_revision,
+                )
+                arrival = self._arrival_latch.update(
+                    pose=robot_pose,
+                    target=self._arrival_target,
+                )
                 return ViewpointSamplingUpdate(
-                    True, self.target_pose, True, "sampling_advanced"
+                    True,
+                    self.target_pose,
+                    True,
+                    "sampling_advanced",
+                    arrival.to_status_dict(),
                 )
         return ViewpointSamplingUpdate(
-            True, self.target_pose, False, "sampling_target_held"
+            True,
+            self.target_pose,
+            False,
+            "sampling_target_held",
+            arrival.to_status_dict(),
         )
 
 
@@ -218,6 +757,79 @@ def normalize_angle(angle_rad: float) -> float:
     return math.atan2(math.sin(angle_rad), math.cos(angle_rad))
 
 
+def sampling_recenter_pose(
+    *,
+    current_target_pose: Pose2D | None,
+    robot_pose: Pose2D,
+    center_error_rad: float | None,
+    target_distance_m: float,
+    max_correction_rad: float,
+) -> Pose2D | None:
+    """Build one bounded off-center correction without moving the stand.
+
+    The current material target is the only source of stand geometry.  Its
+    yaw points from the target toward the stand, so adding one target distance
+    recovers the frozen center.  The corrected target keeps that exact center
+    and radius while applying the bounded image error around the robot's
+    observed yaw.  Invalid or unavailable inputs return ``None`` so callers
+    cannot accidentally fall back to a per-frame candidate.
+    """
+
+    if not isinstance(current_target_pose, Pose2D) or not isinstance(
+        robot_pose, Pose2D
+    ):
+        return None
+    values = (
+        current_target_pose.x_m,
+        current_target_pose.y_m,
+        current_target_pose.yaw_rad,
+        robot_pose.x_m,
+        robot_pose.y_m,
+        robot_pose.yaw_rad,
+        center_error_rad,
+        target_distance_m,
+        max_correction_rad,
+    )
+    try:
+        inputs_are_finite = all(
+            value is not None and math.isfinite(value)
+            for value in values
+        )
+    except TypeError:
+        return None
+    if not inputs_are_finite:
+        return None
+    if target_distance_m <= 0.0 or max_correction_rad <= 0.0:
+        return None
+
+    correction_rad = max(
+        -max_correction_rad,
+        min(max_correction_rad, center_error_rad),
+    )
+    corrected_yaw_rad = normalize_angle(
+        robot_pose.yaw_rad - correction_rad
+    )
+    stand_x_m = (
+        current_target_pose.x_m
+        + target_distance_m * math.cos(current_target_pose.yaw_rad)
+    )
+    stand_y_m = (
+        current_target_pose.y_m
+        + target_distance_m * math.sin(current_target_pose.yaw_rad)
+    )
+    corrected = Pose2D(
+        stand_x_m - target_distance_m * math.cos(corrected_yaw_rad),
+        stand_y_m - target_distance_m * math.sin(corrected_yaw_rad),
+        corrected_yaw_rad,
+    )
+    if not all(
+        math.isfinite(value)
+        for value in (corrected.x_m, corrected.y_m, corrected.yaw_rad)
+    ):
+        return None
+    return corrected
+
+
 def refined_viewpoint_pose(
     measurement: ViewpointMeasurement, config: ViewpointConfig
 ) -> Pose2D:
@@ -228,9 +840,12 @@ def refined_viewpoint_pose(
     )
     correction = 0.0
     if measurement.camera_yaw_rad is not None and math.isfinite(measurement.camera_yaw_rad):
+        damped_camera_yaw_rad = (
+            config.tangential_correction_gain * measurement.camera_yaw_rad
+        )
         correction = max(
             -config.max_tangential_step_rad,
-            min(config.max_tangential_step_rad, measurement.camera_yaw_rad),
+            min(config.max_tangential_step_rad, damped_camera_yaw_rad),
         )
     refined_bearing = normalize_angle(observer_bearing + correction)
     return Pose2D(
@@ -330,6 +945,7 @@ class DynamicTargetUpdate:
     axis_confidence: float
     side_index: int | None
     frozen: bool
+    axis_sample_count: int = 0
 
 
 class AxialAngleFilter:
@@ -450,6 +1066,7 @@ class DynamicPreApproachTracker:
         self.current_normal_rad: float | None = None
         self.committed_axis_rad: float | None = None
         self.committed_axis_confidence: float | None = None
+        self.committed_axis_sample_count: int = 0
         self.frozen = False
 
     def reset_uncommitted_samples(self) -> None:
@@ -476,6 +1093,7 @@ class DynamicPreApproachTracker:
             self.committed_axis_confidence,
             self.current_side,
             True,
+            self.committed_axis_sample_count,
         )
 
     def _remember_physical_side(
@@ -526,7 +1144,7 @@ class DynamicPreApproachTracker:
         )
         if stable is None:
             return DynamicTargetUpdate(False, "axis_samples_not_stable", self.current_pose, filtered_axis, confidence, self.current_side, False)
-        filtered_axis, confidence, _inlier_count = stable
+        filtered_axis, confidence, inlier_count = stable
         if confidence < self.config.min_axis_confidence:
             return DynamicTargetUpdate(False, "axis_consensus_uncertain", self.current_pose, filtered_axis, confidence, self.current_side, False)
         candidates = face_normal_candidates(self.stand, filtered_axis, self.config.approach_offset_m)
@@ -545,5 +1163,15 @@ class DynamicPreApproachTracker:
         # axis that no longer generated current_pose.
         self.committed_axis_rad = filtered_axis
         self.committed_axis_confidence = confidence
+        self.committed_axis_sample_count = inlier_count
         self.frozen = True
-        return DynamicTargetUpdate(True, "target_committed", selected, filtered_axis, confidence, selected_side, True)
+        return DynamicTargetUpdate(
+            True,
+            "target_committed",
+            selected,
+            filtered_axis,
+            confidence,
+            selected_side,
+            True,
+            inlier_count,
+        )

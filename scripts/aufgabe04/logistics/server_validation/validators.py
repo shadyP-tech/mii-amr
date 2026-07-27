@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime, timezone
 from typing import Iterable, Sequence
 
 from scripts.aufgabe04.task_client.models import RobotPlan, RobotStatus, ServerTaskSnapshot
 
-from .models import ValidatedServerTask
+from .models import ValidatedServerTask, server_order_sha256
 
 
 def _parse_timestamp(value: str, *, field_name: str) -> datetime:
@@ -41,6 +43,42 @@ def resolve_scanned_station(plan: RobotPlan, qr_id: str) -> str:
     if normalized in known_stations:
         return normalized
     raise ValueError(f"unknown QR or station id: {normalized}")
+
+
+def _remaining_station_order(plan: RobotPlan, target_station: str) -> tuple[str, ...]:
+    """Return the server path suffix beginning at its current target.
+
+    ``next_step_index`` is treated as a lower bound.  Searching for the target
+    avoids silently assuming that plan-step and expanded-path indices describe
+    the same representation.
+    """
+
+    if plan.next_step_index < 0:
+        raise ValueError("server plan next_step_index must be non-negative")
+    if not plan.expanded_path:
+        raise ValueError("server plan expanded_path must not be empty")
+    matching_indices = [
+        index
+        for index, station_id in enumerate(plan.expanded_path)
+        if index >= plan.next_step_index and station_id == target_station
+    ]
+    if not matching_indices:
+        raise ValueError(
+            "server target does not occur at or after next_step_index in expanded_path: "
+            f"{target_station}"
+        )
+    return tuple(plan.expanded_path[matching_indices[0] :])
+
+
+def _json_sha256(payload: object) -> str:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def build_server_task_snapshot(
@@ -78,12 +116,14 @@ def validate_server_task(
         raise ValueError("status robot_id does not match configured robot")
     if snapshot.plan.robot_id != snapshot.robot_id:
         raise ValueError("plan robot_id does not match configured robot")
-    status_age = (now_utc - _parse_timestamp(snapshot.status.last_seen_at, field_name="last_seen_at")).total_seconds()
+    status_timestamp = _parse_timestamp(snapshot.status.last_seen_at, field_name="last_seen_at")
+    status_age = (now_utc - status_timestamp).total_seconds()
     if status_age < 0:
         raise ValueError("status timestamp is in the future")
     if status_age > max_status_age_sec:
         raise ValueError("robot status is stale")
-    plan_age = (now_utc - _parse_timestamp(snapshot.plan.generated_at, field_name="generated_at")).total_seconds()
+    plan_timestamp = _parse_timestamp(snapshot.plan.generated_at, field_name="generated_at")
+    plan_age = (now_utc - plan_timestamp).total_seconds()
     if plan_age < 0:
         raise ValueError("plan timestamp is in the future")
     if plan_age > max_plan_age_sec:
@@ -97,12 +137,33 @@ def validate_server_task(
         raise ValueError(f"target station is not in server plan: {snapshot.status.target}")
     if snapshot.resolved_station_id not in known_server_stations:
         raise ValueError(f"resolved scanned station is not in server plan: {snapshot.resolved_station_id}")
+    ordered_station_ids = _remaining_station_order(snapshot.plan, snapshot.status.target)
+    unknown_ordered_stations = [
+        station_id for station_id in ordered_station_ids if station_id not in local_stations
+    ]
+    if unknown_ordered_stations:
+        raise ValueError(
+            "server order contains stations not in the local station map: "
+            + ", ".join(unknown_ordered_stations)
+        )
+    order_digest = server_order_sha256(
+        robot_id=snapshot.robot_id,
+        mission_id=snapshot.status.mission_id,
+        target_station=snapshot.status.target,
+        plan_step_index=snapshot.plan.next_step_index,
+        ordered_station_ids=ordered_station_ids,
+        plan_generated_at_sec=plan_timestamp.timestamp(),
+    )
+    source_plan_digest = _json_sha256(snapshot.plan.raw)
     evidence = {
         "scanned_qr_id": snapshot.scanned_qr_id,
         "resolved_station_id": snapshot.resolved_station_id,
         "server_target": snapshot.status.target,
         "status_age_sec": round(status_age, 3),
         "plan_age_sec": round(plan_age, 3),
+        "ordered_station_ids": ordered_station_ids,
+        "order_sha256": order_digest,
+        "source_plan_sha256": source_plan_digest,
         "admin_observed_endpoints": True,
     }
     return ValidatedServerTask(
@@ -115,5 +176,10 @@ def validate_server_task(
         cargo=snapshot.status.cargo,
         plan_step_index=snapshot.plan.next_step_index,
         evidence=evidence,
+        ordered_station_ids=ordered_station_ids,
+        status_observed_at_sec=status_timestamp.timestamp(),
+        plan_generated_at_sec=plan_timestamp.timestamp(),
+        validated_at_sec=now_utc.timestamp(),
+        order_sha256=order_digest,
+        source_plan_sha256=source_plan_digest,
     )
-

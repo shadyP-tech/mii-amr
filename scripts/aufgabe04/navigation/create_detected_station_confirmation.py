@@ -20,14 +20,20 @@ from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds
 from scripts.aufgabe04.navigation.plan_first_detected_station import (
     validate_observation_provenance,
 )
-from scripts.aufgabe04.navigation.route_context import file_sha256
+from scripts.aufgabe04.navigation.map_io import freeze_map_bundle
 from scripts.aufgabe04.perception.stand_confirmation import (
     StandConfirmationAccumulator,
     StandConfirmationConfig,
     select_confirmed_stand_by_id,
     select_unique_confirmed_stand,
 )
-from scripts.aufgabe04.perception.stand_observation import load_observation_jsonl
+from scripts.aufgabe04.perception.stand_observation import (
+    DEFAULT_OBSERVATION_TIMING_LIMITS,
+    VALID_OBSERVER_CLOCKS,
+    ObservationTimingLimits,
+    load_observation_jsonl,
+    validated_observation_stream_clock,
+)
 
 
 DEFAULT_OBSERVATIONS_JSONL = Path("results/aufgabe04/detected_stations/stand_observations.jsonl")
@@ -40,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--observations-jsonl", type=Path, default=DEFAULT_OBSERVATIONS_JSONL)
     parser.add_argument("--map", required=True, type=Path, help="ROS map YAML path")
+    parser.add_argument("--semantic-map-id", default="")
     parser.add_argument("--station-id", required=True)
     parser.add_argument(
         "--stand-id",
@@ -72,10 +79,34 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-observation-age-sec", type=float, default=8.0)
     parser.add_argument("--min-confidence", type=float, default=0.55)
     parser.add_argument("--min-boundary-clearance-m", type=float, default=0.10)
-    parser.add_argument("--max-tf-age-sec", type=float, default=1.0)
+    parser.add_argument(
+        "--max-tf-age-sec",
+        type=float,
+        default=DEFAULT_OBSERVATION_TIMING_LIMITS.max_tf_age_sec,
+    )
+    parser.add_argument(
+        "--max-scan-age-sec",
+        type=float,
+        default=DEFAULT_OBSERVATION_TIMING_LIMITS.max_scan_age_sec,
+    )
+    parser.add_argument(
+        "--max-future-timestamp-sec",
+        type=float,
+        default=DEFAULT_OBSERVATION_TIMING_LIMITS.max_future_timestamp_sec,
+    )
+    parser.add_argument(
+        "--max-tf-scan-skew-sec",
+        type=float,
+        default=DEFAULT_OBSERVATION_TIMING_LIMITS.max_tf_scan_skew_sec,
+    )
     parser.add_argument("--required-map-frame", default="map")
     parser.add_argument("--required-base-frame", default="base_footprint")
     parser.add_argument("--required-localization-source", default=None, choices=["amcl", "tf"])
+    parser.add_argument(
+        "--required-observer-clock",
+        default=None,
+        choices=sorted(VALID_OBSERVER_CLOCKS),
+    )
     parser.add_argument("--arena-length-m", type=float, default=ArenaBounds.length_m)
     parser.add_argument("--arena-width-m", type=float, default=ArenaBounds.width_m)
     parser.add_argument("--arena-center-x-m", type=float, default=ArenaBounds.center_x_m)
@@ -89,6 +120,11 @@ def build_confirmation_receipt(args) -> dict[str, object]:
     station_id = args.station_id.strip().upper()
     if not station_id:
         raise ValueError("station id must not be empty")
+    map_bundle = freeze_map_bundle(
+        args.map,
+        semantic_map_id=args.semantic_map_id or args.map.stem,
+        planning_frame=args.required_map_frame,
+    )
     observations = load_observation_jsonl(args.observations_jsonl)
     if not observations:
         raise ValueError("no stand observations found")
@@ -100,7 +136,23 @@ def build_confirmation_receipt(args) -> dict[str, object]:
             required_base_frame=args.required_base_frame,
             required_localization_source=args.required_localization_source,
             max_tf_age_sec=args.max_tf_age_sec,
+            max_scan_age_sec=args.max_scan_age_sec,
+            max_future_timestamp_sec=args.max_future_timestamp_sec,
+            max_tf_scan_skew_sec=args.max_tf_scan_skew_sec,
+            required_observer_clock=args.required_observer_clock,
+            expected_map_yaml_sha256=map_bundle.yaml_sha256,
+            expected_map_bundle_sha256=map_bundle.bundle_sha256,
         )
+    observer_clock = validated_observation_stream_clock(
+        observations,
+        required_observer_clock=args.required_observer_clock,
+    )
+    timing_limits = ObservationTimingLimits(
+        max_scan_age_sec=args.max_scan_age_sec,
+        max_future_timestamp_sec=args.max_future_timestamp_sec,
+        max_tf_age_sec=args.max_tf_age_sec,
+        max_tf_scan_skew_sec=args.max_tf_scan_skew_sec,
+    ).validated()
 
     arena_bounds = ArenaBounds(
         length_m=args.arena_length_m,
@@ -147,9 +199,14 @@ def build_confirmation_receipt(args) -> dict[str, object]:
         "source_observation_ids": list(stand.source_observation_ids),
         "observations_jsonl": str(args.observations_jsonl),
         "map_yaml": str(args.map),
-        "map_yaml_sha256": file_sha256(args.map),
+        "map_yaml_sha256": map_bundle.yaml_sha256,
+        "map_image_sha256": map_bundle.image_sha256,
+        "map_bundle_sha256": map_bundle.bundle_sha256,
         "required_map_frame": args.required_map_frame,
         "required_base_frame": args.required_base_frame,
+        "observer_clock": observer_clock,
+        "required_observer_clock": args.required_observer_clock,
+        "observation_timing_limits": timing_limits.as_dict(),
         "operator_note": args.operator_note,
     }
     if args.confirmation_source == "operator":

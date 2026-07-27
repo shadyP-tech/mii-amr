@@ -21,7 +21,10 @@ from scripts.aufgabe04.navigation.ros_runtime_config import (
     resolve_runtime_config,
 )
 from scripts.aufgabe04.navigation.run_events import configure_event_logger, emit_event
-from scripts.aufgabe04.navigation.dynamic_route_handoff import DynamicRouteSource
+from scripts.aufgabe04.navigation.dynamic_route_handoff import (
+    DynamicRouteSource,
+    validate_arena_boundary_evidence,
+)
 from scripts.aufgabe04.navigation.route_revision_store import (
     LoadedRouteRevision,
     RouteRevisionError,
@@ -36,15 +39,36 @@ from scripts.aufgabe04.navigation.safety_checks import (
 )
 from scripts.aufgabe04.navigation.segment_run_logger import append_segment_run
 from scripts.aufgabe04.navigation.follower_models import FollowerResult
+from scripts.aufgabe04.navigation.execution_route_certificate import (
+    execution_route_certificate_sha256,
+    load_execution_route_certificate,
+    validate_execution_route_identity,
+)
+from scripts.aufgabe04.navigation.mission_execution_gate import (
+    DiagnosticsSnapshot,
+    MissionExecutionBinding,
+    load_diagnostics_snapshot,
+    validate_logistics_execution_bundle,
+)
 from scripts.aufgabe04.navigation.simple_waypoint_follower import (
     DYNAMIC_VIEWPOINT_ROUTE_KINDS,
     FollowerConfig,
+    INTERMEDIATE_TERMINAL_HEADING_DISTANCE_COMPARISON_EPSILON_M,
+    INTERMEDIATE_TERMINAL_HEADING_ENTRY_TOLERANCE_M,
+    INTERMEDIATE_TERMINAL_HEADING_HOLD_TOLERANCE_M,
+    INTERMEDIATE_TERMINAL_HEADING_TARGET_ENVELOPE_RADIUS_M,
     PHYSICAL_ROUTE_KINDS,
     STATIC_PHYSICAL_ROUTE_KINDS,
+    controller_config_for_route_kind,
+    intermediate_terminal_heading_entry_tolerance_m,
     run_simple_waypoint_follower,
 )
 from scripts.aufgabe04.navigation.waypoint_controller import ControllerConfig
-from scripts.aufgabe04.navigation.waypoint_csv import load_route_leg, poses_from_waypoints
+from scripts.aufgabe04.navigation.waypoint_csv import (
+    SelectedRouteLeg,
+    load_route_leg,
+    poses_from_waypoints,
+)
 
 
 DEFAULT_ROUTE_CSV = Path("results/aufgabe04/routes/station_route.csv")
@@ -52,6 +76,7 @@ DEFAULT_DIAGNOSTICS_JSON = Path("results/aufgabe04/routes/station_route_diagnost
 DEFAULT_RUN_LOG = Path("results/aufgabe04/station_segment_runs.csv")
 DEFAULT_EVENT_LOG_DIR = Path("results/aufgabe04/run_events")
 _CATALOG_ROUTE_INITIAL_DISTANCE_LIMIT_M = 0.15
+LEGACY_SIMULATION_ROUTE_KIND = "legacy_simulation_waypoint"
 
 
 def _execution_initial_distance_limit(requested_m: float, route_kind: str) -> float:
@@ -60,6 +85,63 @@ def _execution_initial_distance_limit(requested_m: float, route_kind: str) -> fl
     if route_kind in STATIC_PHYSICAL_ROUTE_KINDS:
         return min(requested_m, _CATALOG_ROUTE_INITIAL_DISTANCE_LIMIT_M)
     return requested_m
+
+
+def _simulation_odom_fallback_admission_failure(
+    args,
+    resolved,
+    leg: SelectedRouteLeg,
+    *,
+    route_purpose: str,
+    authoritative_dynamic_route: bool,
+) -> str:
+    """Return why the explicit direct-odometry recovery is not admissible."""
+
+    if not args.allow_simulation_odom_after_stale_tf:
+        return ""
+    if not args.allow_sim_time:
+        return (
+            "--allow-simulation-odom-after-stale-tf requires "
+            "--allow-sim-time"
+        )
+    if resolved.use_sim_time is not True:
+        return (
+            "simulation odometry recovery requires resolved "
+            "use_sim_time=true"
+        )
+    if resolved.localization_source != "tf":
+        return (
+            "simulation odometry recovery requires "
+            "--localization-source tf"
+        )
+    if resolved.map_frame != resolved.odom_frame:
+        return (
+            "simulation odometry recovery requires map_frame == odom_frame"
+        )
+    if not leg.simulation_only:
+        return (
+            "simulation odometry recovery requires "
+            "route simulation_only=true"
+        )
+
+    static_survey = (
+        leg.route_kind in STATIC_PHYSICAL_ROUTE_KINDS
+        and route_purpose == "survey"
+        and args.allow_unbound_survey_simulation_route
+    )
+    dynamic_viewpoint_survey = (
+        leg.route_kind in DYNAMIC_VIEWPOINT_ROUTE_KINDS
+        and authoritative_dynamic_route
+        and route_purpose in ("", "survey")
+    )
+    if not (static_survey or dynamic_viewpoint_survey):
+        return (
+            "simulation odometry recovery is admitted only for an explicit "
+            "static route_purpose=survey demonstration or an authoritative "
+            "dynamic viewpoint survey; logistics, legacy, and unknown static "
+            "route purposes are rejected"
+        )
+    return ""
 
 
 def _load_execution_route_leg(
@@ -110,6 +192,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--route-csv", type=Path, default=DEFAULT_ROUTE_CSV)
     parser.add_argument("--diagnostics-json", type=Path, default=DEFAULT_DIAGNOSTICS_JSON)
+    parser.add_argument("--route-certificate-json", type=Path, default=None)
+    parser.add_argument("--mission-plan-manifest", type=Path, default=None)
+    parser.add_argument("--survey-manifest", type=Path, default=None)
+    parser.add_argument("--route-bundle-json", type=Path, default=None)
+    parser.add_argument("--planner-config-json", type=Path, default=None)
+    parser.add_argument("--runtime-map-bundle-json", type=Path, default=None)
+    parser.add_argument("--runtime-environment", type=Path, default=None)
+    parser.add_argument("--candidate-snapshot", type=Path, default=None)
+    parser.add_argument("--station-identity-registry", type=Path, default=None)
+    parser.add_argument("--arrival-pose-catalog", type=Path, default=None)
+    parser.add_argument("--task-snapshot", type=Path, default=None)
     parser.add_argument("--leg-index", type=int, required=True)
     parser.add_argument("--results-csv", type=Path, default=DEFAULT_RUN_LOG)
     parser.add_argument("--run-id", default=None)
@@ -124,9 +217,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-frame", default="base_footprint")
     parser.add_argument("--localization-source", default="amcl", choices=["amcl", "tf"])
     parser.add_argument("--allow-sim-time", action="store_true")
+    parser.add_argument(
+        "--allow-simulation-odom-after-stale-tf",
+        action="store_true",
+        help=(
+            "Simulation-survey-only recovery after the existing zero plus "
+            "bounded stale-TF retry. Disabled by default and never admitted "
+            "for logistics or real-time runs."
+        ),
+    )
     parser.add_argument("--max-linear-mps", type=float, default=0.055)
     parser.add_argument("--max-angular-radps", type=float, default=0.18)
     parser.add_argument("--goal-tolerance-m", type=float, default=0.08)
+    parser.add_argument(
+        "--physical-waypoint-tolerance-m",
+        type=float,
+        default=0.02,
+        help=(
+            "Capture tolerance for intermediate vertices on certified physical "
+            "routes; it must remain inside the certified route tube."
+        ),
+    )
     parser.add_argument(
         "--physical-goal-tolerance-m",
         type=float,
@@ -150,6 +261,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-odom-age-sec", type=float, default=1.0)
     parser.add_argument("--max-tf-age-sec", type=float, default=1.0)
     parser.add_argument("--max-amcl-age-sec", type=float, default=2.0)
+    parser.add_argument(
+        "--max-future-timestamp-sec",
+        type=float,
+        default=0.25,
+        help="Reject sensor or TF stamps farther than this into the future.",
+    )
+    parser.add_argument(
+        "--certified-route-tube-radius-m",
+        type=float,
+        default=0.03,
+        help=(
+            "Maximum live base/pursuit deviation from the active certified "
+            "polyline segment on physical stand approaches."
+        ),
+    )
+    parser.add_argument(
+        "--certified-route-chord-sample-spacing-m",
+        type=float,
+        default=0.01,
+        help="Sampling spacing for runtime pursuit-chord certificate checks.",
+    )
     parser.add_argument("--preflight-observation-window-sec", type=float, default=2.0)
     parser.add_argument("--initial-sensor-wait-sec", type=float, default=2.0)
     parser.add_argument("--waypoint-timeout-sec", type=float, default=45.0)
@@ -172,13 +304,51 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--viewpoint-sampling-target-timeout-sec",
+        type=float,
+        default=30.0,
+        help=(
+            "Simulation-only convergence budget for one material sampling "
+            "target; newer targets reset this clock but not the total phase clock."
+        ),
+    )
+    parser.add_argument(
         "--viewpoint-sampling-goal-tolerance-m",
         type=float,
         default=0.01,
         help=(
-            "Simulation-only position tolerance for tangential camera samples; "
-            "kept tighter than generic transit so angular viewpoint corrections "
-            "are not consumed by position tolerance."
+            "Simulation-only position tolerance for axis acquisition and "
+            "tangential camera samples; kept tighter than generic transit so "
+            "angular viewpoint corrections are not consumed by position error."
+        ),
+    )
+    parser.add_argument(
+        "--viewpoint-sampling-terminal-heading-hold-tolerance-m",
+        type=float,
+        default=INTERMEDIATE_TERMINAL_HEADING_HOLD_TOLERANCE_M,
+        help=(
+            "Simulation-only bounded terminal-yaw latch radius. Once the "
+            "strict position target is captured, leaving this radius stops "
+            "the follower instead of resuming point-bearing pursuit."
+        ),
+    )
+    parser.add_argument(
+        "--viewpoint-sampling-target-distance-m",
+        type=float,
+        default=0.33,
+        help=(
+            "Simulation-only nominal stand-center distance encoded by each "
+            "intermediate target pose."
+        ),
+    )
+    parser.add_argument(
+        "--viewpoint-sampling-terminal-heading-target-envelope-radius-m",
+        type=float,
+        default=INTERMEDIATE_TERMINAL_HEADING_TARGET_ENVELOPE_RADIUS_M,
+        help=(
+            "Simulation-only maximum pose-to-target drift retained during "
+            "zero-linear terminal yaw; the stand-distance annulus is checked "
+            "independently."
         ),
     )
     parser.add_argument(
@@ -186,8 +356,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=math.radians(5.0),
         help=(
-            "Simulation-only terminal heading tolerance for camera sampling; "
-            "kept tight enough for the stand to satisfy the image-centering gate."
+            "Simulation-only terminal heading tolerance for axis acquisition "
+            "and camera sampling; kept tight enough for the stand to satisfy "
+            "the image-centering gate."
         ),
     )
     parser.add_argument("--stuck-timeout-sec", type=float, default=8.0)
@@ -263,6 +434,23 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--allow-legacy-simulation-route",
+        action="store_true",
+        help=(
+            "Explicitly allow route_kind=legacy_simulation_waypoint. The CSV "
+            "must also declare simulation_only=true and --allow-sim-time is required."
+        ),
+    )
+    parser.add_argument(
+        "--allow-unbound-survey-simulation-route",
+        action="store_true",
+        help=(
+            "Allow a static route_purpose=survey demonstration only when both "
+            "the CSV and runtime are explicitly simulation-only. Logistics "
+            "routes can never use this escape hatch."
+        ),
+    )
     parser.add_argument("--allow-noop", action="store_true")
     parser.add_argument(
         "--prompt-for-initialpose",
@@ -282,6 +470,71 @@ def build_parser() -> argparse.ArgumentParser:
         help="Namespace-qualified node identity allowed in preflight, e.g. /robot1/controller_server",
     )
     return parser
+
+
+def _runtime_command_owner(namespace: str) -> str:
+    normalized = str(namespace).strip()
+    if not normalized or normalized == "/":
+        return "/aufgabe04_simple_waypoint_follower"
+    return f"/{normalized.strip('/')}/aufgabe04_simple_waypoint_follower"
+
+
+def _execution_certificate_failures(
+    *,
+    route_leg: SelectedRouteLeg,
+    diagnostics_snapshot: DiagnosticsSnapshot,
+    explicit_certificate_path: Path | None,
+    route_kind: str,
+    runtime_namespace: str,
+    runtime_planning_frame: str,
+    tracking_tube_radius_m: float,
+) -> list[str]:
+    try:
+        metadata = diagnostics_snapshot.metadata
+        recorded_path = metadata.get("route_certificate_path")
+        certificate_path = explicit_certificate_path
+        if certificate_path is None:
+            if not isinstance(recorded_path, str) or not recorded_path:
+                raise ValueError("physical route has no execution certificate")
+            certificate_path = Path(recorded_path)
+        certificate = load_execution_route_certificate(certificate_path)
+        recorded_hash = metadata.get("route_certificate_sha256")
+        if (
+            not isinstance(recorded_hash, str)
+            or recorded_hash != execution_route_certificate_sha256(certificate)
+        ):
+            raise ValueError(
+                "execution route certificate SHA-256 does not match diagnostics"
+            )
+        map_bundle_sha256 = metadata.get("map_bundle_sha256", "")
+        candidate_snapshot_sha256 = metadata.get(
+            "candidate_snapshot_sha256", ""
+        )
+        diagnostics_planning_frame = str(metadata.get("planning_frame", ""))
+        if diagnostics_planning_frame != runtime_planning_frame:
+            raise ValueError(
+                "route diagnostics planning frame differs from runtime map frame: "
+                f"diagnostics={diagnostics_planning_frame!r}, "
+                f"runtime={runtime_planning_frame!r}"
+            )
+        validate_execution_route_identity(
+            certificate,
+            route_path=route_leg.source_path,
+            route_snapshot_sha256=route_leg.source_sha256,
+            planning_frame=runtime_planning_frame,
+            route_kind=route_kind,
+            waypoint_count=route_leg.source_waypoint_count,
+            command_owner=_runtime_command_owner(runtime_namespace),
+            map_bundle_sha256=str(map_bundle_sha256),
+            candidate_snapshot_sha256=str(candidate_snapshot_sha256),
+        )
+        if abs(certificate.tracking_tube_radius_m - tracking_tube_radius_m) > 1.0e-9:
+            raise ValueError(
+                "runtime tracking tube differs from execution certificate"
+            )
+        return []
+    except (OSError, ValueError) as exc:
+        return [f"execution route certificate is invalid: {exc}"]
 
 
 def _physical_checklist(args, resolved) -> None:
@@ -481,20 +734,99 @@ def main(argv: list[str] | None = None) -> int:
     ):
         parser.error("--viewpoint-sampling-timeout-sec must be positive")
     if (
+        not math.isfinite(args.viewpoint_sampling_target_timeout_sec)
+        or args.viewpoint_sampling_target_timeout_sec <= 0.0
+    ):
+        parser.error("--viewpoint-sampling-target-timeout-sec must be positive")
+    if (
+        not math.isfinite(args.physical_waypoint_tolerance_m)
+        or args.physical_waypoint_tolerance_m <= 0.0
+    ):
+        parser.error("--physical-waypoint-tolerance-m must be positive")
+    if (
         not math.isfinite(args.physical_goal_tolerance_m)
         or args.physical_goal_tolerance_m <= 0.0
     ):
         parser.error("--physical-goal-tolerance-m must be positive")
+    if (
+        not math.isfinite(args.max_future_timestamp_sec)
+        or args.max_future_timestamp_sec < 0.0
+    ):
+        parser.error("--max-future-timestamp-sec must be non-negative")
+    if (
+        not math.isfinite(args.certified_route_tube_radius_m)
+        or args.certified_route_tube_radius_m <= 0.0
+    ):
+        parser.error("--certified-route-tube-radius-m must be positive")
+    if args.physical_goal_tolerance_m > args.certified_route_tube_radius_m:
+        parser.error(
+            "--physical-goal-tolerance-m must not exceed "
+            "--certified-route-tube-radius-m"
+        )
+    if (
+        args.physical_waypoint_tolerance_m
+        > args.certified_route_tube_radius_m
+    ):
+        parser.error(
+            "--physical-waypoint-tolerance-m must not exceed "
+            "--certified-route-tube-radius-m"
+        )
+    if (
+        not math.isfinite(args.certified_route_chord_sample_spacing_m)
+        or args.certified_route_chord_sample_spacing_m <= 0.0
+    ):
+        parser.error("--certified-route-chord-sample-spacing-m must be positive")
     if (
         not math.isfinite(args.viewpoint_sampling_goal_tolerance_m)
         or args.viewpoint_sampling_goal_tolerance_m <= 0.0
     ):
         parser.error("--viewpoint-sampling-goal-tolerance-m must be positive")
     if (
+        not math.isfinite(
+            args.viewpoint_sampling_terminal_heading_hold_tolerance_m
+        )
+        or args.viewpoint_sampling_terminal_heading_hold_tolerance_m <= 0.0
+        or args.viewpoint_sampling_terminal_heading_hold_tolerance_m
+        > INTERMEDIATE_TERMINAL_HEADING_HOLD_TOLERANCE_M
+        or args.viewpoint_sampling_terminal_heading_hold_tolerance_m
+        < min(
+            args.viewpoint_sampling_goal_tolerance_m,
+            INTERMEDIATE_TERMINAL_HEADING_ENTRY_TOLERANCE_M,
+        )
+    ):
+        parser.error(
+            "--viewpoint-sampling-terminal-heading-hold-tolerance-m must "
+            "be no smaller than the effective entry tolerance and no "
+            "greater than 0.020"
+        )
+    if (
         not math.isfinite(args.viewpoint_sampling_heading_tolerance_rad)
         or args.viewpoint_sampling_heading_tolerance_rad <= 0.0
     ):
         parser.error("--viewpoint-sampling-heading-tolerance-rad must be positive")
+    if (
+        not math.isfinite(args.viewpoint_sampling_target_distance_m)
+        or args.viewpoint_sampling_target_distance_m
+        <= args.viewpoint_sampling_terminal_heading_hold_tolerance_m
+    ):
+        parser.error(
+            "--viewpoint-sampling-target-distance-m must be finite and "
+            "greater than the radial hold tolerance"
+        )
+    if (
+        not math.isfinite(
+            args.viewpoint_sampling_terminal_heading_target_envelope_radius_m
+        )
+        or args.viewpoint_sampling_terminal_heading_target_envelope_radius_m
+        < args.viewpoint_sampling_terminal_heading_hold_tolerance_m
+        or args.viewpoint_sampling_terminal_heading_target_envelope_radius_m
+        > INTERMEDIATE_TERMINAL_HEADING_TARGET_ENVELOPE_RADIUS_M
+    ):
+        parser.error(
+            "--viewpoint-sampling-terminal-heading-target-envelope-radius-m "
+            "must be no smaller than the radial hold tolerance and no "
+            "greater than 0.030"
+        )
     if (
         not math.isfinite(args.dynamic_route_join_tolerance_m)
         or args.dynamic_route_join_tolerance_m <= 0.0
@@ -592,6 +924,9 @@ def main(argv: list[str] | None = None) -> int:
         localization_source=resolved.localization_source,
         ros_domain_id=resolved.ros_domain_id,
         allow_sim_time=args.allow_sim_time,
+        allow_simulation_odom_after_stale_tf_requested=(
+            args.allow_simulation_odom_after_stale_tf
+        ),
     )
     if committed_route is not None:
         manifest = committed_route.manifest
@@ -644,6 +979,64 @@ def main(argv: list[str] | None = None) -> int:
         )
         parser.exit(2, f"error: route validation failed: {exc}\n")
 
+    try:
+        diagnostics_snapshot = load_diagnostics_snapshot(
+            diagnostics_json_path,
+            require_metadata=leg.route_kind in STATIC_PHYSICAL_ROUTE_KINDS,
+        )
+    except ValueError as exc:
+        emit_event(
+            event_logger,
+            "route_validation_failed",
+            run_id=args.run_id,
+            leg_index=args.leg_index,
+            status="failed",
+            stop_reason=str(exc),
+        )
+        emit_event(
+            event_logger,
+            "run_finished",
+            run_id=args.run_id,
+            final_status="route_validation_failed",
+            stop_reason=str(exc),
+            results_csv=str(args.results_csv),
+            semantic_log_path=str(args.semantic_log),
+            preflight_json_path=str(args.preflight_json or ""),
+        )
+        parser.exit(2, f"error: route diagnostics validation failed: {exc}\n")
+
+    diagnostics_metadata = diagnostics_snapshot.payload.get("metadata")
+    route_purpose_value = (
+        diagnostics_metadata.get("route_purpose")
+        if isinstance(diagnostics_metadata, dict)
+        else None
+    )
+    route_purpose = (
+        route_purpose_value
+        if isinstance(route_purpose_value, str)
+        else ""
+    )
+    known_route_kinds = DYNAMIC_VIEWPOINT_ROUTE_KINDS | STATIC_PHYSICAL_ROUTE_KINDS
+    if leg.route_kind == LEGACY_SIMULATION_ROUTE_KIND:
+        if not args.allow_legacy_simulation_route:
+            parser.exit(
+                2,
+                "error: legacy simulation route requires "
+                "--allow-legacy-simulation-route\n",
+            )
+        if not leg.simulation_only or not args.allow_sim_time:
+            parser.exit(
+                2,
+                "error: legacy route escape hatch is simulation-only and requires "
+                "simulation_only=true plus --allow-sim-time\n",
+            )
+        if committed_route is not None:
+            parser.exit(2, "error: legacy simulation route cannot use a route manifest\n")
+    elif leg.route_kind not in known_route_kinds:
+        parser.exit(
+            2,
+            f"error: missing or unknown Aufgabe04 route kind: {leg.route_kind!r}\n",
+        )
     if leg.route_kind in DYNAMIC_VIEWPOINT_ROUTE_KINDS and not leg.simulation_only:
         parser.exit(2, "error: dynamic viewpoint route is missing simulation_only provenance\n")
     if leg.route_kind in DYNAMIC_VIEWPOINT_ROUTE_KINDS and committed_route is None:
@@ -658,35 +1051,141 @@ def main(argv: list[str] | None = None) -> int:
             2,
             f"error: authoritative route has unknown dynamic route kind: {leg.route_kind!r}\n",
         )
+    simulation_odom_fallback_admission_failure = (
+        _simulation_odom_fallback_admission_failure(
+            args,
+            resolved,
+            leg,
+            route_purpose=route_purpose,
+            authoritative_dynamic_route=committed_route is not None,
+        )
+    )
+    if simulation_odom_fallback_admission_failure:
+        parser.exit(
+            2,
+            "error: "
+            + simulation_odom_fallback_admission_failure
+            + "\n",
+        )
+    allow_simulation_odom_after_stale_tf = bool(
+        args.allow_simulation_odom_after_stale_tf
+    )
 
     diagnostics_status = validate_route_diagnostics_json(
         diagnostics_json_path,
         args.leg_index,
         csv_point_count=len(leg.raw_waypoints),
         require_motion=require_motion,
+        diagnostics_payload=diagnostics_snapshot.payload,
     )
     catalog_binding_status = (
-        validate_catalog_route_binding_json(diagnostics_json_path, leg)
+        validate_catalog_route_binding_json(
+            diagnostics_json_path,
+            leg,
+            catalog_path_override=args.arrival_pose_catalog,
+            diagnostics_payload=diagnostics_snapshot.payload,
+        )
         if leg.route_kind in STATIC_PHYSICAL_ROUTE_KINDS
         else None
     )
     catalog_egress_certificate = None
     catalog_egress_failures = []
+    execution_certificate_failures = []
+    mission_execution_failures = []
+    mission_execution_binding: MissionExecutionBinding | None = None
     if leg.route_kind in STATIC_PHYSICAL_ROUTE_KINDS:
         try:
             catalog_egress_certificate = catalog_start_egress_certificate(
                 diagnostics_json_path,
                 leg,
+                diagnostics_payload=diagnostics_snapshot.payload,
             )
         except ValueError as exc:
             catalog_egress_failures.append(
                 f"catalog start-egress certificate is invalid: {exc}"
+            )
+        execution_certificate_failures = _execution_certificate_failures(
+            route_leg=leg,
+            diagnostics_snapshot=diagnostics_snapshot,
+            explicit_certificate_path=args.route_certificate_json,
+            route_kind=leg.route_kind,
+            runtime_namespace=resolved.namespace,
+            runtime_planning_frame=resolved.map_frame,
+            tracking_tube_radius_m=args.certified_route_tube_radius_m,
+        )
+        try:
+            validate_arena_boundary_evidence(diagnostics_snapshot.metadata)
+            if route_purpose == "logistics":
+                missing = [
+                    option
+                    for option, value in (
+                        ("--mission-plan-manifest", args.mission_plan_manifest),
+                        ("--survey-manifest", args.survey_manifest),
+                        ("--route-bundle-json", args.route_bundle_json),
+                        ("--planner-config-json", args.planner_config_json),
+                        ("--runtime-map-bundle-json", args.runtime_map_bundle_json),
+                        ("--runtime-environment", args.runtime_environment),
+                        ("--candidate-snapshot", args.candidate_snapshot),
+                        (
+                            "--station-identity-registry",
+                            args.station_identity_registry,
+                        ),
+                        ("--arrival-pose-catalog", args.arrival_pose_catalog),
+                        ("--task-snapshot", args.task_snapshot),
+                    )
+                    if value is None
+                ]
+                if missing:
+                    raise ValueError(
+                        "logistics execution requires " + ", ".join(missing)
+                    )
+                mission_execution_binding = validate_logistics_execution_bundle(
+                    route_leg=leg,
+                    diagnostics_path=diagnostics_json_path,
+                    route_certificate_path=args.route_certificate_json,
+                    mission_plan_path=args.mission_plan_manifest,
+                    survey_manifest_path=args.survey_manifest,
+                    route_bundle_path=args.route_bundle_json,
+                    planner_config_path=args.planner_config_json,
+                    runtime_map_bundle_path=args.runtime_map_bundle_json,
+                    runtime_environment_path=args.runtime_environment,
+                    candidate_snapshot_path=args.candidate_snapshot,
+                    station_identity_registry_path=(
+                        args.station_identity_registry
+                    ),
+                    arrival_pose_catalog_path=args.arrival_pose_catalog,
+                    task_snapshot_path=args.task_snapshot,
+                    robot_id=args.robot_id,
+                    runtime_planning_frame=resolved.map_frame,
+                    diagnostics_snapshot=diagnostics_snapshot,
+                )
+            elif route_purpose == "survey":
+                if not (
+                    args.allow_unbound_survey_simulation_route
+                    and args.allow_sim_time
+                    and leg.simulation_only
+                ):
+                    raise ValueError(
+                        "static survey route is unbound to a task mission; a "
+                        "simulation demonstration requires "
+                        "--allow-unbound-survey-simulation-route, "
+                        "--allow-sim-time, and simulation_only=true"
+                    )
+            else:
+                raise ValueError(
+                    f"static route has missing or unknown route_purpose: {route_purpose!r}"
+                )
+        except (OSError, ValueError) as exc:
+            mission_execution_failures.append(
+                f"mission execution binding is invalid: {exc}"
             )
     speed_status = validate_speed_limits(args.max_linear_mps, args.max_angular_radps)
     pure_failures = (
         diagnostics_status.failures
         + ([] if catalog_binding_status is None else catalog_binding_status.failures)
         + catalog_egress_failures
+        + execution_certificate_failures
+        + mission_execution_failures
         + speed_status.failures
     )
     if pure_failures:
@@ -772,6 +1271,7 @@ def main(argv: list[str] | None = None) -> int:
             max_odom_age_sec=args.max_odom_age_sec,
             max_tf_age_sec=args.max_tf_age_sec,
             max_amcl_age_sec=args.max_amcl_age_sec,
+            max_future_timestamp_sec=args.max_future_timestamp_sec,
             observation_window_sec=args.preflight_observation_window_sec,
             allowed_cmd_vel_publishers=args.allowed_cmd_vel_publisher,
             require_real_time=not args.allow_sim_time,
@@ -938,6 +1438,63 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
 
+    if mission_execution_binding is not None:
+        try:
+            current_diagnostics_snapshot = load_diagnostics_snapshot(
+                diagnostics_json_path
+            )
+            current_binding = validate_logistics_execution_bundle(
+                route_leg=leg,
+                diagnostics_path=diagnostics_json_path,
+                route_certificate_path=args.route_certificate_json,
+                mission_plan_path=args.mission_plan_manifest,
+                survey_manifest_path=args.survey_manifest,
+                route_bundle_path=args.route_bundle_json,
+                planner_config_path=args.planner_config_json,
+                runtime_map_bundle_path=args.runtime_map_bundle_json,
+                runtime_environment_path=args.runtime_environment,
+                candidate_snapshot_path=args.candidate_snapshot,
+                station_identity_registry_path=args.station_identity_registry,
+                arrival_pose_catalog_path=args.arrival_pose_catalog,
+                task_snapshot_path=args.task_snapshot,
+                robot_id=args.robot_id,
+                runtime_planning_frame=resolved.map_frame,
+                diagnostics_snapshot=current_diagnostics_snapshot,
+            )
+            if current_binding != mission_execution_binding:
+                raise ValueError("mission execution artifacts changed before motion")
+        except (OSError, ValueError) as exc:
+            stop_reason = f"mission execution revalidation failed: {exc}"
+            result = FollowerResult(
+                "stopped",
+                stop_reason,
+                0.0,
+                0.0,
+                False,
+                {"fault_code": "mission_revalidation_failed", "fail_closed": True},
+            )
+            _append_result(args, resolved, leg, preflight_ok=True, result=result)
+            emit_event(
+                event_logger,
+                "mission_execution_rejected",
+                run_id=args.run_id,
+                leg_index=leg.leg_index,
+                status="stopped",
+                phase="immediately_before_motion",
+                stop_reason=stop_reason,
+            )
+            emit_event(
+                event_logger,
+                "run_finished",
+                run_id=args.run_id,
+                final_status=result.status,
+                stop_reason=result.stop_reason,
+                results_csv=str(args.results_csv),
+                semantic_log_path=str(args.semantic_log),
+                preflight_json_path=str(args.preflight_json or ""),
+            )
+            return 1
+
     execution_initial_distance_limit_m = _execution_initial_distance_limit(
         args.initial_distance_limit_m,
         leg.route_kind,
@@ -964,6 +1521,7 @@ def main(argv: list[str] | None = None) -> int:
             min_linear_speed_scale=args.min_linear_speed_scale,
             max_progress_advance_m=args.max_progress_advance_m,
             enforce_heading_corridor=leg.route_kind in PHYSICAL_ROUTE_KINDS,
+            exact_vertex_pursuit=leg.route_kind in PHYSICAL_ROUTE_KINDS,
         ),
         min_obstacle_distance_m=args.min_obstacle_distance_m,
         front_obstacle_slow_distance_m=args.front_obstacle_slow_distance_m,
@@ -971,6 +1529,10 @@ def main(argv: list[str] | None = None) -> int:
         max_scan_age_sec=args.max_scan_age_sec,
         max_odom_age_sec=args.max_odom_age_sec,
         max_tf_age_sec=args.max_tf_age_sec,
+        max_future_timestamp_sec=args.max_future_timestamp_sec,
+        allow_simulation_odom_after_stale_tf=(
+            allow_simulation_odom_after_stale_tf
+        ),
         initial_sensor_wait_sec=args.initial_sensor_wait_sec,
         waypoint_timeout_sec=args.waypoint_timeout_sec,
         stuck_timeout_sec=args.stuck_timeout_sec,
@@ -998,16 +1560,154 @@ def main(argv: list[str] | None = None) -> int:
         initial_route_kind=leg.route_kind,
         axis_acquisition_wait_timeout_sec=args.axis_acquisition_wait_timeout_sec,
         viewpoint_sampling_timeout_sec=args.viewpoint_sampling_timeout_sec,
+        viewpoint_sampling_target_timeout_sec=(
+            args.viewpoint_sampling_target_timeout_sec
+        ),
         viewpoint_sampling_goal_tolerance_m=(
             args.viewpoint_sampling_goal_tolerance_m
+        ),
+        viewpoint_sampling_terminal_heading_hold_tolerance_m=(
+            args.viewpoint_sampling_terminal_heading_hold_tolerance_m
+        ),
+        viewpoint_sampling_target_distance_m=(
+            args.viewpoint_sampling_target_distance_m
+        ),
+        viewpoint_sampling_terminal_heading_target_envelope_radius_m=(
+            args
+            .viewpoint_sampling_terminal_heading_target_envelope_radius_m
         ),
         viewpoint_sampling_heading_tolerance_rad=(
             args.viewpoint_sampling_heading_tolerance_rad
         ),
+        physical_waypoint_tolerance_m=args.physical_waypoint_tolerance_m,
         physical_goal_tolerance_m=args.physical_goal_tolerance_m,
+        certified_route_tube_radius_m=args.certified_route_tube_radius_m,
+        certified_route_chord_sample_spacing_m=(
+            args.certified_route_chord_sample_spacing_m
+        ),
+    )
+    resolved_controller_config = controller_config_for_route_kind(
+        follower_config.controller,
+        leg.route_kind,
+        viewpoint_sampling_goal_tolerance_m=(
+            follower_config.viewpoint_sampling_goal_tolerance_m
+        ),
+        viewpoint_sampling_heading_tolerance_rad=(
+            follower_config.viewpoint_sampling_heading_tolerance_rad
+        ),
+        physical_waypoint_tolerance_m=(
+            follower_config.physical_waypoint_tolerance_m
+        ),
+        physical_goal_tolerance_m=follower_config.physical_goal_tolerance_m,
+    )
+    resolved_terminal_goal_tolerance_m = (
+        resolved_controller_config.goal_tolerance_m
+        if resolved_controller_config.terminal_goal_tolerance_m is None
+        else resolved_controller_config.terminal_goal_tolerance_m
+    )
+    emit_event(
+        event_logger,
+        "controller_config_resolved",
+        run_id=args.run_id,
+        leg_index=leg.leg_index,
+        route_kind=leg.route_kind,
+        max_linear_mps=follower_config.controller.max_linear_mps,
+        max_angular_radps=follower_config.controller.max_angular_radps,
+        effective_goal_tolerance_m=resolved_terminal_goal_tolerance_m,
+        effective_intermediate_goal_tolerance_m=(
+            resolved_controller_config.goal_tolerance_m
+        ),
+        effective_terminal_goal_tolerance_m=(
+            resolved_terminal_goal_tolerance_m
+        ),
+        intermediate_terminal_heading_entry_tolerance_m=(
+            intermediate_terminal_heading_entry_tolerance_m(
+                resolved_controller_config
+            )
+        ),
+        intermediate_terminal_heading_hold_tolerance_m=(
+            follower_config
+            .viewpoint_sampling_terminal_heading_hold_tolerance_m
+        ),
+        intermediate_terminal_heading_distance_comparison_epsilon_m=(
+            INTERMEDIATE_TERMINAL_HEADING_DISTANCE_COMPARISON_EPSILON_M
+        ),
+        intermediate_terminal_heading_effective_hold_limit_m=(
+            follower_config
+            .viewpoint_sampling_terminal_heading_hold_tolerance_m
+            + INTERMEDIATE_TERMINAL_HEADING_DISTANCE_COMPARISON_EPSILON_M
+        ),
+        intermediate_terminal_heading_target_distance_m=(
+            follower_config.viewpoint_sampling_target_distance_m
+        ),
+        intermediate_terminal_heading_target_envelope_radius_m=(
+            follower_config
+            .viewpoint_sampling_terminal_heading_target_envelope_radius_m
+        ),
+        intermediate_terminal_heading_minimum_stand_distance_m=(
+            follower_config.viewpoint_sampling_target_distance_m
+            - follower_config
+            .viewpoint_sampling_terminal_heading_hold_tolerance_m
+        ),
+        intermediate_terminal_heading_maximum_stand_distance_m=(
+            follower_config.viewpoint_sampling_target_distance_m
+            + follower_config
+            .viewpoint_sampling_terminal_heading_hold_tolerance_m
+        ),
+        heading_tolerance_rad=resolved_controller_config.heading_tolerance_rad,
+        slow_heading_error_rad=follower_config.controller.slow_heading_error_rad,
+        stop_heading_error_rad=follower_config.controller.stop_heading_error_rad,
+        exact_vertex_pursuit=resolved_controller_config.exact_vertex_pursuit,
+        exact_vertex_alignment_enabled=(
+            resolved_controller_config.exact_vertex_pursuit
+        ),
+        start_egress_waypoint_index=(
+            follower_config.initial_start_egress_waypoint_index
+        ),
+        start_egress_waypoint_tolerance_m=(
+            follower_config.start_egress_waypoint_tolerance_m
+        ),
+        start_egress_alignment_tolerance_rad=(
+            follower_config.start_egress_alignment_tolerance_rad
+        ),
+        start_egress_max_linear_mps=(
+            follower_config.start_egress_max_linear_mps
+        ),
+        initial_start_join_clearance_m=(
+            follower_config.initial_start_join_clearance_m
+        ),
+        certified_route_tube_radius_m=(
+            follower_config.certified_route_tube_radius_m
+        ),
+        certified_route_chord_sample_spacing_m=(
+            follower_config.certified_route_chord_sample_spacing_m
+        ),
+        allow_simulation_odom_after_stale_tf=(
+            follower_config.allow_simulation_odom_after_stale_tf
+        ),
+        route_purpose=route_purpose,
+        route_simulation_only=leg.simulation_only,
     )
     waypoint_provider = None
-    route_update_callback = None
+
+    def route_update_callback(update):
+        event_name = {
+            "dynamic_route_adopted": "route_reloaded",
+            "dynamic_route_withdrawn": "route_withdrawn",
+            "dynamic_route_rejected": "route_reload_rejected",
+            "dynamic_route_stopped": "route_reload_rejected",
+            "dynamic_survey_completed": "survey_completed",
+        }.get(update.event_name, update.event_name)
+        if event_name is None:
+            return
+        emit_event(
+            event_logger,
+            event_name,
+            run_id=args.run_id,
+            leg_index=args.leg_index,
+            **dict(update.event_fields),
+        )
+
     if committed_route is not None:
         assert committed_route is not None and args.route_manifest is not None
         route_source = DynamicRouteSource(
@@ -1029,24 +1729,6 @@ def main(argv: list[str] | None = None) -> int:
 
         def waypoint_provider(pose):
             return route_source.poll(pose)
-
-        def route_update_callback(update):
-            event_name = {
-                "dynamic_route_adopted": "route_reloaded",
-                "dynamic_route_withdrawn": "route_withdrawn",
-                "dynamic_route_rejected": "route_reload_rejected",
-                "dynamic_route_stopped": "route_reload_rejected",
-                "dynamic_survey_completed": "survey_completed",
-            }.get(update.event_name, update.event_name)
-            if event_name is None:
-                return
-            emit_event(
-                event_logger,
-                event_name,
-                run_id=args.run_id,
-                leg_index=args.leg_index,
-                **dict(update.event_fields),
-            )
     emit_event(
         event_logger,
         "motion_started",

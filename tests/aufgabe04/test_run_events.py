@@ -41,7 +41,7 @@ from scripts.aufgabe04.navigation.route_revision_store import (  # noqa: E402
 
 ROUTE_HEADER = (
     "leg_index,point_index,grid_x,grid_y,world_x_m,world_y_m,"
-    "segment_length_m,cumulative_length_m\n"
+    "segment_length_m,cumulative_length_m,simulation_only,route_kind\n"
 )
 
 
@@ -50,8 +50,8 @@ def write_route(path: Path) -> None:
         ROUTE_HEADER
         + "\n".join(
             [
-                "0,0,0,0,0.0,0.0,0.0,0.0",
-                "0,1,1,0,0.2,0.0,0.2,0.2",
+                "0,0,0,0,0.0,0.0,0.0,0.0,true,legacy_simulation_waypoint",
+                "0,1,1,0,0.2,0.0,0.2,0.2,true,legacy_simulation_waypoint",
             ]
         )
         + "\n"
@@ -59,13 +59,16 @@ def write_route(path: Path) -> None:
 
 
 def write_dynamic_route_manifest(
-    paths: dict[str, Path], *, published_at: float | None = None
+    paths: dict[str, Path],
+    *,
+    published_at: float | None = None,
+    route_kind: str = "synchronized_viewpoint",
 ) -> Path:
     route_text = (
         "leg_index,point_index,grid_x,grid_y,world_x_m,world_y_m,"
         "segment_length_m,cumulative_length_m,simulation_only,route_kind,stream_id\n"
-        "0,0,0,0,0.0,0.0,0.0,0.0,true,synchronized_viewpoint,sim-stream\n"
-        "0,1,1,0,0.2,0.0,0.2,0.2,true,synchronized_viewpoint,sim-stream\n"
+        f"0,0,0,0,0.0,0.0,0.0,0.0,true,{route_kind},sim-stream\n"
+        f"0,1,1,0,0.2,0.0,0.2,0.2,true,{route_kind},sim-stream\n"
     )
     now = time.time() if published_at is None else published_at
     manifest = paths["route"].with_suffix(".manifest.json")
@@ -85,6 +88,15 @@ def write_dynamic_route_manifest(
         safety_diagnostics={
             "corridor_clear": True,
             "start_join_clearance_m": 0.5,
+            "arena_bounds": {
+                "length_m": 3.9,
+                "width_m": 1.898,
+                "center_x_m": 0.0,
+                "center_y_m": 0.0,
+                "yaw_deg": 0.0,
+                "margin_m": 0.0,
+            },
+            "arena_boundary_overlay": True,
         },
     )
     return manifest
@@ -259,7 +271,86 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
             "run-1",
             "--leg-index",
             "0",
+            "--allow-sim-time",
+            "--allow-legacy-simulation-route",
         ]
+
+    def test_controller_event_reports_effective_sampling_tolerances(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            manifest = write_dynamic_route_manifest(
+                paths,
+                route_kind="viewpoint_sampling",
+            )
+            args = self.base_args(paths) + [
+                "--route-manifest",
+                str(manifest),
+                "--viewpoint-sampling-goal-tolerance-m",
+                "0.018",
+                "--viewpoint-sampling-heading-tolerance-rad",
+                "0.08",
+            ]
+            with patch.object(
+                run_single_station_segment,
+                "run_ros_preflight",
+                return_value=passing_preflight(),
+            ), patch.object(
+                run_single_station_segment,
+                "run_simple_waypoint_follower",
+                return_value=FollowerResult("completed", "", 1.0, 0.2, True),
+            ), redirect_stdout(StringIO()):
+                status = run_single_station_segment.main(args)
+
+            event = next(
+                item
+                for item in read_events(paths["events"])
+                if item["event"] == "controller_config_resolved"
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(event["effective_goal_tolerance_m"], 0.018)
+        self.assertEqual(
+            event["effective_intermediate_goal_tolerance_m"],
+            0.018,
+        )
+        self.assertEqual(event["effective_terminal_goal_tolerance_m"], 0.018)
+        self.assertEqual(event["heading_tolerance_rad"], 0.08)
+        self.assertEqual(
+            event["intermediate_terminal_heading_entry_tolerance_m"],
+            0.018,
+        )
+        self.assertEqual(
+            event["intermediate_terminal_heading_hold_tolerance_m"],
+            0.02,
+        )
+        self.assertEqual(
+            event[
+                "intermediate_terminal_heading_distance_comparison_epsilon_m"
+            ],
+            1.0e-5,
+        )
+        self.assertEqual(
+            event["intermediate_terminal_heading_effective_hold_limit_m"],
+            0.02001,
+        )
+        self.assertEqual(
+            event["intermediate_terminal_heading_target_distance_m"],
+            0.33,
+        )
+        self.assertEqual(
+            event[
+                "intermediate_terminal_heading_target_envelope_radius_m"
+            ],
+            0.03,
+        )
+        self.assertEqual(
+            event["intermediate_terminal_heading_minimum_stand_distance_m"],
+            0.31,
+        )
+        self.assertAlmostEqual(
+            event["intermediate_terminal_heading_maximum_stand_distance_m"],
+            0.35,
+        )
 
     def test_preflight_failure_logs_event_and_skips_follower(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -290,9 +381,10 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
 
             with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
                 with self.assertRaises(SystemExit) as raised:
+                    args = self.base_args(paths)
+                    args.remove("--allow-sim-time")
                     run_single_station_segment.main(
-                        self.base_args(paths)
-                        + ["--route-manifest", str(manifest)]
+                        args + ["--route-manifest", str(manifest)]
                     )
 
         self.assertEqual(raised.exception.code, 2)
@@ -391,13 +483,37 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
                 "--allow-sim-time",
                 "--route-manifest",
                 str(manifest),
+                "--localization-source",
+                "tf",
+                "--map-frame",
+                "odom",
+                "--odom-frame",
+                "odom",
+                "--allow-simulation-odom-after-stale-tf",
             ]
             observed = {}
 
-            def fake_follower(_resolved, _waypoints, config, provider, _callback):
+            def fake_follower(_resolved, _waypoints, config, provider, callback):
                 observed["refresh_sec"] = config.dynamic_route_refresh_sec
+                observed["simulation_odom_fallback"] = (
+                    config.allow_simulation_odom_after_stale_tf
+                )
                 observed["provider"] = provider
                 observed["update"] = provider(Pose2D(0.0, 0.0, 0.0))
+                callback(
+                    RouteUpdate(
+                        kind=RouteUpdateKind.UNCHANGED,
+                        event_name=(
+                            "simulation_odom_pose_fallback_started"
+                        ),
+                        event_fields={
+                            "source": (
+                                "simulation_direct_odom_after_tf_retry"
+                            ),
+                            "not_real_robot_migration_evidence": True,
+                        },
+                    )
+                )
                 return FollowerResult("completed", "", 1.0, 0.2, True)
 
             with patch.object(
@@ -410,14 +526,29 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
                 side_effect=fake_follower,
             ), redirect_stdout(StringIO()):
                 status = run_single_station_segment.main(args)
+            events = read_events(paths["events"])
 
         self.assertEqual(status, 0)
         self.assertEqual(observed["refresh_sec"], 0.0)
+        self.assertTrue(observed["simulation_odom_fallback"])
         self.assertIsNotNone(observed["provider"])
         self.assertEqual(observed["update"].kind, RouteUpdateKind.ADOPT)
         self.assertEqual(observed["update"].target_index, 0)
         self.assertGreater(
             observed["update"].event_fields["effective_join_limit_m"], 0.0
+        )
+        fallback_event = next(
+            event
+            for event in events
+            if event["event"]
+            == "simulation_odom_pose_fallback_started"
+        )
+        self.assertEqual(
+            fallback_event["source"],
+            "simulation_direct_odom_after_tf_retry",
+        )
+        self.assertTrue(
+            fallback_event["not_real_robot_migration_evidence"]
         )
 
     def test_manifest_change_during_preflight_is_rejected_before_motion(self):
@@ -621,9 +752,10 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
                 run_single_station_segment,
                 "run_ros_preflight",
                 return_value=passing_preflight(),
-            ), patch.object(run_single_station_segment, "run_simple_waypoint_follower") as follower, patch(
-                "builtins.input",
-                return_value="",
+            ), patch.object(run_single_station_segment, "run_simple_waypoint_follower") as follower, patch.object(
+                run_single_station_segment,
+                "_confirm_motion",
+                return_value=False,
             ), redirect_stdout(
                 StringIO()
             ):
@@ -672,6 +804,9 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(follower_config.initial_sensor_wait_sec, 3.5)
         self.assertEqual(follower_config.allowed_cmd_vel_publishers, ("/behavior_server",))
+        self.assertFalse(
+            follower_config.allow_simulation_odom_after_stale_tf
+        )
         self.assertIn("motion_started", [event["event"] for event in events])
         self.assertEqual(rows[-1]["status"], "completed")
 

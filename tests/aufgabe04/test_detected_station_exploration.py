@@ -1,20 +1,24 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from scripts.aufgabe04.navigation.plan_first_detected_station import (  # noqa: E402
+    build_parser as build_first_detected_station_parser,
     load_and_validate_confirmation_receipt,
     main as plan_first_detected_station_main,
     validate_observation_provenance,
@@ -24,10 +28,15 @@ from scripts.aufgabe04.navigation.plan_detected_stand_exploration import (  # no
     main as plan_detected_stand_exploration_main,
     start_pose_from_args,
 )
+from scripts.aufgabe04.navigation import (  # noqa: E402
+    plan_detected_stand_exploration as exploration_planner,
+)
 from scripts.aufgabe04.navigation.create_detected_station_confirmation import (  # noqa: E402
+    build_parser as build_detected_station_confirmation_parser,
     main as create_detected_station_confirmation_main,
 )
 from scripts.aufgabe04.navigation.route_context import file_sha256  # noqa: E402
+from scripts.aufgabe04.navigation.map_io import freeze_map_bundle  # noqa: E402
 from scripts.aufgabe04.perception.models import StandCandidate  # noqa: E402
 from scripts.aufgabe04.perception.stand_confirmation import (  # noqa: E402
     StandConfirmationAccumulator,
@@ -37,10 +46,18 @@ from scripts.aufgabe04.perception.stand_confirmation import (  # noqa: E402
     select_unique_confirmed_stand,
 )
 from scripts.aufgabe04.perception.stand_observation import (  # noqa: E402
+    DEFAULT_OBSERVATION_TIMING_LIMITS,
     OBSERVATION_SCHEMA_VERSION,
+    OBSERVER_CLOCK_ROS_SYSTEM_TIME,
+    RUNTIME_TIMING_LIMITS_KEY,
+    TF_LOOKUP_MODE_SCAN_TIME_EXACT,
     ObservationProvenance,
     PlanarTransform,
     observation_from_candidate,
+    observation_from_payload,
+    observation_to_payload,
+    load_observation_jsonl_snapshot,
+    validated_observation_stream_clock,
     write_observation_jsonl,
 )
 from scripts.aufgabe04.stations.detected_station_layout import (  # noqa: E402
@@ -70,7 +87,26 @@ def write_free_map(root: Path, *, width=30, height=30, resolution=0.1) -> Path:
     return root / "map.yaml"
 
 
-def provenance(*, map_yaml: Path | None = None, tf_age_sec=0.1, map_frame="map"):
+def provenance(
+    *,
+    map_yaml: Path | None = None,
+    tf_age_sec=0.1,
+    map_frame="map",
+    observer_clock=OBSERVER_CLOCK_ROS_SYSTEM_TIME,
+    use_sim_time=False,
+    observer_clock_sec=10.1,
+    scan_stamp_sec=10.0,
+):
+    map_bundle = (
+        None
+        if map_yaml is None
+        else freeze_map_bundle(
+            map_yaml,
+            semantic_map_id=map_yaml.stem,
+            planning_frame=map_frame,
+        )
+    )
+    tf_stamp_sec = observer_clock_sec - tf_age_sec
     return ObservationProvenance(
         schema_version=OBSERVATION_SCHEMA_VERSION,
         observer_version="test-observer",
@@ -79,12 +115,26 @@ def provenance(*, map_yaml: Path | None = None, tf_age_sec=0.1, map_frame="map")
         map_frame=map_frame,
         base_frame="base_footprint",
         localization_source="amcl",
-        scan_stamp_sec=10.0,
-        tf_lookup_stamp_sec=10.0,
+        scan_stamp_sec=scan_stamp_sec,
+        tf_lookup_stamp_sec=tf_stamp_sec,
         tf_age_sec=tf_age_sec,
-        runtime_config={"scan_topic": "/scan"},
+        runtime_config={
+            "scan_topic": "/scan",
+            "use_sim_time": use_sim_time,
+            RUNTIME_TIMING_LIMITS_KEY: (
+                DEFAULT_OBSERVATION_TIMING_LIMITS.as_dict()
+            ),
+        },
+        observer_clock=observer_clock,
+        observer_clock_sec=observer_clock_sec,
+        scan_age_sec=observer_clock_sec - scan_stamp_sec,
+        tf_scan_skew_sec=abs(tf_stamp_sec - scan_stamp_sec),
+        tf_query_stamp_sec=scan_stamp_sec,
+        tf_lookup_mode=TF_LOOKUP_MODE_SCAN_TIME_EXACT,
         map_yaml=str(map_yaml or ""),
         map_yaml_sha256=file_sha256(map_yaml) if map_yaml else "",
+        map_image_sha256="" if map_bundle is None else map_bundle.image_sha256,
+        map_bundle_sha256="" if map_bundle is None else map_bundle.bundle_sha256,
     )
 
 
@@ -126,6 +176,58 @@ def write_confirmation(path: Path, *, stand_id="detected_stand_01", station_id="
 
 
 class DetectedStandPlannerStartPoseTest(unittest.TestCase):
+    def test_tf_discovery_timeout_uses_monotonic_time_not_sim_clock(self):
+        class FakeTransformException(Exception):
+            pass
+
+        class FakeRclpy:
+            @staticmethod
+            def init(args=None):
+                return None
+
+            @staticmethod
+            def ok():
+                return True
+
+            @staticmethod
+            def spin_once(_node, timeout_sec):
+                return None
+
+            @staticmethod
+            def shutdown():
+                return None
+
+        node = MagicMock()
+        node.current_pose.side_effect = FakeTransformException()
+        node.get_clock.side_effect = AssertionError(
+            "simulated ROS time must not bound DDS discovery"
+        )
+
+        with patch.object(exploration_planner, "rclpy", FakeRclpy), patch.object(
+            exploration_planner,
+            "CurrentTfPoseReader",
+            return_value=node,
+        ), patch.object(
+            exploration_planner,
+            "TransformException",
+            FakeTransformException,
+        ), patch.object(
+            exploration_planner.time,
+            "monotonic",
+            side_effect=(10.0, 11.0),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "timed out waiting for TF"):
+                exploration_planner.read_current_tf_pose(
+                    target_frame="odom",
+                    source_frame="base_footprint",
+                    timeout_sec=0.5,
+                    lookup_timeout_sec=0.2,
+                    use_sim_time=True,
+                )
+
+        node.get_clock.assert_not_called()
+        node.destroy_node.assert_called_once_with()
+
     def test_start_pose_from_explicit_args(self):
         args = build_detected_stand_exploration_parser().parse_args(
             [
@@ -154,6 +256,30 @@ class DetectedStandPlannerStartPoseTest(unittest.TestCase):
 
 
 class DetectedStationExplorationTest(unittest.TestCase):
+    def test_observation_snapshot_hashes_the_exact_parsed_bytes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "observations.jsonl"
+            write_observation_jsonl(path, (observation(1),))
+            expected_bytes = path.read_bytes()
+
+            loaded, digest = load_observation_jsonl_snapshot(path)
+
+        self.assertEqual(loaded, (observation(1),))
+        self.assertEqual(digest, hashlib.sha256(expected_bytes).hexdigest())
+
+    def test_observation_jsonl_rejects_ambiguous_schema_evidence(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "observations.jsonl"
+            payload = observation_to_payload(observation(1))
+            payload["provenance"]["schema_version"] = 2.5
+            path.write_text(json.dumps(payload) + "\n")
+            with self.assertRaisesRegex(ValueError, "schema_version must be an integer"):
+                load_observation_jsonl_snapshot(path)
+
+            path.write_text('{"observation_id":"a","observation_id":"b"}\n')
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                load_observation_jsonl_snapshot(path)
+
     def test_candidate_transforms_from_scan_frame_to_map_frame(self):
         obs = observation_from_candidate(
             candidate(),
@@ -275,7 +401,7 @@ class DetectedStationExplorationTest(unittest.TestCase):
                     "provenance": provenance(map_yaml=map_yaml, tf_age_sec=5.0),
                 }
             )
-            with self.assertRaisesRegex(ValueError, "TF age"):
+            with self.assertRaisesRegex(ValueError, "TF timestamp is stale"):
                 validate_observation_provenance(
                     stale,
                     map_yaml=map_yaml,
@@ -302,6 +428,156 @@ class DetectedStationExplorationTest(unittest.TestCase):
                     max_tf_age_sec=1.0,
                 )
 
+    def test_schema_v1_remains_loadable_but_is_not_planning_evidence(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            map_yaml = write_free_map(Path(tmpdir))
+            payload = observation_to_payload(observation(1, map_yaml=map_yaml))
+            provenance_payload = payload["provenance"]
+            provenance_payload["schema_version"] = 1
+            for key in (
+                "observer_clock",
+                "observer_clock_sec",
+                "scan_age_sec",
+                "tf_scan_skew_sec",
+                "tf_query_stamp_sec",
+                "tf_lookup_mode",
+            ):
+                provenance_payload.pop(key)
+
+            loaded = observation_from_payload(payload)
+
+            self.assertEqual(loaded.provenance.schema_version, 1)
+            with self.assertRaisesRegex(ValueError, "unsupported observation schema"):
+                validate_observation_provenance(
+                    loaded,
+                    map_yaml=map_yaml,
+                    required_map_frame="map",
+                    required_base_frame="base_footprint",
+                    required_localization_source="amcl",
+                    max_tf_age_sec=1.0,
+                )
+
+    def test_provenance_recomputes_instead_of_trusting_stored_ages(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            map_yaml = write_free_map(Path(tmpdir))
+            obs = observation(1, map_yaml=map_yaml)
+            tampered = replace(
+                obs,
+                provenance=replace(obs.provenance, scan_age_sec=0.0),
+            )
+
+            with self.assertRaisesRegex(ValueError, "inconsistent scan_age_sec"):
+                validate_observation_provenance(
+                    tampered,
+                    map_yaml=map_yaml,
+                    required_map_frame="map",
+                    required_base_frame="base_footprint",
+                    required_localization_source="amcl",
+                    max_tf_age_sec=1.0,
+                )
+
+    def test_provenance_requires_clock_binding_and_exact_query_stamp(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            map_yaml = write_free_map(Path(tmpdir))
+            obs = observation(1, map_yaml=map_yaml)
+            wrong_clock = replace(
+                obs,
+                provenance=replace(
+                    obs.provenance,
+                    observer_clock="ros_sim_time",
+                ),
+            )
+            wrong_query = replace(
+                obs,
+                provenance=replace(
+                    obs.provenance,
+                    tf_query_stamp_sec=obs.provenance.scan_stamp_sec + 0.01,
+                ),
+            )
+
+            for invalid, expected in (
+                (wrong_clock, "clock/use_sim_time mismatch"),
+                (wrong_query, "TF query/scan timestamp mismatch"),
+            ):
+                with self.subTest(expected=expected):
+                    with self.assertRaisesRegex(ValueError, expected):
+                        validate_observation_provenance(
+                            invalid,
+                            map_yaml=map_yaml,
+                            required_map_frame="map",
+                            required_base_frame="base_footprint",
+                            required_localization_source="amcl",
+                            max_tf_age_sec=1.0,
+                        )
+
+    def test_stream_rejects_mixed_observer_clock_domains(self):
+        first = observation(1)
+        second = observation(2)
+        second = replace(
+            second,
+            provenance=replace(
+                second.provenance,
+                observer_clock="ros_sim_time",
+                runtime_config={
+                    **second.provenance.runtime_config,
+                    "use_sim_time": True,
+                },
+            ),
+        )
+
+        with self.assertRaisesRegex(ValueError, "mixes incompatible observer clocks"):
+            validated_observation_stream_clock((first, second))
+
+    def test_all_observation_consumers_expose_the_same_timing_policy_cli(self):
+        parsers_and_required_args = (
+            (
+                build_first_detected_station_parser(),
+                [
+                    "--map",
+                    "map.yaml",
+                    "--start-x",
+                    "0",
+                    "--start-y",
+                    "0",
+                    "--confirmation-json",
+                    "confirmation.json",
+                ],
+            ),
+            (
+                build_detected_station_confirmation_parser(),
+                [
+                    "--map",
+                    "map.yaml",
+                    "--station-id",
+                    "A",
+                    "--confirmation-source",
+                    "operator",
+                ],
+            ),
+            (build_detected_stand_exploration_parser(), ["--map", "map.yaml"]),
+        )
+        timing_args = [
+            "--max-scan-age-sec",
+            "0.6",
+            "--max-tf-age-sec",
+            "0.7",
+            "--max-future-timestamp-sec",
+            "0.08",
+            "--max-tf-scan-skew-sec",
+            "0.009",
+            "--required-observer-clock",
+            "ros_sim_time",
+        ]
+
+        for parser, required in parsers_and_required_args:
+            with self.subTest(prog=parser.prog):
+                args = parser.parse_args(required + timing_args)
+                self.assertEqual(args.max_scan_age_sec, 0.6)
+                self.assertEqual(args.max_tf_age_sec, 0.7)
+                self.assertEqual(args.max_future_timestamp_sec, 0.08)
+                self.assertEqual(args.max_tf_scan_skew_sec, 0.009)
+                self.assertEqual(args.required_observer_clock, "ros_sim_time")
+
     def test_provenance_validation_requires_map_hash(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             map_yaml = write_free_map(Path(tmpdir))
@@ -315,6 +591,61 @@ class DetectedStationExplorationTest(unittest.TestCase):
                     required_base_frame="base_footprint",
                     required_localization_source="amcl",
                     max_tf_age_sec=1.0,
+                )
+
+    def test_provenance_validation_can_bind_the_already_frozen_map_read(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            map_yaml = write_free_map(Path(tmpdir))
+            obs = observation(1, map_yaml=map_yaml)
+            frozen_yaml_sha256 = obs.provenance.map_yaml_sha256
+            map_yaml.write_text(map_yaml.read_text() + "# later revision\n")
+
+            validate_observation_provenance(
+                obs,
+                map_yaml=map_yaml,
+                required_map_frame="map",
+                required_base_frame="base_footprint",
+                required_localization_source="amcl",
+                max_tf_age_sec=1.0,
+                expected_map_yaml_sha256=frozen_yaml_sha256,
+            )
+
+            with self.assertRaisesRegex(ValueError, "map hash"):
+                validate_observation_provenance(
+                    obs,
+                    map_yaml=map_yaml,
+                    required_map_frame="map",
+                    required_base_frame="base_footprint",
+                    required_localization_source="amcl",
+                    max_tf_age_sec=1.0,
+                )
+
+    def test_provenance_rejects_changed_map_image_with_same_yaml(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            map_yaml = write_free_map(root)
+            obs = observation(1, map_yaml=map_yaml)
+            old_yaml_hash = obs.provenance.map_yaml_sha256
+            (root / "map.pgm").write_text(
+                "P2\n30 30\n255\n" + " ".join(["0"] * 900) + "\n"
+            )
+            current = freeze_map_bundle(
+                map_yaml,
+                semantic_map_id=map_yaml.stem,
+                planning_frame="map",
+            )
+
+            self.assertEqual(current.yaml_sha256, old_yaml_hash)
+            with self.assertRaisesRegex(ValueError, "map bundle hash"):
+                validate_observation_provenance(
+                    obs,
+                    map_yaml=map_yaml,
+                    required_map_frame="map",
+                    required_base_frame="base_footprint",
+                    required_localization_source="amcl",
+                    max_tf_age_sec=1.0,
+                    expected_map_yaml_sha256=current.yaml_sha256,
+                    expected_map_bundle_sha256=current.bundle_sha256,
                 )
 
     def test_confirmation_receipt_binds_selected_stand_to_station(self):

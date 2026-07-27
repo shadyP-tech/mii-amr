@@ -1,9 +1,9 @@
 """ROS-free contract and identity state for synchronized stand viewpoints.
 
-The simulation observer and route planner run in different processes.  This
-module gives their JSON hand-off a strict, versioned shape and keeps the two
-180-degree-opposed stand faces stable while unordered silhouette estimates
-arrive.  It deliberately contains no ROS, camera, or QR-decoder dependencies.
+Simulation and real-robot observers use the same strict JSON hand-off.  The
+``simulation_only`` field remains explicit so every consumer can require the
+intended environment instead of inferring it from topic names or filenames.
+This module deliberately contains no ROS, camera, or QR-decoder dependencies.
 """
 
 from __future__ import annotations
@@ -80,6 +80,9 @@ class SynchronizedViewpointRecommendation:
     face_candidates: tuple[FaceCandidate, FaceCandidate]
     side_evidence: SideEvidence
     material_target: MaterialTarget
+    # Actual stable inlier frames reported by the estimator, not its configured
+    # minimum. Legacy payloads decode as zero and cannot complete a sealed survey.
+    axis_sample_count: int = 0
 
 
 def normalize_angle(angle_rad: float) -> float:
@@ -95,6 +98,7 @@ def validate_recommendation(
     *,
     required_planning_frame: str | None = None,
     required_source: str | None = None,
+    required_simulation_only: bool | None = None,
 ) -> None:
     """Validate structure and provenance, but intentionally not wall-clock age."""
 
@@ -103,8 +107,17 @@ def validate_recommendation(
             "unsupported viewpoint recommendation schema_version: "
             f"{recommendation.schema_version!r}"
         )
-    if recommendation.simulation_only is not True:
-        raise ValueError("viewpoint recommendation must be marked simulation_only=true")
+    if type(recommendation.simulation_only) is not bool:
+        raise ValueError("viewpoint recommendation simulation_only must be boolean")
+    if (
+        required_simulation_only is not None
+        and recommendation.simulation_only is not required_simulation_only
+    ):
+        expected = str(required_simulation_only).lower()
+        raise ValueError(
+            "viewpoint recommendation environment mismatch: "
+            f"simulation_only must be {expected}"
+        )
     _validate_safe_id(recommendation.stream_id, "stream_id")
     _validate_safe_id(recommendation.stand_id, "stand_id")
     _validate_frame(recommendation.planning_frame, "planning_frame")
@@ -130,6 +143,12 @@ def validate_recommendation(
     if not 0.0 <= confidence <= 1.0:
         raise ValueError("axis_confidence must be in [0, 1]")
     _validate_safe_id(recommendation.axis_state, "axis_state")
+    if (
+        isinstance(recommendation.axis_sample_count, bool)
+        or not isinstance(recommendation.axis_sample_count, int)
+        or recommendation.axis_sample_count < 0
+    ):
+        raise ValueError("axis_sample_count must be a non-negative integer")
 
     faces = tuple(recommendation.face_candidates)
     if len(faces) != 2:
@@ -261,6 +280,9 @@ def recommendation_from_payload(
                 ),
                 evidence_state=_require_string(target_payload, "evidence_state"),
             ),
+            axis_sample_count=_optional_nonnegative_int(
+                axis_payload, "sample_count"
+            ),
         )
     except (KeyError, TypeError) as exc:
         raise ValueError(f"malformed viewpoint recommendation: {exc}") from exc
@@ -276,6 +298,7 @@ def recommendation_to_payload(
     payload["axis"] = {
         "confidence": payload.pop("axis_confidence"),
         "state": payload.pop("axis_state"),
+        "sample_count": payload.pop("axis_sample_count"),
     }
     return payload
 
@@ -293,6 +316,7 @@ def load_viewpoint_recommendation(
     *,
     required_planning_frame: str | None = None,
     required_source: str | None = None,
+    required_simulation_only: bool | None = None,
 ) -> SynchronizedViewpointRecommendation:
     if isinstance(source, Mapping):
         payload = source
@@ -308,6 +332,7 @@ def load_viewpoint_recommendation(
         recommendation,
         required_planning_frame=required_planning_frame,
         required_source=required_source,
+        required_simulation_only=required_simulation_only,
     )
     return recommendation
 
@@ -317,6 +342,7 @@ def load_recommendation(
     *,
     expected_frame: str | None = None,
     expected_source: str | None = None,
+    expected_simulation_only: bool | None = None,
     now_unix_sec: float | None = None,
     max_age_sec: float | None = None,
 ) -> SynchronizedViewpointRecommendation:
@@ -331,6 +357,7 @@ def load_recommendation(
         source,
         required_planning_frame=expected_frame,
         required_source=expected_source,
+        required_simulation_only=expected_simulation_only,
     )
     if (now_unix_sec is None) != (max_age_sec is None):
         raise ValueError("now_unix_sec and max_age_sec must be provided together")
@@ -687,6 +714,13 @@ def _require_int(payload: Mapping[str, object], key: str) -> int:
     value = payload.get(key)
     if type(value) is not int:
         raise ValueError(f"{key} must be an integer")
+    return value
+
+
+def _optional_nonnegative_int(payload: Mapping[str, object], key: str) -> int:
+    value = payload.get(key, 0)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{key} must be a non-negative integer")
     return value
 
 

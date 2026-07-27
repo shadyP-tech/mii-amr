@@ -4,6 +4,11 @@ This runbook tracks the implementation order and evidence split for Aufgabe 04.
 Keep logistics logic mostly pure. Add ROS motion only behind dry-run/preflight
 gates, and wrap every physical run in a debug bundle.
 
+The authoritative implementation status, sealed artifact chain, and explicit
+hardware migration blockers are in
+[`aufgabe04_sim_to_real_gate.md`](aufgabe04_sim_to_real_gate.md). The repository
+is **not currently cleared for real end-to-end logistics or two-robot motion**.
+
 Initial implementation order:
 
 1. Pure QR parsing and station ordering.
@@ -14,9 +19,20 @@ Initial implementation order:
 6. ROS camera integration, multi-segment missions, and two-robot operation only
 after single-robot dry-run and real-run evidence exists.
 
-The simulation-only workflow that surveys future perpendicular stand-arrival
-poses without immediately driving to them is documented in
+The simulation workflow that surveys future perpendicular stand-arrival poses
+is documented in
 [`aufgabe04_arrival_pose_survey.md`](aufgabe04_arrival_pose_survey.md).
+The dedicated hardware-profile, passive real survey, and unloaded single-leg
+adapters are documented in
+[`aufgabe04_real_pipeline.md`](aufgabe04_real_pipeline.md).
+
+Current pure foundations include immutable map/candidate/survey/task/mission
+artifacts, exact server-order planning, strict QR evidence and mission-state
+contracts, route-tube certificates, carrier/custody models, and fenced
+station/conflict-zone permits. Do not interpret “implemented” here as “wired to
+ROS”: strict QR event production, mission-to-follower dispatch, the independent
+command guard node/mux, carrier sensing, execution-manifest generation, and the
+fleet coordinator transport remain incomplete.
 
 Dry-run artifact layout:
 
@@ -26,9 +42,9 @@ Dry-run artifact layout:
   or a more specific subfolder when a feature starts producing repeated files.
 - Raw physical-run debug bundles go under `results/real_runs/<run_id>/`.
 
-## Current Single-Segment Navigation Slice
+## Legacy Offline Station-Route Slice
 
-Current route generation remains dry-run only:
+The older station-map generator remains useful for offline visualization only:
 
 ```bash
 python3 scripts/aufgabe04/navigation/run_station_route.py \
@@ -38,37 +54,13 @@ python3 scripts/aufgabe04/navigation/run_station_route.py \
   --diagnostics-json results/aufgabe04/routes/station_route_diagnostics.json
 ```
 
-Before physical motion, run the single-segment dry run:
+These legacy CSVs have no sealed route kind, certificate, or mission root and
+are intentionally rejected by `run_single_station_segment.py`. Do not use them
+for motion. For simulation admission, follow the complete candidate → survey →
+task → mission workflow in `aufgabe04_arrival_pose_survey.md`. Physical mission
+motion remains blocked by `aufgabe04_sim_to_real_gate.md`.
 
-```bash
-python3 scripts/aufgabe04/navigation/run_single_station_segment.py \
-  --dry-run \
-  --leg-index 1 \
-  --route-csv results/aufgabe04/routes/station_route.csv \
-  --diagnostics-json results/aufgabe04/routes/station_route_diagnostics.json
-```
-
-The dry run must pass route CSV validation, diagnostics cross-checking, speed
-limits, resolved namespace/topic/frame checks, sensor freshness, TF/localization
-freshness, `/cmd_vel` ownership, and Nav2 handoff checks.
-
-For physical motion, wrap the command:
-
-```bash
-scripts/common/run_with_bundle.sh run_001 -- \
-  python3 scripts/aufgabe04/navigation/run_single_station_segment.py \
-    --leg-index 1 \
-    --route-csv results/aufgabe04/routes/station_route.csv \
-    --diagnostics-json results/aufgabe04/routes/station_route_diagnostics.json \
-    --preflight-json results/real_runs/run_001/aufgabe04_preflight.json
-```
-
-The bundle captures raw diagnostics only. It never publishes motion and does
-not replace the runner's strict preflight or typed `RUN` confirmation.
-
-If using namespaces, pass matching namespace/topic/frame options to
-`run_with_bundle.sh` and `run_single_station_segment.py`; otherwise the bundle
-may capture evidence for the wrong robot.
+Debug bundles capture evidence only and never make a legacy route executable.
 
 ## Tests
 
@@ -94,12 +86,15 @@ python3 scripts/aufgabe04/perception/stand_explorer_node.py \
   --base-frame base_footprint \
   --localization-source amcl \
   --map-yaml maps/aufgabe03/arena_1p898x3p9_auto.yaml \
+  --semantic-map-id arena_1p898x3p9_auto \
   --output-jsonl results/aufgabe04/detected_stations/stand_observations.jsonl
 ```
 
-The observer uses `LaserScan.header.frame_id` as the source frame and requires a
-fresh timestamped TF transform into `map`. It drops observations when frame or TF
-provenance is missing or stale.
+The observer uses `LaserScan.header.frame_id` as the source frame and requests
+the transform into `map` at the exact scan stamp. A bounded nonblocking queue
+lets the TF listener catch up without falling back to the latest transform. It
+drops observations when the scan/TF stamps are zero, stale, future-dated, too
+far apart, or inconsistent with the recorded ROS clock mode.
 
 Create an explicit confirmation receipt before route planning. This is the
 manual/QR gate that turns one unique confirmed LiDAR stand into a station
@@ -109,6 +104,7 @@ identity; it does not move the robot:
 python3 scripts/aufgabe04/navigation/create_detected_station_confirmation.py \
   --observations-jsonl results/aufgabe04/detected_stations/stand_observations.jsonl \
   --map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
+  --semantic-map-id arena_1p898x3p9_auto \
   --station-id A \
   --confirmation-source operator \
   --operator-confirmed \

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -35,9 +36,17 @@ from scripts.aufgabe04.perception.stand_confirmation import (
     select_unique_confirmed_stand,
 )
 from scripts.aufgabe04.perception.stand_observation import (
+    DEFAULT_OBSERVATION_TIMING_LIMITS,
     OBSERVATION_SCHEMA_VERSION,
+    TF_LOOKUP_MODE_SCAN_TIME_EXACT,
+    VALID_OBSERVER_CLOCKS,
+    ObservationTimingLimits,
     StandObservation,
     load_observation_jsonl,
+    observation_timing_limits_from_runtime_config,
+    validated_observation_timing,
+    validated_observation_stream_clock,
+    validated_provenance_observer_clock,
 )
 from scripts.aufgabe04.stations.detected_station_layout import (
     DetectedStationLayoutConfig,
@@ -93,10 +102,34 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-observation-age-sec", type=float, default=8.0)
     parser.add_argument("--min-confidence", type=float, default=0.55)
     parser.add_argument("--min-boundary-clearance-m", type=float, default=0.10)
-    parser.add_argument("--max-tf-age-sec", type=float, default=1.0)
+    parser.add_argument(
+        "--max-tf-age-sec",
+        type=float,
+        default=DEFAULT_OBSERVATION_TIMING_LIMITS.max_tf_age_sec,
+    )
+    parser.add_argument(
+        "--max-scan-age-sec",
+        type=float,
+        default=DEFAULT_OBSERVATION_TIMING_LIMITS.max_scan_age_sec,
+    )
+    parser.add_argument(
+        "--max-future-timestamp-sec",
+        type=float,
+        default=DEFAULT_OBSERVATION_TIMING_LIMITS.max_future_timestamp_sec,
+    )
+    parser.add_argument(
+        "--max-tf-scan-skew-sec",
+        type=float,
+        default=DEFAULT_OBSERVATION_TIMING_LIMITS.max_tf_scan_skew_sec,
+    )
     parser.add_argument("--required-map-frame", default="map")
     parser.add_argument("--required-base-frame", default="base_footprint")
     parser.add_argument("--required-localization-source", default=None, choices=["amcl", "tf"])
+    parser.add_argument(
+        "--required-observer-clock",
+        default=None,
+        choices=sorted(VALID_OBSERVER_CLOCKS),
+    )
     parser.add_argument(
         "--require-map-hash",
         action="store_true",
@@ -136,6 +169,16 @@ def validate_observation_provenance(
     required_base_frame: str,
     required_localization_source: str | None,
     max_tf_age_sec: float,
+    max_scan_age_sec: float = DEFAULT_OBSERVATION_TIMING_LIMITS.max_scan_age_sec,
+    max_future_timestamp_sec: float = (
+        DEFAULT_OBSERVATION_TIMING_LIMITS.max_future_timestamp_sec
+    ),
+    max_tf_scan_skew_sec: float = (
+        DEFAULT_OBSERVATION_TIMING_LIMITS.max_tf_scan_skew_sec
+    ),
+    required_observer_clock: str | None = None,
+    expected_map_yaml_sha256: str | None = None,
+    expected_map_bundle_sha256: str | None = None,
 ) -> None:
     provenance = observation.provenance
     if provenance.schema_version != OBSERVATION_SCHEMA_VERSION:
@@ -148,11 +191,86 @@ def validate_observation_provenance(
         raise ValueError(f"observation {observation.observation_id} localization source mismatch")
     if not provenance.scan_frame:
         raise ValueError(f"observation {observation.observation_id} missing scan_frame")
-    if provenance.tf_age_sec > max_tf_age_sec:
-        raise ValueError(f"observation {observation.observation_id} TF age exceeds limit")
-    expected_hash = file_sha256(map_yaml)
+    if not math.isfinite(observation.observed_at_sec) or observation.observed_at_sec <= 0.0:
+        raise ValueError(
+            f"observation {observation.observation_id} observed_at_sec is invalid"
+        )
+    try:
+        validated_provenance_observer_clock(
+            provenance,
+            required_observer_clock=required_observer_clock,
+        )
+    except ValueError as exc:
+        raise ValueError(f"observation {observation.observation_id}: {exc}") from exc
+    if provenance.tf_lookup_mode != TF_LOOKUP_MODE_SCAN_TIME_EXACT:
+        raise ValueError(
+            f"observation {observation.observation_id} did not use exact scan-time TF"
+        )
+    if not math.isclose(
+        provenance.tf_query_stamp_sec,
+        provenance.scan_stamp_sec,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    ):
+        raise ValueError(
+            f"observation {observation.observation_id} TF query/scan timestamp mismatch"
+        )
+
+    consumer_limits = ObservationTimingLimits(
+        max_scan_age_sec=max_scan_age_sec,
+        max_future_timestamp_sec=max_future_timestamp_sec,
+        max_tf_age_sec=max_tf_age_sec,
+        max_tf_scan_skew_sec=max_tf_scan_skew_sec,
+    ).validated()
+    timing = validated_observation_timing(
+        observer_clock_sec=provenance.observer_clock_sec,
+        scan_stamp_sec=provenance.scan_stamp_sec,
+        tf_stamp_sec=provenance.tf_lookup_stamp_sec,
+        **consumer_limits.as_dict(),
+    )
+    producer_limits = observation_timing_limits_from_runtime_config(
+        provenance.runtime_config
+    )
+    validated_observation_timing(
+        observer_clock_sec=provenance.observer_clock_sec,
+        scan_stamp_sec=provenance.scan_stamp_sec,
+        tf_stamp_sec=provenance.tf_lookup_stamp_sec,
+        **producer_limits.as_dict(),
+    )
+    for field_name, stored, recomputed in (
+        ("scan_age_sec", provenance.scan_age_sec, timing.scan_age_sec),
+        ("tf_age_sec", provenance.tf_age_sec, timing.tf_age_sec),
+        (
+            "tf_scan_skew_sec",
+            provenance.tf_scan_skew_sec,
+            timing.tf_scan_skew_sec,
+        ),
+    ):
+        if not math.isfinite(stored) or not math.isclose(
+            stored,
+            recomputed,
+            rel_tol=0.0,
+            abs_tol=1e-6,
+        ):
+            raise ValueError(
+                f"observation {observation.observation_id} inconsistent {field_name}"
+            )
+    # Callers that have already frozen the map must pass the digest obtained
+    # from that same read. Re-reading the path here could validate observation
+    # evidence against a newer map revision while planning on the older grid.
+    expected_hash = (
+        file_sha256(map_yaml)
+        if expected_map_yaml_sha256 is None
+        else expected_map_yaml_sha256
+    )
     if provenance.map_yaml_sha256 != expected_hash:
         raise ValueError(f"observation {observation.observation_id} map hash mismatch")
+    if expected_map_bundle_sha256 is not None and (
+        provenance.map_bundle_sha256 != expected_map_bundle_sha256
+    ):
+        raise ValueError(
+            f"observation {observation.observation_id} map bundle hash mismatch"
+        )
 
 
 def validated_observations(args) -> tuple[StandObservation, ...]:
@@ -167,7 +285,15 @@ def validated_observations(args) -> tuple[StandObservation, ...]:
             required_base_frame=args.required_base_frame,
             required_localization_source=args.required_localization_source,
             max_tf_age_sec=args.max_tf_age_sec,
+            max_scan_age_sec=args.max_scan_age_sec,
+            max_future_timestamp_sec=args.max_future_timestamp_sec,
+            max_tf_scan_skew_sec=args.max_tf_scan_skew_sec,
+            required_observer_clock=args.required_observer_clock,
         )
+    validated_observation_stream_clock(
+        observations,
+        required_observer_clock=args.required_observer_clock,
+    )
     return observations
 
 
@@ -356,6 +482,16 @@ def main(argv: list[str] | None = None) -> int:
                 "map_yaml_sha256": file_sha256(args.map),
                 "required_map_frame": args.required_map_frame,
                 "required_base_frame": args.required_base_frame,
+                "observation_admission": {
+                    "observer_clock": observations[0].provenance.observer_clock,
+                    "required_observer_clock": args.required_observer_clock,
+                    "timing_limits": ObservationTimingLimits(
+                        max_scan_age_sec=args.max_scan_age_sec,
+                        max_future_timestamp_sec=args.max_future_timestamp_sec,
+                        max_tf_age_sec=args.max_tf_age_sec,
+                        max_tf_scan_skew_sec=args.max_tf_scan_skew_sec,
+                    ).validated().as_dict(),
+                },
                 "confirmation_json": str(args.confirmation_json),
                 "confirmation": confirmation,
                 "pre_approach": {

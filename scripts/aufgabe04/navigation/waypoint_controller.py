@@ -20,6 +20,7 @@ class ControllerConfig:
     max_linear_mps: float = 0.055
     max_angular_radps: float = 0.18
     goal_tolerance_m: float = 0.08
+    terminal_goal_tolerance_m: float | None = None
     heading_tolerance_rad: float = 0.25
     rotate_gain: float = 1.2
     lookahead_distance_m: float = 0.18
@@ -29,6 +30,7 @@ class ControllerConfig:
     max_progress_advance_m: float = 0.45
     enforce_heading_corridor: bool = False
     reverse_staging: bool = False
+    exact_vertex_pursuit: bool = False
 
 
 @dataclass(frozen=True)
@@ -66,6 +68,7 @@ class ControllerStep:
     distance_to_target_m: float
     pursuit_index: int = 0
     controlled_heading_error_rad: float = math.nan
+    progress_mode: str = "path_tracking"
 
 
 def normalize_angle(angle_rad: float) -> float:
@@ -135,19 +138,19 @@ def _closest_index_from(
     closest_distance = distance(pose, waypoints[start_index])
     cumulative = 0.0
     for index in range(start_index + 1, len(waypoints)):
-        # Finite-yaw runs are protected approach corridors.  Never advance a
-        # progress cursor across their entry (or across a new constrained
-        # heading) merely because a later point is Euclidean-nearer.
-        if enforce_heading_corridor:
-            previous_yaw = waypoints[index - 1].yaw_rad
-            candidate_yaw = waypoints[index].yaw_rad
-            if math.isfinite(previous_yaw) != math.isfinite(candidate_yaw):
-                break
-            if (
-                math.isfinite(previous_yaw)
-                and abs(normalize_angle(candidate_yaw - previous_yaw)) > 1.0e-6
-            ):
-                break
+        # Free/constrained and changed-heading vertices are control-mode
+        # handoffs even when early corridor alignment is disabled.  Crossing
+        # one by Euclidean-nearest progress can skip the exact vertex that the
+        # controller must acknowledge before changing modes.
+        previous_yaw = waypoints[index - 1].yaw_rad
+        candidate_yaw = waypoints[index].yaw_rad
+        if math.isfinite(previous_yaw) != math.isfinite(candidate_yaw):
+            break
+        if (
+            math.isfinite(previous_yaw)
+            and abs(normalize_angle(candidate_yaw - previous_yaw)) > 1.0e-6
+        ):
+            break
         cumulative += distance(waypoints[index - 1], waypoints[index])
         advance_limit_exceeded = (
             max_advance_m > 0.0 and cumulative > max_advance_m
@@ -183,16 +186,18 @@ def _lookahead_index(
     if cumulative >= lookahead_distance_m:
         return start_index
     for index in range(start_index + 1, len(waypoints)):
-        if enforce_heading_corridor:
-            previous_yaw = waypoints[index - 1].yaw_rad
-            candidate_yaw = waypoints[index].yaw_rad
-            if math.isfinite(previous_yaw) != math.isfinite(candidate_yaw):
-                return index - 1
-            if (
-                math.isfinite(previous_yaw)
-                and abs(normalize_angle(candidate_yaw - previous_yaw)) > 1.0e-6
-            ):
-                return index - 1
+        # A lookahead command must obey the same mode boundaries as progress
+        # latching.  Otherwise it can cut past an exact free/finite-yaw vertex
+        # while the target clock remains attached to that missed vertex.
+        previous_yaw = waypoints[index - 1].yaw_rad
+        candidate_yaw = waypoints[index].yaw_rad
+        if math.isfinite(previous_yaw) != math.isfinite(candidate_yaw):
+            return index - 1
+        if (
+            math.isfinite(previous_yaw)
+            and abs(normalize_angle(candidate_yaw - previous_yaw)) > 1.0e-6
+        ):
+            return index - 1
         cumulative += distance(waypoints[index - 1], waypoints[index])
         if cumulative >= lookahead_distance_m:
             return index
@@ -237,6 +242,8 @@ def _linear_speed_for_heading(
     heading_error_abs: float,
     target_distance_m: float,
     config: ControllerConfig,
+    *,
+    goal_tolerance_m: float | None = None,
 ) -> float:
     if heading_error_abs >= config.stop_heading_error_rad:
         return 0.0
@@ -251,9 +258,27 @@ def _linear_speed_for_heading(
         taper_fraction = (heading_error_abs - slow_heading) / (stop_heading - slow_heading)
         heading_scale = min_scale * (1.0 - taper_fraction)
 
-    approach_distance_m = max(config.goal_tolerance_m * 2.0, 1e-6)
+    effective_goal_tolerance_m = (
+        config.goal_tolerance_m
+        if goal_tolerance_m is None
+        else goal_tolerance_m
+    )
+    approach_distance_m = max(effective_goal_tolerance_m * 2.0, 1e-6)
     approach_scale = _clamp(target_distance_m / approach_distance_m, 0.25, 1.0)
     return config.max_linear_mps * _clamp(heading_scale, 0.0, 1.0) * approach_scale
+
+
+def _goal_tolerance_for_index(
+    config: ControllerConfig,
+    index: int,
+    waypoint_count: int,
+) -> float:
+    if (
+        index == waypoint_count - 1
+        and config.terminal_goal_tolerance_m is not None
+    ):
+        return config.terminal_goal_tolerance_m
+    return config.goal_tolerance_m
 
 
 def compute_waypoint_command(
@@ -276,18 +301,24 @@ def compute_waypoint_command(
         index = locked_pursuit_index
     else:
         index = min(max(target_index, 0), len(waypoints) - 1)
-        index = _closest_index_from(
-            pose,
-            waypoints,
-            index,
-            config.max_progress_advance_m,
-            config.enforce_heading_corridor,
-        )
+        if not config.exact_vertex_pursuit:
+            index = _closest_index_from(
+                pose,
+                waypoints,
+                index,
+                config.max_progress_advance_m,
+                config.enforce_heading_corridor,
+            )
     target = waypoints[index]
     target_distance = distance(pose, target)
+    target_tolerance_m = _goal_tolerance_for_index(
+        config,
+        index,
+        len(waypoints),
+    )
     while (
         locked_pursuit_index is None
-        and target_distance <= config.goal_tolerance_m
+        and target_distance <= target_tolerance_m
         and index < len(waypoints) - 1
     ):
         next_index = index + 1
@@ -302,12 +333,22 @@ def compute_waypoint_command(
                 False,
                 distance(pose, next_target),
                 next_index,
+                math.nan,
+                "mode_handoff",
             )
         index = next_index
         target = waypoints[index]
         target_distance = distance(pose, target)
+        target_tolerance_m = _goal_tolerance_for_index(
+            config,
+            index,
+            len(waypoints),
+        )
 
-    at_final_position = index == len(waypoints) - 1 and target_distance <= config.goal_tolerance_m
+    at_final_position = (
+        index == len(waypoints) - 1
+        and target_distance <= target_tolerance_m
+    )
     if at_final_position:
         # Planned station-approach routes carry a finite yaw on their final
         # waypoint.  Reaching only the x/y cell is insufficient for camera/QR
@@ -328,6 +369,7 @@ def compute_waypoint_command(
                     target_distance,
                     index,
                     final_heading_error,
+                    "terminal_heading",
                 )
         return ControllerStep(VelocityCommand(0.0, 0.0), index, True, target_distance, index)
 
@@ -346,11 +388,12 @@ def compute_waypoint_command(
                 target_distance,
                 index,
                 corridor_heading_error,
+                "heading_corridor",
             )
 
     pursuit_index = (
         index
-        if locked_pursuit_index is not None
+        if locked_pursuit_index is not None or config.exact_vertex_pursuit
         else _lookahead_index(
             pose,
             waypoints,
@@ -386,7 +429,21 @@ def compute_waypoint_command(
         -config.max_angular_radps,
         config.max_angular_radps,
     )
-    linear = _linear_speed_for_heading(abs(heading_error), target_distance, config)
+    exact_vertex_alignment = (
+        config.exact_vertex_pursuit
+        and not math.isfinite(pursuit.yaw_rad)
+        and abs(heading_error) > config.heading_tolerance_rad
+    )
+    linear = (
+        0.0
+        if exact_vertex_alignment
+        else _linear_speed_for_heading(
+            abs(heading_error),
+            target_distance,
+            config,
+            goal_tolerance_m=target_tolerance_m,
+        )
+    )
     if reversing_stage:
         linear = -linear
     return ControllerStep(
@@ -396,6 +453,11 @@ def compute_waypoint_command(
         target_distance,
         pursuit_index,
         heading_error,
+        (
+            "exact_vertex_alignment"
+            if exact_vertex_alignment
+            else "path_tracking"
+        ),
     )
 
 
@@ -430,6 +492,7 @@ def compute_start_egress_vertex_command(
         replace(
             config,
             goal_tolerance_m=min(config.goal_tolerance_m, reach_tolerance_m),
+            terminal_goal_tolerance_m=None,
             lookahead_distance_m=0.0,
             max_progress_advance_m=0.0,
             reverse_staging=False,
@@ -472,6 +535,7 @@ def compute_join_anchor_command(
         replace(
             config,
             goal_tolerance_m=join_tolerance_m,
+            terminal_goal_tolerance_m=None,
             lookahead_distance_m=0.0,
             max_progress_advance_m=0.0,
         ),

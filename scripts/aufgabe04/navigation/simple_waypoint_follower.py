@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import threading
 import time
 from dataclasses import dataclass, replace
 from typing import Callable, Sequence
@@ -10,6 +11,9 @@ from typing import Callable, Sequence
 from scripts.aufgabe04.navigation.dynamic_route_handoff import (
     RouteUpdate,
     RouteUpdateKind,
+)
+from scripts.aufgabe04.navigation.execution_route_certificate import (
+    check_execution_route_tube,
 )
 from scripts.aufgabe04.navigation.follower_models import FollowerResult
 from scripts.aufgabe04.navigation.follower_safety import (
@@ -26,20 +30,56 @@ from scripts.aufgabe04.navigation.follower_safety import (
 )
 from scripts.aufgabe04.navigation.models import Pose2D
 from scripts.aufgabe04.navigation.ros_runtime_config import ResolvedRuntimeConfig
+from scripts.aufgabe04.navigation.viewpoint_sampling_contract import (
+    DEFAULT_VIEWPOINT_SAMPLING_TARGET_DISTANCE_M,
+    INTERMEDIATE_TERMINAL_HEADING_DISTANCE_COMPARISON_EPSILON_M,
+    INTERMEDIATE_TERMINAL_HEADING_ENTRY_TOLERANCE_M,
+    INTERMEDIATE_TERMINAL_HEADING_HOLD_TOLERANCE_M,
+    INTERMEDIATE_TERMINAL_HEADING_TARGET_ENVELOPE_RADIUS_M,
+    ViewpointSamplingHoldConfig,
+    viewpoint_sampling_hold_metrics,
+)
 from scripts.aufgabe04.navigation.waypoint_controller import (
     ControllerConfig,
+    ControllerStep,
     StartEgressControlConfig,
+    VelocityCommand,
     compute_join_anchor_command,
     compute_start_egress_vertex_command,
     compute_waypoint_command,
+    normalize_angle,
     reverse_staging_is_preferred,
 )
+
+
+STALE_TF_RECOVERY_MAX_DURATION_SEC = 0.18
+STALE_TF_RECOVERY_MAX_CALLBACKS = 48
+STALE_TF_RECOVERY_SPIN_TIMEOUT_SEC = 0.005
+# Gazebo odometry quaternions are unit normalized.  A 1e-3 norm tolerance
+# admits only floating-point serialization drift; it is not a normalization
+# or malformed-pose repair path.
+SIMULATION_ODOM_FALLBACK_QUATERNION_NORM_TOLERANCE = 1.0e-3
+SIMULATION_ODOM_FALLBACK_SOURCE = (
+    "simulation_direct_odom_after_tf_retry"
+)
+# Keep capacity for /clock, scan, and odometry even when their callback
+# groups are simultaneously runnable.  Production TF subscriptions live on a
+# separate node/executor so they cannot be starved by this executor.
+FOLLOWER_EXECUTOR_NUM_THREADS = 4
+TF_LISTENER_NODE_NAME = "aufgabe04_waypoint_follower_tf_listener"
+CALLBACK_SERVICE_CALLER_SPIN = "caller_spin"
+CALLBACK_SERVICE_BACKGROUND_EXECUTOR = "background_executor"
+INTERMEDIATE_TERMINAL_HEADING_HOLD_EXCEEDED = (
+    "intermediate_terminal_heading_hold_tolerance_exceeded"
+)
+
 
 try:  # pragma: no cover - exercised on ROS hosts.
     import rclpy
     from geometry_msgs.msg import Twist
     from nav_msgs.msg import Odometry
     from rclpy.duration import Duration
+    from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
     from rclpy.node import Node
     from rclpy.parameter import Parameter
     from rclpy.qos import qos_profile_sensor_data
@@ -52,6 +92,8 @@ except ImportError:  # pragma: no cover - keeps offline tests ROS-free.
     LaserScan = None
     Odometry = None
     Duration = None
+    MultiThreadedExecutor = None
+    SingleThreadedExecutor = None
     Node = object
     Parameter = None
     qos_profile_sensor_data = None
@@ -70,6 +112,8 @@ class FollowerConfig:
     max_scan_age_sec: float = 1.0
     max_odom_age_sec: float = 1.0
     max_tf_age_sec: float = 1.0
+    max_future_timestamp_sec: float = 0.25
+    allow_simulation_odom_after_stale_tf: bool = False
     initial_sensor_wait_sec: float = 2.0
     waypoint_timeout_sec: float = 45.0
     stuck_timeout_sec: float = 8.0
@@ -88,11 +132,33 @@ class FollowerConfig:
     initial_route_kind: str = ""
     axis_acquisition_wait_timeout_sec: float = 12.0
     viewpoint_sampling_timeout_sec: float = 30.0
-    viewpoint_sampling_goal_tolerance_m: float = 0.01
+    viewpoint_sampling_target_timeout_sec: float = 30.0
+    viewpoint_sampling_goal_tolerance_m: float = (
+        INTERMEDIATE_TERMINAL_HEADING_ENTRY_TOLERANCE_M
+    )
+    viewpoint_sampling_terminal_heading_hold_tolerance_m: float = (
+        INTERMEDIATE_TERMINAL_HEADING_HOLD_TOLERANCE_M
+    )
+    viewpoint_sampling_target_distance_m: float = (
+        DEFAULT_VIEWPOINT_SAMPLING_TARGET_DISTANCE_M
+    )
+    viewpoint_sampling_terminal_heading_target_envelope_radius_m: float = (
+        INTERMEDIATE_TERMINAL_HEADING_TARGET_ENVELOPE_RADIUS_M
+    )
     viewpoint_sampling_heading_tolerance_rad: float = math.radians(5.0)
+    physical_waypoint_tolerance_m: float = 0.02
     physical_goal_tolerance_m: float = 0.03
+    certified_route_tube_radius_m: float = 0.03
+    certified_route_chord_sample_spacing_m: float = 0.01
 
     def __post_init__(self) -> None:
+        if not isinstance(
+            self.allow_simulation_odom_after_stale_tf,
+            bool,
+        ):
+            raise ValueError(
+                "allow_simulation_odom_after_stale_tf must be boolean"
+            )
         if (
             not math.isfinite(self.dynamic_join_tolerance_m)
             or self.dynamic_join_tolerance_m <= 0.0
@@ -154,11 +220,59 @@ class FollowerConfig:
                 "viewpoint_sampling_timeout_sec must be finite and positive"
             )
         if (
+            not math.isfinite(self.viewpoint_sampling_target_timeout_sec)
+            or self.viewpoint_sampling_target_timeout_sec <= 0.0
+        ):
+            raise ValueError(
+                "viewpoint_sampling_target_timeout_sec must be finite and positive"
+            )
+        if (
             not math.isfinite(self.viewpoint_sampling_goal_tolerance_m)
             or self.viewpoint_sampling_goal_tolerance_m <= 0.0
         ):
             raise ValueError(
                 "viewpoint_sampling_goal_tolerance_m must be finite and positive"
+            )
+        if (
+            not math.isfinite(
+                self.viewpoint_sampling_terminal_heading_hold_tolerance_m
+            )
+            or self.viewpoint_sampling_terminal_heading_hold_tolerance_m <= 0.0
+            or self.viewpoint_sampling_terminal_heading_hold_tolerance_m
+            > INTERMEDIATE_TERMINAL_HEADING_HOLD_TOLERANCE_M
+            or self.viewpoint_sampling_terminal_heading_hold_tolerance_m
+            < min(
+                self.viewpoint_sampling_goal_tolerance_m,
+                INTERMEDIATE_TERMINAL_HEADING_ENTRY_TOLERANCE_M,
+            )
+        ):
+            raise ValueError(
+                "viewpoint_sampling_terminal_heading_hold_tolerance_m must be "
+                "finite, no smaller than the effective sampling tolerance, "
+                "and no greater than 0.020"
+            )
+        if (
+            not math.isfinite(self.viewpoint_sampling_target_distance_m)
+            or self.viewpoint_sampling_target_distance_m
+            <= self.viewpoint_sampling_terminal_heading_hold_tolerance_m
+        ):
+            raise ValueError(
+                "viewpoint_sampling_target_distance_m must be finite and greater "
+                "than the terminal-heading radial hold tolerance"
+            )
+        if (
+            not math.isfinite(
+                self.viewpoint_sampling_terminal_heading_target_envelope_radius_m
+            )
+            or self.viewpoint_sampling_terminal_heading_target_envelope_radius_m
+            < self.viewpoint_sampling_terminal_heading_hold_tolerance_m
+            or self.viewpoint_sampling_terminal_heading_target_envelope_radius_m
+            > INTERMEDIATE_TERMINAL_HEADING_TARGET_ENVELOPE_RADIUS_M
+        ):
+            raise ValueError(
+                "viewpoint_sampling_terminal_heading_target_envelope_radius_m "
+                "must be finite, no smaller than the radial hold tolerance, "
+                "and no greater than 0.030"
             )
         if (
             not math.isfinite(self.viewpoint_sampling_heading_tolerance_rad)
@@ -168,10 +282,48 @@ class FollowerConfig:
                 "viewpoint_sampling_heading_tolerance_rad must be finite and positive"
             )
         if (
+            not math.isfinite(self.physical_waypoint_tolerance_m)
+            or self.physical_waypoint_tolerance_m <= 0.0
+        ):
+            raise ValueError(
+                "physical_waypoint_tolerance_m must be finite and positive"
+            )
+        if (
             not math.isfinite(self.physical_goal_tolerance_m)
             or self.physical_goal_tolerance_m <= 0.0
         ):
             raise ValueError("physical_goal_tolerance_m must be finite and positive")
+        if (
+            not math.isfinite(self.max_future_timestamp_sec)
+            or self.max_future_timestamp_sec < 0.0
+        ):
+            raise ValueError("max_future_timestamp_sec must be finite and non-negative")
+        if (
+            not math.isfinite(self.certified_route_tube_radius_m)
+            or self.certified_route_tube_radius_m <= 0.0
+        ):
+            raise ValueError(
+                "certified_route_tube_radius_m must be finite and positive"
+            )
+        if (
+            not math.isfinite(self.certified_route_chord_sample_spacing_m)
+            or self.certified_route_chord_sample_spacing_m <= 0.0
+        ):
+            raise ValueError(
+                "certified_route_chord_sample_spacing_m must be finite and positive"
+            )
+        if self.physical_goal_tolerance_m > self.certified_route_tube_radius_m:
+            raise ValueError(
+                "physical_goal_tolerance_m must not exceed the certified route tube"
+            )
+        if (
+            self.physical_waypoint_tolerance_m
+            > self.certified_route_tube_radius_m
+        ):
+            raise ValueError(
+                "physical_waypoint_tolerance_m must not exceed "
+                "the certified route tube"
+            )
 
 
 @dataclass(frozen=True)
@@ -211,6 +363,327 @@ DYNAMIC_VIEWPOINT_ROUTE_KINDS = (
 )
 
 
+@dataclass(frozen=True)
+class IntermediateTerminalHeadingLatch:
+    """Identity of an intermediate target committed to in-place yaw control."""
+
+    route_kind: str
+    target_index: int
+    target: Pose2D
+
+
+@dataclass(frozen=True)
+class IntermediateTerminalHeadingDecision:
+    """Pure controller result plus the next immutable latch state."""
+
+    step: ControllerStep
+    latch: IntermediateTerminalHeadingLatch | None
+    failure: str = ""
+
+
+def reset_intermediate_terminal_heading_latch(
+    latch: IntermediateTerminalHeadingLatch | None,
+    *,
+    material_route_revision: bool = False,
+    target_changed: bool = False,
+) -> IntermediateTerminalHeadingLatch | None:
+    """Clear a latch at either route-identity boundary."""
+
+    if material_route_revision or target_changed:
+        return None
+    return latch
+
+
+def intermediate_terminal_heading_entry_tolerance_m(
+    config: ControllerConfig,
+) -> float:
+    """Return the strict final-position entry tolerance for survey routes."""
+
+    configured_tolerance_m = (
+        config.goal_tolerance_m
+        if config.terminal_goal_tolerance_m is None
+        else config.terminal_goal_tolerance_m
+    )
+    return min(
+        configured_tolerance_m,
+        INTERMEDIATE_TERMINAL_HEADING_ENTRY_TOLERANCE_M,
+    )
+
+
+def intermediate_terminal_heading_hold_diagnostics(
+    pose: Pose2D,
+    latch: IntermediateTerminalHeadingLatch,
+    *,
+    hold_tolerance_m: float,
+    viewpoint_sampling_target_distance_m: float,
+    viewpoint_sampling_target_envelope_radius_m: float,
+) -> dict[str, object]:
+    """Return the pure metric predicates used by the latched-yaw safety gate."""
+
+    target = latch.target
+    comparison_epsilon_m = (
+        INTERMEDIATE_TERMINAL_HEADING_DISTANCE_COMPARISON_EPSILON_M
+    )
+    target_envelope_distance_m = math.hypot(
+        pose.x_m - target.x_m,
+        pose.y_m - target.y_m,
+    )
+    heading_is_finite = math.isfinite(pose.yaw_rad) and math.isfinite(
+        target.yaw_rad
+    )
+    is_viewpoint_sampling = latch.route_kind == "viewpoint_sampling"
+    if is_viewpoint_sampling:
+        metrics = viewpoint_sampling_hold_metrics(
+            pose,
+            target,
+            config=ViewpointSamplingHoldConfig(
+                entry_tolerance_m=min(
+                    hold_tolerance_m,
+                    INTERMEDIATE_TERMINAL_HEADING_ENTRY_TOLERANCE_M,
+                ),
+                hold_tolerance_m=hold_tolerance_m,
+                target_envelope_radius_m=(
+                    viewpoint_sampling_target_envelope_radius_m
+                ),
+                target_distance_m=viewpoint_sampling_target_distance_m,
+                distance_comparison_epsilon_m=comparison_epsilon_m,
+            ),
+        )
+        return metrics.to_diagnostics_dict()
+
+    target_envelope_radius_m = hold_tolerance_m
+    target_envelope_comparison_limit_m = (
+        target_envelope_radius_m + comparison_epsilon_m
+    )
+    target_envelope_within_limit = (
+        math.isfinite(target_envelope_distance_m)
+        and math.isfinite(target_envelope_comparison_limit_m)
+        and target_envelope_distance_m <= target_envelope_comparison_limit_m
+    )
+
+    inferred_stand_center_x_m = math.nan
+    inferred_stand_center_y_m = math.nan
+    inferred_stand_distance_m = math.nan
+    annulus_min_m = math.nan
+    annulus_max_m = math.nan
+    inferred_stand_distance_within_annulus = True
+    within_hold = (
+        heading_is_finite
+        and target_envelope_within_limit
+        and inferred_stand_distance_within_annulus
+    )
+    return {
+        "hold_model": "target_distance_disk",
+        "distance_unit": "m",
+        "target_yaw_unit": "rad",
+        "target_yaw_rad": target.yaw_rad,
+        "heading_is_finite": heading_is_finite,
+        "target_envelope_distance_m": target_envelope_distance_m,
+        "target_envelope_radius_m": target_envelope_radius_m,
+        "target_envelope_within_limit": target_envelope_within_limit,
+        "nominal_target_distance_m": viewpoint_sampling_target_distance_m,
+        "inferred_stand_center_x_m": inferred_stand_center_x_m,
+        "inferred_stand_center_y_m": inferred_stand_center_y_m,
+        "inferred_stand_distance_m": inferred_stand_distance_m,
+        "annulus_min_m": annulus_min_m,
+        "annulus_max_m": annulus_max_m,
+        "inferred_stand_distance_within_annulus": (
+            inferred_stand_distance_within_annulus
+        ),
+        "distance_comparison_epsilon_m": comparison_epsilon_m,
+        "within_hold": within_hold,
+    }
+
+
+def _latched_intermediate_terminal_heading_decision(
+    pose: Pose2D,
+    latch: IntermediateTerminalHeadingLatch,
+    config: ControllerConfig,
+    hold_tolerance_m: float,
+    viewpoint_sampling_target_distance_m: float,
+    viewpoint_sampling_target_envelope_radius_m: float,
+) -> IntermediateTerminalHeadingDecision:
+    diagnostics = intermediate_terminal_heading_hold_diagnostics(
+        pose,
+        latch,
+        hold_tolerance_m=hold_tolerance_m,
+        viewpoint_sampling_target_distance_m=(
+            viewpoint_sampling_target_distance_m
+        ),
+        viewpoint_sampling_target_envelope_radius_m=(
+            viewpoint_sampling_target_envelope_radius_m
+        ),
+    )
+    target_envelope_distance_m = float(
+        diagnostics["target_envelope_distance_m"]
+    )
+    if not bool(diagnostics["within_hold"]):
+        return IntermediateTerminalHeadingDecision(
+            ControllerStep(
+                VelocityCommand(0.0, 0.0),
+                latch.target_index,
+                False,
+                target_envelope_distance_m,
+                latch.target_index,
+                math.nan,
+                "terminal_heading_hold_exceeded",
+            ),
+            latch,
+            INTERMEDIATE_TERMINAL_HEADING_HOLD_EXCEEDED,
+        )
+
+    target = latch.target
+    final_heading_error = normalize_angle(target.yaw_rad - pose.yaw_rad)
+    reached_goal = abs(final_heading_error) <= config.heading_tolerance_rad
+    angular_z_radps = 0.0
+    if not reached_goal:
+        angular_z_radps = max(
+            -config.max_angular_radps,
+            min(
+                config.max_angular_radps,
+                final_heading_error * config.rotate_gain,
+            ),
+        )
+    return IntermediateTerminalHeadingDecision(
+        ControllerStep(
+            VelocityCommand(0.0, angular_z_radps),
+            latch.target_index,
+            reached_goal,
+            target_envelope_distance_m,
+            latch.target_index,
+            final_heading_error,
+            "terminal_heading",
+        ),
+        latch,
+    )
+
+
+def compute_intermediate_terminal_heading_command(
+    pose: Pose2D,
+    waypoints: Sequence[Pose2D],
+    target_index: int,
+    config: ControllerConfig,
+    route_kind: str,
+    latch: IntermediateTerminalHeadingLatch | None = None,
+    *,
+    hold_tolerance_m: float = INTERMEDIATE_TERMINAL_HEADING_HOLD_TOLERANCE_M,
+    viewpoint_sampling_target_distance_m: float = (
+        DEFAULT_VIEWPOINT_SAMPLING_TARGET_DISTANCE_M
+    ),
+    viewpoint_sampling_target_envelope_radius_m: float = (
+        INTERMEDIATE_TERMINAL_HEADING_TARGET_ENVELOPE_RADIUS_M
+    ),
+) -> IntermediateTerminalHeadingDecision:
+    """Latch final survey-yaw control without changing other route behavior."""
+
+    if not waypoints:
+        return IntermediateTerminalHeadingDecision(
+            compute_waypoint_command(pose, waypoints, target_index, config),
+            None,
+        )
+
+    entry_tolerance_m = intermediate_terminal_heading_entry_tolerance_m(config)
+    if route_kind in INTERMEDIATE_ROUTE_KINDS and (
+        not math.isfinite(hold_tolerance_m)
+        or hold_tolerance_m <= 0.0
+        or hold_tolerance_m > INTERMEDIATE_TERMINAL_HEADING_HOLD_TOLERANCE_M
+        or hold_tolerance_m < entry_tolerance_m
+    ):
+        raise ValueError(
+            "hold_tolerance_m must be finite, no smaller than the effective "
+            "entry tolerance, and no greater than 0.020"
+        )
+    if route_kind == "viewpoint_sampling" and (
+        not math.isfinite(viewpoint_sampling_target_distance_m)
+        or viewpoint_sampling_target_distance_m <= hold_tolerance_m
+    ):
+        raise ValueError(
+            "viewpoint_sampling_target_distance_m must be finite and greater "
+            "than hold_tolerance_m"
+        )
+    if route_kind == "viewpoint_sampling" and (
+        not math.isfinite(viewpoint_sampling_target_envelope_radius_m)
+        or viewpoint_sampling_target_envelope_radius_m < hold_tolerance_m
+        or viewpoint_sampling_target_envelope_radius_m
+        > INTERMEDIATE_TERMINAL_HEADING_TARGET_ENVELOPE_RADIUS_M
+    ):
+        raise ValueError(
+            "viewpoint_sampling_target_envelope_radius_m must be finite, no "
+            "smaller than hold_tolerance_m, and no greater than 0.030"
+        )
+
+    current_index = min(max(target_index, 0), len(waypoints) - 1)
+    current_target = waypoints[current_index]
+    latch_matches_target = (
+        latch is not None
+        and route_kind in INTERMEDIATE_ROUTE_KINDS
+        and latch.route_kind == route_kind
+        and latch.target_index == current_index
+        and latch.target == current_target
+        and current_index == len(waypoints) - 1
+        and math.isfinite(current_target.yaw_rad)
+    )
+    if latch is not None and not latch_matches_target:
+        latch = reset_intermediate_terminal_heading_latch(
+            latch,
+            target_changed=True,
+        )
+    if latch is not None:
+        return _latched_intermediate_terminal_heading_decision(
+            pose,
+            latch,
+            config,
+            hold_tolerance_m,
+            viewpoint_sampling_target_distance_m,
+            viewpoint_sampling_target_envelope_radius_m,
+        )
+
+    ordinary_step = compute_waypoint_command(
+        pose,
+        waypoints,
+        target_index,
+        config,
+    )
+    if route_kind not in INTERMEDIATE_ROUTE_KINDS:
+        return IntermediateTerminalHeadingDecision(ordinary_step, None)
+
+    final_index = len(waypoints) - 1
+    if (
+        current_index != final_index
+        or ordinary_step.target_index != current_index
+        or not math.isfinite(current_target.yaw_rad)
+    ):
+        # A controller-side target advance is a material target change.  Let
+        # the caller persist it first; the following tick may enter the latch.
+        return IntermediateTerminalHeadingDecision(ordinary_step, None)
+
+    target_distance_m = math.hypot(
+        pose.x_m - current_target.x_m,
+        pose.y_m - current_target.y_m,
+    )
+    if (
+        not math.isfinite(entry_tolerance_m)
+        or entry_tolerance_m <= 0.0
+        or not math.isfinite(target_distance_m)
+        or target_distance_m > entry_tolerance_m
+    ):
+        return IntermediateTerminalHeadingDecision(ordinary_step, None)
+
+    latch = IntermediateTerminalHeadingLatch(
+        route_kind=route_kind,
+        target_index=current_index,
+        target=current_target,
+    )
+    return _latched_intermediate_terminal_heading_decision(
+        pose,
+        latch,
+        config,
+        hold_tolerance_m,
+        viewpoint_sampling_target_distance_m,
+        viewpoint_sampling_target_envelope_radius_m,
+    )
+
+
 def controller_config_for_route_kind(
     config: ControllerConfig,
     route_kind: str,
@@ -218,6 +691,7 @@ def controller_config_for_route_kind(
     reverse_staging: bool = False,
     viewpoint_sampling_goal_tolerance_m: float | None = None,
     viewpoint_sampling_heading_tolerance_rad: float | None = None,
+    physical_waypoint_tolerance_m: float | None = None,
     physical_goal_tolerance_m: float | None = None,
 ) -> ControllerConfig:
     """Apply terminal-heading constraints only to physical face approaches.
@@ -232,27 +706,55 @@ def controller_config_for_route_kind(
         return config
     physical = route_kind in PHYSICAL_ROUTE_KINDS
     goal_tolerance = config.goal_tolerance_m
-    if (
-        route_kind == "viewpoint_sampling"
-        and viewpoint_sampling_goal_tolerance_m is not None
-    ):
-        goal_tolerance = min(goal_tolerance, viewpoint_sampling_goal_tolerance_m)
+    intermediate = route_kind in INTERMEDIATE_ROUTE_KINDS
+    if intermediate:
+        # Acquisition must also end close enough that lateral position error
+        # plus the terminal-yaw tolerance stays inside the observer's camera
+        # centering cone.  At 0.55 m standoff, 0.03 m and 5 degrees remain
+        # comfortably below the 12-degree perception gate.
+        goal_tolerance = min(
+            goal_tolerance,
+            INTERMEDIATE_TERMINAL_HEADING_ENTRY_TOLERANCE_M,
+        )
+        if viewpoint_sampling_goal_tolerance_m is not None:
+            goal_tolerance = min(
+                goal_tolerance,
+                viewpoint_sampling_goal_tolerance_m,
+            )
+    terminal_goal_tolerance = config.terminal_goal_tolerance_m
+    if intermediate and terminal_goal_tolerance is not None:
+        terminal_goal_tolerance = min(
+            terminal_goal_tolerance,
+            goal_tolerance,
+        )
+    if physical and physical_waypoint_tolerance_m is not None:
+        goal_tolerance = min(goal_tolerance, physical_waypoint_tolerance_m)
     if physical and physical_goal_tolerance_m is not None:
-        goal_tolerance = min(goal_tolerance, physical_goal_tolerance_m)
+        terminal_goal_tolerance = min(
+            config.goal_tolerance_m,
+            physical_goal_tolerance_m,
+        )
     heading_tolerance = config.heading_tolerance_rad
     if (
-        route_kind == "viewpoint_sampling"
+        route_kind in INTERMEDIATE_ROUTE_KINDS
         and viewpoint_sampling_heading_tolerance_rad is not None
     ):
+        # Both intermediate phases are camera observation poses.  The generic
+        # 0.25 rad transit tolerance can declare an acquisition goal complete
+        # while the observer's image-centering gate still rejects it (retry
+        # 08 stopped at 0.224 rad).  Use the shared camera-heading tolerance
+        # before starting the bounded stationary hold.
         heading_tolerance = min(
             heading_tolerance, viewpoint_sampling_heading_tolerance_rad
         )
     return replace(
         config,
         goal_tolerance_m=goal_tolerance,
+        terminal_goal_tolerance_m=terminal_goal_tolerance,
         heading_tolerance_rad=heading_tolerance,
         enforce_heading_corridor=physical,
         reverse_staging=physical and reverse_staging,
+        exact_vertex_pursuit=physical,
     )
 
 
@@ -305,6 +807,27 @@ def viewpoint_sampling_timeout_failure(
     return ""
 
 
+def viewpoint_sampling_target_timeout_failure(
+    *,
+    route_kind: str,
+    target_started_at: float | None,
+    now_monotonic: float,
+    timeout_sec: float,
+) -> str:
+    failure = viewpoint_sampling_timeout_failure(
+        route_kind=route_kind,
+        phase_started_at=target_started_at,
+        now_monotonic=now_monotonic,
+        timeout_sec=timeout_sec,
+    )
+    return {
+        "viewpoint_sampling_clock_unavailable": (
+            "viewpoint_sampling_target_clock_unavailable"
+        ),
+        "viewpoint_sampling_timeout": "viewpoint_sampling_target_timeout",
+    }.get(failure, failure)
+
+
 def acquisition_goal_action(
     *,
     route_kind: str,
@@ -328,6 +851,22 @@ def _require_ros() -> None:
         raise RuntimeError("ROS2 Python packages are not available in this environment")
 
 
+def _create_dedicated_tf_listener(runtime_config: ResolvedRuntimeConfig):
+    """Create an isolated owner for only the TF listener subscriptions."""
+
+    listener_node = Node(
+        TF_LISTENER_NODE_NAME,
+        namespace=runtime_config.namespace,
+    )
+    tf_buffer = Buffer(node=listener_node)
+    tf_listener = TransformListener(
+        tf_buffer,
+        listener_node,
+        spin_thread=False,
+    )
+    return listener_node, tf_buffer, tf_listener
+
+
 def _node_identity(endpoint) -> str:
     namespace = getattr(endpoint, "node_namespace", "") or ""
     name = getattr(endpoint, "node_name", "") or ""
@@ -345,10 +884,20 @@ def _yaw_from_quaternion(q) -> float:
     cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
     return math.atan2(siny_cosp, cosy_cosp)
 
+
+def _ros_stamp_sec(stamp) -> float | None:
+    try:
+        value = float(stamp.sec) + float(stamp.nanosec) / 1_000_000_000.0
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return None
+    return value if math.isfinite(value) else None
+
+
 @dataclass(frozen=True)
 class PoseLookupResult:
     pose: Pose2D | None
     details: dict[str, object] | None = None
+    stamp_sec: float | None = None
 
 
 def tf_lookup_failure_details(
@@ -374,6 +923,45 @@ def tf_lookup_failure_details(
         payload["exception_type"] = exception.__class__.__name__
         payload["exception"] = str(exception)
     return payload
+
+
+def _pose_lookup_diagnostics(result: PoseLookupResult) -> dict[str, object]:
+    details = dict(result.details or {})
+    if not details:
+        details = {
+            "source": "tf_lookup",
+            "reason": "fresh_transform",
+        }
+    if result.stamp_sec is not None:
+        details["stamp_sec"] = result.stamp_sec
+    return details
+
+
+def _stale_tf_recovery_failure_details(
+    final_details: dict[str, object],
+    *,
+    first_lookup: PoseLookupResult,
+    retry_lookup: PoseLookupResult,
+    callback_drain: dict[str, object],
+) -> dict[str, object]:
+    first_details = _pose_lookup_diagnostics(first_lookup)
+    retry_details = _pose_lookup_diagnostics(retry_lookup)
+    combined = dict(final_details)
+    combined.update(
+        {
+            "fail_closed": True,
+            "recovery_attempted": True,
+            "zero_published_before_retry": True,
+            "first_lookup_age_sec": first_details.get("age_sec"),
+            "retry_lookup_age_sec": retry_details.get("age_sec"),
+            "first_lookup_stamp_sec": first_lookup.stamp_sec,
+            "retry_lookup_stamp_sec": retry_lookup.stamp_sec,
+            "first_lookup": first_details,
+            "retry_lookup": retry_details,
+            "callback_drain": callback_drain,
+        }
+    )
+    return combined
 
 
 def dynamic_join_envelope_failure(
@@ -496,8 +1084,16 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         follower_config: FollowerConfig,
         waypoint_provider: Callable[[Pose2D], RouteUpdate | None] | None = None,
         route_update_callback: Callable[[RouteUpdate], None] | None = None,
+        *,
+        tf_buffer=None,
     ) -> None:
-        super().__init__("aufgabe04_simple_waypoint_follower")
+        # Topic resolution alone does not namespace the ROS node identity.
+        # Create the publisher in the resolved namespace so the identity bound
+        # into the execution certificate is the identity DDS actually reports.
+        super().__init__(
+            "aufgabe04_simple_waypoint_follower",
+            namespace=runtime_config.namespace,
+        )
         self.runtime_config = runtime_config
         self.waypoints = tuple(waypoints)
         self.follower_config = follower_config
@@ -513,14 +1109,21 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         self.dynamic_join_limit_m = startup_state.join_limit_m
         self.start_egress_lock_index = startup_state.egress_lock_index
         self.current_route_kind = follower_config.initial_route_kind
+        self.intermediate_terminal_heading_latch: (
+            IntermediateTerminalHeadingLatch | None
+        ) = None
         self.reverse_staging = False
         self.axis_acquisition_hold_started_at: float | None = None
+        self.axis_acquisition_target_revision: int | None = None
         self.viewpoint_sampling_started_at: float | None = None
+        self.viewpoint_sampling_target_started_at: float | None = None
+        self.viewpoint_sampling_target_revision: int | None = None
         self.target_index = 0
         self.latest_scan = None
         self.latest_scan_receipt = None
         self.latest_odom = None
         self.latest_odom_receipt = None
+        self.latest_odom_callback_count = 0
         self.motion_published = False
         self.distance_estimate_m = 0.0
         self.last_pose = None
@@ -528,10 +1131,16 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         self.last_progress_heading_error_rad = math.inf
         self.last_progress_target_index: int | None = None
         self.last_progress_pursuit_index: int | None = None
+        self.last_progress_mode: str | None = None
+        self.progress_heading_modes_seen: set[str] = set()
+        self.progress_heading_error_by_mode: dict[str, float] = {}
         self.last_progress_at = time.monotonic()
         self.target_started_at = time.monotonic()
         self.latest_stop_details = None
         self.latest_front_clearance_details = None
+        self._simulation_odom_fallback_active = False
+        self._simulation_odom_fallback_episode = 0
+        self._background_callback_service_enabled = False
         self._configure_sim_time(runtime_config.use_sim_time)
 
         self.cmd_vel_pub = self.create_publisher(Twist, runtime_config.cmd_vel_topic, 10)
@@ -542,14 +1151,23 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
             qos_profile_sensor_data,
         )
         self.create_subscription(Odometry, runtime_config.odom_topic, self._odom_callback, 10)
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
+        if tf_buffer is None:
+            # Preserve direct-node construction for focused ROS use.  The
+            # production runner always injects the buffer serviced by its
+            # isolated listener node/executor below.
+            self.tf_buffer = Buffer()
+            self.tf_listener = TransformListener(self.tf_buffer, self)
+        else:
+            self.tf_buffer = tf_buffer
+            self.tf_listener = None
 
     def _configure_sim_time(self, use_sim_time: bool) -> None:
         if not self.has_parameter("use_sim_time"):
             self.declare_parameter("use_sim_time", use_sim_time)
             return
-        self.set_parameters([Parameter("use_sim_time", Parameter.Type.BOOL, use_sim_time)])
+        self.set_parameters(
+            [Parameter("use_sim_time", Parameter.Type.BOOL, use_sim_time)]
+        )
 
     def _scan_callback(self, msg) -> None:
         self.latest_scan = msg
@@ -562,25 +1180,121 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
     def _odom_callback(self, msg) -> None:
         self.latest_odom = msg
         self.latest_odom_receipt = time.monotonic()
+        self.latest_odom_callback_count = (
+            getattr(self, "latest_odom_callback_count", 0) + 1
+        )
 
     def publish_zero(self) -> None:
         self.cmd_vel_pub.publish(Twist())
 
+    @property
+    def callback_service_mode(self) -> str:
+        if getattr(self, "_background_callback_service_enabled", False):
+            return CALLBACK_SERVICE_BACKGROUND_EXECUTOR
+        return CALLBACK_SERVICE_CALLER_SPIN
+
+    def enable_background_callback_service(self) -> None:
+        """Mark this node as owned by the continuously spinning executor."""
+
+        self._background_callback_service_enabled = True
+
+    def disable_background_callback_service(self) -> None:
+        """Return callback ownership to the caller after executor teardown."""
+
+        self._background_callback_service_enabled = False
+
+    def _service_or_wait_for_callbacks(self, timeout_sec: float) -> None:
+        """Wait for background callbacks, or service them in legacy caller mode."""
+
+        if self.callback_service_mode == CALLBACK_SERVICE_BACKGROUND_EXECUTOR:
+            time.sleep(timeout_sec)
+            return
+        rclpy.spin_once(self, timeout_sec=timeout_sec)
+
     def publish_repeated_zero(self, count: int = 5) -> None:
         for _ in range(count):
             self.publish_zero()
-            rclpy.spin_once(self, timeout_sec=0.02)
+            self._service_or_wait_for_callbacks(0.02)
 
-    def _drain_runtime_callbacks(self, max_callbacks: int = 12) -> None:
-        """Service all currently ready sensor/TF callbacks without blocking.
+    def _drain_runtime_callbacks(
+        self,
+        max_callbacks: int = 12,
+        *,
+        max_duration_sec: float | None = None,
+        spin_timeout_sec: float = 0.0,
+    ) -> dict[str, object]:
+        """Service callbacks in caller mode or wait for the background executor.
 
-        A single ``spin_once`` per controller tick can permanently starve TF
-        when scan and odometry publishers run faster than the controller.  A
-        bounded drain keeps the control period finite while allowing the TF
-        listener to consume the newest transform.
+        Production runs use continuously spinning follower and TF executors.
+        Their ordinary control-loop drain is therefore an immediate no-op.  A
+        bounded stale-TF recovery instead waits its full safety window while
+        the follower executor services scan/odometry/clock and the isolated TF
+        executor services TF subscriptions.  ``spin_count`` remains scoped to
+        caller spins performed here; it never claims work done by either
+        background executor.  The caller-spin branch remains only for ROS-free
+        focused tests and direct node use outside
+        :func:`run_simple_waypoint_follower`.
         """
+        if (
+            not isinstance(max_callbacks, int)
+            or isinstance(max_callbacks, bool)
+            or max_callbacks <= 0
+        ):
+            raise ValueError("max_callbacks must be a positive integer")
+        if max_duration_sec is not None and (
+            not math.isfinite(max_duration_sec) or max_duration_sec <= 0.0
+        ):
+            raise ValueError("max_duration_sec must be finite and positive")
+        if not math.isfinite(spin_timeout_sec) or spin_timeout_sec < 0.0:
+            raise ValueError("spin_timeout_sec must be finite and non-negative")
+
+        started_at = time.monotonic()
+        if self.callback_service_mode == CALLBACK_SERVICE_BACKGROUND_EXECUTOR:
+            waited_for_background_callbacks = max_duration_sec is not None
+            if waited_for_background_callbacks:
+                time.sleep(max_duration_sec)
+            elapsed_sec = time.monotonic() - started_at
+            return {
+                "callback_service_mode": self.callback_service_mode,
+                "spin_count": 0,
+                "elapsed_sec": elapsed_sec,
+                "max_callbacks": max_callbacks,
+                "max_duration_sec": max_duration_sec,
+                "spin_timeout_sec": spin_timeout_sec,
+                "deadline_reached": waited_for_background_callbacks,
+                "background_wait_requested_sec": (
+                    max_duration_sec if waited_for_background_callbacks else 0.0
+                ),
+            }
+
+        spin_count = 0
+        deadline_reached = False
         for _ in range(max_callbacks):
-            rclpy.spin_once(self, timeout_sec=0.0)
+            elapsed_sec = time.monotonic() - started_at
+            if (
+                max_duration_sec is not None
+                and elapsed_sec >= max_duration_sec
+            ):
+                deadline_reached = True
+                break
+            timeout_sec = spin_timeout_sec
+            if max_duration_sec is not None:
+                timeout_sec = min(
+                    timeout_sec,
+                    max(0.0, max_duration_sec - elapsed_sec),
+                )
+            rclpy.spin_once(self, timeout_sec=timeout_sec)
+            spin_count += 1
+        elapsed_sec = time.monotonic() - started_at
+        return {
+            "callback_service_mode": self.callback_service_mode,
+            "spin_count": spin_count,
+            "elapsed_sec": elapsed_sec,
+            "max_callbacks": max_callbacks,
+            "max_duration_sec": max_duration_sec,
+            "spin_timeout_sec": spin_timeout_sec,
+            "deadline_reached": deadline_reached,
+        }
 
     def _start_egress_command(
         self,
@@ -610,6 +1324,10 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         if step is not None:
             return step
         self.start_egress_lock_index = None
+        if waypoint_index != self.target_index:
+            self._clear_intermediate_terminal_heading_latch(
+                target_changed=True,
+            )
         self.target_index = waypoint_index
         self.target_started_at = time.monotonic()
         self._reset_progress_watchdog(time.monotonic())
@@ -620,7 +1338,24 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         self.last_progress_heading_error_rad = math.inf
         self.last_progress_target_index = None
         self.last_progress_pursuit_index = None
+        self.last_progress_mode = None
+        self.progress_heading_modes_seen.clear()
+        self.progress_heading_error_by_mode.clear()
         self.last_progress_at = now_monotonic
+
+    def _clear_intermediate_terminal_heading_latch(
+        self,
+        *,
+        material_route_revision: bool = False,
+        target_changed: bool = False,
+    ) -> None:
+        self.intermediate_terminal_heading_latch = (
+            reset_intermediate_terminal_heading_latch(
+                getattr(self, "intermediate_terminal_heading_latch", None),
+                material_route_revision=material_route_revision,
+                target_changed=target_changed,
+            )
+        )
 
     def run(self) -> FollowerResult:
         if len(self.waypoints) < 2:
@@ -628,6 +1363,7 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         started_at = time.monotonic()
         if self.current_route_kind == "viewpoint_sampling":
             self.viewpoint_sampling_started_at = started_at
+            self.viewpoint_sampling_target_started_at = started_at
         self.publish_repeated_zero()
         startup_failure = self._wait_for_initial_runtime_inputs(started_at)
         if startup_failure:
@@ -654,13 +1390,22 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                         self.motion_published,
                         self.latest_stop_details,
                     )
-                pose_lookup = self._current_pose_lookup()
+                # Endpoint graph discovery in _safety_failure can briefly
+                # delay TF listener callbacks.  Recover only that resulting
+                # stale-transform case, while holding an explicit zero command.
+                pose_lookup = self._current_pose_lookup_with_stale_recovery()
                 pose = pose_lookup.pose
                 if pose is None:
                     self.publish_repeated_zero()
+                    stop_reason = str(
+                        (pose_lookup.details or {}).get(
+                            "stop_reason",
+                            "map-to-base transform unavailable",
+                        )
+                    )
                     return FollowerResult(
                         "stopped",
-                        "map-to-base transform unavailable",
+                        stop_reason,
                         time.monotonic() - started_at,
                         self.distance_estimate_m,
                         self.motion_published,
@@ -687,12 +1432,24 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                         self.motion_published,
                         self.latest_stop_details,
                     )
+                sampling_now = time.monotonic()
                 sampling_timeout = viewpoint_sampling_timeout_failure(
                     route_kind=self.current_route_kind,
                     phase_started_at=self.viewpoint_sampling_started_at,
-                    now_monotonic=time.monotonic(),
+                    now_monotonic=sampling_now,
                     timeout_sec=self.follower_config.viewpoint_sampling_timeout_sec,
                 )
+                if not sampling_timeout:
+                    sampling_timeout = viewpoint_sampling_target_timeout_failure(
+                        route_kind=self.current_route_kind,
+                        target_started_at=(
+                            self.viewpoint_sampling_target_started_at
+                        ),
+                        now_monotonic=sampling_now,
+                        timeout_sec=(
+                            self.follower_config.viewpoint_sampling_target_timeout_sec
+                        ),
+                    )
                 if sampling_timeout:
                     self.latest_stop_details = {
                         "reason": sampling_timeout,
@@ -703,7 +1460,18 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                             else time.monotonic()
                             - self.viewpoint_sampling_started_at
                         ),
-                        "timeout_sec": self.follower_config.viewpoint_sampling_timeout_sec,
+                        "target_elapsed_sec": (
+                            None
+                            if self.viewpoint_sampling_target_started_at is None
+                            else time.monotonic()
+                            - self.viewpoint_sampling_target_started_at
+                        ),
+                        "phase_timeout_sec": (
+                            self.follower_config.viewpoint_sampling_timeout_sec
+                        ),
+                        "target_timeout_sec": (
+                            self.follower_config.viewpoint_sampling_target_timeout_sec
+                        ),
                         "fail_closed": True,
                     }
                     self.publish_repeated_zero()
@@ -764,6 +1532,10 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                     if join_action == "zero":
                         self.dynamic_join_pending = False
                         self.dynamic_join_limit_m = None
+                        if self.target_index != 0:
+                            self._clear_intermediate_terminal_heading_latch(
+                                target_changed=True,
+                            )
                         self.target_index = 0
                         self.target_started_at = time.monotonic()
                         self._reset_progress_watchdog(time.monotonic())
@@ -789,6 +1561,9 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                             physical_goal_tolerance_m=(
                                 self.follower_config.physical_goal_tolerance_m
                             ),
+                            physical_waypoint_tolerance_m=(
+                                self.follower_config.physical_waypoint_tolerance_m
+                            ),
                         ),
                         join_tolerance_m=self.follower_config.dynamic_join_tolerance_m,
                     )
@@ -806,6 +1581,9 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                         physical_goal_tolerance_m=(
                             self.follower_config.physical_goal_tolerance_m
                         ),
+                        physical_waypoint_tolerance_m=(
+                            self.follower_config.physical_waypoint_tolerance_m
+                        ),
                     )
                     if self.start_egress_lock_index is not None:
                         step = self._start_egress_command(
@@ -819,13 +1597,119 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                             time.sleep(loop_sleep_sec)
                             continue
                     else:
-                        step = compute_waypoint_command(
-                            pose,
-                            self.waypoints,
-                            self.target_index,
-                            route_controller_config,
+                        terminal_heading_decision = (
+                            compute_intermediate_terminal_heading_command(
+                                pose,
+                                self.waypoints,
+                                self.target_index,
+                                route_controller_config,
+                                self.current_route_kind,
+                                self.intermediate_terminal_heading_latch,
+                                hold_tolerance_m=(
+                                    self.follower_config
+                                    .viewpoint_sampling_terminal_heading_hold_tolerance_m
+                                ),
+                                viewpoint_sampling_target_distance_m=(
+                                    self.follower_config
+                                    .viewpoint_sampling_target_distance_m
+                                ),
+                                viewpoint_sampling_target_envelope_radius_m=(
+                                    self.follower_config
+                                    .viewpoint_sampling_terminal_heading_target_envelope_radius_m
+                                ),
+                            )
+                        )
+                        self.intermediate_terminal_heading_latch = (
+                            terminal_heading_decision.latch
+                        )
+                        step = terminal_heading_decision.step
+                        if terminal_heading_decision.failure:
+                            hold_diagnostics = (
+                                intermediate_terminal_heading_hold_diagnostics(
+                                    pose,
+                                    terminal_heading_decision.latch,
+                                    hold_tolerance_m=(
+                                        self.follower_config
+                                        .viewpoint_sampling_terminal_heading_hold_tolerance_m
+                                    ),
+                                    viewpoint_sampling_target_distance_m=(
+                                        self.follower_config
+                                        .viewpoint_sampling_target_distance_m
+                                    ),
+                                    viewpoint_sampling_target_envelope_radius_m=(
+                                        self.follower_config
+                                        .viewpoint_sampling_terminal_heading_target_envelope_radius_m
+                                    ),
+                                )
+                                if terminal_heading_decision.latch is not None
+                                else {}
+                            )
+                            self.latest_stop_details = {
+                                "reason": terminal_heading_decision.failure,
+                                "fault_code": terminal_heading_decision.failure,
+                                "route_kind": self.current_route_kind,
+                                "target_index": step.target_index,
+                                "distance_to_target_m": step.distance_to_target_m,
+                                "entry_tolerance_m": (
+                                    intermediate_terminal_heading_entry_tolerance_m(
+                                        route_controller_config
+                                    )
+                                ),
+                                "hold_tolerance_m": (
+                                    self.follower_config
+                                    .viewpoint_sampling_terminal_heading_hold_tolerance_m
+                                ),
+                                "distance_comparison_epsilon_m": (
+                                    INTERMEDIATE_TERMINAL_HEADING_DISTANCE_COMPARISON_EPSILON_M
+                                ),
+                                "effective_hold_limit_m": (
+                                    self.follower_config
+                                    .viewpoint_sampling_terminal_heading_hold_tolerance_m
+                                    + INTERMEDIATE_TERMINAL_HEADING_DISTANCE_COMPARISON_EPSILON_M
+                                ),
+                                **hold_diagnostics,
+                                "fail_closed": True,
+                            }
+                            self.publish_repeated_zero()
+                            return FollowerResult(
+                                "stopped",
+                                terminal_heading_decision.failure.replace("_", " "),
+                                time.monotonic() - started_at,
+                                self.distance_estimate_m,
+                                self.motion_published,
+                                self.latest_stop_details,
+                            )
+                if (
+                    self.current_route_kind in PHYSICAL_ROUTE_KINDS
+                    and not self.dynamic_join_pending
+                ):
+                    route_check = check_execution_route_tube(
+                        pose,
+                        self.waypoints,
+                        target_index=step.target_index,
+                        pursuit_index=step.pursuit_index,
+                        tracking_tube_radius_m=(
+                            self.follower_config.certified_route_tube_radius_m
+                        ),
+                        chord_sample_spacing_m=(
+                            self.follower_config.certified_route_chord_sample_spacing_m
+                        ),
+                    )
+                    if not route_check.ok:
+                        self.latest_stop_details = route_check.to_log_dict()
+                        self.publish_repeated_zero()
+                        return FollowerResult(
+                            "stopped",
+                            route_check.reason,
+                            time.monotonic() - started_at,
+                            self.distance_estimate_m,
+                            self.motion_published,
+                            self.latest_stop_details,
                         )
                 if step.target_index != self.target_index:
+                    self._clear_intermediate_terminal_heading_latch(
+                        target_changed=True,
+                    )
                     self.target_index = step.target_index
                     self.target_started_at = time.monotonic()
                     self._reset_progress_watchdog(time.monotonic())
@@ -878,18 +1762,43 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                         self.distance_estimate_m,
                         self.motion_published,
                     )
+                timeout_now = time.monotonic()
+                timeout_elapsed = timeout_now - self.target_started_at
                 timeout_failure = waypoint_timeout_failure(
-                    time.monotonic() - self.target_started_at,
+                    timeout_elapsed,
                     self.follower_config.waypoint_timeout_sec,
                 )
                 if timeout_failure:
+                    self.latest_stop_details = {
+                        "reason": timeout_failure,
+                        "route_kind": self.current_route_kind,
+                        "elapsed_sec": timeout_elapsed,
+                        "timeout_sec": self.follower_config.waypoint_timeout_sec,
+                        "target_index": step.target_index,
+                        "pursuit_index": step.pursuit_index,
+                        "distance_to_target_m": step.distance_to_target_m,
+                        "progress_mode": step.progress_mode,
+                        "axis_acquisition_target_revision": (
+                            self.axis_acquisition_target_revision
+                        ),
+                        "viewpoint_sampling_target_revision": (
+                            self.viewpoint_sampling_target_revision
+                        ),
+                        "robot_pose": {
+                            "x_m": pose.x_m,
+                            "y_m": pose.y_m,
+                            "yaw_rad": pose.yaw_rad,
+                        },
+                        "fail_closed": True,
+                    }
                     self.publish_repeated_zero()
                     return FollowerResult(
                         "stopped",
                         timeout_failure,
-                        time.monotonic() - started_at,
+                        timeout_now - started_at,
                         self.distance_estimate_m,
                         self.motion_published,
+                        self.latest_stop_details,
                     )
                 now_monotonic = time.monotonic()
                 front_clearance_scale = self._motion_clearance_linear_scale(
@@ -906,6 +1815,7 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                         abs(step.command.linear_x_mps) > 0.0
                         or abs(step.command.angular_z_radps) > 0.0
                     ),
+                    step.progress_mode,
                 )
                 if progress_failure:
                     self.latest_stop_details = stuck_progress_details(
@@ -1106,6 +2016,9 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
             next_egress_lock_index = raw_lock_index
         previous_route_kind = self.current_route_kind
         self.publish_zero()
+        self._clear_intermediate_terminal_heading_latch(
+            material_route_revision=True,
+        )
         self.waypoints = replacement
         # Every route replacement owns a fresh lock decision. Ordinary routes
         # explicitly clear any lock retained from the previous revision.
@@ -1126,13 +2039,58 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                     "physical_goal_tolerance_m": (
                         self.follower_config.physical_goal_tolerance_m
                     ),
+                    "physical_waypoint_tolerance_m": (
+                        self.follower_config.physical_waypoint_tolerance_m
+                    ),
                 },
             )
         if next_route_kind != previous_route_kind:
             self.axis_acquisition_hold_started_at = None
+            self.axis_acquisition_target_revision = (
+                update.target_revision
+                if next_route_kind == "axis_acquisition"
+                else None
+            )
             self.viewpoint_sampling_started_at = (
                 now if next_route_kind == "viewpoint_sampling" else None
             )
+            self.viewpoint_sampling_target_started_at = (
+                now if next_route_kind == "viewpoint_sampling" else None
+            )
+            self.viewpoint_sampling_target_revision = (
+                update.target_revision
+                if next_route_kind == "viewpoint_sampling"
+                else None
+            )
+        elif next_route_kind == "viewpoint_sampling":
+            if self.viewpoint_sampling_target_revision is None:
+                self.viewpoint_sampling_target_revision = update.target_revision
+            elif (
+                update.target_revision is not None
+                and update.target_revision
+                > self.viewpoint_sampling_target_revision
+            ):
+                # A material target revision may move the sampling point. Give
+                # the new point its own bounded convergence window; identical
+                # geometry heartbeats are filtered before ADOPT and do not
+                # reset this clock.
+                self.viewpoint_sampling_target_started_at = now
+                self.viewpoint_sampling_target_revision = (
+                    update.target_revision
+                )
+        elif next_route_kind == "axis_acquisition":
+            if self.axis_acquisition_target_revision is None:
+                self.axis_acquisition_target_revision = update.target_revision
+            elif (
+                update.target_revision is not None
+                and update.target_revision
+                > self.axis_acquisition_target_revision
+            ):
+                # A bounded acquisition sweep installed a genuinely new ray.
+                # Fresh route heartbeats are UNCHANGED and cannot extend this
+                # hold window.
+                self.axis_acquisition_hold_started_at = None
+                self.axis_acquisition_target_revision = update.target_revision
         self.target_index = update.target_index
         self.target_started_at = now
         self._reset_progress_watchdog(now)
@@ -1151,7 +2109,7 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         except Exception as exc:
             self.latest_stop_details = {
                 **dict(update.event_fields),
-                "reason": f"dynamic route event callback failed: {exc}",
+                "reason": f"semantic event callback failed: {exc}",
                 "fault_code": "route_event_callback_exception",
                 "fail_closed": True,
             }
@@ -1162,7 +2120,7 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         deadline = started_at + self.follower_config.initial_sensor_wait_sec
         last_failure = "missing scan"
         while rclpy.ok():
-            rclpy.spin_once(self, timeout_sec=0.05)
+            self._service_or_wait_for_callbacks(0.05)
             scan_failure = self._freshness_failure(
                 "scan",
                 self.latest_scan,
@@ -1237,6 +2195,7 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
             receipt_age_sec=receipt_age,
             header_age_sec=header_age,
             max_age_sec=max_age_sec,
+            max_future_sec=self.follower_config.max_future_timestamp_sec,
         )
         if failure:
             self.latest_stop_details = {
@@ -1247,8 +2206,15 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                 "receipt_age_sec": receipt_age,
                 "header_age_sec": header_age,
                 "max_age_sec": max_age_sec,
+                "max_future_sec": self.follower_config.max_future_timestamp_sec,
                 "receipt_stale": receipt_age > max_age_sec,
                 "header_stale": header_age > max_age_sec,
+                "receipt_future": (
+                    receipt_age < -self.follower_config.max_future_timestamp_sec
+                ),
+                "header_future": (
+                    header_age < -self.follower_config.max_future_timestamp_sec
+                ),
                 "fail_closed": True,
             }
         return failure
@@ -1305,21 +2271,65 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         pursuit_index: int,
         now_monotonic: float,
         motion_commanded: bool,
+        progress_mode: str = "path_tracking",
     ) -> str:
         heading_error_abs = abs(controlled_heading_error_rad)
-        indices_changed = (
-            target_index != self.last_progress_target_index
-            or pursuit_index != self.last_progress_pursuit_index
+        target_changed = target_index != self.last_progress_target_index
+        pursuit_advanced = (
+            not target_changed
+            and pursuit_index > self.last_progress_pursuit_index
+        )
+        # Pure-pursuit progress is monotonic. A pursuit-index regression or
+        # same-target chatter must not renew the stuck watchdog indefinitely.
+        indices_changed = target_changed or pursuit_advanced
+        heading_mode_first_entry = (
+            progress_mode
+            in {
+                "exact_vertex_alignment",
+                "heading_corridor",
+                "terminal_heading",
+            }
+            and progress_mode not in self.progress_heading_modes_seen
         )
         if indices_changed:
+            self.progress_heading_modes_seen.clear()
+            self.progress_heading_error_by_mode.clear()
+            heading_mode_first_entry = progress_mode in {
+                "exact_vertex_alignment",
+                "heading_corridor",
+                "terminal_heading",
+            }
+        if heading_mode_first_entry:
+            self.progress_heading_modes_seen.add(progress_mode)
+        if indices_changed or heading_mode_first_entry:
             self.last_progress_distance_m = distance_to_target_m
             self.last_progress_heading_error_rad = (
                 heading_error_abs if math.isfinite(heading_error_abs) else math.inf
             )
+            self.progress_heading_error_by_mode[progress_mode] = (
+                self.last_progress_heading_error_rad
+            )
             self.last_progress_target_index = target_index
             self.last_progress_pursuit_index = pursuit_index
+            self.last_progress_mode = progress_mode
             self.last_progress_at = now_monotonic
             return ""
+        self.last_progress_mode = progress_mode
+        mode_heading_baseline = self.progress_heading_error_by_mode.get(
+            progress_mode
+        )
+        if mode_heading_baseline is None:
+            # Path-bearing and terminal-yaw errors are different metrics.  A
+            # tolerance-boundary chatter may enter a mode for the first time
+            # without constituting progress, so establish its own baseline
+            # without renewing the watchdog deadline.
+            mode_heading_baseline = (
+                heading_error_abs if math.isfinite(heading_error_abs) else math.inf
+            )
+            self.progress_heading_error_by_mode[progress_mode] = (
+                mode_heading_baseline
+            )
+        self.last_progress_heading_error_rad = mode_heading_baseline
         distance_improved = (
             distance_to_target_m + self.follower_config.stuck_progress_epsilon_m
             < self.last_progress_distance_m
@@ -1328,11 +2338,12 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
             math.isfinite(heading_error_abs)
             and heading_error_abs
             + self.follower_config.stuck_heading_progress_epsilon_rad
-            < self.last_progress_heading_error_rad
+            < mode_heading_baseline
         )
         if distance_improved:
             self.last_progress_distance_m = distance_to_target_m
         if heading_improved:
+            self.progress_heading_error_by_mode[progress_mode] = heading_error_abs
             self.last_progress_heading_error_rad = heading_error_abs
         if distance_improved or heading_improved:
             self.last_progress_at = now_monotonic
@@ -1350,7 +2361,9 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         return cmd_vel_ownership_failure(
             publisher_identities,
             self_identity,
-            self.follower_config.allowed_cmd_vel_publishers,
+            # Allow-lists are useful for preflight discovery, but publishing
+            # begins only when this process is the sole cmd_vel owner.
+            (),
         )
 
     def _current_pose_lookup(self) -> PoseLookupResult:
@@ -1372,7 +2385,23 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                     exception=exc,
                 ),
             )
-        age = (self.get_clock().now() - Time.from_msg(transform.header.stamp)).nanoseconds / 1_000_000_000.0
+        transform_stamp = Time.from_msg(transform.header.stamp)
+        age = (
+            self.get_clock().now() - transform_stamp
+        ).nanoseconds / 1_000_000_000.0
+        stamp_sec = transform_stamp.nanoseconds / 1_000_000_000.0
+        if age < -self.follower_config.max_future_timestamp_sec:
+            return PoseLookupResult(
+                None,
+                tf_lookup_failure_details(
+                    reason="future_transform",
+                    target_frame=self.runtime_config.map_frame,
+                    source_frame=self.runtime_config.base_frame,
+                    max_age_sec=self.follower_config.max_tf_age_sec,
+                    age_sec=age,
+                ),
+                stamp_sec,
+            )
         if age > self.follower_config.max_tf_age_sec:
             return PoseLookupResult(
                 None,
@@ -1383,10 +2412,574 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                     max_age_sec=self.follower_config.max_tf_age_sec,
                     age_sec=age,
                 ),
+                stamp_sec,
             )
         translation = transform.transform.translation
         rotation = transform.transform.rotation
-        return PoseLookupResult(Pose2D(translation.x, translation.y, _yaw_from_quaternion(rotation)))
+        return PoseLookupResult(
+            Pose2D(translation.x, translation.y, _yaw_from_quaternion(rotation)),
+            stamp_sec=stamp_sec,
+        )
+
+    def _post_stale_tf_recovery_freshness_failure(self) -> str:
+        scan_failure = self._freshness_failure(
+            "scan",
+            self.latest_scan,
+            self.latest_scan_receipt,
+            self.follower_config.max_scan_age_sec,
+        )
+        if scan_failure:
+            return scan_failure
+        return self._freshness_failure(
+            "odom",
+            self.latest_odom,
+            self.latest_odom_receipt,
+            self.follower_config.max_odom_age_sec,
+        )
+
+    def _fallback_message_freshness_evidence(
+        self,
+        name: str,
+        msg,
+        receipt,
+        max_age_sec: float,
+    ) -> dict[str, object]:
+        """Apply the ordinary freshness gate and retain its predicate evidence."""
+
+        try:
+            failure = self._freshness_failure(
+                name,
+                msg,
+                receipt,
+                max_age_sec,
+            )
+        except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+            return {
+                "sensor": name,
+                "fresh": False,
+                "failure": f"malformed {name} freshness data",
+                "exception_type": exc.__class__.__name__,
+                "exception": str(exc),
+                "receipt_age_sec": None,
+                "header_age_sec": None,
+                "max_age_sec": max_age_sec,
+                "max_future_sec": getattr(
+                    self.follower_config,
+                    "max_future_timestamp_sec",
+                    None,
+                ),
+            }
+
+        if failure:
+            stop_details = dict(self.latest_stop_details or {})
+            return {
+                "sensor": name,
+                "fresh": False,
+                "failure": failure,
+                "receipt_age_sec": stop_details.get("receipt_age_sec"),
+                "header_age_sec": stop_details.get("header_age_sec"),
+                "max_age_sec": max_age_sec,
+                "max_future_sec": stop_details.get(
+                    "max_future_sec",
+                    getattr(
+                        self.follower_config,
+                        "max_future_timestamp_sec",
+                        None,
+                    ),
+                ),
+                "receipt_stale": stop_details.get("receipt_stale"),
+                "header_stale": stop_details.get("header_stale"),
+                "receipt_future": stop_details.get("receipt_future"),
+                "header_future": stop_details.get("header_future"),
+            }
+
+        try:
+            receipt_age_sec = time.monotonic() - float(receipt)
+            header_age_sec = (
+                self.get_clock().now() - Time.from_msg(msg.header.stamp)
+            ).nanoseconds / 1_000_000_000.0
+        except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+            # This branch is conservative: the ordinary gate just passed, but
+            # evidence extraction itself was not trustworthy.
+            return {
+                "sensor": name,
+                "fresh": False,
+                "failure": f"malformed {name} timing evidence",
+                "exception_type": exc.__class__.__name__,
+                "exception": str(exc),
+                "receipt_age_sec": None,
+                "header_age_sec": None,
+                "max_age_sec": max_age_sec,
+                "max_future_sec": getattr(
+                    self.follower_config,
+                    "max_future_timestamp_sec",
+                    None,
+                ),
+            }
+        return {
+            "sensor": name,
+            "fresh": True,
+            "failure": "",
+            "receipt_age_sec": receipt_age_sec,
+            "header_age_sec": header_age_sec,
+            "max_age_sec": max_age_sec,
+            "max_future_sec": self.follower_config.max_future_timestamp_sec,
+            "receipt_stale": False,
+            "header_stale": False,
+            "receipt_future": False,
+            "header_future": False,
+        }
+
+    def _semantic_event_failure_lookup(
+        self,
+        *,
+        event_name: str,
+        stamp_sec: float | None,
+    ) -> PoseLookupResult:
+        callback_failure = dict(self.latest_stop_details or {})
+        return PoseLookupResult(
+            None,
+            {
+                "stop_reason": callback_failure.get(
+                    "reason",
+                    "semantic event callback failed",
+                ),
+                "source": "semantic_event_callback",
+                "event_name": event_name,
+                "semantic_event_failure": callback_failure,
+                "fail_closed": True,
+            },
+            stamp_sec,
+        )
+
+    def _primary_tf_result_with_restore_event(
+        self,
+        result: PoseLookupResult,
+        *,
+        recovered_after_retry: bool,
+    ) -> PoseLookupResult:
+        if (
+            result.pose is None
+            or not getattr(
+                self,
+                "_simulation_odom_fallback_active",
+                False,
+            )
+        ):
+            return result
+
+        # The prior command may have been nonzero.  Hold zero while the
+        # semantic source transition is synchronously committed.
+        self.publish_zero()
+        event_name = "simulation_odom_pose_fallback_restored"
+        event_fields = {
+            "source": "tf_lookup",
+            "pose_source": "tf_lookup",
+            "primary_tf_stamp_sec": result.stamp_sec,
+            "recovered_after_retry": recovered_after_retry,
+            "fallback_episode": getattr(
+                self,
+                "_simulation_odom_fallback_episode",
+                0,
+            ),
+            "not_real_robot_migration_evidence": True,
+        }
+        if not self._emit_route_update(
+            RouteUpdate(
+                kind=RouteUpdateKind.UNCHANGED,
+                event_name=event_name,
+                event_fields=event_fields,
+            )
+        ):
+            return self._semantic_event_failure_lookup(
+                event_name=event_name,
+                stamp_sec=result.stamp_sec,
+            )
+        self._simulation_odom_fallback_active = False
+        return result
+
+    def _simulation_odom_fallback_after_stale_retry(
+        self,
+        *,
+        first_lookup: PoseLookupResult,
+        retry_lookup: PoseLookupResult,
+        callback_drain: dict[str, object],
+        odom_callback_count_before: int,
+        odom_callback_count_after: int,
+        odom_msg,
+        odom_receipt,
+        scan_msg,
+        scan_receipt,
+    ) -> PoseLookupResult:
+        """Validate one explicit Gazebo-only direct-odometry recovery."""
+
+        runtime = getattr(self, "runtime_config", None)
+        follower_config = getattr(self, "follower_config", None)
+        enabled = (
+            getattr(
+                follower_config,
+                "allow_simulation_odom_after_stale_tf",
+                False,
+            )
+            is True
+        )
+        if not enabled:
+            disabled_details = {
+                "source": SIMULATION_ODOM_FALLBACK_SOURCE,
+                "pose_source": SIMULATION_ODOM_FALLBACK_SOURCE,
+                "attempted": False,
+                "accepted": False,
+                "fail_closed": True,
+                "zero_published_before_fallback": True,
+                "not_real_robot_migration_evidence": True,
+                "first_lookup": _pose_lookup_diagnostics(first_lookup),
+                "retry_lookup": _pose_lookup_diagnostics(retry_lookup),
+                "callback_drain": callback_drain,
+                "predicates": {
+                    "explicitly_enabled": False,
+                },
+                "rejection_reasons": ["explicitly_enabled"],
+            }
+            original_failure = _stale_tf_recovery_failure_details(
+                dict(retry_lookup.details or {}),
+                first_lookup=first_lookup,
+                retry_lookup=retry_lookup,
+                callback_drain=callback_drain,
+            )
+            original_failure["simulation_odom_fallback"] = disabled_details
+            return PoseLookupResult(
+                None,
+                original_failure,
+                retry_lookup.stamp_sec,
+            )
+        use_sim_time = getattr(runtime, "use_sim_time", False) is True
+        localization_is_tf = getattr(runtime, "localization_source", "") == "tf"
+        map_frame = str(getattr(runtime, "map_frame", ""))
+        odom_frame = str(getattr(runtime, "odom_frame", ""))
+        base_frame = str(getattr(runtime, "base_frame", ""))
+        map_frame_is_odom_frame = bool(map_frame) and map_frame == odom_frame
+
+        odom_freshness = self._fallback_message_freshness_evidence(
+            "odom",
+            odom_msg,
+            odom_receipt,
+            getattr(follower_config, "max_odom_age_sec", 1.0),
+        )
+        scan_freshness = self._fallback_message_freshness_evidence(
+            "scan",
+            scan_msg,
+            scan_receipt,
+            getattr(follower_config, "max_scan_age_sec", 1.0),
+        )
+
+        header = getattr(odom_msg, "header", None)
+        odom_message_frame = str(getattr(header, "frame_id", ""))
+        odom_child_frame = str(getattr(odom_msg, "child_frame_id", ""))
+        odom_stamp_sec = _ros_stamp_sec(getattr(header, "stamp", None))
+        pose_message = getattr(getattr(odom_msg, "pose", None), "pose", None)
+        position = getattr(pose_message, "position", None)
+        orientation = getattr(pose_message, "orientation", None)
+
+        def numeric(attribute_owner, attribute_name: str) -> float | None:
+            try:
+                value = float(getattr(attribute_owner, attribute_name))
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                return None
+            return value if math.isfinite(value) else None
+
+        x_m = numeric(position, "x")
+        y_m = numeric(position, "y")
+        quaternion = {
+            field_name: numeric(orientation, field_name)
+            for field_name in ("x", "y", "z", "w")
+        }
+        quaternion_finite = all(
+            value is not None for value in quaternion.values()
+        )
+        quaternion_norm = (
+            math.sqrt(
+                sum(float(value) ** 2 for value in quaternion.values())
+            )
+            if quaternion_finite
+            else None
+        )
+        quaternion_norm_valid = (
+            quaternion_norm is not None
+            and abs(quaternion_norm - 1.0)
+            <= SIMULATION_ODOM_FALLBACK_QUATERNION_NORM_TOLERANCE
+        )
+        yaw_rad = None
+        if quaternion_finite:
+            yaw_candidate = _yaw_from_quaternion(
+                type(
+                    "_QuaternionValue",
+                    (),
+                    quaternion,
+                )()
+            )
+            if math.isfinite(yaw_candidate):
+                yaw_rad = yaw_candidate
+
+        retry_reason = str((retry_lookup.details or {}).get("reason", ""))
+        predicates = {
+            "explicitly_enabled": enabled,
+            "use_sim_time": use_sim_time,
+            "localization_source_is_tf": localization_is_tf,
+            "map_frame_is_odom_frame": map_frame_is_odom_frame,
+            "retry_is_stale_transform": retry_reason == "stale_transform",
+            "odom_callback_advanced_during_recovery": (
+                odom_callback_count_after > odom_callback_count_before
+            ),
+            "odom_message_available": odom_msg is not None,
+            "odom_parent_frame_exact": (
+                bool(odom_message_frame)
+                and odom_message_frame == map_frame == odom_frame
+            ),
+            "odom_child_frame_exact": (
+                bool(odom_child_frame)
+                and odom_child_frame == base_frame
+            ),
+            "odom_fresh": bool(odom_freshness["fresh"]),
+            "scan_fresh_after_recovery": bool(scan_freshness["fresh"]),
+            "odom_stamp_available": odom_stamp_sec is not None,
+            "retry_tf_stamp_available": retry_lookup.stamp_sec is not None,
+            "odom_stamp_newer_than_tf_retry": (
+                odom_stamp_sec is not None
+                and retry_lookup.stamp_sec is not None
+                and odom_stamp_sec > retry_lookup.stamp_sec
+            ),
+            "position_xy_finite": x_m is not None and y_m is not None,
+            "quaternion_finite": quaternion_finite,
+            "quaternion_norm_valid": quaternion_norm_valid,
+            "yaw_finite": yaw_rad is not None,
+        }
+        rejection_reasons = [
+            predicate
+            for predicate, passed in predicates.items()
+            if not passed
+        ]
+        fallback_episode = getattr(
+            self,
+            "_simulation_odom_fallback_episode",
+            0,
+        ) + (
+            0
+            if getattr(
+                self,
+                "_simulation_odom_fallback_active",
+                False,
+            )
+            else 1
+        )
+        details: dict[str, object] = {
+            "source": SIMULATION_ODOM_FALLBACK_SOURCE,
+            "pose_source": SIMULATION_ODOM_FALLBACK_SOURCE,
+            "attempted": True,
+            "accepted": not rejection_reasons,
+            "fail_closed": bool(rejection_reasons),
+            "zero_published_before_fallback": True,
+            "not_real_robot_migration_evidence": True,
+            "fallback_episode": fallback_episode,
+            "first_lookup_age_sec": (first_lookup.details or {}).get(
+                "age_sec"
+            ),
+            "retry_lookup_age_sec": (retry_lookup.details or {}).get(
+                "age_sec"
+            ),
+            "first_lookup_stamp_sec": first_lookup.stamp_sec,
+            "retry_lookup_stamp_sec": retry_lookup.stamp_sec,
+            "first_lookup": _pose_lookup_diagnostics(first_lookup),
+            "retry_lookup": _pose_lookup_diagnostics(retry_lookup),
+            "callback_drain": callback_drain,
+            "runtime": {
+                "use_sim_time": getattr(runtime, "use_sim_time", None),
+                "localization_source": getattr(
+                    runtime,
+                    "localization_source",
+                    None,
+                ),
+                "map_frame": map_frame,
+                "odom_frame": odom_frame,
+                "base_frame": base_frame,
+            },
+            "odom": {
+                "frame_id": odom_message_frame,
+                "child_frame_id": odom_child_frame,
+                "header_stamp_sec": odom_stamp_sec,
+                "receipt_monotonic_sec": odom_receipt,
+                "callback_count_before_recovery": (
+                    odom_callback_count_before
+                ),
+                "callback_count_after_recovery": (
+                    odom_callback_count_after
+                ),
+                "freshness": odom_freshness,
+                "pose": {
+                    "x_m": x_m,
+                    "y_m": y_m,
+                    "yaw_rad": yaw_rad,
+                    "quaternion": quaternion,
+                    "quaternion_norm": quaternion_norm,
+                    "quaternion_norm_tolerance": (
+                        SIMULATION_ODOM_FALLBACK_QUATERNION_NORM_TOLERANCE
+                    ),
+                },
+            },
+            "scan": {
+                "receipt_monotonic_sec": scan_receipt,
+                "freshness": scan_freshness,
+            },
+            "predicates": predicates,
+            "rejection_reasons": rejection_reasons,
+        }
+
+        if rejection_reasons:
+            original_failure = _stale_tf_recovery_failure_details(
+                dict(retry_lookup.details or {}),
+                first_lookup=first_lookup,
+                retry_lookup=retry_lookup,
+                callback_drain=callback_drain,
+            )
+            original_failure["simulation_odom_fallback"] = details
+            return PoseLookupResult(
+                None,
+                original_failure,
+                retry_lookup.stamp_sec,
+            )
+
+        event_name = "simulation_odom_pose_fallback_started"
+        if not getattr(
+            self,
+            "_simulation_odom_fallback_active",
+            False,
+        ):
+            if not self._emit_route_update(
+                RouteUpdate(
+                    kind=RouteUpdateKind.UNCHANGED,
+                    event_name=event_name,
+                    event_fields=details,
+                )
+            ):
+                return self._semantic_event_failure_lookup(
+                    event_name=event_name,
+                    stamp_sec=odom_stamp_sec,
+                )
+            self._simulation_odom_fallback_episode = fallback_episode
+            self._simulation_odom_fallback_active = True
+        return PoseLookupResult(
+            Pose2D(float(x_m), float(y_m), float(yaw_rad)),
+            details,
+            odom_stamp_sec,
+        )
+
+    def _current_pose_lookup_with_stale_recovery(self) -> PoseLookupResult:
+        first_lookup = self._current_pose_lookup()
+        first_details = dict(first_lookup.details or {})
+        if first_lookup.pose is not None:
+            return self._primary_tf_result_with_restore_event(
+                first_lookup,
+                recovered_after_retry=False,
+            )
+        if first_details.get("reason") != "stale_transform":
+            return first_lookup
+
+        # Override any preceding nonzero Twist before servicing queued
+        # scan/odom/TF work.  No motion command is published during recovery.
+        odom_callback_count_before = getattr(
+            self,
+            "latest_odom_callback_count",
+            0,
+        )
+        self.publish_zero()
+        drain_details = self._drain_runtime_callbacks(
+            max_callbacks=STALE_TF_RECOVERY_MAX_CALLBACKS,
+            max_duration_sec=STALE_TF_RECOVERY_MAX_DURATION_SEC,
+            spin_timeout_sec=STALE_TF_RECOVERY_SPIN_TIMEOUT_SEC,
+        )
+        odom_callback_count_after = getattr(
+            self,
+            "latest_odom_callback_count",
+            0,
+        )
+        odom_msg = getattr(self, "latest_odom", None)
+        odom_receipt = getattr(self, "latest_odom_receipt", None)
+        scan_msg = getattr(self, "latest_scan", None)
+        scan_receipt = getattr(self, "latest_scan_receipt", None)
+        retry_lookup = self._current_pose_lookup()
+        retry_details = dict(retry_lookup.details or {})
+        if retry_lookup.pose is None:
+            if retry_details.get("reason") == "stale_transform":
+                return self._simulation_odom_fallback_after_stale_retry(
+                    first_lookup=first_lookup,
+                    retry_lookup=retry_lookup,
+                    callback_drain=drain_details,
+                    odom_callback_count_before=(
+                        odom_callback_count_before
+                    ),
+                    odom_callback_count_after=(
+                        odom_callback_count_after
+                    ),
+                    odom_msg=odom_msg,
+                    odom_receipt=odom_receipt,
+                    scan_msg=scan_msg,
+                    scan_receipt=scan_receipt,
+                )
+            # Preserve the retry failure as the top-level stop diagnostic.
+            # Persistent stale_transform therefore stops exactly as before,
+            # with its retry age in the legacy age_sec field.
+            return PoseLookupResult(
+                None,
+                _stale_tf_recovery_failure_details(
+                    retry_details,
+                    first_lookup=first_lookup,
+                    retry_lookup=retry_lookup,
+                    callback_drain=drain_details,
+                ),
+                retry_lookup.stamp_sec,
+            )
+        if (
+            first_lookup.stamp_sec is None
+            or retry_lookup.stamp_sec is None
+            or retry_lookup.stamp_sec <= first_lookup.stamp_sec
+        ):
+            nonadvancing_details = tf_lookup_failure_details(
+                reason="nonadvancing_transform",
+                target_frame=self.runtime_config.map_frame,
+                source_frame=self.runtime_config.base_frame,
+                max_age_sec=self.follower_config.max_tf_age_sec,
+            )
+            return PoseLookupResult(
+                None,
+                _stale_tf_recovery_failure_details(
+                    nonadvancing_details,
+                    first_lookup=first_lookup,
+                    retry_lookup=retry_lookup,
+                    callback_drain=drain_details,
+                ),
+                retry_lookup.stamp_sec,
+            )
+        freshness_failure = self._post_stale_tf_recovery_freshness_failure()
+        if freshness_failure:
+            freshness_details = {
+                "stop_reason": freshness_failure,
+                "source": "stale_tf_recovery",
+                "reason": "post_recovery_sensor_freshness_failure",
+                "sensor_failure": dict(self.latest_stop_details or {}),
+            }
+            return PoseLookupResult(
+                None,
+                _stale_tf_recovery_failure_details(
+                    freshness_details,
+                    first_lookup=first_lookup,
+                    retry_lookup=retry_lookup,
+                    callback_drain=drain_details,
+                ),
+                retry_lookup.stamp_sec,
+            )
+        return self._primary_tf_result_with_restore_event(
+            retry_lookup,
+            recovered_after_retry=True,
+        )
 
     def _current_pose(self) -> Pose2D | None:
         return self._current_pose_lookup().pose
@@ -1401,15 +2994,92 @@ def run_simple_waypoint_follower(
 ) -> FollowerResult:
     _require_ros()
     rclpy.init(args=None)
-    node = SimpleWaypointFollowerNode(
-        runtime_config,
-        waypoints,
-        follower_config,
-        waypoint_provider,
-        route_update_callback,
-    )
+    node = None
+    listener_node = None
+    tf_listener = None
+    follower_executor = None
+    tf_executor = None
+    follower_executor_thread = None
+    tf_executor_thread = None
+    node_added_to_follower_executor = False
+    listener_node_added_to_tf_executor = False
     try:
+        listener_node, tf_buffer, tf_listener = _create_dedicated_tf_listener(
+            runtime_config
+        )
+        node = SimpleWaypointFollowerNode(
+            runtime_config,
+            waypoints,
+            follower_config,
+            waypoint_provider,
+            route_update_callback,
+            tf_buffer=tf_buffer,
+        )
+        follower_executor = MultiThreadedExecutor(
+            num_threads=FOLLOWER_EXECUTOR_NUM_THREADS,
+        )
+        tf_executor = SingleThreadedExecutor()
+        node_added_to_follower_executor = follower_executor.add_node(node)
+        if not node_added_to_follower_executor:
+            raise RuntimeError(
+                "failed to add waypoint follower to background executor"
+            )
+        listener_node_added_to_tf_executor = tf_executor.add_node(
+            listener_node
+        )
+        if not listener_node_added_to_tf_executor:
+            raise RuntimeError(
+                "failed to add TF listener to isolated background executor"
+            )
+        node.enable_background_callback_service()
+        tf_executor_thread = threading.Thread(
+            target=tf_executor.spin,
+            name="aufgabe04-follower-tf-listener",
+            daemon=False,
+        )
+        follower_executor_thread = threading.Thread(
+            target=follower_executor.spin,
+            name="aufgabe04-follower-callbacks",
+            daemon=False,
+        )
+        # Give TF its independent callback service before the follower starts
+        # its sensor wait/control loop.
+        tf_executor_thread.start()
+        follower_executor_thread.start()
         return node.run()
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        if follower_executor is not None:
+            follower_executor.shutdown()
+        if tf_executor is not None:
+            tf_executor.shutdown()
+        if (
+            follower_executor_thread is not None
+            and follower_executor_thread.ident is not None
+        ):
+            follower_executor_thread.join()
+        if (
+            tf_executor_thread is not None
+            and tf_executor_thread.ident is not None
+        ):
+            tf_executor_thread.join()
+        if (
+            follower_executor is not None
+            and node is not None
+            and node_added_to_follower_executor
+        ):
+            follower_executor.remove_node(node)
+        if (
+            tf_executor is not None
+            and listener_node is not None
+            and listener_node_added_to_tf_executor
+        ):
+            tf_executor.remove_node(listener_node)
+        if node is not None:
+            node.disable_background_callback_service()
+            node.destroy_node()
+        if tf_listener is not None:
+            tf_listener.unregister()
+        if listener_node is not None:
+            listener_node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()

@@ -8,13 +8,19 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts.aufgabe04.navigation.costmap import Costmap
+from scripts.aufgabe04.navigation.axis_acquisition_feedback import (
+    load_axis_acquisition_feedback,
+)
 from scripts.aufgabe04.navigation.dynamic_approach_planner import (
     circular_keepout_cells,
 )
 from scripts.aufgabe04.navigation.map_io import load_occupancy_grid
 from scripts.aufgabe04.navigation.models import Pose2D
+from scripts.aufgabe04.navigation.map_io import freeze_map_bundle
 from scripts.aufgabe04.navigation.plan_synchronized_viewpoint import (
+    _axis_acquisition_rejection_feedback,
     _known_stand_keepout_costmap,
+    _point_approach_targets,
     _validate_known_stand_route_clearance,
     load_recommended_pose,
     main,
@@ -31,7 +37,139 @@ from scripts.aufgabe04.navigation.viewpoint_recommendation import (
 from scripts.aufgabe04.stations.arrival_pose_catalog import load_arrival_pose_catalog
 
 
+SYNTHETIC_ARENA_ARGS = [
+    "--arena-length-m",
+    "20.0",
+    "--arena-width-m",
+    "20.0",
+]
+
+
 class PlanSynchronizedViewpointTest(unittest.TestCase):
+    @staticmethod
+    def _v3_axis_acquisition_recommendation(
+        index,
+        *,
+        observation_unix_sec,
+        sensor_stamp_sec,
+        robot_pose,
+    ):
+        stand = Pose2D(-1.5991445772801, 0.5427822809871301)
+        if index == 0:
+            near = Pose2D(
+                -1.0680438670531678,
+                0.3998416093906661,
+                2.878682160747617,
+            )
+            near_normal = -0.262910492842176
+        elif index == 1:
+            near = Pose2D(
+                -1.1225253453924258,
+                0.8172528764883664,
+                -2.619104983034521,
+            )
+            near_normal = 0.5224876705552723
+        else:
+            near_normal = -0.262910492842176 + index * math.pi / 4.0
+            near = Pose2D(
+                stand.x_m + 0.55 * math.cos(near_normal),
+                stand.y_m + 0.55 * math.sin(near_normal),
+                math.atan2(
+                    math.sin(near_normal + math.pi),
+                    math.cos(near_normal + math.pi),
+                ),
+            )
+        far_normal = math.atan2(
+            math.sin(near_normal + math.pi),
+            math.cos(near_normal + math.pi),
+        )
+        far = Pose2D(
+            stand.x_m + 0.55 * math.cos(far_normal),
+            stand.y_m + 0.55 * math.sin(far_normal),
+            math.atan2(
+                math.sin(far_normal + math.pi),
+                math.cos(far_normal + math.pi),
+            ),
+        )
+        return SynchronizedViewpointRecommendation(
+            schema_version=1,
+            simulation_only=True,
+            stream_id="survey-v3-feedback",
+            stand_id="A",
+            planning_frame="odom",
+            source="synchronized_lidar_camera_viewpoint",
+            observation_unix_sec=observation_unix_sec,
+            sensor_stamp_sec=sensor_stamp_sec,
+            stand=StandGeometry(
+                stand,
+                0.06,
+                0.02,
+                "synchronized_lidar_cluster",
+            ),
+            robot_pose=robot_pose,
+            axis_confidence=0.0,
+            axis_state="axis_acquisition",
+            face_candidates=(
+                FaceCandidate(
+                    f"acquisition_near_{index:02d}",
+                    near_normal,
+                    near,
+                    False,
+                ),
+                FaceCandidate(
+                    f"acquisition_far_{index:02d}",
+                    far_normal,
+                    far,
+                    False,
+                ),
+            ),
+            side_evidence=SideEvidence(
+                "none",
+                0.0,
+                False,
+                False,
+                None,
+                "axis_acquisition_axis_uncommitted",
+            ),
+            material_target=MaterialTarget(
+                f"acquisition_near_{index:02d}",
+                near,
+                "axis_acquisition",
+            ),
+        )
+
+    @staticmethod
+    def _v3_planner_args(root, recommendation_path):
+        map_yaml = Path("maps/aufgabe03/arena_1p898x3p9_auto.yaml")
+        return [
+            "--map",
+            str(map_yaml),
+            "--start-x",
+            "0.421246145689513",
+            "--start-y",
+            "-0.0009865396291015179",
+            "--start-yaw",
+            "0.2747471906818155",
+            "--recommended-pose-json",
+            str(recommendation_path),
+            "--route-csv",
+            str(root / "survey_route.csv"),
+            "--diagnostics-json",
+            str(root / "survey_route_diagnostics.json"),
+            "--route-manifest",
+            str(root / "survey_route.manifest.json"),
+            "--stream-id",
+            "survey-v3-feedback",
+            "--known-stand-keepout",
+            "0.745172137745638",
+            "0.10260548589928459",
+            "0.26",
+            "--known-stand-keepout",
+            "-0.2512062005169",
+            "-0.4956933824542771",
+            "0.26",
+        ]
+
     @staticmethod
     def _point_to_segment_distance(point, start, end):
         dx = end[0] - start[0]
@@ -121,6 +259,7 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
                 "--recommended-pose-json", str(recommendation_path),
                 "--route-csv", str(route),
                 "--diagnostics-json", str(diagnostics),
+                *SYNTHETIC_ARENA_ARGS,
             ]
             with patch(
                 "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.time",
@@ -146,6 +285,7 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
                 robot_pose=acquisition,
                 axis_confidence=0.93,
                 axis_state="target_committed",
+                axis_sample_count=7,
                 face_candidates=(
                     FaceCandidate("face_a", math.pi, face_a, True),
                     FaceCandidate(
@@ -176,6 +316,13 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
                         "--world-id", "test_world",
                         "--world-sha256", "a" * 64,
                         "--session-id", "test_session",
+                        "--expected-map-bundle-sha256",
+                        freeze_map_bundle(
+                            map_yaml,
+                            semantic_map_id=map_yaml.stem,
+                            planning_frame="odom",
+                        ).bundle_sha256,
+                        "--candidate-snapshot-sha256", "b" * 64,
                     ]
                 )
             terminal = read_committed_revision(
@@ -187,6 +334,10 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(terminal.status, "survey_complete")
         self.assertEqual(terminal.route_hash, active.route_hash)
+        self.assertAlmostEqual(
+            active.manifest["safety_diagnostics"]["keepout_radius_m"],
+            0.235,
+        )
         self.assertEqual(route_after, route_before)
         self.assertEqual(len(catalog.records), 1)
         self.assertEqual(catalog.records[0].candidate_uid, "A")
@@ -250,6 +401,7 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
                         str(diagnostics),
                         "--standoff-distance-m",
                         "0.35",
+                        *SYNTHETIC_ARENA_ARGS,
                     ]
                 )
 
@@ -280,6 +432,7 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
                         str(diagnostics),
                         "--standoff-distance-m",
                         "0.35",
+                        *SYNTHETIC_ARENA_ARGS,
                     ]
                 )
             committed = read_committed_revision(
@@ -325,6 +478,7 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
                             str(diagnostics),
                             "--standoff-distance-m",
                             "0.35",
+                            *SYNTHETIC_ARENA_ARGS,
                         ]
                     )
             heartbeat = read_committed_revision(
@@ -410,6 +564,7 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
                         "--recommended-pose-json", str(recommendation_path),
                         "--route-csv", str(route),
                         "--diagnostics-json", str(diagnostics),
+                        *SYNTHETIC_ARENA_ARGS,
                     ]
                 )
             committed = read_committed_revision(
@@ -449,6 +604,7 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
                             "--recommended-pose-json", str(recommendation_path),
                             "--route-csv", str(route),
                             "--diagnostics-json", str(diagnostics),
+                            *SYNTHETIC_ARENA_ARGS,
                         ]
                     )
             heartbeat = read_committed_revision(
@@ -470,6 +626,371 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
         self.assertTrue(all(row["corridor"] == "false" for row in rows))
         self.assertTrue(all(row["route_kind"] == "axis_acquisition" for row in rows))
         self.assertEqual(committed.manifest["target"]["face_id"], "acquisition_near")
+
+    def test_v3_static_rejection_feedback_keeps_active_manifest_unrevisioned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            recommendation_path = root / "recommendation.json"
+            initial = self._v3_axis_acquisition_recommendation(
+                0,
+                observation_unix_sec=100.0,
+                sensor_stamp_sec=10.0,
+                robot_pose=Pose2D(
+                    0.421246145689513,
+                    -0.0009865396291015179,
+                    0.2747471906818155,
+                ),
+            )
+            recommendation_path.write_text(
+                json.dumps(recommendation_to_dict(initial))
+            )
+            common = self._v3_planner_args(root, recommendation_path)
+            with patch(
+                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.time",
+                return_value=100.0,
+            ):
+                self.assertEqual(main(common), 0)
+            manifest_path = root / "survey_route.manifest.json"
+            active_before = read_committed_revision(
+                manifest_path,
+                expected_stream_id="survey-v3-feedback",
+                now_unix_sec=100.0,
+            )
+            manifest_before = manifest_path.read_bytes()
+            route_before = active_before.route_path.read_bytes()
+
+            rejected = self._v3_axis_acquisition_recommendation(
+                1,
+                observation_unix_sec=101.0,
+                sensor_stamp_sec=11.0,
+                robot_pose=Pose2D(
+                    -1.0539397321019714,
+                    0.3967815348626196,
+                    2.9360318703611052,
+                ),
+            )
+            recommendation_path.write_text(
+                json.dumps(recommendation_to_dict(rejected))
+            )
+            feedback_path = root / "axis_acquisition_feedback.json"
+            map_bundle = freeze_map_bundle(
+                Path("maps/aufgabe03/arena_1p898x3p9_auto.yaml"),
+                semantic_map_id="arena_1p898x3p9_auto",
+                planning_frame="odom",
+            )
+            survey = common + [
+                "--workflow-mode",
+                "survey-only",
+                "--arrival-pose-catalog",
+                str(root / "catalog.json"),
+                "--candidate-uid",
+                "detected_stand_02",
+                "--expected-candidate-uid",
+                "detected_stand_02",
+                "--world-id",
+                "variant_v3_top_chicane",
+                "--world-sha256",
+                "a" * 64,
+                "--session-id",
+                "v3_feedback",
+                "--expected-map-bundle-sha256",
+                map_bundle.bundle_sha256,
+                "--candidate-snapshot-sha256",
+                "b" * 64,
+                "--axis-acquisition-feedback-json",
+                str(feedback_path),
+                "--axis-acquisition-arrival-tolerance-m",
+                "0.10",
+                "--axis-acquisition-search-max-targets",
+                "7",
+                "--watch",
+            ]
+            with patch(
+                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.time",
+                return_value=101.0,
+            ), patch(
+                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.sleep",
+                side_effect=KeyboardInterrupt,
+            ):
+                status = main(survey)
+            active_after = read_committed_revision(
+                manifest_path,
+                expected_stream_id="survey-v3-feedback",
+                now_unix_sec=101.0,
+            )
+            feedback = load_axis_acquisition_feedback(feedback_path)
+            manifest_after = manifest_path.read_bytes()
+            route_after = active_after.route_path.read_bytes()
+
+        self.assertEqual(status, 0)
+        self.assertEqual(active_after.status, "active")
+        self.assertEqual(active_after.route_revision, active_before.route_revision)
+        self.assertEqual(
+            active_after.target_revision,
+            active_before.target_revision,
+        )
+        self.assertEqual(manifest_before, manifest_after)
+        self.assertEqual(route_before, route_after)
+        self.assertEqual(feedback["state"], "pending")
+        self.assertTrue(feedback["simulation_only"])
+        self.assertEqual(feedback["binding"]["search_index"], 1)
+        self.assertEqual(
+            [item["failure_reason"] for item in feedback["rejections"]],
+            [
+                "acquisition_target_not_traversable",
+                "acquisition_target_not_traversable",
+            ],
+        )
+        self.assertAlmostEqual(feedback["held_distance_m"], 0.014434, places=5)
+
+    def test_v3_rejection_outside_held_target_withdraws_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            recommendation_path = root / "recommendation.json"
+            initial = self._v3_axis_acquisition_recommendation(
+                0,
+                observation_unix_sec=100.0,
+                sensor_stamp_sec=10.0,
+                robot_pose=Pose2D(
+                    0.421246145689513,
+                    -0.0009865396291015179,
+                    0.2747471906818155,
+                ),
+            )
+            recommendation_path.write_text(
+                json.dumps(recommendation_to_dict(initial))
+            )
+            common = self._v3_planner_args(root, recommendation_path)
+            with patch(
+                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.time",
+                return_value=100.0,
+            ):
+                self.assertEqual(main(common), 0)
+
+            unsafe = self._v3_axis_acquisition_recommendation(
+                1,
+                observation_unix_sec=101.0,
+                sensor_stamp_sec=11.0,
+                robot_pose=Pose2D(-0.90, 0.3998416094, 2.9),
+            )
+            recommendation_path.write_text(
+                json.dumps(recommendation_to_dict(unsafe))
+            )
+            map_bundle = freeze_map_bundle(
+                Path("maps/aufgabe03/arena_1p898x3p9_auto.yaml"),
+                semantic_map_id="arena_1p898x3p9_auto",
+                planning_frame="odom",
+            )
+            feedback_path = root / "axis_acquisition_feedback.json"
+            survey = common + [
+                "--workflow-mode",
+                "survey-only",
+                "--arrival-pose-catalog",
+                str(root / "catalog.json"),
+                "--candidate-uid",
+                "detected_stand_02",
+                "--expected-candidate-uid",
+                "detected_stand_02",
+                "--world-id",
+                "variant_v3_top_chicane",
+                "--world-sha256",
+                "a" * 64,
+                "--session-id",
+                "v3_feedback",
+                "--expected-map-bundle-sha256",
+                map_bundle.bundle_sha256,
+                "--candidate-snapshot-sha256",
+                "b" * 64,
+                "--axis-acquisition-feedback-json",
+                str(feedback_path),
+                "--watch",
+            ]
+            with patch(
+                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.time",
+                return_value=101.0,
+            ), patch(
+                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.sleep",
+                side_effect=KeyboardInterrupt,
+            ):
+                status = main(survey)
+            withdrawn = read_committed_revision(
+                root / "survey_route.manifest.json",
+                expected_stream_id="survey-v3-feedback",
+                now_unix_sec=101.0,
+            )
+            feedback_exists = feedback_path.exists()
+
+        self.assertEqual(status, 0)
+        self.assertEqual(withdrawn.status, "withdrawn")
+        self.assertIn("not safely held", withdrawn.reason)
+        self.assertFalse(feedback_exists)
+
+    def test_rejection_feedback_duplicate_stale_malformed_and_exhaustion_gates(self):
+        held = {
+            "target": {
+                "face_id": "acquisition_near_00",
+                "evidence_state": "axis_acquisition",
+                "x_m": -1.0680438670531678,
+                "y_m": 0.3998416093906661,
+                "yaw_rad": 2.878682160747617,
+            },
+            "evidence": {
+                "hard": False,
+                "valid": False,
+            },
+        }
+        recommendation = self._v3_axis_acquisition_recommendation(
+            1,
+            observation_unix_sec=100.0,
+            sensor_stamp_sec=10.0,
+            robot_pose=Pose2D(
+                -1.0539397321019714,
+                0.3967815348626196,
+                2.9360318703611052,
+            ),
+        )
+        attempts = tuple(
+            {
+                "face_id": face.face_id,
+                "diagnostics": {
+                    "failure_reason": "acquisition_target_not_traversable"
+                },
+            }
+            for face in recommendation.face_candidates
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "feedback.json"
+            first = _axis_acquisition_rejection_feedback(
+                path=path,
+                recommendation=recommendation,
+                active_publication=held,
+                point_approach_attempts=attempts,
+                arrival_tolerance_m=0.10,
+                max_search_targets=7,
+                now_unix_sec=100.0,
+                max_age_sec=3.0,
+            )
+            first_bytes = path.read_bytes()
+            newer_same_target = recommendation.__class__(
+                **{
+                    **recommendation.__dict__,
+                    "observation_unix_sec": 100.2,
+                    "sensor_stamp_sec": 10.2,
+                }
+            )
+            duplicate = _axis_acquisition_rejection_feedback(
+                path=path,
+                recommendation=newer_same_target,
+                active_publication=held,
+                point_approach_attempts=attempts,
+                arrival_tolerance_m=0.10,
+                max_search_targets=7,
+                now_unix_sec=100.2,
+                max_age_sec=3.0,
+            )
+            self.assertEqual(first, duplicate)
+            self.assertEqual(first_bytes, path.read_bytes())
+            with self.assertRaisesRegex(ValueError, "stale"):
+                _axis_acquisition_rejection_feedback(
+                    path=path,
+                    recommendation=newer_same_target,
+                    active_publication=held,
+                    point_approach_attempts=attempts,
+                    arrival_tolerance_m=0.10,
+                    max_search_targets=7,
+                    now_unix_sec=104.0,
+                    max_age_sec=3.0,
+                )
+
+            malformed_path = root / "malformed.json"
+            malformed_path.write_text("{malformed")
+            with self.assertRaises((ValueError, json.JSONDecodeError)):
+                _axis_acquisition_rejection_feedback(
+                    path=malformed_path,
+                    recommendation=recommendation,
+                    active_publication=held,
+                    point_approach_attempts=attempts,
+                    arrival_tolerance_m=0.10,
+                    max_search_targets=7,
+                    now_unix_sec=100.0,
+                    max_age_sec=3.0,
+                )
+
+            unsafe_attempts = tuple(
+                {
+                    **attempt,
+                    "diagnostics": {"failure_reason": "start_connector_blocked"},
+                }
+                for attempt in attempts
+            )
+            with self.assertRaisesRegex(ValueError, "allowlisted"):
+                _axis_acquisition_rejection_feedback(
+                    path=root / "unsafe.json",
+                    recommendation=recommendation,
+                    active_publication=held,
+                    point_approach_attempts=unsafe_attempts,
+                    arrival_tolerance_m=0.10,
+                    max_search_targets=7,
+                    now_unix_sec=100.0,
+                    max_age_sec=3.0,
+                )
+
+            exhausted = self._v3_axis_acquisition_recommendation(
+                6,
+                observation_unix_sec=100.0,
+                sensor_stamp_sec=10.0,
+                robot_pose=recommendation.robot_pose,
+            )
+            exhausted_attempts = tuple(
+                {
+                    "face_id": face.face_id,
+                    "diagnostics": {
+                        "failure_reason": "acquisition_target_not_traversable"
+                    },
+                }
+                for face in exhausted.face_candidates
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "axis_acquisition_search_exhausted",
+            ):
+                _axis_acquisition_rejection_feedback(
+                    path=root / "exhausted.json",
+                    recommendation=exhausted,
+                    active_publication=held,
+                    point_approach_attempts=exhausted_attempts,
+                    arrival_tolerance_m=0.10,
+                    max_search_targets=7,
+                    now_unix_sec=100.0,
+                    max_age_sec=3.0,
+                )
+
+        sampling = recommendation.__class__(
+            **{
+                **recommendation.__dict__,
+                "axis_state": "viewpoint_sampling",
+                "material_target": MaterialTarget(
+                    recommendation.material_target.face_id,
+                    recommendation.material_target.pose,
+                    "viewpoint_sampling",
+                ),
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+            ValueError,
+            "requires axis_acquisition",
+        ):
+            _axis_acquisition_rejection_feedback(
+                path=Path(tmp) / "feedback.json",
+                recommendation=sampling,
+                active_publication=held,
+                point_approach_attempts=attempts,
+                arrival_tolerance_m=0.10,
+                max_search_targets=7,
+                now_unix_sec=100.0,
+                max_age_sec=3.0,
+            )
 
     def test_station_b_regression_avoids_station_a_from_sampling_pose(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -575,6 +1096,7 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
                         str(station_a[0]),
                         str(station_a[1]),
                         "0.26",
+                        *SYNTHETIC_ARENA_ARGS,
                     ]
                 )
             with route.open() as route_file:
@@ -787,6 +1309,7 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
                         "--recommended-pose-json", str(recommendation_path),
                         "--route-csv", str(route),
                         "--diagnostics-json", str(diagnostics),
+                        *SYNTHETIC_ARENA_ARGS,
                     ]
                 )
             committed = read_committed_revision(
@@ -811,6 +1334,175 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
             diagnostics_payload["metadata"]["approach_phase"],
             "viewpoint_sampling",
         )
+
+    def test_retry07_wall_rejects_preferred_sampling_side_and_heartbeats_antipode(self):
+        map_yaml = (
+            Path(__file__).resolve().parents[2]
+            / "maps/aufgabe03/arena_1p898x3p9_auto.yaml"
+        )
+        stand = Pose2D(0.4087581398207478, 0.6801682891885629)
+        near = Pose2D(
+            0.682590495015525,
+            0.8027074308881902,
+            -2.720822220764573,
+        )
+        far = Pose2D(
+            0.13492578462597055,
+            0.5576291474889356,
+            0.4207704328252202,
+        )
+        recommendation = SynchronizedViewpointRecommendation(
+            schema_version=1,
+            simulation_only=True,
+            stream_id="sim-stand-viewpoint",
+            stand_id="C",
+            planning_frame="odom",
+            source="synchronized_lidar_camera_viewpoint",
+            observation_unix_sec=100.0,
+            sensor_stamp_sec=10.0,
+            stand=StandGeometry(stand, 0.06, 0.02, "lidar_cluster"),
+            robot_pose=Pose2D(1.55, -0.6, 2.996),
+            axis_confidence=0.0,
+            axis_state="viewpoint_sampling",
+            face_candidates=(
+                FaceCandidate("sampling_near", 0.42077043282522053, near, False),
+                FaceCandidate("sampling_far", -2.720822220764573, far, False),
+            ),
+            side_evidence=SideEvidence(
+                "none", 0.0, False, False, None, "axis_uncommitted"
+            ),
+            material_target=MaterialTarget(
+                "sampling_near", near, "viewpoint_sampling"
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            recommendation_path = root / "recommendation.json"
+            recommendation_path.write_text(
+                json.dumps(recommendation_to_dict(recommendation))
+            )
+            route = root / "route.csv"
+            diagnostics = root / "diagnostics.json"
+            argv = [
+                "--map", str(map_yaml),
+                "--start-x", "1.55",
+                "--start-y", "-0.6",
+                "--start-yaw", "2.996",
+                "--recommended-pose-json", str(recommendation_path),
+                "--route-csv", str(route),
+                "--diagnostics-json", str(diagnostics),
+            ]
+            with patch(
+                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.time",
+                return_value=100.0,
+            ):
+                self.assertEqual(main(argv), 0)
+            first = read_committed_revision(
+                route.with_suffix(".manifest.json"), now_unix_sec=100.0
+            )
+            first_route = first.route_path.read_bytes()
+            attempts = first.manifest["safety_diagnostics"][
+                "point_approach_attempts"
+            ]
+
+            refreshed = recommendation_to_dict(recommendation)
+            refreshed["observation_unix_sec"] = 105.0
+            recommendation_path.write_text(json.dumps(refreshed))
+            with patch(
+                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.time",
+                return_value=105.0,
+            ), patch(
+                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.plan_axis_acquisition",
+                side_effect=AssertionError("safe fallback heartbeat must retain geometry"),
+            ):
+                self.assertEqual(main(argv), 0)
+            heartbeat = read_committed_revision(
+                route.with_suffix(".manifest.json"), now_unix_sec=105.0
+            )
+            heartbeat_route = heartbeat.route_path.read_bytes()
+
+        self.assertEqual([attempt["valid"] for attempt in attempts], [False, True])
+        self.assertEqual(attempts[0]["face_id"], "sampling_near")
+        self.assertIn(
+            "acquisition_target_not_traversable",
+            attempts[0]["diagnostics"]["failure_reason"],
+        )
+        self.assertEqual(first.manifest["target"]["face_id"], "sampling_far")
+        self.assertAlmostEqual(
+            first.manifest["safety_diagnostics"]["static_inflation_radius_m"],
+            0.23,
+        )
+        self.assertEqual(heartbeat.manifest["target"], first.manifest["target"])
+        self.assertEqual(
+            heartbeat.manifest["target_revision"],
+            first.manifest["target_revision"],
+        )
+        self.assertEqual(heartbeat.route_hash, first.route_hash)
+        self.assertEqual(heartbeat_route, first_route)
+
+    def test_point_fallback_rejects_resolved_or_hard_evidence(self):
+        stand = Pose2D(1.5, 1.5)
+        near = Pose2D(1.8, 1.5, math.pi)
+        far = Pose2D(1.2, 1.5, 0.0)
+        base = SynchronizedViewpointRecommendation(
+            schema_version=1,
+            simulation_only=True,
+            stream_id="sim-stand-viewpoint",
+            stand_id="A",
+            planning_frame="odom",
+            source="synchronized_lidar_camera_viewpoint",
+            observation_unix_sec=100.0,
+            sensor_stamp_sec=10.0,
+            stand=StandGeometry(stand, 0.06, 0.02, "lidar_cluster"),
+            robot_pose=Pose2D(2.0, 1.5),
+            axis_confidence=0.0,
+            axis_state="viewpoint_sampling",
+            face_candidates=(
+                FaceCandidate("sampling_near", 0.0, near, True),
+                FaceCandidate("sampling_far", math.pi, far, True),
+            ),
+            side_evidence=SideEvidence(
+                "qr", 1.0, True, True, "sampling_near", "qr_binding"
+            ),
+            material_target=MaterialTarget(
+                "sampling_near", near, "viewpoint_sampling"
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "resolved_face_identity"):
+            _point_approach_targets(base, None)
+
+    def test_point_fallback_preserves_active_hemisphere_when_ids_rebase(self):
+        near = Pose2D(-0.28, 0.10, 0.0)
+        far = Pose2D(0.28, -0.10, math.pi)
+        recommendation = SimpleNamespace(
+            axis_state="viewpoint_sampling",
+            face_candidates=(
+                FaceCandidate("sampling_near", 0.0, near, False),
+                FaceCandidate("sampling_far", math.pi, far, False),
+            ),
+            side_evidence=SideEvidence(
+                "none", 0.0, False, False, None, "axis_uncommitted"
+            ),
+            material_target=MaterialTarget(
+                "sampling_near", near, "viewpoint_sampling"
+            ),
+        )
+        active_publication = {
+            "target": {
+                "face_id": "sampling_far",
+                "x_m": -0.30,
+                "y_m": 0.10,
+                "yaw_rad": 0.0,
+            }
+        }
+
+        ordered = _point_approach_targets(
+            recommendation,
+            active_publication,
+        )
+
+        self.assertEqual(ordered[0].face_id, "sampling_near")
+        self.assertEqual(ordered[0].pose, near)
 
     def test_sampling_at_point_three_meter_keeps_current_target_free_and_avoids_other_stand(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -885,6 +1577,7 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
                         str(other_stand[0]),
                         str(other_stand[1]),
                         "0.26",
+                        *SYNTHETIC_ARENA_ARGS,
                     ]
                 )
             with route.open() as route_file:
@@ -984,6 +1677,7 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
                 str(diagnostics),
                 "--standoff-distance-m",
                 "0.35",
+                *SYNTHETIC_ARENA_ARGS,
             ]
             with patch(
                 "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.time",

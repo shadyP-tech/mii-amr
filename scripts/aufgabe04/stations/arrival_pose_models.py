@@ -38,6 +38,12 @@ class CatalogProvenance:
     world_sha256: str
     session_id: str
     environment: str
+    map_bundle_sha256: str = ""
+    candidate_snapshot_sha256: str = ""
+    station_identity_registry_sha256: str = ""
+    survey_config_sha256: str = ""
+    calibration_profile_sha256: str = ""
+    survey_input_binding_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -158,4 +164,3 @@ class ArrivalPoseCatalog:
             (record for record in self.records if record.candidate_uid == candidate_uid),
             None,
         )
-

@@ -94,6 +94,7 @@ def _segment_command(args, leg_index: int) -> list[str]:
         "--base-frame",
         args.base_frame,
         "--allow-sim-time",
+        "--allow-unbound-survey-simulation-route",
         "--max-tf-age-sec",
         str(args.max_tf_age_sec),
         "--max-scan-age-sec",

@@ -1,5 +1,22 @@
 # Aufgabe 04 Real Parkour Checklist
 
+## Migration Status
+
+End-to-end Aufgabe04 hardware migration is currently **blocked**. This checklist
+is necessary but not sufficient; complete the staged gate in
+[`aufgabe04_sim_to_real_gate.md`](aufgabe04_sim_to_real_gate.md) first. The
+passive synchronized real viewpoint adapter and sealed unloaded-segment wrapper
+are implemented, but have not yet been validated on the robot. Strict onboard
+QR-event production, mission/follower integration, an independent ROS command
+guard/mux, automatic execution-evidence manifests, measured carrier/loaded
+dynamics, and the active fleet runtime are still not implemented. Follow
+[`aufgabe04_real_pipeline.md`](aufgabe04_real_pipeline.md) for passive survey
+and profile preparation.
+
+Until those blockers are closed, limit new real-world work to passive sensor and
+calibration capture or separately authorized, unloaded single-segment
+validation. Do not present either as a completed logistics mission.
+
 Before any real robot motion:
 
 - Clear the arena and station approach zones.
@@ -17,6 +34,33 @@ Before any real robot motion:
   the follower only during runtime.
 - Start with dry-run and single-robot checks before two-robot operation.
 
+## Sealed Artifact and Route Gate
+
+Before an unloaded single-segment motion trial, verify all applicable artifacts
+belong to the same run:
+
+- frozen map bundle matches the exact YAML, referenced image, semantic map ID,
+  and planning frame loaded for localization/planning;
+- candidate snapshot and identity registry match the surveyed catalog;
+- a logistics route matches the immutable task snapshot's exact station order
+  and its parent survey manifest;
+- route CSV and diagnostics match the execution route certificate, including
+  frame, route kind, waypoint count, tube radius, exact-vertex policy, command
+  owner, map bundle, and candidate snapshot;
+- robot namespace and runtime command-owner identity match the certificate;
+- controller profile, footprint, localization uncertainty, and clearance margin
+  are the measured values intended for this run.
+
+For loaded motion, additionally require a measured carrier profile, confirmed
+retention, current fenced puck custody, loaded stopping-distance evidence, and
+the loaded footprint in planning and fleet collision checks. These are not yet
+wired into the ROS runner, so loaded mission motion remains blocked.
+
+The ROS-free `cmd_vel_guard.py` state machine is not an active watchdog. Do not
+credit it as crash-independent velocity authority until a deployed guard/mux
+has been tested to output zero velocity on owner/lease loss, replay, stale or
+future commands, clock rollback, and process termination.
+
 ## Single-Segment Bringup Order
 
 1. Start TurtleBot3 bringup.
@@ -25,16 +69,10 @@ Before any real robot motion:
 3. Set the initial pose in RViz and verify the LiDAR overlay aligns with the map.
 4. Confirm there is no active Nav2 goal before handing off to the custom
    Aufgabe 04 follower.
-5. Run the station-segment dry run. Inspect the resolved topics before motion:
-
-```bash
-python3 scripts/aufgabe04/navigation/run_single_station_segment.py \
-  --dry-run \
-  --leg-index 1 \
-  --route-csv results/aufgabe04/routes/station_route.csv \
-  --diagnostics-json results/aufgabe04/routes/station_route_diagnostics.json \
-  --semantic-log results/aufgabe04/run_events/dry_run_001.jsonl
-```
+5. Do not feed the old `station_route.csv` artifacts to the segment runner.
+   They lack the sealed route kind, certificate, and mission root and are now
+   intentionally rejected. Complete the simulation-to-real gate and use the
+   full task-route inputs documented in `aufgabe04_arrival_pose_survey.md`.
 
 6. If the dry run passes, keep a separate stop terminal ready for the resolved
    velocity topic printed by the dry run. For example:
@@ -46,16 +84,11 @@ ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist '{}'
 Use `/robot1/cmd_vel` instead when the dry-run output resolves the robot's
 velocity topic under a namespace.
 
-7. Run the real segment only after the dry-run gates are clean:
-
-```bash
-python3 scripts/aufgabe04/navigation/run_single_station_segment.py \
-  --leg-index 1 \
-  --route-csv results/aufgabe04/routes/station_route.csv \
-  --diagnostics-json results/aufgabe04/routes/station_route_diagnostics.json \
-  --preflight-json results/real_runs/run_001/aufgabe04_preflight.json \
-  --semantic-log results/real_runs/run_001/aufgabe04_events.jsonl
-```
+7. The dedicated `real_robot/run_unloaded_segment.py` adapter retains every
+   sealed mission-chain input and is dry-run by default. Its `--execute` path is
+   only for a separately authorized, unloaded single-leg validation after the
+   staged gate and physical precautions pass. It does not clear real logistics
+   mission execution.
 
 Every physical validation requires typing `RUN` before motion. There is no
 `--yes` bypass for `run_single_station_segment.py`; repeated runs still require
@@ -79,35 +112,10 @@ scripts/aufgabe04/navigation/run_first_detected_station_segment_with_bundle.sh \
   --operator-note "first detected station pre-approach"
 ```
 
-Example namespaced real run:
-
-```bash
-scripts/common/run_with_bundle.sh \
-  --namespace robot1 \
-  --cmd-vel-topic cmd_vel \
-  --scan-topic scan \
-  --odom-topic odom \
-  --amcl-topic amcl_pose \
-  --map-frame map \
-  --odom-frame odom \
-  --base-frame base_footprint \
-  run_001 \
-  -- \
-  python3 scripts/aufgabe04/navigation/run_single_station_segment.py \
-    --namespace robot1 \
-    --cmd-vel-topic cmd_vel \
-    --scan-topic scan \
-    --odom-topic odom \
-    --amcl-topic amcl_pose \
-    --map-frame map \
-    --odom-frame odom \
-    --base-frame base_footprint \
-    --leg-index 1 \
-    --route-csv results/aufgabe04/routes/station_route.csv \
-    --diagnostics-json results/aufgabe04/routes/station_route_diagnostics.json \
-    --preflight-json results/real_runs/run_001/aufgabe04_preflight.json \
-    --semantic-log results/real_runs/run_001/aufgabe04_events.jsonl
-```
+Do not reconstruct the removed abbreviated namespaced example by adding only
+topic flags. A future real command must retain every sealed mission-chain input
+from the simulation admission command and add matching namespace/topic/frame
+settings to both the evidence wrapper and runner.
 
 After the run, create the upload/debug archive printed in
 `results/real_runs/run_001/archive_hint.txt`. The same wrapper can be used for

@@ -60,9 +60,18 @@ def message_freshness_failure(
     receipt_age_sec: float | None,
     header_age_sec: float | None,
     max_age_sec: float,
+    max_future_sec: float = 0.25,
 ) -> str:
+    if not math.isfinite(max_age_sec) or max_age_sec < 0.0:
+        raise ValueError("max_age_sec must be finite and non-negative")
+    if not math.isfinite(max_future_sec) or max_future_sec < 0.0:
+        raise ValueError("max_future_sec must be finite and non-negative")
     if not has_message or receipt_age_sec is None or header_age_sec is None:
         return f"missing {name}"
+    if not math.isfinite(receipt_age_sec) or not math.isfinite(header_age_sec):
+        return f"invalid {name} timestamp"
+    if receipt_age_sec < -max_future_sec or header_age_sec < -max_future_sec:
+        return f"future-dated {name}"
     if receipt_age_sec > max_age_sec or header_age_sec > max_age_sec:
         return f"stale {name}"
     return ""

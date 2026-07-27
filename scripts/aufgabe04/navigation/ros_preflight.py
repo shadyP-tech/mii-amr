@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -138,6 +139,7 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         max_odom_age_sec: float,
         max_tf_age_sec: float,
         max_amcl_age_sec: float,
+        max_future_timestamp_sec: float,
         observation_window_sec: float,
         allow_idle_nav2: bool,
         allowed_cmd_vel_publishers: Sequence[str],
@@ -152,6 +154,7 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         self.max_odom_age_sec = max_odom_age_sec
         self.max_tf_age_sec = max_tf_age_sec
         self.max_amcl_age_sec = max_amcl_age_sec
+        self.max_future_timestamp_sec = max_future_timestamp_sec
         self.observation_window_sec = observation_window_sec
         self.allow_idle_nav2 = allow_idle_nav2
         self.allowed_cmd_vel_publishers = tuple(allowed_cmd_vel_publishers)
@@ -339,17 +342,32 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         now = self.get_clock().now()
         receipt_age = (now - receipt).nanoseconds / 1_000_000_000.0
         header_age = (now - Time.from_msg(msg.header.stamp)).nanoseconds / 1_000_000_000.0
-        ok = receipt_age <= max_age_sec and header_age <= max_age_sec
+        ok = (
+            -self.max_future_timestamp_sec <= receipt_age <= max_age_sec
+            and -self.max_future_timestamp_sec <= header_age <= max_age_sec
+        )
         observations.append(
             RosObservation(
                 name,
                 ok,
                 f"receipt_age={receipt_age:.3f}s header_age={header_age:.3f}s",
-                {"receipt_age_sec": receipt_age, "header_age_sec": header_age},
+                {
+                    "receipt_age_sec": receipt_age,
+                    "header_age_sec": header_age,
+                    "max_future_sec": self.max_future_timestamp_sec,
+                },
             )
         )
         if not ok:
-            failures.append(f"{name}: stale message")
+            failures.append(
+                f"{name}: "
+                + (
+                    "future-dated message"
+                    if receipt_age < -self.max_future_timestamp_sec
+                    or header_age < -self.max_future_timestamp_sec
+                    else "stale message"
+                )
+            )
 
     def _message_freshness(self, msg, receipt, max_age_sec: float) -> Tuple[bool, Dict[str, object]]:
         if msg is None or receipt is None:
@@ -357,11 +375,15 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         now = self.get_clock().now()
         receipt_age = (now - receipt).nanoseconds / 1_000_000_000.0
         header_age = (now - Time.from_msg(msg.header.stamp)).nanoseconds / 1_000_000_000.0
-        ok = receipt_age <= max_age_sec and header_age <= max_age_sec
+        ok = (
+            -self.max_future_timestamp_sec <= receipt_age <= max_age_sec
+            and -self.max_future_timestamp_sec <= header_age <= max_age_sec
+        )
         return ok, {
             "received": True,
             "receipt_age_sec": receipt_age,
             "header_age_sec": header_age,
+            "max_future_sec": self.max_future_timestamp_sec,
         }
 
     def _observe_tf(
@@ -386,11 +408,22 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             failures.append(f"{name}: unavailable")
             return False, data
         age = (self.get_clock().now() - Time.from_msg(transform.header.stamp)).nanoseconds / 1_000_000_000.0
-        ok = age <= max_age_sec
-        data = {"available": True, "age_sec": age}
+        ok = -self.max_future_timestamp_sec <= age <= max_age_sec
+        data = {
+            "available": True,
+            "age_sec": age,
+            "max_future_sec": self.max_future_timestamp_sec,
+        }
         observations.append(RosObservation(name, ok, f"age={age:.3f}s", data))
         if not ok:
-            failures.append(f"{name}: stale transform")
+            failures.append(
+                f"{name}: "
+                + (
+                    "future-dated transform"
+                    if age < -self.max_future_timestamp_sec
+                    else "stale transform"
+                )
+            )
         return ok, data
 
     def _observe_localization_ownership(
@@ -461,6 +494,7 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             receipt_age_sec=receipt_age,
             header_age_sec=header_age,
             max_age_sec=self.max_tf_age_sec,
+            max_future_sec=self.max_future_timestamp_sec,
         )
 
     def _external_tf_owner_candidates(self) -> List[str]:
@@ -540,11 +574,17 @@ def run_ros_preflight(
     max_odom_age_sec: float = 1.0,
     max_tf_age_sec: float = 1.0,
     max_amcl_age_sec: float = 2.0,
+    max_future_timestamp_sec: float = 0.25,
     observation_window_sec: float = 2.0,
     allow_idle_nav2: bool = False,
     allowed_cmd_vel_publishers: Sequence[str] = (),
     require_real_time: bool = True,
 ) -> RosPreflightResult:
+    if (
+        not math.isfinite(max_future_timestamp_sec)
+        or max_future_timestamp_sec < 0.0
+    ):
+        raise ValueError("max_future_timestamp_sec must be finite and non-negative")
     _require_ros()
     rclpy.init(args=None)
     node = RosPreflightNode(
@@ -553,6 +593,7 @@ def run_ros_preflight(
         max_odom_age_sec=max_odom_age_sec,
         max_tf_age_sec=max_tf_age_sec,
         max_amcl_age_sec=max_amcl_age_sec,
+        max_future_timestamp_sec=max_future_timestamp_sec,
         observation_window_sec=observation_window_sec,
         allow_idle_nav2=allow_idle_nav2,
         allowed_cmd_vel_publishers=allowed_cmd_vel_publishers,
@@ -577,6 +618,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-frame", default="base_footprint")
     parser.add_argument("--localization-source", default="amcl", choices=["amcl", "tf"])
     parser.add_argument("--allow-sim-time", action="store_true")
+    parser.add_argument("--max-future-timestamp-sec", type=float, default=0.25)
     parser.add_argument("--output-json", type=Path, default=None)
     parser.add_argument(
         "--allowed-cmd-vel-publisher",
@@ -590,6 +632,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if (
+        not math.isfinite(args.max_future_timestamp_sec)
+        or args.max_future_timestamp_sec < 0.0
+    ):
+        parser.error("--max-future-timestamp-sec must be non-negative")
     runtime_config = resolve_runtime_config(
         RuntimeConfig(
             namespace=args.namespace,
@@ -607,6 +654,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = run_ros_preflight(
             runtime_config,
+            max_future_timestamp_sec=args.max_future_timestamp_sec,
             allowed_cmd_vel_publishers=args.allowed_cmd_vel_publisher,
             require_real_time=not args.allow_sim_time,
         )

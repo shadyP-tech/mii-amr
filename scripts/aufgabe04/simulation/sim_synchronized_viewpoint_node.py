@@ -24,6 +24,22 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.aufgabe04.navigation.models import Pose2D
+from scripts.aufgabe04.navigation.axis_acquisition_feedback import (
+    AXIS_ACQUISITION_FEEDBACK_CONTRACT,
+    AXIS_ACQUISITION_FEEDBACK_SCHEMA_VERSION,
+    axis_acquisition_feedback_binding,
+    canonical_json_sha256,
+    consume_axis_acquisition_feedback,
+    load_axis_acquisition_feedback,
+)
+from scripts.aufgabe04.navigation.viewpoint_sampling_contract import (
+    DEFAULT_VIEWPOINT_SAMPLING_TARGET_DISTANCE_M,
+    INTERMEDIATE_TERMINAL_HEADING_HOLD_TOLERANCE_M,
+    INTERMEDIATE_TERMINAL_HEADING_TARGET_ENVELOPE_RADIUS_M,
+    VIEWPOINT_SAMPLING_CONTRACT_NAME,
+    VIEWPOINT_SAMPLING_CONTRACT_VERSION,
+    ViewpointSamplingHoldConfig,
+)
 from scripts.aufgabe04.navigation.viewpoint_recommendation import (
     FaceCandidate,
     MaterialTarget,
@@ -59,17 +75,25 @@ from scripts.aufgabe04.simulation.sim_head_roi import (
 )
 from scripts.aufgabe04.simulation.sim_qr_detector import detect_simulated_station_qr_bgr
 from scripts.aufgabe04.simulation.sim_viewpoint_optimization import (
+    DEFAULT_SAMPLING_ARRIVAL_TOLERANCE_M,
+    DEFAULT_TANGENTIAL_CORRECTION_GAIN,
     DynamicPreApproachTracker,
     DynamicTargetConfig,
     StationarySettleGate,
     TimedSample,
     ViewpointConfig,
     ViewpointMeasurement,
+    ViewpointSamplingOdomSample,
     ViewpointSamplingLatch,
+    VIEWPOINT_SAMPLING_ODOM_QUATERNION_NORM_TOLERANCE,
     evaluate_viewpoint,
     face_normal_candidates,
     newest_synchronized_triplet,
     normalize_angle,
+    sampling_recenter_pose,
+    select_viewpoint_sampling_odom_replay,
+    viewpoint_sampling_history_identity,
+    viewpoint_sampling_history_identity_changed,
 )
 
 
@@ -81,6 +105,51 @@ def _yaw(quaternion) -> float:
     siny = 2.0 * (quaternion.w * quaternion.z + quaternion.x * quaternion.y)
     cosy = 1.0 - 2.0 * (quaternion.y * quaternion.y + quaternion.z * quaternion.z)
     return math.atan2(siny, cosy)
+
+
+def center_distance_with_lidar_presence(
+    *,
+    robot_x_m: float,
+    robot_y_m: float,
+    stand_x_m: float,
+    stand_y_m: float,
+    stand_radius_m: float,
+    stand_uncertainty_m: float,
+    range_tolerance_m: float,
+    lidar_surface_distance_m: float | None,
+) -> float | None:
+    """Return center distance only when the synchronized scan sees the target.
+
+    Viewpoint standoff is specified from the frozen stand center, whereas a
+    LaserScan measures the nearer stand surface. Mixing those frames makes a
+    nominal 0.30 m viewpoint appear several centimetres too close.
+    """
+
+    if (
+        lidar_surface_distance_m is None
+        or not math.isfinite(lidar_surface_distance_m)
+        or lidar_surface_distance_m <= 0.0
+    ):
+        return None
+    support_allowance_m = (
+        stand_radius_m + stand_uncertainty_m + range_tolerance_m
+    )
+    if (
+        not math.isfinite(support_allowance_m)
+        or support_allowance_m <= 0.0
+    ):
+        return None
+    center_distance_m = math.hypot(
+        stand_x_m - robot_x_m,
+        stand_y_m - robot_y_m,
+    )
+    if (
+        not math.isfinite(center_distance_m)
+        or abs(center_distance_m - lidar_surface_distance_m)
+        > support_allowance_m
+    ):
+        return None
+    return center_distance_m
 
 
 def _atomic_json(path: Path, payload: dict) -> None:
@@ -115,11 +184,168 @@ def _nearest_face_id(face_candidates, pose: Pose2D) -> str:
     ).face_id
 
 
+def unresolved_point_target_poses(
+    recommendation: SynchronizedViewpointRecommendation | None,
+    *,
+    expected_axis_state: str,
+) -> tuple[Pose2D, ...]:
+    """Return both equivalent survey targets only while identity is unresolved.
+
+    The point planner may safely substitute the antipode when the observer's
+    preferred side is blocked.  That substitution carries no physical-face
+    meaning, so the observer must recognize either published candidate as the
+    reached point.  Any resolved or side-bound evidence disables this symmetry.
+    """
+
+    if recommendation is None or recommendation.axis_state != expected_axis_state:
+        return ()
+    if recommendation.material_target.evidence_state != expected_axis_state:
+        return ()
+    if recommendation.side_evidence.hard or recommendation.side_evidence.valid:
+        return ()
+    if any(face.identity_resolved for face in recommendation.face_candidates):
+        return ()
+    return tuple(face.pose for face in recommendation.face_candidates)
+
+
+def unresolved_point_target_reached(
+    recommendation: SynchronizedViewpointRecommendation | None,
+    robot_pose: Pose2D,
+    *,
+    expected_axis_state: str,
+    arrival_tolerance_m: float,
+) -> bool:
+    if not math.isfinite(arrival_tolerance_m) or arrival_tolerance_m <= 0.0:
+        raise ValueError("arrival_tolerance_m must be finite and positive")
+    return any(
+        math.hypot(robot_pose.x_m - pose.x_m, robot_pose.y_m - pose.y_m)
+        <= arrival_tolerance_m
+        for pose in unresolved_point_target_poses(
+            recommendation,
+            expected_axis_state=expected_axis_state,
+        )
+    )
+
+
 @dataclass(frozen=True)
 class ConditionedAxisDecision:
     axis_rad: float | None
     confidence: float
     reason: str
+
+
+@dataclass(frozen=True)
+class AxisAcquisitionFeedbackDecision:
+    accepted: bool
+    reason: str
+    next_search_index: int | None
+    binding_sha256: str | None
+
+
+def evaluate_axis_acquisition_feedback(
+    path: Path | None,
+    *,
+    last_recommendation: SynchronizedViewpointRecommendation | None,
+    current_robot_pose: Pose2D,
+    current_search_index: int,
+    max_search_targets: int,
+    arrival_tolerance_m: float,
+    max_age_sec: float,
+    now_unix_sec: float,
+    current_stationary: bool = True,
+    current_view_centered: bool = True,
+) -> AxisAcquisitionFeedbackDecision:
+    """Consume one exact planner rejection only while the prior route is held."""
+
+    if path is None or not path.exists():
+        return AxisAcquisitionFeedbackDecision(
+            False,
+            "feedback_unavailable",
+            None,
+            None,
+        )
+    try:
+        payload = load_axis_acquisition_feedback(
+            path,
+            now_unix_sec=now_unix_sec,
+            max_age_sec=max_age_sec,
+        )
+        if payload["state"] != "pending":
+            return AxisAcquisitionFeedbackDecision(
+                False,
+                "feedback_already_consumed",
+                None,
+                str(payload["binding_sha256"]),
+            )
+        if last_recommendation is None:
+            raise ValueError("feedback has no exact last recommendation")
+        expected_binding = axis_acquisition_feedback_binding(
+            last_recommendation
+        )
+        expected_digest = canonical_json_sha256(expected_binding)
+        if payload["binding_sha256"] != expected_digest:
+            raise ValueError("feedback does not bind the exact last recommendation")
+        if (
+            float(payload["source_observation_unix_sec"])
+            > last_recommendation.observation_unix_sec
+            or float(payload["source_sensor_stamp_sec"])
+            > last_recommendation.sensor_stamp_sec
+        ):
+            raise ValueError("feedback source stamps are newer than the observer")
+        feedback_index = int(payload["binding"]["search_index"])
+        if feedback_index != current_search_index:
+            raise ValueError("feedback search index mismatch")
+        if (
+            current_search_index < 0
+            or current_search_index + 1 >= max_search_targets
+        ):
+            raise ValueError("feedback would exceed the bounded acquisition search")
+        feedback_tolerance_m = float(payload["arrival_tolerance_m"])
+        if (
+            not math.isfinite(arrival_tolerance_m)
+            or arrival_tolerance_m <= 0.0
+            or abs(feedback_tolerance_m - arrival_tolerance_m) > 1.0e-12
+        ):
+            raise ValueError("feedback arrival tolerance mismatch")
+        held_pose_payload = payload["held_active_target"]["pose"]
+        held_pose = Pose2D(
+            float(held_pose_payload["x_m"]),
+            float(held_pose_payload["y_m"]),
+            float(held_pose_payload["yaw_rad"]),
+        )
+        recommendation_hold_distance_m = math.hypot(
+            last_recommendation.robot_pose.x_m - held_pose.x_m,
+            last_recommendation.robot_pose.y_m - held_pose.y_m,
+        )
+        live_hold_distance_m = math.hypot(
+            current_robot_pose.x_m - held_pose.x_m,
+            current_robot_pose.y_m - held_pose.y_m,
+        )
+        if (
+            recommendation_hold_distance_m > arrival_tolerance_m
+            or live_hold_distance_m > arrival_tolerance_m
+        ):
+            raise ValueError("feedback active target hold is unsafe")
+        if not current_stationary or not current_view_centered:
+            raise ValueError("feedback current measurement is not safely settled")
+        consume_axis_acquisition_feedback(
+            path,
+            expected_binding_sha256=expected_digest,
+            consumed_unix_sec=now_unix_sec,
+        )
+        return AxisAcquisitionFeedbackDecision(
+            True,
+            "static_target_rejection_consumed",
+            current_search_index + 1,
+            expected_digest,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return AxisAcquisitionFeedbackDecision(
+            False,
+            f"feedback_rejected:{exc}",
+            None,
+            None,
+        )
 
 
 def camera_yaw_from_target_line_of_sight(
@@ -259,6 +485,43 @@ def provisional_viewpoint_candidates(
     )
 
 
+def axis_acquisition_search_target(
+    stand_pose: Pose2D,
+    *,
+    reference_normal_rad: float,
+    distance_m: float,
+    target_index: int,
+    step_rad: float,
+) -> Pose2D:
+    """Return one bounded alternating acquisition ray around the stand.
+
+    Index order is ``0, +step, -step, +2*step, -2*step, ...``. The search
+    uses no guessed physical face: every pose remains survey-only and faces
+    the frozen stand center.
+    """
+
+    if not isinstance(target_index, int) or isinstance(target_index, bool):
+        raise ValueError("axis acquisition target index must be an integer")
+    if target_index < 0:
+        raise ValueError("axis acquisition target index must be non-negative")
+    if not math.isfinite(distance_m) or distance_m <= 0.0:
+        raise ValueError("axis acquisition distance must be finite and positive")
+    if not math.isfinite(step_rad) or step_rad <= 0.0:
+        raise ValueError("axis acquisition step must be finite and positive")
+    if target_index == 0:
+        offset_rad = 0.0
+    else:
+        magnitude = (target_index + 1) // 2
+        direction = 1.0 if target_index % 2 else -1.0
+        offset_rad = direction * magnitude * step_rad
+    normal = normalize_angle(reference_normal_rad + offset_rad)
+    return Pose2D(
+        stand_pose.x_m + distance_m * math.cos(normal),
+        stand_pose.y_m + distance_m * math.sin(normal),
+        normalize_angle(normal + math.pi),
+    )
+
+
 def select_published_viewpoint_pose(
     decision_pose: Pose2D, dynamic_update
 ) -> Pose2D:
@@ -330,6 +593,25 @@ def should_defer_initial_physical_recommendation(
     )
 
 
+def should_attempt_qr_face_binding(
+    *,
+    acquiring_axis: bool,
+    consensus_available: bool,
+    qr_detected: bool,
+) -> bool:
+    """Bind QR identity only after physical face IDs exist.
+
+    Axis-acquisition and viewpoint-sampling targets deliberately use
+    provisional face IDs.  Their unresolved identity is expected and must not
+    turn an otherwise valid, face-independent sampling route into an
+    ``invalid_face_identity_unresolved`` recommendation.  The QR consensus is
+    still accumulated while sampling; binding starts as soon as the committed
+    axis has bootstrapped the stable physical-face resolver.
+    """
+
+    return not acquiring_axis and consensus_available and qr_detected
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image-topic", default="/camera/image_raw")
@@ -341,6 +623,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stream-id", default="sim-stand-viewpoint")
     parser.add_argument("--stand-radius-m", type=float, default=0.06)
     parser.add_argument("--stand-uncertainty-m", type=float, default=0.02)
+    parser.add_argument(
+        "--lidar-stand-range-tolerance-m",
+        type=float,
+        default=0.03,
+        help=(
+            "Extra radial allowance when checking that the synchronized "
+            "LiDAR return is consistent with the frozen stand center."
+        ),
+    )
     parser.add_argument("--map-frame", default="odom")
     parser.add_argument("--base-frame", default="base_footprint")
     parser.add_argument("--scan-frame", default="base_scan")
@@ -366,7 +657,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--sync-tolerance-sec", type=float, default=0.12)
-    parser.add_argument("--target-distance-m", type=float, default=0.30)
+    parser.add_argument(
+        "--target-distance-m",
+        type=float,
+        default=DEFAULT_VIEWPOINT_SAMPLING_TARGET_DISTANCE_M,
+    )
     parser.add_argument(
         "--axis-acquisition-distance-m",
         type=float,
@@ -379,10 +674,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sampling-arrival-tolerance-m",
         type=float,
-        default=0.10,
+        default=DEFAULT_SAMPLING_ARRIVAL_TOLERANCE_M,
         help=(
             "Distance for considering a latched viewpoint-sampling target reached; "
             "another tangential sample cannot be selected before this gate."
+        ),
+    )
+    parser.add_argument(
+        "--viewpoint-sampling-terminal-heading-hold-tolerance-m",
+        type=float,
+        default=INTERMEDIATE_TERMINAL_HEADING_HOLD_TOLERANCE_M,
+        help=(
+            "Inferred stand-distance annulus half-width retained after the "
+            "observer has seen strict sampling-target entry."
+        ),
+    )
+    parser.add_argument(
+        "--viewpoint-sampling-terminal-heading-target-envelope-radius-m",
+        type=float,
+        default=INTERMEDIATE_TERMINAL_HEADING_TARGET_ENVELOPE_RADIUS_M,
+        help=(
+            "Hard pose-to-target tube retained after strict observer arrival; "
+            "it must match the survey follower contract."
         ),
     )
     parser.add_argument(
@@ -393,6 +706,35 @@ def build_parser() -> argparse.ArgumentParser:
             "Distance for recognizing completion of the initial acquisition route. "
             "This is independent of the tighter camera-sampling tolerance."
         ),
+    )
+    parser.add_argument(
+        "--axis-acquisition-search-step-deg",
+        type=float,
+        default=45.0,
+        help=(
+            "Alternating azimuth step for bounded survey-only recovery when "
+            "the initial acquisition ray has no reliable silhouette."
+        ),
+    )
+    parser.add_argument(
+        "--axis-acquisition-search-max-targets",
+        type=int,
+        default=7,
+        help="Maximum acquisition rays, including the initial target.",
+    )
+    parser.add_argument(
+        "--axis-acquisition-feedback-json",
+        type=Path,
+        default=None,
+        help=(
+            "Simulation-only planner rejection sidecar. It is observer/planner "
+            "coordination and is never forwarded to a motion process."
+        ),
+    )
+    parser.add_argument(
+        "--axis-acquisition-feedback-max-age-sec",
+        type=float,
+        default=3.0,
     )
     parser.add_argument("--min-distance-m", type=float, default=0.28)
     parser.add_argument("--max-distance-m", type=float, default=0.35)
@@ -413,6 +755,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Simulation-only bound for one camera-derived sampling correction. "
             "This moves an oblique view but never turns it into accepted axis evidence."
+        ),
+    )
+    parser.add_argument(
+        "--tangential-correction-gain",
+        type=float,
+        default=DEFAULT_TANGENTIAL_CORRECTION_GAIN,
+        help=(
+            "Simulation-only gain applied to one camera-derived tangential "
+            "correction before the maximum-step clamp."
         ),
     )
     parser.add_argument("--max-linear-speed-mps", type=float, default=0.01)
@@ -477,15 +828,53 @@ class SimSynchronizedViewpointNode:  # instantiated only with ROS available
             max_center_error_rad=math.radians(args.max_center_error_deg),
             max_obliqueness_rad=math.radians(args.max_obliqueness_deg),
             max_tangential_step_rad=math.radians(args.max_tangential_step_deg),
+            tangential_correction_gain=args.tangential_correction_gain,
             max_linear_speed_mps=args.max_linear_speed_mps,
             max_angular_speed_radps=args.max_angular_speed_radps,
             settle_time_sec=args.settle_time_sec,
         )
         self.settle_gate = StationarySettleGate(args.settle_time_sec)
         self.sampling_settle_gate = StationarySettleGate(args.settle_time_sec)
-        self.sampling_latch = ViewpointSamplingLatch(
-            arrival_tolerance_m=args.sampling_arrival_tolerance_m
+        self.acquisition_search_settle_gate = StationarySettleGate(
+            args.settle_time_sec
         )
+        self.acquisition_search_index = 0
+        self.axis_acquisition_feedback_status = {
+            "contract": AXIS_ACQUISITION_FEEDBACK_CONTRACT,
+            "schema_version": AXIS_ACQUISITION_FEEDBACK_SCHEMA_VERSION,
+            "accepted": False,
+            "reason": "not_checked",
+            "next_search_index": None,
+            "binding_sha256": None,
+        }
+        self.sampling_latch = ViewpointSamplingLatch(
+            arrival_tolerance_m=args.sampling_arrival_tolerance_m,
+            hold_tolerance_m=(
+                args.viewpoint_sampling_terminal_heading_hold_tolerance_m
+            ),
+            target_distance_m=args.target_distance_m,
+            target_envelope_radius_m=(
+                args
+                .viewpoint_sampling_terminal_heading_target_envelope_radius_m
+            ),
+        )
+        self.sampling_arrival_history_target = None
+        self.sampling_arrival_history_stream_id = None
+        self.sampling_arrival_target_activation_stamp_sec = None
+        self.sampling_arrival_last_checked_odom_stamp_sec = None
+        self.sampling_arrival_history_diagnostics = {
+            "state": "reset",
+            "fail_closed": False,
+            "reason": "not_initialized",
+            "target_identity": None,
+            "history_processed_sample_count": 0,
+            "strict_history_sample_count": 0,
+            "checked_from_stamp_sec": None,
+            "checked_to_stamp_sec": None,
+            "strict_history_min_distance_m": None,
+            "strict_history_min_distance_stamp_sec": None,
+            "strict_armed_by_history": False,
+        }
         self.consensus = AxisConsensusAccumulator(
             required_samples=args.consensus_frames,
             max_deviation_rad=math.radians(args.consensus_max_deviation_deg),
@@ -530,6 +919,302 @@ class SimSynchronizedViewpointNode:  # instantiated only with ROS available
     def _on_odom(self, message) -> None:
         self.odometry.append(TimedSample(_stamp_sec(message), message))
 
+    @staticmethod
+    def _arrival_odom_sample(sample: TimedSample) -> ViewpointSamplingOdomSample:
+        odom = sample.value
+        position = odom.pose.pose.position
+        quaternion = odom.pose.pose.orientation
+        return ViewpointSamplingOdomSample(
+            stamp_sec=sample.stamp_sec,
+            pose=Pose2D(
+                float(position.x),
+                float(position.y),
+                _yaw(quaternion),
+            ),
+            parent_frame=str(getattr(odom.header, "frame_id", "")),
+            child_frame=str(getattr(odom, "child_frame_id", "")),
+            quaternion_xyzw=(
+                float(quaternion.x),
+                float(quaternion.y),
+                float(quaternion.z),
+                float(quaternion.w),
+            ),
+        )
+
+    def _reset_sampling_arrival_history(self, *, reason: str) -> None:
+        self.sampling_arrival_history_target = None
+        self.sampling_arrival_history_stream_id = None
+        self.sampling_arrival_target_activation_stamp_sec = None
+        self.sampling_arrival_last_checked_odom_stamp_sec = None
+        self.sampling_arrival_history_diagnostics = {
+            "state": "reset",
+            "fail_closed": False,
+            "reason": reason,
+            "target_identity": None,
+            "history_processed_sample_count": 0,
+            "strict_history_sample_count": 0,
+            "checked_from_stamp_sec": None,
+            "checked_to_stamp_sec": None,
+            "strict_history_min_distance_m": None,
+            "strict_history_min_distance_stamp_sec": None,
+            "strict_armed_by_history": False,
+        }
+
+    def _sampling_arrival_target_identity(self, target) -> dict[str, object]:
+        return viewpoint_sampling_history_identity(
+            self.args.stream_id,
+            target,
+        )
+
+    def _replay_sampling_arrival_history(
+        self,
+        *,
+        current_image_stamp_sec: float,
+        current_odom_stamp_sec: float,
+    ) -> bool:
+        target = self.sampling_latch.arrival_material_target
+        activation_stamp_sec = (
+            self.sampling_arrival_target_activation_stamp_sec
+        )
+        last_checked_stamp_sec = (
+            self.sampling_arrival_last_checked_odom_stamp_sec
+        )
+        cursor_identity_changed = (
+            self.sampling_arrival_history_target is not None
+            or target is not None
+        ) and viewpoint_sampling_history_identity_changed(
+            previous_stream_id=self.sampling_arrival_history_stream_id,
+            previous_target=self.sampling_arrival_history_target,
+            current_stream_id=self.args.stream_id,
+            current_target=target,
+        )
+        if (
+            target is None
+            or cursor_identity_changed
+            or activation_stamp_sec is None
+            or last_checked_stamp_sec is None
+        ):
+            if (
+                target is not None
+                and self.sampling_arrival_history_target is not None
+                and cursor_identity_changed
+            ):
+                self.sampling_latch.invalidate_arrival_evidence(
+                    reason="sampling_arrival_history_identity_changed"
+                )
+                self.sampling_arrival_history_target = None
+                self.sampling_arrival_history_stream_id = None
+                self.sampling_arrival_target_activation_stamp_sec = None
+                self.sampling_arrival_last_checked_odom_stamp_sec = None
+            self.sampling_arrival_history_diagnostics = {
+                "state": (
+                    "target_history_discarded"
+                    if cursor_identity_changed
+                    else "inactive"
+                ),
+                "fail_closed": False,
+                "reason": (
+                    "material_target_identity_changed"
+                    if cursor_identity_changed
+                    else "no_exact_material_target_history_cursor"
+                ),
+                "history_discarded_on_target_change": cursor_identity_changed,
+                "target_identity": (
+                    None
+                    if target is None
+                    else self._sampling_arrival_target_identity(target)
+                ),
+                "current_image_stamp_sec": current_image_stamp_sec,
+                "current_pose_revalidation_stamp_sec": current_odom_stamp_sec,
+            }
+            return True
+
+        if current_odom_stamp_sec == last_checked_stamp_sec:
+            self.sampling_arrival_history_diagnostics = {
+                "state": "duplicate_current_odom_skipped",
+                "fail_closed": False,
+                "reason": "current_odom_stamp_already_checked",
+                "target_identity": (
+                    self._sampling_arrival_target_identity(target)
+                ),
+                "target_activation_stamp_sec": activation_stamp_sec,
+                "last_checked_odom_stamp_sec_before": last_checked_stamp_sec,
+                "last_checked_odom_stamp_sec_after": last_checked_stamp_sec,
+                "current_image_stamp_sec": current_image_stamp_sec,
+                "current_pose_revalidation_stamp_sec": current_odom_stamp_sec,
+                "strict_history_sample_count": 0,
+                "strict_armed_by_history": False,
+            }
+            return False
+
+        if current_odom_stamp_sec < last_checked_stamp_sec:
+            self.sampling_latch.invalidate_arrival_evidence(
+                reason="nonmonotonic_current_odom_stamp"
+            )
+            self.sampling_arrival_history_diagnostics = {
+                "state": "rejected",
+                "fail_closed": True,
+                "reason": "nonmonotonic_current_odom_stamp",
+                "target_identity": (
+                    self._sampling_arrival_target_identity(target)
+                ),
+                "target_activation_stamp_sec": activation_stamp_sec,
+                "last_checked_odom_stamp_sec_before": last_checked_stamp_sec,
+                "current_image_stamp_sec": current_image_stamp_sec,
+                "current_pose_revalidation_stamp_sec": current_odom_stamp_sec,
+            }
+            self.sampling_arrival_history_target = None
+            self.sampling_arrival_history_stream_id = None
+            self.sampling_arrival_target_activation_stamp_sec = None
+            self.sampling_arrival_last_checked_odom_stamp_sec = None
+            return False
+
+        was_armed = self.sampling_latch.arrival_status().get("armed") is True
+        replay = select_viewpoint_sampling_odom_replay(
+            tuple(
+                self._arrival_odom_sample(sample)
+                for sample in tuple(self.odometry)
+            ),
+            target_pose=target.pose,
+            target_activation_stamp_sec=activation_stamp_sec,
+            last_checked_odom_stamp_sec=last_checked_stamp_sec,
+            current_image_stamp_sec=current_image_stamp_sec,
+            current_pose_stamp_sec=current_odom_stamp_sec,
+            expected_parent_frame=self.args.map_frame,
+            expected_child_frame=self.args.base_frame,
+            strict_entry_tolerance_m=self.args.sampling_arrival_tolerance_m,
+        )
+        diagnostics = {
+            **replay.diagnostics,
+            "target_identity": self._sampling_arrival_target_identity(target),
+            "current_pose_revalidation_stamp_sec": current_odom_stamp_sec,
+            "history_processed_sample_count": replay.diagnostics.get(
+                "processed_sample_count",
+                0,
+            ),
+            "strict_history_sample_count": replay.diagnostics.get(
+                "strict_entry_sample_count",
+                0,
+            ),
+            "checked_from_stamp_sec": replay.diagnostics.get(
+                "history_lower_bound_stamp_sec"
+            ),
+            "checked_to_stamp_sec": replay.diagnostics.get(
+                "history_replay_upper_bound_stamp_sec"
+            ),
+            "strict_history_min_distance_m": replay.diagnostics.get(
+                "minimum_target_distance_m"
+            ),
+            "strict_history_min_distance_stamp_sec": replay.diagnostics.get(
+                "minimum_target_distance_stamp_sec"
+            ),
+        }
+        if replay.diagnostics.get("fail_closed") is True:
+            self.sampling_latch.invalidate_arrival_evidence(
+                reason=f"odom_history_{replay.diagnostics['reason']}"
+            )
+            self.sampling_arrival_history_target = None
+            self.sampling_arrival_history_stream_id = None
+            self.sampling_arrival_target_activation_stamp_sec = None
+            self.sampling_arrival_last_checked_odom_stamp_sec = None
+        else:
+            for sample in replay.samples:
+                self.sampling_latch.observe_arrival_pose(sample.pose)
+            if replay.samples:
+                self.sampling_arrival_last_checked_odom_stamp_sec = max(
+                    last_checked_stamp_sec,
+                    replay.samples[-1].stamp_sec,
+                )
+                diagnostics["last_checked_odom_stamp_sec_after_history"] = (
+                    self.sampling_arrival_last_checked_odom_stamp_sec
+                )
+        diagnostics["arrival_after_replay"] = (
+            self.sampling_latch.arrival_status()
+        )
+        diagnostics["strict_armed_by_history"] = (
+            not was_armed
+            and diagnostics["arrival_after_replay"].get("armed") is True
+        )
+        self.sampling_arrival_history_diagnostics = diagnostics
+        return True
+
+    def _advance_sampling_arrival_history_cursor(
+        self,
+        *,
+        current_image_stamp_sec: float,
+        current_odom_stamp_sec: float,
+    ) -> None:
+        target = self.sampling_latch.arrival_material_target
+        previous_target = self.sampling_arrival_history_target
+        previous_stream_id = self.sampling_arrival_history_stream_id
+        target_changed = viewpoint_sampling_history_identity_changed(
+            previous_stream_id=previous_stream_id,
+            previous_target=previous_target,
+            current_stream_id=self.args.stream_id,
+            current_target=target,
+        )
+        if target is None:
+            self._reset_sampling_arrival_history(
+                reason="no_active_sampling_material_target"
+            )
+            return
+        if target_changed:
+            self.sampling_arrival_history_target = target
+            self.sampling_arrival_history_stream_id = self.args.stream_id
+            self.sampling_arrival_target_activation_stamp_sec = (
+                max(current_image_stamp_sec, current_odom_stamp_sec)
+            )
+            self.sampling_arrival_last_checked_odom_stamp_sec = (
+                current_odom_stamp_sec
+            )
+        else:
+            assert self.sampling_arrival_last_checked_odom_stamp_sec is not None
+            self.sampling_arrival_last_checked_odom_stamp_sec = max(
+                self.sampling_arrival_last_checked_odom_stamp_sec,
+                current_odom_stamp_sec,
+            )
+
+        diagnostics = {
+            **self.sampling_arrival_history_diagnostics,
+            "target_identity": self._sampling_arrival_target_identity(target),
+            "target_identity_changed": target_changed,
+            "history_discarded_on_target_change": target_changed,
+            "previous_target_identity": (
+                None
+                if previous_target is None
+                else {
+                    "stream_id": previous_stream_id,
+                    "material_target": previous_target.to_status_dict(),
+                }
+            ),
+            "target_activation_stamp_sec": (
+                self.sampling_arrival_target_activation_stamp_sec
+            ),
+            "last_checked_odom_stamp_sec_after": (
+                self.sampling_arrival_last_checked_odom_stamp_sec
+            ),
+            "current_image_stamp_sec": current_image_stamp_sec,
+            "current_pose_revalidation_stamp_sec": current_odom_stamp_sec,
+            "arrival_after_current_pose_revalidation": (
+                self.sampling_latch.arrival_status()
+            ),
+        }
+        if target_changed:
+            diagnostics["state"] = "target_history_initialized"
+            diagnostics["reason"] = "material_target_identity_changed"
+            diagnostics["history_processed_sample_count"] = 0
+            diagnostics["strict_history_sample_count"] = 0
+            diagnostics["checked_from_stamp_sec"] = (
+                self.sampling_arrival_target_activation_stamp_sec
+            )
+            diagnostics["checked_to_stamp_sec"] = (
+                self.sampling_arrival_target_activation_stamp_sec
+            )
+            diagnostics["strict_history_min_distance_m"] = None
+            diagnostics["strict_history_min_distance_stamp_sec"] = None
+            diagnostics["strict_armed_by_history"] = False
+        self.sampling_arrival_history_diagnostics = diagnostics
+
     def _invalidate_recommendation(
         self, *, axis_state: str, evidence_state: str, sensor_stamp_sec: float
     ) -> None:
@@ -561,8 +1246,14 @@ class SimSynchronizedViewpointNode:  # instantiated only with ROS available
             self.odometry.clear()
             self.consensus.reset()
             self.settle_gate.update(stamp_sec=newest_image.stamp_sec, ready=False)
+            self.acquisition_search_settle_gate.update(
+                stamp_sec=newest_image.stamp_sec,
+                ready=False,
+            )
+            self.acquisition_search_index = 0
             self.face_resolver.reset(self.args.stream_id)
-            self.sampling_latch.reset()
+            self.sampling_latch.reset(reason="sensor_clock_reset")
+            self._reset_sampling_arrival_history(reason="sensor_clock_reset")
             self.axis_identity_mode = "uninitialized"
             self.qr_face_latch.invalidate(
                 stream_id=self.args.stream_id,
@@ -575,6 +1266,10 @@ class SimSynchronizedViewpointNode:  # instantiated only with ROS available
                     "state": "clock_reset",
                     "reason": "image_sensor_time_moved_backwards",
                     "image_stamp_sec": newest_image.stamp_sec,
+                    "sampling_arrival": self.sampling_latch.arrival_status(),
+                    "sampling_arrival_history": (
+                        self.sampling_arrival_history_diagnostics
+                    ),
                 },
             )
             self._invalidate_recommendation(
@@ -600,6 +1295,10 @@ class SimSynchronizedViewpointNode:  # instantiated only with ROS available
                 "buffered_image_count": len(self.images),
                 "buffered_scan_count": len(self.scans),
                 "buffered_odom_count": len(self.odometry),
+                "sampling_arrival": self.sampling_latch.arrival_status(),
+                "sampling_arrival_history": (
+                    self.sampling_arrival_history_diagnostics
+                ),
             })
             return
         image_sample, scan_sample, odom_sample = synchronized
@@ -624,6 +1323,10 @@ class SimSynchronizedViewpointNode:  # instantiated only with ROS available
             if observed != expected_frames[name]
         }
         if frame_mismatches:
+            self.sampling_latch.reset(reason="sensor_frame_mismatch")
+            self._reset_sampling_arrival_history(
+                reason="sensor_frame_mismatch"
+            )
             _atomic_json(
                 self.args.status_json,
                 {
@@ -631,12 +1334,20 @@ class SimSynchronizedViewpointNode:  # instantiated only with ROS available
                     "state": "frame_mismatch",
                     "reason": "synchronized_sensor_frames_do_not_match_simulation_contract",
                     "frame_mismatches": frame_mismatches,
+                    "sampling_arrival": self.sampling_latch.arrival_status(),
+                    "sampling_arrival_history": (
+                        self.sampling_arrival_history_diagnostics
+                    ),
                 },
             )
             self.consensus.reset()
             self.settle_gate.update(stamp_sec=image_sample.stamp_sec, ready=False)
+            self.acquisition_search_settle_gate.update(
+                stamp_sec=image_sample.stamp_sec,
+                ready=False,
+            )
+            self.acquisition_search_index = 0
             self.face_resolver.reset(self.args.stream_id)
-            self.sampling_latch.reset()
             self.axis_identity_mode = "uninitialized"
             self.qr_face_latch.invalidate(
                 stream_id=self.args.stream_id,
@@ -648,9 +1359,101 @@ class SimSynchronizedViewpointNode:  # instantiated only with ROS available
                 sensor_stamp_sec=image_sample.stamp_sec,
             )
             return
+        current_arrival_odom = self._arrival_odom_sample(odom_sample)
+        quaternion_norm = math.sqrt(
+            sum(
+                value * value
+                for value in current_arrival_odom.quaternion_xyzw
+            )
+        )
+        current_odom_pose_valid = (
+            math.isfinite(current_arrival_odom.stamp_sec)
+            and all(
+                math.isfinite(value)
+                for value in (
+                    current_arrival_odom.pose.x_m,
+                    current_arrival_odom.pose.y_m,
+                    current_arrival_odom.pose.yaw_rad,
+                    *current_arrival_odom.quaternion_xyzw,
+                    quaternion_norm,
+                )
+            )
+            and abs(quaternion_norm - 1.0)
+            <= VIEWPOINT_SAMPLING_ODOM_QUATERNION_NORM_TOLERANCE
+        )
+        if not current_odom_pose_valid:
+            self.sampling_latch.reset(reason="invalid_synchronized_odometry")
+            self._reset_sampling_arrival_history(
+                reason="invalid_synchronized_odometry"
+            )
+            _atomic_json(
+                self.args.status_json,
+                {
+                    "schema_version": 1,
+                    "state": "invalid_synchronized_odometry",
+                    "reason": (
+                        "synchronized_odometry_pose_or_quaternion_is_invalid"
+                    ),
+                    "odom_stamp_sec": odom_sample.stamp_sec,
+                    "quaternion_norm": (
+                        quaternion_norm
+                        if math.isfinite(quaternion_norm)
+                        else None
+                    ),
+                    "sampling_arrival": self.sampling_latch.arrival_status(),
+                    "sampling_arrival_history": (
+                        self.sampling_arrival_history_diagnostics
+                    ),
+                },
+            )
+            self._invalidate_recommendation(
+                axis_state="invalid_synchronized_odometry",
+                evidence_state="invalid_odometry",
+                sensor_stamp_sec=image_sample.stamp_sec,
+            )
+            return
+        if not self._replay_sampling_arrival_history(
+            current_image_stamp_sec=image_sample.stamp_sec,
+            current_odom_stamp_sec=odom_sample.stamp_sec,
+        ):
+            temporal_failure = (
+                self.sampling_arrival_history_diagnostics.get("fail_closed")
+                is True
+            )
+            _atomic_json(
+                self.args.status_json,
+                {
+                    "schema_version": 1,
+                    "state": (
+                        "nonmonotonic_sampling_arrival_odometry"
+                        if temporal_failure
+                        else "awaiting_new_sampling_arrival_odometry"
+                    ),
+                    "reason": (
+                        "current_odometry_did_not_advance_arrival_cursor"
+                        if temporal_failure
+                        else "current_odometry_sample_already_consumed"
+                    ),
+                    "sampling_arrival": self.sampling_latch.arrival_status(),
+                    "sampling_arrival_history": (
+                        self.sampling_arrival_history_diagnostics
+                    ),
+                },
+            )
+            if temporal_failure:
+                self._invalidate_recommendation(
+                    axis_state="invalid_sampling_arrival_odometry",
+                    evidence_state="invalid_odometry_history",
+                    sensor_stamp_sec=image_sample.stamp_sec,
+                )
+            return
         position = odom.pose.pose.position
-        robot_yaw = _yaw(odom.pose.pose.orientation)
-        robot_pose = Pose2D(position.x, position.y, robot_yaw)
+        robot_yaw = current_arrival_odom.pose.yaw_rad
+        robot_pose = current_arrival_odom.pose
+        stand_center_distance_m = math.hypot(
+            self.args.stand_x - position.x,
+            self.args.stand_y - position.y,
+        )
         if self.fallback_reference_pose is None:
             self.fallback_reference_pose = robot_pose
         bearing = normalize_angle(
@@ -787,7 +1590,21 @@ class SimSynchronizedViewpointNode:  # instantiated only with ROS available
             angular_speed_radps=twist.angular.z,
             stand_x_m=self.args.stand_x,
             stand_y_m=self.args.stand_y,
-            distance_m=range_query.distance_m,
+            # The planned standoff and its admissible band are defined from
+            # the frozen stand center.  A LaserScan reports the nearer stand
+            # surface, which is orientation-dependent and several centimetres
+            # shorter for the square head.  Keep requiring a live return, but
+            # compare the center-to-base distance to the center-based band.
+            distance_m=center_distance_with_lidar_presence(
+                robot_x_m=position.x,
+                robot_y_m=position.y,
+                stand_x_m=self.args.stand_x,
+                stand_y_m=self.args.stand_y,
+                stand_radius_m=self.args.stand_radius_m,
+                stand_uncertainty_m=self.args.stand_uncertainty_m,
+                range_tolerance_m=self.args.lidar_stand_range_tolerance_m,
+                lidar_surface_distance_m=range_query.distance_m,
+            ),
             camera_center_error_rad=center_error,
             camera_yaw_rad=camera_yaw,
             silhouette_usable=bool(estimate.usable and estimate.mode == "face_visible"),
@@ -834,7 +1651,7 @@ class SimSynchronizedViewpointNode:  # instantiated only with ROS available
             freeze_allowed=self.qr_face_latch.latched_evidence is not None,
             allow_opposite_side_switch=False,
         )
-        fallback_candidate_index = 0
+        fallback_candidate_index = self.acquisition_search_index
         decision = replace(
             decision,
             recommended_pose=select_published_viewpoint_pose(
@@ -865,28 +1682,119 @@ class SimSynchronizedViewpointNode:  # instantiated only with ROS available
         acquiring_axis = recommendation_axis is None
         precommit_selected_face_id = ""
         precommit_evidence_state = ""
+        sampling_update = None
         if recommendation_axis is None:
             reference = self.fallback_reference_pose or robot_pose
             acquisition_normal = math.atan2(
                 reference.y_m - self.args.stand_y,
                 reference.x_m - self.args.stand_x,
             )
-            acquisition_target = Pose2D(
-                self.args.stand_x
-                + self.args.axis_acquisition_distance_m * math.cos(acquisition_normal),
-                self.args.stand_y
-                + self.args.axis_acquisition_distance_m * math.sin(acquisition_normal),
-                normalize_angle(acquisition_normal + math.pi),
-            )
             previous = self.last_recommendation
-            acquisition_reached = (
-                previous is not None
-                and previous.axis_state == "axis_acquisition"
-                and math.hypot(
-                    robot_pose.x_m - previous.material_target.pose.x_m,
-                    robot_pose.y_m - previous.material_target.pose.y_m,
+            projection_centered = (
+                abs(camera_projection.bearing_rad)
+                <= self.config.max_center_error_rad
+            )
+            feedback_decision = evaluate_axis_acquisition_feedback(
+                self.args.axis_acquisition_feedback_json,
+                last_recommendation=previous,
+                current_robot_pose=robot_pose,
+                current_search_index=self.acquisition_search_index,
+                max_search_targets=(
+                    self.args.axis_acquisition_search_max_targets
+                ),
+                arrival_tolerance_m=(
+                    self.args.axis_acquisition_arrival_tolerance_m
+                ),
+                max_age_sec=(
+                    self.args.axis_acquisition_feedback_max_age_sec
+                ),
+                now_unix_sec=time.time(),
+                current_stationary=decision.stationary,
+                current_view_centered=projection_centered,
+            )
+            self.axis_acquisition_feedback_status = {
+                "contract": AXIS_ACQUISITION_FEEDBACK_CONTRACT,
+                "schema_version": AXIS_ACQUISITION_FEEDBACK_SCHEMA_VERSION,
+                **asdict(feedback_decision),
+            }
+            if feedback_decision.accepted:
+                assert feedback_decision.next_search_index is not None
+                self.acquisition_search_index = (
+                    feedback_decision.next_search_index
                 )
-                <= self.args.axis_acquisition_arrival_tolerance_m
+                # A planner rejection is not an arrival at the rejected ray.
+                # Clear only its settle timer and publish the next bounded
+                # target from the same stationary, safely-held pose.
+                self.acquisition_search_settle_gate.update(
+                    stamp_sec=image_sample.stamp_sec,
+                    ready=False,
+                )
+            acquisition_target = axis_acquisition_search_target(
+                stand_pose,
+                reference_normal_rad=acquisition_normal,
+                distance_m=self.args.axis_acquisition_distance_m,
+                target_index=self.acquisition_search_index,
+                step_rad=math.radians(
+                    self.args.axis_acquisition_search_step_deg
+                ),
+            )
+            acquisition_reached = unresolved_point_target_reached(
+                previous,
+                robot_pose,
+                expected_axis_state="axis_acquisition",
+                arrival_tolerance_m=(
+                    self.args.axis_acquisition_arrival_tolerance_m
+                ),
+            )
+            acquisition_search_ready = (
+                self.acquisition_search_settle_gate.update(
+                    stamp_sec=image_sample.stamp_sec,
+                    ready=(
+                        acquisition_reached
+                        and decision.stationary
+                        and projection_centered
+                    ),
+                )
+            )
+            if (
+                acquisition_search_ready
+                and axis_input.reason
+                not in ViewpointSamplingLatch._START_REASONS
+                and self.acquisition_search_index + 1
+                < self.args.axis_acquisition_search_max_targets
+            ):
+                self.acquisition_search_index += 1
+                fallback_candidate_index = self.acquisition_search_index
+                acquisition_target = axis_acquisition_search_target(
+                    stand_pose,
+                    reference_normal_rad=acquisition_normal,
+                    distance_m=self.args.axis_acquisition_distance_m,
+                    target_index=self.acquisition_search_index,
+                    step_rad=math.radians(
+                        self.args.axis_acquisition_search_step_deg
+                    ),
+                )
+                acquisition_reached = False
+            equivalent_sampling_targets = unresolved_point_target_poses(
+                previous,
+                expected_axis_state="viewpoint_sampling",
+            )
+            equivalent_sampling_face_ids = (
+                tuple(face.face_id for face in previous.face_candidates)
+                if previous is not None and equivalent_sampling_targets
+                else ()
+            )
+            sampling_arrival_status = self.sampling_latch.arrival_status()
+            recenter_pose = sampling_recenter_pose(
+                current_target_pose=(
+                    self.sampling_latch.arrival_target_pose
+                    if sampling_arrival_status.get("arrived") is True
+                    else None
+                ),
+                robot_pose=robot_pose,
+                center_error_rad=center_error,
+                target_distance_m=self.config.target_distance_m,
+                max_correction_rad=self.config.max_tangential_step_rad,
             )
             sampling_update = self.sampling_latch.update(
                 robot_pose=robot_pose,
@@ -896,6 +1804,18 @@ class SimSynchronizedViewpointNode:  # instantiated only with ROS available
                 allow_start=acquisition_reached,
                 view_centered=view_centered,
                 view_settled=sampling_view_settled,
+                recenter_pose=recenter_pose,
+                equivalent_target_poses=equivalent_sampling_targets,
+                target_face_id="sampling_near",
+                # The observer publishes target identity but does not own the
+                # planner's immutable route-revision counter.  ``None`` is
+                # explicit evidence that no revision was available here.
+                target_revision=None,
+                equivalent_target_face_ids=equivalent_sampling_face_ids,
+            )
+            self._advance_sampling_arrival_history_cursor(
+                current_image_stamp_sec=image_sample.stamp_sec,
+                current_odom_stamp_sec=odom_sample.stamp_sec,
             )
             if sampling_update.active:
                 assert sampling_update.target_pose is not None
@@ -915,14 +1835,23 @@ class SimSynchronizedViewpointNode:  # instantiated only with ROS available
                 face_candidates = provisional_viewpoint_candidates(
                     stand_pose,
                     acquisition_target,
-                    near_id="acquisition_near",
-                    far_id="acquisition_far",
+                    near_id=(
+                        f"acquisition_near_{self.acquisition_search_index:02d}"
+                    ),
+                    far_id=(
+                        f"acquisition_far_{self.acquisition_search_index:02d}"
+                    ),
                 )
-                precommit_selected_face_id = "acquisition_near"
+                precommit_selected_face_id = (
+                    f"acquisition_near_{self.acquisition_search_index:02d}"
+                )
                 precommit_evidence_state = "axis_acquisition"
             face_identity_resolved = False
         else:
-            self.sampling_latch.reset()
+            self.sampling_latch.reset(reason="physical_axis_committed")
+            self._reset_sampling_arrival_history(
+                reason="physical_axis_committed"
+            )
             if should_reseed_face_resolver(
                 self.axis_identity_mode,
                 axis_identity_mode,
@@ -968,7 +1897,13 @@ class SimSynchronizedViewpointNode:  # instantiated only with ROS available
             return
 
         qr_binding_observation = None
-        if consensus is not None and qr_detection is not None:
+        if should_attempt_qr_face_binding(
+            acquiring_axis=acquiring_axis,
+            consensus_available=consensus is not None,
+            qr_detected=qr_detection is not None,
+        ):
+            assert consensus is not None
+            assert qr_detection is not None
             observer_normal = math.atan2(
                 robot_pose.y_m - self.args.stand_y,
                 robot_pose.x_m - self.args.stand_x,
@@ -1071,6 +2006,9 @@ class SimSynchronizedViewpointNode:  # instantiated only with ROS available
                 pose=selected_face.pose,
                 evidence_state=evidence_state,
             ),
+            axis_sample_count=(
+                0 if acquiring_axis else dynamic_update.axis_sample_count
+            ),
         )
         recommendation_payload = recommendation_to_dict(recommendation)
         self.last_recommendation = recommendation
@@ -1082,6 +2020,44 @@ class SimSynchronizedViewpointNode:  # instantiated only with ROS available
             "odom_stamp_sec": odom_sample.stamp_sec,
             "settled": settled,
             "sampling_view_settled": sampling_view_settled,
+            "sampling_arrival": self.sampling_latch.arrival_status(),
+            "sampling_arrival_history": (
+                self.sampling_arrival_history_diagnostics
+            ),
+            "sampling_update": (
+                None
+                if sampling_update is None
+                else {
+                    "active": sampling_update.active,
+                    "advanced": sampling_update.advanced,
+                    "reason": sampling_update.reason,
+                    "target_pose": (
+                        None
+                        if sampling_update.target_pose is None
+                        else asdict(sampling_update.target_pose)
+                    ),
+                }
+            ),
+            "viewpoint_sampling_contract": {
+                "name": VIEWPOINT_SAMPLING_CONTRACT_NAME,
+                "version": VIEWPOINT_SAMPLING_CONTRACT_VERSION,
+                "strict_entry_tolerance_m": (
+                    self.args.sampling_arrival_tolerance_m
+                ),
+                "hold_tolerance_m": (
+                    self.args
+                    .viewpoint_sampling_terminal_heading_hold_tolerance_m
+                ),
+                "target_distance_m": self.args.target_distance_m,
+                "target_envelope_radius_m": (
+                    self.args
+                    .viewpoint_sampling_terminal_heading_target_envelope_radius_m
+                ),
+                "max_center_error_deg": self.args.max_center_error_deg,
+                "max_tangential_step_deg": (
+                    self.args.max_tangential_step_deg
+                ),
+            },
             "qr_texts": list(qr_texts),
             "camera_yaw_deg": None if camera_yaw is None else math.degrees(camera_yaw),
             "camera_optical_yaw_deg": (
@@ -1090,9 +2066,27 @@ class SimSynchronizedViewpointNode:  # instantiated only with ROS available
                 else math.degrees(camera_optical_yaw)
             ),
             "center_error_deg": None if center_error is None else math.degrees(center_error),
-            "distance_m": range_query.distance_m,
+            "distance_m": center_distance_with_lidar_presence(
+                robot_x_m=position.x,
+                robot_y_m=position.y,
+                stand_x_m=self.args.stand_x,
+                stand_y_m=self.args.stand_y,
+                stand_radius_m=self.args.stand_radius_m,
+                stand_uncertainty_m=self.args.stand_uncertainty_m,
+                range_tolerance_m=self.args.lidar_stand_range_tolerance_m,
+                lidar_surface_distance_m=range_query.distance_m,
+            ),
+            "stand_center_distance_m": stand_center_distance_m,
+            "lidar_surface_distance_m": range_query.distance_m,
             "camera_projection": asdict(camera_projection),
             "fallback_candidate_index": fallback_candidate_index,
+            "axis_acquisition_search_index": self.acquisition_search_index,
+            "axis_acquisition_search_max_targets": (
+                self.args.axis_acquisition_search_max_targets
+            ),
+            "axis_acquisition_feedback": (
+                self.axis_acquisition_feedback_status
+            ),
             "axis_estimator_reason": estimate.reason,
             "axis_estimator_source": estimate.source,
             "axis_contour_area_px": estimate.contour_area_px,
@@ -1175,10 +2169,29 @@ class SimSynchronizedViewpointNode:  # instantiated only with ROS available
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    if args.axis_acquisition_feedback_json is not None:
+        feedback_path = args.axis_acquisition_feedback_json.resolve()
+        observer_outputs = {
+            args.status_json.resolve(),
+            args.recommended_pose_json.resolve(),
+            args.observation_json.resolve(),
+        }
+        if feedback_path in observer_outputs:
+            raise SystemExit(
+                "--axis-acquisition-feedback-json must be a distinct "
+                "observer/planner-only sidecar"
+            )
     if not 1 <= args.fallback_candidate_index <= 7:
         raise SystemExit("--fallback-candidate-index must be in [1, 7]")
+    if args.axis_acquisition_search_max_targets < 1:
+        raise SystemExit("--axis-acquisition-search-max-targets must be positive")
     if args.stand_radius_m <= 0.0 or args.stand_uncertainty_m < 0.0:
         raise SystemExit("stand radius must be positive and uncertainty non-negative")
+    if (
+        not math.isfinite(args.lidar_stand_range_tolerance_m)
+        or args.lidar_stand_range_tolerance_m < 0.0
+    ):
+        raise SystemExit("--lidar-stand-range-tolerance-m must be non-negative")
     positive_values = {
         "--camera-fx-px": args.camera_fx_px,
         "--camera-fy-px": args.camera_fy_px,
@@ -1190,14 +2203,40 @@ def main(argv=None) -> int:
         "--target-distance-m": args.target_distance_m,
         "--axis-acquisition-distance-m": args.axis_acquisition_distance_m,
         "--sampling-arrival-tolerance-m": args.sampling_arrival_tolerance_m,
+        "--viewpoint-sampling-terminal-heading-hold-tolerance-m": (
+            args.viewpoint_sampling_terminal_heading_hold_tolerance_m
+        ),
+        "--viewpoint-sampling-terminal-heading-target-envelope-radius-m": (
+            args
+            .viewpoint_sampling_terminal_heading_target_envelope_radius_m
+        ),
         "--axis-acquisition-arrival-tolerance-m": (
             args.axis_acquisition_arrival_tolerance_m
+        ),
+        "--axis-acquisition-feedback-max-age-sec": (
+            args.axis_acquisition_feedback_max_age_sec
         ),
     }
     if any(not math.isfinite(value) or value <= 0.0 for value in positive_values.values()):
         raise SystemExit(
             "camera intrinsics, heights, stand size, and ROI padding must be finite and positive"
         )
+    try:
+        ViewpointSamplingHoldConfig(
+            entry_tolerance_m=args.sampling_arrival_tolerance_m,
+            hold_tolerance_m=(
+                args.viewpoint_sampling_terminal_heading_hold_tolerance_m
+            ),
+            target_distance_m=args.target_distance_m,
+            target_envelope_radius_m=(
+                args
+                .viewpoint_sampling_terminal_heading_target_envelope_radius_m
+            ),
+        )
+    except ValueError as exc:
+        raise SystemExit(
+            f"invalid viewpoint-sampling arrival contract: {exc}"
+        ) from exc
     if args.axis_acquisition_distance_m <= args.max_distance_m:
         raise SystemExit(
             "--axis-acquisition-distance-m must exceed --max-distance-m so acquisition "
@@ -1206,10 +2245,29 @@ def main(argv=None) -> int:
     if args.dynamic_min_axis_samples < 2:
         raise SystemExit("--dynamic-min-axis-samples must be at least 2")
     if (
+        not math.isfinite(args.max_center_error_deg)
+        or args.max_center_error_deg <= 0.0
+    ):
+        raise SystemExit(
+            "--max-center-error-deg must be finite and positive"
+        )
+    if (
         not math.isfinite(args.max_tangential_step_deg)
         or not 0.0 < args.max_tangential_step_deg <= 45.0
     ):
         raise SystemExit("--max-tangential-step-deg must be in (0, 45]")
+    if (
+        not math.isfinite(args.tangential_correction_gain)
+        or not 0.0 < args.tangential_correction_gain <= 1.0
+    ):
+        raise SystemExit("--tangential-correction-gain must be in (0, 1]")
+    if (
+        not math.isfinite(args.axis_acquisition_search_step_deg)
+        or not 0.0 < args.axis_acquisition_search_step_deg <= 90.0
+    ):
+        raise SystemExit(
+            "--axis-acquisition-search-step-deg must be in (0, 90]"
+        )
     for option, frame in (
         ("--map-frame", args.map_frame),
         ("--base-frame", args.base_frame),

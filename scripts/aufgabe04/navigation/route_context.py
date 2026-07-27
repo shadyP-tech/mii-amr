@@ -10,7 +10,11 @@ from typing import Iterable, Mapping
 from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds
 from scripts.aufgabe04.navigation.costmap import Costmap
 from scripts.aufgabe04.navigation.global_planner import PlanRouteResult, plan_route
-from scripts.aufgabe04.navigation.map_io import OccupancyGrid, load_occupancy_grid
+from scripts.aufgabe04.navigation.map_io import (
+    FrozenMapBundle,
+    OccupancyGrid,
+    load_occupancy_grid,
+)
 from scripts.aufgabe04.navigation.models import Pose2D
 from scripts.aufgabe04.navigation.station_approach import NavigationTarget, navigation_targets_from_visits
 from scripts.aufgabe04.stations.models import Station, StationVisit
@@ -44,13 +48,23 @@ def build_route_metadata(
     *,
     station_layout_json: Path | None = None,
     arena_bounds: ArenaBounds | None = None,
+    map_bundle: FrozenMapBundle | None = None,
 ) -> dict[str, object]:
     metadata: dict[str, object] = {
         "frame_id": "map",
         "map": str(map_yaml),
         "map_yaml": str(map_yaml),
         "map_image": str(grid.metadata.image_path),
-        "map_image_sha256": file_sha256(grid.metadata.image_path),
+        "map_yaml_sha256": (
+            file_sha256(map_yaml)
+            if map_bundle is None
+            else map_bundle.yaml_sha256
+        ),
+        "map_image_sha256": (
+            file_sha256(grid.metadata.image_path)
+            if map_bundle is None
+            else map_bundle.image_sha256
+        ),
         "resolution": grid.metadata.resolution,
         "origin": grid.metadata.origin,
         "stations": list(station_ids),
@@ -61,8 +75,12 @@ def build_route_metadata(
     }
     if station_layout_json is not None:
         metadata["station_layout_json"] = str(station_layout_json)
+    if map_bundle is not None:
+        metadata["semantic_map_id"] = map_bundle.semantic_map_id
+        metadata["map_bundle_sha256"] = map_bundle.bundle_sha256
     if arena_bounds is not None:
         metadata["arena_bounds"] = arena_bounds.to_metadata()
+        metadata["arena_boundary_overlay"] = True
     return metadata
 
 
@@ -77,12 +95,25 @@ def build_station_route_dry_run(
     snap_radius_m: float = 0.30,
     transit_keepout_radius_m: float = 0.0,
     arena_bounds: ArenaBounds | None = None,
+    occupancy_grid: OccupancyGrid | None = None,
+    map_bundle: FrozenMapBundle | None = None,
 ) -> StationRouteDryRun:
     selected_arena_bounds = arena_bounds if arena_bounds is not None else ArenaBounds()
     selected_arena_bounds.validate()
     selected_station_ids = tuple(station_ids)
-    grid = load_occupancy_grid(map_yaml)
-    base_costmap = Costmap.from_occupancy_grid(grid)
+    if (occupancy_grid is None) != (map_bundle is None):
+        raise ValueError("occupancy_grid and map_bundle must be supplied together")
+    grid = occupancy_grid or load_occupancy_grid(map_yaml)
+    if map_bundle is not None:
+        if grid.width != map_bundle.width or grid.height != map_bundle.height:
+            raise ValueError("occupancy grid dimensions do not match map bundle")
+    # Saved maps may be padded beyond the measured arena and may not contain
+    # the Gazebo/parkour walls at all.  Rasterize the physical boundary before
+    # inflation so a route cannot leave the arena through nominally free map
+    # cells.
+    base_costmap = Costmap.from_occupancy_grid(grid).with_arena_bounds(
+        selected_arena_bounds
+    )
     selected_station_map = station_map if station_map is not None else DEFAULT_STATIONS
     visits = tuple(build_station_visits(selected_station_ids, selected_station_map))
     planning_costmap = base_costmap
@@ -117,6 +148,7 @@ def build_station_route_dry_run(
         selected_station_ids,
         station_layout_json=station_layout_json,
         arena_bounds=selected_arena_bounds,
+        map_bundle=map_bundle,
     )
     metadata["inflation_radius_m"] = inflation_radius_m
     return StationRouteDryRun(

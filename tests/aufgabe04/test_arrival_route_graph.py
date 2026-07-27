@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import math
 import unittest
 from pathlib import Path
@@ -10,15 +12,18 @@ from scripts.aufgabe04.navigation.arrival_route_graph import (
     _continuous_non_target_clearances,
     _with_non_target_stand_keepouts,
     build_arrival_route_graph,
+    build_required_arrival_route_graph,
+    resolve_station_arrival_order,
     selected_edges,
 )
 from scripts.aufgabe04.navigation.costmap import Costmap
 from scripts.aufgabe04.navigation.dynamic_approach_planner import (
     DynamicApproachConfig,
     FaceNormalCandidate,
+    circular_keepout_cells,
 )
 from scripts.aufgabe04.navigation.map_io import CELL_FREE, MapMetadata, OccupancyGrid
-from scripts.aufgabe04.navigation.models import Pose2D
+from scripts.aufgabe04.navigation.models import GridCell, Pose2D
 from scripts.aufgabe04.stations.arrival_pose_geometry import (
     ArrivalGeometryConfig,
     arrival_face_candidates,
@@ -126,7 +131,155 @@ def frozen_catalog_node(
         ),
         config=config,
     )
+
+
 class ArrivalRouteGraphTest(unittest.TestCase):
+    def test_safe_exact_source_with_unsafe_cell_center_uses_egress_anchor(self):
+        costmap = free_costmap()
+        source = frozen_catalog_node(
+            "source",
+            (1.024, 1.025),
+            0.0,
+            (1.285, 1.025),
+            (1.685, 1.025),
+        )
+        target = node("target", Pose2D(3.0, 1.025), 0.0, 1)
+
+        graph = build_arrival_route_graph(
+            costmap,
+            Pose2D(0.2, 0.2),
+            (source, target),
+        )
+        edge = graph.edges[(source.arrival_id, target.arrival_id)]
+        overlay = edge.non_target_overlay
+
+        self.assertIsNotNone(overlay)
+        assert overlay is not None
+        self.assertTrue(overlay.start_cell_was_rasterized)
+        self.assertGreater(overlay.exact_start_minimum_margin_m, 0.0)
+        self.assertLessEqual(overlay.cell_center_minimum_margin_m, 0.0)
+        self.assertFalse(overlay.start_cell_exempted)
+        self.assertEqual(
+            overlay.blocked_cell_count,
+            overlay.rasterized_cell_count,
+        )
+        self.assertIsNone(overlay.egress_failure_reason)
+        self.assertIsNotNone(overlay.egress_anchor)
+        self.assertIsNotNone(overlay.egress_anchor_cell)
+        self.assertTrue(overlay.egress_cells)
+        self.assertGreater(overlay.egress_connector_minimum_margin_m, 0.0)
+        self.assertTrue(overlay.egress_continuous_clearance_validated)
+
+        self.assertIsNotNone(
+            edge.result.plan,
+            edge.result.diagnostics.failure_reason,
+        )
+        assert edge.result.plan is not None
+        anchor = overlay.egress_anchor
+        anchor_cell = overlay.egress_anchor_cell
+        assert anchor is not None
+        assert anchor_cell is not None
+        exact_start = source.face.target
+        self.assertAlmostEqual(
+            edge.result.plan.waypoints[0].pose.x_m,
+            exact_start.x_m,
+        )
+        self.assertAlmostEqual(
+            edge.result.plan.waypoints[0].pose.y_m,
+            exact_start.y_m,
+        )
+        self.assertAlmostEqual(edge.result.plan.waypoints[1].pose.x_m, anchor.x_m)
+        self.assertAlmostEqual(edge.result.plan.waypoints[1].pose.y_m, anchor.y_m)
+        self.assertEqual(costmap.world_to_grid(anchor), anchor_cell)
+
+        radius_m = source.config.non_target_stand_keepout_radius_m
+        rasterized = circular_keepout_cells(costmap, source.stand, radius_m)
+        self.assertNotIn(anchor_cell, rasterized)
+        outward_dot = (
+            (anchor.x_m - exact_start.x_m)
+            * (exact_start.x_m - source.stand.x_m)
+            + (anchor.y_m - exact_start.y_m)
+            * (exact_start.y_m - source.stand.y_m)
+        )
+        self.assertGreater(outward_dot, 0.0)
+        first_segment = SimpleNamespace(
+            waypoints=edge.result.plan.waypoints[:2],
+        )
+        (clearance,) = _continuous_non_target_clearances(
+            first_segment,
+            (
+                NonTargetStandKeepout(
+                    station_id=source.station_id,
+                    stand=source.stand,
+                    radius_m=radius_m,
+                ),
+            ),
+        )
+        self.assertGreater(clearance.minimum_route_clearance_m, radius_m)
+
+    def test_no_safe_egress_anchor_keeps_source_edge_unreachable(self):
+        base = free_costmap()
+        source = frozen_catalog_node(
+            "source",
+            (1.024, 1.025),
+            0.0,
+            (1.285, 1.025),
+            (1.685, 1.025),
+        )
+        target = node("target", Pose2D(3.0, 1.025), 0.0, 1)
+        start_cell = base.world_to_grid(source.face.target)
+        boxed_in = base.with_blocked_cells(
+            GridCell(x, y)
+            for y in range(base.height)
+            for x in range(base.width)
+            if GridCell(x, y) != start_cell
+        )
+        self.assertTrue(boxed_in.is_traversable(start_cell))
+
+        graph = build_arrival_route_graph(
+            boxed_in,
+            Pose2D(0.2, 0.2),
+            (source, target),
+        )
+        edge = graph.edges[(source.arrival_id, target.arrival_id)]
+        overlay = edge.non_target_overlay
+
+        self.assertIsNotNone(overlay)
+        assert overlay is not None
+        self.assertTrue(overlay.start_cell_was_rasterized)
+        self.assertGreater(overlay.exact_start_minimum_margin_m, 0.0)
+        self.assertLessEqual(overlay.cell_center_minimum_margin_m, 0.0)
+        self.assertFalse(overlay.start_cell_exempted)
+        self.assertIsNone(overlay.egress_anchor)
+        self.assertIsNone(overlay.egress_anchor_cell)
+        self.assertFalse(overlay.egress_cells)
+        self.assertFalse(overlay.egress_continuous_clearance_validated)
+        self.assertEqual(
+            overlay.egress_failure_reason,
+            "start_egress_no_safe_anchor",
+        )
+        self.assertIsNone(edge.result.plan)
+        self.assertIn(
+            "start_egress_no_safe_anchor",
+            edge.result.diagnostics.failure_reason,
+        )
+
+        keepout = NonTargetStandKeepout(
+            station_id=source.station_id,
+            stand=source.stand,
+            radius_m=source.config.non_target_stand_keepout_radius_m,
+        )
+        planning_costmap, direct_diagnostics = _with_non_target_stand_keepouts(
+            boxed_in,
+            (keepout,),
+            start=source.face.target,
+        )
+        self.assertTrue(planning_costmap.is_blocked(start_cell))
+        self.assertEqual(
+            direct_diagnostics.egress_failure_reason,
+            "start_egress_no_safe_anchor",
+        )
+
     def test_safe_source_cell_raster_artifact_does_not_close_catalog_graph(self):
         # Exact values from the frozen gazebo_arrival_e2e_006 catalog.  A and
         # C are 0.300 m from their source stands, but their containing 5 cm
@@ -336,6 +489,56 @@ class ArrivalRouteGraphTest(unittest.TestCase):
         edges = selected_edges(graph, (first.arrival_id, second.arrival_id))
         self.assertEqual(edges[-1].result.plan.target, second.face.target)
         self.assertEqual(edges[-1].result.plan.entry, second.face.entry)
+
+    def test_task_order_plans_only_required_directed_edges(self):
+        first = node("A", Pose2D(1.5, 1.5), 0.0, 0)
+        second = node("B", Pose2D(2.8, 2.6), math.pi / 4.0, 1)
+        arrival_order = resolve_station_arrival_order(
+            (first, second), ("B", "A")
+        )
+
+        graph = build_required_arrival_route_graph(
+            free_costmap(),
+            Pose2D(0.4, 0.4),
+            (first, second),
+            arrival_order,
+        )
+
+        self.assertEqual(
+            tuple(graph.edges),
+            (
+                ("mission_start", second.arrival_id),
+                (second.arrival_id, first.arrival_id),
+            ),
+        )
+        self.assertEqual(
+            tuple(edge.target_id for edge in selected_edges(graph, arrival_order)),
+            arrival_order,
+        )
+
+    def test_station_order_rejects_ambiguous_candidate_identity(self):
+        first = node("A", Pose2D(1.5, 1.5), 0.0, 0)
+        alternate = node("A", Pose2D(1.6, 1.5), 0.0, 1)
+
+        with self.assertRaisesRegex(ValueError, "ambiguous frozen arrivals"):
+            resolve_station_arrival_order((first, alternate), ("A",))
+
+    def test_task_order_preserves_nonconsecutive_repeated_station(self):
+        first = node("A", Pose2D(1.5, 1.5), 0.0, 0)
+        second = node("B", Pose2D(2.8, 2.6), math.pi / 4.0, 1)
+        arrivals = resolve_station_arrival_order(
+            (first, second), ("B", "A", "B")
+        )
+
+        graph = build_required_arrival_route_graph(
+            free_costmap(),
+            Pose2D(0.4, 0.4),
+            (first, second),
+            arrivals,
+        )
+
+        self.assertEqual(arrivals, (second.arrival_id, first.arrival_id, second.arrival_id))
+        self.assertEqual(len(selected_edges(graph, arrivals)), 3)
 
     def test_selected_edges_rejects_uncomputed_order(self):
         first = node("A", Pose2D(1.5, 1.5), 0.0, 0)

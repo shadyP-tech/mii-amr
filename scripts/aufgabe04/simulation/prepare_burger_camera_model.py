@@ -8,11 +8,64 @@ import re
 from pathlib import Path
 
 
+def _resolve_model_resource_uris(text: str, resource_root: Path | None) -> str:
+    """Replace Gazebo model URIs with validated absolute simulation assets."""
+
+    if resource_root is None:
+        return text
+    resolved_root = resource_root.resolve()
+    common_root = (resolved_root / "turtlebot3_common").resolve()
+    if not common_root.is_dir():
+        raise SystemExit(
+            "TurtleBot model resource root does not contain turtlebot3_common: "
+            f"{resolved_root}"
+        )
+
+    def replace(match: re.Match[str]) -> str:
+        relative = Path(match.group(1))
+        if relative.is_absolute() or ".." in relative.parts:
+            raise SystemExit(
+                "unsafe turtlebot3_common model resource URI: "
+                f"{match.group(0)}"
+            )
+        packaged_resource = common_root / relative
+        if not packaged_resource.is_file():
+            raise SystemExit(
+                "TurtleBot model resource does not exist: "
+                f"{packaged_resource}"
+            )
+        # Colcon's install tree may expose each mesh as a symlink to the source
+        # workspace. Resolve it only after the sanitized package-relative path
+        # has been validated so gzserver receives the actual readable file.
+        resource = packaged_resource.resolve()
+        return f"<uri>{resource.as_uri()}</uri>"
+
+    resolved, count = re.subn(
+        r"<uri>model://turtlebot3_common/([^<]+)</uri>",
+        replace,
+        text,
+    )
+    if count == 0:
+        raise SystemExit(
+            "source SDF does not contain turtlebot3_common model resource URIs"
+        )
+    return resolved
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--horizontal-fov-rad", type=float, default=1.3962634)
+    parser.add_argument(
+        "--model-resource-root",
+        type=Path,
+        default=None,
+        help=(
+            "Optional Gazebo models directory used to replace "
+            "model://turtlebot3_common URIs with validated absolute file URIs."
+        ),
+    )
     args = parser.parse_args()
     if not 0.1 < args.horizontal_fov_rad < 3.0:
         parser.error("horizontal FOV must be between 0.1 and 3.0 radians")
@@ -55,6 +108,8 @@ def main() -> int:
     patched, height_count = re.subn(r"<height>240</height>", "<height>480</height>", patched, count=1)
     if width_count != 1 or height_count != 1:
         raise SystemExit("source SDF does not contain the expected 320x240 camera image")
+    if args.model_resource_root is not None:
+        patched = _resolve_model_resource_uris(patched, args.model_resource_root)
     ground_truth_plugin = """
     <plugin name="aufgabe04_gazebo_ground_truth" filename="libgazebo_ros_p3d.so">
       <ros><remapping>odom:=/gazebo_ground_truth</remapping></ros>

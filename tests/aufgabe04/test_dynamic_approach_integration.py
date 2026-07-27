@@ -92,7 +92,20 @@ def recommendation(
             "qr_registry", 0.98, True, True, "face_a", "sim_qr_consensus"
         ),
         material_target=MaterialTarget("face_a", face_a, "hard_qr"),
-    )
+)
+
+
+ARENA_BOUNDARY_EVIDENCE = {
+    "arena_bounds": {
+        "length_m": 3.9,
+        "width_m": 1.898,
+        "center_x_m": 0.0,
+        "center_y_m": 0.0,
+        "yaw_deg": 0.0,
+        "margin_m": 0.0,
+    },
+    "arena_boundary_overlay": True,
+}
 
 
 class DynamicApproachIntegrationTest(unittest.TestCase):
@@ -146,7 +159,10 @@ class DynamicApproachIntegrationTest(unittest.TestCase):
                 evidence=asdict(rec.side_evidence),
                 previous_route_length_m=0.0,
                 new_route_length_m=plan.length_m,
-                safety_diagnostics=asdict(result.diagnostics),
+                safety_diagnostics={
+                    **asdict(result.diagnostics),
+                    **ARENA_BOUNDARY_EVIDENCE,
+                },
             )
             state = policy.mark_route_planned(
                 state,
@@ -217,7 +233,10 @@ class DynamicApproachIntegrationTest(unittest.TestCase):
                 evidence=asdict(refined.side_evidence),
                 previous_route_length_m=plan.length_m,
                 new_route_length_m=refined_plan.length_m,
-                safety_diagnostics=asdict(refined_result.diagnostics),
+                safety_diagnostics={
+                    **asdict(refined_result.diagnostics),
+                    **ARENA_BOUNDARY_EVIDENCE,
+                },
             )
             state = policy.mark_route_planned(
                 state,
@@ -277,7 +296,10 @@ class DynamicApproachIntegrationTest(unittest.TestCase):
                 evidence={},
                 previous_route_length_m=0.0,
                 new_route_length_m=plan.length_m,
-                safety_diagnostics=asdict(result.diagnostics),
+                safety_diagnostics={
+                    **asdict(result.diagnostics),
+                    **ARENA_BOUNDARY_EVIDENCE,
+                },
             )
             death_source = DynamicRouteSource(
                 death_manifest,
