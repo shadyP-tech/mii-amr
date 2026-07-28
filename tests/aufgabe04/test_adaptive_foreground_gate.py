@@ -55,22 +55,20 @@ class AdaptiveForegroundGateTest(unittest.TestCase):
         self.assertIsNone(result.gate)
         self.assertEqual(result.reason, "insufficient_background_sample")
 
-    def test_gate_filters_radiator_edges_but_keeps_head_boundary_edges(self):
+    def test_gate_is_only_a_foreground_topology_prior(self):
         frame, seed = self._scene_with_colored_head((210, 45, 35))
         result = adaptive_foreground_gate_from_background(cv2, numpy, frame, seed)
         self.assertTrue(result.applied)
 
         raw_edges = cv2.Canny(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), 20, 60)
-        # Colour alone can retain the darker physical radiator ribs.  Compose
-        # it with the geometry-confirmed rib mask exactly as the viewer does.
-        exclusion = cv2.bitwise_or(seed, cv2.bitwise_not(result.gate))
-        gated_edges = cv2.bitwise_and(raw_edges, cv2.bitwise_not(exclusion))
+        topology_edges = cv2.bitwise_and(raw_edges, result.gate)
 
-        # A repeated heater rail remains raw Canny evidence but is outside the
-        # learned foreground gate.  The square head's outer border remains.
+        # The learned foreground support may guide topology, but it is not a
+        # direct heater/Canny mask. Raw support still contains both the stand
+        # boundary and any radiator rail for independent final edge fitting.
         self.assertGreater(int(numpy.count_nonzero(raw_edges[30:120, 25:32])), 0)
-        self.assertEqual(int(numpy.count_nonzero(gated_edges[30:120, 25:32])), 0)
-        self.assertGreater(int(numpy.count_nonzero(gated_edges[45:108, 160:171])), 0)
+        self.assertGreater(int(numpy.count_nonzero(raw_edges[45:108, 160:171])), 0)
+        self.assertGreater(int(numpy.count_nonzero(topology_edges[45:108, 160:171])), 0)
 
     def test_rejects_an_overly_broad_foreground_gate(self):
         frame = numpy.full((120, 180, 3), (24, 40, 210), dtype=numpy.uint8)

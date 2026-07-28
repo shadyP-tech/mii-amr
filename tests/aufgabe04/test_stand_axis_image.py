@@ -1349,6 +1349,28 @@ class StandAxisImageTest(unittest.TestCase):
         self.assertEqual(int(numpy.count_nonzero(artifacts.edges[60:81, :])), 0)
 
     @unittest.skipIf(numpy is None or cv2 is None, "numpy and OpenCV are required for silhouette tests")
+    def test_topology_exclusion_preserves_raw_canny_measurement_support(self):
+        frame = numpy.zeros((120, 160, 3), dtype=numpy.uint8)
+        cv2.rectangle(frame, (45, 26), (115, 98), (255, 255, 255), 2)
+        topology_exclusion = numpy.full(frame.shape[:2], 255, dtype=numpy.uint8)
+
+        _estimate, artifacts = estimate_stand_axis_from_edges(
+            cv2,
+            frame,
+            edge_preprocess="gray",
+            blur_kernel=1,
+            canny_low=20,
+            canny_high=60,
+            dilate_iterations=0,
+            close_kernel=1,
+            close_iterations=0,
+            topology_edge_exclusion_mask=topology_exclusion,
+        )
+
+        self.assertGreater(int(numpy.count_nonzero(artifacts.raw_edges)), 0)
+        self.assertEqual(int(numpy.count_nonzero(artifacts.edges)), 0)
+
+    @unittest.skipIf(numpy is None or cv2 is None, "numpy and OpenCV are required for silhouette tests")
     def test_standalone_simulation_pipeline_edges_full_frame_then_crops_head(self):
         frame = numpy.full((480, 640, 3), (55, 55, 55), dtype=numpy.uint8)
         cv2.line(frame, (0, 78), (639, 120), (90, 90, 90), thickness=3)

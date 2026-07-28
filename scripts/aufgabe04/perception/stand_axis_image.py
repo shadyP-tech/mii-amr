@@ -171,6 +171,7 @@ def estimate_stand_axis_from_edges(
     silhouette_only: bool = False,
     structural_diagnostic: bool = False,
     edge_exclusion_mask=None,
+    topology_edge_exclusion_mask=None,
 ) -> tuple[StandAxisImageEstimate, StandAxisEdgeDebugArtifacts]:
     frame_height, frame_width = frame.shape[:2]
     effective_camera_fy_px = camera_fy_px if camera_fy_px is not None else camera_fx_px
@@ -201,6 +202,26 @@ def estimate_stand_axis_from_edges(
             cv2.bitwise_not(edge_exclusion_mask),
         )
 
+    # A colour-adaptive foreground gate may narrow only the topology proposal
+    # image.  Keep raw Canny intact: final head-corner support must never lose
+    # an actual stand boundary because a background model was imperfect.
+    effective_topology_exclusion_mask = edge_exclusion_mask
+    if topology_edge_exclusion_mask is not None:
+        if topology_edge_exclusion_mask.shape[:2] != raw_edges.shape[:2]:
+            raise ValueError("topology_edge_exclusion_mask must match the processed frame size")
+        topology_edges = cv2.bitwise_and(
+            topology_edges,
+            cv2.bitwise_not(topology_edge_exclusion_mask),
+        )
+        effective_topology_exclusion_mask = (
+            topology_edge_exclusion_mask
+            if effective_topology_exclusion_mask is None
+            else cv2.bitwise_or(
+                effective_topology_exclusion_mask,
+                topology_edge_exclusion_mask,
+            )
+        )
+
     topology_seed = topology_edges.copy()
     if dilate_iterations > 0:
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
@@ -216,7 +237,7 @@ def estimate_stand_axis_from_edges(
         close_kernel=close_kernel,
         close_iterations=close_iterations,
         include_gap_recovery=silhouette_only,
-        edge_exclusion_mask=edge_exclusion_mask,
+        edge_exclusion_mask=effective_topology_exclusion_mask,
     )
     edges = topology_hypotheses[0]
 

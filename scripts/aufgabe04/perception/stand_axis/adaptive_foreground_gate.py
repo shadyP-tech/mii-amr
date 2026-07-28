@@ -1,11 +1,11 @@
-"""Conservative colour-adaptive foreground support for real-camera Canny.
+"""Conservative colour-adaptive foreground support for real-camera topology.
 
 The silhouette fitter deliberately remains colour agnostic.  This module only
 uses a *verified repeated-rib background region* to learn a local Lab colour
-model and builds a generous gate around pixels that differ from it.  No stand
+model and builds a generous gate around pixels that differ from it. No stand
 hue is configured: a red, blue, or green stand can supply foreground support
-equally.  If the background sample is weak or the resulting gate is too broad,
-the caller receives no gate and must retain the geometry-only path.
+equally. The gate is for proposal topology only; raw Canny evidence remains
+untouched for the final colour-agnostic corner fit.
 """
 
 from __future__ import annotations

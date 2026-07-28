@@ -390,38 +390,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--edge-close-kernel", type=int, default=5)
     parser.add_argument("--edge-close-iterations", type=int, default=1)
     parser.add_argument(
-        "--suppress-repeated-vertical-ribs",
-        dest="suppress_repeated_vertical_ribs",
-        action="store_true",
-        default=True,
-        help=(
-            "Suppress a real-camera family of at least four regular, near-vertical "
-            "Hough rails (for example a heater) before silhouette fitting. "
-            "Enabled by default; it never applies to simulation."
-        ),
-    )
-    parser.add_argument(
-        "--no-suppress-repeated-vertical-ribs",
-        dest="suppress_repeated_vertical_ribs",
-        action="store_false",
-        help="Keep all repeated vertical edge families for a diagnostic A/B comparison.",
-    )
-    parser.add_argument(
         "--adaptive-foreground-gate",
         dest="adaptive_foreground_gate",
         action="store_true",
         default=True,
         help=(
             "Use repeated-rib background pixels to learn a local Lab colour model and "
-            "gate Canny to colour-different foreground support. Enabled by default "
-            "on real-camera edges; the silhouette fit itself remains colour agnostic."
+            "gate only silhouette topology to colour-different foreground support. "
+            "Raw Canny support and the final silhouette fit remain colour agnostic."
         ),
     )
     parser.add_argument(
         "--no-adaptive-foreground-gate",
         dest="adaptive_foreground_gate",
         action="store_false",
-        help="Use only geometry-based repeated-rib suppression for a diagnostic A/B comparison.",
+        help="Disable colour-adaptive topology gating for a diagnostic A/B comparison.",
     )
     parser.add_argument("--hough-threshold", type=int, default=20)
     parser.add_argument("--hough-min-line-length-px", type=int, default=12)
@@ -2653,11 +2636,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 edge_artifacts = StandAxisEdgeDebugArtifacts(edges=edges)
             elif args.axis_source == "edges":
                 edge_exclusion_mask = wall_edge_mask
+                topology_edge_exclusion_mask = None
                 if (
                     not args.sim_raw_image_topic
-                    and args.suppress_repeated_vertical_ribs
+                    and args.adaptive_foreground_gate
                 ):
-                    radiator_rib_mask = repeated_vertical_rib_exclusion_mask(
+                    # This is a background *sample region*, never a Canny
+                    # exclusion. It must not be able to erase a stand edge.
+                    radiator_background_region = repeated_vertical_rib_exclusion_mask(
                         cv2,
                         cv2.Canny(
                             cv2.cvtColor(axis_frame, cv2.COLOR_BGR2GRAY),
@@ -2665,24 +2651,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                             args.canny_high,
                         ),
                     ).mask
-                    edge_exclusion_mask = (
-                        radiator_rib_mask
-                        if edge_exclusion_mask is None
-                        else cv2.bitwise_or(edge_exclusion_mask, radiator_rib_mask)
-                    )
-                    if args.adaptive_foreground_gate:
-                        foreground_gate = adaptive_foreground_gate_from_background(
-                            cv2,
-                            numpy,
-                            axis_frame,
-                            radiator_rib_mask,
-                        ).gate
-                        if foreground_gate is not None:
-                            foreground_exclusion_mask = cv2.bitwise_not(foreground_gate)
-                            edge_exclusion_mask = cv2.bitwise_or(
-                                edge_exclusion_mask,
-                                foreground_exclusion_mask,
-                            )
+                    foreground_gate = adaptive_foreground_gate_from_background(
+                        cv2,
+                        numpy,
+                        axis_frame,
+                        radiator_background_region,
+                    ).gate
+                    if foreground_gate is not None:
+                        topology_edge_exclusion_mask = cv2.bitwise_not(foreground_gate)
                 edge_estimator_options = dict(
                     edge_preprocess=(
                         "channel_union"
@@ -2740,6 +2716,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     cv2,
                     axis_frame,
                     edge_exclusion_mask=edge_exclusion_mask,
+                    topology_edge_exclusion_mask=topology_edge_exclusion_mask,
                     **edge_estimator_options,
                 )
                 edges = edge_artifacts.edges
