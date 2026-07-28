@@ -180,7 +180,6 @@ class DebugWindowRecorder:
         self._sizes = sizes
         self._session_directory = session_directory
         self.write(images)
-        print(f"recording started: {session_directory}")
 
     def write(self, images: dict[str, object]) -> None:
         for window_name, writer in self._writers.items():
@@ -202,7 +201,6 @@ class DebugWindowRecorder:
             return
         for writer in self._writers.values():
             writer.release()
-        print(f"recording saved: {self._session_directory}")
         self._writers = {}
         self._sizes = {}
         self._session_directory = None
@@ -1615,6 +1613,24 @@ def annotate_frame(
         )
 
 
+def annotate_recording_indicator(cv2, frame, recording_active: bool) -> None:
+    """Draw a compact red dot only while diagnostic recording is active."""
+
+    if not recording_active:
+        return
+    height, width = frame.shape[:2]
+    radius = max(6, min(12, min(height, width) // 30))
+    margin = radius + 8
+    cv2.circle(
+        frame,
+        (max(radius, width - margin), min(height - radius, margin)),
+        radius,
+        (0, 0, 255),
+        thickness=-1,
+        lineType=cv2.LINE_AA,
+    )
+
+
 def save_snapshot(cv2, directory: Path, frame, mask) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d_%H%M%S")
@@ -2225,10 +2241,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                             recorder.stop()
                         elif record_start_pending:
                             record_start_pending = False
-                            print("pending recording cancelled")
                         else:
                             record_start_pending = True
-                            print("recording will start with the next displayed frame")
                     continue
                 print(f"WARNING: {read.message}")
                 break
@@ -2241,10 +2255,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         recorder.stop()
                     elif record_start_pending:
                         record_start_pending = False
-                        print("pending recording cancelled")
                     else:
                         record_start_pending = True
-                        print("recording will start with the next displayed frame")
                 continue
             last_processed_sequence = read.sequence
 
@@ -3109,6 +3121,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         else "target ROI"
                     ),
                 )
+            annotate_recording_indicator(cv2, annotated, recorder.active)
 
             frame_count += 1
             if args.headless and args.save_snapshot is not None and frame_count == 1:

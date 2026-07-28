@@ -29,6 +29,7 @@ from scripts.aufgabe04.perception.debug.stand_axis_viewer import (  # noqa: E402
     WINDOW_RECTANGLE_MASK,
     _capture_head_display_snapshot,
     _centered_candidate_roi,
+    annotate_recording_indicator,
     _detected_head_roi,
     _diagnostic_roi_image,
     _head_display_snapshot_for_selection,
@@ -2478,6 +2479,28 @@ class StandAxisImageTest(unittest.TestCase):
         )
         self.assertEqual([len(writer.frames) for writer in fake_cv2.writers], [2, 2])
         self.assertTrue(all(writer.released for writer in fake_cv2.writers))
+
+    @unittest.skipIf(numpy is None, "numpy is required for recording tests")
+    def test_recording_indicator_is_a_red_circle_only_while_active(self):
+        class FakeCv2:
+            LINE_AA = 7
+
+            def __init__(self):
+                self.circles = []
+
+            def circle(self, frame, center, radius, color, thickness, lineType):
+                self.circles.append((center, radius, color, thickness, lineType))
+
+        fake_cv2 = FakeCv2()
+        frame = numpy.zeros((60, 100, 3), dtype=numpy.uint8)
+
+        annotate_recording_indicator(fake_cv2, frame, recording_active=False)
+        annotate_recording_indicator(fake_cv2, frame, recording_active=True)
+
+        self.assertEqual(
+            fake_cv2.circles,
+            [((86, 14), 6, (0, 0, 255), -1, fake_cv2.LINE_AA)],
+        )
 
     def test_stand_axis_viewer_has_no_motion_arguments(self):
         parser = build_parser()

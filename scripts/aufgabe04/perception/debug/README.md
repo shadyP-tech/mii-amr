@@ -138,8 +138,10 @@ run evidence. To show only the annotated camera frame, omit `--display-mask`,
 `--display-edges`, `--display-face-mask`, and `--display-rectangle-mask`.
 
 For a time-aligned debugging record, press `r` while an OpenCV viewer window
-has focus. Press `r` again to stop. The viewer writes one MJPEG AVI per window
-that is currently displayed (the annotated frame plus each enabled diagnostic
+has focus. Press `r` again to stop. A red circle in the upper-right corner of
+the annotated stand-axis window signals that recording is active; there is no
+start/stop terminal message. The viewer writes one MJPEG AVI per window that
+is currently displayed (the annotated frame plus each enabled diagnostic
 window), so no window is hidden inside a composite video. A timestamped
 recording directory is created under
 `results/aufgabe04/stand_axis_debug_recordings` by default; change it with
