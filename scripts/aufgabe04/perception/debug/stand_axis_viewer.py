@@ -70,6 +70,9 @@ from scripts.aufgabe04.perception.stand_axis_image import (
     estimate_stand_axis_from_edges,
     estimate_stand_axis_from_mask,
 )
+from scripts.aufgabe04.perception.stand_axis.radiator_rib_mask import (
+    repeated_vertical_rib_exclusion_mask,
+)
 from scripts.aufgabe04.perception.stand_axis_tracking import (
     HeadCandidateTemporalGate,
     HeadTemporalSelection,
@@ -383,6 +386,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--edge-dilate-iterations", type=int, default=1)
     parser.add_argument("--edge-close-kernel", type=int, default=5)
     parser.add_argument("--edge-close-iterations", type=int, default=1)
+    parser.add_argument(
+        "--suppress-repeated-vertical-ribs",
+        dest="suppress_repeated_vertical_ribs",
+        action="store_true",
+        default=True,
+        help=(
+            "Suppress a real-camera family of at least four regular, near-vertical "
+            "Hough rails (for example a heater) before silhouette fitting. "
+            "Enabled by default; it never applies to simulation."
+        ),
+    )
+    parser.add_argument(
+        "--no-suppress-repeated-vertical-ribs",
+        dest="suppress_repeated_vertical_ribs",
+        action="store_false",
+        help="Keep all repeated vertical edge families for a diagnostic A/B comparison.",
+    )
     parser.add_argument("--hough-threshold", type=int, default=20)
     parser.add_argument("--hough-min-line-length-px", type=int, default=12)
     parser.add_argument("--hough-max-line-gap-px", type=int, default=8)
@@ -2612,6 +2632,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 edges = numpy.zeros(frame.shape[:2], dtype=numpy.uint8)
                 edge_artifacts = StandAxisEdgeDebugArtifacts(edges=edges)
             elif args.axis_source == "edges":
+                edge_exclusion_mask = wall_edge_mask
+                if (
+                    not args.sim_raw_image_topic
+                    and args.suppress_repeated_vertical_ribs
+                ):
+                    radiator_rib_mask = repeated_vertical_rib_exclusion_mask(
+                        cv2,
+                        cv2.Canny(
+                            cv2.cvtColor(axis_frame, cv2.COLOR_BGR2GRAY),
+                            args.canny_low,
+                            args.canny_high,
+                        ),
+                    ).mask
+                    edge_exclusion_mask = (
+                        radiator_rib_mask
+                        if edge_exclusion_mask is None
+                        else cv2.bitwise_or(edge_exclusion_mask, radiator_rib_mask)
+                    )
                 edge_estimator_options = dict(
                     edge_preprocess=(
                         "channel_union"
@@ -2668,7 +2706,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 estimate, edge_artifacts = estimate_stand_axis_from_edges(
                     cv2,
                     axis_frame,
-                    edge_exclusion_mask=wall_edge_mask,
+                    edge_exclusion_mask=edge_exclusion_mask,
                     **edge_estimator_options,
                 )
                 edges = edge_artifacts.edges
