@@ -225,6 +225,36 @@ class StandAxisRawSupportTest(unittest.TestCase):
         cv2 is None or numpy is None,
         "numpy and OpenCV are required for raw-side fitting",
     )
+    def test_head_first_uses_topology_for_proposal_and_raw_edges_for_local_refit(self):
+        topology_edges = numpy.zeros((220, 280), dtype=numpy.uint8)
+        # The topology gate retains only the real head and its centred post.
+        cv2.rectangle(topology_edges, (92, 34), (174, 116), 255, 2)
+        cv2.line(topology_edges, (124, 117), (124, 178), 255, 2)
+        cv2.line(topology_edges, (136, 117), (136, 178), 255, 2)
+        raw_edges = topology_edges.copy()
+        # This stronger-looking radiator/background rectangle exists only in
+        # raw Canny. It must not be allowed to originate a head candidate.
+        cv2.rectangle(raw_edges, (30, 28), (230, 132), 255, 2)
+
+        candidate = _head_first_face_from_edges(
+            cv2,
+            topology_edges,
+            measurement_edges=raw_edges,
+            min_edge_height_px=8.0,
+            min_aspect_ratio=0.45,
+            max_aspect_ratio=1.8,
+            fixed_parallel_side_direction=None,
+        )
+
+        self.assertIsNotNone(candidate)
+        xs = [point.u_px for point in candidate.corners]
+        self.assertAlmostEqual(min(xs), 92.0, delta=5.0)
+        self.assertAlmostEqual(max(xs), 174.0, delta=5.0)
+
+    @unittest.skipIf(
+        cv2 is None or numpy is None,
+        "numpy and OpenCV are required for raw-side fitting",
+    )
     def test_side_first_candidate_learns_rolled_parallel_rails(self):
         edges = numpy.zeros((220, 260), dtype=numpy.uint8)
         # The two outer rails have the same non-vertical image direction;

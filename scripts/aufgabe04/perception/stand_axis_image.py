@@ -263,6 +263,11 @@ def estimate_stand_axis_from_edges(
                 cv2,
                 localization_edges,
                 measurement_edges=raw_edges,
+                head_first_proposal_edges=(
+                    localization_edges
+                    if topology_edge_exclusion_mask is not None
+                    else None
+                ),
                 min_area_px=hypothesis_min_area_px,
                 min_edge_height_px=min_edge_height_px,
                 min_aspect_ratio=min_aspect_ratio,
@@ -734,6 +739,7 @@ def _plain_face_from_stem_cropped_edges(
     edges,
     *,
     measurement_edges=None,
+    head_first_proposal_edges=None,
     min_area_px: float,
     min_edge_height_px: float,
     min_aspect_ratio: float,
@@ -759,11 +765,21 @@ def _plain_face_from_stem_cropped_edges(
         measurement_edges = edges
     if measurement_edges.shape[:2] != edges.shape[:2]:
         raise ValueError("measurement_edges must match localization edges")
+    if (
+        head_first_proposal_edges is not None
+        and head_first_proposal_edges.shape[:2] != edges.shape[:2]
+    ):
+        raise ValueError("head_first_proposal_edges must match localization edges")
 
     if _raster_stem_anchor is None:
         head_first = _head_first_face_from_edges(
             cv2,
-            measurement_edges,
+            (
+                measurement_edges
+                if head_first_proposal_edges is None
+                else head_first_proposal_edges
+            ),
+            measurement_edges=measurement_edges,
             min_edge_height_px=min_edge_height_px,
             min_aspect_ratio=min_aspect_ratio,
             max_aspect_ratio=max_aspect_ratio,
@@ -805,6 +821,7 @@ def _plain_face_from_stem_cropped_edges(
                     cv2,
                     edges,
                     measurement_edges=measurement_edges,
+                    head_first_proposal_edges=head_first_proposal_edges,
                     min_area_px=min_area_px,
                     min_edge_height_px=min_edge_height_px,
                     min_aspect_ratio=min_aspect_ratio,

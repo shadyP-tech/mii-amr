@@ -251,25 +251,31 @@ def _side_first_head_candidates(
 
 def _head_first_face_from_edges(
     cv2,
-    raw_edges,
+    proposal_edges,
     *,
+    measurement_edges=None,
     min_edge_height_px: float,
     min_aspect_ratio: float,
     max_aspect_ratio: float,
     fixed_parallel_side_direction: tuple[float, float] | None,
 ) -> _SilhouetteFaceCandidate | None:
-    """Propose a square head from paired top/bottom raw edge segments.
+    """Propose from filtered topology, then measure only that proposal in raw Canny.
 
-    Unlike the legacy path, this does not require a long paired stem before
-    locating the head.  The outer top/bottom lines seed a compact square-like
-    candidate, then ``_raw_side_evidence_and_corners`` independently measures
-    all four sides from untouched Canny pixels.
+    The proposal image may contain colour-adaptive/topology filtering, whereas
+    ``measurement_edges`` remains untouched raw Canny.  This separation keeps
+    a heater rail from originating a global head hypothesis while preserving
+    real head-border evidence during the local four-side refit.
     """
 
     import numpy
 
+    if measurement_edges is None:
+        measurement_edges = proposal_edges
+    if measurement_edges.shape[:2] != proposal_edges.shape[:2]:
+        raise ValueError("measurement_edges must match proposal_edges")
+
     lines = cv2.HoughLinesP(
-        raw_edges,
+        proposal_edges,
         rho=1,
         theta=numpy.pi / 180.0,
         # Compression and Canny gaps fragment the physical head border more
@@ -282,7 +288,7 @@ def _head_first_face_from_edges(
     )
     if lines is None:
         return None
-    locations = cv2.findNonZero(raw_edges)
+    locations = cv2.findNonZero(measurement_edges)
     if locations is None:
         return None
     edge_points = locations.reshape(-1, 2).astype(numpy.float64)
@@ -300,7 +306,7 @@ def _head_first_face_from_edges(
         horizontals.append((left_x, right_x, float(y1), float(y2), length))
     best: _SilhouetteFaceCandidate | None = None
     best_score = -math.inf
-    frame_height, frame_width = raw_edges.shape[:2]
+    frame_height, frame_width = proposal_edges.shape[:2]
     # In the real-camera path, two observed parallel outer rails are the
     # strongest stand-head invariant.  Do not let an equally supported
     # top/bottom Hough pair switch the frame to a QR/interior quadrilateral.
@@ -308,7 +314,7 @@ def _head_first_face_from_edges(
     side_best_score = -math.inf
     for candidate, score in _side_first_head_candidates(
         cv2,
-        raw_edges,
+        measurement_edges,
         lines=lines,
         min_edge_height_px=min_edge_height_px,
         min_aspect_ratio=min_aspect_ratio,
@@ -385,7 +391,7 @@ def _head_first_face_from_edges(
     for _rank, rough in ranked_horizontal_pairs[:horizontal_limit]:
         verified = _head_candidate_from_rough_corners(
             cv2,
-            raw_edges,
+            measurement_edges,
             rough,
             min_aspect_ratio=min_aspect_ratio,
             max_aspect_ratio=max_aspect_ratio,
