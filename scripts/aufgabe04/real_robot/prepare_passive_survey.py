@@ -29,6 +29,9 @@ from scripts.aufgabe04.real_robot.hardware_profile import (
     load_real_robot_profile,
     real_robot_profile_sha256,
 )
+from scripts.aufgabe04.real_robot.observer_contract import (
+    PASSIVE_VIEWPOINT_OBSERVER_VERSION,
+)
 from scripts.aufgabe04.stations.candidate_snapshot import (
     candidate_snapshot_sha256,
     load_candidate_snapshot,
@@ -259,9 +262,7 @@ def main(argv=None) -> int:
             "stand_head_center_height_m": args.stand_head_center_height_m,
             "lidar_stop_distance_m": args.lidar_stop_distance_m,
             "lidar_clearance_margin_m": args.lidar_clearance_margin_m,
-            "observer_version": (
-                "aufgabe04-real-passive-viewpoint-v1-camera-info-exact-tf"
-            ),
+            "observer_version": PASSIVE_VIEWPOINT_OBSERVER_VERSION,
             "motion_capability": "none",
         }
         survey_config_sha256 = payload_sha256(survey_config)
@@ -403,4 +404,3 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -327,6 +327,93 @@ class ProductionImportBoundaryTest(unittest.TestCase):
 
         self.assertEqual(offenders, [])
 
+    def test_stand_axis_internal_package_stays_pure_and_motion_free(self):
+        package_root = (
+            ROOT / "scripts" / "aufgabe04" / "perception" / "stand_axis"
+        )
+        if not package_root.exists():
+            self.fail("stand-axis implementation package is missing")
+
+        forbidden_prefixes = (
+            "rclpy",
+            "sensor_msgs",
+            "geometry_msgs",
+            "nav2_msgs",
+            "scripts.aufgabe04.perception.debug",
+            "scripts.aufgabe04.perception.stand_axis_consensus",
+            "scripts.aufgabe04.perception.stand_axis_tracking",
+            "scripts.aufgabe04.navigation",
+            "scripts.aufgabe04.logistics",
+            "scripts.aufgabe04.fleet",
+            "scripts.aufgabe04.stations",
+            "scripts.aufgabe04.real_robot",
+            "scripts.aufgabe03",
+        )
+        forbidden_source = (
+            "create_publisher",
+            "/cmd_vel",
+            "run_simple_waypoint_follower",
+            "run_single_station_segment",
+        )
+        offenders = []
+        for path in sorted(package_root.glob("*.py")):
+            source = path.read_text()
+            tree = ast.parse(source, filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported_modules = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    imported_modules = [node.module or ""]
+                else:
+                    continue
+                for module in imported_modules:
+                    if module.startswith(forbidden_prefixes):
+                        offenders.append((path.name, module))
+            for snippet in forbidden_source:
+                if snippet in source:
+                    offenders.append((path.name, snippet))
+
+        self.assertEqual(offenders, [])
+
+    def test_passive_real_viewpoint_observer_stays_motion_free(self):
+        module_path = (
+            ROOT
+            / "scripts"
+            / "aufgabe04"
+            / "real_robot"
+            / "passive_viewpoint_node.py"
+        )
+        source = module_path.read_text()
+        tree = ast.parse(source, filename=str(module_path))
+        forbidden_prefixes = (
+            "geometry_msgs",
+            "nav2_msgs",
+            "scripts.aufgabe04.navigation.run_single_station_segment",
+            "scripts.aufgabe04.navigation.simple_waypoint_follower",
+        )
+        offenders = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported_modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                imported_modules = [node.module or ""]
+            else:
+                continue
+            for module in imported_modules:
+                if module.startswith(forbidden_prefixes):
+                    offenders.append(module)
+
+        self.assertEqual(offenders, [])
+        for snippet in (
+            "create_publisher",
+            "--cmd-vel-topic",
+            "/cmd_vel",
+            "stand_axis_tracking",
+            "Twist",
+            "Publisher",
+        ):
+            self.assertNotIn(snippet, source)
+
     def test_navigation_runners_do_not_consume_structural_diagnostics(self):
         checked_paths = [
             ROOT / "scripts" / "aufgabe04" / "navigation" / "plan_first_detected_station.py",

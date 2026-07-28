@@ -12,6 +12,13 @@ loaded logistics mission or a two-robot run; see
 | --- | --- | --- |
 | `real_robot/capture_camera_calibration.py` | Capture live `CameraInfo` and the measured `base <- camera_optical` TF | None |
 | `real_robot/create_hardware_profile.py` | Seal topics, namespace, frames, site, calibration, footprint, and speed limits | None |
+| `perception/stand_axis_image.py` | Stable compatibility façade and estimator orchestration | None |
+| `perception/stand_axis/models.py` | Immutable estimator, point, support, and debug-artifact contracts | None |
+| `perception/stand_axis/preprocessing.py` | Color-agnostic raw Canny extraction and topology-only gap recovery | None |
+| `perception/stand_axis/stem_candidates.py` | Stem-anchored head localization and candidate construction | None |
+| `perception/stand_axis/raw_support.py` | Four-side raw-edge support, common-side direction, and trapezoid refit | None |
+| `perception/stand_axis/geometry.py` | Quadrilateral geometry, square-head pose estimation, and debug rendering | None |
+| `perception/stand_axis/real_camera_profile.py` | Validate and resolve the offline-candidate real-camera edge recipe | None |
 | `real_robot/passive_viewpoint_node.py` | Synchronize image, scan, and exact-time TF; rectify the image; validate LiDAR/QR/silhouette evidence | None |
 | `real_robot/prepare_passive_survey.py` | Produce immutable per-candidate observer and catalog-validation commands | None |
 | `real_robot/finalize_passive_survey.py` | Freeze a complete real arrival catalog and write a real `SurveyManifest` | None |
@@ -134,6 +141,45 @@ non-stationary poses, missing exact-time TF, projected-target/LiDAR
 disagreement, weak silhouette consensus, and incorrect QR identity. A raw
 compressed image is rectified into the sealed `CameraInfo.p` geometry before
 the projected ROI is evaluated.
+
+The real-camera stand-axis settings are an **offline candidate profile**, not a
+hardware-validated detector profile. Its default preprocessing is
+`--edge-preprocess channel-union`, which preserves color-channel boundaries
+that can disappear in grayscale. `--edge-preprocess gray` remains available
+for a controlled comparison, and the existing `--canny-low`/`--canny-high`
+overrides remain bounded to `0 <= low < high <= 255`. The projected head size
+resolves the minimum contour area, minimum side height, and conservative
+odd-valued close kernel; the current broad square-face aspect gate remains
+`0.45..1.80`.
+
+At each image timestamp, the exact `camera_optical <- map` TF transforms the
+known world-vertical top and bottom of the stand head. Live `CameraInfo.p`
+projects that 3D line into the rectified image, including camera roll, and the
+resulting direction is passed into the same silhouette estimator used by the
+existing façade. There is no additional temporal smoother: only the current
+raw usable estimate may enter `AxisConsensusAccumulator`.
+
+When `perception_debug/` is enabled, the observer refreshes:
+
+- `latest_frame.png` and `latest_head_roi.png`
+- `latest_edges.png` (topology edges)
+- `latest_raw_edges.png` (untouched measurement edges, when available)
+- `latest_side_evidence.png` (selected raw side support, when available)
+- `latest_rectangle_mask.png` and `latest_rectangle_overlay.png` (when
+  available)
+- `latest_metadata.json` with the resolved profile, projected side direction,
+  estimator status, and the exact artifact list
+
+Unavailable optional images are removed instead of leaving stale
+`latest_*.png` evidence from an older frame.
+
+Before describing this profile as real-camera validated, collect representative
+hardware captures across stand colors, QR texture, lighting, distance, camera
+pitch/roll, and background clutter. Compare the default and grayscale modes on
+those frozen captures, record false positives and unavailable estimates, and
+measure rectification plus estimator latency and dropped/stale-frame behavior
+at the intended onboard processing rate. Those capture and latency results are
+required evidence; passing the offline tests below is not a hardware claim.
 
 After all expected candidates are resolved, run the plan's
 `finalize_command`. Finalization refuses incomplete catalogs or provenance that

@@ -40,6 +40,9 @@ from scripts.aufgabe04.perception.stand_axis_consensus import (
     AxisConsensusAccumulator,
     axis_conditioning,
 )
+from scripts.aufgabe04.perception.stand_axis.real_camera_profile import (
+    RealCameraStandAxisProfile,
+)
 from scripts.aufgabe04.perception.stand_axis_image import (
     estimate_stand_axis_from_edges,
 )
@@ -53,6 +56,7 @@ from scripts.aufgabe04.real_robot.camera_geometry import (
     optical_heading_from_transform,
     pose2d_from_transform,
     project_optical_point,
+    project_rectified_image_direction,
     roi_from_projection,
     transform_point,
 )
@@ -64,12 +68,15 @@ from scripts.aufgabe04.real_robot.hardware_profile import (
     real_robot_profile_sha256,
     transform_mismatches,
 )
+from scripts.aufgabe04.real_robot.observer_contract import (
+    PASSIVE_VIEWPOINT_OBSERVER_VERSION,
+)
 from scripts.aufgabe04.real_robot.recommendation_builder import (
     build_real_viewpoint_recommendation,
 )
 
 
-OBSERVER_VERSION = "aufgabe04-real-passive-viewpoint-v1-camera-info-exact-tf"
+OBSERVER_VERSION = PASSIVE_VIEWPOINT_OBSERVER_VERSION
 
 
 @dataclass(frozen=True)
@@ -190,6 +197,16 @@ def _rectify_bgr_frame(
     )
 
 
+def _stand_axis_profile_from_args(args) -> RealCameraStandAxisProfile:
+    """Build the pure real-camera estimator profile from parsed CLI values."""
+
+    return RealCameraStandAxisProfile.from_cli(
+        edge_preprocess=args.edge_preprocess,
+        canny_low=args.canny_low,
+        canny_high=args.canny_high,
+    )
+
+
 class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
     def __init__(self, args) -> None:
         import cv2
@@ -214,6 +231,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self.Duration = Duration
         self.Time = Time
         self.TransformException = TransformException
+        self.stand_axis_profile = _stand_axis_profile_from_args(args)
         self.profile = load_real_robot_profile(args.robot_profile)
         self.calibration = load_camera_calibration(args.camera_calibration)
         if camera_calibration_sha256(self.calibration) != (
@@ -426,15 +444,47 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self.last_pose = robot_pose
         intrinsics = intrinsics_from_camera_info(camera_info.value)
         camera_translation, camera_rotation = _transform_values(camera_from_map)
-        camera_point = transform_point(
-            (
-                self.args.stand_x,
-                self.args.stand_y,
-                self.args.stand_head_center_height_m,
-            ),
-            translation_xyz=camera_translation,
-            rotation_xyzw=camera_rotation,
-        )
+        head_half_height_m = 0.5 * self.args.stand_face_size_m
+        try:
+            camera_point = transform_point(
+                (
+                    self.args.stand_x,
+                    self.args.stand_y,
+                    self.args.stand_head_center_height_m,
+                ),
+                translation_xyz=camera_translation,
+                rotation_xyzw=camera_rotation,
+            )
+            camera_top_point = transform_point(
+                (
+                    self.args.stand_x,
+                    self.args.stand_y,
+                    self.args.stand_head_center_height_m + head_half_height_m,
+                ),
+                translation_xyz=camera_translation,
+                rotation_xyzw=camera_rotation,
+            )
+            camera_bottom_point = transform_point(
+                (
+                    self.args.stand_x,
+                    self.args.stand_y,
+                    self.args.stand_head_center_height_m - head_half_height_m,
+                ),
+                translation_xyz=camera_translation,
+                rotation_xyzw=camera_rotation,
+            )
+            parallel_side_direction = project_rectified_image_direction(
+                camera_top_point,
+                camera_bottom_point,
+                intrinsics,
+            )
+        except ValueError as exc:
+            self.consensus.reset()
+            self._write_status(
+                "world_vertical_projection_failed",
+                reason=str(exc),
+            )
+            return
         projection = project_optical_point(
             camera_point,
             intrinsics,
@@ -452,6 +502,9 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 projection=asdict(projection),
             )
             return
+        resolved_stand_axis_profile = self.stand_axis_profile.resolve(
+            projection.expected_size_px
+        )
         scan_translation, scan_rotation = _transform_values(scan_from_map)
         scan_point = transform_point(
             (self.args.stand_x, self.args.stand_y, 0.0),
@@ -522,23 +575,17 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         estimate, debug = estimate_stand_axis_from_edges(
             self.cv2,
             roi_frame,
-            edge_preprocess="gray",
-            canny_low=self.args.canny_low,
-            canny_high=self.args.canny_high,
+            edge_preprocess=resolved_stand_axis_profile.edge_preprocess,
+            canny_low=resolved_stand_axis_profile.canny_low,
+            canny_high=resolved_stand_axis_profile.canny_high,
             silhouette_only=True,
-            min_area_px=max(
-                40.0,
-                0.10 * projection.expected_size_px**2,
-            ),
+            parallel_side_direction=parallel_side_direction,
+            min_area_px=resolved_stand_axis_profile.min_area_px,
             min_face_area_fraction=0.0,
-            min_edge_height_px=max(
-                5.0,
-                min(14.0, 0.18 * projection.expected_size_px),
-            ),
-            close_kernel=min(
-                7,
-                max(3, int(round(projection.expected_size_px * 0.05)) | 1),
-            ),
+            min_edge_height_px=resolved_stand_axis_profile.min_edge_height_px,
+            close_kernel=resolved_stand_axis_profile.close_kernel,
+            min_aspect_ratio=resolved_stand_axis_profile.min_aspect_ratio,
+            max_aspect_ratio=resolved_stand_axis_profile.max_aspect_ratio,
             stand_width_m=self.args.stand_face_size_m,
             stand_distance_m=projection.depth_m,
             camera_fx_px=intrinsics.fx_px,
@@ -546,13 +593,26 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             camera_cx_px=intrinsics.cx_px - roi.x0,
             camera_cy_px=intrinsics.cy_px - roi.y0,
         )
+        axis_metadata = {
+            "profile": asdict(resolved_stand_axis_profile),
+            "parallel_side_direction": list(parallel_side_direction),
+            "estimator_usable": estimate.usable,
+            "estimator_reason": estimate.reason,
+            "estimator_source": estimate.source,
+        }
         if not estimate.usable or estimate.yaw_deg is None:
             self.consensus.reset()
-            self._write_debug(frame, roi_frame, debug)
+            self._write_debug(
+                frame,
+                roi_frame,
+                debug,
+                metadata=axis_metadata,
+            )
             self._write_status(
                 "silhouette_unavailable",
                 estimator_reason=estimate.reason,
                 estimator_source=estimate.source,
+                stand_axis_debug=axis_metadata,
             )
             return
         optical_yaw = math.radians(estimate.yaw_deg)
@@ -565,12 +625,18 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         )
         if not conditioning.accepted or self.args.expected_qr_id not in qr_texts:
             self.consensus.reset()
-            self._write_debug(frame, roi_frame, debug)
+            self._write_debug(
+                frame,
+                roi_frame,
+                debug,
+                metadata=axis_metadata,
+            )
             self._write_status(
                 "evidence_not_committable",
                 conditioning=asdict(conditioning),
                 qr_texts=list(qr_texts),
                 expected_qr_id=self.args.expected_qr_id,
+                stand_axis_debug=axis_metadata,
             )
             return
         consensus = self.consensus.add(
@@ -579,12 +645,18 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             side="qr_code_side",
             qr_texts=qr_texts,
         )
-        self._write_debug(frame, roi_frame, debug)
+        self._write_debug(
+            frame,
+            roi_frame,
+            debug,
+            metadata=axis_metadata,
+        )
         if consensus is None:
             self._write_status(
                 "collecting_consensus",
                 qr_texts=list(qr_texts),
                 estimator_source=estimate.source,
+                stand_axis_debug=axis_metadata,
             )
             return
         camera_heading = optical_heading_from_transform(map_from_camera)
@@ -636,18 +708,45 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             axis_sample_count=consensus.sample_count,
             axis_confidence=confidence,
             qr_texts=list(qr_texts),
+            stand_axis_debug=axis_metadata,
         )
         self.node.get_logger().info(
             f"committed passive recommendation: {self.args.recommended_pose_json}"
         )
 
-    def _write_debug(self, frame, roi_frame, debug) -> None:
+    def _write_debug(self, frame, roi_frame, debug, *, metadata) -> None:
         if self.args.debug_dir is None:
             return
         self.args.debug_dir.mkdir(parents=True, exist_ok=True)
-        self.cv2.imwrite(str(self.args.debug_dir / "latest_frame.png"), frame)
-        self.cv2.imwrite(str(self.args.debug_dir / "latest_head_roi.png"), roi_frame)
-        self.cv2.imwrite(str(self.args.debug_dir / "latest_edges.png"), debug.edges)
+        image_artifacts = (
+            ("latest_frame.png", frame),
+            ("latest_head_roi.png", roi_frame),
+            ("latest_edges.png", debug.edges),
+            ("latest_raw_edges.png", debug.raw_edges),
+            ("latest_side_evidence.png", debug.face_mask),
+            ("latest_rectangle_mask.png", debug.rectangle_mask),
+            ("latest_rectangle_overlay.png", debug.rectangle_overlay),
+        )
+        written = []
+        for filename, image in image_artifacts:
+            artifact_path = self.args.debug_dir / filename
+            if image is not None and self.cv2.imwrite(str(artifact_path), image):
+                written.append(filename)
+            else:
+                artifact_path.unlink(missing_ok=True)
+        structure = debug.structure_evidence
+        _atomic_json(
+            self.args.debug_dir / "latest_metadata.json",
+            {
+                "schema_version": 1,
+                "observed_unix_sec": time.time(),
+                "artifacts": written,
+                "stand_axis": metadata,
+                "structure_evidence_reason": (
+                    structure.reason if structure is not None else None
+                ),
+            },
+        )
 
     def _write_status(self, state: str, **details) -> None:
         _atomic_json(
@@ -658,6 +757,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 "state": state,
                 "motion_capability": "none",
                 "observed_unix_sec": time.time(),
+                "stand_axis_profile": asdict(self.stand_axis_profile),
                 **details,
             },
         )
@@ -695,6 +795,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lidar-range-tolerance-m", type=float, default=0.04)
     parser.add_argument("--extrinsic-translation-tolerance-m", type=float, default=0.005)
     parser.add_argument("--extrinsic-rotation-tolerance-deg", type=float, default=1.0)
+    parser.add_argument(
+        "--edge-preprocess",
+        choices=("gray", "channel-union"),
+        default="channel-union",
+    )
     parser.add_argument("--canny-low", type=int, default=20)
     parser.add_argument("--canny-high", type=int, default=60)
     parser.add_argument("--status-json", required=True, type=Path)
@@ -733,6 +838,10 @@ def _validate_args(parser: argparse.ArgumentParser, args) -> None:
         parser.error("--lidar-min-samples must be positive")
     if not 0 <= args.canny_low < args.canny_high <= 255:
         parser.error("Canny thresholds must satisfy 0 <= low < high <= 255")
+    try:
+        _stand_axis_profile_from_args(args)
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.status_json.resolve() == args.recommended_pose_json.resolve():
         parser.error("status and recommendation outputs must be distinct")
 

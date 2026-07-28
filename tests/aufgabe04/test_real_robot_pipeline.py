@@ -2,7 +2,7 @@ import json
 import math
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,9 +17,13 @@ from scripts.aufgabe04.navigation.viewpoint_recommendation import (
     load_recommendation,
     recommendation_to_dict,
 )
+from scripts.aufgabe04.perception.stand_axis.real_camera_profile import (
+    RealCameraStandAxisProfile,
+)
 from scripts.aufgabe04.real_robot.camera_geometry import (
     CameraIntrinsics,
     project_optical_point,
+    project_rectified_image_direction,
     roi_from_projection,
     rotate_vector,
     transform_point,
@@ -37,11 +41,18 @@ from scripts.aufgabe04.real_robot.hardware_profile import (
     write_camera_calibration,
     write_real_robot_profile,
 )
+from scripts.aufgabe04.real_robot.observer_contract import (
+    PASSIVE_VIEWPOINT_OBSERVER_VERSION,
+)
 from scripts.aufgabe04.real_robot.passive_viewpoint_node import (
+    PassiveRealViewpointNode,
     _StampedMessage,
     _nearest,
     _pose_is_stationary,
     _rectify_bgr_frame,
+    _stand_axis_profile_from_args,
+    _validate_args,
+    build_parser,
 )
 from scripts.aufgabe04.real_robot.prepare_passive_survey import (
     main as prepare_passive_survey,
@@ -212,8 +223,140 @@ class RealCameraGeometryTest(unittest.TestCase):
         self.assertAlmostEqual(transformed[0], 2.0)
         self.assertAlmostEqual(transformed[1], 4.0)
 
+    def test_rectified_world_vertical_direction_accounts_for_camera_roll(self):
+        intrinsics = CameraIntrinsics(640, 480, 400.0, 400.0, 320.0, 240.0)
+        roll_rad = math.radians(30.0)
+        roll = (0.0, 0.0, math.sin(roll_rad / 2.0), math.cos(roll_rad / 2.0))
+        top_camera = rotate_vector((0.0, -0.10, 1.0), roll)
+        bottom_camera = rotate_vector((0.0, 0.10, 1.0), roll)
+
+        direction = project_rectified_image_direction(
+            top_camera,
+            bottom_camera,
+            intrinsics,
+        )
+
+        self.assertAlmostEqual(direction[0], -0.5, places=7)
+        self.assertAlmostEqual(direction[1], math.sqrt(3.0) / 2.0, places=7)
+        with self.assertRaisesRegex(ValueError, "front"):
+            project_rectified_image_direction(
+                (0.0, -0.1, -1.0),
+                (0.0, 0.1, -1.0),
+                intrinsics,
+            )
+
+
+class RealCameraStandAxisProfileTest(unittest.TestCase):
+    def test_default_profile_resolves_bounded_expected_head_size_gates(self):
+        profile = RealCameraStandAxisProfile()
+        small = profile.resolve(16.0)
+        medium = profile.resolve(100.0)
+        large = profile.resolve(300.0)
+
+        self.assertEqual(profile.edge_preprocess, "channel_union")
+        self.assertEqual(small.min_area_px, 40.0)
+        self.assertEqual(small.min_edge_height_px, 5.0)
+        self.assertEqual(small.close_kernel, 3)
+        self.assertEqual(medium.min_area_px, 1000.0)
+        self.assertEqual(medium.min_edge_height_px, 14.0)
+        self.assertEqual(medium.close_kernel, 5)
+        self.assertEqual(large.min_edge_height_px, 14.0)
+        self.assertEqual(large.close_kernel, 7)
+        self.assertEqual(
+            medium.estimator_kwargs()["edge_preprocess"],
+            "channel_union",
+        )
+        self.assertEqual(medium.min_aspect_ratio, 0.45)
+        self.assertEqual(medium.max_aspect_ratio, 1.80)
+
+    def test_profile_rejects_invalid_modes_thresholds_and_head_sizes(self):
+        with self.assertRaisesRegex(ValueError, "edge_preprocess"):
+            RealCameraStandAxisProfile(edge_preprocess="outer_border")
+        with self.assertRaisesRegex(ValueError, "Canny"):
+            RealCameraStandAxisProfile(canny_low=60, canny_high=20)
+        with self.assertRaisesRegex(ValueError, "Canny"):
+            RealCameraStandAxisProfile(canny_low=-1, canny_high=20)
+        with self.assertRaisesRegex(ValueError, "aspect"):
+            RealCameraStandAxisProfile(
+                min_aspect_ratio=1.1,
+                max_aspect_ratio=1.8,
+            )
+        profile = RealCameraStandAxisProfile()
+        for invalid in (0.0, -1.0, math.nan, math.inf):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "expected_head_size_px"):
+                    profile.resolve(invalid)
+
 
 class PassiveObservationCoreTest(unittest.TestCase):
+    @staticmethod
+    def parser_args() -> list[str]:
+        return [
+            "--robot-profile",
+            "robot.json",
+            "--camera-calibration",
+            "camera.json",
+            "--stream-id",
+            "stream",
+            "--stand-id",
+            "A",
+            "--expected-qr-id",
+            "A",
+            "--stand-x",
+            "0.1",
+            "--stand-y",
+            "0.2",
+            "--status-json",
+            "status.json",
+            "--recommended-pose-json",
+            "recommendation.json",
+        ]
+
+    def test_parser_defaults_to_channel_union_and_wires_valid_override(self):
+        parser = build_parser()
+        defaults = parser.parse_args(self.parser_args())
+        _validate_args(parser, defaults)
+        default_profile = _stand_axis_profile_from_args(defaults)
+        self.assertEqual(defaults.edge_preprocess, "channel-union")
+        self.assertEqual(default_profile.edge_preprocess, "channel_union")
+
+        override = parser.parse_args(
+            [
+                *self.parser_args(),
+                "--edge-preprocess",
+                "gray",
+                "--canny-low",
+                "12",
+                "--canny-high",
+                "44",
+            ]
+        )
+        _validate_args(parser, override)
+        override_profile = _stand_axis_profile_from_args(override)
+        self.assertEqual(override_profile.edge_preprocess, "gray")
+        self.assertEqual(override_profile.canny_low, 12)
+        self.assertEqual(override_profile.canny_high, 44)
+
+        with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    *self.parser_args(),
+                    "--edge-preprocess",
+                    "outer-border",
+                ]
+            )
+        invalid_canny = parser.parse_args(
+            [
+                *self.parser_args(),
+                "--canny-low",
+                "60",
+                "--canny-high",
+                "20",
+            ]
+        )
+        with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+            _validate_args(parser, invalid_canny)
+
     def test_raw_image_is_rectified_into_camera_info_projection_geometry(self):
         import cv2
         import numpy
@@ -260,6 +403,109 @@ class PassiveObservationCoreTest(unittest.TestCase):
                 max_rotation_rad=math.radians(2.0),
             )
         )
+
+    def test_debug_writer_persists_each_available_estimator_artifact(self):
+        class _FakeCv2:
+            @staticmethod
+            def imwrite(path, _image):
+                Path(path).write_bytes(b"debug-image")
+                return True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            debug_dir = Path(tmp)
+            adapter = PassiveRealViewpointNode.__new__(
+                PassiveRealViewpointNode
+            )
+            adapter.args = SimpleNamespace(debug_dir=debug_dir)
+            adapter.cv2 = _FakeCv2()
+            mono = object()
+            overlay = object()
+            debug = SimpleNamespace(
+                edges=mono,
+                raw_edges=mono,
+                face_mask=mono,
+                rectangle_mask=mono,
+                rectangle_overlay=overlay,
+                structure_evidence=SimpleNamespace(reason="accepted"),
+            )
+            metadata = {
+                "profile": {
+                    "edge_preprocess": "channel_union",
+                    "canny_low": 20,
+                    "canny_high": 60,
+                },
+                "parallel_side_direction": [-0.5, 0.866],
+                "estimator_usable": True,
+                "estimator_reason": "ok",
+                "estimator_source": "edge_plain_face_stem_anchor",
+            }
+
+            adapter._write_debug(
+                overlay,
+                overlay,
+                debug,
+                metadata=metadata,
+            )
+            written_metadata = json.loads(
+                (debug_dir / "latest_metadata.json").read_text()
+            )
+
+            expected_images = {
+                "latest_frame.png",
+                "latest_head_roi.png",
+                "latest_edges.png",
+                "latest_raw_edges.png",
+                "latest_side_evidence.png",
+                "latest_rectangle_mask.png",
+                "latest_rectangle_overlay.png",
+            }
+            self.assertEqual(
+                set(written_metadata["artifacts"]),
+                expected_images,
+            )
+            self.assertTrue(
+                all((debug_dir / filename).is_file() for filename in expected_images)
+            )
+            self.assertEqual(
+                written_metadata["stand_axis"]["profile"]["edge_preprocess"],
+                "channel_union",
+            )
+            self.assertEqual(
+                written_metadata["structure_evidence_reason"],
+                "accepted",
+            )
+
+            adapter._write_debug(
+                overlay,
+                overlay,
+                SimpleNamespace(
+                    edges=mono,
+                    raw_edges=None,
+                    face_mask=None,
+                    rectangle_mask=None,
+                    rectangle_overlay=None,
+                    structure_evidence=None,
+                ),
+                metadata=metadata,
+            )
+            for stale_filename in (
+                "latest_raw_edges.png",
+                "latest_side_evidence.png",
+                "latest_rectangle_mask.png",
+                "latest_rectangle_overlay.png",
+            ):
+                self.assertFalse((debug_dir / stale_filename).exists())
+            refreshed_metadata = json.loads(
+                (debug_dir / "latest_metadata.json").read_text()
+            )
+            self.assertEqual(
+                set(refreshed_metadata["artifacts"]),
+                {
+                    "latest_frame.png",
+                    "latest_head_roi.png",
+                    "latest_edges.png",
+                },
+            )
 
     def test_real_recommendation_requires_bound_qr_and_round_trips(self):
         recommendation = build_real_viewpoint_recommendation(
@@ -417,9 +663,17 @@ class PreparePassiveSurveyTest(unittest.TestCase):
                 Path(summary["plan"]),
                 hash_field="real_experiment_plan_sha256",
             )
+            survey_config = load_content_hashed_json(
+                Path(plan["survey_config"]),
+                hash_field="survey_config_sha256",
+            )
 
         self.assertEqual(status, 0)
         self.assertEqual(plan["motion_capability"], "none")
+        self.assertEqual(
+            survey_config["observer_version"],
+            PASSIVE_VIEWPOINT_OBSERVER_VERSION,
+        )
         observer = plan["candidate_runs"][0]["observer_command"]
         planner = plan["candidate_runs"][0]["catalog_validation_command"]
         self.assertIn("passive_viewpoint_node.py", observer[1])
