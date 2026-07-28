@@ -19,6 +19,15 @@ from scripts.aufgabe04.perception.stand_axis.raw_support import (
 )
 
 
+# A heater/radiator produces many nearly vertical Hough lines.  The real head
+# still needs a global search on initial acquisition, but raw four-side fitting
+# every combinatorial rail pair makes the latest-frame ROS subscriber fall
+# behind.  The bound applies only after cheap geometry ranking; the selected
+# proposals remain independently validated against untouched Canny pixels.
+_MAX_SIDE_FIRST_RAW_VERIFICATIONS = 16
+_MAX_HORIZONTAL_RAW_VERIFICATIONS = 6
+
+
 def _short_centered_neck_support(edge_mask, corners) -> bool:
     """Check for a short post continuation below an already fitted head.
 
@@ -74,6 +83,7 @@ def _head_candidate_from_rough_corners(
     min_aspect_ratio: float,
     max_aspect_ratio: float,
     fixed_parallel_side_direction: tuple[float, float] | None,
+    edge_points=None,
 ) -> tuple[_SilhouetteFaceCandidate, float] | None:
     """Verify a coarse head proposal only with raw four-side evidence."""
 
@@ -82,6 +92,7 @@ def _head_candidate_from_rough_corners(
         raw_edges,
         rough_corners,
         fixed_parallel_side_direction=fixed_parallel_side_direction,
+        edge_points=edge_points,
     )
     if fitted is None:
         return None
@@ -118,6 +129,7 @@ def _side_first_head_candidates(
     min_aspect_ratio: float,
     max_aspect_ratio: float,
     fixed_parallel_side_direction: tuple[float, float] | None,
+    edge_points,
 ):
     """Yield raw-verified head candidates seeded by the parallel outer rails.
 
@@ -152,6 +164,7 @@ def _side_first_head_candidates(
             )
         )
 
+    ranked_pairs = []
     for index, left in enumerate(side_segments):
         for right in side_segments[index + 1 :]:
             left_top, left_bottom, left_direction, left_length = left
@@ -178,16 +191,62 @@ def _side_first_head_candidates(
                 continue
             if height > 0.62 * frame_height or width > 0.72 * frame_width:
                 continue
-            verified = _head_candidate_from_rough_corners(
-                cv2,
-                raw_edges,
-                order_corners((left_top, right_top, right_bottom, left_bottom)),
-                min_aspect_ratio=min_aspect_ratio,
-                max_aspect_ratio=max_aspect_ratio,
-                fixed_parallel_side_direction=fixed_parallel_side_direction,
+            # Ranking remains intentionally cheap: it uses only the physical
+            # invariant (parallel rails) and the square-like extent.  Raw
+            # Canny support, including the interrupted bottom edge and neck,
+            # remains the authoritative acceptance decision below.
+            parallel_score = (direction_cosine - math.cos(math.radians(14.0))) / (
+                1.0 - math.cos(math.radians(14.0))
             )
-            if verified is not None:
-                yield verified
+            square_score = 1.0 / (1.0 + abs(math.log(max(aspect, 1.0e-6))))
+            length_balance = min(left_length, right_length) / max(left_length, right_length)
+            extent_score = min(1.0, height / max(2.0 * min_edge_height_px, 1.0))
+            pair_center_x = (left_center_x + right_center_x) / 2.0
+            # The caller has already reduced a real-camera frame to its
+            # operator-configured candidate-search ROI.  Favor proposals near
+            # that ROI's centre so repeated radiator ribs at its edge cannot
+            # crowd out the stand before raw validation.  Simulation keeps a
+            # global, unbiased fallback.
+            center_score = (
+                max(0.0, 1.0 - abs(pair_center_x - frame_width / 2.0) / (frame_width / 2.0))
+                if fixed_parallel_side_direction is None
+                else 0.0
+            )
+            score = (
+                2.0 * parallel_score
+                + square_score
+                + length_balance
+                + 0.15 * extent_score
+                + 1.5 * center_score
+            )
+            ranked_pairs.append(
+                (
+                    score,
+                    left_top,
+                    right_top,
+                    right_bottom,
+                    left_bottom,
+                )
+            )
+
+    # Do not spend the full raw-side fitting cost on radiator pairings.  A
+    # stable sort keeps deterministic behavior when equally ranked Hough lines
+    # occur in adjacent frames.
+    ranked_pairs.sort(key=lambda proposal: proposal[0], reverse=True)
+    for _score, left_top, right_top, right_bottom, left_bottom in ranked_pairs[
+        :_MAX_SIDE_FIRST_RAW_VERIFICATIONS
+    ]:
+        verified = _head_candidate_from_rough_corners(
+            cv2,
+            raw_edges,
+            order_corners((left_top, right_top, right_bottom, left_bottom)),
+            min_aspect_ratio=min_aspect_ratio,
+            max_aspect_ratio=max_aspect_ratio,
+            fixed_parallel_side_direction=fixed_parallel_side_direction,
+            edge_points=edge_points,
+        )
+        if verified is not None:
+            yield verified
 
 
 def _head_first_face_from_edges(
@@ -223,6 +282,10 @@ def _head_first_face_from_edges(
     )
     if lines is None:
         return None
+    locations = cv2.findNonZero(raw_edges)
+    if locations is None:
+        return None
+    edge_points = locations.reshape(-1, 2).astype(numpy.float64)
 
     horizontals: list[tuple[float, float, float, float, float]] = []
     for x1, y1, x2, y2 in lines.reshape(-1, 4):
@@ -251,12 +314,14 @@ def _head_first_face_from_edges(
         min_aspect_ratio=min_aspect_ratio,
         max_aspect_ratio=max_aspect_ratio,
         fixed_parallel_side_direction=fixed_parallel_side_direction,
+        edge_points=edge_points,
     ):
         if score > side_best_score:
             side_best = candidate
             side_best_score = score
     if side_best is not None and fixed_parallel_side_direction is None:
         return side_best
+    ranked_horizontal_pairs = []
     for upper in horizontals:
         for lower in horizontals:
             if upper is lower:
@@ -297,20 +362,42 @@ def _head_first_face_from_edges(
                     ImagePoint(upper_left, lower_y1),
                 )
             )
-            verified = _head_candidate_from_rough_corners(
-                cv2,
-                raw_edges,
-                rough,
-                min_aspect_ratio=min_aspect_ratio,
-                max_aspect_ratio=max_aspect_ratio,
-                fixed_parallel_side_direction=fixed_parallel_side_direction,
+            square_score = 1.0 / (1.0 + abs(math.log(max(aspect, 1.0e-6))))
+            overlap_score = overlap / max(min(upper_length, lower_length), 1.0)
+            length_balance = min(upper_length, lower_length) / max(upper_length, lower_length)
+            ranked_horizontal_pairs.append(
+                (
+                    square_score + overlap_score + length_balance,
+                    rough,
+                )
             )
-            if verified is None:
-                continue
-            candidate, score = verified
-            if score > best_score:
-                best = candidate
-                best_score = score
+
+    # Only the real-camera fallback is bounded: the fixed-direction simulation
+    # path is deterministic and retains its exhaustive validation behavior.
+    # The real path has already been restricted to the configured candidate
+    # ROI and is the one exposed to radiator-like edge clutter.
+    ranked_horizontal_pairs.sort(key=lambda proposal: proposal[0], reverse=True)
+    horizontal_limit = (
+        _MAX_HORIZONTAL_RAW_VERIFICATIONS
+        if fixed_parallel_side_direction is None
+        else len(ranked_horizontal_pairs)
+    )
+    for _rank, rough in ranked_horizontal_pairs[:horizontal_limit]:
+        verified = _head_candidate_from_rough_corners(
+            cv2,
+            raw_edges,
+            rough,
+            min_aspect_ratio=min_aspect_ratio,
+            max_aspect_ratio=max_aspect_ratio,
+            fixed_parallel_side_direction=fixed_parallel_side_direction,
+            edge_points=edge_points,
+        )
+        if verified is None:
+            continue
+        candidate, score = verified
+        if score > best_score:
+            best = candidate
+            best_score = score
     if side_best is not None and side_best_score > best_score:
         best = side_best
     return best

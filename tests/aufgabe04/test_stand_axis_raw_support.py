@@ -12,6 +12,7 @@ except ImportError:  # pragma: no cover - optional outside the project environme
     numpy = None
 
 from scripts.aufgabe04.perception import stand_axis_image
+from scripts.aufgabe04.perception.stand_axis import head_candidates
 from scripts.aufgabe04.perception.stand_axis_image import ImagePoint
 from scripts.aufgabe04.perception.stand_axis.head_candidates import (
     _head_first_face_from_edges,
@@ -253,6 +254,46 @@ class StandAxisRawSupportTest(unittest.TestCase):
         self.assertIsNotNone(candidate)
         self.assertAlmostEqual(min(point.u_px for point in candidate.corners), 60.0, delta=4.0)
         self.assertAlmostEqual(max(point.u_px for point in candidate.corners), 158.0, delta=4.0)
+
+    @unittest.skipIf(
+        cv2 is None or numpy is None,
+        "numpy and OpenCV are required for raw-side fitting",
+    )
+    def test_head_first_bounds_raw_verification_under_dense_hough_clutter(self):
+        edges = numpy.zeros((240, 320), dtype=numpy.uint8)
+        edges[0, 0] = 255
+        # Deliberately provide many plausible rail and horizontal proposals,
+        # similar to a radiator.  The bounded proposal stage must not invoke
+        # the expensive raw four-side verifier for every pair.
+        lines = []
+        for x in range(20, 300, 14):
+            lines.append([[x, 36, x, 156]])
+        for y in range(30, 170, 14):
+            lines.append([[70, y, 250, y]])
+        dense_lines = numpy.array(lines, dtype=numpy.int32)
+        with (
+            patch.object(cv2, "HoughLinesP", return_value=dense_lines),
+            patch.object(
+                head_candidates,
+                "_head_candidate_from_rough_corners",
+                return_value=None,
+            ) as verifier,
+        ):
+            candidate = _head_first_face_from_edges(
+                cv2,
+                edges,
+                min_edge_height_px=8.0,
+                min_aspect_ratio=0.45,
+                max_aspect_ratio=1.8,
+                fixed_parallel_side_direction=None,
+            )
+
+        self.assertIsNone(candidate)
+        self.assertLessEqual(
+            verifier.call_count,
+            head_candidates._MAX_SIDE_FIRST_RAW_VERIFICATIONS
+            + head_candidates._MAX_HORIZONTAL_RAW_VERIFICATIONS,
+        )
 
     @unittest.skipIf(
         cv2 is None or numpy is None,

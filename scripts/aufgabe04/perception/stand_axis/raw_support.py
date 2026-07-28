@@ -646,6 +646,7 @@ def _raw_side_evidence_and_corners(
     rough_corners: Sequence[ImagePoint],
     *,
     fixed_parallel_side_direction: tuple[float, float] | None = None,
+    edge_points=None,
 ):
     """Refit a common-sided head trapezoid from outer raw-Canny evidence.
 
@@ -658,10 +659,13 @@ def _raw_side_evidence_and_corners(
     import numpy
 
     evidence_mask = numpy.zeros(raw_edges.shape[:2], dtype=numpy.uint8)
-    locations = cv2.findNonZero(raw_edges)
-    if locations is None:
+    if edge_points is None:
+        locations = cv2.findNonZero(raw_edges)
+        if locations is None:
+            return evidence_mask, None
+        edge_points = locations.reshape(-1, 2).astype(numpy.float64)
+    elif len(edge_points) == 0:
         return evidence_mask, None
-    edge_points = locations.reshape(-1, 2).astype(numpy.float64)
     top_left, top_right, bottom_right, bottom_left = order_corners(rough_corners)
     widths = (
         _distance(top_left, top_right),

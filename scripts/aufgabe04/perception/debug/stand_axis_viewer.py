@@ -1557,6 +1557,7 @@ def annotate_frame(
     filtered_ratio,
     filtered_proxy,
     age_ms,
+    detector_duration_sec,
 ) -> None:
     if estimate.corners is not None:
         corners = estimate.corners
@@ -1601,10 +1602,15 @@ def annotate_frame(
     cv2.putText(frame, line1, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.62, color, 2)
     cv2.putText(frame, line2, (12, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.56, color, 2)
     cv2.putText(frame, line3, (12, 82), cv2.FONT_HERSHEY_SIMPLEX, 0.52, color, 2)
+    timing_parts = []
     if age_ms is not None:
+        timing_parts.append(f"age={age_ms:.0f}ms")
+    if detector_duration_sec is not None:
+        timing_parts.append(f"detect={detector_duration_sec * 1000.0:.0f}ms")
+    if timing_parts:
         cv2.putText(
             frame,
-            f"age={age_ms:.0f}ms",
+            " ".join(timing_parts),
             (12, frame.shape[0] - 12),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.55,
@@ -3114,7 +3120,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             filtered_proxy = statistics.median(proxy_window) if proxy_window else None
 
             annotated = display_frame.copy()
-            annotate_frame(cv2, annotated, estimate, side, filtered_ratio, filtered_proxy, age_ms)
+            annotate_frame(
+                cv2,
+                annotated,
+                estimate,
+                side,
+                filtered_ratio,
+                filtered_proxy,
+                age_ms,
+                detector_duration_sec,
+            )
             annotate_candidate_search_roi(cv2, annotated, candidate_search_roi)
             if args.sim_raw_image_topic:
                 annotate_simulation_target_roi(
