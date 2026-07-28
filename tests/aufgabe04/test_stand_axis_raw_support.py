@@ -13,6 +13,9 @@ except ImportError:  # pragma: no cover - optional outside the project environme
 
 from scripts.aufgabe04.perception import stand_axis_image
 from scripts.aufgabe04.perception.stand_axis_image import ImagePoint
+from scripts.aufgabe04.perception.stand_axis.head_candidates import (
+    _head_first_face_from_edges,
+)
 from scripts.aufgabe04.perception.stand_axis_image import (
     _SilhouetteFaceCandidate,
     _attach_structure_evidence,
@@ -177,6 +180,44 @@ class StandAxisRawSupportTest(unittest.TestCase):
         self.assertEqual(attached.corners, original)
         self.assertFalse(attached.rectangle_fit_reliable)
         self.assertIs(attached.face_mask, candidate.face_mask)
+
+    @unittest.skipIf(
+        cv2 is None or numpy is None,
+        "numpy and OpenCV are required for raw-side fitting",
+    )
+    def test_head_first_candidate_uses_outer_square_with_split_bottom(self):
+        edges = numpy.zeros((220, 260), dtype=numpy.uint8)
+        # Outer head: the lower border is split by the centred stem exactly as
+        # it is in the real camera recording.
+        cv2.line(edges, (70, 30), (160, 30), 255, 2)
+        cv2.line(edges, (70, 30), (70, 120), 255, 2)
+        cv2.line(edges, (160, 30), (160, 120), 255, 2)
+        cv2.line(edges, (70, 120), (104, 120), 255, 2)
+        cv2.line(edges, (126, 120), (160, 120), 255, 2)
+        cv2.line(edges, (110, 121), (110, 180), 255, 2)
+        cv2.line(edges, (120, 121), (120, 180), 255, 2)
+        # QR-like interior clutter and a nearby radiator-like rectangle must
+        # not become the fitted head.
+        cv2.rectangle(edges, (92, 52), (132, 96), 255, 1)
+        cv2.rectangle(edges, (180, 55), (245, 130), 255, 2)
+
+        candidate = _head_first_face_from_edges(
+            cv2,
+            edges,
+            min_edge_height_px=8.0,
+            min_aspect_ratio=0.45,
+            max_aspect_ratio=1.8,
+            fixed_parallel_side_direction=(0.0, 1.0),
+        )
+
+        self.assertIsNotNone(candidate)
+        self.assertTrue(candidate.rectangle_fit_reliable)
+        xs = [point.u_px for point in candidate.corners]
+        ys = [point.v_px for point in candidate.corners]
+        self.assertAlmostEqual(min(xs), 70.0, delta=4.0)
+        self.assertAlmostEqual(max(xs), 160.0, delta=4.0)
+        self.assertAlmostEqual(min(ys), 30.0, delta=4.0)
+        self.assertAlmostEqual(max(ys), 120.0, delta=4.0)
 
     @unittest.skipIf(
         cv2 is None or numpy is None,

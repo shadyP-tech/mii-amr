@@ -34,6 +34,9 @@ from scripts.aufgabe04.perception.stand_axis.models import (
     _QuadrilateralEdgeSupport,
     _SilhouetteFaceCandidate,
 )
+from scripts.aufgabe04.perception.stand_axis.head_candidates import (
+    _head_first_face_from_edges,
+)
 from scripts.aufgabe04.perception.stand_axis.preprocessing import (
     _canny_edges_from_frame,
     _edge_input_image,
@@ -737,6 +740,16 @@ def _plain_face_from_stem_cropped_edges(
         raise ValueError("measurement_edges must match localization edges")
 
     if _raster_stem_anchor is None:
+        head_first = _head_first_face_from_edges(
+            cv2,
+            measurement_edges,
+            min_edge_height_px=min_edge_height_px,
+            min_aspect_ratio=min_aspect_ratio,
+            max_aspect_ratio=max_aspect_ratio,
+            fixed_parallel_side_direction=_fixed_parallel_side_direction,
+        )
+        if head_first is not None:
+            return head_first
         stem_anchors = _stem_anchor_candidates_from_edges(
             cv2,
             edges,
