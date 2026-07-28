@@ -137,6 +137,15 @@ detectors, camera subscriptions, QR inputs, navigation inputs, or reportable
 run evidence. To show only the annotated camera frame, omit `--display-mask`,
 `--display-edges`, `--display-face-mask`, and `--display-rectangle-mask`.
 
+For a time-aligned debugging record, press `r` while an OpenCV viewer window
+has focus. Press `r` again to stop. The viewer writes one MJPEG AVI per window
+that is currently displayed (the annotated frame plus each enabled diagnostic
+window), so no window is hidden inside a composite video. A timestamped
+recording directory is created under
+`results/aufgabe04/stand_axis_debug_recordings` by default; change it with
+`--record-dir PATH` or set the output rate with `--record-fps N`. The recordings
+remain diagnostic-only and do not affect the detector or control the robot.
+
 In standalone raw-simulation edge mode (`--lidar-bearing-source fixed`), Canny
 is applied to the complete camera frame and `stand-axis-edges` displays that
 complete edge image. The stem-anchored detector then derives a head ROI from

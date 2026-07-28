@@ -1,5 +1,6 @@
 import ast
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr
 from dataclasses import replace
@@ -19,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from scripts.aufgabe04.perception.debug.stand_axis_viewer import (  # noqa: E402
+    DebugWindowRecorder,
     HeadCandidateTemporalGate,
     WINDOW_EDGES,
     WINDOW_FACE_MASK,
@@ -2407,6 +2409,75 @@ class StandAxisImageTest(unittest.TestCase):
         self.assertEqual(args.diagnostic_window_size_px, 320)
         self.assertAlmostEqual(args.head_hold_sec, 0.35)
         self.assertAlmostEqual(args.front_face_to_qr_width_ratio, 1.30)
+        self.assertEqual(
+            args.record_dir,
+            Path("results/aufgabe04/stand_axis_debug_recordings"),
+        )
+        self.assertAlmostEqual(args.record_fps, 15.0)
+
+    @unittest.skipIf(numpy is None, "numpy is required for recording tests")
+    def test_debug_window_recorder_writes_each_displayed_window(self):
+        class FakeWriter:
+            def __init__(self):
+                self.frames = []
+                self.released = False
+
+            def isOpened(self):
+                return True
+
+            def write(self, frame):
+                self.frames.append(frame.copy())
+
+            def release(self):
+                self.released = True
+
+        class FakeCv2:
+            COLOR_GRAY2BGR = 1
+            INTER_NEAREST = 2
+
+            def __init__(self):
+                self.calls = []
+                self.writers = []
+
+            def VideoWriter_fourcc(self, *_codec):
+                return 1
+
+            def VideoWriter(self, path, _codec, fps, size):
+                self.calls.append((Path(path).name, fps, size))
+                writer = FakeWriter()
+                self.writers.append(writer)
+                return writer
+
+            def cvtColor(self, image, _conversion):
+                return numpy.repeat(image[:, :, None], 3, axis=2)
+
+            def resize(self, image, size, interpolation):
+                if interpolation != self.INTER_NEAREST:
+                    raise AssertionError("recording resize must preserve diagnostic pixels")
+                return numpy.zeros((size[1], size[0], 3), dtype=numpy.uint8)
+
+        fake_cv2 = FakeCv2()
+        images = {
+            WINDOW_FRAME: numpy.zeros((10, 12, 3), dtype=numpy.uint8),
+            WINDOW_EDGES: numpy.zeros((5, 6), dtype=numpy.uint8),
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = DebugWindowRecorder(fake_cv2, Path(tmpdir), 12.0)
+            recorder.start(images)
+            recorder.write(
+                {
+                    WINDOW_FRAME: numpy.zeros((8, 9, 3), dtype=numpy.uint8),
+                    WINDOW_EDGES: numpy.zeros((5, 6), dtype=numpy.uint8),
+                }
+            )
+            recorder.stop()
+
+        self.assertEqual(
+            fake_cv2.calls,
+            [("annotated.avi", 12.0, (12, 10)), ("edges.avi", 12.0, (6, 5))],
+        )
+        self.assertEqual([len(writer.frames) for writer in fake_cv2.writers], [2, 2])
+        self.assertTrue(all(writer.released for writer in fake_cv2.writers))
 
     def test_stand_axis_viewer_has_no_motion_arguments(self):
         parser = build_parser()

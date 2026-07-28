@@ -101,6 +101,111 @@ WINDOW_RECTANGLE_MASK = "aufgabe04/stand-axis-rectangle"
 NATIVE_PIXEL_DIAGNOSTIC_WINDOWS = frozenset(
     (WINDOW_FACE_MASK, WINDOW_RECTANGLE_MASK)
 )
+RECORDING_FILENAMES = {
+    WINDOW_FRAME: "annotated.avi",
+    WINDOW_MASK: "color_mask.avi",
+    WINDOW_EDGES: "edges.avi",
+    WINDOW_FACE_MASK: "side_evidence.avi",
+    WINDOW_RECTANGLE_MASK: "rectangle.avi",
+}
+
+
+class DebugWindowRecorder:
+    """Write one diagnostic video per currently displayed OpenCV window."""
+
+    def __init__(self, cv2, output_directory: Path, fps: float) -> None:
+        self._cv2 = cv2
+        self._output_directory = output_directory
+        self._fps = fps
+        self._writers = {}
+        self._sizes = {}
+        self._session_directory: Path | None = None
+
+    @property
+    def active(self) -> bool:
+        return bool(self._writers)
+
+    def _bgr_frame(self, image):
+        if image is None or len(image.shape) not in (2, 3):
+            raise ValueError("recording requires a non-empty grayscale or BGR image")
+        if len(image.shape) == 2:
+            return self._cv2.cvtColor(image, self._cv2.COLOR_GRAY2BGR)
+        if image.shape[2] != 3:
+            raise ValueError("recording requires grayscale or BGR images")
+        return image
+
+    def start(self, images: dict[str, object]) -> None:
+        if self.active:
+            return
+        if not images:
+            raise ValueError("no displayed windows are available to record")
+
+        session_name = (
+            "recording_"
+            + time.strftime("%Y%m%d_%H%M%S")
+            + f"_{time.time_ns() % 1_000_000_000:09d}"
+        )
+        session_directory = self._output_directory / session_name
+        session_directory.mkdir(parents=True, exist_ok=False)
+        codec = self._cv2.VideoWriter_fourcc(*"MJPG")
+        writers = {}
+        sizes = {}
+        try:
+            for window_name, image in images.items():
+                frame = self._bgr_frame(image)
+                height, width = frame.shape[:2]
+                if height <= 0 or width <= 0:
+                    raise ValueError("recording requires non-empty window images")
+                filename = RECORDING_FILENAMES.get(
+                    window_name,
+                    window_name.replace("/", "_") + ".avi",
+                )
+                writer = self._cv2.VideoWriter(
+                    str(session_directory / filename),
+                    codec,
+                    self._fps,
+                    (width, height),
+                )
+                if not writer.isOpened():
+                    writer.release()
+                    raise RuntimeError(f"could not open video writer for {window_name}")
+                writers[window_name] = writer
+                sizes[window_name] = (width, height)
+        except Exception:
+            for writer in writers.values():
+                writer.release()
+            raise
+
+        self._writers = writers
+        self._sizes = sizes
+        self._session_directory = session_directory
+        self.write(images)
+        print(f"recording started: {session_directory}")
+
+    def write(self, images: dict[str, object]) -> None:
+        for window_name, writer in self._writers.items():
+            image = images.get(window_name)
+            if image is None:
+                continue
+            frame = self._bgr_frame(image)
+            width, height = self._sizes[window_name]
+            if frame.shape[1] != width or frame.shape[0] != height:
+                frame = self._cv2.resize(
+                    frame,
+                    (width, height),
+                    interpolation=self._cv2.INTER_NEAREST,
+                )
+            writer.write(frame)
+
+    def stop(self) -> None:
+        if not self.active:
+            return
+        for writer in self._writers.values():
+            writer.release()
+        print(f"recording saved: {self._session_directory}")
+        self._writers = {}
+        self._sizes = {}
+        self._session_directory = None
 
 
 @dataclass(frozen=True)
@@ -630,6 +735,21 @@ def build_parser() -> argparse.ArgumentParser:
             "The side-evidence cutout and derived rectangle always use native-pixel "
             "AUTOSIZE windows. This never resamples processed pixels."
         ),
+    )
+    parser.add_argument(
+        "--record-dir",
+        type=Path,
+        default=Path("results/aufgabe04/stand_axis_debug_recordings"),
+        help=(
+            "Directory where pressing r creates a timestamped set of diagnostic "
+            "AVI recordings (default: results/aufgabe04/stand_axis_debug_recordings)."
+        ),
+    )
+    parser.add_argument(
+        "--record-fps",
+        type=float,
+        default=15.0,
+        help="Frames per second for keyboard-started diagnostic recordings (default: 15).",
     )
     return parser
 
@@ -1824,6 +1944,8 @@ def _standalone_head_geometry_reason(
 def _validate_runtime_args(args) -> None:
     if args.diagnostic_window_size_px <= 0:
         raise ValueError("--diagnostic-window-size-px must be positive")
+    if not math.isfinite(args.record_fps) or args.record_fps <= 0.0:
+        raise ValueError("--record-fps must be finite and positive")
     if not 0.0 < args.max_observation_obliqueness_deg < 90.0:
         raise ValueError("--max-observation-obliqueness-deg must be in (0, 90)")
     if args.sim_sync_tolerance_sec <= 0.0:
@@ -2041,6 +2163,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.tune:
         create_trackbars(cv2, selected_ranges[0])
     _initialize_display_windows(cv2, args)
+    recorder = DebugWindowRecorder(cv2, args.record_dir, args.record_fps)
 
     print("Aufgabe 04 stand-axis viewer: debug-only, read-only ROS subscriptions.")
     if simulation_full_frame_edges:
@@ -2055,7 +2178,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
     print("Face-visible mode: + proxy means left image edge is closer/taller; - means right edge is closer/taller.")
     print("Edge-on mode: reports approximate side-on / 90deg and does not compute a ratio.")
-    print("Keys: ESC/q quit, p print ColorRange, s save snapshot.")
+    print(
+        "Keys: ESC/q quit, p print ColorRange, s save snapshot, "
+        "r start/stop all displayed-window recordings."
+    )
 
     ratio_window = deque(maxlen=max(1, args.median_window))
     proxy_window = deque(maxlen=max(1, args.median_window))
@@ -2065,6 +2191,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     last_waiting_message_sec = 0.0
     last_observation_write_sec = 0.0
     last_diagnostic_shapes = {}
+    record_start_pending = False
     axis_consensus = AxisConsensusAccumulator(
         required_samples=args.axis_consensus_frames,
         max_deviation_rad=math.radians(args.axis_consensus_max_deviation_deg),
@@ -2093,6 +2220,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                     key = 0 if args.headless else cv2.waitKey(1) & 0xFF
                     if key in (27, ord("q")):
                         break
+                    if key == ord("r"):
+                        if recorder.active:
+                            recorder.stop()
+                        elif record_start_pending:
+                            record_start_pending = False
+                            print("pending recording cancelled")
+                        else:
+                            record_start_pending = True
+                            print("recording will start with the next displayed frame")
                     continue
                 print(f"WARNING: {read.message}")
                 break
@@ -2100,6 +2236,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 key = 0 if args.headless else cv2.waitKey(1) & 0xFF
                 if key in (27, ord("q")):
                     break
+                if key == ord("r"):
+                    if recorder.active:
+                        recorder.stop()
+                    elif record_start_pending:
+                        record_start_pending = False
+                        print("pending recording cancelled")
+                    else:
+                        record_start_pending = True
+                        print("recording will start with the next displayed frame")
                 continue
             last_processed_sequence = read.sequence
 
@@ -3108,11 +3253,33 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ):
                     cv2.imshow(WINDOW_RECTANGLE_MASK, diagnostic_rectangle_mask)
 
+            recording_images = {WINDOW_FRAME: annotated}
+            if not args.headless:
+                for window_name, enabled, diagnostic_image in diagnostic_images:
+                    if enabled and diagnostic_image is not None:
+                        recording_images[window_name] = diagnostic_image
+            if record_start_pending:
+                try:
+                    recorder.start(recording_images)
+                except (RuntimeError, ValueError) as exc:
+                    print(f"WARNING: recording did not start: {exc}")
+                record_start_pending = False
+            elif recorder.active:
+                recorder.write(recording_images)
+
             key = 0 if args.headless else cv2.waitKey(1) & 0xFF
             if key in (27, ord("q")):
                 break
             if key == ord("p"):
                 print_palette(active_ranges)
+            if key == ord("r"):
+                if recorder.active:
+                    recorder.stop()
+                else:
+                    try:
+                        recorder.start(recording_images)
+                    except (RuntimeError, ValueError) as exc:
+                        print(f"WARNING: recording did not start: {exc}")
             if key == ord("s") and args.save_snapshot is not None:
                 if args.structural_diagnostic:
                     _save_structural_viewer_capture(
@@ -3149,6 +3316,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        recorder.stop()
         if qr_decoder is not None:
             qr_decoder.stop()
         if lidar_source is not None:
