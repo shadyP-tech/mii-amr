@@ -2214,6 +2214,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     head_candidate_temporal_gate = HeadCandidateTemporalGate(
         hold_sec=args.head_hold_sec,
+        # Rail-owned real-head fits may seed the first rectangle immediately;
+        # every later geometry change still needs the normal three-frame
+        # reacquisition path. This avoids a long blank bootstrap on compressed
+        # real-camera edges while preventing flickering refits.
+        initial_acquire_frames=1,
+        max_width_ratio=(1.25 if args.sim_raw_image_topic else 1.15),
+        max_height_ratio=(1.25 if args.sim_raw_image_topic else 1.15),
+        max_corner_jump_scale=(0.18 if args.sim_raw_image_topic else 0.12),
+        max_side_direction_jump_deg=(8.0 if args.sim_raw_image_topic else 6.0),
     )
     last_accepted_head_display_snapshot = None
 

@@ -238,6 +238,25 @@ def _head_first_face_from_edges(
     best: _SilhouetteFaceCandidate | None = None
     best_score = -math.inf
     frame_height, frame_width = raw_edges.shape[:2]
+    # In the real-camera path, two observed parallel outer rails are the
+    # strongest stand-head invariant.  Do not let an equally supported
+    # top/bottom Hough pair switch the frame to a QR/interior quadrilateral.
+    side_best: _SilhouetteFaceCandidate | None = None
+    side_best_score = -math.inf
+    for candidate, score in _side_first_head_candidates(
+        cv2,
+        raw_edges,
+        lines=lines,
+        min_edge_height_px=min_edge_height_px,
+        min_aspect_ratio=min_aspect_ratio,
+        max_aspect_ratio=max_aspect_ratio,
+        fixed_parallel_side_direction=fixed_parallel_side_direction,
+    ):
+        if score > side_best_score:
+            side_best = candidate
+            side_best_score = score
+    if side_best is not None and fixed_parallel_side_direction is None:
+        return side_best
     for upper in horizontals:
         for lower in horizontals:
             if upper is lower:
@@ -292,16 +311,6 @@ def _head_first_face_from_edges(
             if score > best_score:
                 best = candidate
                 best_score = score
-    for candidate, score in _side_first_head_candidates(
-        cv2,
-        raw_edges,
-        lines=lines,
-        min_edge_height_px=min_edge_height_px,
-        min_aspect_ratio=min_aspect_ratio,
-        max_aspect_ratio=max_aspect_ratio,
-        fixed_parallel_side_direction=fixed_parallel_side_direction,
-    ):
-        if score > best_score:
-            best = candidate
-            best_score = score
+    if side_best is not None and side_best_score > best_score:
+        best = side_best
     return best

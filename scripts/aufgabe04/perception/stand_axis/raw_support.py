@@ -763,16 +763,12 @@ def _raw_side_evidence_and_corners(
         )
 
     parallel_endpoint_corners = None
-    if (
-        fixed_parallel_side_direction is not None
-        and right is not None
-        and left is not None
-    ):
-        # In the level simulation camera, the two fitted outer sides are the
-        # most stable head evidence. Recover their complete raw runs and use
-        # the endpoint pairs as accurate proposals for the perspective-sloped
-        # top and bottom. This repairs row-envelope proposals without accepting
-        # topology-only geometry or inferring an unsupported fourth side.
+    if shared_direction is not None and right is not None and left is not None:
+        # The two fitted outer rails are the most stable physical head
+        # evidence, whether their common direction was calibrated or learned
+        # from this real-camera frame. Recover their complete raw runs and use
+        # their observed endpoints as corners. Top/bottom evidence validates
+        # those endpoints but must not move a corner onto QR/interior clutter.
         left_run = _parallel_side_run_endpoints(
             edge_points,
             left,
@@ -797,7 +793,7 @@ def _raw_side_evidence_and_corners(
                 left_bottom,
                 right_top,
                 right_bottom,
-                parallel_side_direction=fixed_parallel_side_direction,
+                parallel_side_direction=shared_direction,
             ):
                 left_run = right_run = None
             else:

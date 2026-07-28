@@ -11,6 +11,10 @@ class _HeadCandidateSignature:
     center_x_px: float
     center_y_px: float
     extent_px: float
+    width_px: float
+    height_px: float
+    side_direction_rad: float
+    corners_px: tuple[tuple[float, float], ...]
     yaw_deg: float | None
     source: str
 
@@ -39,6 +43,7 @@ def _head_candidate_signature(
 ) -> _HeadCandidateSignature | None:
     if not estimate.usable or estimate.corners is None:
         return None
+    top_left, top_right, bottom_right, bottom_left = estimate.corners
     xs = [point.u_px for point in estimate.corners]
     ys = [point.v_px for point in estimate.corners]
     if not all(math.isfinite(value) for value in (*xs, *ys)):
@@ -46,6 +51,25 @@ def _head_candidate_signature(
     extent = max(max(xs) - min(xs), max(ys) - min(ys))
     if extent <= 0.0:
         return None
+    width_px = (
+        math.dist((top_left.u_px, top_left.v_px), (top_right.u_px, top_right.v_px))
+        + math.dist((bottom_left.u_px, bottom_left.v_px), (bottom_right.u_px, bottom_right.v_px))
+    ) / 2.0
+    left_side = (bottom_left.u_px - top_left.u_px, bottom_left.v_px - top_left.v_px)
+    right_side = (bottom_right.u_px - top_right.u_px, bottom_right.v_px - top_right.v_px)
+    left_height = math.hypot(*left_side)
+    right_height = math.hypot(*right_side)
+    height_px = (left_height + right_height) / 2.0
+    if width_px <= 0.0 or height_px <= 0.0:
+        return None
+    left_direction = (left_side[0] / left_height, left_side[1] / left_height)
+    right_direction = (right_side[0] / right_height, right_side[1] / right_height)
+    if left_direction[0] * right_direction[0] + left_direction[1] * right_direction[1] < 0.0:
+        right_direction = (-right_direction[0], -right_direction[1])
+    side_direction_rad = math.atan2(
+        left_direction[1] + right_direction[1],
+        left_direction[0] + right_direction[0],
+    )
     yaw_deg = estimate.yaw_deg
     if yaw_deg is not None and not math.isfinite(yaw_deg):
         yaw_deg = None
@@ -53,6 +77,10 @@ def _head_candidate_signature(
         center_x_px=(min(xs) + max(xs)) / 2.0,
         center_y_px=(min(ys) + max(ys)) / 2.0,
         extent_px=extent,
+        width_px=width_px,
+        height_px=height_px,
+        side_direction_rad=side_direction_rad,
+        corners_px=tuple((point.u_px, point.v_px) for point in estimate.corners),
         yaw_deg=yaw_deg,
         source=estimate.source,
     )
@@ -67,7 +95,12 @@ class HeadCandidateTemporalGate:
         max_center_jump_scale: float = 0.45,
         max_size_ratio: float = 1.60,
         max_axis_jump_deg: float = 35.0,
+        max_width_ratio: float = 1.25,
+        max_height_ratio: float = 1.25,
+        max_corner_jump_scale: float = 0.18,
+        max_side_direction_jump_deg: float = 8.0,
         reacquire_frames: int = 3,
+        initial_acquire_frames: int = 1,
         hold_sec: float = 0.35,
         structure_owner_memory_sec: float | None = None,
     ) -> None:
@@ -76,7 +109,12 @@ class HeadCandidateTemporalGate:
         self.max_center_jump_scale = max_center_jump_scale
         self.max_size_ratio = max_size_ratio
         self.max_axis_jump_deg = max_axis_jump_deg
+        self.max_width_ratio = max_width_ratio
+        self.max_height_ratio = max_height_ratio
+        self.max_corner_jump_scale = max_corner_jump_scale
+        self.max_side_direction_jump_deg = max_side_direction_jump_deg
         self.reacquire_frames = max(1, int(reacquire_frames))
+        self.initial_acquire_frames = max(1, int(initial_acquire_frames))
         self.hold_sec = hold_sec
         self.structure_owner_memory_sec = (
             max(0.75, hold_sec)
@@ -116,6 +154,34 @@ class HeadCandidateTemporalGate:
         size_ratio = max(previous.extent_px, current.extent_px) / minimum_extent
         if size_ratio > self.max_size_ratio:
             return False
+        width_ratio = max(previous.width_px, current.width_px) / max(
+            1.0, min(previous.width_px, current.width_px)
+        )
+        if width_ratio > self.max_width_ratio:
+            return False
+        height_ratio = max(previous.height_px, current.height_px) / max(
+            1.0, min(previous.height_px, current.height_px)
+        )
+        if height_ratio > self.max_height_ratio:
+            return False
+        maximum_corner_jump = max(
+            math.dist(previous_corner, current_corner)
+            for previous_corner, current_corner in zip(
+                previous.corners_px, current.corners_px
+            )
+        )
+        if maximum_corner_jump > max(
+            4.0,
+            self.max_corner_jump_scale * minimum_extent,
+        ):
+            return False
+        side_delta = abs(
+            (current.side_direction_rad - previous.side_direction_rad + math.pi / 2.0)
+            % math.pi
+            - math.pi / 2.0
+        )
+        if side_delta > math.radians(self.max_side_direction_jump_deg):
+            return False
         if previous.yaw_deg is not None and current.yaw_deg is not None:
             axis_delta = abs(
                 (current.yaw_deg - previous.yaw_deg + 90.0) % 180.0 - 90.0
@@ -135,12 +201,42 @@ class HeadCandidateTemporalGate:
             <= self.max_size_ratio
         )
 
+    def _same_target_neighborhood(
+        self,
+        previous: _HeadCandidateSignature,
+        current: _HeadCandidateSignature,
+    ) -> bool:
+        """Allow a held rectangle only while the target has not moved away."""
+
+        minimum_extent = max(1.0, min(previous.extent_px, current.extent_px))
+        center_jump = math.hypot(
+            current.center_x_px - previous.center_x_px,
+            current.center_y_px - previous.center_y_px,
+        )
+        return (
+            center_jump <= max(18.0, self.max_center_jump_scale * minimum_extent)
+            # This is a hold-only neighborhood, not an acceptance test. A
+            # malformed refit can be substantially taller than the true head
+            # while still being centred on it; keep the validated rectangle
+            # visible, but never accept that enlarged proposal as fresh.
+            and max(previous.extent_px, current.extent_px) / minimum_extent
+            <= min(2.0, self.max_size_ratio * 1.25)
+        )
+
     def accept(self, estimate: StandAxisImageEstimate) -> tuple[bool, str]:
         signature = _head_candidate_signature(estimate)
         if signature is None:
             self._clear_pending()
             return False, estimate.reason
         if self._accepted is None:
+            if self._pending is not None and self._compatible(self._pending, signature):
+                self._pending = signature
+                self._pending_count += 1
+            else:
+                self._pending = signature
+                self._pending_count = 1
+            if self._pending_count < self.initial_acquire_frames:
+                return False, "temporal_head_bootstrap"
             self._accepted = signature
             self._clear_pending()
             return True, "accepted"
@@ -218,6 +314,23 @@ class HeadCandidateTemporalGate:
             self._clear_pending()
             current_accepted = False
             decision_reason = rejection_reason
+
+        if (
+            not current_accepted
+            and decision_reason == "temporal_head_outlier"
+            and self._accepted is not None
+        ):
+            current_signature = _head_candidate_signature(estimate)
+            if (
+                current_signature is not None
+                and self._same_target_neighborhood(self._accepted, current_signature)
+                and self._last_accepted_at_sec is not None
+            ):
+                # The candidate is still centred on the same physical head,
+                # but its newly fitted corners are malformed. Keep the last
+                # fully validated quadrilateral visible instead of allowing a
+                # brief stream of bad refits to erase or flicker the overlay.
+                self._last_accepted_at_sec = now_sec
 
         if current_accepted:
             if estimate.source == "edge_structure_owned_head":

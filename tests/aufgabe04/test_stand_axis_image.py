@@ -300,6 +300,55 @@ class StandAxisImageTest(unittest.TestCase):
         self.assertTrue(recovered.current_accepted)
         self.assertFalse(recovered.held)
 
+    def test_temporal_gate_holds_same_center_malformed_head_quadrilateral(self):
+        gate = HeadCandidateTemporalGate(reacquire_frames=3, hold_sec=0.35)
+        stable = estimate_stand_axis_from_corners(
+            self.make_corners([(150, 90), (250, 95), (248, 198), (152, 192)])
+        )
+        # Its centre and maximum extent are close to the stable head, but the
+        # top/bottom intersections have jumped onto a different trapezoid.
+        malformed = estimate_stand_axis_from_corners(
+            self.make_corners([(146, 70), (254, 112), (246, 215), (154, 174)])
+        )
+
+        acquired = gate.stabilize(stable, now_sec=10.0)
+        held = gate.stabilize(malformed, now_sec=10.1)
+
+        self.assertTrue(acquired.current_accepted)
+        self.assertFalse(held.current_accepted)
+        self.assertTrue(held.held)
+        self.assertEqual(held.reason, "temporal_head_outlier")
+
+    def test_temporal_gate_refreshes_hold_for_same_target_malformed_refits(self):
+        gate = HeadCandidateTemporalGate(reacquire_frames=3, hold_sec=0.35)
+        stable = estimate_stand_axis_from_corners(
+            self.make_corners([(150, 90), (250, 95), (248, 198), (152, 192)])
+        )
+        malformed = estimate_stand_axis_from_corners(
+            self.make_corners([(146, 70), (254, 112), (246, 215), (154, 174)])
+        )
+
+        gate.stabilize(stable, now_sec=10.0)
+        held_one = gate.stabilize(malformed, now_sec=10.2)
+        held_two = gate.stabilize(malformed, now_sec=10.5)
+
+        self.assertTrue(held_one.held)
+        self.assertTrue(held_two.held)
+        self.assertEqual(held_two.estimate.corners, stable.corners)
+
+    def test_temporal_gate_can_require_initial_geometry_consensus(self):
+        gate = HeadCandidateTemporalGate(
+            initial_acquire_frames=3,
+            reacquire_frames=3,
+        )
+        stable = estimate_stand_axis_from_corners(
+            self.make_corners([(150, 90), (250, 95), (248, 198), (152, 192)])
+        )
+
+        self.assertEqual(gate.accept(stable), (False, "temporal_head_bootstrap"))
+        self.assertEqual(gate.accept(stable), (False, "temporal_head_bootstrap"))
+        self.assertEqual(gate.accept(stable), (True, "accepted"))
+
     def test_temporal_hold_expires_instead_of_latching_stale_head(self):
         gate = HeadCandidateTemporalGate(reacquire_frames=3, hold_sec=0.35)
         good = estimate_stand_axis_from_corners(
