@@ -47,6 +47,7 @@ from scripts.aufgabe04.real_robot.observer_contract import (
 from scripts.aufgabe04.real_robot.passive_viewpoint_node import (
     PassiveRealViewpointNode,
     _StampedMessage,
+    _head_scale_gate,
     _nearest,
     _pose_is_stationary,
     _rectify_bgr_frame,
@@ -286,6 +287,25 @@ class RealCameraStandAxisProfileTest(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 with self.assertRaisesRegex(ValueError, "expected_head_size_px"):
                     profile.resolve(invalid)
+
+    def test_head_scale_gate_rejects_recorded_oversized_head(self):
+        accepted = _head_scale_gate(
+            expected_size_px=103.0,
+            left_height_px=101.0,
+            right_height_px=105.0,
+        )
+        rejected = _head_scale_gate(
+            expected_size_px=103.0,
+            left_height_px=151.0,
+            right_height_px=152.0,
+        )
+        self.assertTrue(accepted["accepted"])
+        self.assertEqual(accepted["reason"], "ok")
+        self.assertFalse(rejected["accepted"])
+        self.assertEqual(
+            rejected["reason"],
+            "head_size_projection_mismatch",
+        )
 
 
 class PassiveObservationCoreTest(unittest.TestCase):

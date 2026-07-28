@@ -860,7 +860,11 @@ def _attach_structure_evidence(
     min_aspect_ratio: float,
     max_aspect_ratio: float,
 ) -> _SilhouetteFaceCandidate:
-    """Validate a candidate against a current raw head-stem-base structure."""
+    """Attach structure diagnostics without changing head geometry.
+
+    The raw-side head gate owns accepted corners. Stem/base evidence is
+    diagnostic metadata only and cannot synthesize a missing bottom edge.
+    """
 
     evidence = evaluate_stand_structure(
         cv2,
@@ -871,24 +875,7 @@ def _attach_structure_evidence(
         min_aspect_ratio=min_aspect_ratio,
         max_aspect_ratio=max_aspect_ratio,
     )
-    if candidate.rectangle_fit_reliable or not evidence.tracking_supported:
-        return replace(candidate, structure_evidence=evidence)
-    recovered = tuple(
-        ImagePoint(float(u_px), float(v_px))
-        for u_px, v_px in evidence.corners
-    )
-    return replace(
-        candidate,
-        corners=order_corners(recovered),
-        face_mask=evidence.evidence_mask,
-        rectangle_fit_reliable=True,
-        rectangle_fit_reason=(
-            "structure_owned_three_side_supported"
-            if evidence.accepted
-            else "structure_tracking_three_side_supported"
-        ),
-        structure_evidence=evidence,
-    )
+    return replace(candidate, structure_evidence=evidence)
 
 def _plain_face_from_stem_head_contour(
     cv2,

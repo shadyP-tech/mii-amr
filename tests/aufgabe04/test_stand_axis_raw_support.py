@@ -15,9 +15,14 @@ from scripts.aufgabe04.perception import stand_axis_image
 from scripts.aufgabe04.perception.stand_axis_image import ImagePoint
 from scripts.aufgabe04.perception.stand_axis_image import (
     _SilhouetteFaceCandidate,
+    _attach_structure_evidence,
     _level_camera_endpoint_perspective_consistent,
     _raw_side_evidence_and_corners,
+    _validated_refitted_head_corners,
     order_corners,
+)
+from scripts.aufgabe04.perception.stand_structure_hypothesis import (
+    StandStructureEvidence,
 )
 
 
@@ -94,6 +99,84 @@ class StandAxisRawSupportTest(unittest.TestCase):
                         *points,
                         parallel_side_direction=direction,
                     )
+
+    def test_quadratic_head_gate_rejects_head_plus_stem_rectangle(self):
+        square = tuple(
+            ImagePoint(float(u), float(v))
+            for u, v in ((20, 20), (120, 22), (118, 122), (22, 120))
+        )
+        elongated = tuple(
+            ImagePoint(float(u), float(v))
+            for u, v in ((20, 20), (120, 22), (118, 198), (22, 196))
+        )
+
+        self.assertIsNotNone(
+            _validated_refitted_head_corners(
+                square,
+                square,
+                image_shape=(240, 180),
+                stem_center_x=70.0,
+                stem_top_y=124.0,
+                min_aspect_ratio=0.45,
+                max_aspect_ratio=1.8,
+            )
+        )
+        self.assertIsNone(
+            _validated_refitted_head_corners(
+                elongated,
+                elongated,
+                image_shape=(240, 180),
+                stem_center_x=70.0,
+                stem_top_y=204.0,
+                min_aspect_ratio=0.45,
+                max_aspect_ratio=1.8,
+            )
+        )
+
+    def test_structure_evidence_cannot_promote_or_replace_head_corners(self):
+        original = (
+            ImagePoint(20.0, 20.0),
+            ImagePoint(120.0, 22.0),
+            ImagePoint(118.0, 122.0),
+            ImagePoint(22.0, 120.0),
+        )
+        recovered = ((1.0, 1.0), (200.0, 1.0), (200.0, 220.0), (1.0, 220.0))
+        evidence = StandStructureEvidence(
+            accepted=True,
+            tracking_supported=True,
+            reason="structure_owned_head_supported",
+            head_top_support=1.0,
+            head_left_support=1.0,
+            head_right_support=1.0,
+            stem_left_support=1.0,
+            stem_right_support=1.0,
+            stem_span_px=80.0,
+            base_support=1.0,
+            base_span_px=180.0,
+            base_center_offset_px=0.0,
+            corners=recovered,
+        )
+        candidate = _SilhouetteFaceCandidate(
+            corners=original,
+            face_mask=object(),
+            rectangle_fit_reliable=False,
+        )
+        with patch(
+            "scripts.aufgabe04.perception.stand_axis.stem_candidates.evaluate_stand_structure",
+            return_value=evidence,
+        ):
+            attached = _attach_structure_evidence(
+                object(),
+                candidate,
+                measurement_edges=object(),
+                stem_center_x=70.0,
+                stem_top_y=124.0,
+                min_aspect_ratio=0.45,
+                max_aspect_ratio=1.8,
+            )
+        self.assertEqual(attached.corners, original)
+        self.assertFalse(attached.rectangle_fit_reliable)
+        self.assertIs(attached.face_mask, candidate.face_mask)
 
     @unittest.skipIf(
         cv2 is None or numpy is None,

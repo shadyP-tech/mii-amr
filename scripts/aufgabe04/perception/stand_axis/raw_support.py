@@ -123,6 +123,15 @@ def _validated_refitted_head_corners(
     top_left, top_right, bottom_right, bottom_left = refitted
     top_width = _distance(top_left, top_right)
     bottom_width = _distance(bottom_left, bottom_right)
+    side_height = (
+        _distance(top_left, bottom_left)
+        + _distance(top_right, bottom_right)
+    ) / 2.0
+    mean_width = (top_width + bottom_width) / 2.0
+    # The stand head is a quadratic frame. Perspective may slope the top and
+    # bottom, but a head+stem rectangle must not pass as the head.
+    if side_height > 1.35 * max(mean_width, 1.0):
+        return None
     if min(top_width, bottom_width) < 0.45 * max(top_width, bottom_width, 1e-6):
         return None
 
@@ -167,7 +176,8 @@ def _validated_refitted_head_corners(
     candidate_height = max(candidate_bottom - candidate_top, 1.0)
     if stem_top_y < candidate_bottom - 0.15 * candidate_height:
         return None
-    if stem_top_y > candidate_bottom + 0.50 * candidate_height:
+    # A lower stem anchor is localization failure, not missing-bottom proof.
+    if stem_top_y > candidate_bottom + 0.20 * candidate_height:
         return None
     return refitted
 

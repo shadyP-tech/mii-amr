@@ -396,19 +396,7 @@ def estimate_stand_axis_from_edges(
                     structure_evidence=structure,
                 ),
             )
-        if structural_diagnostic:
-            estimate_source = (
-                "edge_structure_owned_head"
-                if structure is not None and structure.accepted
-                else "edge_structure_tracking_candidate"
-            )
-        else:
-            estimate_source = (
-                "edge_structure_owned_head"
-                if plain_face.rectangle_fit_reason
-                == "structure_owned_three_side_supported"
-                else "edge_plain_face_stem_anchor"
-            )
+        estimate_source = "edge_raw_head_geometry"
         return (
             estimate_stand_axis_from_corners(
                 plain_face.corners,
@@ -810,18 +798,9 @@ def _plain_face_from_stem_cropped_edges(
                         stem_center_x=raster_center_x,
                         stem_top_y=stem_top_y,
                     )
-                    structure = candidate.structure_evidence
-                    structure_rank = (
-                        2
-                        if structure is not None and structure.accepted
-                        else (
-                            1
-                            if structure is not None
-                            and structure.tracking_supported
-                            else 0
-                        )
-                    )
-                    rank = (structure_rank, score)
+                    # Structure evidence is annotation only. Raw head
+                    # geometry must decide which candidate is accepted.
+                    rank = (1, score)
                     if rank > best_reliable_rank:
                         best_reliable_candidate = candidate
                         best_reliable_rank = rank

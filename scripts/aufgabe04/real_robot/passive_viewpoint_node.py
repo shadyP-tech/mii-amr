@@ -79,6 +79,36 @@ from scripts.aufgabe04.real_robot.recommendation_builder import (
 OBSERVER_VERSION = PASSIVE_VIEWPOINT_OBSERVER_VERSION
 
 
+def _head_scale_gate(
+    *,
+    expected_size_px: float,
+    left_height_px: float,
+    right_height_px: float,
+) -> dict[str, object]:
+    """Check that accepted head sides have the calibrated physical scale."""
+
+    expected = float(expected_size_px)
+    heights = (float(left_height_px), float(right_height_px))
+    measured = sum(heights) / 2.0
+    ratio = measured / max(expected, 1.0e-9)
+    balance = min(heights) / max(max(heights), 1.0e-9)
+    accepted = (
+        all(math.isfinite(value) and value > 0.0 for value in (*heights, expected))
+        and 0.60 <= ratio <= 1.35
+        and balance >= 0.65
+    )
+    return {
+        "accepted": accepted,
+        "expected_size_px": expected,
+        "measured_height_px": measured,
+        "left_height_px": heights[0],
+        "right_height_px": heights[1],
+        "height_ratio": ratio,
+        "side_balance": balance,
+        "reason": "ok" if accepted else "head_size_projection_mismatch",
+    }
+
+
 @dataclass(frozen=True)
 class _StampedMessage:
     stamp_sec: float
@@ -596,6 +626,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         axis_metadata = {
             "profile": asdict(resolved_stand_axis_profile),
             "parallel_side_direction": list(parallel_side_direction),
+            "direction_source": "observer_rectified_tf_camera_info",
             "estimator_usable": estimate.usable,
             "estimator_reason": estimate.reason,
             "estimator_source": estimate.source,
@@ -612,6 +643,25 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 "silhouette_unavailable",
                 estimator_reason=estimate.reason,
                 estimator_source=estimate.source,
+                stand_axis_debug=axis_metadata,
+            )
+            return
+        scale_gate = _head_scale_gate(
+            expected_size_px=projection.expected_size_px,
+            left_height_px=estimate.left_height_px,
+            right_height_px=estimate.right_height_px,
+        )
+        axis_metadata["head_scale_gate"] = scale_gate
+        if not scale_gate["accepted"]:
+            self.consensus.reset()
+            self._write_debug(
+                frame,
+                roi_frame,
+                debug,
+                metadata=axis_metadata,
+            )
+            self._write_status(
+                "head_size_projection_mismatch",
                 stand_axis_debug=axis_metadata,
             )
             return

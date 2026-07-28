@@ -2638,7 +2638,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     camera_cy_px=axis_camera_cy_px,
                     stand_depth_m=args.stand_head_depth_m,
                     stand_head_bottom_height_m=args.stand_head_bottom_height_m,
-                    silhouette_only=bool(args.sim_raw_image_topic),
+                    # Real-camera structural diagnostics use the raw-side
+                    # head geometry path; stem/base structure is metadata only.
+                    silhouette_only=bool(
+                        args.sim_raw_image_topic or args.structural_diagnostic
+                    ),
                     structural_diagnostic=args.structural_diagnostic,
                 )
                 estimate, edge_artifacts = estimate_stand_axis_from_edges(
