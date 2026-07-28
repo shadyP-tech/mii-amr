@@ -73,6 +73,9 @@ from scripts.aufgabe04.perception.stand_axis_image import (
 from scripts.aufgabe04.perception.stand_axis.radiator_rib_mask import (
     repeated_vertical_rib_exclusion_mask,
 )
+from scripts.aufgabe04.perception.stand_axis.adaptive_foreground_gate import (
+    adaptive_foreground_gate_from_background,
+)
 from scripts.aufgabe04.perception.stand_axis_tracking import (
     HeadCandidateTemporalGate,
     HeadTemporalSelection,
@@ -402,6 +405,23 @@ def build_parser() -> argparse.ArgumentParser:
         dest="suppress_repeated_vertical_ribs",
         action="store_false",
         help="Keep all repeated vertical edge families for a diagnostic A/B comparison.",
+    )
+    parser.add_argument(
+        "--adaptive-foreground-gate",
+        dest="adaptive_foreground_gate",
+        action="store_true",
+        default=True,
+        help=(
+            "Use repeated-rib background pixels to learn a local Lab colour model and "
+            "gate Canny to colour-different foreground support. Enabled by default "
+            "on real-camera edges; the silhouette fit itself remains colour agnostic."
+        ),
+    )
+    parser.add_argument(
+        "--no-adaptive-foreground-gate",
+        dest="adaptive_foreground_gate",
+        action="store_false",
+        help="Use only geometry-based repeated-rib suppression for a diagnostic A/B comparison.",
     )
     parser.add_argument("--hough-threshold", type=int, default=20)
     parser.add_argument("--hough-min-line-length-px", type=int, default=12)
@@ -2650,6 +2670,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                         if edge_exclusion_mask is None
                         else cv2.bitwise_or(edge_exclusion_mask, radiator_rib_mask)
                     )
+                    if args.adaptive_foreground_gate:
+                        foreground_gate = adaptive_foreground_gate_from_background(
+                            cv2,
+                            numpy,
+                            axis_frame,
+                            radiator_rib_mask,
+                        ).gate
+                        if foreground_gate is not None:
+                            foreground_exclusion_mask = cv2.bitwise_not(foreground_gate)
+                            edge_exclusion_mask = cv2.bitwise_or(
+                                edge_exclusion_mask,
+                                foreground_exclusion_mask,
+                            )
                 edge_estimator_options = dict(
                     edge_preprocess=(
                         "channel_union"
