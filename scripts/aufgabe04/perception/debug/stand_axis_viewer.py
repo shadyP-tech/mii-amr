@@ -2644,6 +2644,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         args.sim_raw_image_topic or args.structural_diagnostic
                     ),
                     structural_diagnostic=args.structural_diagnostic,
+                    # A real camera may see a rotated head frame.  Its side
+                    # rails must be parallel, but need not be image-vertical.
+                    parallel_side_direction=(
+                        (0.0, 1.0) if args.sim_raw_image_topic else None
+                    ),
                 )
                 estimate, edge_artifacts = estimate_stand_axis_from_edges(
                     cv2,

@@ -15,6 +15,7 @@ from scripts.aufgabe04.perception import stand_axis_image
 from scripts.aufgabe04.perception.stand_axis_image import ImagePoint
 from scripts.aufgabe04.perception.stand_axis.head_candidates import (
     _head_first_face_from_edges,
+    _short_centered_neck_support,
 )
 from scripts.aufgabe04.perception.stand_axis_image import (
     _SilhouetteFaceCandidate,
@@ -218,6 +219,56 @@ class StandAxisRawSupportTest(unittest.TestCase):
         self.assertAlmostEqual(max(xs), 160.0, delta=4.0)
         self.assertAlmostEqual(min(ys), 30.0, delta=4.0)
         self.assertAlmostEqual(max(ys), 120.0, delta=4.0)
+
+    @unittest.skipIf(
+        cv2 is None or numpy is None,
+        "numpy and OpenCV are required for raw-side fitting",
+    )
+    def test_side_first_candidate_learns_rolled_parallel_rails(self):
+        edges = numpy.zeros((220, 260), dtype=numpy.uint8)
+        # The two outer rails have the same non-vertical image direction;
+        # top and bottom are independently sloped by perspective.
+        outer = numpy.array(
+            [[(60, 30), (150, 42), (158, 132), (68, 120)]],
+            dtype=numpy.int32,
+        )
+        cv2.polylines(edges, outer, True, 255, thickness=2)
+        cv2.line(edges, (106, 121), (111, 180), 255, 2)
+        cv2.line(edges, (121, 123), (126, 180), 255, 2)
+        only_parallel_rails = numpy.array(
+            [[[60, 30, 68, 120]], [[150, 42, 158, 132]]],
+            dtype=numpy.int32,
+        )
+
+        with patch.object(cv2, "HoughLinesP", return_value=only_parallel_rails):
+            candidate = _head_first_face_from_edges(
+                cv2,
+                edges,
+                min_edge_height_px=8.0,
+                min_aspect_ratio=0.45,
+                max_aspect_ratio=1.8,
+                fixed_parallel_side_direction=None,
+            )
+
+        self.assertIsNotNone(candidate)
+        self.assertAlmostEqual(min(point.u_px for point in candidate.corners), 60.0, delta=4.0)
+        self.assertAlmostEqual(max(point.u_px for point in candidate.corners), 158.0, delta=4.0)
+
+    @unittest.skipIf(
+        cv2 is None or numpy is None,
+        "numpy and OpenCV are required for raw-side fitting",
+    )
+    def test_neck_validator_requires_two_post_rails(self):
+        edges = numpy.zeros((200, 200), dtype=numpy.uint8)
+        corners = tuple(
+            ImagePoint(float(u), float(v))
+            for u, v in ((60, 30), (140, 30), (140, 110), (60, 110))
+        )
+        # A single line/QR fragment below the head is insufficient.
+        cv2.line(edges, (100, 111), (100, 150), 255, 2)
+        self.assertFalse(_short_centered_neck_support(edges, corners))
+        cv2.line(edges, (113, 111), (113, 150), 255, 2)
+        self.assertTrue(_short_centered_neck_support(edges, corners))
 
     @unittest.skipIf(
         cv2 is None or numpy is None,

@@ -44,16 +44,150 @@ def _short_centered_neck_support(edge_mask, corners) -> bool:
     x1 = min(edge_mask.shape[1], int(math.ceil(center_x + x_radius)) + 1)
     if x1 <= x0:
         return False
-    rows = numpy.any(edge_mask[y_start:y_end, x0:x1] > 0, axis=1)
+    neck = edge_mask[y_start:y_end, x0:x1] > 0
     # A post can be broken by the head/ground junction, but it must retain a
-    # short contiguous run; isolated QR or radiator pixels do not suffice.
+    # short contiguous run on *both* outer post rails.  Checking merely for a
+    # foreground pixel admits QR modules directly below an inner QR rectangle.
     required_run = max(3, int(math.ceil(0.12 * height)))
-    run = 0
-    for present in rows:
-        run = run + 1 if present else 0
-        if run >= required_run:
-            return True
+    # Keep the two rails farther apart than the 1--3 px Canny thickness of a
+    # single line, while still accepting the narrow physical post.
+    min_rail_gap = max(3, int(round(0.07 * width)))
+    max_rail_gap = max(min_rail_gap + 1, int(round(0.34 * width)))
+    for left_column in range(neck.shape[1]):
+        for right_column in range(left_column + min_rail_gap, neck.shape[1]):
+            if right_column - left_column > max_rail_gap:
+                break
+            paired_rows = neck[:, left_column] & neck[:, right_column]
+            run = 0
+            for present in paired_rows:
+                run = run + 1 if present else 0
+                if run >= required_run:
+                    return True
     return False
+
+
+def _head_candidate_from_rough_corners(
+    cv2,
+    raw_edges,
+    rough_corners,
+    *,
+    min_aspect_ratio: float,
+    max_aspect_ratio: float,
+    fixed_parallel_side_direction: tuple[float, float] | None,
+) -> tuple[_SilhouetteFaceCandidate, float] | None:
+    """Verify a coarse head proposal only with raw four-side evidence."""
+
+    face_mask, fitted = _raw_side_evidence_and_corners(
+        cv2,
+        raw_edges,
+        rough_corners,
+        fixed_parallel_side_direction=fixed_parallel_side_direction,
+    )
+    if fitted is None:
+        return None
+    fitted = order_corners(fitted)
+    fitted_aspect = quadrilateral_aspect_ratio(fitted)
+    if not max(0.65, min_aspect_ratio) <= fitted_aspect <= min(1.35, max_aspect_ratio):
+        return None
+    support = _quadrilateral_edge_support(cv2, face_mask, fitted)
+    if not support.accepted or not _short_centered_neck_support(raw_edges, fitted):
+        return None
+    width = (_distance(fitted[0], fitted[1]) + _distance(fitted[3], fitted[2])) / 2.0
+    height = (_distance(fitted[0], fitted[3]) + _distance(fitted[1], fitted[2])) / 2.0
+    square_score = 1.0 / (1.0 + abs(math.log(max(fitted_aspect, 1.0e-6))))
+    # Prefer the outer physical frame when inner QR rectangles also have four
+    # edges.  Size is secondary to raw support, never a synthetic expansion.
+    score = 5.0 * support.mean + square_score + min(1.0, width / max(height, 1.0))
+    return (
+        _SilhouetteFaceCandidate(
+            corners=fitted,
+            face_mask=face_mask,
+            rectangle_fit_reliable=True,
+            rectangle_fit_reason="head_first_raw_rectangle_supported",
+        ),
+        score,
+    )
+
+
+def _side_first_head_candidates(
+    cv2,
+    raw_edges,
+    *,
+    lines,
+    min_edge_height_px: float,
+    min_aspect_ratio: float,
+    max_aspect_ratio: float,
+    fixed_parallel_side_direction: tuple[float, float] | None,
+):
+    """Yield raw-verified head candidates seeded by the parallel outer rails.
+
+    The real stand invariant is a pair of parallel side rails.  Top and bottom
+    may be perspective-sloped and the lower edge may be interrupted by the
+    post, so they are fitted later from raw Canny evidence rather than being a
+    Hough prerequisite.
+    """
+
+    frame_height, frame_width = raw_edges.shape[:2]
+    side_segments = []
+    for x1, y1, x2, y2 in lines.reshape(-1, 4):
+        dx = float(x2 - x1)
+        dy = float(y2 - y1)
+        length = math.hypot(dx, dy)
+        if length < max(2.0 * min_edge_height_px, 10.0):
+            continue
+        # This keeps the rail proposal independent of exact image vertical,
+        # while excluding top/bottom-like segments.
+        if abs(dy) < 0.55 * abs(dx):
+            continue
+        if dy < 0.0:
+            x1, y1, x2, y2 = x2, y2, x1, y1
+            dx, dy = -dx, -dy
+        direction = (dx / length, dy / length)
+        side_segments.append(
+            (
+                ImagePoint(float(x1), float(y1)),
+                ImagePoint(float(x2), float(y2)),
+                direction,
+                length,
+            )
+        )
+
+    for index, left in enumerate(side_segments):
+        for right in side_segments[index + 1 :]:
+            left_top, left_bottom, left_direction, left_length = left
+            right_top, right_bottom, right_direction, right_length = right
+            direction_cosine = abs(
+                left_direction[0] * right_direction[0]
+                + left_direction[1] * right_direction[1]
+            )
+            if direction_cosine < math.cos(math.radians(14.0)):
+                continue
+            if max(left_length, right_length) / min(left_length, right_length) > 1.55:
+                continue
+            left_center_x = (left_top.u_px + left_bottom.u_px) / 2.0
+            right_center_x = (right_top.u_px + right_bottom.u_px) / 2.0
+            if abs(right_center_x - left_center_x) < 0.16 * frame_width:
+                continue
+            if left_center_x > right_center_x:
+                left_top, right_top = right_top, left_top
+                left_bottom, right_bottom = right_bottom, left_bottom
+            width = (_distance(left_top, right_top) + _distance(left_bottom, right_bottom)) / 2.0
+            height = (left_length + right_length) / 2.0
+            aspect = width / max(height, 1.0)
+            if not max(0.65, min_aspect_ratio) <= aspect <= min(1.35, max_aspect_ratio):
+                continue
+            if height > 0.62 * frame_height or width > 0.72 * frame_width:
+                continue
+            verified = _head_candidate_from_rough_corners(
+                cv2,
+                raw_edges,
+                order_corners((left_top, right_top, right_bottom, left_bottom)),
+                min_aspect_ratio=min_aspect_ratio,
+                max_aspect_ratio=max_aspect_ratio,
+                fixed_parallel_side_direction=fixed_parallel_side_direction,
+            )
+            if verified is not None:
+                yield verified
 
 
 def _head_first_face_from_edges(
@@ -101,9 +235,6 @@ def _head_first_face_from_edges(
             continue
         left_x, right_x = sorted((float(x1), float(x2)))
         horizontals.append((left_x, right_x, float(y1), float(y2), length))
-    if len(horizontals) < 2:
-        return None
-
     best: _SilhouetteFaceCandidate | None = None
     best_score = -math.inf
     frame_height, frame_width = raw_edges.shape[:2]
@@ -130,7 +261,7 @@ def _head_first_face_from_edges(
             # Do not let a QR module or inner printed frame seed the outer
             # stand head.  The real outer frame spans several edge-height
             # gates even at the far workstation position.
-            if mean_width < max(4.5 * min_edge_height_px, 0.20 * frame_width):
+            if mean_width < max(4.5 * min_edge_height_px, 0.16 * frame_width):
                 continue
             aspect = mean_width / max(height, 1.0)
             # Head-first proposals are deliberately much tighter than the
@@ -147,31 +278,30 @@ def _head_first_face_from_edges(
                     ImagePoint(upper_left, lower_y1),
                 )
             )
-            face_mask, fitted = _raw_side_evidence_and_corners(
+            verified = _head_candidate_from_rough_corners(
                 cv2,
                 raw_edges,
                 rough,
+                min_aspect_ratio=min_aspect_ratio,
+                max_aspect_ratio=max_aspect_ratio,
                 fixed_parallel_side_direction=fixed_parallel_side_direction,
             )
-            if fitted is None:
+            if verified is None:
                 continue
-            fitted = order_corners(fitted)
-            fitted_aspect = quadrilateral_aspect_ratio(fitted)
-            if not max(0.65, min_aspect_ratio) <= fitted_aspect <= min(1.35, max_aspect_ratio):
-                continue
-            support = _quadrilateral_edge_support(cv2, face_mask, fitted)
-            if not support.accepted:
-                continue
-            if not _short_centered_neck_support(raw_edges, fitted):
-                continue
-            square_score = 1.0 / (1.0 + abs(math.log(max(fitted_aspect, 1.0e-6))))
-            score = 5.0 * support.mean + square_score + min(1.0, mean_width / max(height, 1.0))
+            candidate, score = verified
             if score > best_score:
-                best = _SilhouetteFaceCandidate(
-                    corners=fitted,
-                    face_mask=face_mask,
-                    rectangle_fit_reliable=True,
-                    rectangle_fit_reason="head_first_raw_rectangle_supported",
-                )
+                best = candidate
                 best_score = score
+    for candidate, score in _side_first_head_candidates(
+        cv2,
+        raw_edges,
+        lines=lines,
+        min_edge_height_px=min_edge_height_px,
+        min_aspect_ratio=min_aspect_ratio,
+        max_aspect_ratio=max_aspect_ratio,
+        fixed_parallel_side_direction=fixed_parallel_side_direction,
+    ):
+        if score > best_score:
+            best = candidate
+            best_score = score
     return best
