@@ -200,6 +200,7 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
             )
         )
         self.observation_count = 0
+        self.observation_enabled = True
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.pending_scans: deque[_PendingScan] = deque()
@@ -218,7 +219,19 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
             f"{self.runtime.scan_topic}; output={self.output_jsonl}"
         )
 
+    def set_observation_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self.observation_enabled:
+            return
+        self.observation_enabled = enabled
+        if not enabled:
+            self.pending_scans.clear()
+        state = "enabled" if enabled else "paused for localization readiness"
+        self.get_logger().info(f"stand observation {state}")
+
     def _scan_callback(self, msg) -> None:
+        if not self.observation_enabled:
+            return
         scan_frame = msg.header.frame_id
         if not scan_frame:
             self.get_logger().warn("dropping scan without header.frame_id")

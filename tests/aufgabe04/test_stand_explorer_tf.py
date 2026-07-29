@@ -13,6 +13,17 @@ from scripts.aufgabe04.perception import stand_explorer_node  # noqa: E402
 
 
 class StandExplorerTfTest(unittest.TestCase):
+    def test_paused_observer_ignores_scans_before_readiness(self):
+        fake_node = type(
+            "FakeNode",
+            (),
+            {
+                "observation_enabled": False,
+            },
+        )()
+
+        stand_explorer_node.StandExplorerNode._scan_callback(fake_node, object())
+
     def test_lookup_uses_exact_laser_scan_timestamp(self):
         marker = object()
         scan_stamp = object()
