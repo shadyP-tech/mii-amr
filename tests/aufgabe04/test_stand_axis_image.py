@@ -423,6 +423,134 @@ class StandAxisImageTest(unittest.TestCase):
         self.assertEqual(gate.accept(stable), (False, "temporal_head_bootstrap"))
         self.assertEqual(gate.accept(stable), (True, "accepted"))
 
+    def test_real_structural_consensus_acquires_across_oblique_width_modes(self):
+        gate = HeadCandidateTemporalGate(
+            initial_acquire_frames=2,
+            structural_window_frames=5,
+            structural_required_frames=3,
+            max_width_ratio=1.15,
+            max_side_direction_jump_deg=6.0,
+            hold_sec=0.0,
+        )
+        outer = estimate_stand_axis_from_corners(
+            self.make_corners([(117, 58), (172, 58), (172, 138), (117, 138)])
+        )
+        narrow = estimate_stand_axis_from_corners(
+            self.make_corners([(140, 55), (175, 55), (175, 137), (140, 137)])
+        )
+
+        first = gate.stabilize(narrow, now_sec=10.00)
+        second = gate.stabilize(outer, now_sec=10.05)
+        acquired = gate.stabilize(narrow, now_sec=10.10)
+
+        self.assertFalse(first.current_accepted)
+        self.assertFalse(second.current_accepted)
+        self.assertTrue(acquired.current_accepted)
+        self.assertEqual(acquired.reason, "accepted_structural_consensus")
+        # The 55 px raw-supported outer mode owns the new track even though the
+        # current frame's single winner is the 35 px inner/narrow mode.
+        self.assertEqual(acquired.estimate.corners, outer.corners)
+
+    def test_real_outer_hysteresis_blocks_alternating_inner_top_band(self):
+        gate = HeadCandidateTemporalGate(
+            structural_window_frames=5,
+            structural_required_frames=3,
+            outer_inset_hysteresis_frames=3,
+            outer_inset_min_scale=0.05,
+            geometry_filter_alpha=1.0,
+            hold_sec=0.0,
+        )
+        outer = estimate_stand_axis_from_corners(
+            self.make_corners([(92, 49), (174, 49), (174, 136), (92, 136)])
+        )
+        inner_top = estimate_stand_axis_from_corners(
+            self.make_corners([(92, 56), (174, 56), (174, 136), (92, 136)])
+        )
+
+        for frame_index in range(3):
+            selection = gate.stabilize(
+                outer,
+                now_sec=20.0 + 0.05 * frame_index,
+            )
+        self.assertTrue(selection.current_accepted)
+
+        for frame_index, candidate in enumerate(
+            (inner_top, outer, inner_top, outer),
+            start=3,
+        ):
+            selection = gate.stabilize(
+                candidate,
+                now_sec=20.0 + 0.05 * frame_index,
+            )
+            self.assertTrue(selection.current_accepted)
+            self.assertAlmostEqual(
+                min(point.v_px for point in selection.estimate.corners),
+                49.0,
+            )
+
+    def test_real_outer_hysteresis_eventually_tracks_persistent_inset(self):
+        gate = HeadCandidateTemporalGate(
+            structural_window_frames=5,
+            structural_required_frames=3,
+            outer_inset_hysteresis_frames=3,
+            outer_inset_min_scale=0.05,
+            geometry_filter_alpha=1.0,
+            hold_sec=0.0,
+        )
+        outer = estimate_stand_axis_from_corners(
+            self.make_corners([(92, 49), (174, 49), (174, 136), (92, 136)])
+        )
+        inner_top = estimate_stand_axis_from_corners(
+            self.make_corners([(92, 56), (174, 56), (174, 136), (92, 136)])
+        )
+        for frame_index in range(3):
+            gate.stabilize(outer, now_sec=30.0 + 0.05 * frame_index)
+
+        selections = [
+            gate.stabilize(inner_top, now_sec=30.15 + 0.05 * frame_index)
+            for frame_index in range(3)
+        ]
+
+        self.assertAlmostEqual(
+            min(point.v_px for point in selections[1].estimate.corners),
+            49.0,
+        )
+        self.assertAlmostEqual(
+            min(point.v_px for point in selections[2].estimate.corners),
+            56.0,
+        )
+
+    def test_real_geometry_filter_preserves_parallel_side_rails(self):
+        gate = HeadCandidateTemporalGate(
+            structural_window_frames=3,
+            structural_required_frames=2,
+            geometry_filter_alpha=0.5,
+            hold_sec=0.0,
+        )
+        initial = estimate_stand_axis_from_corners(
+            self.make_corners([(80, 40), (150, 45), (156, 125), (86, 120)])
+        )
+        moved = estimate_stand_axis_from_corners(
+            self.make_corners([(84, 42), (154, 51), (164, 131), (94, 122)])
+        )
+        gate.stabilize(initial, now_sec=40.00)
+        acquired = gate.stabilize(initial, now_sec=40.05)
+        filtered = gate.stabilize(moved, now_sec=40.10)
+
+        self.assertTrue(acquired.current_accepted)
+        self.assertTrue(filtered.current_accepted)
+        top_left, top_right, bottom_right, bottom_left = filtered.estimate.corners
+        left = (
+            bottom_left.u_px - top_left.u_px,
+            bottom_left.v_px - top_left.v_px,
+        )
+        right = (
+            bottom_right.u_px - top_right.u_px,
+            bottom_right.v_px - top_right.v_px,
+        )
+        cross = left[0] * right[1] - left[1] * right[0]
+        self.assertAlmostEqual(cross, 0.0, delta=1.0e-6)
+
     def test_temporal_hold_expires_instead_of_latching_stale_head(self):
         gate = HeadCandidateTemporalGate(reacquire_frames=3, hold_sec=0.35)
         good = estimate_stand_axis_from_corners(

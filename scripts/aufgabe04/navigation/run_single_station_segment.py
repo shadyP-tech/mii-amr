@@ -37,6 +37,10 @@ from scripts.aufgabe04.navigation.safety_checks import (
     validate_route_diagnostics_json,
     validate_speed_limits,
 )
+from scripts.aufgabe04.navigation.detected_stand_preapproach import (
+    DETECTED_STAND_PREAPPROACH_ROUTE_KIND,
+    validate_detected_stand_preapproach_binding,
+)
 from scripts.aufgabe04.navigation.segment_run_logger import append_segment_run
 from scripts.aufgabe04.navigation.follower_models import FollowerResult
 from scripts.aufgabe04.navigation.execution_route_certificate import (
@@ -51,6 +55,7 @@ from scripts.aufgabe04.navigation.mission_execution_gate import (
     validate_logistics_execution_bundle,
 )
 from scripts.aufgabe04.navigation.simple_waypoint_follower import (
+    CATALOG_PHYSICAL_ROUTE_KINDS,
     DYNAMIC_VIEWPOINT_ROUTE_KINDS,
     FollowerConfig,
     INTERMEDIATE_TERMINAL_HEADING_DISTANCE_COMPARISON_EPSILON_M,
@@ -1085,7 +1090,17 @@ def main(argv: list[str] | None = None) -> int:
             catalog_path_override=args.arrival_pose_catalog,
             diagnostics_payload=diagnostics_snapshot.payload,
         )
-        if leg.route_kind in STATIC_PHYSICAL_ROUTE_KINDS
+        if leg.route_kind in CATALOG_PHYSICAL_ROUTE_KINDS
+        else None
+    )
+    detected_stand_binding_status = (
+        validate_detected_stand_preapproach_binding(
+            diagnostics_json_path,
+            leg,
+            candidate_snapshot_path=args.candidate_snapshot,
+            diagnostics_payload=diagnostics_snapshot.payload,
+        )
+        if leg.route_kind == DETECTED_STAND_PREAPPROACH_ROUTE_KIND
         else None
     )
     catalog_egress_certificate = None
@@ -1093,7 +1108,7 @@ def main(argv: list[str] | None = None) -> int:
     execution_certificate_failures = []
     mission_execution_failures = []
     mission_execution_binding: MissionExecutionBinding | None = None
-    if leg.route_kind in STATIC_PHYSICAL_ROUTE_KINDS:
+    if leg.route_kind in CATALOG_PHYSICAL_ROUTE_KINDS:
         try:
             catalog_egress_certificate = catalog_start_egress_certificate(
                 diagnostics_json_path,
@@ -1104,6 +1119,7 @@ def main(argv: list[str] | None = None) -> int:
             catalog_egress_failures.append(
                 f"catalog start-egress certificate is invalid: {exc}"
             )
+    if leg.route_kind in STATIC_PHYSICAL_ROUTE_KINDS:
         execution_certificate_failures = _execution_certificate_failures(
             route_leg=leg,
             diagnostics_snapshot=diagnostics_snapshot,
@@ -1115,7 +1131,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         try:
             validate_arena_boundary_evidence(diagnostics_snapshot.metadata)
-            if route_purpose == "logistics":
+            if leg.route_kind == DETECTED_STAND_PREAPPROACH_ROUTE_KIND:
+                if route_purpose != "pre_approach":
+                    raise ValueError(
+                        "detected stand route requires route_purpose=pre_approach"
+                    )
+                if args.candidate_snapshot is None:
+                    raise ValueError(
+                        "detected stand pre-approach requires --candidate-snapshot"
+                    )
+            elif route_purpose == "logistics":
                 missing = [
                     option
                     for option, value in (
@@ -1183,6 +1208,11 @@ def main(argv: list[str] | None = None) -> int:
     pure_failures = (
         diagnostics_status.failures
         + ([] if catalog_binding_status is None else catalog_binding_status.failures)
+        + (
+            []
+            if detected_stand_binding_status is None
+            else detected_stand_binding_status.failures
+        )
         + catalog_egress_failures
         + execution_certificate_failures
         + mission_execution_failures

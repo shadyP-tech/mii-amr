@@ -24,6 +24,7 @@ from scripts.aufgabe04.navigation.map_io import load_occupancy_grid_with_bundle
 from scripts.aufgabe04.navigation.models import Pose2D
 from scripts.aufgabe04.navigation.dynamic_approach_planner import (
     DynamicApproachConfig,
+    minimum_static_obstacle_inflation_m,
 )
 from scripts.aufgabe04.navigation.plan_first_detected_station import (
     validate_observation_provenance,
@@ -74,6 +75,7 @@ from scripts.aufgabe04.stations.candidate_snapshot import (
 )
 from scripts.aufgabe04.artifacts.content_store import payload_sha256
 from scripts.aufgabe04.stations.models import Station, StationPose
+from scripts.aufgabe04.stations.station_positioning import approach_target_for_station
 from scripts.aufgabe04.stations.station_layout_io import write_station_layout_csv, write_station_layout_json
 
 
@@ -122,6 +124,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mark-confirmed-stand-id", action="append", default=[])
     parser.add_argument("--mark-rejected-stand-id", action="append", default=[])
     parser.add_argument("--stand-yaw-rad", type=float, default=0.0)
+    parser.add_argument(
+        "--approach-bearing-mode",
+        choices=["fixed", "robot-to-stand"],
+        default="fixed",
+        help=(
+            "Use --stand-yaw-rad, or place the one-candidate approach on the "
+            "robot-facing side and make its terminal yaw face the stand."
+        ),
+    )
     parser.add_argument("--approach-offset-m", type=float, default=0.30)
     parser.add_argument("--keepout-radius-m", type=float, default=0.20)
     parser.add_argument(
@@ -135,6 +146,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--stand-radius-m", type=float, default=0.06)
     parser.add_argument("--stand-position-uncertainty-m", type=float, default=0.02)
+    parser.add_argument("--robot-radius-m", type=float, default=0.105)
+    parser.add_argument("--collision-margin-m", type=float, default=0.02)
+    parser.add_argument("--tracking-margin-m", type=float, default=0.0)
+    parser.add_argument("--lidar-stop-distance-m", type=float, default=0.18)
+    parser.add_argument("--scan-origin-to-base-offset-m", type=float, default=0.0)
+    parser.add_argument("--lidar-clearance-margin-m", type=float, default=0.02)
+    parser.add_argument(
+        "--enforce-physical-clearance",
+        action="store_true",
+        help="Reject route geometry below the recorded physical clearance minimums.",
+    )
     parser.add_argument("--merge-distance-m", type=float, default=0.18)
     parser.add_argument("--min-hits", type=int, default=3)
     parser.add_argument("--max-observation-age-sec", type=float, default=8.0)
@@ -251,6 +273,14 @@ def _station_id(prefix: str, index: int) -> str:
 
 def _distance(a: Pose2D, b: Pose2D) -> float:
     return math.hypot(a.x_m - b.x_m, a.y_m - b.y_m)
+
+
+def _robot_to_stand_yaw(start: Pose2D, stand: ConfirmedStand) -> float:
+    dx = stand.x_m - start.x_m
+    dy = stand.y_m - start.y_m
+    if math.hypot(dx, dy) <= 1.0e-9:
+        raise ValueError("cannot derive approach bearing when robot and stand coincide")
+    return math.atan2(dy, dx)
 
 
 def _require_ros() -> None:
@@ -410,15 +440,54 @@ def main(argv: list[str] | None = None) -> int:
             semantic_map_id=semantic_map_id,
             planning_frame=args.required_map_frame,
         )
-        minimum_candidate_keepout_m = DynamicApproachConfig(
+        approach_config = DynamicApproachConfig(
             stand_radius_m=args.stand_radius_m,
             stand_position_uncertainty_m=args.stand_position_uncertainty_m,
-        ).non_target_stand_keepout_radius_m
-        if args.candidate_transit_radius_m < minimum_candidate_keepout_m:
+            robot_radius_m=args.robot_radius_m,
+            collision_margin_m=args.collision_margin_m,
+            tracking_margin_m=args.tracking_margin_m,
+            standoff_distance_m=args.approach_offset_m,
+            lidar_stop_distance_m=args.lidar_stop_distance_m,
+            scan_origin_to_base_offset_m=args.scan_origin_to_base_offset_m,
+            lidar_clearance_margin_m=args.lidar_clearance_margin_m,
+            minimum_non_target_keepout_radius_m=args.keepout_radius_m,
+        )
+        minimum_candidate_keepout_m = (
+            approach_config.non_target_stand_keepout_radius_m
+        )
+        minimum_static_inflation_m = minimum_static_obstacle_inflation_m(
+            robot_radius_m=args.robot_radius_m,
+            tracking_margin_m=args.tracking_margin_m,
+            lidar_stop_distance_m=args.lidar_stop_distance_m,
+            scan_origin_to_base_offset_m=args.scan_origin_to_base_offset_m,
+            lidar_clearance_margin_m=args.lidar_clearance_margin_m,
+        )
+        if (
+            args.approach_bearing_mode == "robot-to-stand"
+            and args.plan_mode != "next-candidate"
+        ):
+            raise ValueError(
+                "robot-to-stand bearing currently requires --plan-mode next-candidate"
+            )
+        if args.candidate_transit_radius_m + 1.0e-9 < minimum_candidate_keepout_m:
             raise ValueError(
                 "candidate transit radius is smaller than the body/LiDAR "
                 f"minimum ({minimum_candidate_keepout_m:.3f} m)"
             )
+        if args.enforce_physical_clearance:
+            if args.inflation_radius_m + 1.0e-9 < minimum_static_inflation_m:
+                raise ValueError(
+                    "static map inflation is smaller than the body/LiDAR "
+                    f"minimum ({minimum_static_inflation_m:.3f} m)"
+                )
+            if (
+                args.approach_offset_m + 1.0e-9
+                < approach_config.minimum_lidar_standoff_m
+            ):
+                raise ValueError(
+                    "active stand approach offset is smaller than the LiDAR "
+                    f"minimum ({approach_config.minimum_lidar_standoff_m:.3f} m)"
+                )
         start = start_pose_from_args(args)
         stands, source_artifact_sha256 = _validated_confirmed_stands(
             args,
@@ -451,13 +520,18 @@ def main(argv: list[str] | None = None) -> int:
         stations = []
         stand_metadata = []
         for index, stand in enumerate(ordered, start=1):
+            stand_yaw_rad = (
+                _robot_to_stand_yaw(start, stand)
+                if args.approach_bearing_mode == "robot-to-stand"
+                else args.stand_yaw_rad
+            )
             station = station_from_confirmed_stand(
                 stand,
                 config=DetectedStationLayoutConfig(
                     station_id=_station_id(args.station_prefix, index),
                     approach_offset_m=args.approach_offset_m,
                     keepout_radius_m=args.keepout_radius_m,
-                    stand_yaw_rad=args.stand_yaw_rad,
+                    stand_yaw_rad=stand_yaw_rad,
                     arena_length_m=args.arena_length_m,
                     arena_width_m=args.arena_width_m,
                     arena_center_x_m=args.arena_center_x_m,
@@ -480,6 +554,8 @@ def main(argv: list[str] | None = None) -> int:
                         "required_base_frame": args.required_base_frame,
                         "required_localization_source": args.required_localization_source,
                         "candidate_status": state.status_for(stand),
+                        "approach_bearing_mode": args.approach_bearing_mode,
+                        "approach_yaw_rad": stand_yaw_rad,
                     },
                 )
             )
@@ -579,6 +655,27 @@ def main(argv: list[str] | None = None) -> int:
             map_bundle=map_bundle,
         )
         validate_route_commitment_ready(dry_run)
+        final_yaw_by_leg: dict[int, float] = {}
+        persisted_approach_poses: list[dict[str, float]] = []
+        for leg_index, (stand, station, result) in enumerate(
+            zip(ordered, stations, dry_run.results)
+        ):
+            if result.route is None or not result.route.points:
+                raise ValueError(f"planned leg {leg_index} has no persisted endpoint")
+            endpoint = result.route.points[-1].pose
+            terminal_yaw = (
+                math.atan2(stand.y_m - endpoint.y_m, stand.x_m - endpoint.x_m)
+                if args.approach_bearing_mode == "robot-to-stand"
+                else approach_target_for_station(station).pose.yaw_rad
+            )
+            final_yaw_by_leg[leg_index] = terminal_yaw
+            persisted_approach_poses.append(
+                {
+                    "x_m": endpoint.x_m,
+                    "y_m": endpoint.y_m,
+                    "yaw_rad": terminal_yaw,
+                }
+            )
         write_station_layout_json(
             args.layout_json,
             stations,
@@ -592,6 +689,9 @@ def main(argv: list[str] | None = None) -> int:
                 "confirmed_candidate_count": state.count(STATUS_CONFIRMED, stands),
                 "rejected_candidate_count": state.count(STATUS_REJECTED, stands),
                 "candidate_transit_radius_m": args.candidate_transit_radius_m,
+                "inflation_radius_m": args.inflation_radius_m,
+                "approach_offset_m": args.approach_offset_m,
+                "approach_bearing_mode": args.approach_bearing_mode,
                 "stands": stand_metadata,
             },
         )
@@ -608,6 +708,25 @@ def main(argv: list[str] | None = None) -> int:
                 "confirmed_candidate_count": state.count(STATUS_CONFIRMED, stands),
                 "rejected_candidate_count": state.count(STATUS_REJECTED, stands),
                 "candidate_transit_radius_m": args.candidate_transit_radius_m,
+                "inflation_radius_m": args.inflation_radius_m,
+                "approach_offset_m": args.approach_offset_m,
+                "approach_bearing_mode": args.approach_bearing_mode,
+                "physical_clearance_enforced": args.enforce_physical_clearance,
+                "physical_clearance": {
+                    "robot_radius_m": args.robot_radius_m,
+                    "collision_margin_m": args.collision_margin_m,
+                    "tracking_margin_m": args.tracking_margin_m,
+                    "lidar_stop_distance_m": args.lidar_stop_distance_m,
+                    "scan_origin_to_base_offset_m": args.scan_origin_to_base_offset_m,
+                    "lidar_clearance_margin_m": args.lidar_clearance_margin_m,
+                    "minimum_static_inflation_m": minimum_static_inflation_m,
+                    "minimum_active_standoff_m": (
+                        approach_config.minimum_lidar_standoff_m
+                    ),
+                    "minimum_candidate_transit_radius_m": (
+                        minimum_candidate_keepout_m
+                    ),
+                },
                 "exploration_state_json": str(args.exploration_state_json),
                 "candidate_snapshot_json": str(args.candidate_snapshot_json),
                 "candidate_snapshot_sha256": candidate_snapshot_sha256(
@@ -615,10 +734,19 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 "map_bundle_sha256": map_bundle.bundle_sha256,
                 "selected_candidate_stand_id": ordered[0].stand_id if args.plan_mode == "next-candidate" else "",
+                "selected_approach_pose": (
+                    persisted_approach_poses[0]
+                    if args.plan_mode == "next-candidate"
+                    else None
+                ),
                 "detected_stands": stand_metadata,
             }
         )
-        write_route_csv(args.route_csv, dry_run.results)
+        write_route_csv(
+            args.route_csv,
+            dry_run.results,
+            final_yaw_by_leg=final_yaw_by_leg,
+        )
         write_diagnostics_json(args.diagnostics_json, dry_run.results, metadata=route_metadata)
         write_candidate_snapshot(args.candidate_snapshot_json, candidate_snapshot)
         write_candidate_exploration_state(args.exploration_state_json, state)

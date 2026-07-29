@@ -76,6 +76,10 @@ from scripts.aufgabe04.perception.stand_axis.radiator_rib_mask import (
 from scripts.aufgabe04.perception.stand_axis.adaptive_foreground_gate import (
     AdaptiveForegroundGateTracker,
 )
+from scripts.aufgabe04.perception.stand_axis.geometry import (
+    _debug_rectangle_image,
+    _debug_rectangle_overlay_image,
+)
 from scripts.aufgabe04.perception.stand_axis_tracking import (
     HeadCandidateTemporalGate,
     HeadTemporalSelection,
@@ -104,8 +108,9 @@ WINDOW_EDGES = "aufgabe04/stand-axis-edges"
 # for the four independently fitted sides, not a connected face segmentation.
 WINDOW_FACE_MASK = "aufgabe04/stand-axis-side-evidence"
 WINDOW_RECTANGLE_MASK = "aufgabe04/stand-axis-rectangle"
+WINDOW_PROPOSAL_RECTANGLE = "aufgabe04/stand-axis-raw-proposal"
 NATIVE_PIXEL_DIAGNOSTIC_WINDOWS = frozenset(
-    (WINDOW_FACE_MASK, WINDOW_RECTANGLE_MASK)
+    (WINDOW_FACE_MASK, WINDOW_RECTANGLE_MASK, WINDOW_PROPOSAL_RECTANGLE)
 )
 RECORDING_FILENAMES = {
     WINDOW_FRAME: "annotated.avi",
@@ -113,6 +118,7 @@ RECORDING_FILENAMES = {
     WINDOW_EDGES: "edges.avi",
     WINDOW_FACE_MASK: "side_evidence.avi",
     WINDOW_RECTANGLE_MASK: "rectangle.avi",
+    WINDOW_PROPOSAL_RECTANGLE: "raw_proposal.avi",
 }
 
 
@@ -317,6 +323,38 @@ def _detector_result_is_obsolete(
     return (
         completed_monotonic_sec - received_monotonic_sec
         > max_result_age_sec
+    )
+
+
+def _temporal_rectangle_artifacts(
+    cv2,
+    estimate: StandAxisImageEstimate,
+    *,
+    image_shape,
+    face_mask,
+    target_roi,
+):
+    """Render selected full-frame corners in detector-ROI coordinates."""
+
+    if estimate.corners is None:
+        return None, None
+    x_offset = 0.0 if target_roi is None else float(target_roi.x0)
+    y_offset = 0.0 if target_roi is None else float(target_roi.y0)
+    local_corners = tuple(
+        ImagePoint(
+            point.u_px - x_offset,
+            point.v_px - y_offset,
+        )
+        for point in estimate.corners
+    )
+    return (
+        _debug_rectangle_image(cv2, image_shape, local_corners),
+        _debug_rectangle_overlay_image(
+            cv2,
+            image_shape,
+            local_corners,
+            face_mask,
+        ),
     )
 
 
@@ -778,6 +816,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--display-rectangle-mask",
         action="store_true",
         help="Also show the fitted quadrilateral outline as a separate diagnostic window.",
+    )
+    parser.add_argument(
+        "--display-raw-proposal",
+        action="store_true",
+        help=(
+            "Also show the unfiltered per-frame detector proposal. This remains "
+            "visible when temporal consensus rejects it and never drives the "
+            "accepted overlay."
+        ),
     )
     parser.add_argument(
         "--diagnostic-window-size-px",
@@ -1806,6 +1853,8 @@ def _initialize_display_windows(cv2, args) -> None:
         diagnostic_windows.append(WINDOW_FACE_MASK)
     if args.display_rectangle_mask:
         diagnostic_windows.append(WINDOW_RECTANGLE_MASK)
+    if args.display_raw_proposal:
+        diagnostic_windows.append(WINDOW_PROPOSAL_RECTANGLE)
 
     for window_name in diagnostic_windows:
         window_mode = (
@@ -2288,9 +2337,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     head_candidate_temporal_gate = HeadCandidateTemporalGate(
         hold_sec=args.head_hold_sec,
-        # Real-camera acquisition needs two consecutive fits so one fail-open
-        # heater frame cannot own temporal state. Simulation remains immediate
-        # because its calibrated direction and wall mask are deterministic.
+        # Legacy/simulation mode remains immediate. Real-camera acquisition
+        # below uses structural_required_frames instead of this consecutive
+        # single-winner counter.
         initial_acquire_frames=(1 if args.sim_raw_image_topic else 2),
         max_width_ratio=(1.25 if args.sim_raw_image_topic else 1.15),
         max_height_ratio=(1.25 if args.sim_raw_image_topic else 1.15),
@@ -2299,6 +2348,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         accepted_state_timeout_sec=(
             0.75 if args.sim_raw_image_topic else 0.30
         ),
+        # Real-camera candidates can alternate between nested Canny bands at
+        # oblique views. Acquire one structural rail/neck identity from a
+        # bounded 3-of-5 window, then filter the common-rail trapezoid while
+        # holding isolated inward switches on the previous outer border.
+        structural_window_frames=(0 if args.sim_raw_image_topic else 5),
+        structural_required_frames=(0 if args.sim_raw_image_topic else 3),
+        structural_max_center_jump_scale=0.22,
+        structural_max_height_ratio=1.20,
+        outer_inset_hysteresis_frames=3,
+        outer_inset_min_scale=0.05,
+        geometry_filter_alpha=(1.0 if args.sim_raw_image_topic else 0.55),
     )
     foreground_gate_tracker = AdaptiveForegroundGateTracker(model_ttl_sec=0.75)
     last_accepted_head_display_snapshot = None
@@ -2395,6 +2455,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             face_mask = None
             rectangle_mask = None
             rectangle_overlay = None
+            raw_proposal_overlay = None
             edge_artifacts = StandAxisEdgeDebugArtifacts(edges=None)
             detector_estimate = None
             wall_edge_mask = None
@@ -2855,6 +2916,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         for point in estimate.corners
                     ),
                 )
+            raw_proposal_overlay = rectangle_overlay
             detector_estimate = estimate
             if simulation_full_frame_edges:
                 rejected_fit_diagnostic_roi = (
@@ -3007,6 +3069,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if temporal_selection.estimate is not None
                     else _unavailable_target_estimate(temporal_selection.reason)
                 )
+            if (
+                temporal_selection is not None
+                and temporal_selection.current_accepted
+                and estimate.corners is not None
+                and edges is not None
+            ):
+                # The temporal selector may keep an outer border or return a
+                # line-state-filtered trapezoid rather than the raw per-frame
+                # winner. Render that selected geometry, not the rejected inner
+                # proposal, in the rectangle diagnostic window.
+                rectangle_mask, rectangle_overlay = (
+                    _temporal_rectangle_artifacts(
+                        cv2,
+                        estimate,
+                        image_shape=axis_frame.shape,
+                        face_mask=face_mask,
+                        target_roi=target_roi,
+                    )
+                )
             if mask is None:
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
                 active_ranges = [current_track_range(cv2, args.color)] if args.tune else selected_ranges
@@ -3025,6 +3106,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             display_face_mask = face_mask
             display_rectangle_mask = rectangle_mask
             display_rectangle_overlay = rectangle_overlay
+            display_raw_proposal_overlay = raw_proposal_overlay
             display_detected_head_roi = detected_head_roi
             display_diagnostic_head_roi = diagnostic_head_roi
             if temporal_selection is not None:
@@ -3374,6 +3456,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if display_rectangle_overlay is not None
                     else display_rectangle_mask
                 )
+                diagnostic_raw_proposal = display_raw_proposal_overlay
                 if (
                     simulation_full_frame_edges
                     and display_diagnostic_head_roi is not None
@@ -3384,6 +3467,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                     diagnostic_rectangle_mask = _diagnostic_roi_image(
                         diagnostic_rectangle_mask,
+                        display_diagnostic_head_roi,
+                    )
+                    diagnostic_raw_proposal = _diagnostic_roi_image(
+                        diagnostic_raw_proposal,
                         display_diagnostic_head_roi,
                     )
                 diagnostic_reference = (
@@ -3410,6 +3497,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         face_reference.shape[:2],
                         dtype=numpy.uint8,
                     )
+                if diagnostic_raw_proposal is None and face_reference is not None:
+                    diagnostic_raw_proposal = numpy.zeros(
+                        face_reference.shape[:2],
+                        dtype=numpy.uint8,
+                    )
                 diagnostic_images = (
                     (WINDOW_MASK, args.display_mask, diagnostic_mask),
                     (WINDOW_EDGES, args.display_edges, diagnostic_edges),
@@ -3422,6 +3514,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         WINDOW_RECTANGLE_MASK,
                         args.display_rectangle_mask,
                         diagnostic_rectangle_mask,
+                    ),
+                    (
+                        WINDOW_PROPOSAL_RECTANGLE,
+                        args.display_raw_proposal,
+                        diagnostic_raw_proposal,
                     ),
                 )
                 for window_name, enabled, diagnostic_image in diagnostic_images:
@@ -3452,6 +3549,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     and diagnostic_rectangle_mask is not None
                 ):
                     cv2.imshow(WINDOW_RECTANGLE_MASK, diagnostic_rectangle_mask)
+                if (
+                    args.display_raw_proposal
+                    and diagnostic_raw_proposal is not None
+                ):
+                    cv2.imshow(
+                        WINDOW_PROPOSAL_RECTANGLE,
+                        diagnostic_raw_proposal,
+                    )
 
             recording_images = {WINDOW_FRAME: annotated}
             if not args.headless:

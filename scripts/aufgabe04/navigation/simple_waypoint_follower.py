@@ -356,7 +356,10 @@ INTERMEDIATE_ROUTE_KINDS = frozenset(
 DYNAMIC_PHYSICAL_ROUTE_KINDS = frozenset(
     {"synchronized_face_approach", "synchronized_viewpoint"}
 )
-STATIC_PHYSICAL_ROUTE_KINDS = frozenset({"catalog_face_approach"})
+CATALOG_PHYSICAL_ROUTE_KINDS = frozenset({"catalog_face_approach"})
+STATIC_PHYSICAL_ROUTE_KINDS = CATALOG_PHYSICAL_ROUTE_KINDS | frozenset(
+    {"detected_stand_preapproach"}
+)
 PHYSICAL_ROUTE_KINDS = DYNAMIC_PHYSICAL_ROUTE_KINDS | STATIC_PHYSICAL_ROUTE_KINDS
 DYNAMIC_VIEWPOINT_ROUTE_KINDS = (
     INTERMEDIATE_ROUTE_KINDS | DYNAMIC_PHYSICAL_ROUTE_KINDS

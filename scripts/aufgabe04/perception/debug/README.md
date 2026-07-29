@@ -120,7 +120,7 @@ In edge-on mode it overlays the detected vertical line and reports:
 
 The console output mirrors this with either `camera_axis_rotation_proxy=...` or `camera_axis_edge_on_approx_90deg=true`.
 
-The viewer can open up to five OpenCV windows. They all come from one process
+The viewer can open up to six OpenCV windows. They all come from one process
 and one camera subscription:
 
 | Window | Enabling option | Meaning |
@@ -129,13 +129,15 @@ and one camera subscription:
 | `aufgabe04/stand-axis-mask` | `--display-mask` | HSV/color segmentation mask. |
 | `aufgabe04/stand-axis-edges` | `--display-edges` | Canny/morphology edge image used by the edge path. |
 | `aufgabe04/stand-axis-side-evidence` | `--display-face-mask` | Native-pixel cutout of untouched, color-agnostic Canny pixels selected independently near the four topology-proposed head sides. The historical option name remains for command compatibility. |
-| `aufgabe04/stand-axis-rectangle` | `--display-rectangle-mask` | Native-pixel cutout of the quadrilateral derived from four independent raw-edge side fits; unsupported fits remain empty. |
+| `aufgabe04/stand-axis-rectangle` | `--display-rectangle-mask` | Native-pixel cutout of the temporally selected outer quadrilateral. In the real-camera path this preserves the common parallel-rail constraint and suppresses isolated switches to an inner Canny band. |
+| `aufgabe04/stand-axis-raw-proposal` | `--display-raw-proposal` | Unfiltered per-frame detector proposal. It remains visible during temporal bootstrap/rejection for diagnosis, but never drives the accepted overlay. Recordings use `raw_proposal.avi`. |
 
 The side evidence and fitted rectangle are independently selectable, so similar
 diagnostic views do not have to be opened together. These are not additional
 detectors, camera subscriptions, QR inputs, navigation inputs, or reportable
 run evidence. To show only the annotated camera frame, omit `--display-mask`,
-`--display-edges`, `--display-face-mask`, and `--display-rectangle-mask`.
+`--display-edges`, `--display-face-mask`, `--display-rectangle-mask`, and
+`--display-raw-proposal`.
 
 For a time-aligned debugging record, press `r` while an OpenCV viewer window
 has focus. Press `r` again to stop. A red circle in the upper-right corner of
@@ -165,6 +167,15 @@ same vertical image direction. Non-simulation edge callers jointly estimate a
 single tolerant side direction instead. Top and bottom remain independently
 sloped under perspective. Only sufficiently covered, outermost raw-Canny side
 fits are accepted; a morphology-only rough rectangle cannot become a pose.
+
+For the real camera, raw-supported nested candidates are resolved in favour of
+the largest foreground-originated outer frame before temporal gating. Initial
+tracking uses a three-of-five structural consensus over head centre, side
+height, common rail direction, and neck ownership; projected width is not an
+identity constraint because it contracts at oblique yaw. Once acquired, the
+parallel-rail trapezoid is filtered as a line state. An isolated inward change
+of only the top, bottom, left, or right boundary is held on the previous outer
+border unless it persists for three frames.
 
 Run it from the Apptainer workstation environment with:
 
@@ -230,6 +241,7 @@ scripts/aufgabe04/perception/debug/run_stand_axis_viewer.sh \
   --display-edges \
   --display-face-mask \
   --display-rectangle-mask \
+  --display-raw-proposal \
   --save-snapshot results/aufgabe04/real_camera_debug
 ```
 
