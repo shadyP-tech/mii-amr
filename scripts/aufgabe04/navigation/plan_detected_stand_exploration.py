@@ -105,7 +105,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--start-tf-source-frame", default="base_footprint")
     parser.add_argument("--start-tf-target-frame", default="odom")
-    parser.add_argument("--start-tf-timeout-sec", type=float, default=3.0)
+    parser.add_argument(
+        "--start-tf-timeout-sec",
+        type=float,
+        default=30.0,
+        help=(
+            "Wall-time limit for DDS discovery and the first usable TF pose. "
+            "Real AMCL startup can take several seconds while the robot is stationary."
+        ),
+    )
     parser.add_argument("--start-tf-lookup-timeout-sec", type=float, default=0.2)
     parser.add_argument("--start-tf-use-sim-time", action="store_true")
     parser.add_argument("--station-prefix", default="D")
