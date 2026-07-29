@@ -462,6 +462,8 @@ def _parallel_side_run_endpoints(
     side_evidence,
     *,
     band_px: float,
+    max_extension_fraction: float = 0.35,
+    max_gap_fraction: float = 0.30,
 ):
     """Recover one head side's real endpoints from its aligned raw-edge run.
 
@@ -507,7 +509,12 @@ def _parallel_side_run_endpoints(
         ],
         dtype=numpy.float64,
     )
-    search_margin = max(4.0, 0.35 * rough_length)
+    if not 0.0 <= max_extension_fraction <= 1.0:
+        raise ValueError("max_extension_fraction must be between 0 and 1")
+    if not 0.0 <= max_gap_fraction <= 1.0:
+        raise ValueError("max_gap_fraction must be between 0 and 1")
+
+    search_margin = max(4.0, max_extension_fraction * rough_length)
     residual_limit_px = max(1.25, min(2.5, 0.50 * band_px))
     local_mask = (
         (residuals <= residual_limit_px)
@@ -530,7 +537,7 @@ def _parallel_side_run_endpoints(
     # side run.  The search is still constrained to the fitted line, to the
     # rough head neighbourhood, and to a run overlapping the original side
     # evidence, so this cannot jump across to the stem or another stand.
-    maximum_gap_bins = max(3, int(math.ceil(0.30 * rough_length)))
+    maximum_gap_bins = max(3, int(math.ceil(max_gap_fraction * rough_length)))
     runs: list[tuple[int, int]] = []
     run_start = run_end = int(unique_bins[0])
     for raw_bin in unique_bins[1:]:
@@ -640,6 +647,27 @@ def _level_camera_endpoint_perspective_consistent(
     )
 
 
+def _parallel_side_lengths_comparable(
+    corners: Sequence[ImagePoint],
+    *,
+    maximum_ratio: float = 1.45,
+) -> bool:
+    """Keep a learned real-camera trapezoid from growing one background rail.
+
+    Both side fits already use one shared direction, so they are parallel by
+    construction. This remaining check prevents endpoint recovery from making
+    one physical side implausibly longer than the other.
+    """
+
+    top_left, top_right, bottom_right, bottom_left = order_corners(corners)
+    left_length = _distance(top_left, bottom_left)
+    right_length = _distance(top_right, bottom_right)
+    shorter_length = min(left_length, right_length)
+    if shorter_length <= 1e-6:
+        return False
+    return max(left_length, right_length) / shorter_length <= maximum_ratio
+
+
 def _raw_side_evidence_and_corners(
     cv2,
     raw_edges,
@@ -647,6 +675,8 @@ def _raw_side_evidence_and_corners(
     *,
     fixed_parallel_side_direction: tuple[float, float] | None = None,
     edge_points=None,
+    real_camera_endpoint_fraction: float | None = None,
+    maximum_parallel_side_length_ratio: float | None = None,
 ):
     """Refit a common-sided head trapezoid from outer raw-Canny evidence.
 
@@ -773,6 +803,20 @@ def _raw_side_evidence_and_corners(
         # from this real-camera frame. Recover their complete raw runs and use
         # their observed endpoints as corners. Top/bottom evidence validates
         # those endpoints but must not move a corner onto QR/interior clutter.
+        # A colour-gated real-camera topology is already a close head proposal.
+        # Its caller supplies a tight endpoint fraction so aligned heater/QR
+        # pixels cannot grow a valid rail after a few frames. Legacy and
+        # simulation paths retain the wider allowance needed for wall gaps.
+        endpoint_extension_fraction = (
+            0.35
+            if real_camera_endpoint_fraction is None
+            else real_camera_endpoint_fraction
+        )
+        endpoint_gap_fraction = (
+            0.30
+            if real_camera_endpoint_fraction is None
+            else real_camera_endpoint_fraction
+        )
         left_run = _parallel_side_run_endpoints(
             edge_points,
             left,
@@ -780,6 +824,8 @@ def _raw_side_evidence_and_corners(
             bottom_left,
             left_evidence,
             band_px=parallel_side_band_px,
+            max_extension_fraction=endpoint_extension_fraction,
+            max_gap_fraction=endpoint_gap_fraction,
         )
         right_run = _parallel_side_run_endpoints(
             edge_points,
@@ -788,6 +834,8 @@ def _raw_side_evidence_and_corners(
             bottom_right,
             right_evidence,
             band_px=parallel_side_band_px,
+            max_extension_fraction=endpoint_extension_fraction,
+            max_gap_fraction=endpoint_gap_fraction,
         )
         if left_run is not None and right_run is not None:
             left_top, left_bottom, recovered_left_evidence = left_run
@@ -859,11 +907,21 @@ def _raw_side_evidence_and_corners(
         return evidence_mask, None
     if parallel_endpoint_corners is not None:
         ordered_endpoint_corners = order_corners(parallel_endpoint_corners)
-        if _quadrilateral_edge_support(
-            cv2,
-            evidence_mask,
-            ordered_endpoint_corners,
-        ).accepted:
+        side_lengths_accepted = (
+            maximum_parallel_side_length_ratio is None
+            or _parallel_side_lengths_comparable(
+                ordered_endpoint_corners,
+                maximum_ratio=maximum_parallel_side_length_ratio,
+            )
+        )
+        if (
+            side_lengths_accepted
+            and _quadrilateral_edge_support(
+                cv2,
+                evidence_mask,
+                ordered_endpoint_corners,
+            ).accepted
+        ):
             return evidence_mask, ordered_endpoint_corners
     corners = (
         _image_line_intersection(top, left),
@@ -874,6 +932,14 @@ def _raw_side_evidence_and_corners(
     if any(point is None for point in corners):
         return evidence_mask, None
     ordered_corners = order_corners(corners)
+    if (
+        maximum_parallel_side_length_ratio is not None
+        and not _parallel_side_lengths_comparable(
+            ordered_corners,
+            maximum_ratio=maximum_parallel_side_length_ratio,
+        )
+    ):
+        return evidence_mask, None
     if (
         fixed_parallel_side_direction is not None
         and not _level_camera_endpoint_perspective_consistent(

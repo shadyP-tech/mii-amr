@@ -22,6 +22,8 @@ from scripts.aufgabe04.perception.stand_axis_image import (
     _SilhouetteFaceCandidate,
     _attach_structure_evidence,
     _level_camera_endpoint_perspective_consistent,
+    _parallel_side_lengths_comparable,
+    _parallel_side_run_endpoints,
     _raw_side_evidence_and_corners,
     _validated_refitted_head_corners,
     order_corners,
@@ -79,8 +81,8 @@ class StandAxisRawSupportTest(unittest.TestCase):
                         parallel_side_direction=direction,
                     )
                 )
-                self.assertFalse(
-                    _level_camera_endpoint_perspective_consistent(
+        self.assertFalse(
+            _level_camera_endpoint_perspective_consistent(
                         *rotated_rejected,
                         parallel_side_direction=direction,
                     )
@@ -137,6 +139,83 @@ class StandAxisRawSupportTest(unittest.TestCase):
                 max_aspect_ratio=1.8,
             )
         )
+
+    @unittest.skipIf(
+        numpy is None,
+        "numpy is required for raw-side endpoint recovery",
+    )
+    def test_real_camera_endpoint_recovery_stays_local_to_rough_side(self):
+        edge_points = numpy.array(
+            [(40.0, float(v_px)) for v_px in range(0, 121)],
+            dtype=numpy.float64,
+        )
+        side_evidence = numpy.array(
+            [(40.0, float(v_px)) for v_px in range(40, 111)],
+            dtype=numpy.float64,
+        )
+        fitted_line = (40.0, 75.0, 0.0, 1.0)
+
+        recovered = _parallel_side_run_endpoints(
+            edge_points,
+            fitted_line,
+            ImagePoint(40.0, 30.0),
+            ImagePoint(40.0, 120.0),
+            side_evidence,
+            band_px=4.0,
+            max_extension_fraction=0.15,
+            max_gap_fraction=0.15,
+        )
+
+        self.assertIsNotNone(recovered)
+        recovered_start, recovered_end, _run_points = recovered
+        self.assertGreaterEqual(recovered_start.v_px, 16.0)
+        self.assertAlmostEqual(recovered_end.v_px, 120.0, delta=1.0)
+
+    @unittest.skipIf(
+        numpy is None,
+        "numpy is required for raw-side endpoint recovery",
+    )
+    def test_simulation_endpoint_recovery_retains_wide_allowance(self):
+        edge_points = numpy.array(
+            [(40.0, float(v_px)) for v_px in range(0, 121)],
+            dtype=numpy.float64,
+        )
+        side_evidence = numpy.array(
+            [(40.0, float(v_px)) for v_px in range(40, 111)],
+            dtype=numpy.float64,
+        )
+
+        recovered = _parallel_side_run_endpoints(
+            edge_points,
+            (40.0, 75.0, 0.0, 1.0),
+            ImagePoint(40.0, 30.0),
+            ImagePoint(40.0, 120.0),
+            side_evidence,
+            band_px=4.0,
+            max_extension_fraction=0.35,
+            max_gap_fraction=0.30,
+        )
+
+        self.assertIsNotNone(recovered)
+        recovered_start, _recovered_end, _run_points = recovered
+        self.assertAlmostEqual(recovered_start.v_px, 0.0, delta=1.0)
+
+    def test_real_camera_parallel_side_lengths_must_remain_comparable(self):
+        accepted = (
+            ImagePoint(20.0, 10.0),
+            ImagePoint(100.0, 20.0),
+            ImagePoint(100.0, 90.0),
+            ImagePoint(20.0, 100.0),
+        )
+        malformed = (
+            ImagePoint(20.0, 10.0),
+            ImagePoint(100.0, 20.0),
+            ImagePoint(100.0, 65.0),
+            ImagePoint(20.0, 100.0),
+        )
+
+        self.assertTrue(_parallel_side_lengths_comparable(accepted))
+        self.assertFalse(_parallel_side_lengths_comparable(malformed))
 
     def test_structure_evidence_cannot_promote_or_replace_head_corners(self):
         original = (

@@ -83,6 +83,7 @@ def _head_candidate_from_rough_corners(
     min_aspect_ratio: float,
     max_aspect_ratio: float,
     fixed_parallel_side_direction: tuple[float, float] | None,
+    bounded_endpoint_recovery: bool,
     edge_points=None,
 ) -> tuple[_SilhouetteFaceCandidate, float] | None:
     """Verify a coarse head proposal only with raw four-side evidence."""
@@ -93,6 +94,12 @@ def _head_candidate_from_rough_corners(
         rough_corners,
         fixed_parallel_side_direction=fixed_parallel_side_direction,
         edge_points=edge_points,
+        real_camera_endpoint_fraction=(
+            0.15 if bounded_endpoint_recovery else None
+        ),
+        maximum_parallel_side_length_ratio=(
+            1.45 if bounded_endpoint_recovery else None
+        ),
     )
     if fitted is None:
         return None
@@ -129,6 +136,7 @@ def _side_first_head_candidates(
     min_aspect_ratio: float,
     max_aspect_ratio: float,
     fixed_parallel_side_direction: tuple[float, float] | None,
+    bounded_endpoint_recovery: bool,
     edge_points,
 ):
     """Yield raw-verified head candidates seeded by the parallel outer rails.
@@ -243,6 +251,7 @@ def _side_first_head_candidates(
             min_aspect_ratio=min_aspect_ratio,
             max_aspect_ratio=max_aspect_ratio,
             fixed_parallel_side_direction=fixed_parallel_side_direction,
+            bounded_endpoint_recovery=bounded_endpoint_recovery,
             edge_points=edge_points,
         )
         if verified is not None:
@@ -258,6 +267,7 @@ def _head_first_face_from_edges(
     min_aspect_ratio: float,
     max_aspect_ratio: float,
     fixed_parallel_side_direction: tuple[float, float] | None,
+    bounded_endpoint_recovery: bool = False,
 ) -> _SilhouetteFaceCandidate | None:
     """Propose from filtered topology, then measure only that proposal in raw Canny.
 
@@ -320,6 +330,7 @@ def _head_first_face_from_edges(
         min_aspect_ratio=min_aspect_ratio,
         max_aspect_ratio=max_aspect_ratio,
         fixed_parallel_side_direction=fixed_parallel_side_direction,
+        bounded_endpoint_recovery=bounded_endpoint_recovery,
         edge_points=edge_points,
     ):
         if score > side_best_score:
@@ -396,6 +407,7 @@ def _head_first_face_from_edges(
             min_aspect_ratio=min_aspect_ratio,
             max_aspect_ratio=max_aspect_ratio,
             fixed_parallel_side_direction=fixed_parallel_side_direction,
+            bounded_endpoint_recovery=bounded_endpoint_recovery,
             edge_points=edge_points,
         )
         if verified is None:

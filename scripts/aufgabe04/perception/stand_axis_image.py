@@ -49,6 +49,7 @@ from scripts.aufgabe04.perception.stand_axis.raw_support import (
     _fit_raw_edge_side_in_band,
     _image_line_intersection,
     _level_camera_endpoint_perspective_consistent,
+    _parallel_side_lengths_comparable,
     _parallel_side_run_endpoints,
     _quadrilateral_edge_support,
     _raw_side_evidence_and_corners,
@@ -784,6 +785,10 @@ def _plain_face_from_stem_cropped_edges(
             min_aspect_ratio=min_aspect_ratio,
             max_aspect_ratio=max_aspect_ratio,
             fixed_parallel_side_direction=_fixed_parallel_side_direction,
+            bounded_endpoint_recovery=(
+                head_first_proposal_edges is not None
+                and _fixed_parallel_side_direction is None
+            ),
         )
         if head_first is not None:
             return head_first
