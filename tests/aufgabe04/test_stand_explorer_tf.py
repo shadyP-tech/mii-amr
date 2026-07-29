@@ -184,7 +184,39 @@ class StandExplorerTfTest(unittest.TestCase):
         self.assertEqual(defaults.max_tf_scan_skew_sec, 0.02)
         self.assertEqual(defaults.tf_timeout_sec, 0.5)
         self.assertEqual(defaults.pending_scan_limit, 8)
+        self.assertIsNone(defaults.summary_json)
+        self.assertEqual(defaults.duration_sec, 0.0)
         self.assertEqual(alias.max_future_timestamp_sec, 0.1)
+
+    def test_observer_summary_records_negative_scan_epoch(self):
+        fake_node = SimpleNamespace(
+            started_unix_sec=10.0,
+            output_jsonl=Path("empty_observations.jsonl"),
+            map_bundle=SimpleNamespace(bundle_sha256="a" * 64),
+            runtime=SimpleNamespace(
+                map_frame="map",
+                as_log_dict=lambda: {"map_frame": "map"},
+            ),
+            timing_limits=SimpleNamespace(
+                as_dict=lambda: {"max_scan_age_sec": 1.0}
+            ),
+            last_scan_pose_map={"x_m": 1.0, "y_m": 2.0, "yaw_rad": 0.0},
+            last_processed_scan_stamp_sec=9.9,
+            processed_scan_count=5,
+            detected_candidate_count=0,
+            accepted_observation_count=0,
+            last_confirmed_stand_count=0,
+        )
+
+        payload = stand_explorer_node.observer_summary_payload(fake_node)
+
+        self.assertFalse(payload["motion_published"])
+        self.assertEqual(payload["processed_scan_count"], 5)
+        self.assertEqual(payload["accepted_observation_count"], 0)
+        self.assertEqual(
+            payload["scan_frame_pose_in_planning_frame"]["x_m"],
+            1.0,
+        )
 
     def test_sim_time_override_sets_ros_node_clock_parameter(self):
         class FakeParameter:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections import deque
 from dataclasses import dataclass
+import json
 import math
 import sys
 import time
@@ -200,6 +201,13 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
             )
         )
         self.observation_count = 0
+        self.processed_scan_count = 0
+        self.detected_candidate_count = 0
+        self.accepted_observation_count = 0
+        self.last_confirmed_stand_count = 0
+        self.started_unix_sec = time.time()
+        self.last_processed_scan_stamp_sec: float | None = None
+        self.last_scan_pose_map: dict[str, float] | None = None
         self.observation_enabled = True
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -350,17 +358,25 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
             self.get_logger().warn(f"dropping scan: {exc}")
             return
 
+        self.processed_scan_count += 1
+        self.last_processed_scan_stamp_sec = scan_stamp_sec
+        translation = transform.transform.translation
+        rotation = transform.transform.rotation
+        self.last_scan_pose_map = {
+            "x_m": float(translation.x),
+            "y_m": float(translation.y),
+            "yaw_rad": _yaw_from_quaternion(rotation),
+        }
         candidates = detect_stand_candidates_from_scan(
             msg.ranges,
             angle_min_rad=msg.angle_min,
             angle_increment_rad=msg.angle_increment,
             config=self.detector_config,
         )
+        self.detected_candidate_count += len(candidates)
         if not candidates:
             return
 
-        translation = transform.transform.translation
-        rotation = transform.transform.rotation
         runtime_config = dict(self.runtime.as_log_dict())
         runtime_config[RUNTIME_TIMING_LIMITS_KEY] = self.timing_limits.as_dict()
         provenance = ObservationProvenance(
@@ -417,8 +433,10 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
                 f"rejected {rejected_count} candidate observations at perception gates"
             )
             return
+        self.accepted_observation_count += len(observations)
         write_observation_jsonl(self.output_jsonl, observations)
         confirmed = self.accumulator.add_observations(observations)
+        self.last_confirmed_stand_count = len(confirmed)
         self.get_logger().info(
             f"wrote {len(observations)} observations; rejected={rejected_count}; "
             f"confirmed_stands={len(confirmed)}"
@@ -438,6 +456,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--localization-source", default="amcl", choices=["amcl", "tf"])
     parser.add_argument("--allow-sim-time", action="store_true")
     parser.add_argument("--output-jsonl", type=Path, default=DEFAULT_OUTPUT_JSONL)
+    parser.add_argument(
+        "--summary-json",
+        type=Path,
+        default=None,
+        help=(
+            "Optional stopped-observation receipt. Written on clean shutdown even "
+            "when no stand candidate was detected."
+        ),
+    )
+    parser.add_argument(
+        "--duration-sec",
+        type=float,
+        default=0.0,
+        help="Wall-time observation duration; 0 keeps observing until Ctrl+C.",
+    )
     parser.add_argument("--map-yaml", type=Path, default=None)
     parser.add_argument("--semantic-map-id", default="")
     parser.add_argument(
@@ -491,6 +524,41 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def observer_summary_payload(node: StandExplorerNode) -> dict[str, object]:
+    """Return evidence that a scan epoch ran, including negative observations."""
+
+    return {
+        "schema_version": 1,
+        "observer_version": OBSERVER_VERSION,
+        "motion_published": False,
+        "started_unix_sec": node.started_unix_sec,
+        "finished_unix_sec": time.time(),
+        "output_jsonl": str(node.output_jsonl),
+        "map_bundle_sha256": (
+            "" if node.map_bundle is None else node.map_bundle.bundle_sha256
+        ),
+        "planning_frame": node.runtime.map_frame,
+        "scan_frame_pose_in_planning_frame": node.last_scan_pose_map,
+        "last_processed_scan_stamp_sec": node.last_processed_scan_stamp_sec,
+        "processed_scan_count": node.processed_scan_count,
+        "detected_candidate_count": node.detected_candidate_count,
+        "accepted_observation_count": node.accepted_observation_count,
+        "confirmed_stand_count": node.last_confirmed_stand_count,
+        "runtime_config": node.runtime.as_log_dict(),
+        "timing_limits": node.timing_limits.as_dict(),
+    }
+
+
+def write_observer_summary(path: Path, node: StandExplorerNode) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        raise ValueError(f"refusing to overwrite observer summary: {path}")
+    path.write_text(
+        json.dumps(observer_summary_payload(node), indent=2, sort_keys=True) + "\n"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -498,6 +566,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--tf-timeout-sec must be finite and positive")
     if args.pending_scan_limit <= 0:
         parser.error("--pending-scan-limit must be positive")
+    if not math.isfinite(args.duration_sec) or args.duration_sec < 0.0:
+        parser.error("--duration-sec must be finite and non-negative")
+    if args.summary_json is not None and args.summary_json.exists():
+        parser.error(f"refusing to overwrite observer summary: {args.summary_json}")
     try:
         _timing_limits_from_args(args)
     except ValueError as exc:
@@ -506,13 +578,23 @@ def main(argv: list[str] | None = None) -> int:
     rclpy.init(args=None)
     node = StandExplorerNode(args)
     try:
-        rclpy.spin(node)
+        if args.duration_sec > 0.0:
+            deadline = time.monotonic() + args.duration_sec
+            while rclpy.ok() and time.monotonic() < deadline:
+                remaining_sec = max(0.0, deadline - time.monotonic())
+                rclpy.spin_once(node, timeout_sec=min(0.1, remaining_sec))
+        else:
+            rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        try:
+            if args.summary_json is not None:
+                write_observer_summary(args.summary_json, node)
+        finally:
+            node.destroy_node()
+            if rclpy.ok():
+                rclpy.shutdown()
     return 0
 
 

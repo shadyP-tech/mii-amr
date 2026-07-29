@@ -4,6 +4,141 @@ This run detects local stand candidates from `/scan`, waits for stationary
 AMCL/TF readiness, selects one candidate, and writes a route. It does not
 publish `/cmd_vel` and does not execute the route.
 
+## Multi-viewpoint coverage survey
+
+The one-shot command later in this document is retained for focused
+one-candidate checks. It is not evidence that the whole arena was surveyed.
+For arena-wide discovery, use the map-derived coverage survey:
+
+```text
+plan two staggered rails
+  -> reach one survey viewpoint
+  -> stop and collect an exact-time-TF LiDAR epoch
+  -> persist negative or positive scan evidence
+  -> fuse stable candidate IDs and provisional keepouts
+  -> replan the next leg
+  -> repeat until the coverage gate passes
+  -> inspect pending candidates with the stopped camera
+```
+
+The LDS is a 360-degree scanner. Translating between the staggered rails is
+what creates new lines of sight; rotating repeatedly at the initial pose does
+not resolve geometric occlusion.
+
+### 1. Create the coverage plan
+
+Use the current localized base pose for `--start-x`, `--start-y`, and
+`--start-yaw`. This command is ROS-free and motion-free:
+
+```bash
+python3 scripts/aufgabe04/navigation/plan_stand_coverage_survey.py \
+  --map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
+  --semantic-map-id arena_1p898x3p9_auto \
+  --planning-frame map \
+  --start-x CURRENT_MAP_X \
+  --start-y CURRENT_MAP_Y \
+  --start-yaw CURRENT_MAP_YAW \
+  --survey-id stand_coverage_001 \
+  --output-dir results/aufgabe04/stand_coverage_001
+```
+
+The default planner uses two staggered rails, `0.90 m` stop spacing, a
+conservative `1.35 m` visibility model, `0.25 m` static inflation, and a
+`95%` coverage gate. It writes:
+
+- `coverage_plan.json`: immutable planned viewpoints and per-viewpoint
+  line-of-sight cells;
+- `coverage_progress.json`: visited viewpoints;
+- `stand_registry.json`: stable candidates and their statuses;
+- `legs/leg_000_route.csv` plus diagnostics: motion-free A* planning evidence;
+- `survey_summary.json`: coverage and unresolved-candidate gates.
+
+The generated leg is deliberately marked `motion_authorized: false`. Do not
+feed it directly to the real-robot segment runner. Real survey execution still
+needs a separately reviewed route certificate/admission wrapper, dry-run,
+fresh sensor/localization checks, exclusive velocity ownership, and the
+physical stop precautions in the real parkour checklist.
+
+### 2. At each stopped viewpoint, capture one observation epoch
+
+After a separately authorized mechanism has placed and stopped the robot at
+the `next_viewpoint_id` from `survey_summary.json`, capture a fresh epoch using
+unique paths:
+
+```bash
+export SURVEY_ROOT=results/aufgabe04/stand_coverage_001
+export VIEWPOINT_ID=survey_vp_001
+mkdir -p "$SURVEY_ROOT/raw_epochs/$VIEWPOINT_ID"
+
+python3 scripts/aufgabe04/perception/stand_explorer_node.py \
+  --scan-topic scan \
+  --amcl-topic amcl_pose \
+  --map-frame map \
+  --base-frame base_footprint \
+  --localization-source amcl \
+  --map-yaml maps/aufgabe03/arena_1p898x3p9_auto.yaml \
+  --semantic-map-id arena_1p898x3p9_auto \
+  --duration-sec 8 \
+  --output-jsonl "$SURVEY_ROOT/raw_epochs/$VIEWPOINT_ID/observations.jsonl" \
+  --summary-json "$SURVEY_ROOT/raw_epochs/$VIEWPOINT_ID/observer_summary.json"
+```
+
+`observer_summary.json` is written even when no candidate was found. A
+viewpoint counts as covered only when that receipt reports at least one
+processed scan and its exact map bundle, planning frame, and observed scan
+pose match the plan.
+
+### 3. Fuse candidates and replan
+
+```bash
+python3 scripts/aufgabe04/navigation/record_stand_coverage_stop.py \
+  --survey-root "$SURVEY_ROOT" \
+  --map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
+  --semantic-map-id arena_1p898x3p9_auto \
+  --viewpoint-id "$VIEWPOINT_ID" \
+  --observer-summary-json \
+    "$SURVEY_ROOT/raw_epochs/$VIEWPOINT_ID/observer_summary.json"
+```
+
+This command:
+
+- validates the stopped scan receipt and observation provenance;
+- marks the viewpoint visited, including valid zero-candidate epochs;
+- keeps a candidate provisional after only one viewpoint;
+- promotes it to `pending_camera` after sufficient hits from two distinct
+  viewpoints;
+- rejects replayed observation IDs as fake viewpoint diversity;
+- adds every non-rejected candidate as a keepout;
+- writes a new A* leg to the next reachable unvisited viewpoint.
+
+The survey is not complete merely because no candidate is pending.
+`exploration_complete` becomes true only when the coverage threshold passes,
+there are no provisional or pending-camera candidates, and an optional
+`--expected-stand-count` gate matches.
+
+### 4. Record a stopped camera/operator decision
+
+After inspecting a `pending_camera` candidate, create a small receipt:
+
+```json
+{
+  "schema_version": 1,
+  "survey_id": "stand_coverage_001",
+  "candidate_uid": "survey_candidate_0001",
+  "decision": "confirmed",
+  "decision_source": "camera_evidence",
+  "camera_evidence_path": "results/real_runs/EXAMPLE/camera_capture"
+}
+```
+
+Then record it without invoking motion:
+
+```bash
+python3 scripts/aufgabe04/navigation/record_stand_candidate_decision.py \
+  --survey-root "$SURVEY_ROOT" \
+  --decision-receipt-json candidate_decision.json
+```
+
 Keep the saved-map Nav2/AMCL launch active. Do not run Cartographer at the same
 time because only one node may own `map -> odom`.
 
