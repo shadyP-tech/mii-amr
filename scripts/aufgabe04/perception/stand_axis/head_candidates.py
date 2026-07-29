@@ -137,7 +137,16 @@ def _head_candidate_from_rough_corners(
         return None
     width = (_distance(fitted[0], fitted[1]) + _distance(fitted[3], fitted[2])) / 2.0
     height = (_distance(fitted[0], fitted[3]) + _distance(fitted[1], fitted[2])) / 2.0
-    square_score = 1.0 / (1.0 + abs(math.log(max(fitted_aspect, 1.0e-6))))
+    # A real square viewed around the vertical stand axis is not square in the
+    # image: its projected width contracts approximately with cos(yaw), while
+    # the two side rails keep their height.  Do not make a narrow, valid
+    # projective head lose to a wider inner/background rail pair merely because
+    # the wider proposal looks more frontal.
+    square_score = (
+        1.0
+        if bounded_endpoint_recovery
+        else 1.0 / (1.0 + abs(math.log(max(fitted_aspect, 1.0e-6))))
+    )
     # Prefer the outer physical frame when inner QR rectangles also have four
     # edges.  Size is secondary to raw support, never a synthetic expansion.
     score = 5.0 * support.mean + square_score + min(1.0, width / max(height, 1.0))
@@ -150,6 +159,116 @@ def _head_candidate_from_rough_corners(
         ),
         score,
     )
+
+
+def _select_outer_supported_head_candidate(cv2, ranked_candidates):
+    """Select the outer physical frame among raw-supported hypotheses.
+
+    Every input candidate has already passed four-side raw-Canny support and
+    the centred two-rail neck check.  At that point, nested candidates normally
+    represent the outer frame and one of its inner printed/frame borders.  The
+    physically outer head is the supported candidate with the largest polygon
+    area; support and the original proposal score only break near-ties.
+
+    This selection deliberately runs only after the colour-gated topology has
+    originated the hypotheses.  It must not turn an arbitrary large raw-Canny
+    rectangle (for example a heater cell) into a proposal.
+    """
+
+    if not ranked_candidates:
+        return None
+
+    def geometry(item):
+        candidate, _proposal_score = item
+        top_left, top_right, bottom_right, bottom_left = order_corners(
+            candidate.corners
+        )
+        center = (
+            sum(point.u_px for point in candidate.corners) / 4.0,
+            sum(point.v_px for point in candidate.corners) / 4.0,
+        )
+        left_vector = (
+            bottom_left.u_px - top_left.u_px,
+            bottom_left.v_px - top_left.v_px,
+        )
+        right_vector = (
+            bottom_right.u_px - top_right.u_px,
+            bottom_right.v_px - top_right.v_px,
+        )
+        left_height = math.hypot(*left_vector)
+        right_height = math.hypot(*right_vector)
+        if (
+            left_vector[0] * right_vector[0]
+            + left_vector[1] * right_vector[1]
+            < 0.0
+        ):
+            right_vector = (-right_vector[0], -right_vector[1])
+        direction = math.atan2(
+            left_vector[1] / max(left_height, 1.0e-9)
+            + right_vector[1] / max(right_height, 1.0e-9),
+            left_vector[0] / max(left_height, 1.0e-9)
+            + right_vector[0] / max(right_height, 1.0e-9),
+        )
+        return center, (left_height + right_height) / 2.0, direction
+
+    geometries = [geometry(item) for item in ranked_candidates]
+
+    def related(first_index, second_index):
+        first_center, first_height, first_direction = geometries[first_index]
+        second_center, second_height, second_direction = geometries[second_index]
+        minimum_height = max(1.0, min(first_height, second_height))
+        if math.dist(first_center, second_center) > max(8.0, 0.25 * minimum_height):
+            return False
+        if max(first_height, second_height) / minimum_height > 1.25:
+            return False
+        direction_delta = abs(
+            (second_direction - first_direction + math.pi / 2.0)
+            % math.pi
+            - math.pi / 2.0
+        )
+        return direction_delta <= math.radians(8.0)
+
+    clusters = [
+        [
+            candidate_index
+            for candidate_index in range(len(ranked_candidates))
+            if related(seed_index, candidate_index)
+        ]
+        for seed_index in range(len(ranked_candidates))
+    ]
+    selected_cluster = max(
+        clusters,
+        key=lambda indices: (
+            len(indices),
+            sum(ranked_candidates[index][1] for index in indices),
+        ),
+    )
+
+    def selection_key(index):
+        item = ranked_candidates[index]
+        candidate, proposal_score = item
+        support = _quadrilateral_edge_support(
+            cv2,
+            candidate.face_mask,
+            candidate.corners,
+        )
+        top_left, top_right, bottom_right, bottom_left = order_corners(
+            candidate.corners
+        )
+        area_twice = abs(
+            sum(
+                first.u_px * second.v_px - second.u_px * first.v_px
+                for first, second in (
+                    (top_left, top_right),
+                    (top_right, bottom_right),
+                    (bottom_right, bottom_left),
+                    (bottom_left, top_left),
+                )
+            )
+        )
+        return area_twice, support.mean, proposal_score
+
+    return ranked_candidates[max(selected_cluster, key=selection_key)][0]
 
 
 def _side_first_head_candidates(
@@ -240,7 +359,11 @@ def _side_first_head_candidates(
             parallel_score = (direction_cosine - math.cos(math.radians(14.0))) / (
                 1.0 - math.cos(math.radians(14.0))
             )
-            square_score = 1.0 / (1.0 + abs(math.log(max(aspect, 1.0e-6))))
+            square_score = (
+                1.0
+                if bounded_endpoint_recovery
+                else 1.0 / (1.0 + abs(math.log(max(aspect, 1.0e-6))))
+            )
             length_balance = min(left_length, right_length) / max(left_length, right_length)
             extent_score = min(1.0, height / max(2.0 * min_edge_height_px, 1.0))
             pair_center_x = (left_center_x + right_center_x) / 2.0
@@ -354,22 +477,28 @@ def _head_first_face_from_edges(
     # In the real-camera path, two observed parallel outer rails are the
     # strongest stand-head invariant.  Do not let an equally supported
     # top/bottom Hough pair switch the frame to a QR/interior quadrilateral.
+    side_candidates = list(
+        _side_first_head_candidates(
+            cv2,
+            measurement_edges,
+            lines=lines,
+            min_edge_height_px=min_edge_height_px,
+            min_aspect_ratio=min_aspect_ratio,
+            max_aspect_ratio=max_aspect_ratio,
+            fixed_parallel_side_direction=fixed_parallel_side_direction,
+            bounded_endpoint_recovery=bounded_endpoint_recovery,
+            edge_points=edge_points,
+        )
+    )
     side_best: _SilhouetteFaceCandidate | None = None
     side_best_score = -math.inf
-    for candidate, score in _side_first_head_candidates(
-        cv2,
-        measurement_edges,
-        lines=lines,
-        min_edge_height_px=min_edge_height_px,
-        min_aspect_ratio=min_aspect_ratio,
-        max_aspect_ratio=max_aspect_ratio,
-        fixed_parallel_side_direction=fixed_parallel_side_direction,
-        bounded_endpoint_recovery=bounded_endpoint_recovery,
-        edge_points=edge_points,
-    ):
-        if score > side_best_score:
-            side_best = candidate
-            side_best_score = score
+    if bounded_endpoint_recovery and fixed_parallel_side_direction is None:
+        side_best = _select_outer_supported_head_candidate(cv2, side_candidates)
+    else:
+        for candidate, score in side_candidates:
+            if score > side_best_score:
+                side_best = candidate
+                side_best_score = score
     if side_best is not None and fixed_parallel_side_direction is None:
         return side_best
     ranked_horizontal_pairs = []

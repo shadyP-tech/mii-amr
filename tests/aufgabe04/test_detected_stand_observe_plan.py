@@ -54,6 +54,19 @@ class DetectedStandObservePlanTest(unittest.TestCase):
         self.assertNotIn("--start-from-tf", planner)
         self.assertEqual(planner[planner.index("--start-x") + 1], "0.2")
         self.assertEqual(planner[planner.index("--max-stands") + 1], "1")
+        self.assertEqual(
+            planner[planner.index("--approach-bearing-mode") + 1],
+            "robot-to-stand",
+        )
+        self.assertEqual(
+            float(planner[planner.index("--inflation-radius-m") + 1]),
+            0.25,
+        )
+        self.assertAlmostEqual(
+            float(planner[planner.index("--candidate-transit-radius-m") + 1]),
+            0.31,
+        )
+        self.assertIn("--enforce-physical-clearance", planner)
 
     def test_existing_artifact_is_never_overwritten(self):
         with tempfile.TemporaryDirectory() as tmpdir:

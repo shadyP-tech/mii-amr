@@ -18,6 +18,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.aufgabe04.navigation.models import Pose2D
+from scripts.aufgabe04.navigation.dynamic_approach_planner import (
+    DynamicApproachConfig,
+    minimum_static_obstacle_inflation_m,
+)
 from scripts.aufgabe04.navigation.plan_detected_stand_exploration import (
     main as plan_detected_stand_exploration,
 )
@@ -95,6 +99,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-confidence", type=float, default=0.55)
     parser.add_argument("--merge-distance-m", type=float, default=0.18)
     parser.add_argument("--max-observation-age-sec", type=float, default=8.0)
+    parser.add_argument("--stand-radius-m", type=float, default=0.06)
+    parser.add_argument("--stand-position-uncertainty-m", type=float, default=0.02)
+    parser.add_argument("--robot-radius-m", type=float, default=0.105)
+    parser.add_argument("--collision-margin-m", type=float, default=0.02)
+    parser.add_argument("--tracking-margin-m", type=float, default=0.03)
+    parser.add_argument("--lidar-stop-distance-m", type=float, default=0.20)
+    parser.add_argument("--scan-origin-to-base-offset-m", type=float, default=0.0)
+    parser.add_argument("--lidar-clearance-margin-m", type=float, default=0.02)
+    parser.add_argument("--stand-keepout-radius-m", type=float, default=0.26)
+    parser.add_argument("--approach-offset-m", type=float, default=0.32)
     return parser
 
 
@@ -242,6 +256,7 @@ def _observer_args(args, paths: dict[str, Path]):
 
 
 def _planner_argv(args, paths: dict[str, Path], start: Pose2D) -> list[str]:
+    clearance = _physical_clearance(args)
     return [
         "--observations-jsonl",
         str(paths["observations"]),
@@ -267,6 +282,33 @@ def _planner_argv(args, paths: dict[str, Path], start: Pose2D) -> list[str]:
         str(args.merge_distance_m),
         "--max-observation-age-sec",
         str(args.max_observation_age_sec),
+        "--approach-bearing-mode",
+        "robot-to-stand",
+        "--approach-offset-m",
+        str(args.approach_offset_m),
+        "--keepout-radius-m",
+        str(args.stand_keepout_radius_m),
+        "--candidate-transit-radius-m",
+        str(clearance["minimum_candidate_transit_radius_m"]),
+        "--inflation-radius-m",
+        str(clearance["minimum_static_inflation_m"]),
+        "--stand-radius-m",
+        str(args.stand_radius_m),
+        "--stand-position-uncertainty-m",
+        str(args.stand_position_uncertainty_m),
+        "--robot-radius-m",
+        str(args.robot_radius_m),
+        "--collision-margin-m",
+        str(args.collision_margin_m),
+        "--tracking-margin-m",
+        str(args.tracking_margin_m),
+        "--lidar-stop-distance-m",
+        str(args.lidar_stop_distance_m),
+        "--scan-origin-to-base-offset-m",
+        str(args.scan_origin_to_base_offset_m),
+        "--lidar-clearance-margin-m",
+        str(args.lidar_clearance_margin_m),
+        "--enforce-physical-clearance",
         "--required-map-frame",
         args.map_frame,
         "--required-base-frame",
@@ -288,6 +330,34 @@ def _planner_argv(args, paths: dict[str, Path], start: Pose2D) -> list[str]:
         "--candidate-snapshot-json",
         str(paths["snapshot"]),
     ]
+
+
+def _physical_clearance(args) -> dict[str, float]:
+    config = DynamicApproachConfig(
+        stand_radius_m=args.stand_radius_m,
+        stand_position_uncertainty_m=args.stand_position_uncertainty_m,
+        robot_radius_m=args.robot_radius_m,
+        collision_margin_m=args.collision_margin_m,
+        tracking_margin_m=args.tracking_margin_m,
+        standoff_distance_m=args.approach_offset_m,
+        lidar_stop_distance_m=args.lidar_stop_distance_m,
+        scan_origin_to_base_offset_m=args.scan_origin_to_base_offset_m,
+        lidar_clearance_margin_m=args.lidar_clearance_margin_m,
+        minimum_non_target_keepout_radius_m=args.stand_keepout_radius_m,
+    )
+    return {
+        "minimum_static_inflation_m": minimum_static_obstacle_inflation_m(
+            robot_radius_m=args.robot_radius_m,
+            tracking_margin_m=args.tracking_margin_m,
+            lidar_stop_distance_m=args.lidar_stop_distance_m,
+            scan_origin_to_base_offset_m=args.scan_origin_to_base_offset_m,
+            lidar_clearance_margin_m=args.lidar_clearance_margin_m,
+        ),
+        "minimum_active_standoff_m": config.minimum_lidar_standoff_m,
+        "minimum_candidate_transit_radius_m": (
+            config.non_target_stand_keepout_radius_m
+        ),
+    }
 
 
 def _wait_for_ready_pose(
@@ -402,6 +472,9 @@ def _summary(paths: dict[str, Path], start: Pose2D) -> dict[str, object]:
         },
         "route_length_m": leg["route_length_m"],
         "route_point_count": leg["route_point_count"],
+        "physical_clearance": metadata["physical_clearance"],
+        "approach_bearing_mode": metadata["approach_bearing_mode"],
+        "selected_approach_pose": metadata["selected_approach_pose"],
         "artifacts": {
             key: str(path)
             for key, path in paths.items()
@@ -419,10 +492,26 @@ def main(argv: list[str] | None = None) -> int:
         "observation_duration_sec",
         "nomotion_refresh_sec",
         "max_observation_age_sec",
+        "stand_radius_m",
+        "robot_radius_m",
+        "lidar_stop_distance_m",
+        "approach_offset_m",
     ):
         value = getattr(args, name)
         if not math.isfinite(value) or value <= 0.0:
             parser.error(f"--{name.replace('_', '-')} must be finite and positive")
+    for name in (
+        "stand_position_uncertainty_m",
+        "collision_margin_m",
+        "tracking_margin_m",
+        "lidar_clearance_margin_m",
+        "stand_keepout_radius_m",
+    ):
+        value = getattr(args, name)
+        if not math.isfinite(value) or value < 0.0:
+            parser.error(f"--{name.replace('_', '-')} must be finite and non-negative")
+    if not math.isfinite(args.scan_origin_to_base_offset_m):
+        parser.error("--scan-origin-to-base-offset-m must be finite")
     output_dir = args.output_dir or _default_output_dir()
     paths = _artifact_paths(output_dir)
     try:

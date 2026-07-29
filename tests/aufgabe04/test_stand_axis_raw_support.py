@@ -16,7 +16,11 @@ from scripts.aufgabe04.perception.stand_axis import head_candidates
 from scripts.aufgabe04.perception.stand_axis_image import ImagePoint
 from scripts.aufgabe04.perception.stand_axis.head_candidates import (
     _head_first_face_from_edges,
+    _select_outer_supported_head_candidate,
     _short_centered_neck_support,
+)
+from scripts.aufgabe04.perception.stand_axis.models import (
+    _QuadrilateralEdgeSupport,
 )
 from scripts.aufgabe04.perception.stand_axis_image import (
     _SilhouetteFaceCandidate,
@@ -141,6 +145,59 @@ class StandAxisRawSupportTest(unittest.TestCase):
                 max_aspect_ratio=1.8,
             )
         )
+
+    def test_nested_raw_supported_candidate_selection_prefers_outer_frame(self):
+        inner = _SilhouetteFaceCandidate(
+            corners=(
+                ImagePoint(40.0, 30.0),
+                ImagePoint(75.0, 30.0),
+                ImagePoint(75.0, 112.0),
+                ImagePoint(40.0, 112.0),
+            ),
+            face_mask=object(),
+        )
+        outer = _SilhouetteFaceCandidate(
+            corners=(
+                ImagePoint(17.0, 33.0),
+                ImagePoint(72.0, 33.0),
+                ImagePoint(72.0, 113.0),
+                ImagePoint(17.0, 113.0),
+            ),
+            face_mask=object(),
+        )
+        unrelated_large = _SilhouetteFaceCandidate(
+            corners=(
+                ImagePoint(180.0, 20.0),
+                ImagePoint(280.0, 20.0),
+                ImagePoint(280.0, 120.0),
+                ImagePoint(180.0, 120.0),
+            ),
+            face_mask=object(),
+        )
+        support = _QuadrilateralEdgeSupport(
+            top=0.9,
+            right=0.9,
+            bottom_left=0.9,
+            bottom_right=0.9,
+            left=0.9,
+            tolerance_px=2.0,
+        )
+
+        with patch.object(
+            head_candidates,
+            "_quadrilateral_edge_support",
+            return_value=support,
+        ):
+            selected = _select_outer_supported_head_candidate(
+                object(),
+                (
+                    (inner, 9.0),
+                    (outer, 8.0),
+                    (unrelated_large, 100.0),
+                ),
+            )
+
+        self.assertIs(selected, outer)
 
     @unittest.skipIf(
         cv2 is None or numpy is None,

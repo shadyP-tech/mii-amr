@@ -5,7 +5,12 @@ import unittest
 from pathlib import Path
 
 from scripts.aufgabe04.perception import stand_axis_image
-from scripts.aufgabe04.perception.stand_axis import geometry, models, preprocessing
+from scripts.aufgabe04.perception.stand_axis import (
+    geometry,
+    models,
+    preprocessing,
+    temporal_geometry,
+)
 from scripts.aufgabe04.perception.stand_axis import raw_support, stem_candidates
 
 
@@ -120,6 +125,7 @@ class StandAxisFacadeTest(unittest.TestCase):
             preprocessing,
             raw_support,
             stem_candidates,
+            temporal_geometry,
         ):
             with self.subTest(module=module.__name__):
                 source = Path(module.__file__).read_text(encoding="utf-8")

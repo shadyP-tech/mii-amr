@@ -1,22 +1,18 @@
 from __future__ import annotations
 
 import math
+from collections import deque
 from dataclasses import dataclass, replace
 
-from scripts.aufgabe04.perception.stand_axis_image import StandAxisImageEstimate
-
-
-@dataclass(frozen=True)
-class _HeadCandidateSignature:
-    center_x_px: float
-    center_y_px: float
-    extent_px: float
-    width_px: float
-    height_px: float
-    side_direction_rad: float
-    corners_px: tuple[tuple[float, float], ...]
-    yaw_deg: float | None
-    source: str
+from scripts.aufgabe04.perception.stand_axis.models import StandAxisImageEstimate
+from scripts.aufgabe04.perception.stand_axis.temporal_geometry import (
+    HeadCandidateSignature as _HeadCandidateSignature,
+    blend_parallel_head_estimates as _blend_parallel_head_estimates,
+    head_candidate_signature as _head_candidate_signature,
+    outer_candidate_area as _outer_candidate_area,
+    single_boundary_inset_index as _single_boundary_inset_index,
+    structural_geometry_compatible as _structural_geometry_compatible,
+)
 
 
 @dataclass(frozen=True)
@@ -38,54 +34,6 @@ class HeadTemporalSelection:
         return "unavailable"
 
 
-def _head_candidate_signature(
-    estimate: StandAxisImageEstimate,
-) -> _HeadCandidateSignature | None:
-    if not estimate.usable or estimate.corners is None:
-        return None
-    top_left, top_right, bottom_right, bottom_left = estimate.corners
-    xs = [point.u_px for point in estimate.corners]
-    ys = [point.v_px for point in estimate.corners]
-    if not all(math.isfinite(value) for value in (*xs, *ys)):
-        return None
-    extent = max(max(xs) - min(xs), max(ys) - min(ys))
-    if extent <= 0.0:
-        return None
-    width_px = (
-        math.dist((top_left.u_px, top_left.v_px), (top_right.u_px, top_right.v_px))
-        + math.dist((bottom_left.u_px, bottom_left.v_px), (bottom_right.u_px, bottom_right.v_px))
-    ) / 2.0
-    left_side = (bottom_left.u_px - top_left.u_px, bottom_left.v_px - top_left.v_px)
-    right_side = (bottom_right.u_px - top_right.u_px, bottom_right.v_px - top_right.v_px)
-    left_height = math.hypot(*left_side)
-    right_height = math.hypot(*right_side)
-    height_px = (left_height + right_height) / 2.0
-    if width_px <= 0.0 or height_px <= 0.0:
-        return None
-    left_direction = (left_side[0] / left_height, left_side[1] / left_height)
-    right_direction = (right_side[0] / right_height, right_side[1] / right_height)
-    if left_direction[0] * right_direction[0] + left_direction[1] * right_direction[1] < 0.0:
-        right_direction = (-right_direction[0], -right_direction[1])
-    side_direction_rad = math.atan2(
-        left_direction[1] + right_direction[1],
-        left_direction[0] + right_direction[0],
-    )
-    yaw_deg = estimate.yaw_deg
-    if yaw_deg is not None and not math.isfinite(yaw_deg):
-        yaw_deg = None
-    return _HeadCandidateSignature(
-        center_x_px=(min(xs) + max(xs)) / 2.0,
-        center_y_px=(min(ys) + max(ys)) / 2.0,
-        extent_px=extent,
-        width_px=width_px,
-        height_px=height_px,
-        side_direction_rad=side_direction_rad,
-        corners_px=tuple((point.u_px, point.v_px) for point in estimate.corners),
-        yaw_deg=yaw_deg,
-        source=estimate.source,
-    )
-
-
 class HeadCandidateTemporalGate:
     """Reject head jumps and expose bounded holds without creating evidence."""
 
@@ -104,6 +52,13 @@ class HeadCandidateTemporalGate:
         hold_sec: float = 0.35,
         structure_owner_memory_sec: float | None = None,
         accepted_state_timeout_sec: float = 0.75,
+        structural_window_frames: int = 0,
+        structural_required_frames: int = 0,
+        structural_max_center_jump_scale: float = 0.22,
+        structural_max_height_ratio: float = 1.20,
+        outer_inset_hysteresis_frames: int = 3,
+        outer_inset_min_scale: float = 0.05,
+        geometry_filter_alpha: float = 1.0,
     ) -> None:
         if not math.isfinite(hold_sec) or hold_sec < 0.0:
             raise ValueError("hold_sec must be finite and non-negative")
@@ -127,6 +82,41 @@ class HeadCandidateTemporalGate:
         self.accepted_state_timeout_sec = float(
             accepted_state_timeout_sec
         )
+        self.structural_window_frames = max(0, int(structural_window_frames))
+        self.structural_required_frames = max(
+            0,
+            int(structural_required_frames),
+        )
+        if bool(self.structural_window_frames) != bool(
+            self.structural_required_frames
+        ):
+            raise ValueError(
+                "structural window and required frames must both be enabled"
+            )
+        if (
+            self.structural_window_frames
+            and self.structural_required_frames > self.structural_window_frames
+        ):
+            raise ValueError(
+                "structural_required_frames cannot exceed the window"
+            )
+        self.structural_max_center_jump_scale = float(
+            structural_max_center_jump_scale
+        )
+        self.structural_max_height_ratio = float(structural_max_height_ratio)
+        self.outer_inset_hysteresis_frames = max(
+            1,
+            int(outer_inset_hysteresis_frames),
+        )
+        self.outer_inset_min_scale = float(outer_inset_min_scale)
+        if (
+            not math.isfinite(geometry_filter_alpha)
+            or not 0.0 < geometry_filter_alpha <= 1.0
+        ):
+            raise ValueError(
+                "geometry_filter_alpha must be in the interval (0, 1]"
+            )
+        self.geometry_filter_alpha = float(geometry_filter_alpha)
         self.structure_owner_memory_sec = (
             max(0.75, hold_sec)
             if structure_owner_memory_sec is None
@@ -145,17 +135,32 @@ class HeadCandidateTemporalGate:
         self._last_accepted_estimate: StandAxisImageEstimate | None = None
         self._last_accepted_at_sec: float | None = None
         self._last_structure_owner_at_sec: float | None = None
+        self._structural_window = deque(
+            maxlen=max(1, self.structural_window_frames)
+        )
+        self._selected_estimate: StandAxisImageEstimate | None = None
+        self._inset_pending: _HeadCandidateSignature | None = None
+        self._inset_pending_boundary: int | None = None
+        self._inset_pending_count = 0
 
     def _expire_accepted_state(self) -> None:
         self._accepted = None
         self._last_accepted_estimate = None
         self._last_accepted_at_sec = None
         self._last_structure_owner_at_sec = None
+        self._selected_estimate = None
+        self._structural_window.clear()
+        self._clear_inset_pending()
         self._clear_pending()
 
     def _clear_pending(self) -> None:
         self._pending = None
         self._pending_count = 0
+
+    def _clear_inset_pending(self) -> None:
+        self._inset_pending = None
+        self._inset_pending_boundary = None
+        self._inset_pending_count = 0
 
     def _compatible(
         self,
@@ -219,11 +224,146 @@ class HeadCandidateTemporalGate:
             <= self.max_size_ratio
         )
 
+    def _structurally_compatible(
+        self,
+        previous: _HeadCandidateSignature,
+        current: _HeadCandidateSignature,
+    ) -> bool:
+        return _structural_geometry_compatible(
+            previous,
+            current,
+            max_center_jump_scale=self.structural_max_center_jump_scale,
+            max_height_ratio=self.structural_max_height_ratio,
+            max_side_direction_jump_deg=self.max_side_direction_jump_deg,
+        )
+
+    def _structural_cluster(
+        self,
+        seed: _HeadCandidateSignature,
+    ) -> list[tuple[StandAxisImageEstimate, _HeadCandidateSignature]]:
+        return [
+            (estimate, signature)
+            for estimate, signature in self._structural_window
+            if signature is not None
+            and self._structurally_compatible(seed, signature)
+        ]
+
+    def _accept_structural_window(
+        self,
+        estimate: StandAxisImageEstimate,
+        signature: _HeadCandidateSignature,
+    ) -> tuple[bool, str]:
+        self._structural_window.append((estimate, signature))
+        cluster = self._structural_cluster(signature)
+
+        if self._accepted is None:
+            if len(cluster) < self.structural_required_frames:
+                return False, "temporal_head_bootstrap"
+            # Nested outer/inner Canny bands are one structural identity. Start
+            # the track on the largest supported observation in the window,
+            # rather than whichever band happened to win the last frame.
+            selected, selected_signature = max(
+                cluster,
+                key=lambda item: _outer_candidate_area(item[0]),
+            )
+            self._accepted = selected_signature
+            self._selected_estimate = selected
+            self._structural_window.clear()
+            self._clear_pending()
+            self._clear_inset_pending()
+            return True, "accepted_structural_consensus"
+
+        if self._structurally_compatible(self._accepted, signature):
+            minimum_inset_px = max(
+                3.0,
+                self.outer_inset_min_scale * self._accepted.height_px,
+            )
+            inset_boundary = _single_boundary_inset_index(
+                self._accepted,
+                signature,
+                minimum_inset_px=minimum_inset_px,
+            )
+            if inset_boundary is not None:
+                if (
+                    self._inset_pending is not None
+                    and self._inset_pending_boundary == inset_boundary
+                    and self._structurally_compatible(
+                        self._inset_pending,
+                        signature,
+                    )
+                ):
+                    self._inset_pending = signature
+                    self._inset_pending_count += 1
+                else:
+                    self._inset_pending = signature
+                    self._inset_pending_boundary = inset_boundary
+                    self._inset_pending_count = 1
+                if (
+                    self._inset_pending_count
+                    < self.outer_inset_hysteresis_frames
+                    and self._selected_estimate is not None
+                ):
+                    # Raw evidence still owns this frame, but display the last
+                    # outer geometry until the inward band persists.
+                    return True, "accepted_outer_border_hysteresis"
+            else:
+                self._clear_inset_pending()
+
+            selected_estimate = (
+                _blend_parallel_head_estimates(
+                    self._selected_estimate,
+                    estimate,
+                    alpha=self.geometry_filter_alpha,
+                )
+                if self._selected_estimate is not None
+                else estimate
+            )
+            selected_signature = _head_candidate_signature(selected_estimate)
+            self._accepted = (
+                signature
+                if selected_signature is None
+                else selected_signature
+            )
+            self._selected_estimate = selected_estimate
+            self._structural_window.clear()
+            self._clear_pending()
+            self._clear_inset_pending()
+            return True, "accepted_structural_tracking"
+
+        # A genuinely moved/new head still requires bounded rolling evidence.
+        if len(cluster) >= self.reacquire_frames:
+            selected, selected_signature = max(
+                cluster,
+                key=lambda item: _outer_candidate_area(item[0]),
+            )
+            if not self._size_compatible(self._accepted, selected_signature):
+                return False, "temporal_head_outlier"
+            self._accepted = selected_signature
+            self._selected_estimate = selected
+            self._structural_window.clear()
+            self._clear_pending()
+            self._clear_inset_pending()
+            return True, "reacquired_structural_consensus"
+        return False, "temporal_head_outlier"
+
     def accept(self, estimate: StandAxisImageEstimate) -> tuple[bool, str]:
         signature = _head_candidate_signature(estimate)
         if signature is None:
+            if self.structural_window_frames:
+                # Missing frames occupy the rolling window and therefore cannot
+                # be silently skipped while establishing a 3-of-5 consensus.
+                self._structural_window.append((estimate, None))
             self._clear_pending()
             return False, estimate.reason
+        if self.structural_window_frames:
+            if signature.source == "edge_qr_scaled_front":
+                self._accepted = signature
+                self._selected_estimate = estimate
+                self._structural_window.clear()
+                self._clear_pending()
+                self._clear_inset_pending()
+                return True, "accepted_qr_anchor"
+            return self._accept_structural_window(estimate, signature)
         if self._accepted is None:
             if self._pending is not None and self._compatible(self._pending, signature):
                 self._pending = signature
@@ -321,12 +461,18 @@ class HeadCandidateTemporalGate:
             decision_reason = rejection_reason
 
         if current_accepted:
-            if estimate.source == "edge_structure_owned_head":
+            selected_estimate = (
+                self._selected_estimate
+                if self.structural_window_frames
+                and self._selected_estimate is not None
+                else estimate
+            )
+            if selected_estimate.source == "edge_structure_owned_head":
                 self._last_structure_owner_at_sec = now_sec
-            self._last_accepted_estimate = estimate
+            self._last_accepted_estimate = selected_estimate
             self._last_accepted_at_sec = now_sec
             return HeadTemporalSelection(
-                estimate=estimate,
+                estimate=selected_estimate,
                 current_accepted=True,
                 held=False,
                 reason=decision_reason,

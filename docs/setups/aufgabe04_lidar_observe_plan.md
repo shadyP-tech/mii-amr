@@ -74,10 +74,66 @@ containing:
 - `pipeline_summary.json`
 
 `pipeline_summary.json` records the selected candidate, captured start pose,
-route length, and `motion_published: false`.
+route length, robot-facing terminal pose, physical-clearance calculation, and
+`motion_published: false`. The default nominal Burger values are:
 
-The resulting exploration CSV is not a sealed real-motion route. Do not pass
-it to `run_single_station_segment.py` by weakening route-kind or simulation
-gates. A physical approach requires the real hardware/site profile, passive
-survey/catalog, certified route artifacts, dry-run preflight, and explicit
-operator motion confirmation.
+- robot radius: `0.105 m`
+- certified tracking tube: `0.03 m`
+- LiDAR stop distance: `0.20 m`
+- static map inflation: `0.25 m`
+- non-target candidate transit radius: `0.31 m`
+- selected-stand approach offset: `0.32 m`
+
+Replace the nominal mounting/clearance values with measured site values when
+they differ.
+
+## Terminal C: seal the selected pre-approach
+
+Set `RUN_ROOT` to the exact timestamped directory printed by the preceding
+command:
+
+```bash
+export RUN_ROOT=results/aufgabe04/real_explore_YYYYMMDD_HHMMSS
+
+python3 scripts/aufgabe04/navigation/prepare_detected_stand_preapproach.py \
+  --pipeline-root "$RUN_ROOT"
+```
+
+This creates a typed, non-simulation route plus its execution certificate
+under `$RUN_ROOT/preapproach_execution/`. It binds the selected candidate
+snapshot, map bundle, robot-facing terminal yaw, physical clearances, exact
+route bytes, tracking tube, and command owner.
+
+## Terminal C: live runner dry-run
+
+This step performs artifact and live ROS preflight checks but never starts the
+waypoint follower:
+
+```bash
+python3 scripts/aufgabe04/navigation/run_single_station_segment.py \
+  --route-csv "$RUN_ROOT/preapproach_execution/route.csv" \
+  --diagnostics-json "$RUN_ROOT/preapproach_execution/route_diagnostics.json" \
+  --route-certificate-json "$RUN_ROOT/preapproach_execution/route_certificate.json" \
+  --candidate-snapshot "$RUN_ROOT/candidate_snapshot.json" \
+  --leg-index 0 \
+  --localization-source amcl \
+  --map-frame map \
+  --odom-frame odom \
+  --base-frame base_footprint \
+  --scan-topic scan \
+  --odom-topic odom \
+  --amcl-topic amcl_pose \
+  --cmd-vel-topic cmd_vel \
+  --certified-route-tube-radius-m 0.03 \
+  --min-obstacle-distance-m 0.20 \
+  --preflight-json "$RUN_ROOT/preapproach_execution/preflight.json" \
+  --semantic-log "$RUN_ROOT/preapproach_execution/dry_run_events.jsonl" \
+  --results-csv "$RUN_ROOT/preapproach_execution/dry_run_results.csv" \
+  --dry-run
+```
+
+Do not remove `--dry-run` until the physical parameters have been checked
+against the robot, the dry-run passes, `/cmd_vel` ownership is unambiguous, the
+arena is clear, and an operator is beside the robot with the physical stop and
+a separate zero-Twist terminal ready. The later motion invocation still
+requires an explicit typed `RUN`; the axis viewer remains diagnostic-only.
