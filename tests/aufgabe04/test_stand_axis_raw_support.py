@@ -24,9 +24,11 @@ from scripts.aufgabe04.perception.stand_axis_image import (
     _level_camera_endpoint_perspective_consistent,
     _parallel_side_lengths_comparable,
     _parallel_side_run_endpoints,
+    _quadrilateral_edge_support,
     _raw_side_evidence_and_corners,
     _validated_refitted_head_corners,
     order_corners,
+    quadrilateral_aspect_ratio,
 )
 from scripts.aufgabe04.perception.stand_structure_hypothesis import (
     StandStructureEvidence,
@@ -139,6 +141,62 @@ class StandAxisRawSupportTest(unittest.TestCase):
                 max_aspect_ratio=1.8,
             )
         )
+
+    @unittest.skipIf(
+        cv2 is None or numpy is None,
+        "numpy and OpenCV are required for projective head fitting",
+    )
+    def test_colour_gated_head_first_path_accepts_narrow_projective_trapezoid(self):
+        edges = numpy.zeros((210, 200), dtype=numpy.uint8)
+        corners = (
+            ImagePoint(80.0, 30.0),
+            ImagePoint(118.0, 35.0),
+            ImagePoint(116.0, 135.0),
+            ImagePoint(82.0, 130.0),
+        )
+        polygon = numpy.array(
+            [[(round(point.u_px), round(point.v_px)) for point in corners]],
+            dtype=numpy.int32,
+        )
+        cv2.polylines(edges, polygon, True, 255, thickness=2)
+        cv2.rectangle(edges, (94, 132), (104, 180), 255, thickness=2)
+
+        face_mask, fitted = _raw_side_evidence_and_corners(
+            cv2,
+            edges,
+            corners,
+            real_camera_endpoint_fraction=0.15,
+            maximum_parallel_side_length_ratio=1.45,
+        )
+        self.assertIsNotNone(fitted)
+        self.assertTrue(
+            _quadrilateral_edge_support(cv2, face_mask, fitted).accepted
+        )
+        self.assertTrue(_short_centered_neck_support(edges, fitted))
+        verified = head_candidates._head_candidate_from_rough_corners(
+            cv2,
+            edges,
+            corners,
+            min_aspect_ratio=0.45,
+            max_aspect_ratio=1.80,
+            fixed_parallel_side_direction=None,
+            bounded_endpoint_recovery=True,
+        )
+        candidate = _head_first_face_from_edges(
+            cv2,
+            edges,
+            measurement_edges=edges,
+            min_edge_height_px=8.0,
+            min_aspect_ratio=0.45,
+            max_aspect_ratio=1.80,
+            fixed_parallel_side_direction=None,
+            bounded_endpoint_recovery=True,
+        )
+
+        self.assertIsNotNone(verified)
+        self.assertIsNotNone(candidate)
+        self.assertTrue(candidate.rectangle_fit_reliable)
+        self.assertLess(quadrilateral_aspect_ratio(candidate.corners), 0.45)
 
     @unittest.skipIf(
         numpy is None,

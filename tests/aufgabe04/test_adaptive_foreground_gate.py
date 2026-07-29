@@ -10,6 +10,7 @@ except ImportError:  # pragma: no cover - optional outside the project environme
     numpy = None
 
 from scripts.aufgabe04.perception.stand_axis.adaptive_foreground_gate import (
+    AdaptiveForegroundGateTracker,
     adaptive_foreground_gate_from_background,
 )
 
@@ -81,3 +82,44 @@ class AdaptiveForegroundGateTest(unittest.TestCase):
         self.assertFalse(result.applied)
         self.assertIsNone(result.gate)
         self.assertEqual(result.reason, "foreground_coverage_unreliable")
+
+    def test_tracker_recomputes_current_gate_from_cached_colour_model(self):
+        frame, seed = self._scene_with_colored_head((35, 45, 210))
+        empty_seed = numpy.zeros(frame.shape[:2], dtype=numpy.uint8)
+        tracker = AdaptiveForegroundGateTracker(model_ttl_sec=0.75)
+
+        current = tracker.update(cv2, numpy, frame, seed, now_sec=10.0)
+        cached = tracker.update(
+            cv2,
+            numpy,
+            frame,
+            empty_seed,
+            now_sec=10.2,
+        )
+
+        self.assertTrue(current.applied)
+        self.assertEqual(current.reason, "applied_current_model")
+        self.assertTrue(cached.applied)
+        self.assertEqual(cached.reason, "applied_cached_model")
+        self.assertEqual(int(cached.gate[76, 205]), 255)
+        self.assertEqual(int(cached.gate[76, 10]), 0)
+
+    def test_tracker_releases_enforcement_after_model_expiry(self):
+        frame, seed = self._scene_with_colored_head((35, 210, 50))
+        empty_seed = numpy.zeros(frame.shape[:2], dtype=numpy.uint8)
+        tracker = AdaptiveForegroundGateTracker(model_ttl_sec=0.5)
+
+        tracker.update(cv2, numpy, frame, seed, now_sec=20.0)
+        expired = tracker.update(
+            cv2,
+            numpy,
+            frame,
+            empty_seed,
+            now_sec=20.6,
+        )
+
+        self.assertTrue(tracker.has_activated)
+        self.assertFalse(tracker.enforcement_active)
+        self.assertFalse(expired.applied)
+        self.assertIsNone(expired.gate)
+        self.assertEqual(expired.reason, "background_model_unavailable")

@@ -26,6 +26,26 @@ from scripts.aufgabe04.perception.stand_axis.raw_support import (
 # proposals remain independently validated against untouched Canny pixels.
 _MAX_SIDE_FIRST_RAW_VERIFICATIONS = 16
 _MAX_HORIZONTAL_RAW_VERIFICATIONS = 6
+_MAX_PROJECTIVE_HEAD_YAW_DEG = 70.0
+_MIN_PROJECTED_HEAD_ASPECT = math.cos(
+    math.radians(_MAX_PROJECTIVE_HEAD_YAW_DEG)
+)
+
+
+def _head_first_aspect_bounds(
+    min_aspect_ratio: float,
+    max_aspect_ratio: float,
+    *,
+    projective_real_camera: bool,
+) -> tuple[float, float]:
+    """Return bounds for a frontal square or its perspective trapezoid."""
+
+    minimum = (
+        _MIN_PROJECTED_HEAD_ASPECT
+        if projective_real_camera
+        else max(0.65, min_aspect_ratio)
+    )
+    return minimum, min(1.35, max_aspect_ratio)
 
 
 def _short_centered_neck_support(edge_mask, corners) -> bool:
@@ -105,7 +125,12 @@ def _head_candidate_from_rough_corners(
         return None
     fitted = order_corners(fitted)
     fitted_aspect = quadrilateral_aspect_ratio(fitted)
-    if not max(0.65, min_aspect_ratio) <= fitted_aspect <= min(1.35, max_aspect_ratio):
+    minimum_aspect, maximum_aspect = _head_first_aspect_bounds(
+        min_aspect_ratio,
+        max_aspect_ratio,
+        projective_real_camera=bounded_endpoint_recovery,
+    )
+    if not minimum_aspect <= fitted_aspect <= maximum_aspect:
         return None
     support = _quadrilateral_edge_support(cv2, face_mask, fitted)
     if not support.accepted or not _short_centered_neck_support(raw_edges, fitted):
@@ -173,6 +198,15 @@ def _side_first_head_candidates(
         )
 
     ranked_pairs = []
+    minimum_aspect, maximum_aspect = _head_first_aspect_bounds(
+        min_aspect_ratio,
+        max_aspect_ratio,
+        projective_real_camera=bounded_endpoint_recovery,
+    )
+    minimum_rail_separation = max(
+        2.0 * min_edge_height_px,
+        (0.05 if bounded_endpoint_recovery else 0.16) * frame_width,
+    )
     for index, left in enumerate(side_segments):
         for right in side_segments[index + 1 :]:
             left_top, left_bottom, left_direction, left_length = left
@@ -187,7 +221,7 @@ def _side_first_head_candidates(
                 continue
             left_center_x = (left_top.u_px + left_bottom.u_px) / 2.0
             right_center_x = (right_top.u_px + right_bottom.u_px) / 2.0
-            if abs(right_center_x - left_center_x) < 0.16 * frame_width:
+            if abs(right_center_x - left_center_x) < minimum_rail_separation:
                 continue
             if left_center_x > right_center_x:
                 left_top, right_top = right_top, left_top
@@ -195,7 +229,7 @@ def _side_first_head_candidates(
             width = (_distance(left_top, right_top) + _distance(left_bottom, right_bottom)) / 2.0
             height = (left_length + right_length) / 2.0
             aspect = width / max(height, 1.0)
-            if not max(0.65, min_aspect_ratio) <= aspect <= min(1.35, max_aspect_ratio):
+            if not minimum_aspect <= aspect <= maximum_aspect:
                 continue
             if height > 0.62 * frame_height or width > 0.72 * frame_width:
                 continue
@@ -339,6 +373,11 @@ def _head_first_face_from_edges(
     if side_best is not None and fixed_parallel_side_direction is None:
         return side_best
     ranked_horizontal_pairs = []
+    minimum_aspect, maximum_aspect = _head_first_aspect_bounds(
+        min_aspect_ratio,
+        max_aspect_ratio,
+        projective_real_camera=bounded_endpoint_recovery,
+    )
     for upper in horizontals:
         for lower in horizontals:
             if upper is lower:
@@ -362,12 +401,26 @@ def _head_first_face_from_edges(
             # Do not let a QR module or inner printed frame seed the outer
             # stand head.  The real outer frame spans several edge-height
             # gates even at the far workstation position.
-            if mean_width < max(4.5 * min_edge_height_px, 0.16 * frame_width):
+            minimum_horizontal_width = max(
+                (
+                    2.0
+                    if bounded_endpoint_recovery
+                    else 4.5
+                )
+                * min_edge_height_px,
+                (
+                    0.05
+                    if bounded_endpoint_recovery
+                    else 0.16
+                )
+                * frame_width,
+            )
+            if mean_width < minimum_horizontal_width:
                 continue
             aspect = mean_width / max(height, 1.0)
             # Head-first proposals are deliberately much tighter than the
             # generic legacy 0.45--1.8 detector envelope.
-            if not max(0.65, min_aspect_ratio) <= aspect <= min(1.35, max_aspect_ratio):
+            if not minimum_aspect <= aspect <= maximum_aspect:
                 continue
             if mean_width > 0.72 * frame_width:
                 continue

@@ -1,4 +1,5 @@
 import ast
+import math
 import sys
 import tempfile
 import unittest
@@ -31,6 +32,7 @@ from scripts.aufgabe04.perception.debug.stand_axis_viewer import (  # noqa: E402
     _centered_candidate_roi,
     annotate_recording_indicator,
     _detected_head_roi,
+    _detector_result_is_obsolete,
     _diagnostic_roi_image,
     _head_display_snapshot_for_selection,
     _initialize_display_windows,
@@ -39,6 +41,9 @@ from scripts.aufgabe04.perception.debug.stand_axis_viewer import (  # noqa: E402
     _standalone_head_geometry_reason,
     _validate_runtime_args,
     build_parser,
+)
+from scripts.aufgabe04.perception.stand_axis.head_candidates import (  # noqa: E402
+    _head_first_aspect_bounds,
 )
 from scripts.aufgabe04.perception.stand_axis_image import (  # noqa: E402
     ImagePoint,
@@ -319,7 +324,7 @@ class StandAxisImageTest(unittest.TestCase):
         self.assertTrue(held.held)
         self.assertEqual(held.reason, "temporal_head_outlier")
 
-    def test_temporal_gate_refreshes_hold_for_same_target_malformed_refits(self):
+    def test_temporal_gate_does_not_refresh_hold_from_malformed_refits(self):
         gate = HeadCandidateTemporalGate(reacquire_frames=3, hold_sec=0.35)
         stable = estimate_stand_axis_from_corners(
             self.make_corners([(150, 90), (250, 95), (248, 198), (152, 192)])
@@ -333,8 +338,77 @@ class StandAxisImageTest(unittest.TestCase):
         held_two = gate.stabilize(malformed, now_sec=10.5)
 
         self.assertTrue(held_one.held)
-        self.assertTrue(held_two.held)
-        self.assertEqual(held_two.estimate.corners, stable.corners)
+        self.assertFalse(held_two.held)
+        self.assertIsNone(held_two.estimate)
+
+    def test_temporal_gate_expires_hidden_owner_before_narrow_reacquisition(self):
+        gate = HeadCandidateTemporalGate(
+            initial_acquire_frames=1,
+            reacquire_frames=3,
+            hold_sec=0.0,
+            accepted_state_timeout_sec=0.30,
+        )
+        heater_wide = estimate_stand_axis_from_corners(
+            self.make_corners([(120, 80), (240, 80), (240, 180), (120, 180)])
+        )
+        rotated_true_head = estimate_stand_axis_from_corners(
+            self.make_corners([(163, 80), (197, 84), (197, 180), (163, 176)])
+        )
+
+        acquired = gate.stabilize(heater_wide, now_sec=10.0)
+        blocked = gate.stabilize(rotated_true_head, now_sec=10.1)
+        reacquired = gate.stabilize(rotated_true_head, now_sec=10.31)
+
+        self.assertTrue(acquired.current_accepted)
+        self.assertFalse(blocked.current_accepted)
+        self.assertTrue(reacquired.current_accepted)
+        self.assertEqual(reacquired.estimate.corners, rotated_true_head.corners)
+
+    def test_projective_real_head_bounds_cover_seventy_degree_view(self):
+        minimum, maximum = _head_first_aspect_bounds(
+            0.45,
+            1.80,
+            projective_real_camera=True,
+        )
+        legacy_minimum, legacy_maximum = _head_first_aspect_bounds(
+            0.45,
+            1.80,
+            projective_real_camera=False,
+        )
+
+        self.assertAlmostEqual(minimum, math.cos(math.radians(70.0)))
+        self.assertEqual(maximum, 1.35)
+        self.assertEqual(legacy_minimum, 0.65)
+        self.assertEqual(legacy_maximum, 1.35)
+
+    def test_detector_result_freshness_requires_newer_frame_and_deadline(self):
+        self.assertFalse(
+            _detector_result_is_obsolete(
+                processed_sequence=10,
+                newest_sequence=10,
+                received_monotonic_sec=5.0,
+                completed_monotonic_sec=5.5,
+                max_result_age_sec=0.18,
+            )
+        )
+        self.assertFalse(
+            _detector_result_is_obsolete(
+                processed_sequence=10,
+                newest_sequence=11,
+                received_monotonic_sec=5.0,
+                completed_monotonic_sec=5.17,
+                max_result_age_sec=0.18,
+            )
+        )
+        self.assertTrue(
+            _detector_result_is_obsolete(
+                processed_sequence=10,
+                newest_sequence=12,
+                received_monotonic_sec=5.0,
+                completed_monotonic_sec=5.19,
+                max_result_age_sec=0.18,
+            )
+        )
 
     def test_temporal_gate_can_require_initial_geometry_consensus(self):
         gate = HeadCandidateTemporalGate(

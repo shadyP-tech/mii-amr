@@ -103,6 +103,7 @@ class HeadCandidateTemporalGate:
         initial_acquire_frames: int = 1,
         hold_sec: float = 0.35,
         structure_owner_memory_sec: float | None = None,
+        accepted_state_timeout_sec: float = 0.75,
     ) -> None:
         if not math.isfinite(hold_sec) or hold_sec < 0.0:
             raise ValueError("hold_sec must be finite and non-negative")
@@ -116,6 +117,16 @@ class HeadCandidateTemporalGate:
         self.reacquire_frames = max(1, int(reacquire_frames))
         self.initial_acquire_frames = max(1, int(initial_acquire_frames))
         self.hold_sec = hold_sec
+        if (
+            not math.isfinite(accepted_state_timeout_sec)
+            or accepted_state_timeout_sec <= 0.0
+        ):
+            raise ValueError(
+                "accepted_state_timeout_sec must be finite and positive"
+            )
+        self.accepted_state_timeout_sec = float(
+            accepted_state_timeout_sec
+        )
         self.structure_owner_memory_sec = (
             max(0.75, hold_sec)
             if structure_owner_memory_sec is None
@@ -134,6 +145,13 @@ class HeadCandidateTemporalGate:
         self._last_accepted_estimate: StandAxisImageEstimate | None = None
         self._last_accepted_at_sec: float | None = None
         self._last_structure_owner_at_sec: float | None = None
+
+    def _expire_accepted_state(self) -> None:
+        self._accepted = None
+        self._last_accepted_estimate = None
+        self._last_accepted_at_sec = None
+        self._last_structure_owner_at_sec = None
+        self._clear_pending()
 
     def _clear_pending(self) -> None:
         self._pending = None
@@ -199,28 +217,6 @@ class HeadCandidateTemporalGate:
         return (
             max(previous.extent_px, current.extent_px) / minimum_extent
             <= self.max_size_ratio
-        )
-
-    def _same_target_neighborhood(
-        self,
-        previous: _HeadCandidateSignature,
-        current: _HeadCandidateSignature,
-    ) -> bool:
-        """Allow a held rectangle only while the target has not moved away."""
-
-        minimum_extent = max(1.0, min(previous.extent_px, current.extent_px))
-        center_jump = math.hypot(
-            current.center_x_px - previous.center_x_px,
-            current.center_y_px - previous.center_y_px,
-        )
-        return (
-            center_jump <= max(18.0, self.max_center_jump_scale * minimum_extent)
-            # This is a hold-only neighborhood, not an acceptance test. A
-            # malformed refit can be substantially taller than the true head
-            # while still being centred on it; keep the validated rectangle
-            # visible, but never accept that enlarged proposal as fresh.
-            and max(previous.extent_px, current.extent_px) / minimum_extent
-            <= min(2.0, self.max_size_ratio * 1.25)
         )
 
     def accept(self, estimate: StandAxisImageEstimate) -> tuple[bool, str]:
@@ -300,6 +296,15 @@ class HeadCandidateTemporalGate:
     ) -> HeadTemporalSelection:
         if not math.isfinite(now_sec):
             raise ValueError("now_sec must be finite")
+        if (
+            self._accepted is not None
+            and self._last_accepted_at_sec is not None
+            and now_sec - self._last_accepted_at_sec
+            > self.accepted_state_timeout_sec
+        ):
+            # A hidden accepted signature must not outlive the visible hold
+            # and block a narrower, strongly rotated head indefinitely.
+            self._expire_accepted_state()
         if rejection_reason is None:
             if estimate.source == "edge_structure_tracking_candidate":
                 current_accepted, decision_reason = (
@@ -314,23 +319,6 @@ class HeadCandidateTemporalGate:
             self._clear_pending()
             current_accepted = False
             decision_reason = rejection_reason
-
-        if (
-            not current_accepted
-            and decision_reason == "temporal_head_outlier"
-            and self._accepted is not None
-        ):
-            current_signature = _head_candidate_signature(estimate)
-            if (
-                current_signature is not None
-                and self._same_target_neighborhood(self._accepted, current_signature)
-                and self._last_accepted_at_sec is not None
-            ):
-                # The candidate is still centred on the same physical head,
-                # but its newly fitted corners are malformed. Keep the last
-                # fully validated quadrilateral visible instead of allowing a
-                # brief stream of bad refits to erase or flicker the overlay.
-                self._last_accepted_at_sec = now_sec
 
         if current_accepted:
             if estimate.source == "edge_structure_owned_head":

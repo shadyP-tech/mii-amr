@@ -74,7 +74,7 @@ from scripts.aufgabe04.perception.stand_axis.radiator_rib_mask import (
     repeated_vertical_rib_exclusion_mask,
 )
 from scripts.aufgabe04.perception.stand_axis.adaptive_foreground_gate import (
-    adaptive_foreground_gate_from_background,
+    AdaptiveForegroundGateTracker,
 )
 from scripts.aufgabe04.perception.stand_axis_tracking import (
     HeadCandidateTemporalGate,
@@ -296,6 +296,28 @@ def _head_display_snapshot_for_selection(
     if selection.held:
         return last_accepted
     return current
+
+
+def _detector_result_is_obsolete(
+    *,
+    processed_sequence: int,
+    newest_sequence: int,
+    received_monotonic_sec: float | None,
+    completed_monotonic_sec: float,
+    max_result_age_sec: float,
+) -> bool:
+    """Reject an expensive result only when a newer source frame exists."""
+
+    if (
+        max_result_age_sec <= 0.0
+        or newest_sequence <= processed_sequence
+        or received_monotonic_sec is None
+    ):
+        return False
+    return (
+        completed_monotonic_sec - received_monotonic_sec
+        > max_result_age_sec
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -692,6 +714,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.25,
         help="Drop incoming ROS image messages older than this. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--max-result-age-sec",
+        type=float,
+        default=0.18,
+        help=(
+            "Discard a completed real-camera detector result when its local "
+            "receive-to-result age exceeds this and a newer frame is waiting. "
+            "Use 0 to disable."
+        ),
     )
     parser.add_argument(
         "--observation-output-json",
@@ -1581,6 +1613,8 @@ def annotate_frame(
     filtered_proxy,
     age_ms,
     detector_duration_sec,
+    result_age_ms=None,
+    foreground_gate_reason=None,
 ) -> None:
     if estimate.corners is not None:
         corners = estimate.corners
@@ -1630,6 +1664,10 @@ def annotate_frame(
         timing_parts.append(f"age={age_ms:.0f}ms")
     if detector_duration_sec is not None:
         timing_parts.append(f"detect={detector_duration_sec * 1000.0:.0f}ms")
+    if result_age_ms is not None:
+        timing_parts.append(f"result={result_age_ms:.0f}ms")
+    if foreground_gate_reason:
+        timing_parts.append(f"gate={foreground_gate_reason}")
     if timing_parts:
         cv2.putText(
             frame,
@@ -1999,6 +2037,13 @@ def _validate_runtime_args(args) -> None:
         raise ValueError("--head-roi-padding-scale must be positive")
     if not math.isfinite(args.head_hold_sec) or args.head_hold_sec < 0.0:
         raise ValueError("--head-hold-sec must be finite and non-negative")
+    if (
+        not math.isfinite(args.max_result_age_sec)
+        or args.max_result_age_sec < 0.0
+    ):
+        raise ValueError(
+            "--max-result-age-sec must be finite and non-negative"
+        )
     if args.sim_wall_range_tolerance_m <= 0.0:
         raise ValueError("--sim-wall-range-tolerance-m must be positive")
     if args.sim_wall_mask_line_width_px <= 0:
@@ -2243,16 +2288,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     head_candidate_temporal_gate = HeadCandidateTemporalGate(
         hold_sec=args.head_hold_sec,
-        # Rail-owned real-head fits may seed the first rectangle immediately;
-        # every later geometry change still needs the normal three-frame
-        # reacquisition path. This avoids a long blank bootstrap on compressed
-        # real-camera edges while preventing flickering refits.
-        initial_acquire_frames=1,
+        # Real-camera acquisition needs two consecutive fits so one fail-open
+        # heater frame cannot own temporal state. Simulation remains immediate
+        # because its calibrated direction and wall mask are deterministic.
+        initial_acquire_frames=(1 if args.sim_raw_image_topic else 2),
         max_width_ratio=(1.25 if args.sim_raw_image_topic else 1.15),
         max_height_ratio=(1.25 if args.sim_raw_image_topic else 1.15),
         max_corner_jump_scale=(0.18 if args.sim_raw_image_topic else 0.12),
         max_side_direction_jump_deg=(8.0 if args.sim_raw_image_topic else 6.0),
+        accepted_state_timeout_sec=(
+            0.75 if args.sim_raw_image_topic else 0.30
+        ),
     )
+    foreground_gate_tracker = AdaptiveForegroundGateTracker(model_ttl_sec=0.75)
     last_accepted_head_display_snapshot = None
 
     try:
@@ -2333,6 +2381,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             map_target_projection = None
             target_roi_failure_reason = None
             head_measurement_fresh = True
+            foreground_gate_result = None
+            foreground_gate_required_but_unavailable = False
             head_estimate_held = False
             temporal_selection = None
             active_lidar_bearing_source = args.lidar_bearing_source
@@ -2651,14 +2701,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                             args.canny_high,
                         ),
                     ).mask
-                    foreground_gate = adaptive_foreground_gate_from_background(
+                    foreground_gate_result = foreground_gate_tracker.update(
                         cv2,
                         numpy,
                         axis_frame,
                         radiator_background_region,
-                    ).gate
+                        now_sec=time.monotonic(),
+                    )
+                    foreground_gate = foreground_gate_result.gate
                     if foreground_gate is not None:
                         topology_edge_exclusion_mask = cv2.bitwise_not(foreground_gate)
+                    elif foreground_gate_tracker.enforcement_active:
+                        # Once a verified heater colour model exists, never
+                        # reopen unrestricted topology because one rib seed or
+                        # coverage check flickered. Raw Canny remains intact;
+                        # only this proposal observation is dropped.
+                        foreground_gate_required_but_unavailable = True
                 edge_estimator_options = dict(
                     edge_preprocess=(
                         "channel_union"
@@ -2712,13 +2770,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                         (0.0, 1.0) if args.sim_raw_image_topic else None
                     ),
                 )
-                estimate, edge_artifacts = estimate_stand_axis_from_edges(
-                    cv2,
-                    axis_frame,
-                    edge_exclusion_mask=edge_exclusion_mask,
-                    topology_edge_exclusion_mask=topology_edge_exclusion_mask,
-                    **edge_estimator_options,
-                )
+                if foreground_gate_required_but_unavailable:
+                    estimate = _unavailable_target_estimate(
+                        "foreground_gate_unavailable"
+                    )
+                    empty_edges = numpy.zeros(
+                        axis_frame.shape[:2],
+                        dtype=numpy.uint8,
+                    )
+                    edge_artifacts = StandAxisEdgeDebugArtifacts(
+                        edges=empty_edges
+                    )
+                else:
+                    estimate, edge_artifacts = estimate_stand_axis_from_edges(
+                        cv2,
+                        axis_frame,
+                        edge_exclusion_mask=edge_exclusion_mask,
+                        topology_edge_exclusion_mask=topology_edge_exclusion_mask,
+                        **edge_estimator_options,
+                    )
                 edges = edge_artifacts.edges
                 face_mask = edge_artifacts.face_mask
                 rectangle_mask = edge_artifacts.rectangle_mask
@@ -2743,7 +2813,37 @@ def main(argv: Sequence[str] | None = None) -> int:
                     stand_depth_m=args.stand_head_depth_m,
                     stand_head_bottom_height_m=args.stand_head_bottom_height_m,
                 )
-            detector_duration_sec = time.monotonic() - detector_started_monotonic
+            detector_completed_monotonic = time.monotonic()
+            detector_duration_sec = (
+                detector_completed_monotonic - detector_started_monotonic
+            )
+            result_age_ms = (
+                None
+                if read.received_monotonic_sec is None
+                else (
+                    detector_completed_monotonic
+                    - read.received_monotonic_sec
+                )
+                * 1000.0
+            )
+            newest_after_detection = frame_source.read()
+            if (
+                not args.sim_raw_image_topic
+                and args.axis_source == "edges"
+                and _detector_result_is_obsolete(
+                    processed_sequence=read.sequence,
+                    newest_sequence=newest_after_detection.sequence,
+                    received_monotonic_sec=read.received_monotonic_sec,
+                    completed_monotonic_sec=detector_completed_monotonic,
+                    max_result_age_sec=args.max_result_age_sec,
+                )
+            ):
+                estimate = _unavailable_target_estimate(
+                    "obsolete_detector_result"
+                )
+                face_mask = None
+                rectangle_mask = None
+                rectangle_overlay = None
             if estimate.corners is not None and target_roi is not None:
                 estimate = replace(
                     estimate,
@@ -3177,6 +3277,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 filtered_proxy,
                 age_ms,
                 detector_duration_sec,
+                result_age_ms,
+                (
+                    None
+                    if foreground_gate_result is None
+                    else foreground_gate_result.reason
+                ),
             )
             annotate_candidate_search_roi(cv2, annotated, candidate_search_roi)
             if args.sim_raw_image_topic:
