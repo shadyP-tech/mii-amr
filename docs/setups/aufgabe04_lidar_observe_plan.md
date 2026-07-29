@@ -107,7 +107,11 @@ route bytes, tracking tube, and command owner.
 ## Terminal C: live runner dry-run
 
 This step performs artifact and live ROS preflight checks but never starts the
-waypoint follower:
+waypoint follower. The runner creates its AMCL subscriber and TF listener
+first, requests `/request_nomotion_update`, waits for the transform chain to
+become usable, and applies the `1.1 s` AMCL-only forward-TF allowance needed
+by the standard `transform_tolerance: 1.0` configuration. Scan and odometry
+timestamps retain the stricter `0.25 s` future limit.
 
 ```bash
 python3 scripts/aufgabe04/navigation/run_single_station_segment.py \
@@ -137,3 +141,9 @@ against the robot, the dry-run passes, `/cmd_vel` ownership is unambiguous, the
 arena is clear, and an operator is beside the robot with the physical stop and
 a separate zero-Twist terminal ready. The later motion invocation still
 requires an explicit typed `RUN`; the axis viewer remains diagnostic-only.
+
+With the full TurtleBot3 Nav2 launch active, the dry-run may correctly reject
+`/behavior_server` and `/velocity_smoother` as existing `/cmd_vel` publishers.
+Do not bypass that result using `--allowed-cmd-vel-publisher`. Use a verified
+command mux/guard or a launch profile in which the custom follower is the
+single robot velocity owner while map server and AMCL remain active.

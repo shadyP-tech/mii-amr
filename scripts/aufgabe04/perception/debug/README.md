@@ -291,6 +291,13 @@ edges, localization edges, side/structure evidence, rectangle, annotated
 display, and a JSON ledger with sensor and measurement status. This replaces
 the older ambiguous two-PNG snapshot semantics for structural audits.
 
+In the adaptive real-camera path, the rectangle fitter no longer searches the
+entire immutable raw-Canny image. It measures only real pre-morphology Canny
+pixels inside a narrow corridor around the foreground-gated, low-frequency
+topology shown by `stand-axis-edges`. Background rails absent from that window
+therefore cannot take over a side fit, while the outer-border preprocessing and
+an immediate two-rail neck check suppress interior QR rectangles.
+
 Direct module form when the environment is already sourced:
 
 ```bash

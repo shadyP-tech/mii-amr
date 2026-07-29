@@ -153,6 +153,38 @@ def _topology_edges_from_frame(
     return edges
 
 
+def _topology_supported_measurement_edges(
+    cv2,
+    raw_edges,
+    topology_edges,
+    *,
+    min_edge_height_px: float,
+):
+    """Keep precise Canny pixels only near the gated outer-border topology.
+
+    The adaptive foreground gate and the low-frequency topology image remove
+    background clutter and most QR texture.  The final fit must still use
+    actual pre-morphology Canny pixels, but unrestricted raw Canny can escape
+    the proposal and snap a side to a radiator rail or an interior QR edge.
+    This corridor preserves raw-pixel precision while enforcing the same
+    foreground/topology ownership shown in the stand-axis edge window.
+    """
+
+    if raw_edges.shape[:2] != topology_edges.shape[:2]:
+        raise ValueError("raw_edges and topology_edges must have matching shapes")
+    corridor_radius_px = max(
+        2,
+        min(5, int(round(0.25 * float(min_edge_height_px)))),
+    )
+    kernel_size = 2 * corridor_radius_px + 1
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (kernel_size, kernel_size),
+    )
+    topology_corridor = cv2.dilate(topology_edges, kernel, iterations=1)
+    return cv2.bitwise_and(raw_edges, topology_corridor)
+
+
 def _edge_input_image(cv2, frame, *, edge_preprocess: str, blur_kernel: int):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     if edge_preprocess == "outer_border":

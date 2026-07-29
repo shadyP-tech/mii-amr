@@ -282,12 +282,36 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--max-localization-tf-future-sec",
+        type=float,
+        default=1.1,
+        help=(
+            "AMCL map->odom forward-stamp allowance. Keep this at least as "
+            "large as AMCL transform_tolerance; it does not relax sensor stamps."
+        ),
+    )
+    parser.add_argument(
         "--certified-route-chord-sample-spacing-m",
         type=float,
         default=0.01,
         help="Sampling spacing for runtime pursuit-chord certificate checks.",
     )
     parser.add_argument("--preflight-observation-window-sec", type=float, default=2.0)
+    parser.add_argument(
+        "--nomotion-update-service",
+        default="/request_nomotion_update",
+        help="Stationary AMCL refresh service used after preflight subscribers exist.",
+    )
+    parser.add_argument(
+        "--nomotion-update-timeout-sec",
+        type=float,
+        default=15.0,
+    )
+    parser.add_argument(
+        "--skip-nomotion-update-before-preflight",
+        action="store_true",
+        help="Disable the automatic stationary AMCL refresh.",
+    )
     parser.add_argument("--initial-sensor-wait-sec", type=float, default=2.0)
     parser.add_argument("--waypoint-timeout-sec", type=float, default=45.0)
     parser.add_argument(
@@ -758,6 +782,16 @@ def main(argv: list[str] | None = None) -> int:
         or args.max_future_timestamp_sec < 0.0
     ):
         parser.error("--max-future-timestamp-sec must be non-negative")
+    if (
+        not math.isfinite(args.max_localization_tf_future_sec)
+        or args.max_localization_tf_future_sec < 0.0
+    ):
+        parser.error("--max-localization-tf-future-sec must be non-negative")
+    if (
+        not math.isfinite(args.nomotion_update_timeout_sec)
+        or args.nomotion_update_timeout_sec <= 0.0
+    ):
+        parser.error("--nomotion-update-timeout-sec must be positive")
     if (
         not math.isfinite(args.certified_route_tube_radius_m)
         or args.certified_route_tube_radius_m <= 0.0
@@ -1302,9 +1336,18 @@ def main(argv: list[str] | None = None) -> int:
             max_tf_age_sec=args.max_tf_age_sec,
             max_amcl_age_sec=args.max_amcl_age_sec,
             max_future_timestamp_sec=args.max_future_timestamp_sec,
+            max_localization_tf_future_sec=(
+                args.max_localization_tf_future_sec
+            ),
             observation_window_sec=args.preflight_observation_window_sec,
             allowed_cmd_vel_publishers=args.allowed_cmd_vel_publisher,
             require_real_time=not args.allow_sim_time,
+            request_nomotion_update=(
+                resolved.localization_source == "amcl"
+                and not args.skip_nomotion_update_before_preflight
+            ),
+            nomotion_update_service=args.nomotion_update_service,
+            nomotion_update_timeout_sec=args.nomotion_update_timeout_sec,
         )
     except RuntimeError as exc:
         stop_reason = str(exc)

@@ -82,15 +82,19 @@ def _short_centered_neck_support(edge_mask, corners) -> bool:
     # single line, while still accepting the narrow physical post.
     min_rail_gap = max(3, int(round(0.07 * width)))
     max_rail_gap = max(min_rail_gap + 1, int(round(0.34 * width)))
+    maximum_start_gap = max(3, int(math.ceil(0.08 * height)))
     for left_column in range(neck.shape[1]):
         for right_column in range(left_column + min_rail_gap, neck.shape[1]):
             if right_column - left_column > max_rail_gap:
                 break
             paired_rows = neck[:, left_column] & neck[:, right_column]
             run = 0
-            for present in paired_rows:
+            for row_index, present in enumerate(paired_rows):
                 run = run + 1 if present else 0
-                if run >= required_run:
+                if (
+                    run >= required_run
+                    and row_index - run + 1 <= maximum_start_gap
+                ):
                     return True
     return False
 
@@ -118,7 +122,7 @@ def _head_candidate_from_rough_corners(
             0.15 if bounded_endpoint_recovery else None
         ),
         maximum_parallel_side_length_ratio=(
-            1.45 if bounded_endpoint_recovery else None
+            1.30 if bounded_endpoint_recovery else None
         ),
     )
     if fitted is None:
@@ -429,9 +433,10 @@ def _head_first_face_from_edges(
     """Propose from filtered topology, then measure only that proposal in raw Canny.
 
     The proposal image may contain colour-adaptive/topology filtering, whereas
-    ``measurement_edges`` remains untouched raw Canny.  This separation keeps
-    a heater rail from originating a global head hypothesis while preserving
-    real head-border evidence during the local four-side refit.
+    ``measurement_edges`` remains pre-morphology Canny. In the colour-gated
+    real-camera path it is additionally restricted to a narrow topology
+    corridor, so a heater rail or QR texture cannot originate or take over the
+    local four-side refit.
     """
 
     import numpy

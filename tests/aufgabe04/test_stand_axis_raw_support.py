@@ -539,6 +539,23 @@ class StandAxisRawSupportTest(unittest.TestCase):
         cv2 is None or numpy is None,
         "numpy and OpenCV are required for raw-side fitting",
     )
+    def test_neck_validator_rejects_delayed_post_below_inner_qr_frame(self):
+        edges = numpy.zeros((220, 200), dtype=numpy.uint8)
+        inner_qr = tuple(
+            ImagePoint(float(u), float(v))
+            for u, v in ((65, 45), (135, 45), (135, 105), (65, 105))
+        )
+        # The physical head continues below this inner QR rectangle. Its post
+        # rails do not begin until well after the inner rectangle's bottom.
+        cv2.line(edges, (92, 122), (92, 175), 255, 2)
+        cv2.line(edges, (108, 122), (108, 175), 255, 2)
+
+        self.assertFalse(_short_centered_neck_support(edges, inner_qr))
+
+    @unittest.skipIf(
+        cv2 is None or numpy is None,
+        "numpy and OpenCV are required for raw-side fitting",
+    )
     def test_fixed_rolled_direction_preserves_observed_trapezoid_dimensions(self):
         center_u, center_v = 120.0, 100.0
         angle_rad = math.radians(24.0)
