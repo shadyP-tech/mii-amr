@@ -40,9 +40,10 @@ class StandAxisEdgeDebugArtifacts:
     face_mask: object | None = None
     rectangle_mask: object | None = None
     rectangle_overlay: object | None = None
-    # Immutable pre-morphology Canny evidence. ``edges`` is allowed to contain
-    # small gap closures used to discover topology; raw_edges is the only edge
-    # domain allowed to validate and refit the measured head rectangle.
+    # Immutable pre-morphology Canny evidence retained for diagnostics.
+    # ``edges`` may contain small gap closures used to discover topology. In
+    # the adaptive real-camera path, rectangle validation uses only real Canny
+    # pixels inside a gated topology corridor derived from these two domains.
     raw_edges: object | None = None
     structure_evidence: StandStructureEvidence | None = None
 

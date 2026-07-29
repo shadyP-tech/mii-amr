@@ -1253,6 +1253,72 @@ class StandAxisImageTest(unittest.TestCase):
         self.assertIs(artifacts.edges, detector.call_args_list[1].args[1])
 
     @unittest.skipIf(numpy is None or cv2 is None, "numpy and OpenCV are required for silhouette tests")
+    def test_real_gate_constrains_raw_measurement_to_topology_corridor(self):
+        frame = numpy.zeros((120, 160, 3), dtype=numpy.uint8)
+        topology_edges = numpy.zeros(frame.shape[:2], dtype=numpy.uint8)
+        cv2.rectangle(topology_edges, (45, 20), (105, 80), 255, 2)
+        raw_edges = topology_edges.copy()
+        cv2.line(raw_edges, (5, 104), (150, 104), 255, 2)
+        face_mask = topology_edges.copy()
+        corners = self.make_corners(
+            [(45, 20), (105, 20), (105, 80), (45, 80)]
+        )
+        reliable = _SilhouetteFaceCandidate(
+            corners=corners,
+            face_mask=face_mask,
+        )
+
+        with (
+            patch(
+                "scripts.aufgabe04.perception.stand_axis_image._canny_edges_from_frame",
+                return_value=raw_edges,
+            ),
+            patch(
+                "scripts.aufgabe04.perception.stand_axis_image._topology_edges_from_frame",
+                return_value=topology_edges,
+            ),
+            patch(
+                "scripts.aufgabe04.perception.stand_axis_image._edge_topology_hypotheses",
+                return_value=[topology_edges],
+            ),
+            patch(
+                "scripts.aufgabe04.perception.stand_axis_image._plain_face_from_stem_cropped_edges",
+                return_value=reliable,
+            ) as detector,
+        ):
+            estimate, artifacts = estimate_stand_axis_from_edges(
+                cv2,
+                frame,
+                dilate_iterations=0,
+                min_area_px=0.0,
+                min_face_area_fraction=0.0,
+                silhouette_only=True,
+                topology_edge_exclusion_mask=numpy.zeros(
+                    frame.shape[:2],
+                    dtype=numpy.uint8,
+                ),
+            )
+
+        self.assertTrue(estimate.usable, estimate.reason)
+        measurement = detector.call_args.kwargs["measurement_edges"]
+        self.assertGreater(cv2.countNonZero(artifacts.raw_edges), 0)
+        self.assertGreater(cv2.countNonZero(measurement), 0)
+        self.assertLess(
+            cv2.countNonZero(measurement),
+            cv2.countNonZero(artifacts.raw_edges),
+        )
+        self.assertEqual(cv2.countNonZero(measurement[100:108, :]), 0)
+        self.assertEqual(
+            cv2.countNonZero(
+                cv2.bitwise_and(
+                    measurement,
+                    cv2.bitwise_not(artifacts.raw_edges),
+                )
+            ),
+            0,
+        )
+
+    @unittest.skipIf(numpy is None or cv2 is None, "numpy and OpenCV are required for silhouette tests")
     def test_silhouette_head_rejects_connected_wall_seam_branch_not_the_head(self):
         """A background seam may touch both head sides without becoming a corner.
 

@@ -43,6 +43,7 @@ from scripts.aufgabe04.perception.stand_axis.preprocessing import (
     _edge_topology_hypotheses,
     _largest_external_bounding_area,
     _outer_border_edge_input,
+    _topology_supported_measurement_edges,
     _topology_edges_from_frame,
 )
 from scripts.aufgabe04.perception.stand_axis.raw_support import (
@@ -203,9 +204,10 @@ def estimate_stand_axis_from_edges(
             cv2.bitwise_not(edge_exclusion_mask),
         )
 
-    # A colour-adaptive foreground gate may narrow only the topology proposal
-    # image.  Keep raw Canny intact: final head-corner support must never lose
-    # an actual stand boundary because a background model was imperfect.
+    # A colour-adaptive foreground gate narrows the topology proposal image.
+    # Keep ``raw_edges`` immutable for diagnostics, then derive a second,
+    # pre-morphology measurement image below. Its pixels remain real Canny
+    # evidence but must belong to the gated low-frequency topology corridor.
     effective_topology_exclusion_mask = edge_exclusion_mask
     if topology_edge_exclusion_mask is not None:
         if topology_edge_exclusion_mask.shape[:2] != raw_edges.shape[:2]:
@@ -250,11 +252,27 @@ def estimate_stand_axis_from_edges(
     if silhouette_only:
         # Match the real-camera silhouette pipeline: use connected topology to
         # locate the stem and propose a head quadrilateral, then independently
-        # fit its four sides from untouched raw Canny pixels. Simulation
-        # forbids QR geometry and synthetic outlines as orientation sources.
+        # fit its four sides from pre-morphology Canny pixels. With a real
+        # adaptive gate those pixels must also remain inside the gated
+        # low-frequency topology corridor, preventing background/QR escape.
+        # Simulation forbids QR geometry and synthetic outlines as orientation
+        # sources and retains its legacy unrestricted raw measurement image.
         silhouette_face = None
         debug_edges = edges
         for localization_edges in topology_hypotheses:
+            measurement_edges = raw_edges
+            if topology_edge_exclusion_mask is not None:
+                # Bind the final raw-pixel fit to the exact gated topology
+                # hypothesis being displayed and evaluated in this pass.
+                # Later gap-recovery hypotheses can widen the corridor only
+                # locally; the foreground exclusion is reapplied after every
+                # morphology operation above.
+                measurement_edges = _topology_supported_measurement_edges(
+                    cv2,
+                    raw_edges,
+                    localization_edges,
+                    min_edge_height_px=min_edge_height_px,
+                )
             hypothesis_min_area_px = max(
                 min_area_px,
                 _largest_external_bounding_area(cv2, localization_edges)
@@ -263,7 +281,7 @@ def estimate_stand_axis_from_edges(
             candidate = _plain_face_from_stem_cropped_edges(
                 cv2,
                 localization_edges,
-                measurement_edges=raw_edges,
+                measurement_edges=measurement_edges,
                 head_first_proposal_edges=(
                     localization_edges
                     if topology_edge_exclusion_mask is not None

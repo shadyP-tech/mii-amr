@@ -40,12 +40,14 @@ try:  # pragma: no cover - exercised on ROS hosts.
     from rclpy.qos import qos_profile_sensor_data
     from rclpy.time import Time
     from sensor_msgs.msg import LaserScan
+    from std_srvs.srv import Empty
     from tf2_msgs.msg import TFMessage
     from tf2_ros import Buffer, TransformException, TransformListener
 except ImportError:  # pragma: no cover - keeps offline tests ROS-free.
     rclpy = None
     GoalStatusArray = None
     LaserScan = None
+    Empty = None
     Odometry = None
     PoseWithCovarianceStamped = None
     TFMessage = None
@@ -140,10 +142,14 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         max_tf_age_sec: float,
         max_amcl_age_sec: float,
         max_future_timestamp_sec: float,
+        max_localization_tf_future_sec: float,
         observation_window_sec: float,
         allow_idle_nav2: bool,
         allowed_cmd_vel_publishers: Sequence[str],
         require_real_time: bool,
+        request_nomotion_update: bool,
+        nomotion_update_service: str,
+        nomotion_update_timeout_sec: float,
     ) -> None:
         super().__init__(
             "aufgabe04_ros_preflight",
@@ -155,10 +161,12 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         self.max_tf_age_sec = max_tf_age_sec
         self.max_amcl_age_sec = max_amcl_age_sec
         self.max_future_timestamp_sec = max_future_timestamp_sec
+        self.max_localization_tf_future_sec = max_localization_tf_future_sec
         self.observation_window_sec = observation_window_sec
         self.allow_idle_nav2 = allow_idle_nav2
         self.allowed_cmd_vel_publishers = tuple(allowed_cmd_vel_publishers)
         self.require_real_time = require_real_time
+        self.nomotion_update_timeout_sec = nomotion_update_timeout_sec
         self.latest_scan = None
         self.latest_scan_receipt = None
         self.latest_odom = None
@@ -168,6 +176,11 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         self.latest_nav2_status = None
         self.latest_dynamic_map_to_odom = None
         self.latest_dynamic_map_to_odom_receipt = None
+        self.nomotion_client = (
+            self.create_client(Empty, nomotion_update_service)
+            if request_nomotion_update and config.localization_source == "amcl"
+            else None
+        )
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -241,6 +254,8 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             rclpy.spin_once(self, timeout_sec=0.05)
         observations: List[RosObservation] = []
         failures: List[str] = []
+        if self.nomotion_client is not None:
+            observations.append(self._refresh_stationary_amcl())
 
         self._observe_topic(
             observations,
@@ -311,6 +326,71 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             observations=observations,
             runtime_config=self.config.as_log_dict(),
         )
+
+    def _refresh_stationary_amcl(self) -> RosObservation:
+        """Request AMCL only after this node's subscriptions and TF listener exist."""
+
+        fresh, _data = self._message_freshness(
+            self.latest_amcl,
+            self.latest_amcl_receipt,
+            self.max_amcl_age_sec,
+        )
+        if fresh and self._route_transform_available():
+            return RosObservation(
+                "stationary AMCL refresh",
+                True,
+                "fresh AMCL already observed",
+                {"service_requested": False},
+            )
+        deadline = time.monotonic() + self.nomotion_update_timeout_sec
+        future = None
+        while rclpy.ok() and time.monotonic() < deadline:
+            if future is None and self.nomotion_client.service_is_ready():
+                future = self.nomotion_client.call_async(Empty.Request())
+            rclpy.spin_once(self, timeout_sec=0.05)
+            fresh, data = self._message_freshness(
+                self.latest_amcl,
+                self.latest_amcl_receipt,
+                self.max_amcl_age_sec,
+            )
+            if fresh and self._route_transform_available():
+                return RosObservation(
+                    "stationary AMCL refresh",
+                    True,
+                    "fresh AMCL observed after stationary refresh",
+                    {
+                        "service_requested": future is not None,
+                        **data,
+                    },
+                )
+            if future is not None and future.done() and future.exception() is not None:
+                return RosObservation(
+                    "stationary AMCL refresh",
+                    False,
+                    f"service failed: {future.exception()}",
+                    {"service_requested": True},
+                )
+        return RosObservation(
+            "stationary AMCL refresh",
+            False,
+            "timed out waiting for fresh AMCL",
+            {
+                "service_requested": future is not None,
+                "timeout_sec": self.nomotion_update_timeout_sec,
+            },
+        )
+
+    def _route_transform_available(self) -> bool:
+        try:
+            self.tf_buffer.lookup_transform(
+                self.config.map_frame,
+                self.config.base_frame,
+                Time(),
+                timeout=Duration(seconds=0.0),
+            )
+        except TransformException:
+            return False
+        return True
 
     def _observe_topic(
         self,
@@ -494,7 +574,7 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             receipt_age_sec=receipt_age,
             header_age_sec=header_age,
             max_age_sec=self.max_tf_age_sec,
-            max_future_sec=self.max_future_timestamp_sec,
+            max_future_sec=self.max_localization_tf_future_sec,
         )
 
     def _external_tf_owner_candidates(self) -> List[str]:
@@ -575,16 +655,37 @@ def run_ros_preflight(
     max_tf_age_sec: float = 1.0,
     max_amcl_age_sec: float = 2.0,
     max_future_timestamp_sec: float = 0.25,
+    max_localization_tf_future_sec: float | None = None,
     observation_window_sec: float = 2.0,
     allow_idle_nav2: bool = False,
     allowed_cmd_vel_publishers: Sequence[str] = (),
     require_real_time: bool = True,
+    request_nomotion_update: bool = False,
+    nomotion_update_service: str = "/request_nomotion_update",
+    nomotion_update_timeout_sec: float = 15.0,
 ) -> RosPreflightResult:
     if (
         not math.isfinite(max_future_timestamp_sec)
         or max_future_timestamp_sec < 0.0
     ):
         raise ValueError("max_future_timestamp_sec must be finite and non-negative")
+    localization_tf_future_sec = (
+        max_future_timestamp_sec
+        if max_localization_tf_future_sec is None
+        else max_localization_tf_future_sec
+    )
+    if (
+        not math.isfinite(localization_tf_future_sec)
+        or localization_tf_future_sec < 0.0
+    ):
+        raise ValueError(
+            "max_localization_tf_future_sec must be finite and non-negative"
+        )
+    if (
+        not math.isfinite(nomotion_update_timeout_sec)
+        or nomotion_update_timeout_sec <= 0.0
+    ):
+        raise ValueError("nomotion_update_timeout_sec must be finite and positive")
     _require_ros()
     rclpy.init(args=None)
     node = RosPreflightNode(
@@ -594,10 +695,14 @@ def run_ros_preflight(
         max_tf_age_sec=max_tf_age_sec,
         max_amcl_age_sec=max_amcl_age_sec,
         max_future_timestamp_sec=max_future_timestamp_sec,
+        max_localization_tf_future_sec=localization_tf_future_sec,
         observation_window_sec=observation_window_sec,
         allow_idle_nav2=allow_idle_nav2,
         allowed_cmd_vel_publishers=allowed_cmd_vel_publishers,
         require_real_time=require_real_time,
+        request_nomotion_update=request_nomotion_update,
+        nomotion_update_service=nomotion_update_service,
+        nomotion_update_timeout_sec=nomotion_update_timeout_sec,
     )
     try:
         return node.collect()

@@ -41,6 +41,9 @@ class StandAxisFacadeTest(unittest.TestCase):
             "_edge_topology_hypotheses": (
                 preprocessing._edge_topology_hypotheses
             ),
+            "_topology_supported_measurement_edges": (
+                preprocessing._topology_supported_measurement_edges
+            ),
             "_quadrilateral_edge_support": (
                 raw_support._quadrilateral_edge_support
             ),
@@ -93,6 +96,7 @@ class StandAxisFacadeTest(unittest.TestCase):
             "_stem_anchor_candidates_from_edges",
             "_stem_anchored_face_from_edges",
             "_stem_owned_head_from_line_segments",
+            "_topology_supported_measurement_edges",
             "_validated_refitted_head_corners",
             "estimate_edge_on_axis_from_line",
             "estimate_stand_axis_from_corners",
