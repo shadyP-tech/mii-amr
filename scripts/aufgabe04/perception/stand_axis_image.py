@@ -16,6 +16,7 @@ from scripts.aufgabe04.perception.stand_axis.geometry import (
     _quadrilateral_corners,
     _scale_quadrilateral_about_center,
     _unusable,
+    _well_formed_quadrilateral,
     _yaw_deg_from_projected_width,
     _yaw_deg_from_ratio,
     _yaw_deg_from_square_pnp,
@@ -356,7 +357,7 @@ def estimate_stand_axis_from_edges(
     qr_front_face = _front_face_from_qr_geometry(
         cv2,
         frame,
-        edges,
+        raw_edges,
         width_ratio=front_face_to_qr_width_ratio,
         # A valid QR plane is already strong target-specific evidence. Do not
         # let an unrelated heater/radiator contour inflate its area threshold.
@@ -365,7 +366,22 @@ def estimate_stand_axis_from_edges(
         min_aspect_ratio=min_aspect_ratio,
         max_aspect_ratio=max_aspect_ratio,
     )
-    if qr_front_face is not None:
+    plain_face = _plain_face_from_stem_cropped_edges(
+        cv2,
+        edges,
+        measurement_edges=raw_edges,
+        min_area_px=adaptive_min_area_px,
+        min_edge_height_px=min_edge_height_px,
+        min_aspect_ratio=min_aspect_ratio,
+        max_aspect_ratio=max_aspect_ratio,
+    )
+    plain_structure_supported = (
+        plain_face is not None
+        and plain_face.rectangle_fit_reliable
+        and plain_face.structure_evidence is not None
+        and plain_face.structure_evidence.tracking_supported
+    )
+    if qr_front_face is not None and not plain_structure_supported:
         return (
             estimate_stand_axis_from_corners(
                 qr_front_face.corners,
@@ -385,7 +401,11 @@ def estimate_stand_axis_from_edges(
             StandAxisEdgeDebugArtifacts(
                 edges=edges,
                 face_mask=qr_front_face.face_mask,
-                rectangle_mask=_debug_rectangle_image(cv2, edges.shape, qr_front_face.corners),
+                rectangle_mask=_debug_rectangle_image(
+                    cv2,
+                    edges.shape,
+                    qr_front_face.corners,
+                ),
                 rectangle_overlay=_debug_rectangle_overlay_image(
                     cv2,
                     edges.shape,
@@ -396,15 +416,6 @@ def estimate_stand_axis_from_edges(
             ),
         )
 
-    plain_face = _plain_face_from_stem_cropped_edges(
-        cv2,
-        edges,
-        measurement_edges=raw_edges,
-        min_area_px=adaptive_min_area_px,
-        min_edge_height_px=min_edge_height_px,
-        min_aspect_ratio=min_aspect_ratio,
-        max_aspect_ratio=max_aspect_ratio,
-    )
     if plain_face is not None:
         structure = plain_face.structure_evidence
         if structural_diagnostic and (
@@ -673,9 +684,11 @@ def _front_face_from_qr_geometry(
     if width_ratio is None or width_ratio <= 1.0:
         return None
     qr_corners = _detect_qr_quad_corners(cv2, frame)
-    if qr_corners is None:
+    if qr_corners is None or not _well_formed_quadrilateral(qr_corners):
         return None
     corners = _scale_quadrilateral_about_center(qr_corners, width_ratio)
+    if not _well_formed_quadrilateral(corners):
+        return None
     area = _polygon_area(corners)
     if area < min_area_px:
         return None
@@ -691,6 +704,8 @@ def _front_face_from_qr_geometry(
         source="edge_qr_scaled_front",
     )
     if not estimate.usable:
+        return None
+    if not _quadrilateral_edge_support(cv2, edges, corners).accepted:
         return None
 
     return _SilhouetteFaceCandidate(

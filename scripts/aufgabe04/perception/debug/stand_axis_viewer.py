@@ -8,7 +8,7 @@ import sys
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Sequence
 
@@ -29,11 +29,17 @@ from scripts.aufgabe04.perception.debug.stand_axis_capture_store import (
     save_structural_capture,
     sensor_frame_status,
 )
+from scripts.aufgabe04.perception.debug.text_overlay import OverlayTextCursor
 from scripts.aufgabe04.perception.mask_processing import apply_morphology, build_mask_for_ranges
 from scripts.aufgabe04.perception.camera_stand_observation import (
     CameraStandObservation,
     stand_axis_from_camera_yaw,
     write_camera_observation,
+)
+from scripts.aufgabe04.perception.camera_calibration import rectify_bgr_frame
+from scripts.aufgabe04.perception.debug.calibrated_handoff_runtime import (
+    CalibrationRuntimeSnapshot,
+    RosCameraCalibrationTfSource,
 )
 from scripts.aufgabe04.perception.ros_image_adapter import (
     compressed_msg_stamp_sec,
@@ -88,6 +94,21 @@ from scripts.aufgabe04.perception.stand_axis_tracking import (
 from scripts.aufgabe04.perception.stand_axis_consensus import (
     AxisConsensusAccumulator,
     axis_conditioning,
+)
+from scripts.aufgabe04.perception.stand_axis_handoff import (
+    AxialConsensusAccumulator,
+    AxisHandoffConfig,
+    AxisHandoffDecision,
+    CameraAxisEstimate,
+    LidarAxisEstimate,
+    camera_face_normal_axis_in_scan,
+    estimate_pooled_lidar_axis,
+    evaluate_axis_handoff,
+    rectified_pixel_bearing_in_scan,
+    transform_point,
+)
+from scripts.aufgabe04.perception.stand_axis_handoff.overlay import (
+    annotate_axis_handoff,
 )
 from scripts.aufgabe04.qr_scanning.opencv_qr_detector import detect_qr_texts_bgr
 from scripts.aufgabe04.simulation.sim_head_roi import (
@@ -565,6 +586,65 @@ def build_parser() -> argparse.ArgumentParser:
         help="Camera principal point cy in pixels for the processed image. Defaults to the image center.",
     )
     parser.add_argument(
+        "--calibrated-handoff",
+        action="store_true",
+        help=(
+            "Real-camera observe-only mode: rectify with live CameraInfo, use "
+            "the full camera-to-scan TF, pool a coarse LiDAR axis, and gate the "
+            "camera refinement. Never publishes motion."
+        ),
+    )
+    parser.add_argument(
+        "--camera-info-topic",
+        default="/camera/camera_info",
+        help="CameraInfo topic used by --calibrated-handoff.",
+    )
+    parser.add_argument(
+        "--camera-optical-frame",
+        default="camera",
+        help="Calibrated optical frame used by --calibrated-handoff.",
+    )
+    parser.add_argument(
+        "--scan-frame",
+        default="base_scan",
+        help="LiDAR frame receiving the calibrated camera axis.",
+    )
+    parser.add_argument("--max-camera-info-age-sec", type=float, default=1.0)
+    parser.add_argument("--handoff-tf-timeout-sec", type=float, default=0.20)
+    parser.add_argument("--handoff-lidar-window-scans", type=int, default=20)
+    parser.add_argument(
+        "--handoff-lidar-bearing-half-angle-deg",
+        type=float,
+        default=8.0,
+    )
+    parser.add_argument(
+        "--handoff-lidar-range-tolerance-m",
+        type=float,
+        default=0.12,
+    )
+    parser.add_argument("--handoff-min-lidar-points", type=int, default=20)
+    parser.add_argument("--handoff-min-lidar-linearity", type=float, default=0.90)
+    parser.add_argument("--handoff-min-lidar-length-m", type=float, default=0.04)
+    parser.add_argument("--handoff-max-lidar-length-m", type=float, default=0.12)
+    parser.add_argument(
+        "--handoff-max-axis-difference-deg",
+        type=float,
+        default=15.0,
+    )
+    parser.add_argument(
+        "--handoff-approach-stand-off-m",
+        type=float,
+        default=0.45,
+    )
+    parser.add_argument(
+        "--handoff-status-json",
+        type=Path,
+        help=(
+            "Optional diagnostic-only JSON snapshot of the latest calibrated "
+            "handoff decision."
+        ),
+    )
+    parser.add_argument(
         "--camera-height-m",
         type=float,
         default=0.093,
@@ -710,7 +790,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--camera-to-lidar-yaw-offset-rad",
         type=float,
         default=0.0,
-        help="Measured yaw offset added to the image-derived camera bearing before sampling the LiDAR scan.",
+        help=(
+            "Legacy planar yaw offset added to the image-derived bearing. "
+            "Ignored by --calibrated-handoff, which uses the full TF."
+        ),
     )
     parser.add_argument(
         "--lidar-cone-deg",
@@ -1326,6 +1409,11 @@ class RosLaserScanRangeSource:
             tolerance_sec=tolerance_sec,
         )
 
+    def recent_scans(self, max_count: int) -> tuple[PlainLaserScan, ...]:
+        with self._lock:
+            scans = tuple(self._scans)
+        return scans[-max(1, int(max_count)) :]
+
     def release(self) -> None:
         self._running = False
         if self._spin_thread is not None:
@@ -1575,6 +1663,41 @@ def print_status_line(
     )
 
 
+def _write_handoff_status(
+    path: Path,
+    *,
+    decision: AxisHandoffDecision,
+    calibration: CalibrationRuntimeSnapshot,
+    observed_at_sec: float,
+) -> None:
+    payload = {
+        "schema_version": 1,
+        "observed_at_sec": observed_at_sec,
+        "observe_only": True,
+        "motion_authorized": False,
+        "calibration": {
+            "ready": calibration.ready,
+            "reason": calibration.reason,
+            "camera_info_age_sec": calibration.camera_info_age_sec,
+            "camera_frame": (
+                None
+                if calibration.calibration is None
+                else calibration.calibration.frame_id
+            ),
+            "scan_frame": (
+                None
+                if calibration.scan_from_camera is None
+                else calibration.scan_from_camera.parent_frame
+            ),
+        },
+        "decision": asdict(decision),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    temporary.replace(path)
+
+
 def annotate_simulation_target_roi(
     cv2,
     frame,
@@ -1585,21 +1708,36 @@ def annotate_simulation_target_roi(
     camera_depth_m: float | None,
     failure_reason: str | None,
     label: str = "target ROI",
+    reserved_top_px: int = 0,
+    label_slot: int = 0,
+    text_cursor: OverlayTextCursor | None = None,
 ) -> None:
     """Expose a projected target ROI or post-detection head ROI."""
 
     color = (255, 255, 0)
     if target_roi is None:
         if failure_reason:
-            cv2.putText(
-                frame,
-                f"{label} unavailable: {failure_reason}",
-                (12, 110),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.50,
-                color,
-                2,
-            )
+            text = f"{label} unavailable: {failure_reason}"
+            if text_cursor is None:
+                cv2.putText(
+                    frame,
+                    text,
+                    (12, 110),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.50,
+                    color,
+                    2,
+                )
+            else:
+                text_cursor.draw(
+                    cv2,
+                    frame,
+                    text,
+                    font_face=cv2.FONT_HERSHEY_SIMPLEX,
+                    font_scale=0.50,
+                    color=color,
+                    thickness=2,
+                )
         return
 
     top_left = (target_roi.x0, target_roi.y0)
@@ -1619,7 +1757,16 @@ def annotate_simulation_target_roi(
     cv2.putText(
         frame,
         f"{label} camera={camera_text} scan={scan_text} depth={depth_text}",
-        (target_roi.x0, max(14, target_roi.y0 - 6)),
+        _roi_label_origin(
+            cv2,
+            frame,
+            target_roi,
+            f"{label} camera={camera_text} scan={scan_text} depth={depth_text}",
+            font_scale=0.42,
+            thickness=1,
+            reserved_top_px=reserved_top_px,
+            label_slot=label_slot,
+        ),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.42,
         color,
@@ -1627,7 +1774,63 @@ def annotate_simulation_target_roi(
     )
 
 
-def annotate_candidate_search_roi(cv2, frame, target_roi: HeadRoi | None) -> None:
+def _roi_label_origin(
+    cv2,
+    frame,
+    target_roi: HeadRoi,
+    text: str,
+    *,
+    font_scale: float,
+    thickness: int,
+    reserved_top_px: int,
+    label_slot: int,
+) -> tuple[int, int]:
+    """Place an ROI label above or below it without entering status rows."""
+
+    if not hasattr(cv2, "getTextSize") or not hasattr(frame, "shape"):
+        return target_roi.x0, max(14, target_roi.y0 - 6)
+    (text_width, text_height), baseline = cv2.getTextSize(
+        text,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        font_scale,
+        thickness,
+    )
+    frame_height, frame_width = frame.shape[:2]
+    x = min(
+        max(0, target_roi.x0),
+        max(0, frame_width - int(text_width) - 2),
+    )
+    row_height = int(text_height) + int(baseline) + 5
+    slot_offset = max(0, int(label_slot)) * row_height
+
+    above_y = max(int(text_height), target_roi.y0 - 6 - slot_offset)
+    if above_y - int(text_height) >= int(reserved_top_px) + 2:
+        return x, above_y
+
+    below_y = target_roi.y1 + int(text_height) + 5 + slot_offset
+    reserved_bottom_px = 30
+    if below_y + int(baseline) <= frame_height - reserved_bottom_px:
+        return x, below_y
+
+    inside_y = max(
+        int(reserved_top_px) + int(text_height) + 2,
+        target_roi.y0 + int(text_height) + 5 + slot_offset,
+    )
+    maximum_y = max(
+        int(text_height),
+        frame_height - reserved_bottom_px - int(baseline),
+    )
+    return x, min(inside_y, maximum_y)
+
+
+def annotate_candidate_search_roi(
+    cv2,
+    frame,
+    target_roi: HeadRoi | None,
+    *,
+    reserved_top_px: int = 0,
+    label_slot: int = 0,
+) -> None:
     """Show the real-camera pixel domain allowed to produce head candidates."""
 
     if target_roi is None:
@@ -1643,7 +1846,16 @@ def annotate_candidate_search_roi(cv2, frame, target_roi: HeadRoi | None) -> Non
     cv2.putText(
         frame,
         "candidate search ROI",
-        (target_roi.x0, max(14, target_roi.y0 - 6)),
+        _roi_label_origin(
+            cv2,
+            frame,
+            target_roi,
+            "candidate search ROI",
+            font_scale=0.42,
+            thickness=1,
+            reserved_top_px=reserved_top_px,
+            label_slot=label_slot,
+        ),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.42,
         color,
@@ -1662,7 +1874,8 @@ def annotate_frame(
     detector_duration_sec,
     result_age_ms=None,
     foreground_gate_reason=None,
-) -> None:
+    text_cursor: OverlayTextCursor | None = None,
+) -> OverlayTextCursor:
     if estimate.corners is not None:
         corners = estimate.corners
         int_points = [(int(round(point.u_px)), int(round(point.v_px))) for point in corners]
@@ -1703,9 +1916,21 @@ def annotate_frame(
         line3 = f"camera axis rotation unavailable stand_side={side.side}"
         color = (0, 200, 255)
 
-    cv2.putText(frame, line1, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.62, color, 2)
-    cv2.putText(frame, line2, (12, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.56, color, 2)
-    cv2.putText(frame, line3, (12, 82), cv2.FONT_HERSHEY_SIMPLEX, 0.52, color, 2)
+    cursor = text_cursor or OverlayTextCursor()
+    for text, font_scale in (
+        (line1, 0.62),
+        (line2, 0.56),
+        (line3, 0.52),
+    ):
+        cursor.draw(
+            cv2,
+            frame,
+            text,
+            font_face=cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale=font_scale,
+            color=color,
+            thickness=2,
+        )
     timing_parts = []
     if age_ms is not None:
         timing_parts.append(f"age={age_ms:.0f}ms")
@@ -1725,6 +1950,7 @@ def annotate_frame(
             (255, 255, 255),
             2,
         )
+    return cursor
 
 
 def annotate_recording_indicator(cv2, frame, recording_active: bool) -> None:
@@ -2076,6 +2302,42 @@ def _standalone_head_geometry_reason(
 def _validate_runtime_args(args) -> None:
     if args.diagnostic_window_size_px <= 0:
         raise ValueError("--diagnostic-window-size-px must be positive")
+    if args.calibrated_handoff:
+        if args.sim_raw_image_topic:
+            raise ValueError("--calibrated-handoff is real-camera-only")
+        if not args.scan_topic:
+            raise ValueError("--calibrated-handoff requires --scan-topic")
+        if not args.camera_info_topic:
+            raise ValueError("--calibrated-handoff requires --camera-info-topic")
+        if not args.camera_optical_frame or not args.scan_frame:
+            raise ValueError(
+                "--calibrated-handoff requires camera and scan frame names"
+            )
+        positive_values = (
+            args.max_camera_info_age_sec,
+            args.handoff_tf_timeout_sec,
+            args.handoff_lidar_bearing_half_angle_deg,
+            args.handoff_lidar_range_tolerance_m,
+            args.handoff_min_lidar_linearity,
+            args.handoff_min_lidar_length_m,
+            args.handoff_max_lidar_length_m,
+            args.handoff_max_axis_difference_deg,
+            args.handoff_approach_stand_off_m,
+        )
+        if not all(math.isfinite(value) and value > 0.0 for value in positive_values):
+            raise ValueError(
+                "calibrated handoff thresholds must be finite and positive"
+            )
+        if args.handoff_lidar_window_scans < 3:
+            raise ValueError("--handoff-lidar-window-scans must be at least 3")
+        if args.handoff_min_lidar_points < 3:
+            raise ValueError("--handoff-min-lidar-points must be at least 3")
+        if not 0.0 < args.handoff_min_lidar_linearity <= 1.0:
+            raise ValueError("--handoff-min-lidar-linearity must be in (0, 1]")
+        if args.handoff_max_lidar_length_m <= args.handoff_min_lidar_length_m:
+            raise ValueError(
+                "maximum LiDAR length must exceed minimum LiDAR length"
+            )
     if not math.isfinite(args.record_fps) or args.record_fps <= 0.0:
         raise ValueError("--record-fps must be finite and positive")
     if not 0.0 < args.max_observation_obliqueness_deg < 90.0:
@@ -2250,6 +2512,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         camera_cx_px *= args.resize
     if camera_cy_px is not None and args.camera_fx_is_full_resolution:
         camera_cy_px *= args.resize
+    configured_camera_fx_px = camera_fx_px
+    configured_camera_fy_px = camera_fy_px
+    configured_camera_cx_px = camera_cx_px
+    configured_camera_cy_px = camera_cy_px
     try:
         import cv2
         import numpy
@@ -2282,15 +2548,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         image_topic = args.compressed_image_topic
     frame_source.start()
+    calibration_source = None
+    if args.calibrated_handoff:
+        calibration_source = RosCameraCalibrationTfSource(
+            camera_info_topic=args.camera_info_topic,
+            scan_frame=args.scan_frame,
+            camera_frame=args.camera_optical_frame,
+            max_camera_info_age_sec=args.max_camera_info_age_sec,
+            tf_timeout_sec=args.handoff_tf_timeout_sec,
+        )
+        calibration_source.start()
     lidar_source = None
-    if args.use_lidar_distance:
+    if args.use_lidar_distance or args.calibrated_handoff:
         if not args.scan_topic:
-            raise SystemExit("--use-lidar-distance requires --scan-topic")
+            raise SystemExit("LiDAR distance/handoff mode requires --scan-topic")
         lidar_source = RosLaserScanRangeSource(
             topic=args.scan_topic,
             max_scan_age_sec=args.max_scan_age_sec,
         )
         lidar_source.start()
+    handoff_config = AxisHandoffConfig(
+        max_axis_difference_rad=math.radians(
+            args.handoff_max_axis_difference_deg
+        ),
+        approach_stand_off_m=args.handoff_approach_stand_off_m,
+    )
     qr_decoder = None if args.no_qr_decode or args.sim_raw_image_topic else BackgroundQrDecoder(
         cv2=cv2,
         numpy=numpy,
@@ -2305,6 +2587,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     recorder = DebugWindowRecorder(cv2, args.record_dir, args.record_fps)
 
     print("Aufgabe 04 stand-axis viewer: debug-only, read-only ROS subscriptions.")
+    if args.calibrated_handoff:
+        print(
+            "Calibrated handoff: CameraInfo rectification + full TF + pooled "
+            "LiDAR coarse axis + fail-closed camera refinement."
+        )
     if simulation_full_frame_edges:
         print(
             "Simulation standalone mode: full-frame edges -> detected silhouette "
@@ -2329,9 +2616,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     last_display_sec = 0.0
     last_waiting_message_sec = 0.0
     last_observation_write_sec = 0.0
+    last_handoff_write_sec = 0.0
     last_diagnostic_shapes = {}
     record_start_pending = False
     axis_consensus = AxisConsensusAccumulator(
+        required_samples=args.axis_consensus_frames,
+        max_deviation_rad=math.radians(args.axis_consensus_max_deviation_deg),
+    )
+    handoff_axis_consensus = AxialConsensusAccumulator(
         required_samples=args.axis_consensus_frames,
         max_deviation_rad=math.radians(args.axis_consensus_max_deviation_deg),
     )
@@ -2418,6 +2710,65 @@ def main(argv: Sequence[str] | None = None) -> int:
                 continue
             decode_duration_sec = time.monotonic() - decode_started_monotonic
             decoded_source_frame = frame.copy()
+            camera_fx_px = configured_camera_fx_px
+            camera_fy_px = configured_camera_fy_px
+            camera_cx_px = configured_camera_cx_px
+            camera_cy_px = configured_camera_cy_px
+            calibration_snapshot = CalibrationRuntimeSnapshot(
+                False, "calibrated_handoff_disabled"
+            )
+            if calibration_source is not None:
+                calibration_snapshot = calibration_source.snapshot()
+                calibration = calibration_snapshot.calibration
+                if (
+                    calibration_snapshot.ready
+                    and calibration is not None
+                    and calibration_snapshot.scan_from_camera is not None
+                ):
+                    if (
+                        read.frame_id
+                        and read.frame_id.lstrip("/")
+                        != calibration.frame_id.lstrip("/")
+                    ):
+                        calibration_snapshot = CalibrationRuntimeSnapshot(
+                            False,
+                            "image_camera_info_frame_mismatch",
+                            calibration=calibration,
+                            scan_from_camera=calibration_snapshot.scan_from_camera,
+                            camera_info_age_sec=(
+                                calibration_snapshot.camera_info_age_sec
+                            ),
+                        )
+                    else:
+                        try:
+                            frame = rectify_bgr_frame(
+                                frame,
+                                calibration,
+                                cv2,
+                                numpy,
+                            )
+                        except ValueError as exc:
+                            calibration_snapshot = CalibrationRuntimeSnapshot(
+                                False,
+                                f"image_rectification_failed:{exc}",
+                                calibration=calibration,
+                                scan_from_camera=(
+                                    calibration_snapshot.scan_from_camera
+                                ),
+                                camera_info_age_sec=(
+                                    calibration_snapshot.camera_info_age_sec
+                                ),
+                            )
+                        else:
+                            camera_fx_px = calibration.fx_px
+                            camera_fy_px = calibration.fy_px
+                            camera_cx_px = calibration.cx_px
+                            camera_cy_px = calibration.cy_px
+                if not calibration_snapshot.ready:
+                    camera_fx_px = None
+                    camera_fy_px = None
+                    camera_cx_px = None
+                    camera_cy_px = None
             last_display_sec = time.time()
             age_ms = (
                 None
@@ -2427,6 +2778,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             if args.resize != 1.0:
                 frame = cv2.resize(frame, None, fx=args.resize, fy=args.resize)
+                if calibration_snapshot.ready:
+                    camera_fx_px *= args.resize
+                    camera_fy_px *= args.resize
+                    camera_cx_px *= args.resize
+                    camera_cy_px *= args.resize
             query_camera_cx_px = camera_cx_px if camera_cx_px is not None else float(frame.shape[1]) / 2.0
             query_camera_cy_px = camera_cy_px if camera_cy_px is not None else float(frame.shape[0]) / 2.0
             sim_qr_detection = None
@@ -3160,7 +3516,101 @@ def main(argv: Sequence[str] | None = None) -> int:
                     display_diagnostic_head_roi = (
                         selected_head_display_snapshot.diagnostic_head_roi
                     )
-            if args.lidar_bearing_source == "image-center":
+            calibrated_target_bearing_rad = None
+            calibrated_target_range_m = None
+            if (
+                args.calibrated_handoff
+                and calibration_snapshot.ready
+                and calibration_snapshot.scan_from_camera is not None
+                and estimate.corners
+                and camera_fx_px is not None
+                and camera_fy_px is not None
+                and camera_cx_px is not None
+                and camera_cy_px is not None
+                and lidar_source is not None
+            ):
+                roi_x0 = 0 if target_roi is None else target_roi.x0
+                roi_y0 = 0 if target_roi is None else target_roi.y0
+                lidar_rect_center_x_px = (
+                    sum(point.u_px for point in estimate.corners)
+                    / len(estimate.corners)
+                    + roi_x0
+                )
+                lidar_rect_center_y_px = (
+                    sum(point.v_px for point in estimate.corners)
+                    / len(estimate.corners)
+                    + roi_y0
+                )
+                try:
+                    calibrated_target_bearing_rad = (
+                        rectified_pixel_bearing_in_scan(
+                            u_px=lidar_rect_center_x_px,
+                            v_px=lidar_rect_center_y_px,
+                            fx_px=camera_fx_px,
+                            fy_px=camera_fy_px,
+                            cx_px=query_camera_cx_px,
+                            cy_px=query_camera_cy_px,
+                            scan_from_camera=(
+                                calibration_snapshot.scan_from_camera
+                            ),
+                        )
+                    )
+                except ValueError:
+                    calibrated_target_bearing_rad = None
+                if (
+                    head_measurement_fresh
+                    and detector_estimate.camera_face_center_xyz_m is not None
+                ):
+                    try:
+                        target_center_scan = transform_point(
+                            detector_estimate.camera_face_center_xyz_m,
+                            calibration_snapshot.scan_from_camera,
+                        )
+                    except ValueError:
+                        pass
+                    else:
+                        calibrated_target_range_m = math.hypot(
+                            target_center_scan[0],
+                            target_center_scan[1],
+                        )
+                        if calibrated_target_range_m > 1.0e-9:
+                            calibrated_target_bearing_rad = math.atan2(
+                                target_center_scan[1],
+                                target_center_scan[0],
+                            )
+                if calibrated_target_bearing_rad is not None:
+                    synchronized_scan = lidar_source.nearest_scan(
+                        image_stamp_sec=read.stamp_sec,
+                        tolerance_sec=max(
+                            args.max_scan_age_sec,
+                            args.sim_sync_tolerance_sec,
+                        ),
+                    )
+                    if synchronized_scan is None:
+                        synchronized_scan = lidar_source.latest_scan()
+                    lidar_query = median_range_in_scan_cone(
+                        synchronized_scan,
+                        bearing_rad=calibrated_target_bearing_rad,
+                        cone_half_angle_rad=math.radians(
+                            args.handoff_lidar_bearing_half_angle_deg
+                        ),
+                        now_sec=last_display_sec,
+                        max_scan_age_sec=args.max_scan_age_sec,
+                        min_sample_count=args.lidar_min_samples,
+                    )
+                    active_lidar_bearing_source = (
+                        "calibrated-pnp-center"
+                        if calibrated_target_range_m is not None
+                        else "calibrated-image-center"
+                    )
+                    lidar_fallback_source = "full_camera_to_scan_tf"
+                    lidar_distance_m = lidar_query.distance_m
+                    stand_distance_m = (
+                        lidar_distance_m
+                        if lidar_distance_m is not None
+                        else args.stand_distance_m
+                    )
+            elif args.lidar_bearing_source == "image-center":
                 lidar_query, lidar_camera_bearing_rad, lidar_rect_center_x_px, lidar_fallback_source = (
                     _query_lidar_distance(
                         lidar_source=lidar_source,
@@ -3261,6 +3711,36 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             elif not head_estimate_held:
                 axis_consensus.reset()
+            handoff_camera_consensus = None
+            if (
+                args.calibrated_handoff
+                and calibration_snapshot.ready
+                and calibration_snapshot.scan_from_camera is not None
+                and detector_estimate.camera_face_normal_xyz is not None
+                and estimate.usable
+                and estimate.mode == "face_visible"
+                and head_measurement_fresh
+            ):
+                try:
+                    scan_axis_rad = camera_face_normal_axis_in_scan(
+                        camera_face_normal_xyz=(
+                            detector_estimate.camera_face_normal_xyz
+                        ),
+                        scan_from_camera=(
+                            calibration_snapshot.scan_from_camera
+                        ),
+                    )
+                except ValueError:
+                    handoff_axis_consensus.reset()
+                else:
+                    handoff_camera_consensus = handoff_axis_consensus.add(
+                        angle_rad=scan_axis_rad,
+                        source=estimate.source,
+                        side=side.side,
+                        qr_texts=tuple(qr_texts),
+                    )
+            elif args.calibrated_handoff and not head_estimate_held:
+                handoff_axis_consensus.reset()
             conditioning = (
                 None
                 if consensus is None
@@ -3271,6 +3751,111 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ),
                 )
             )
+            handoff_decision = None
+            if args.calibrated_handoff:
+                empty_lidar = LidarAxisEstimate(
+                    False, "calibrated_target_unavailable"
+                )
+                empty_camera = CameraAxisEstimate(
+                    False, "camera_consensus_incomplete"
+                )
+                if (
+                    not calibration_snapshot.ready
+                    or calibration_snapshot.scan_from_camera is None
+                ):
+                    handoff_decision = AxisHandoffDecision(
+                        status="calibration_unavailable",
+                        accepted=False,
+                        reason=calibration_snapshot.reason,
+                        lidar=empty_lidar,
+                        camera=CameraAxisEstimate(
+                            False, calibration_snapshot.reason
+                        ),
+                    )
+                elif (
+                    calibrated_target_bearing_rad is None
+                    or lidar_source is None
+                ):
+                    handoff_decision = AxisHandoffDecision(
+                        status="target_association_unavailable",
+                        accepted=False,
+                        reason="calibrated_image_center_bearing_unavailable",
+                        lidar=empty_lidar,
+                        camera=empty_camera,
+                    )
+                else:
+                    lidar_axis = estimate_pooled_lidar_axis(
+                        lidar_source.recent_scans(
+                            args.handoff_lidar_window_scans
+                        ),
+                        target_bearing_rad=calibrated_target_bearing_rad,
+                        bearing_half_angle_rad=math.radians(
+                            args.handoff_lidar_bearing_half_angle_deg
+                        ),
+                        target_range_m=calibrated_target_range_m,
+                        range_tolerance_m=(
+                            args.handoff_lidar_range_tolerance_m
+                        ),
+                        min_points=args.handoff_min_lidar_points,
+                        min_linearity=args.handoff_min_lidar_linearity,
+                        min_length_m=args.handoff_min_lidar_length_m,
+                        max_length_m=args.handoff_max_lidar_length_m,
+                    )
+                    camera_axis = empty_camera
+                    if (
+                        handoff_camera_consensus is not None
+                        and conditioning is not None
+                        and conditioning.accepted
+                    ):
+                        camera_axis = CameraAxisEstimate(
+                            True,
+                            "metric_camera_consensus_ready",
+                            angle_rad=handoff_camera_consensus.angle_rad,
+                            confidence=max(
+                                0.0,
+                                min(
+                                    1.0,
+                                    1.0
+                                    - handoff_camera_consensus.max_deviation_rad
+                                    / max(
+                                        math.radians(
+                                            args.axis_consensus_max_deviation_deg
+                                        ),
+                                        1.0e-9,
+                                    ),
+                                ),
+                            ),
+                            sample_count=handoff_camera_consensus.sample_count,
+                            max_deviation_rad=(
+                                handoff_camera_consensus.max_deviation_rad
+                            ),
+                            source=handoff_camera_consensus.source,
+                        )
+                    elif conditioning is not None:
+                        camera_axis = CameraAxisEstimate(
+                            False,
+                            (
+                                conditioning.reason
+                                if not conditioning.accepted
+                                else "metric_camera_consensus_incomplete"
+                            ),
+                        )
+                    handoff_decision = evaluate_axis_handoff(
+                        lidar=lidar_axis,
+                        camera=camera_axis,
+                        config=handoff_config,
+                    )
+                if (
+                    args.handoff_status_json is not None
+                    and last_display_sec - last_handoff_write_sec >= 0.5
+                ):
+                    _write_handoff_status(
+                        args.handoff_status_json,
+                        decision=handoff_decision,
+                        calibration=calibration_snapshot,
+                        observed_at_sec=last_display_sec,
+                    )
+                    last_handoff_write_sec = last_display_sec
             if conditioning is not None and args.observation_status_json is not None:
                 status_payload = {
                     "schema_version": 1,
@@ -3350,7 +3935,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             filtered_proxy = statistics.median(proxy_window) if proxy_window else None
 
             annotated = display_frame.copy()
-            annotate_frame(
+            text_cursor = annotate_frame(
                 cv2,
                 annotated,
                 estimate,
@@ -3366,7 +3951,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                     else foreground_gate_result.reason
                 ),
             )
-            annotate_candidate_search_roi(cv2, annotated, candidate_search_roi)
+            if handoff_decision is not None:
+                annotate_axis_handoff(
+                    cv2,
+                    annotated,
+                    handoff_decision,
+                    text_cursor=text_cursor,
+                )
+            reserved_status_bottom_px = text_cursor.bottom_px
+            annotate_candidate_search_roi(
+                cv2,
+                annotated,
+                candidate_search_roi,
+                reserved_top_px=reserved_status_bottom_px,
+                label_slot=0,
+            )
             if args.sim_raw_image_topic:
                 annotate_simulation_target_roi(
                     cv2,
@@ -3389,6 +3988,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         if simulation_full_frame_edges
                         else "target ROI"
                     ),
+                    reserved_top_px=reserved_status_bottom_px,
+                    label_slot=1,
+                    text_cursor=text_cursor,
                 )
             annotate_recording_indicator(cv2, annotated, recorder.active)
 
@@ -3444,6 +4046,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                         f"sensor_status={sensor_frame_status(source_stamp_sec=read.stamp_sec, received_wall_sec=read.received_wall_sec, max_frame_age_sec=args.max_frame_age_sec)} "
                         f"measurement_status={measurement_status} "
                         f"detector_reason={detector_estimate.reason}"
+                    )
+                if handoff_decision is not None:
+                    print(
+                        "axis_handoff "
+                        "observe_only=true motion_authorized=false "
+                        f"status={handoff_decision.status} "
+                        f"accepted={str(handoff_decision.accepted).lower()} "
+                        f"reason={handoff_decision.reason} "
+                        f"lidar_axis_deg="
+                        f"{format_optional_float(None if handoff_decision.lidar.angle_rad is None else math.degrees(handoff_decision.lidar.angle_rad), precision=1)} "
+                        f"camera_axis_deg="
+                        f"{format_optional_float(None if handoff_decision.camera.angle_rad is None else math.degrees(handoff_decision.camera.angle_rad), precision=1)} "
+                        f"axis_delta_deg="
+                        f"{format_optional_float(None if handoff_decision.axial_difference_rad is None else math.degrees(handoff_decision.axial_difference_rad), precision=1)}"
                     )
 
             if not args.headless:
@@ -3626,6 +4242,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             qr_decoder.stop()
         if lidar_source is not None:
             lidar_source.release()
+        if calibration_source is not None:
+            calibration_source.release()
         frame_source.release()
         cv2.destroyAllWindows()
     return 0

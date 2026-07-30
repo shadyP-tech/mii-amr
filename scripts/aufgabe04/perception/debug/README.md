@@ -456,6 +456,67 @@ Use standalone `fixed` mode for stationary/manual full-frame silhouette
 debugging. Use `map-target` when the simulated robot translates or rotates
 toward a known candidate.
 
+### Calibrated camera/LiDAR axis handoff
+
+The real-camera viewer can combine the calibrated camera and LiDAR without
+making the diagnostic output a navigation input. In `--calibrated-handoff`
+mode it:
+
+1. rectifies every raw camera frame with the current `CameraInfo`;
+2. transforms the metric PnP head centre through the full
+   `base_scan <- camera` TF, including translation, roll, and pitch (with the
+   rectified centre ray retained only as an association fallback);
+3. associates returns in that LiDAR bearing corridor and fits a temporally
+   pooled PCA tangent as the coarse stand axis;
+4. computes an observe-only perpendicular approach-pose proposal from that
+   coarse axis;
+5. transforms each 3D PnP face normal into a `base_scan` tangent, reaches
+   multi-frame axial consensus there, and accepts it as the refined axis only
+   when its 180-degree-symmetric difference from the LiDAR estimate is at most
+   15 degrees by default.
+
+Run the current real-camera handoff from the workstation container with:
+
+```bash
+scripts/aufgabe04/perception/debug/run_stand_axis_viewer.sh \
+  --compressed-image-topic /camera/image_raw/compressed \
+  --camera-info-topic /camera/camera_info \
+  --camera-optical-frame camera \
+  --scan-topic /scan \
+  --scan-frame base_scan \
+  --calibrated-handoff \
+  --axis-source edges \
+  --edge-preprocess channel-union \
+  --canny-low 20 \
+  --canny-high 60 \
+  --edge-dilate-iterations 0 \
+  --edge-close-iterations 0 \
+  --candidate-center-width-fraction 0.55 \
+  --candidate-center-height-fraction 0.50 \
+  --candidate-center-y-fraction 0.62 \
+  --front-face-to-qr-width-ratio 1.30 \
+  --stand-face-size-m 0.078 \
+  --max-frame-age-sec 0.25 \
+  --max-result-age-sec 0 \
+  --max-scan-age-sec 0.5 \
+  --display-edges \
+  --display-face-mask \
+  --display-rectangle-mask \
+  --handoff-status-json results/aufgabe04/stand_axis_handoff/latest.json
+```
+
+The annotated frame shows both axes and a small scan-frame top-down inset.
+The console emits `axis_handoff ...`, and the optional JSON contains the
+calibration state, LiDAR fit quality, coarse approach proposal, camera/LiDAR
+axis difference, and final decision. Every output explicitly carries
+`observe_only=true` and `motion_authorized=false`; no velocity, navigation
+goal, station route, or approach command is published. Do not combine this
+mode with `--structural-diagnostic`, because that mode intentionally disables
+metric camera pose estimation. The command above disables detector-result age
+rejection because the current workstation can exceed that latency while
+running the full calibrated headless pipeline. Restore a positive
+`--max-result-age-sec` before treating timing as evidence.
+
 Approximate yaw degrees require extra geometry:
 
 ```bash

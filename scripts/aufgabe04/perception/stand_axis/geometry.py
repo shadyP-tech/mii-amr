@@ -37,7 +37,7 @@ def estimate_stand_axis_from_corners(
     ratio = left_height / right_height
     yaw_proxy = (ratio - 1.0) / (ratio + 1.0)
     closer_side = "left" if left_height > right_height else "right" if right_height > left_height else "equal"
-    yaw_deg = _yaw_deg_from_square_pnp(
+    pnp_geometry = _square_pnp_face_geometry(
         cv2,
         corners,
         stand_width_m=stand_width_m,
@@ -45,6 +45,13 @@ def estimate_stand_axis_from_corners(
         camera_fy_px=camera_fy_px,
         camera_cx_px=camera_cx_px,
         camera_cy_px=camera_cy_px,
+    )
+    yaw_deg = None if pnp_geometry is None else pnp_geometry[0]
+    camera_face_normal_xyz = (
+        None if pnp_geometry is None else pnp_geometry[1]
+    )
+    camera_face_center_xyz_m = (
+        None if pnp_geometry is None else pnp_geometry[2]
     )
     if yaw_deg is None:
         yaw_deg = _yaw_deg_from_projected_width(corners, stand_width_m, stand_distance_m, camera_fx_px)
@@ -65,6 +72,8 @@ def estimate_stand_axis_from_corners(
         closer_side=closer_side,
         contour_area_px=contour_area_px,
         source=source,
+        camera_face_normal_xyz=camera_face_normal_xyz,
+        camera_face_center_xyz_m=camera_face_center_xyz_m,
     )
 
 
@@ -241,6 +250,71 @@ def _polygon_area(corners: Sequence[ImagePoint]) -> float:
     return abs(area) / 2.0
 
 
+def _well_formed_quadrilateral(
+    corners: Sequence[ImagePoint],
+    *,
+    min_bbox_fill_ratio: float = 0.60,
+    min_side_length_ratio: float = 0.20,
+    min_corner_sine: float = 0.12,
+) -> bool:
+    """Reject collapsed or triangular four-point detector output.
+
+    OpenCV may occasionally report four QR points even though two points have
+    converged onto one corner. Area and average aspect ratio alone do not catch
+    that case. This gate is deliberately projection-tolerant, but requires a
+    convex polygon with four meaningful sides and enough area inside its axis
+    aligned bounding box to represent a visible stand face.
+    """
+
+    if len(corners) != 4:
+        return False
+    ordered = order_corners(corners)
+    coordinates = tuple(
+        (float(point.u_px), float(point.v_px)) for point in ordered
+    )
+    if not all(math.isfinite(value) for point in coordinates for value in point):
+        return False
+
+    xs = tuple(point[0] for point in coordinates)
+    ys = tuple(point[1] for point in coordinates)
+    bbox_area = (max(xs) - min(xs)) * (max(ys) - min(ys))
+    if bbox_area <= 0.0:
+        return False
+    if _polygon_area(ordered) / bbox_area < min_bbox_fill_ratio:
+        return False
+
+    edges = tuple(
+        (
+            following[0] - current[0],
+            following[1] - current[1],
+        )
+        for current, following in zip(
+            coordinates,
+            coordinates[1:] + coordinates[:1],
+        )
+    )
+    lengths = tuple(math.hypot(*edge) for edge in edges)
+    maximum_length = max(lengths)
+    if maximum_length <= 0.0:
+        return False
+    if min(lengths) / maximum_length < min_side_length_ratio:
+        return False
+
+    corner_crosses = []
+    for previous_edge, current_edge in zip(edges[-1:] + edges[:-1], edges):
+        cross = (
+            previous_edge[0] * current_edge[1]
+            - previous_edge[1] * current_edge[0]
+        )
+        denominator = math.hypot(*previous_edge) * math.hypot(*current_edge)
+        if denominator <= 0.0 or abs(cross) / denominator < min_corner_sine:
+            return False
+        corner_crosses.append(cross)
+    return all(cross > 0.0 for cross in corner_crosses) or all(
+        cross < 0.0 for cross in corner_crosses
+    )
+
+
 def _quadrilateral_corners(cv2, contour) -> tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint] | None:
     perimeter = cv2.arcLength(contour, True)
     for epsilon_fraction in (0.015, 0.02, 0.03, 0.04, 0.06, 0.08):
@@ -277,7 +351,7 @@ def _yaw_deg_from_ratio(
     return math.degrees(math.asin(sin_yaw))
 
 
-def _yaw_deg_from_square_pnp(
+def _square_pnp_face_geometry(
     cv2,
     corners: Sequence[ImagePoint],
     *,
@@ -286,7 +360,11 @@ def _yaw_deg_from_square_pnp(
     camera_fy_px: float | None,
     camera_cx_px: float | None,
     camera_cy_px: float | None,
-) -> float | None:
+) -> tuple[
+    float,
+    tuple[float, float, float],
+    tuple[float, float, float],
+] | None:
     if cv2 is None:
         return None
     if (
@@ -316,22 +394,44 @@ def _yaw_deg_from_square_pnp(
     )
     distortion = numpy.zeros((4, 1), dtype=numpy.float64)
 
-    def yaw_from_rotation_vector(rvec) -> float | None:
+    def geometry_from_pose(
+        rvec,
+        tvec,
+    ) -> tuple[
+        float,
+        tuple[float, float, float],
+        tuple[float, float, float],
+    ] | None:
         rotation, _jacobian = cv2.Rodrigues(rvec)
         normal = rotation @ numpy.array(
             [[0.0], [0.0], [1.0]],
             dtype=numpy.float64,
         )
         normal_x = float(normal[0, 0])
+        normal_y = float(normal[1, 0])
         normal_z = float(normal[2, 0])
-        if not math.isfinite(normal_x) or not math.isfinite(normal_z):
+        center = tuple(
+            float(value)
+            for value in numpy.asarray(
+                tvec,
+                dtype=numpy.float64,
+            ).reshape(3)
+        )
+        if not all(
+            math.isfinite(value)
+            for value in (normal_x, normal_y, normal_z, *center)
+        ):
             return None
         # OpenCV optical +x points to image-right.  The public stand-axis
         # convention used by yaw_proxy, the metric fallbacks, ROS map yaw, and
         # the viewpoint planner is positive image-left / counterclockwise.
         # Convert handedness here so every estimator branch exposes the same
         # signed quantity to both the real viewer and simulation observer.
-        return -math.degrees(math.atan2(normal_x, abs(normal_z)))
+        return (
+            -math.degrees(math.atan2(normal_x, abs(normal_z))),
+            (normal_x, normal_y, normal_z),
+            center,
+        )
 
     # IPPE_SQUARE is specialized for a four-point coplanar square and returns
     # both planar-pose solutions.  Its object/image point order is fixed; the
@@ -392,11 +492,11 @@ def _yaw_deg_from_square_pnp(
                 reprojection_rmse = math.sqrt(
                     float(numpy.mean(numpy.sum(residual * residual, axis=1)))
                 )
-                yaw_deg = yaw_from_rotation_vector(rvec)
-                if yaw_deg is None or not math.isfinite(reprojection_rmse):
+                geometry = geometry_from_pose(rvec, tvec)
+                if geometry is None or not math.isfinite(reprojection_rmse):
                     continue
                 if best_pose is None or reprojection_rmse < best_pose[0]:
-                    best_pose = (reprojection_rmse, yaw_deg)
+                    best_pose = (reprojection_rmse, geometry)
             if best_pose is not None:
                 return best_pose[1]
 
@@ -420,7 +520,7 @@ def _yaw_deg_from_square_pnp(
         dtype=numpy.float64,
     )
     try:
-        ok, rvec, _tvec = cv2.solvePnP(
+        ok, rvec, tvec = cv2.solvePnP(
             object_points,
             image_points,
             camera_matrix,
@@ -431,7 +531,31 @@ def _yaw_deg_from_square_pnp(
         return None
     if not ok:
         return None
-    return yaw_from_rotation_vector(rvec)
+    return geometry_from_pose(rvec, tvec)
+
+
+def _yaw_deg_from_square_pnp(
+    cv2,
+    corners: Sequence[ImagePoint],
+    *,
+    stand_width_m: float | None,
+    camera_fx_px: float | None,
+    camera_fy_px: float | None,
+    camera_cx_px: float | None,
+    camera_cy_px: float | None,
+) -> float | None:
+    """Compatibility wrapper retaining the historical scalar helper."""
+
+    geometry = _square_pnp_face_geometry(
+        cv2,
+        corners,
+        stand_width_m=stand_width_m,
+        camera_fx_px=camera_fx_px,
+        camera_fy_px=camera_fy_px,
+        camera_cx_px=camera_cx_px,
+        camera_cy_px=camera_cy_px,
+    )
+    return None if geometry is None else geometry[0]
 
 
 def _yaw_deg_from_projected_width(

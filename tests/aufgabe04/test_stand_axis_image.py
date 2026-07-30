@@ -7,6 +7,7 @@ from contextlib import redirect_stderr
 from dataclasses import replace
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 try:
@@ -53,6 +54,7 @@ from scripts.aufgabe04.perception.stand_axis_image import (  # noqa: E402
     _edge_pixels_inside_polygon,
     _expanded_head_edge_roi,
     _face_quadrilateral_from_silhouette,
+    _front_face_from_qr_geometry,
     _level_camera_endpoint_perspective_consistent,
     _largest_qr_quad,
     _plain_face_from_stem_cropped_edges,
@@ -65,6 +67,7 @@ from scripts.aufgabe04.perception.stand_axis_image import (  # noqa: E402
     _stem_anchored_face_from_edges,
     _stem_owned_head_from_line_segments,
     _validated_refitted_head_corners,
+    _well_formed_quadrilateral,
     estimate_edge_on_axis_from_line,
     estimate_stand_axis_from_edges,
     estimate_stand_axis_from_corners,
@@ -222,10 +225,13 @@ class StandAxisImageTest(unittest.TestCase):
         )
 
         self.assertEqual(gate.accept(good), (True, "accepted"))
-        self.assertEqual(gate.accept(wall), (False, "temporal_head_outlier"))
+        self.assertEqual(
+            gate.accept(wall),
+            (False, "head_quadrilateral_malformed"),
+        )
         self.assertEqual(gate.accept(good), (True, "accepted"))
 
-    def test_temporal_gate_does_not_switch_directly_from_qr_head_to_silhouette(self):
+    def test_temporal_gate_does_not_give_qr_source_special_authority(self):
         gate = HeadCandidateTemporalGate(reacquire_frames=3)
         qr_head = replace(
             estimate_stand_axis_from_corners(
@@ -241,10 +247,47 @@ class StandAxisImageTest(unittest.TestCase):
         )
 
         self.assertEqual(gate.accept(qr_head), (True, "accepted"))
-        self.assertEqual(gate.accept(heater), (False, "temporal_head_outlier"))
-        self.assertEqual(gate.accept(heater), (False, "temporal_head_outlier"))
-        self.assertEqual(gate.accept(heater), (True, "reacquired"))
-        self.assertEqual(gate.accept(qr_head), (True, "accepted_qr_anchor"))
+        self.assertEqual(gate.accept(heater), (True, "accepted"))
+        self.assertEqual(gate.accept(qr_head), (True, "accepted"))
+
+    def test_real_temporal_gate_rejects_triangle_and_recovers_outer_border(self):
+        gate = HeadCandidateTemporalGate(
+            structural_window_frames=5,
+            structural_required_frames=3,
+            hold_sec=0.5,
+        )
+        outer = replace(
+            estimate_stand_axis_from_corners(
+                self.make_corners(
+                    [(150, 90), (250, 92), (248, 192), (152, 190)]
+                )
+            ),
+            source="edge_raw_head_geometry",
+        )
+        collapsed_qr = replace(
+            estimate_stand_axis_from_corners(
+                self.make_corners(
+                    [(150, 90), (250, 90), (250, 190), (240, 185)]
+                )
+            ),
+            source="edge_qr_scaled_front",
+        )
+
+        gate.stabilize(outer, now_sec=10.00)
+        gate.stabilize(outer, now_sec=10.05)
+        acquired = gate.stabilize(outer, now_sec=10.10)
+        held = gate.stabilize(collapsed_qr, now_sec=10.15)
+        recovered = gate.stabilize(outer, now_sec=10.20)
+
+        self.assertTrue(acquired.current_accepted)
+        self.assertTrue(held.held)
+        self.assertEqual(held.reason, "head_quadrilateral_malformed")
+        self.assertEqual(held.estimate.corners, acquired.estimate.corners)
+        self.assertTrue(recovered.current_accepted)
+        self.assertEqual(
+            recovered.estimate.source,
+            "edge_raw_head_geometry",
+        )
 
     def test_temporal_gate_reacquires_a_consistent_new_view(self):
         gate = HeadCandidateTemporalGate(reacquire_frames=3)
@@ -292,7 +335,7 @@ class StandAxisImageTest(unittest.TestCase):
         self.assertTrue(held.estimate.usable)
         self.assertEqual(
             held.estimate.reason,
-            "temporal_hold_after_temporal_head_outlier",
+            "temporal_hold_after_head_quadrilateral_malformed",
         )
         self.assertIsNotNone(
             _detected_head_roi(
@@ -916,12 +959,89 @@ class StandAxisImageTest(unittest.TestCase):
 
         self.assertEqual(selected, large)
 
+    def test_well_formed_quadrilateral_rejects_collapsed_triangle(self):
+        square = self.make_corners(
+            [(150, 90), (250, 92), (248, 192), (152, 190)]
+        )
+        collapsed = self.make_corners(
+            [(150, 90), (250, 90), (250, 190), (240, 185)]
+        )
+
+        self.assertTrue(_well_formed_quadrilateral(square))
+        self.assertFalse(_well_formed_quadrilateral(collapsed))
+
+    @unittest.skipIf(numpy is None or cv2 is None, "numpy and OpenCV are required for QR tests")
+    def test_qr_front_face_rejects_collapsed_detector_quadrilateral(self):
+        frame = numpy.zeros((300, 440, 3), dtype=numpy.uint8)
+        edges = numpy.zeros(frame.shape[:2], dtype=numpy.uint8)
+        collapsed = self.make_corners(
+            [(150, 90), (250, 90), (250, 190), (240, 185)]
+        )
+
+        with patch(
+            "scripts.aufgabe04.perception.stand_axis_image._detect_qr_quad_corners",
+            return_value=collapsed,
+        ):
+            candidate = _front_face_from_qr_geometry(
+                cv2,
+                frame,
+                edges,
+                width_ratio=1.30,
+                min_area_px=250.0,
+                min_edge_height_px=8.0,
+                min_aspect_ratio=0.45,
+                max_aspect_ratio=1.80,
+            )
+
+        self.assertIsNone(candidate)
+
+    @unittest.skipIf(numpy is None or cv2 is None, "numpy and OpenCV are required for QR tests")
+    def test_qr_front_face_requires_outer_border_edge_support(self):
+        frame = numpy.zeros((300, 440, 3), dtype=numpy.uint8)
+        edges = numpy.zeros(frame.shape[:2], dtype=numpy.uint8)
+        qr_corners = self.make_corners(
+            [(150, 32), (238, 33), (238, 121), (149, 119)]
+        )
+
+        with patch(
+            "scripts.aufgabe04.perception.stand_axis_image._detect_qr_quad_corners",
+            return_value=qr_corners,
+        ):
+            candidate = _front_face_from_qr_geometry(
+                cv2,
+                frame,
+                edges,
+                width_ratio=1.30,
+                min_area_px=250.0,
+                min_edge_height_px=8.0,
+                min_aspect_ratio=0.45,
+                max_aspect_ratio=1.80,
+            )
+
+        self.assertIsNone(candidate)
+
     @unittest.skipIf(numpy is None or cv2 is None, "numpy and OpenCV are required for QR tests")
     def test_qr_head_area_gate_is_not_inflated_by_background_rectangle(self):
         frame = numpy.zeros((300, 440, 3), dtype=numpy.uint8)
         cv2.rectangle(frame, (2, 2), (437, 297), (255, 255, 255), thickness=3)
         qr_corners = self.make_corners(
             [(150, 32), (238, 33), (238, 121), (149, 119)]
+        )
+        scaled_head = _scale_quadrilateral_about_center(qr_corners, 1.30)
+        cv2.polylines(
+            frame,
+            [
+                numpy.array(
+                    [
+                        (round(point.u_px), round(point.v_px))
+                        for point in scaled_head
+                    ],
+                    dtype=numpy.int32,
+                )
+            ],
+            True,
+            (255, 255, 255),
+            thickness=3,
         )
 
         with patch(
@@ -941,6 +1061,50 @@ class StandAxisImageTest(unittest.TestCase):
 
         self.assertTrue(estimate.usable)
         self.assertEqual(estimate.source, "edge_qr_scaled_front")
+
+    @unittest.skipIf(numpy is None or cv2 is None, "numpy and OpenCV are required for arbitration tests")
+    def test_topology_supported_outer_border_wins_over_qr_geometry(self):
+        frame = numpy.zeros((220, 300, 3), dtype=numpy.uint8)
+        face_mask = numpy.zeros(frame.shape[:2], dtype=numpy.uint8)
+        outer_corners = self.make_corners(
+            [(70, 35), (210, 38), (208, 175), (72, 172)]
+        )
+        qr_corners = self.make_corners(
+            [(95, 60), (185, 62), (184, 150), (96, 148)]
+        )
+        topology_face = _SilhouetteFaceCandidate(
+            corners=outer_corners,
+            face_mask=face_mask,
+            structure_evidence=SimpleNamespace(
+                tracking_supported=True,
+                reason="structure_tracking_supported",
+            ),
+        )
+        qr_face = _SilhouetteFaceCandidate(
+            corners=qr_corners,
+            face_mask=face_mask,
+        )
+
+        with (
+            patch(
+                "scripts.aufgabe04.perception.stand_axis_image._front_face_from_qr_geometry",
+                return_value=qr_face,
+            ),
+            patch(
+                "scripts.aufgabe04.perception.stand_axis_image._plain_face_from_stem_cropped_edges",
+                return_value=topology_face,
+            ),
+        ):
+            estimate, _artifacts = estimate_stand_axis_from_edges(
+                cv2,
+                frame,
+                front_face_to_qr_width_ratio=1.30,
+                structural_diagnostic=True,
+            )
+
+        self.assertTrue(estimate.usable)
+        self.assertEqual(estimate.source, "edge_raw_head_geometry")
+        self.assertEqual(estimate.corners, outer_corners)
 
     @unittest.skipIf(numpy is None or cv2 is None, "numpy and OpenCV are required for silhouette tests")
     def test_silhouette_face_mask_shows_selected_head_outline_only(self):

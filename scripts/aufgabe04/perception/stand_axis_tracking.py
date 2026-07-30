@@ -349,20 +349,18 @@ class HeadCandidateTemporalGate:
     def accept(self, estimate: StandAxisImageEstimate) -> tuple[bool, str]:
         signature = _head_candidate_signature(estimate)
         if signature is None:
+            rejection_reason = (
+                "head_quadrilateral_malformed"
+                if estimate.usable and estimate.corners is not None
+                else estimate.reason
+            )
             if self.structural_window_frames:
                 # Missing frames occupy the rolling window and therefore cannot
                 # be silently skipped while establishing a 3-of-5 consensus.
                 self._structural_window.append((estimate, None))
             self._clear_pending()
-            return False, estimate.reason
+            return False, rejection_reason
         if self.structural_window_frames:
-            if signature.source == "edge_qr_scaled_front":
-                self._accepted = signature
-                self._selected_estimate = estimate
-                self._structural_window.clear()
-                self._clear_pending()
-                self._clear_inset_pending()
-                return True, "accepted_qr_anchor"
             return self._accept_structural_window(estimate, signature)
         if self._accepted is None:
             if self._pending is not None and self._compatible(self._pending, signature):
@@ -376,15 +374,10 @@ class HeadCandidateTemporalGate:
             self._accepted = signature
             self._clear_pending()
             return True, "accepted"
-        if signature.source == "edge_qr_scaled_front":
+        if self._compatible(self._accepted, signature):
             self._accepted = signature
             self._clear_pending()
-            return True, "accepted_qr_anchor"
-        if self._compatible(self._accepted, signature):
-            if self._accepted.source != "edge_qr_scaled_front":
-                self._accepted = signature
-                self._clear_pending()
-                return True, "accepted"
+            return True, "accepted"
 
         if not self._size_compatible(self._accepted, signature):
             self._clear_pending()

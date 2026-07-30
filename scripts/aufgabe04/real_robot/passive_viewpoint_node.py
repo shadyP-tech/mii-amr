@@ -32,6 +32,9 @@ from scripts.aufgabe04.navigation.viewpoint_recommendation import (
 from scripts.aufgabe04.perception.camera_stand_observation import (
     stand_axis_from_camera_yaw,
 )
+from scripts.aufgabe04.perception.camera_calibration import (
+    rectify_bgr_frame as _rectify_bgr_frame,
+)
 from scripts.aufgabe04.perception.ros_image_adapter import (
     compressed_msg_stamp_sec,
     compressed_msg_to_bgr_frame,
@@ -189,42 +192,6 @@ def _atomic_json(path: Path, payload: dict[str, object]) -> None:
             Path(temporary_name).unlink()
         except FileNotFoundError:
             pass
-
-
-def _rectify_bgr_frame(
-    frame: object,
-    camera_info: object,
-    cv2_module: object,
-    numpy_module: object,
-) -> object:
-    """Rectify a raw BGR frame into the pixel geometry described by CameraInfo.p."""
-    height, width = frame.shape[:2]
-    if width != int(camera_info.width) or height != int(camera_info.height):
-        raise ValueError(
-            "decoded image dimensions do not match CameraInfo: "
-            f"image={width}x{height}, info={camera_info.width}x{camera_info.height}"
-        )
-
-    camera_matrix = numpy_module.asarray(camera_info.k, dtype=float).reshape(3, 3)
-    distortion = numpy_module.asarray(camera_info.d, dtype=float)
-    rectification = numpy_module.asarray(camera_info.r, dtype=float).reshape(3, 3)
-    projection = numpy_module.asarray(camera_info.p, dtype=float).reshape(3, 4)
-    output_matrix = projection[:, :3]
-    map_x, map_y = cv2_module.initUndistortRectifyMap(
-        camera_matrix,
-        distortion,
-        rectification,
-        output_matrix,
-        (width, height),
-        cv2_module.CV_32FC1,
-    )
-    return cv2_module.remap(
-        frame,
-        map_x,
-        map_y,
-        interpolation=cv2_module.INTER_LINEAR,
-        borderMode=cv2_module.BORDER_CONSTANT,
-    )
 
 
 def _stand_axis_profile_from_args(args) -> RealCameraStandAxisProfile:

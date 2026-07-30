@@ -32,6 +32,10 @@ class StandAxisImageEstimate:
     closer_side: str | None
     contour_area_px: float
     source: str = "unknown"
+    # Unit face normal in rectified OpenCV optical coordinates (+x right,
+    # +y down, +z forward). Present only for a successful metric PnP pose.
+    camera_face_normal_xyz: tuple[float, float, float] | None = None
+    camera_face_center_xyz_m: tuple[float, float, float] | None = None
 
 
 @dataclass(frozen=True)

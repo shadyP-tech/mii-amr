@@ -5,7 +5,10 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, replace
 
-from scripts.aufgabe04.perception.stand_axis.geometry import order_corners
+from scripts.aufgabe04.perception.stand_axis.geometry import (
+    _well_formed_quadrilateral,
+    order_corners,
+)
 from scripts.aufgabe04.perception.stand_axis.models import (
     ImagePoint,
     StandAxisImageEstimate,
@@ -41,6 +44,8 @@ def head_candidate_signature(
     estimate: StandAxisImageEstimate,
 ) -> HeadCandidateSignature | None:
     if not estimate.usable or estimate.corners is None:
+        return None
+    if not _well_formed_quadrilateral(estimate.corners):
         return None
     top_left, top_right, bottom_right, bottom_left = estimate.corners
     xs = [point.u_px for point in estimate.corners]
