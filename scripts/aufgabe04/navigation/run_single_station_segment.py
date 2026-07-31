@@ -41,6 +41,10 @@ from scripts.aufgabe04.navigation.detected_stand_preapproach import (
     DETECTED_STAND_PREAPPROACH_ROUTE_KIND,
     validate_detected_stand_preapproach_binding,
 )
+from scripts.aufgabe04.navigation.stand_discovery_route import (
+    STAND_DISCOVERY_ROUTE_KIND,
+    validate_stand_discovery_route_binding,
+)
 from scripts.aufgabe04.navigation.segment_run_logger import append_segment_run
 from scripts.aufgabe04.navigation.follower_models import FollowerResult
 from scripts.aufgabe04.navigation.execution_route_certificate import (
@@ -205,6 +209,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--runtime-map-bundle-json", type=Path, default=None)
     parser.add_argument("--runtime-environment", type=Path, default=None)
     parser.add_argument("--candidate-snapshot", type=Path, default=None)
+    parser.add_argument("--coverage-plan", type=Path, default=None)
     parser.add_argument("--station-identity-registry", type=Path, default=None)
     parser.add_argument("--arrival-pose-catalog", type=Path, default=None)
     parser.add_argument("--task-snapshot", type=Path, default=None)
@@ -1137,6 +1142,16 @@ def main(argv: list[str] | None = None) -> int:
         if leg.route_kind == DETECTED_STAND_PREAPPROACH_ROUTE_KIND
         else None
     )
+    stand_discovery_binding_status = (
+        validate_stand_discovery_route_binding(
+            diagnostics_json_path,
+            leg,
+            coverage_plan_path=args.coverage_plan,
+            diagnostics_payload=diagnostics_snapshot.payload,
+        )
+        if leg.route_kind == STAND_DISCOVERY_ROUTE_KIND
+        else None
+    )
     catalog_egress_certificate = None
     catalog_egress_failures = []
     execution_certificate_failures = []
@@ -1173,6 +1188,16 @@ def main(argv: list[str] | None = None) -> int:
                 if args.candidate_snapshot is None:
                     raise ValueError(
                         "detected stand pre-approach requires --candidate-snapshot"
+                    )
+            elif leg.route_kind == STAND_DISCOVERY_ROUTE_KIND:
+                if route_purpose != "stand_discovery":
+                    raise ValueError(
+                        "stand discovery route requires "
+                        "route_purpose=stand_discovery"
+                    )
+                if args.coverage_plan is None:
+                    raise ValueError(
+                        "stand discovery route requires --coverage-plan"
                     )
             elif route_purpose == "logistics":
                 missing = [
@@ -1246,6 +1271,11 @@ def main(argv: list[str] | None = None) -> int:
             []
             if detected_stand_binding_status is None
             else detected_stand_binding_status.failures
+        )
+        + (
+            []
+            if stand_discovery_binding_status is None
+            else stand_discovery_binding_status.failures
         )
         + catalog_egress_failures
         + execution_certificate_failures

@@ -20,6 +20,10 @@ from scripts.aufgabe04.navigation.viewpoint_recommendation import (
 from scripts.aufgabe04.perception.stand_axis.real_camera_profile import (
     RealCameraStandAxisProfile,
 )
+from scripts.aufgabe04.perception.stand_axis.model_profile import (
+    stand_model_from_payload,
+    write_stand_model,
+)
 from scripts.aufgabe04.real_robot.camera_geometry import (
     CameraIntrinsics,
     project_optical_point,
@@ -376,6 +380,57 @@ class PassiveObservationCoreTest(unittest.TestCase):
         )
         with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
             _validate_args(parser, invalid_canny)
+
+    def test_passive_observer_requires_measured_model_profile(self):
+        base_payload = {
+            "schema_version": 1,
+            "profile_id": "physical_test_v1",
+            "environment": "physical",
+            "measurement_status": "measured",
+            "head_width_m": 0.078,
+            "head_height_m": 0.078,
+            "head_depth_m": 0.007,
+            "qr_symbol_width_m": 0.060,
+            "qr_symbol_height_m": 0.060,
+            "qr_center_x_m": 0.0,
+            "qr_center_y_m": 0.0,
+            "stem_width_m": 0.010,
+            "stem_visible_height_m": 0.080,
+            "tolerance_m": 0.001,
+            "source": "direct test metrology",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            measured_path = root / "measured.json"
+            write_stand_model(
+                measured_path,
+                stand_model_from_payload(base_payload),
+            )
+            measured = build_parser().parse_args(
+                [
+                    *self.parser_args(),
+                    "--stand-model-profile",
+                    str(measured_path),
+                ]
+            )
+            _validate_args(build_parser(), measured)
+
+            provisional_payload = dict(base_payload)
+            provisional_payload["measurement_status"] = "provisional"
+            provisional_path = root / "provisional.json"
+            write_stand_model(
+                provisional_path,
+                stand_model_from_payload(provisional_payload),
+            )
+            provisional = build_parser().parse_args(
+                [
+                    *self.parser_args(),
+                    "--stand-model-profile",
+                    str(provisional_path),
+                ]
+            )
+            with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+                _validate_args(build_parser(), provisional)
 
     def test_raw_image_is_rectified_into_camera_info_projection_geometry(self):
         import cv2

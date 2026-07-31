@@ -1,0 +1,18 @@
+{
+  "environment": "physical",
+  "head_depth_m": 0.007,
+  "head_height_m": 0.078,
+  "head_width_m": 0.078,
+  "measurement_status": "provisional",
+  "profile_id": "physical_stand_assumptions_v1",
+  "qr_center_x_m": 0.0,
+  "qr_center_y_m": 0.0,
+  "qr_symbol_height_m": 0.06,
+  "qr_symbol_width_m": 0.06,
+  "schema_version": 1,
+  "source": "repository assumptions pending direct metrology",
+  "stand_model_sha256": "1a40b60f14b3286423e8b0b524a38523b659ef0cd950635719b9efded6f5570b",
+  "stem_visible_height_m": 0.08,
+  "stem_width_m": 0.01,
+  "tolerance_m": 0.001
+}

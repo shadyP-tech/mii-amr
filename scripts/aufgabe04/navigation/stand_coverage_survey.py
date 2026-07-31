@@ -43,7 +43,7 @@ VALID_CANDIDATE_STATUSES = frozenset(
 
 @dataclass(frozen=True)
 class CoverageSurveyConfig:
-    """Geometry and completion gates for a deterministic two-rail survey."""
+    """Geometry and completion gates for a deterministic rail survey."""
 
     lane_count: int = 2
     stop_spacing_m: float = 0.90
@@ -83,8 +83,8 @@ class CoverageSurveyConfig:
         for name, value in nonnegative.items():
             if not math.isfinite(value) or value < 0.0:
                 raise ValueError(f"{name} must be finite and non-negative")
-        if type(self.lane_count) is not int or self.lane_count < 2:
-            raise ValueError("lane_count must be an integer of at least 2")
+        if type(self.lane_count) is not int or self.lane_count < 1:
+            raise ValueError("lane_count must be a positive integer")
         if (
             type(self.minimum_distinct_viewpoints) is not int
             or self.minimum_distinct_viewpoints < 1

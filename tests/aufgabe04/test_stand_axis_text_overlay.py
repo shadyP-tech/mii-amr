@@ -11,6 +11,7 @@ except ImportError:
     numpy = None
 
 from scripts.aufgabe04.perception.debug.stand_axis_viewer import (
+    _draw_dashed_polygon,
     _roi_label_origin,
 )
 from scripts.aufgabe04.perception.debug.text_overlay import OverlayTextCursor
@@ -30,6 +31,7 @@ class _FakeCv2:
 
     def __init__(self):
         self.text_calls = []
+        self.line_calls = []
 
     @staticmethod
     def getTextSize(text, _font_face, _font_scale, _thickness):
@@ -47,8 +49,22 @@ class _FakeCv2:
     ):
         self.text_calls.append((text, origin))
 
+    def line(self, _frame, start, end, color, thickness):
+        self.line_calls.append((start, end, color, thickness))
+
 
 class StandAxisTextOverlayTest(unittest.TestCase):
+    def test_model_prediction_uses_dashed_segments(self):
+        cv2 = _FakeCv2()
+        points = [(10, 10), (50, 10), (50, 50), (10, 50)]
+
+        _draw_dashed_polygon(cv2, object(), points, (255, 0, 255), 1)
+
+        self.assertGreater(len(cv2.line_calls), 4)
+        self.assertTrue(
+            all(call[2] == (255, 0, 255) for call in cv2.line_calls)
+        )
+
     def test_cursor_wraps_and_stacks_measured_rows_without_overlap(self):
         cv2 = _FakeCv2()
         frame = SimpleNamespace(shape=(180, 220, 3))

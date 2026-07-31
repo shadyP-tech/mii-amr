@@ -358,7 +358,7 @@ DYNAMIC_PHYSICAL_ROUTE_KINDS = frozenset(
 )
 CATALOG_PHYSICAL_ROUTE_KINDS = frozenset({"catalog_face_approach"})
 STATIC_PHYSICAL_ROUTE_KINDS = CATALOG_PHYSICAL_ROUTE_KINDS | frozenset(
-    {"detected_stand_preapproach"}
+    {"detected_stand_preapproach", "stand_discovery_corridor"}
 )
 PHYSICAL_ROUTE_KINDS = DYNAMIC_PHYSICAL_ROUTE_KINDS | STATIC_PHYSICAL_ROUTE_KINDS
 DYNAMIC_VIEWPOINT_ROUTE_KINDS = (

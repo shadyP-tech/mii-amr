@@ -1,0 +1,227 @@
+import json
+from contextlib import redirect_stdout
+from io import StringIO
+import math
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from scripts.aufgabe04.navigation.plan_stand_coverage_survey import (
+    main as plan_coverage,
+)
+from scripts.aufgabe04.navigation.ros_preflight import RosPreflightResult
+from scripts.aufgabe04.navigation.run_single_station_segment import (
+    main as run_segment,
+)
+from scripts.aufgabe04.navigation.simple_waypoint_follower import (
+    STATIC_PHYSICAL_ROUTE_KINDS,
+)
+from scripts.aufgabe04.navigation.stand_coverage_survey import (
+    STATUS_PENDING_CAMERA,
+    SurveyCandidate,
+    load_coverage_survey_plan,
+    load_stand_survey_registry,
+    write_stand_survey_registry,
+)
+from scripts.aufgabe04.navigation.stand_discovery_route import (
+    STAND_DISCOVERY_ROUTE_KIND,
+    seal_stand_discovery_route,
+    validate_stand_discovery_route_binding,
+)
+from scripts.aufgabe04.navigation.waypoint_csv import load_route_leg
+from scripts.aufgabe04.real_robot.passive_viewpoint_node import _resolved_qr_id
+from scripts.aufgabe04.real_robot.run_autonomous_stand_exploration import (
+    _opposite_face_normal,
+    candidate_snapshot_from_registry,
+)
+
+
+MAP = Path("maps/aufgabe03/arena_1p898x3p9_auto.yaml")
+
+
+class AutonomousStandExplorationTest(unittest.TestCase):
+    def _planned_center_corridor(self, root: Path) -> None:
+        with redirect_stdout(StringIO()):
+            status = plan_coverage(
+                [
+                    "--map",
+                    str(MAP),
+                    "--semantic-map-id",
+                    "arena_1p898x3p9_auto",
+                    "--planning-frame",
+                    "map",
+                    "--start-x",
+                    "0",
+                    "--start-y",
+                    "0",
+                    "--start-yaw",
+                    "0",
+                    "--survey-id",
+                    "autonomous_test",
+                    "--output-dir",
+                    str(root),
+                    "--lane-count",
+                    "1",
+                    "--stop-spacing-m",
+                    "0.70",
+                    "--expected-stand-count",
+                    "1",
+                ]
+            )
+        self.assertEqual(status, 0)
+
+    def test_single_center_lane_is_plannable_and_meets_coverage_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "survey"
+            self._planned_center_corridor(root)
+            plan = load_coverage_survey_plan(root / "coverage_plan.json")
+            self.assertEqual(plan.config.lane_count, 1)
+            self.assertGreaterEqual(plan.planned_coverage_ratio, 0.95)
+            self.assertTrue(
+                all(abs(viewpoint.pose.y_m) <= 0.35 for viewpoint in plan.viewpoints)
+            )
+
+    def test_center_corridor_leg_is_sealed_as_a_certified_physical_route(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "survey"
+            sealed_root = Path(tmp) / "sealed"
+            self._planned_center_corridor(root)
+            outputs = seal_stand_discovery_route(
+                source_route_csv=root / "legs/leg_000_route.csv",
+                source_diagnostics_json=root / "legs/leg_000_diagnostics.json",
+                coverage_plan_path=root / "coverage_plan.json",
+                output_dir=sealed_root,
+            )
+            leg = load_route_leg(Path(outputs["route_csv"]), 0)
+            status = validate_stand_discovery_route_binding(
+                Path(outputs["diagnostics_json"]),
+                leg,
+                coverage_plan_path=root / "coverage_plan.json",
+            )
+            self.assertTrue(status.ok, status.failures)
+            self.assertEqual(leg.route_kind, STAND_DISCOVERY_ROUTE_KIND)
+            self.assertFalse(leg.simulation_only)
+            self.assertTrue(leg.raw_waypoints[-1].protected)
+            self.assertIn(
+                STAND_DISCOVERY_ROUTE_KIND,
+                STATIC_PHYSICAL_ROUTE_KINDS,
+            )
+            diagnostics = json.loads(
+                Path(outputs["diagnostics_json"]).read_text()
+            )
+            self.assertTrue(diagnostics["metadata"]["motion_authorized"])
+
+            with patch(
+                "scripts.aufgabe04.navigation.run_single_station_segment."
+                "run_ros_preflight",
+                return_value=RosPreflightResult(
+                    ok=True,
+                    failures=[],
+                    observations=[],
+                    runtime_config={},
+                ),
+            ), patch(
+                "scripts.aufgabe04.navigation.run_single_station_segment."
+                "run_simple_waypoint_follower"
+            ) as follower, redirect_stdout(StringIO()):
+                runner_status = run_segment(
+                    [
+                        "--route-csv",
+                        outputs["route_csv"],
+                        "--diagnostics-json",
+                        outputs["diagnostics_json"],
+                        "--route-certificate-json",
+                        outputs["route_certificate_json"],
+                        "--coverage-plan",
+                        str(root / "coverage_plan.json"),
+                        "--leg-index",
+                        "0",
+                        "--semantic-log",
+                        str(Path(tmp) / "events.jsonl"),
+                        "--results-csv",
+                        str(Path(tmp) / "results.csv"),
+                        "--preflight-json",
+                        str(Path(tmp) / "preflight.json"),
+                        "--dry-run",
+                    ]
+                )
+            self.assertEqual(runner_status, 0)
+            follower.assert_not_called()
+
+    def test_pending_registry_freezes_to_candidate_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "survey"
+            self._planned_center_corridor(root)
+            plan = load_coverage_survey_plan(root / "coverage_plan.json")
+            registry_path = root / "stand_registry.json"
+            registry = load_stand_survey_registry(registry_path, plan)
+            candidate = SurveyCandidate(
+                candidate_uid="survey_candidate_0001",
+                x_m=0.2,
+                y_m=0.3,
+                radius_m=0.06,
+                uncertainty_m=0.02,
+                keepout_radius_m=0.31,
+                confidence=0.9,
+                hit_count=5,
+                first_seen_sec=10.0,
+                last_seen_sec=12.0,
+                source_observation_ids=("obs_1", "obs_2"),
+                viewpoint_ids=("survey_vp_001", "survey_vp_002"),
+                status=STATUS_PENDING_CAMERA,
+            )
+            registry = type(registry)(
+                schema_version=registry.schema_version,
+                survey_id=registry.survey_id,
+                planning_frame=registry.planning_frame,
+                map_bundle_sha256=registry.map_bundle_sha256,
+                candidates=(candidate,),
+            )
+            write_stand_survey_registry(registry_path, registry, plan)
+            snapshot = candidate_snapshot_from_registry(
+                registry,
+                plan,
+                registry_path=registry_path,
+                snapshot_id="autonomous_snapshot",
+            )
+            self.assertEqual(snapshot.candidate_uids, (candidate.candidate_uid,))
+            self.assertEqual(
+                snapshot.candidates[0].source.observation_ids,
+                candidate.source_observation_ids,
+            )
+
+    def test_auto_qr_requires_exactly_one_identity(self):
+        self.assertEqual(_resolved_qr_id("auto", ("A",)), "A")
+        self.assertIsNone(_resolved_qr_id("auto", ()))
+        self.assertIsNone(_resolved_qr_id("auto", ("A", "B")))
+        self.assertEqual(_resolved_qr_id("A", ("A",)), "A")
+        self.assertIsNone(_resolved_qr_id("A", ("B",)))
+
+    def test_axis_only_observation_selects_opposite_face(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            axis_path = Path(tmp) / "axis.json"
+            axis_path.write_text(
+                json.dumps(
+                    {
+                        "observation_kind": "real_stand_axis_without_qr",
+                        "stand_axis_rad": 0.0,
+                        "stand_center": {"x_m": 0.0, "y_m": 0.0},
+                        "robot_pose": {
+                            "x_m": 0.0,
+                            "y_m": 0.7,
+                            "yaw_rad": -math.pi / 2.0,
+                        },
+                    }
+                )
+            )
+            selected = _opposite_face_normal(axis_path)
+            error = math.atan2(
+                math.sin(selected + math.pi / 2.0),
+                math.cos(selected + math.pi / 2.0),
+            )
+            self.assertAlmostEqual(error, 0.0, places=6)
+
+
+if __name__ == "__main__":
+    unittest.main()

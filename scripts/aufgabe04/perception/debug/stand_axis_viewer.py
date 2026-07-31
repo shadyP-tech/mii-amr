@@ -75,6 +75,13 @@ from scripts.aufgabe04.perception.stand_axis_image import (
     StandAxisImageEstimate,
     estimate_stand_axis_from_edges,
     estimate_stand_axis_from_mask,
+    estimate_stand_axis_from_metric_model,
+)
+from scripts.aufgabe04.perception.stand_axis.model_profile import (
+    load_stand_model,
+)
+from scripts.aufgabe04.perception.stand_axis.pose_tracking import (
+    MetricPoseTracker,
 )
 from scripts.aufgabe04.perception.stand_axis.radiator_rib_mask import (
     repeated_vertical_rib_exclusion_mask,
@@ -559,6 +566,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--stand-face-size-m",
         type=float,
         help="Alias for --stand-width-m for a square stand face, e.g. 0.078 for a 7.8 cm x 7.8 cm frame.",
+    )
+    parser.add_argument(
+        "--stand-model-profile",
+        type=Path,
+        help=(
+            "Content-hashed metric stand profile. QR/IPPE projects the known "
+            "head and current raw edges must independently refine it."
+        ),
     )
     parser.add_argument(
         "--stand-distance-m",
@@ -1879,12 +1894,15 @@ def annotate_frame(
     if estimate.corners is not None:
         corners = estimate.corners
         int_points = [(int(round(point.u_px)), int(round(point.v_px))) for point in corners]
-        for start, end in zip(int_points, int_points[1:] + int_points[:1]):
-            cv2.line(frame, start, end, (0, 255, 255), 2)
-        cv2.line(frame, int_points[0], int_points[3], (0, 180, 255), 3)
-        cv2.line(frame, int_points[1], int_points[2], (255, 180, 0), 3)
-        for label, point in zip(("TL", "TR", "BR", "BL"), int_points):
-            cv2.putText(frame, label, point, cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+        if estimate.evidence_state == "predicted_only":
+            _draw_dashed_polygon(cv2, frame, int_points, (255, 0, 255), 1)
+        else:
+            for start, end in zip(int_points, int_points[1:] + int_points[:1]):
+                cv2.line(frame, start, end, (0, 255, 255), 2)
+            cv2.line(frame, int_points[0], int_points[3], (0, 180, 255), 3)
+            cv2.line(frame, int_points[1], int_points[2], (255, 180, 0), 3)
+            for label, point in zip(("TL", "TR", "BR", "BL"), int_points):
+                cv2.putText(frame, label, point, cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
     if estimate.axis_line is not None:
         start, end = estimate.axis_line
         start_point = (int(round(start.u_px)), int(round(start.v_px)))
@@ -1915,6 +1933,11 @@ def annotate_frame(
         line2 = f"source={estimate.source} area={estimate.contour_area_px:.0f}px"
         line3 = f"camera axis rotation unavailable stand_side={side.side}"
         color = (0, 200, 255)
+
+    if estimate.model_profile_sha256 is not None:
+        line3 += f" evidence={estimate.evidence_state}"
+        if estimate.pose_reprojection_rmse_px is not None:
+            line2 += f" pnp_rmse={estimate.pose_reprojection_rmse_px:.2f}px"
 
     cursor = text_cursor or OverlayTextCursor()
     for text, font_scale in (
@@ -1951,6 +1974,43 @@ def annotate_frame(
             2,
         )
     return cursor
+
+
+def _draw_dashed_polygon(cv2, frame, points, color, thickness: int) -> None:
+    """Render a model prediction without making it look measured."""
+
+    for start, end in zip(points, points[1:] + points[:1]):
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        length = max(1.0, math.hypot(dx, dy))
+        dash_count = max(1, int(math.ceil(length / 8.0)))
+        for index in range(0, dash_count, 2):
+            first = index / dash_count
+            second = min(1.0, (index + 1) / dash_count)
+            cv2.line(
+                frame,
+                (round(start[0] + first * dx), round(start[1] + first * dy)),
+                (round(start[0] + second * dx), round(start[1] + second * dy)),
+                color,
+                thickness,
+            )
+
+
+def annotate_model_prediction(
+    cv2,
+    frame,
+    corners,
+    *,
+    x_offset: int = 0,
+    y_offset: int = 0,
+) -> None:
+    if corners is None:
+        return
+    points = [
+        (round(point.u_px + x_offset), round(point.v_px + y_offset))
+        for point in corners
+    ]
+    _draw_dashed_polygon(cv2, frame, points, (255, 0, 255), 1)
 
 
 def annotate_recording_indicator(cv2, frame, recording_active: bool) -> None:
@@ -2500,6 +2560,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     simulation_full_frame_edges = _simulation_full_frame_edge_mode(args)
     simulation_wall_suppression = _simulation_wall_suppression_mode(args)
     stand_width_m = args.stand_face_size_m if args.stand_face_size_m is not None else args.stand_width_m
+    stand_model_profile = None
+    if args.stand_model_profile is not None:
+        try:
+            stand_model_profile = load_stand_model(args.stand_model_profile)
+        except ValueError as exc:
+            raise SystemExit(f"invalid stand model profile: {exc}") from exc
+        if (
+            stand_width_m is not None
+            and abs(stand_width_m - stand_model_profile.head_width_m)
+            > max(stand_model_profile.tolerance_m, 1.0e-6)
+        ):
+            raise SystemExit(
+                "--stand-face-size-m disagrees with the hashed stand model profile"
+            )
+        stand_width_m = stand_model_profile.head_width_m
     camera_fx_px = args.camera_fx_px
     camera_fy_px = args.camera_fy_px
     camera_cx_px = args.camera_cx_px
@@ -2587,6 +2662,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     recorder = DebugWindowRecorder(cv2, args.record_dir, args.record_fps)
 
     print("Aufgabe 04 stand-axis viewer: debug-only, read-only ROS subscriptions.")
+    if stand_model_profile is not None:
+        print(
+            "Metric stand model: "
+            f"profile={stand_model_profile.profile_id} "
+            f"measurement_status={stand_model_profile.measurement_status} "
+            f"sha256={stand_model_profile.sha256}"
+        )
     if args.calibrated_handoff:
         print(
             "Calibrated handoff: CameraInfo rectification + full TF + pooled "
@@ -2627,12 +2709,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         required_samples=args.axis_consensus_frames,
         max_deviation_rad=math.radians(args.axis_consensus_max_deviation_deg),
     )
+    model_pose_tracker = (
+        None if stand_model_profile is None else MetricPoseTracker(prediction_ttl_sec=0.25)
+    )
     head_candidate_temporal_gate = HeadCandidateTemporalGate(
-        hold_sec=args.head_hold_sec,
+        # The model path draws its bounded prediction on the current frame.
+        # Replaying a previously accepted frame would look like fresh support.
+        hold_sec=(0.0 if stand_model_profile is not None else args.head_hold_sec),
         # Legacy/simulation mode remains immediate. Real-camera acquisition
         # below uses structural_required_frames instead of this consecutive
         # single-winner counter.
-        initial_acquire_frames=(1 if args.sim_raw_image_topic else 2),
+        initial_acquire_frames=(
+            1 if args.sim_raw_image_topic or stand_model_profile is not None else 2
+        ),
         max_width_ratio=(1.25 if args.sim_raw_image_topic else 1.15),
         max_height_ratio=(1.25 if args.sim_raw_image_topic else 1.15),
         max_corner_jump_scale=(0.18 if args.sim_raw_image_topic else 0.12),
@@ -2644,8 +2733,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         # oblique views. Acquire one structural rail/neck identity from a
         # bounded 3-of-5 window, then filter the common-rail trapezoid while
         # holding isolated inward switches on the previous outer border.
-        structural_window_frames=(0 if args.sim_raw_image_topic else 5),
-        structural_required_frames=(0 if args.sim_raw_image_topic else 3),
+        structural_window_frames=(
+            0 if args.sim_raw_image_topic or stand_model_profile is not None else 5
+        ),
+        structural_required_frames=(
+            0 if args.sim_raw_image_topic or stand_model_profile is not None else 3
+        ),
         structural_max_center_jump_scale=0.22,
         structural_max_height_ratio=1.20,
         outer_inset_hysteresis_frames=3,
@@ -3187,25 +3280,113 @@ def main(argv: Sequence[str] | None = None) -> int:
                         (0.0, 1.0) if args.sim_raw_image_topic else None
                     ),
                 )
+                metric_estimate = None
+                metric_artifacts = None
+                metric_inputs_ready = (
+                    stand_model_profile is not None
+                    and not args.sim_raw_image_topic
+                    and not args.structural_diagnostic
+                    and camera_fx_px is not None
+                    and camera_fy_px is not None
+                    and axis_camera_cx_px is not None
+                    and axis_camera_cy_px is not None
+                )
+                if metric_inputs_ready:
+                    camera_signature = (
+                        float(camera_fx_px),
+                        float(camera_fy_px),
+                        float(axis_camera_cx_px),
+                        float(axis_camera_cy_px),
+                    )
+                    prediction = model_pose_tracker.prediction(
+                        now_sec=time.monotonic(),
+                        profile_sha256=stand_model_profile.sha256,
+                        camera_signature=camera_signature,
+                    )
+                    metric_estimate, metric_artifacts = (
+                        estimate_stand_axis_from_metric_model(
+                            cv2,
+                            axis_frame,
+                            model_profile=stand_model_profile,
+                            camera_fx_px=camera_fx_px,
+                            camera_fy_px=camera_fy_px,
+                            camera_cx_px=axis_camera_cx_px,
+                            camera_cy_px=axis_camera_cy_px,
+                            pose_hint=prediction.pose,
+                            edge_preprocess=args.edge_preprocess.replace("-", "_"),
+                            blur_kernel=args.edge_blur_kernel,
+                            canny_low=args.canny_low,
+                            canny_high=args.canny_high,
+                            min_edge_height_px=args.min_edge_height_px,
+                        )
+                    )
+                    if (
+                        metric_artifacts.model_pose is not None
+                        and (
+                            metric_estimate.evidence_state == "fresh_refined"
+                            or metric_artifacts.qr_detected
+                        )
+                    ):
+                        model_pose_tracker.accept(
+                            metric_artifacts.model_pose,
+                            now_sec=time.monotonic(),
+                            profile_sha256=stand_model_profile.sha256,
+                            camera_signature=camera_signature,
+                        )
+
                 if foreground_gate_required_but_unavailable:
-                    estimate = _unavailable_target_estimate(
+                    fallback_estimate = _unavailable_target_estimate(
                         "foreground_gate_unavailable"
                     )
                     empty_edges = numpy.zeros(
                         axis_frame.shape[:2],
                         dtype=numpy.uint8,
                     )
-                    edge_artifacts = StandAxisEdgeDebugArtifacts(
+                    fallback_artifacts = StandAxisEdgeDebugArtifacts(
                         edges=empty_edges
                     )
                 else:
-                    estimate, edge_artifacts = estimate_stand_axis_from_edges(
-                        cv2,
-                        axis_frame,
-                        edge_exclusion_mask=edge_exclusion_mask,
-                        topology_edge_exclusion_mask=topology_edge_exclusion_mask,
-                        **edge_estimator_options,
+                    fallback_estimate, fallback_artifacts = (
+                        estimate_stand_axis_from_edges(
+                            cv2,
+                            axis_frame,
+                            edge_exclusion_mask=edge_exclusion_mask,
+                            topology_edge_exclusion_mask=topology_edge_exclusion_mask,
+                            **edge_estimator_options,
+                        )
                     )
+
+                if metric_estimate is not None and metric_estimate.usable:
+                    estimate, edge_artifacts = metric_estimate, metric_artifacts
+                elif (
+                    metric_estimate is not None
+                    and metric_estimate.evidence_state
+                    in ("predicted_only", "ambiguous")
+                ):
+                    # A valid model seed owns this target. A global rectangle
+                    # outside its unsupported corridor must not override the
+                    # fail-closed prediction/measurement distinction.
+                    estimate, edge_artifacts = metric_estimate, metric_artifacts
+                elif fallback_estimate.usable:
+                    estimate = fallback_estimate
+                    edge_artifacts = fallback_artifacts
+                    if metric_artifacts is not None:
+                        edge_artifacts = replace(
+                            edge_artifacts,
+                            predicted_corners=metric_artifacts.predicted_corners,
+                            model_profile_sha256=(
+                                metric_artifacts.model_profile_sha256
+                            ),
+                            pose_reprojection_rmse_px=(
+                                metric_artifacts.pose_reprojection_rmse_px
+                            ),
+                            pose_ambiguity_gap_px=(
+                                metric_artifacts.pose_ambiguity_gap_px
+                            ),
+                            qr_detected=metric_artifacts.qr_detected,
+                        )
+                else:
+                    estimate, edge_artifacts = fallback_estimate, fallback_artifacts
                 edges = edge_artifacts.edges
                 face_mask = edge_artifacts.face_mask
                 rectangle_mask = edge_artifacts.rectangle_mask
@@ -3696,12 +3877,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             orientation_yaw_rad = (
                 None if estimate.yaw_deg is None else math.radians(estimate.yaw_deg)
             )
+            estimate_committable = (
+                estimate.evidence_state == "fresh_refined"
+                and estimate.model_measurement_status != "provisional"
+                and (
+                    stand_model_profile is None
+                    or estimate.model_profile_sha256
+                    == stand_model_profile.sha256
+                )
+            )
             consensus = None
             if (
                 orientation_yaw_rad is not None
                 and estimate.usable
                 and estimate.mode == "face_visible"
                 and head_measurement_fresh
+                and estimate_committable
             ):
                 consensus = axis_consensus.add(
                     yaw_rad=orientation_yaw_rad,
@@ -3720,6 +3911,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 and estimate.usable
                 and estimate.mode == "face_visible"
                 and head_measurement_fresh
+                and estimate_committable
             ):
                 try:
                     scan_axis_rad = camera_face_normal_axis_in_scan(
@@ -3884,6 +4076,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.observation_output_json is not None
                 and estimate.usable
                 and estimate.mode == "face_visible"
+                and estimate_committable
                 and consensus is not None
                 and conditioning is not None
                 and conditioning.accepted
@@ -3951,6 +4144,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     else foreground_gate_result.reason
                 ),
             )
+            if (
+                edge_artifacts.predicted_corners is not None
+                and estimate.evidence_state != "predicted_only"
+            ):
+                annotate_model_prediction(
+                    cv2,
+                    annotated,
+                    edge_artifacts.predicted_corners,
+                    x_offset=(0 if target_roi is None else target_roi.x0),
+                    y_offset=(0 if target_roi is None else target_roi.y0),
+                )
             if handoff_decision is not None:
                 annotate_axis_handoff(
                     cv2,

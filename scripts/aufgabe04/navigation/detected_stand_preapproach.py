@@ -29,6 +29,8 @@ DETECTED_STAND_PREAPPROACH_ROUTE_KIND = "detected_stand_preapproach"
 DETECTED_STAND_PREAPPROACH_ROUTE_PURPOSE = "pre_approach"
 DEFAULT_TRACKING_TUBE_RADIUS_M = 0.03
 DEFAULT_COMMAND_OWNER = "/aufgabe04_simple_waypoint_follower"
+ROBOT_TO_STAND_BEARING_MODE = "robot-to-stand"
+CAMERA_AXIS_FACE_BEARING_MODE = "camera-axis-face"
 
 
 def _angle_error(a: float, b: float) -> float:
@@ -115,8 +117,12 @@ def validate_detected_stand_preapproach_binding(
         failures.append("detected stand diagnostics have an unexpected source")
     if metadata.get("plan_mode") != "next-candidate":
         failures.append("detected stand pre-approach requires next-candidate planning")
-    if metadata.get("approach_bearing_mode") != "robot-to-stand":
-        failures.append("detected stand approach is not robot-facing")
+    bearing_mode = metadata.get("approach_bearing_mode")
+    if bearing_mode not in {
+        ROBOT_TO_STAND_BEARING_MODE,
+        CAMERA_AXIS_FACE_BEARING_MODE,
+    }:
+        failures.append("detected stand approach bearing mode is unsupported")
     if metadata.get("physical_clearance_enforced") is not True:
         failures.append("detected stand physical clearance was not enforced")
     if metadata.get("route_csv_sha256") != leg.source_sha256:
@@ -146,6 +152,99 @@ def validate_detected_stand_preapproach_binding(
     if selected is None:
         failures.append("selected candidate UID is absent from candidate snapshot")
         return PreflightStatus(ok=False, failures=failures)
+
+    if bearing_mode == CAMERA_AXIS_FACE_BEARING_MODE:
+        axis_path_value = metadata.get("axis_observation_json")
+        if not isinstance(axis_path_value, str) or not axis_path_value:
+            failures.append("camera-axis approach is missing axis observation")
+        else:
+            axis_path = Path(axis_path_value)
+            try:
+                axis_payload = _load_json(axis_path)
+                axis_digest = file_sha256(axis_path)
+                axis_rad = _finite_number(
+                    axis_payload.get("stand_axis_rad"), "stand_axis_rad"
+                )
+                face_normal = _finite_number(
+                    metadata.get("selected_face_normal_rad"),
+                    "selected_face_normal_rad",
+                )
+                approach_offset = _finite_number(
+                    metadata.get("approach_offset_m"), "approach_offset_m"
+                )
+                stand_center = axis_payload.get("stand_center")
+                robot_pose = axis_payload.get("robot_pose")
+                if not isinstance(stand_center, Mapping):
+                    raise ValueError("axis observation stand_center is missing")
+                if not isinstance(robot_pose, Mapping):
+                    raise ValueError("axis observation robot_pose is missing")
+                observed_stand_x = _finite_number(
+                    stand_center.get("x_m"), "axis stand x"
+                )
+                observed_stand_y = _finite_number(
+                    stand_center.get("y_m"), "axis stand y"
+                )
+                observed_robot_x = _finite_number(
+                    robot_pose.get("x_m"), "axis robot x"
+                )
+                observed_robot_y = _finite_number(
+                    robot_pose.get("y_m"), "axis robot y"
+                )
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
+                failures.append(f"axis observation validation failed: {exc}")
+            else:
+                if metadata.get("axis_observation_sha256") != axis_digest:
+                    failures.append("axis observation SHA-256 does not match")
+                if axis_payload.get("observation_kind") != (
+                    "real_stand_axis_without_qr"
+                ):
+                    failures.append("axis observation has the wrong kind")
+                if axis_payload.get("stand_id") != selected_uid:
+                    failures.append("axis observation stand ID does not match")
+                if axis_payload.get("planning_frame") != snapshot.planning_frame:
+                    failures.append("axis observation planning frame does not match")
+                if (
+                    math.hypot(
+                        observed_stand_x - selected.geometry.x_m,
+                        observed_stand_y - selected.geometry.y_m,
+                    )
+                    > 1.0e-6
+                ):
+                    failures.append("axis observation stand center does not match")
+                perpendicular_error = abs(
+                    abs(
+                        math.atan2(
+                            math.sin(face_normal - axis_rad),
+                            math.cos(face_normal - axis_rad),
+                        )
+                    )
+                    - math.pi / 2.0
+                )
+                if perpendicular_error > 0.15:
+                    failures.append("selected face normal is not perpendicular to axis")
+                initial_side_angle = math.atan2(
+                    observed_robot_y - selected.geometry.y_m,
+                    observed_robot_x - selected.geometry.x_m,
+                )
+                if math.cos(face_normal - initial_side_angle) > -0.5:
+                    failures.append(
+                        "camera-axis approach does not inspect the opposite face"
+                    )
+                expected_x = (
+                    selected.geometry.x_m
+                    + approach_offset * math.cos(face_normal)
+                )
+                expected_y = (
+                    selected.geometry.y_m
+                    + approach_offset * math.sin(face_normal)
+                )
+                if math.hypot(
+                    final.pose.x_m - expected_x,
+                    final.pose.y_m - expected_y,
+                ) > 0.06:
+                    failures.append(
+                        "camera-axis terminal position does not match selected face"
+                    )
 
     clearance = metadata.get("physical_clearance")
     if not isinstance(clearance, Mapping):
@@ -249,8 +348,11 @@ def seal_detected_stand_preapproach(
         raise ValueError("pipeline summary does not prove observe-and-plan-only execution")
     source_payload = _load_json(source_diagnostics)
     source_metadata = dict(_metadata(source_payload))
-    if source_metadata.get("approach_bearing_mode") != "robot-to-stand":
-        raise ValueError("source route must use robot-to-stand approach bearing")
+    if source_metadata.get("approach_bearing_mode") not in {
+        ROBOT_TO_STAND_BEARING_MODE,
+        CAMERA_AXIS_FACE_BEARING_MODE,
+    }:
+        raise ValueError("source route has an unsupported approach bearing")
     if source_metadata.get("physical_clearance_enforced") is not True:
         raise ValueError("source route must enforce physical clearance")
 

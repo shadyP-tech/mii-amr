@@ -201,6 +201,9 @@ def main(argv: list[str] | None = None) -> int:
                     "yaw_rad": next_leg.viewpoint.pose.yaw_rad,
                 },
                 "candidate_keepout_count": 0,
+                "inflation_radius_m": plan.config.inflation_radius_m,
+                "arena_boundary_overlay": True,
+                "arena_bounds": plan.arena_bounds.to_metadata(),
             },
         )
         summary = {

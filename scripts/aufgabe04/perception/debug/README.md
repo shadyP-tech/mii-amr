@@ -182,6 +182,11 @@ Run it from the Apptainer workstation environment with:
 ```bash
 scripts/aufgabe04/perception/debug/run_stand_axis_viewer.sh \
   --compressed-image-topic /camera/image_raw/compressed \
+  --camera-info-topic /camera/camera_info \
+  --camera-optical-frame camera \
+  --scan-topic /scan \
+  --scan-frame base_scan \
+  --calibrated-handoff \
   --axis-source edges \
   --edge-preprocess channel-union \
   --canny-low 20 \
@@ -243,6 +248,52 @@ scripts/aufgabe04/perception/debug/run_stand_axis_viewer.sh \
   --display-rectangle-mask \
   --display-raw-proposal \
   --save-snapshot results/aufgabe04/real_camera_debug
+```
+
+### Metric model-seeded head refinement
+
+The model-seeded path detects QR corners without requiring payload decode,
+estimates both IPPE planar pose hypotheses, projects the physical outer head,
+and searches only narrow raw-Canny corridors around that projection. A dashed
+magenta outline is prediction-only. The normal solid rectangle appears only
+after all four physical sides have fresh current-frame support.
+
+The checked-in profile is intentionally marked `provisional`: it captures the
+existing 78 mm head, 60 mm QR, and 7 mm depth assumptions so the viewer can be
+evaluated, but it cannot enter camera/LiDAR consensus or the passive observer.
+Replace it with a newly content-hashed `measurement_status=measured` profile
+after direct metrology. Use
+`python3 -m scripts.aufgabe04.perception.create_stand_model_profile --help`
+to publish that immutable profile; the QR dimensions must describe the
+detected symbol boundary rather than its quiet zone or white panel.
+
+```bash
+scripts/aufgabe04/perception/debug/run_stand_axis_viewer.sh \
+  --compressed-image-topic /camera/image_raw/compressed \
+  --camera-info-topic /camera/camera_info \
+  --camera-optical-frame camera \
+  --scan-topic /scan \
+  --scan-frame base_scan \
+  --calibrated-handoff \
+  --axis-source edges \
+  --stand-model-profile configs/aufgabe04/stand_models/physical_stand_assumptions_v1.json \
+  --stand-face-size-m 0.078 \
+  --front-face-to-qr-width-ratio 1.0 \
+  --edge-preprocess channel-union \
+  --canny-low 20 \
+  --canny-high 60 \
+  --edge-dilate-iterations 0 \
+  --edge-close-iterations 0 \
+  --no-qr-decode \
+  --candidate-center-width-fraction 0.55 \
+  --candidate-center-height-fraction 0.50 \
+  --candidate-center-y-fraction 0.62 \
+  --head-hold-sec 0 \
+  --max-frame-age-sec 0 \
+  --max-display-fps 10 \
+  --display-edges \
+  --display-face-mask \
+  --display-rectangle-mask
 ```
 
 For the expanded real-camera ROI that includes the complete stand base, enable

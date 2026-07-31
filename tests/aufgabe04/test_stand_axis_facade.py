@@ -12,6 +12,14 @@ from scripts.aufgabe04.perception.stand_axis import (
     temporal_geometry,
 )
 from scripts.aufgabe04.perception.stand_axis import raw_support, stem_candidates
+from scripts.aufgabe04.perception.stand_axis import (
+    model_profile,
+    model_pipeline,
+    model_projection,
+    model_refinement,
+    pose_tracking,
+    qr_pose_seed,
+)
 
 
 class StandAxisFacadeTest(unittest.TestCase):
@@ -26,6 +34,9 @@ class StandAxisFacadeTest(unittest.TestCase):
             ),
             "estimate_stand_axis_from_corners": (
                 geometry.estimate_stand_axis_from_corners
+            ),
+            "estimate_stand_axis_from_metric_model": (
+                model_pipeline.estimate_stand_axis_from_metric_model
             ),
             "order_corners": geometry.order_corners,
             "quadrilateral_aspect_ratio": geometry.quadrilateral_aspect_ratio,
@@ -102,6 +113,7 @@ class StandAxisFacadeTest(unittest.TestCase):
             "estimate_stand_axis_from_corners",
             "estimate_stand_axis_from_edges",
             "estimate_stand_axis_from_mask",
+            "estimate_stand_axis_from_metric_model",
             "order_corners",
             "quadrilateral_aspect_ratio",
             "wide_row_band",
@@ -130,6 +142,12 @@ class StandAxisFacadeTest(unittest.TestCase):
             raw_support,
             stem_candidates,
             temporal_geometry,
+            model_profile,
+            model_pipeline,
+            model_projection,
+            model_refinement,
+            pose_tracking,
+            qr_pose_seed,
         ):
             with self.subTest(module=module.__name__):
                 source = Path(module.__file__).read_text(encoding="utf-8")

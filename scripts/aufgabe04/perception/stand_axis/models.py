@@ -36,6 +36,15 @@ class StandAxisImageEstimate:
     # +y down, +z forward). Present only for a successful metric PnP pose.
     camera_face_normal_xyz: tuple[float, float, float] | None = None
     camera_face_center_xyz_m: tuple[float, float, float] | None = None
+    # Evidence provenance for model-seeded perception. Existing edge and mask
+    # estimators produce fresh image measurements, hence the compatibility
+    # default. ``predicted_only`` geometry may be displayed but must never
+    # enter axis consensus or a motion handoff.
+    evidence_state: str = "fresh_refined"
+    model_profile_sha256: str | None = None
+    model_measurement_status: str | None = None
+    pose_reprojection_rmse_px: float | None = None
+    pose_ambiguity_gap_px: float | None = None
 
 
 @dataclass(frozen=True)
@@ -50,6 +59,14 @@ class StandAxisEdgeDebugArtifacts:
     # pixels inside a gated topology corridor derived from these two domains.
     raw_edges: object | None = None
     structure_evidence: StandStructureEvidence | None = None
+    predicted_corners: tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint] | None = None
+    evidence_state: str | None = None
+    model_profile_sha256: str | None = None
+    pose_reprojection_rmse_px: float | None = None
+    pose_ambiguity_gap_px: float | None = None
+    refinement_support_mean: float | None = None
+    model_pose: object | None = None
+    qr_detected: bool = False
 
 
 @dataclass(frozen=True)

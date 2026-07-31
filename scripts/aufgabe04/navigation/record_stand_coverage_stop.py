@@ -28,6 +28,7 @@ from scripts.aufgabe04.navigation.plan_first_detected_station import (
     validate_observation_provenance,
 )
 from scripts.aufgabe04.navigation.stand_coverage_survey import (
+    coverage_survey_plan_sha256,
     fuse_confirmed_stands,
     load_coverage_survey_plan,
     load_stand_survey_registry,
@@ -323,8 +324,14 @@ def main(argv: list[str] | None = None) -> int:
                     "route_kind": "stand_coverage_survey",
                     "motion_authorized": False,
                     "survey_id": plan.survey_id,
+                    "plan_sha256": coverage_survey_plan_sha256(plan),
                     "map_bundle_sha256": plan.map_bundle_sha256,
                     "target_viewpoint_id": next_leg.viewpoint.viewpoint_id,
+                    "target_pose": {
+                        "x_m": next_leg.viewpoint.pose.x_m,
+                        "y_m": next_leg.viewpoint.pose.y_m,
+                        "yaw_rad": next_leg.viewpoint.pose.yaw_rad,
+                    },
                     "candidate_keepout_count": sum(
                         1
                         for candidate in registry.candidates
@@ -333,6 +340,9 @@ def main(argv: list[str] | None = None) -> int:
                     "unreachable_viewpoint_ids_before_target": list(
                         next_leg.unreachable_viewpoint_ids
                     ),
+                    "inflation_radius_m": plan.config.inflation_radius_m,
+                    "arena_boundary_overlay": True,
+                    "arena_bounds": plan.arena_bounds.to_metadata(),
                 },
             )
             next_viewpoint_id = next_leg.viewpoint.viewpoint_id
