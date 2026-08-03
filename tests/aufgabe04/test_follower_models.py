@@ -27,6 +27,16 @@ class FollowerModelsTest(unittest.TestCase):
         self.assertEqual(config.initial_sensor_wait_sec, 2.0)
         self.assertEqual(config.front_obstacle_slow_distance_m, 0.38)
         self.assertEqual(config.stuck_timeout_sec, 8.0)
+        self.assertEqual(config.certified_corner_release_tolerance_m, 0.01)
+        self.assertEqual(config.certified_corner_hold_tolerance_m, 0.025)
+
+    def test_corner_hold_must_preserve_margin_inside_route_tube(self):
+        with self.assertRaisesRegex(ValueError, "strictly inside"):
+            FollowerConfig(
+                controller=ControllerConfig(),
+                certified_route_tube_radius_m=0.03,
+                certified_corner_hold_tolerance_m=0.03,
+            )
 
     def test_stuck_progress_details_include_command_and_clearance_context(self):
         details = stuck_progress_details(

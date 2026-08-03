@@ -41,10 +41,14 @@ from scripts.aufgabe04.navigation.viewpoint_sampling_contract import (
     viewpoint_sampling_hold_metrics,
 )
 from scripts.aufgabe04.navigation.waypoint_controller import (
+    CertifiedCornerControlConfig,
+    CertifiedCornerTransitionDecision,
+    CertifiedCornerTransitionLatch,
     ControllerConfig,
     ControllerStep,
     StartEgressControlConfig,
     VelocityCommand,
+    compute_certified_corner_transition,
     compute_join_anchor_command,
     compute_start_egress_vertex_command,
     compute_waypoint_command,
@@ -151,6 +155,10 @@ class FollowerConfig:
     physical_goal_tolerance_m: float = 0.03
     certified_route_tube_radius_m: float = 0.03
     certified_route_chord_sample_spacing_m: float = 0.01
+    certified_corner_turn_threshold_rad: float = 0.20
+    certified_corner_release_tolerance_m: float = 0.01
+    certified_corner_hold_tolerance_m: float = 0.025
+    certified_corner_alignment_tolerance_rad: float = 0.10
 
     def __post_init__(self) -> None:
         if not isinstance(
@@ -312,6 +320,27 @@ class FollowerConfig:
         ):
             raise ValueError(
                 "certified_route_chord_sample_spacing_m must be finite and positive"
+            )
+        corner_config = CertifiedCornerControlConfig(
+            turn_threshold_rad=self.certified_corner_turn_threshold_rad,
+            release_tolerance_m=self.certified_corner_release_tolerance_m,
+            hold_tolerance_m=self.certified_corner_hold_tolerance_m,
+            alignment_tolerance_rad=(
+                self.certified_corner_alignment_tolerance_rad
+            ),
+        )
+        if (
+            corner_config.release_tolerance_m
+            > self.physical_waypoint_tolerance_m
+        ):
+            raise ValueError(
+                "certified corner release tolerance must not exceed the "
+                "physical waypoint tolerance"
+            )
+        if corner_config.hold_tolerance_m >= self.certified_route_tube_radius_m:
+            raise ValueError(
+                "certified corner hold tolerance must remain strictly inside "
+                "the certified route tube"
             )
         if self.physical_goal_tolerance_m > self.certified_route_tube_radius_m:
             raise ValueError(
@@ -1187,6 +1216,8 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         self.intermediate_terminal_heading_latch: (
             IntermediateTerminalHeadingLatch | None
         ) = None
+        self.certified_corner_latch: CertifiedCornerTransitionLatch | None = None
+        self._last_certified_corner_phase: tuple[int, str] | None = None
         self.reverse_staging = False
         self.axis_acquisition_hold_started_at: float | None = None
         self.axis_acquisition_target_revision: int | None = None
@@ -1407,6 +1438,65 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         self.target_started_at = time.monotonic()
         self._reset_progress_watchdog(time.monotonic())
         return None
+
+    def _certified_corner_decision(
+        self,
+        pose: Pose2D,
+        controller_config: ControllerConfig,
+    ) -> CertifiedCornerTransitionDecision:
+        """Apply the physical discovery-route sharp-vertex contract."""
+
+        if self.current_route_kind != "stand_discovery_corridor":
+            self.certified_corner_latch = None
+            return CertifiedCornerTransitionDecision(None, None)
+        decision = compute_certified_corner_transition(
+            pose,
+            self.waypoints,
+            self.target_index,
+            controller_config,
+            self.certified_corner_latch,
+            CertifiedCornerControlConfig(
+                turn_threshold_rad=(
+                    self.follower_config.certified_corner_turn_threshold_rad
+                ),
+                release_tolerance_m=(
+                    self.follower_config.certified_corner_release_tolerance_m
+                ),
+                hold_tolerance_m=(
+                    self.follower_config.certified_corner_hold_tolerance_m
+                ),
+                alignment_tolerance_rad=(
+                    self.follower_config
+                    .certified_corner_alignment_tolerance_rad
+                ),
+            ),
+        )
+        self.certified_corner_latch = decision.latch
+        return decision
+
+    def _log_certified_corner_phase(
+        self,
+        step: ControllerStep | None,
+    ) -> None:
+        if step is None or not step.progress_mode.startswith("certified_corner_"):
+            self._last_certified_corner_phase = None
+            return
+        phase = (step.target_index, step.progress_mode)
+        if phase == self._last_certified_corner_phase:
+            return
+        self._last_certified_corner_phase = phase
+        try:
+            logger = self.get_logger()
+        except Exception:
+            return
+        logger.info(
+            "certified sharp-corner transition: "
+            f"phase={step.progress_mode} target_index={step.target_index} "
+            f"distance_m={step.distance_to_target_m:.6f} "
+            f"heading_error_rad={step.controlled_heading_error_rad:.6f} "
+            f"linear_mps={step.command.linear_x_mps:.6f} "
+            f"angular_radps={step.command.angular_z_radps:.6f}"
+        )
 
     def _reset_progress_watchdog(self, now_monotonic: float) -> None:
         self.last_progress_distance_m = math.inf
@@ -1716,33 +1806,79 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                             time.sleep(loop_sleep_sec)
                             continue
                     else:
-                        terminal_heading_decision = (
-                            compute_intermediate_terminal_heading_command(
-                                pose,
-                                self.waypoints,
-                                self.target_index,
-                                route_controller_config,
-                                self.current_route_kind,
-                                self.intermediate_terminal_heading_latch,
-                                hold_tolerance_m=(
-                                    self.follower_config
-                                    .viewpoint_sampling_terminal_heading_hold_tolerance_m
+                        corner_decision = self._certified_corner_decision(
+                            pose,
+                            route_controller_config,
+                        )
+                        self._log_certified_corner_phase(corner_decision.step)
+                        if corner_decision.failure:
+                            failed_step = corner_decision.step
+                            assert failed_step is not None
+                            self.latest_stop_details = {
+                                "reason": corner_decision.failure,
+                                "source": "execution_route_certificate",
+                                "route_kind": self.current_route_kind,
+                                "target_index": failed_step.target_index,
+                                "pursuit_index": failed_step.pursuit_index,
+                                "distance_to_vertex_m": (
+                                    failed_step.distance_to_target_m
                                 ),
-                                viewpoint_sampling_target_distance_m=(
+                                "release_tolerance_m": (
                                     self.follower_config
-                                    .viewpoint_sampling_target_distance_m
+                                    .certified_corner_release_tolerance_m
                                 ),
-                                viewpoint_sampling_target_envelope_radius_m=(
+                                "hold_tolerance_m": (
                                     self.follower_config
-                                    .viewpoint_sampling_terminal_heading_target_envelope_radius_m
+                                    .certified_corner_hold_tolerance_m
                                 ),
+                                "tracking_tube_radius_m": (
+                                    self.follower_config
+                                    .certified_route_tube_radius_m
+                                ),
+                                "fail_closed": True,
+                            }
+                            self.publish_repeated_zero()
+                            return FollowerResult(
+                                "stopped",
+                                corner_decision.failure,
+                                time.monotonic() - started_at,
+                                self.distance_estimate_m,
+                                self.motion_published,
+                                self.latest_stop_details,
                             )
-                        )
-                        self.intermediate_terminal_heading_latch = (
-                            terminal_heading_decision.latch
-                        )
-                        step = terminal_heading_decision.step
-                        if terminal_heading_decision.failure:
+                        if corner_decision.step is not None:
+                            step = corner_decision.step
+                        else:
+                            terminal_heading_decision = (
+                                compute_intermediate_terminal_heading_command(
+                                    pose,
+                                    self.waypoints,
+                                    self.target_index,
+                                    route_controller_config,
+                                    self.current_route_kind,
+                                    self.intermediate_terminal_heading_latch,
+                                    hold_tolerance_m=(
+                                        self.follower_config
+                                        .viewpoint_sampling_terminal_heading_hold_tolerance_m
+                                    ),
+                                    viewpoint_sampling_target_distance_m=(
+                                        self.follower_config
+                                        .viewpoint_sampling_target_distance_m
+                                    ),
+                                    viewpoint_sampling_target_envelope_radius_m=(
+                                        self.follower_config
+                                        .viewpoint_sampling_terminal_heading_target_envelope_radius_m
+                                    ),
+                                )
+                            )
+                            self.intermediate_terminal_heading_latch = (
+                                terminal_heading_decision.latch
+                            )
+                            step = terminal_heading_decision.step
+                        if (
+                            corner_decision.step is None
+                            and terminal_heading_decision.failure
+                        ):
                             hold_diagnostics = (
                                 intermediate_terminal_heading_hold_diagnostics(
                                     pose,
@@ -1830,6 +1966,7 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                         target_changed=True,
                     )
                     self.target_index = step.target_index
+                    self.certified_corner_latch = None
                     self.target_started_at = time.monotonic()
                     self._reset_progress_watchdog(time.monotonic())
                 if step.reached_goal:
@@ -2138,6 +2275,8 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         self._clear_intermediate_terminal_heading_latch(
             material_route_revision=True,
         )
+        self.certified_corner_latch = None
+        self._last_certified_corner_phase = None
         self.waypoints = replacement
         # Every route replacement owns a fresh lock decision. Ordinary routes
         # explicitly clear any lock retained from the previous revision.

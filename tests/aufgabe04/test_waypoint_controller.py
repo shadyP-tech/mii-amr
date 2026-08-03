@@ -8,9 +8,14 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from scripts.aufgabe04.navigation.models import Pose2D  # noqa: E402
+from scripts.aufgabe04.navigation.execution_route_certificate import (  # noqa: E402
+    check_execution_route_tube,
+)
 from scripts.aufgabe04.navigation.waypoint_controller import (  # noqa: E402
+    CertifiedCornerControlConfig,
     ControllerConfig,
     StartEgressControlConfig,
+    compute_certified_corner_transition,
     compute_start_egress_vertex_command,
     compute_waypoint_command,
     normalize_angle,
@@ -19,6 +24,171 @@ from scripts.aufgabe04.navigation.waypoint_controller import (  # noqa: E402
 
 
 class WaypointControllerTest(unittest.TestCase):
+    def test_live_discovery_corner_uses_tight_approach_alignment_and_zero_handoff(self):
+        waypoints = (
+            Pose2D(-0.4405799284256718, -0.6511976219870571, math.nan),
+            Pose2D(-0.44499999999999984, -0.615, math.nan),
+            Pose2D(-0.49499999999999966, -0.565, math.nan),
+        )
+        incoming_heading = math.atan2(
+            waypoints[1].y_m - waypoints[0].y_m,
+            waypoints[1].x_m - waypoints[0].x_m,
+        )
+        outgoing_heading = math.atan2(
+            waypoints[2].y_m - waypoints[1].y_m,
+            waypoints[2].x_m - waypoints[1].x_m,
+        )
+        controller = ControllerConfig(
+            max_linear_mps=0.055,
+            max_angular_radps=0.18,
+            goal_tolerance_m=0.02,
+            exact_vertex_pursuit=True,
+        )
+        corner = CertifiedCornerControlConfig()
+        incoming_length = math.hypot(
+            waypoints[1].x_m - waypoints[0].x_m,
+            waypoints[1].y_m - waypoints[0].y_m,
+        )
+        approach_pose = Pose2D(
+            waypoints[1].x_m
+            - 0.015 * (waypoints[1].x_m - waypoints[0].x_m) / incoming_length,
+            waypoints[1].y_m
+            - 0.015 * (waypoints[1].y_m - waypoints[0].y_m) / incoming_length,
+            incoming_heading,
+        )
+
+        approach = compute_certified_corner_transition(
+            approach_pose,
+            waypoints,
+            1,
+            controller,
+            corner_config=corner,
+        )
+        alignment = compute_certified_corner_transition(
+            Pose2D(waypoints[1].x_m, waypoints[1].y_m, incoming_heading),
+            waypoints,
+            1,
+            controller,
+            approach.latch,
+            corner,
+        )
+        recorded_post_stop = compute_certified_corner_transition(
+            Pose2D(
+                -0.462100114325277,
+                -0.631808162341835,
+                1.662574823013693,
+            ),
+            waypoints,
+            1,
+            controller,
+            alignment.latch,
+            corner,
+        )
+        perpendicular_x = -math.sin(outgoing_heading)
+        perpendicular_y = math.cos(outgoing_heading)
+        handoff_pose = Pose2D(
+            waypoints[1].x_m + 0.012 * perpendicular_x,
+            waypoints[1].y_m + 0.012 * perpendicular_y,
+            outgoing_heading - 0.05,
+        )
+        handoff = compute_certified_corner_transition(
+            handoff_pose,
+            waypoints,
+            1,
+            controller,
+            alignment.latch,
+            corner,
+        )
+
+        self.assertEqual(approach.step.target_index, 1)
+        self.assertEqual(approach.step.pursuit_index, 1)
+        self.assertEqual(approach.step.progress_mode, "certified_corner_approach")
+        self.assertGreater(approach.step.command.linear_x_mps, 0.0)
+        self.assertIsNone(approach.latch)
+        self.assertEqual(alignment.step.target_index, 1)
+        self.assertEqual(alignment.step.pursuit_index, 1)
+        self.assertEqual(alignment.step.command.linear_x_mps, 0.0)
+        self.assertGreater(alignment.step.command.angular_z_radps, 0.0)
+        self.assertEqual(
+            alignment.step.progress_mode,
+            "certified_corner_alignment",
+        )
+        self.assertIsNotNone(alignment.latch)
+        self.assertEqual(recorded_post_stop.failure, "")
+        self.assertEqual(recorded_post_stop.step.target_index, 1)
+        self.assertEqual(recorded_post_stop.step.pursuit_index, 1)
+        self.assertEqual(recorded_post_stop.step.command.linear_x_mps, 0.0)
+        self.assertEqual(
+            recorded_post_stop.step.progress_mode,
+            "certified_corner_alignment",
+        )
+        self.assertEqual(handoff.step.target_index, 2)
+        self.assertEqual(handoff.step.pursuit_index, 2)
+        self.assertEqual(
+            (handoff.step.command.linear_x_mps, handoff.step.command.angular_z_radps),
+            (0.0, 0.0),
+        )
+        self.assertEqual(handoff.step.progress_mode, "certified_corner_handoff")
+        self.assertIsNone(handoff.latch)
+        route_check = check_execution_route_tube(
+            handoff_pose,
+            waypoints,
+            target_index=handoff.step.target_index,
+            pursuit_index=handoff.step.pursuit_index,
+            tracking_tube_radius_m=0.03,
+        )
+        self.assertTrue(route_check.ok)
+        self.assertLess(route_check.pose_distance_to_segment_m, 0.013)
+
+    def test_latched_corner_fails_closed_before_consuming_route_tube(self):
+        waypoints = (
+            Pose2D(0.0, 0.0, math.nan),
+            Pose2D(0.05, 0.0, math.nan),
+            Pose2D(0.05, 0.05, math.nan),
+        )
+        controller = ControllerConfig(exact_vertex_pursuit=True)
+        entered = compute_certified_corner_transition(
+            Pose2D(0.05, 0.0, 0.0),
+            waypoints,
+            1,
+            controller,
+        )
+        drifted = compute_certified_corner_transition(
+            Pose2D(0.076, 0.0, 0.0),
+            waypoints,
+            1,
+            controller,
+            entered.latch,
+        )
+
+        self.assertIsNotNone(entered.latch)
+        self.assertEqual(
+            drifted.failure,
+            "certified corner hold tolerance exceeded",
+        )
+        self.assertEqual(
+            (drifted.step.command.linear_x_mps, drifted.step.command.angular_z_radps),
+            (0.0, 0.0),
+        )
+        self.assertEqual(drifted.step.target_index, 1)
+        self.assertEqual(drifted.step.pursuit_index, 1)
+
+    def test_straight_certified_vertex_does_not_activate_corner_contract(self):
+        decision = compute_certified_corner_transition(
+            Pose2D(0.05, 0.0, 0.0),
+            (
+                Pose2D(0.0, 0.0, math.nan),
+                Pose2D(0.05, 0.0, math.nan),
+                Pose2D(0.10, 0.0, math.nan),
+            ),
+            1,
+            ControllerConfig(exact_vertex_pursuit=True),
+        )
+
+        self.assertIsNone(decision.step)
+        self.assertIsNone(decision.latch)
+        self.assertEqual(decision.failure, "")
+
     def test_start_egress_lock_pursues_first_vertex_without_lookahead(self):
         config = ControllerConfig(
             goal_tolerance_m=0.08,

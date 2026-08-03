@@ -61,6 +61,53 @@ class StartEgressControlConfig:
 
 
 @dataclass(frozen=True)
+class CertifiedCornerControlConfig:
+    """Fail-closed controls for a material bend in a certified polyline."""
+
+    turn_threshold_rad: float = 0.20
+    release_tolerance_m: float = 0.01
+    hold_tolerance_m: float = 0.025
+    alignment_tolerance_rad: float = 0.10
+
+    def __post_init__(self) -> None:
+        angular = {
+            "turn_threshold_rad": self.turn_threshold_rad,
+            "alignment_tolerance_rad": self.alignment_tolerance_rad,
+        }
+        for name, value in angular.items():
+            if not math.isfinite(value) or value <= 0.0 or value > math.pi:
+                raise ValueError(f"{name} must be finite and in (0, pi]")
+        distances = {
+            "release_tolerance_m": self.release_tolerance_m,
+            "hold_tolerance_m": self.hold_tolerance_m,
+        }
+        for name, value in distances.items():
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"{name} must be finite and positive")
+        if self.release_tolerance_m > self.hold_tolerance_m:
+            raise ValueError(
+                "release_tolerance_m must not exceed hold_tolerance_m"
+            )
+        if self.alignment_tolerance_rad >= self.turn_threshold_rad:
+            raise ValueError(
+                "alignment_tolerance_rad must be smaller than "
+                "turn_threshold_rad"
+            )
+
+
+@dataclass(frozen=True)
+class CertifiedCornerTransitionLatch:
+    vertex_index: int
+
+
+@dataclass(frozen=True)
+class CertifiedCornerTransitionDecision:
+    step: "ControllerStep | None"
+    latch: CertifiedCornerTransitionLatch | None
+    failure: str = ""
+
+
+@dataclass(frozen=True)
 class ControllerStep:
     command: VelocityCommand
     target_index: int
@@ -77,6 +124,130 @@ def normalize_angle(angle_rad: float) -> float:
     while angle_rad < -math.pi:
         angle_rad += 2.0 * math.pi
     return angle_rad
+
+
+def route_vertex_turn_angle_rad(
+    waypoints: Sequence[Pose2D],
+    vertex_index: int,
+) -> float:
+    """Return the unsigned heading change at one interior route vertex."""
+
+    if not 0 < vertex_index < len(waypoints) - 1:
+        return 0.0
+    previous = waypoints[vertex_index - 1]
+    vertex = waypoints[vertex_index]
+    following = waypoints[vertex_index + 1]
+    incoming_dx = vertex.x_m - previous.x_m
+    incoming_dy = vertex.y_m - previous.y_m
+    outgoing_dx = following.x_m - vertex.x_m
+    outgoing_dy = following.y_m - vertex.y_m
+    if (
+        math.hypot(incoming_dx, incoming_dy) <= 1.0e-9
+        or math.hypot(outgoing_dx, outgoing_dy) <= 1.0e-9
+    ):
+        return 0.0
+    incoming = math.atan2(incoming_dy, incoming_dx)
+    outgoing = math.atan2(outgoing_dy, outgoing_dx)
+    return abs(normalize_angle(outgoing - incoming))
+
+
+def compute_certified_corner_transition(
+    pose: Pose2D,
+    waypoints: Sequence[Pose2D],
+    target_index: int,
+    controller_config: ControllerConfig,
+    latch: CertifiedCornerTransitionLatch | None = None,
+    corner_config: CertifiedCornerControlConfig = CertifiedCornerControlConfig(),
+) -> CertifiedCornerTransitionDecision:
+    """Approach, align at, and explicitly hand off one material route bend.
+
+    The incoming segment remains the active certificate while the robot
+    rotates in place.  Only a pose tightly bound to the exact vertex may
+    switch to the outgoing segment, and that switch publishes one zero-command
+    control cycle before translation can resume.
+    """
+
+    if not waypoints:
+        return CertifiedCornerTransitionDecision(None, None)
+    if not 0 <= target_index < len(waypoints):
+        raise ValueError("target_index is outside the route")
+    if latch is not None and latch.vertex_index != target_index:
+        latch = None
+    turn_angle_rad = route_vertex_turn_angle_rad(waypoints, target_index)
+    if turn_angle_rad < corner_config.turn_threshold_rad:
+        return CertifiedCornerTransitionDecision(None, None)
+    if not 0 < target_index < len(waypoints) - 1:
+        return CertifiedCornerTransitionDecision(None, None)
+
+    vertex = waypoints[target_index]
+    distance_to_vertex_m = distance(pose, vertex)
+    if latch is None and distance_to_vertex_m > corner_config.release_tolerance_m:
+        approach = compute_waypoint_command(
+            pose,
+            waypoints,
+            target_index,
+            controller_config,
+            locked_pursuit_index=target_index,
+        )
+        return CertifiedCornerTransitionDecision(
+            replace(approach, progress_mode="certified_corner_approach"),
+            None,
+        )
+    if latch is None:
+        latch = CertifiedCornerTransitionLatch(vertex_index=target_index)
+
+    following = waypoints[target_index + 1]
+    outgoing_heading_rad = math.atan2(
+        following.y_m - vertex.y_m,
+        following.x_m - vertex.x_m,
+    )
+    heading_error_rad = normalize_angle(outgoing_heading_rad - pose.yaw_rad)
+    if distance_to_vertex_m > corner_config.hold_tolerance_m:
+        return CertifiedCornerTransitionDecision(
+            ControllerStep(
+                VelocityCommand(0.0, 0.0),
+                target_index,
+                False,
+                distance_to_vertex_m,
+                target_index,
+                heading_error_rad,
+                "certified_corner_hold_exceeded",
+            ),
+            latch,
+            "certified corner hold tolerance exceeded",
+        )
+    if abs(heading_error_rad) > corner_config.alignment_tolerance_rad:
+        angular_z_radps = _clamp(
+            heading_error_rad * controller_config.rotate_gain,
+            -controller_config.max_angular_radps,
+            controller_config.max_angular_radps,
+        )
+        return CertifiedCornerTransitionDecision(
+            ControllerStep(
+                VelocityCommand(0.0, angular_z_radps),
+                target_index,
+                False,
+                distance_to_vertex_m,
+                target_index,
+                heading_error_rad,
+                "certified_corner_alignment",
+            ),
+            latch,
+        )
+
+    next_index = target_index + 1
+    return CertifiedCornerTransitionDecision(
+        ControllerStep(
+            VelocityCommand(0.0, 0.0),
+            next_index,
+            False,
+            distance(pose, following),
+            next_index,
+            heading_error_rad,
+            "certified_corner_handoff",
+        ),
+        None,
+    )
 
 
 def distance(a: Pose2D, b: Pose2D) -> float:

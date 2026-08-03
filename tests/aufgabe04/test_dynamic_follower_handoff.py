@@ -56,6 +56,8 @@ def bare_follower(update: RouteUpdate, callback):
     node.dynamic_join_pending = False
     node.dynamic_join_limit_m = None
     node.start_egress_lock_index = None
+    node.certified_corner_latch = None
+    node._last_certified_corner_phase = None
     node.current_route_kind = "axis_acquisition"
     node.reverse_staging = False
     node.axis_acquisition_hold_started_at = None
@@ -67,6 +69,34 @@ def bare_follower(update: RouteUpdate, callback):
 
 
 class DynamicFollowerHandoffTest(unittest.TestCase):
+    def test_discovery_route_node_uses_corner_contract_only_for_material_bend(self):
+        node = bare_follower(RouteUpdate(kind=RouteUpdateKind.UNCHANGED), None)
+        node.current_route_kind = "stand_discovery_corridor"
+        node.waypoints = (
+            Pose2D(-0.4405799284256718, -0.6511976219870571, math.nan),
+            Pose2D(-0.44499999999999984, -0.615, math.nan),
+            Pose2D(-0.49499999999999966, -0.565, math.nan),
+        )
+        node.target_index = 1
+        incoming_heading = math.atan2(
+            node.waypoints[1].y_m - node.waypoints[0].y_m,
+            node.waypoints[1].x_m - node.waypoints[0].x_m,
+        )
+
+        decision = node._certified_corner_decision(
+            Pose2D(node.waypoints[1].x_m, node.waypoints[1].y_m, incoming_heading),
+            node.follower_config.controller,
+        )
+
+        self.assertEqual(decision.failure, "")
+        self.assertEqual(decision.step.target_index, 1)
+        self.assertEqual(decision.step.command.linear_x_mps, 0.0)
+        self.assertEqual(
+            decision.step.progress_mode,
+            "certified_corner_alignment",
+        )
+        self.assertIsNotNone(node.certified_corner_latch)
+
     def test_static_catalog_startup_is_anchor_zero_then_egress_vertex(self):
         waypoints = (
             Pose2D(-0.18491188596302915, -0.200843551718869, float("nan")),

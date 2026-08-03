@@ -194,6 +194,13 @@ also inspect `adaptive_replans.jsonl`, `coverage/replans/`, and the suffixed
 reason such as route-tube departure, stale TF, or ambiguous velocity ownership
 is not classified as a stand and is never auto-replanned.
 
+Certified discovery routes also treat every material A* bend as an explicit
+control handoff. The follower approaches that vertex to within `0.01 m`, keeps
+the incoming segment active while rotating in place toward the outgoing
+segment, and publishes a zero-command handoff cycle before translating again.
+The in-place hold is limited to `0.025 m`, strictly inside the unchanged
+`0.03 m` execution tube; exceeding the hold fails closed.
+
 Next validate the complete center-corridor discovery without approaching any
 candidate:
 

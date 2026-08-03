@@ -1785,6 +1785,21 @@ def main(argv: list[str] | None = None) -> int:
         certified_route_chord_sample_spacing_m=(
             follower_config.certified_route_chord_sample_spacing_m
         ),
+        certified_corner_transition_enabled=(
+            leg.route_kind == "stand_discovery_corridor"
+        ),
+        certified_corner_turn_threshold_rad=(
+            follower_config.certified_corner_turn_threshold_rad
+        ),
+        certified_corner_release_tolerance_m=(
+            follower_config.certified_corner_release_tolerance_m
+        ),
+        certified_corner_hold_tolerance_m=(
+            follower_config.certified_corner_hold_tolerance_m
+        ),
+        certified_corner_alignment_tolerance_rad=(
+            follower_config.certified_corner_alignment_tolerance_rad
+        ),
         allow_simulation_odom_after_stale_tf=(
             follower_config.allow_simulation_odom_after_stale_tf
         ),
