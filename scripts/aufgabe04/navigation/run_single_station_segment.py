@@ -9,13 +9,16 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Mapping
 
 ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation.ros_preflight import run_ros_preflight
+from scripts.aufgabe04.navigation.ros_preflight import (
+    RosPreflightResult,
+    run_ros_preflight,
+)
 from scripts.aufgabe04.navigation.ros_runtime_config import (
     RuntimeConfig,
     resolve_runtime_config,
@@ -47,6 +50,7 @@ from scripts.aufgabe04.navigation.stand_discovery_route import (
 )
 from scripts.aufgabe04.navigation.segment_run_logger import append_segment_run
 from scripts.aufgabe04.navigation.follower_models import FollowerResult
+from scripts.aufgabe04.navigation.models import Pose2D
 from scripts.aufgabe04.navigation.execution_route_certificate import (
     execution_route_certificate_sha256,
     load_execution_route_certificate,
@@ -68,6 +72,7 @@ from scripts.aufgabe04.navigation.simple_waypoint_follower import (
     INTERMEDIATE_TERMINAL_HEADING_TARGET_ENVELOPE_RADIUS_M,
     PHYSICAL_ROUTE_KINDS,
     STATIC_PHYSICAL_ROUTE_KINDS,
+    certified_static_startup_decision,
     controller_config_for_route_kind,
     intermediate_terminal_heading_entry_tolerance_m,
     run_simple_waypoint_follower,
@@ -94,6 +99,109 @@ def _execution_initial_distance_limit(requested_m: float, route_kind: str) -> fl
     if route_kind in STATIC_PHYSICAL_ROUTE_KINDS:
         return min(requested_m, _CATALOG_ROUTE_INITIAL_DISTANCE_LIMIT_M)
     return requested_m
+
+
+def _static_start_preflight_rejection(
+    preflight: RosPreflightResult,
+    leg: SelectedRouteLeg,
+    *,
+    map_frame: str,
+    base_frame: str,
+    tracking_tube_radius_m: float,
+) -> FollowerResult | None:
+    """Reject a stale sealed start before motion confirmation is requested."""
+
+    if leg.route_kind not in STATIC_PHYSICAL_ROUTE_KINDS:
+        return None
+    raw_pose = preflight.route_pose
+    if not isinstance(raw_pose, Mapping):
+        return FollowerResult(
+            "stopped",
+            "preflight did not provide a route-frame startup pose",
+            0.0,
+            0.0,
+            False,
+            {
+                "reason": "preflight did not provide a route-frame startup pose",
+                "source": "ros_preflight",
+                "phase": "before_motion_confirmation",
+                "fail_closed": True,
+            },
+        )
+    try:
+        pose = Pose2D(
+            float(raw_pose["x_m"]),
+            float(raw_pose["y_m"]),
+            float(raw_pose["yaw_rad"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        return FollowerResult(
+            "stopped",
+            "preflight route-frame startup pose is invalid",
+            0.0,
+            0.0,
+            False,
+            {
+                "reason": "preflight route-frame startup pose is invalid",
+                "source": "ros_preflight",
+                "phase": "before_motion_confirmation",
+                "error": str(exc),
+                "fail_closed": True,
+            },
+        )
+    if (
+        raw_pose.get("frame_id") != map_frame
+        or raw_pose.get("child_frame_id") != base_frame
+        or not all(
+            math.isfinite(value)
+            for value in (pose.x_m, pose.y_m, pose.yaw_rad)
+        )
+    ):
+        return FollowerResult(
+            "stopped",
+            "preflight route-frame startup pose is invalid",
+            0.0,
+            0.0,
+            False,
+            {
+                "reason": "preflight route-frame startup pose is invalid",
+                "source": "ros_preflight",
+                "phase": "before_motion_confirmation",
+                "route_pose": dict(raw_pose),
+                "fail_closed": True,
+            },
+        )
+
+    decision = certified_static_startup_decision(
+        pose,
+        poses_from_waypoints(leg.executable_waypoints),
+        tracking_tube_radius_m=tracking_tube_radius_m,
+    )
+    if decision.ok:
+        return None
+    return FollowerResult(
+        "stopped",
+        "pose outside certified startup segment",
+        0.0,
+        0.0,
+        False,
+        {
+            **decision.route_check.to_log_dict(),
+            "reason": "pose outside certified startup segment",
+            "certificate_reason": decision.route_check.reason,
+            "startup_target_candidates": [0, 1],
+            "source": "execution_route_certificate",
+            "phase": "before_motion_confirmation",
+            "route_pose": {
+                "frame_id": map_frame,
+                "child_frame_id": base_frame,
+                "x_m": pose.x_m,
+                "y_m": pose.y_m,
+                "yaw_rad": pose.yaw_rad,
+            },
+            "fail_closed": True,
+        },
+    )
 
 
 def _simulation_odom_fallback_admission_failure(
@@ -1446,6 +1554,54 @@ def main(argv: list[str] | None = None) -> int:
         observations=_observation_log_rows(preflight.observations),
         runtime_config=preflight.runtime_config,
     )
+    startup_rejection = _static_start_preflight_rejection(
+        preflight,
+        leg,
+        map_frame=resolved.map_frame,
+        base_frame=resolved.base_frame,
+        tracking_tube_radius_m=args.certified_route_tube_radius_m,
+    )
+    if startup_rejection is not None:
+        _append_result(
+            args,
+            resolved,
+            leg,
+            preflight_ok=True,
+            result=startup_rejection,
+        )
+        emit_event(
+            event_logger,
+            "startup_route_rejected",
+            run_id=args.run_id,
+            leg_index=leg.leg_index,
+            status=startup_rejection.status,
+            stop_reason=startup_rejection.stop_reason,
+            motion_published=False,
+            stop_details=startup_rejection.stop_details,
+        )
+        emit_event(
+            event_logger,
+            "safety_stop",
+            run_id=args.run_id,
+            leg_index=leg.leg_index,
+            status=startup_rejection.status,
+            stop_reason=startup_rejection.stop_reason,
+            motion_published=False,
+            stop_details=startup_rejection.stop_details,
+            duration_sec=0.0,
+            distance_estimate_m=0.0,
+        )
+        emit_event(
+            event_logger,
+            "run_finished",
+            run_id=args.run_id,
+            final_status=startup_rejection.status,
+            stop_reason=startup_rejection.stop_reason,
+            results_csv=str(args.results_csv),
+            semantic_log_path=str(args.semantic_log),
+            preflight_json_path=str(args.preflight_json or ""),
+        )
+        return 1
     if args.dry_run:
         result = FollowerResult("dry_run_ok", "", 0.0, 0.0, False)
         _append_result(args, resolved, leg, preflight_ok=True, result=result)

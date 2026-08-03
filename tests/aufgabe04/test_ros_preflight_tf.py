@@ -31,6 +31,24 @@ class RosPreflightParameterTest(unittest.TestCase):
         finally:
             ros_preflight.Parameter = original_parameter
 
+    def test_preflight_result_persists_route_frame_pose(self):
+        route_pose = {
+            "frame_id": "map",
+            "child_frame_id": "base_footprint",
+            "x_m": -0.5,
+            "y_m": -0.62,
+            "yaw_rad": 1.7,
+        }
+        result = ros_preflight.RosPreflightResult(
+            ok=True,
+            failures=[],
+            observations=[],
+            runtime_config={},
+            route_pose=route_pose,
+        )
+
+        self.assertEqual(result.to_json_dict()["route_pose"], route_pose)
+
 
 if __name__ == "__main__":
     unittest.main()

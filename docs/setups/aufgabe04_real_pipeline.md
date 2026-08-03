@@ -178,6 +178,7 @@ python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
   --semantic-map-id <real_map_id> \
   --expected-stand-count 3 \
   --max-blockage-replans-per-leg 3 \
+  --max-startup-reseals-per-leg 3 \
   --coverage-leg-limit 1 \
   --session-id stand_explore_leg_001 \
   --execute
@@ -193,6 +194,18 @@ also inspect `adaptive_replans.jsonl`, `coverage/replans/`, and the suffixed
 `execution/coverage_leg_<index>_replan_<index>/` certificate bundle. A stop
 reason such as route-tube departure, stale TF, or ambiguous velocity ownership
 is not classified as a stand and is never auto-replanned.
+
+Immediately after ROS preflight, the runner also binds the fresh
+`map -> base_footprint` pose to the first certified route segment before it asks
+for motion confirmation. If AMCL has moved outside the unchanged `0.03 m`
+startup tube, no velocity is published and the stale certificate is rejected.
+For an ordinary coverage leg, the autonomous wrapper may use that rejected
+pose to run a complete new A* plan, validate a new exact-start connector, seal
+a new certificate, and repeat the dry-run. The previous mission-level `RUN`
+does not authorize this replacement: type a fresh `RUN` only after inspecting
+the resealed artifact paths printed by the script. The bounded retry count is
+controlled by `--max-startup-reseals-per-leg`; dynamic stand-blockage overlays
+remain fail-closed rather than being discarded by this generic reseal.
 
 Certified discovery routes also treat every material A* bend as an explicit
 control handoff. The follower approaches that vertex to within `0.01 m`, keeps

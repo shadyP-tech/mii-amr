@@ -38,7 +38,10 @@ from scripts.aufgabe04.real_robot.run_autonomous_stand_exploration import (
     _bounded_approach_offsets,
     _execute_coverage_leg_with_replans,
     _is_confirmable_stand_blockage,
+    _is_resealable_startup_mismatch,
     _opposite_face_normal,
+    _replan_startup_source,
+    _run_motion_leg,
     build_parser,
     candidate_snapshot_from_registry,
     plan_candidate_preapproach,
@@ -52,6 +55,23 @@ MAP = Path("maps/aufgabe03/arena_1p898x3p9_auto.yaml")
 
 
 class AutonomousStandExplorationTest(unittest.TestCase):
+    @staticmethod
+    def _profile():
+        return SimpleNamespace(
+            robot_id="turtlebot1",
+            namespace="",
+            scan_topic="scan",
+            odom_topic="odom",
+            cmd_vel_topic="cmd_vel",
+            amcl_topic="amcl_pose",
+            map_frame="map",
+            odom_frame="odom",
+            base_frame="base_footprint",
+            localization_source="amcl",
+            max_linear_speed_mps=0.055,
+            max_angular_speed_radps=0.18,
+        )
+
     def _planned_center_corridor(self, root: Path) -> None:
         with redirect_stdout(StringIO()):
             status = plan_coverage(
@@ -131,6 +151,13 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                     failures=[],
                     observations=[],
                     runtime_config={},
+                    route_pose={
+                        "frame_id": "map",
+                        "child_frame_id": "base_footprint",
+                        "x_m": leg.raw_waypoints[0].pose.x_m,
+                        "y_m": leg.raw_waypoints[0].pose.y_m,
+                        "yaw_rad": 0.0,
+                    },
                 ),
             ), patch(
                 "scripts.aufgabe04.navigation.run_single_station_segment."
@@ -159,6 +186,77 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 )
             self.assertEqual(runner_status, 0)
             follower.assert_not_called()
+
+    def test_discovery_dry_run_rejects_stale_start_before_confirmation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "survey"
+            sealed_root = Path(tmp) / "sealed"
+            self._planned_center_corridor(root)
+            outputs = seal_stand_discovery_route(
+                source_route_csv=root / "legs/leg_000_route.csv",
+                source_diagnostics_json=root / "legs/leg_000_diagnostics.json",
+                coverage_plan_path=root / "coverage_plan.json",
+                output_dir=sealed_root,
+            )
+            leg = load_route_leg(Path(outputs["route_csv"]), 0)
+            events = Path(tmp) / "events.jsonl"
+            with patch(
+                "scripts.aufgabe04.navigation.run_single_station_segment."
+                "run_ros_preflight",
+                return_value=RosPreflightResult(
+                    ok=True,
+                    failures=[],
+                    observations=[],
+                    runtime_config={},
+                    route_pose={
+                        "frame_id": "map",
+                        "child_frame_id": "base_footprint",
+                        "x_m": leg.raw_waypoints[0].pose.x_m - 0.10,
+                        "y_m": leg.raw_waypoints[0].pose.y_m,
+                        "yaw_rad": 0.0,
+                    },
+                ),
+            ), patch(
+                "scripts.aufgabe04.navigation.run_single_station_segment."
+                "run_simple_waypoint_follower"
+            ) as follower, redirect_stdout(StringIO()):
+                status = run_segment(
+                    [
+                        "--route-csv",
+                        outputs["route_csv"],
+                        "--diagnostics-json",
+                        outputs["diagnostics_json"],
+                        "--route-certificate-json",
+                        outputs["route_certificate_json"],
+                        "--coverage-plan",
+                        str(root / "coverage_plan.json"),
+                        "--leg-index",
+                        "0",
+                        "--semantic-log",
+                        str(events),
+                        "--results-csv",
+                        str(Path(tmp) / "results.csv"),
+                        "--preflight-json",
+                        str(Path(tmp) / "preflight.json"),
+                        "--dry-run",
+                    ]
+                )
+            self.assertEqual(status, 1)
+            follower.assert_not_called()
+            payloads = [
+                json.loads(line)
+                for line in events.read_text().splitlines()
+                if line.strip()
+            ]
+            rejected = next(
+                item for item in payloads
+                if item["event"] == "startup_route_rejected"
+            )
+            self.assertFalse(rejected["motion_published"])
+            self.assertEqual(
+                rejected["stop_details"]["phase"],
+                "before_motion_confirmation",
+            )
 
     def test_pending_registry_freezes_to_candidate_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -249,6 +347,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             ]
         )
         self.assertEqual(args.coverage_leg_limit, 1)
+        self.assertEqual(args.max_startup_reseals_per_leg, 3)
         self.assertTrue(args.stop_after_coverage)
         self.assertTrue(args.execute)
 
@@ -370,6 +469,255 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 second_seal["source_diagnostics_json"],
                 replacement_diagnostics,
             )
+
+    def test_startup_mismatch_replans_and_requires_fresh_confirmation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_route = root / "route.csv"
+            source_diagnostics = root / "diagnostics.json"
+            source_route.write_text("source\n")
+            source_diagnostics.write_text("{}\n")
+            replacement_route = root / "replacement_route.csv"
+            replacement_diagnostics = root / "replacement_diagnostics.json"
+            replacement_route.write_text("replacement\n")
+            replacement_diagnostics.write_text("{}\n")
+            rejected = MotionLegOutcome(
+                run_id="mission_coverage_000",
+                status="stopped",
+                stop_reason="pose outside certified startup segment",
+                stop_details={
+                    "source": "execution_route_certificate",
+                    "phase": "before_motion_confirmation",
+                    "route_pose": {
+                        "frame_id": "map",
+                        "child_frame_id": "base_footprint",
+                        "x_m": -0.5044625,
+                        "y_m": -0.6255536,
+                        "yaw_rad": 1.7007652,
+                    },
+                },
+                motion_published=False,
+                returncode=1,
+                semantic_log_path=root / "rejected.jsonl",
+            )
+            completed = MotionLegOutcome(
+                run_id="mission_coverage_000_startup_reseal_001",
+                status="completed",
+                stop_reason="",
+                stop_details={},
+                motion_published=True,
+                returncode=0,
+                semantic_log_path=root / "completed.jsonl",
+            )
+            args = SimpleNamespace(
+                session_id="mission",
+                max_blockage_replans_per_leg=2,
+                max_startup_reseals_per_leg=2,
+                map=MAP,
+                semantic_map_id="arena_1p898x3p9_auto",
+            )
+            sealed = {
+                "route_csv": str(source_route),
+                "diagnostics_json": str(source_diagnostics),
+                "route_certificate_json": str(root / "certificate.json"),
+            }
+            with patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "seal_stand_discovery_route",
+                return_value=sealed,
+            ) as seal, patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "_run_motion_leg",
+                side_effect=(rejected, completed),
+            ) as run, patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "_replan_startup_source",
+                return_value={
+                    "route_csv": str(replacement_route),
+                    "diagnostics_json": str(replacement_diagnostics),
+                    "summary_json": str(root / "reseal_summary.json"),
+                },
+            ) as replan, patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "_capture_lidar_epoch"
+            ) as observe:
+                _execute_coverage_leg_with_replans(
+                    profile=SimpleNamespace(robot_radius_m=0.105),
+                    args=args,
+                    session_root=root / "session",
+                    survey_root=root / "survey",
+                    plan_path=root / "coverage_plan.json",
+                    leg_index=0,
+                    target_viewpoint_id="survey_vp_001",
+                    source_route=source_route,
+                    source_diagnostics=source_diagnostics,
+                )
+
+            self.assertTrue(_is_resealable_startup_mismatch(rejected))
+            self.assertEqual(run.call_count, 2)
+            self.assertFalse(
+                run.call_args_list[0].kwargs["require_fresh_confirmation"]
+            )
+            self.assertTrue(
+                run.call_args_list[1].kwargs["require_fresh_confirmation"]
+            )
+            self.assertEqual(seal.call_count, 2)
+            self.assertEqual(
+                seal.call_args_list[1].kwargs["source_route_csv"],
+                replacement_route,
+            )
+            replan.assert_called_once()
+            observe.assert_not_called()
+            adaptive = [
+                json.loads(line)
+                for line in (root / "session/adaptive_replans.jsonl")
+                .read_text()
+                .splitlines()
+            ]
+            self.assertEqual(
+                adaptive[-1]["event"], "startup_pose_route_resealed"
+            )
+            self.assertTrue(adaptive[-1]["fresh_confirmation_required"])
+
+    def test_dry_precheck_mismatch_is_returned_without_execution_attempt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "startup_rejected"
+            event_path = root / "run_events" / f"{run_id}.jsonl"
+            event_path.parent.mkdir(parents=True)
+            event_path.write_text(
+                json.dumps(
+                    {
+                        "event": "safety_stop",
+                        "run_id": run_id,
+                        "status": "stopped",
+                        "stop_reason": "pose outside certified startup segment",
+                        "stop_details": {
+                            "source": "execution_route_certificate",
+                            "phase": "before_motion_confirmation",
+                            "route_pose": {
+                                "frame_id": "map",
+                                "child_frame_id": "base_footprint",
+                                "x_m": -0.5044625,
+                                "y_m": -0.6255536,
+                                "yaw_rad": 1.7007652,
+                            },
+                        },
+                        "motion_published": False,
+                    }
+                )
+                + "\n"
+            )
+            sealed = {
+                "route_csv": str(root / "route.csv"),
+                "diagnostics_json": str(root / "diagnostics.json"),
+                "route_certificate_json": str(root / "certificate.json"),
+            }
+            with patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "subprocess.run",
+                return_value=SimpleNamespace(returncode=1),
+            ) as run:
+                outcome = _run_motion_leg(
+                    profile=self._profile(),
+                    sealed=sealed,
+                    run_id=run_id,
+                    session_root=root,
+                    execute=True,
+                    coverage_plan=root / "coverage_plan.json",
+                )
+
+            self.assertTrue(_is_resealable_startup_mismatch(outcome))
+            self.assertEqual(run.call_count, 1)
+
+    def test_resealed_route_refusal_never_launches_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sealed = {
+                "route_csv": str(root / "route.csv"),
+                "diagnostics_json": str(root / "diagnostics.json"),
+                "route_certificate_json": str(root / "certificate.json"),
+            }
+            with patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "subprocess.run",
+                return_value=SimpleNamespace(returncode=0),
+            ) as run, patch("builtins.input", return_value="NO"), redirect_stdout(
+                StringIO()
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "operator did not authorize resealed route",
+                ):
+                    _run_motion_leg(
+                        profile=self._profile(),
+                        sealed=sealed,
+                        run_id="resealed",
+                        session_root=root,
+                        execute=True,
+                        coverage_plan=root / "coverage_plan.json",
+                        require_fresh_confirmation=True,
+                    )
+
+            self.assertEqual(run.call_count, 1)
+
+    def test_startup_reseal_replans_full_a_star_leg_from_rejected_pose(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            survey_root = root / "survey"
+            self._planned_center_corridor(survey_root)
+            plan_path = survey_root / "coverage_plan.json"
+            summary = json.loads(
+                (survey_root / "survey_summary.json").read_text()
+            )
+            current = Pose2D(0.04, 0.02, 0.1)
+            rejected = MotionLegOutcome(
+                run_id="rejected",
+                status="stopped",
+                stop_reason="pose outside certified startup segment",
+                stop_details={
+                    "source": "execution_route_certificate",
+                    "phase": "before_motion_confirmation",
+                    "route_pose": {
+                        "frame_id": "map",
+                        "child_frame_id": "base_footprint",
+                        "x_m": current.x_m,
+                        "y_m": current.y_m,
+                        "yaw_rad": current.yaw_rad,
+                    },
+                },
+                motion_published=False,
+                returncode=1,
+                semantic_log_path=root / "events.jsonl",
+            )
+            outputs = _replan_startup_source(
+                map_yaml=MAP,
+                semantic_map_id="arena_1p898x3p9_auto",
+                survey_root=survey_root,
+                plan_path=plan_path,
+                expected_target_viewpoint_id=summary["next_viewpoint_id"],
+                current_pose=current,
+                rejected_outcome=rejected,
+                reseal_index=1,
+                output_dir=root / "reseal_source",
+            )
+            leg = load_route_leg(Path(outputs["route_csv"]), 0)
+            self.assertAlmostEqual(leg.raw_waypoints[0].pose.x_m, current.x_m)
+            self.assertAlmostEqual(leg.raw_waypoints[0].pose.y_m, current.y_m)
+            diagnostics = json.loads(
+                Path(outputs["diagnostics_json"]).read_text()
+            )
+            self.assertTrue(diagnostics["metadata"]["startup_reseal"])
+            self.assertTrue(
+                diagnostics["metadata"]["exact_start_connector"]["validated"]
+            )
+            sealed = seal_stand_discovery_route(
+                source_route_csv=Path(outputs["route_csv"]),
+                source_diagnostics_json=Path(outputs["diagnostics_json"]),
+                coverage_plan_path=plan_path,
+                output_dir=root / "sealed_reseal",
+            )
+            self.assertTrue(Path(sealed["route_certificate_json"]).is_file())
 
     def test_opposite_inspection_offsets_never_cross_physical_minimum(self):
         offsets = _bounded_approach_offsets(0.70, 0.32)

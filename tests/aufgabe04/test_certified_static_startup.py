@@ -77,6 +77,30 @@ class CertifiedStaticStartupDecisionTest(unittest.TestCase):
         self.assertEqual(decision.route_check.active_segment_start_index, 0)
         self.assertEqual(decision.route_check.active_segment_end_index, 1)
 
+    def test_rejects_latest_physical_amcl_pose_before_motion_confirmation(self):
+        route = (
+            Pose2D(-0.4665397603219273, -0.6378901500773804),
+            Pose2D(-0.44499999999999984, -0.615),
+            Pose2D(-0.49499999999999966, -0.565),
+        )
+        decision = certified_static_startup_decision(
+            Pose2D(
+                -0.5044625036597687,
+                -0.6255535677217878,
+                1.7007651906618557,
+            ),
+            route,
+            tracking_tube_radius_m=0.03,
+        )
+
+        self.assertFalse(decision.ok)
+        self.assertGreater(
+            decision.route_check.pose_distance_to_segment_m,
+            0.03,
+        )
+        self.assertEqual(decision.route_check.active_segment_start_index, 0)
+        self.assertEqual(decision.route_check.active_segment_end_index, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

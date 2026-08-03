@@ -144,6 +144,7 @@ class DetectedStandPreapproachTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = self._pipeline(Path(tmpdir))
             outputs = seal_detected_stand_preapproach(pipeline_root=root)
+            leg = load_route_leg(Path(outputs["route_csv"]), 0)
             with patch(
                 "scripts.aufgabe04.navigation.run_single_station_segment."
                 "run_ros_preflight",
@@ -152,6 +153,13 @@ class DetectedStandPreapproachTest(unittest.TestCase):
                     failures=[],
                     observations=[],
                     runtime_config={},
+                    route_pose={
+                        "frame_id": "map",
+                        "child_frame_id": "base_footprint",
+                        "x_m": leg.raw_waypoints[0].pose.x_m,
+                        "y_m": leg.raw_waypoints[0].pose.y_m,
+                        "yaw_rad": 0.0,
+                    },
                 ),
             ), patch(
                 "scripts.aufgabe04.navigation.run_single_station_segment."

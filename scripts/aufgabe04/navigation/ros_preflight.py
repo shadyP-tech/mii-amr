@@ -90,6 +90,7 @@ class RosPreflightResult:
     failures: List[str]
     observations: List[RosObservation]
     runtime_config: Dict[str, object]
+    route_pose: Dict[str, object] | None = None
 
     def to_json_dict(self) -> Dict[str, object]:
         return {
@@ -97,6 +98,7 @@ class RosPreflightResult:
             "failures": self.failures,
             "observations": [asdict(observation) for observation in self.observations],
             "runtime_config": self.runtime_config,
+            "route_pose": self.route_pose,
         }
 
 
@@ -320,11 +322,23 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         )
         self._observe_use_sim_time(observations, failures)
         self._observe_cmd_vel_ownership(observations, failures)
+        route_pose = None
+        if map_to_base_ok and all(
+            key in map_to_base_data for key in ("x_m", "y_m", "yaw_rad")
+        ):
+            route_pose = {
+                "frame_id": self.config.map_frame,
+                "child_frame_id": self.config.base_frame,
+                "x_m": map_to_base_data["x_m"],
+                "y_m": map_to_base_data["y_m"],
+                "yaw_rad": map_to_base_data["yaw_rad"],
+            }
         return RosPreflightResult(
             ok=not failures,
             failures=failures,
             observations=observations,
             runtime_config=self.config.as_log_dict(),
+            route_pose=route_pose,
         )
 
     def _refresh_stationary_amcl(self) -> RosObservation:
@@ -489,10 +503,19 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             return False, data
         age = (self.get_clock().now() - Time.from_msg(transform.header.stamp)).nanoseconds / 1_000_000_000.0
         ok = -self.max_future_timestamp_sec <= age <= max_age_sec
+        translation = transform.transform.translation
+        rotation = transform.transform.rotation
+        yaw_rad = math.atan2(
+            2.0 * (rotation.w * rotation.z + rotation.x * rotation.y),
+            1.0 - 2.0 * (rotation.y * rotation.y + rotation.z * rotation.z),
+        )
         data = {
             "available": True,
             "age_sec": age,
             "max_future_sec": self.max_future_timestamp_sec,
+            "x_m": float(translation.x),
+            "y_m": float(translation.y),
+            "yaw_rad": yaw_rad,
         }
         observations.append(RosObservation(name, ok, f"age={age:.3f}s", data))
         if not ok:

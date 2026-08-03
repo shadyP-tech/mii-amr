@@ -4,9 +4,11 @@
 The mission plans a single center rail, drives certified A* legs to stopped
 inspection poses, fuses LiDAR candidates across those poses, visits every
 stable candidate at a robot-facing pre-approach, and commits calibrated
-camera/LiDAR QR-face poses.  Physical execution requires ``--execute`` and one
-mission-level typed ``RUN``.  Every motion leg still passes the existing
-route, ROS, obstacle, localization, and exclusive-velocity-owner gates.
+camera/LiDAR QR-face poses.  Physical execution requires ``--execute`` and a
+mission-level typed ``RUN``.  A route rebuilt after a pre-motion localization
+mismatch requires another typed ``RUN``.  Every motion leg still passes the
+existing route, ROS, obstacle, localization, and exclusive-velocity-owner
+gates.
 """
 
 from __future__ import annotations
@@ -67,7 +69,9 @@ from scripts.aufgabe04.navigation.stand_coverage_survey import (
     StandSurveyRegistry,
     coverage_survey_plan_sha256,
     load_coverage_survey_plan,
+    load_survey_progress,
     load_stand_survey_registry,
+    plan_next_survey_leg,
 )
 from scripts.aufgabe04.navigation.stand_blockage_replan import (
     record_blockage_replan,
@@ -118,6 +122,7 @@ DEFAULT_LIDAR_STOP_DISTANCE_M = 0.20
 DEFAULT_LIDAR_CLEARANCE_MARGIN_M = 0.02
 DEFAULT_FRONT_OBSTACLE_SLOW_DISTANCE_M = 0.38
 DEFAULT_MAX_BLOCKAGE_REPLANS_PER_LEG = 3
+DEFAULT_MAX_STARTUP_RESEALS_PER_LEG = 3
 
 
 @dataclass(frozen=True)
@@ -583,6 +588,7 @@ def _run_motion_leg(
     execute: bool,
     coverage_plan: Path | None = None,
     candidate_snapshot: Path | None = None,
+    require_fresh_confirmation: bool = False,
 ) -> MotionLegOutcome:
     common = {
         "profile": profile,
@@ -595,8 +601,22 @@ def _run_motion_leg(
         "candidate_snapshot": candidate_snapshot,
     }
     dry = _runner_command(**common, dry_run=True)
-    if subprocess.run(dry, check=False).returncode != 0:
-        raise RuntimeError(f"dry-run failed for {run_id}")
+    dry_result = subprocess.run(dry, check=False)
+    if dry_result.returncode != 0:
+        semantic_log = session_root / "run_events" / f"{run_id}.jsonl"
+        try:
+            outcome = _motion_outcome_from_log(
+                semantic_log,
+                run_id=run_id,
+                returncode=dry_result.returncode,
+            )
+        except RuntimeError as exc:
+            raise RuntimeError(f"dry-run failed for {run_id}: {exc}") from exc
+        if _is_resealable_startup_mismatch(outcome):
+            return outcome
+        raise RuntimeError(
+            f"dry-run failed for {run_id}: {outcome.stop_reason}"
+        )
     if not execute:
         return MotionLegOutcome(
             run_id=run_id,
@@ -609,6 +629,20 @@ def _run_motion_leg(
                 session_root / "run_events" / f"{run_id}.jsonl"
             ),
         )
+    if require_fresh_confirmation:
+        print(
+            "The prior route was rejected before motion because AMCL moved "
+            "outside its certified startup segment. A new A* route, exact-start "
+            "connector, dry-run, and certificate now match the rejected live pose."
+        )
+        print(f"Resealed route: {common['route_csv']}")
+        print(f"Resealed certificate: {common['certificate_json']}")
+        if input(
+            f"Type RUN to authorize the resealed route {run_id}: "
+        ).strip() != "RUN":
+            raise RuntimeError(
+                f"operator did not authorize resealed route {run_id}"
+            )
     runner = _runner_command(**common, dry_run=False)
     wrapped = _bundle_command(profile, run_id, runner)
     result = subprocess.run(
@@ -687,6 +721,151 @@ def _append_jsonl(path: Path, payload: dict[str, object]) -> None:
         handle.write(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
 
 
+def _is_resealable_startup_mismatch(outcome: MotionLegOutcome) -> bool:
+    details = outcome.stop_details
+    return (
+        outcome.status == "stopped"
+        and not outcome.motion_published
+        and outcome.stop_reason == "pose outside certified startup segment"
+        and details.get("source") == "execution_route_certificate"
+        and details.get("phase") == "before_motion_confirmation"
+        and isinstance(details.get("route_pose"), dict)
+    )
+
+
+def _startup_reseal_pose(outcome: MotionLegOutcome) -> Pose2D:
+    if not _is_resealable_startup_mismatch(outcome):
+        raise ValueError("outcome is not a resealable startup mismatch")
+    raw = outcome.stop_details["route_pose"]
+    assert isinstance(raw, dict)
+    pose = Pose2D(
+        float(raw["x_m"]),
+        float(raw["y_m"]),
+        float(raw["yaw_rad"]),
+    )
+    if not all(
+        math.isfinite(value) for value in (pose.x_m, pose.y_m, pose.yaw_rad)
+    ):
+        raise ValueError("startup mismatch pose must be finite")
+    return pose
+
+
+def _replan_startup_source(
+    *,
+    map_yaml: Path,
+    semantic_map_id: str,
+    survey_root: Path,
+    plan_path: Path,
+    expected_target_viewpoint_id: str,
+    current_pose: Pose2D,
+    rejected_outcome: MotionLegOutcome,
+    reseal_index: int,
+    output_dir: Path,
+) -> dict[str, str]:
+    """Rebuild a complete motion-free A* leg from a rejected live pose."""
+
+    if reseal_index <= 0:
+        raise ValueError("startup reseal index must be positive")
+    plan = load_coverage_survey_plan(plan_path)
+    progress = load_survey_progress(
+        survey_root / "coverage_progress.json",
+        plan,
+    )
+    registry = load_stand_survey_registry(
+        survey_root / "stand_registry.json",
+        plan,
+    )
+    grid, map_bundle = load_occupancy_grid_with_bundle(
+        map_yaml,
+        semantic_map_id=semantic_map_id,
+        planning_frame=plan.planning_frame,
+    )
+    if map_bundle.bundle_sha256 != plan.map_bundle_sha256:
+        raise ValueError("startup reseal map differs from coverage plan")
+    next_leg = plan_next_survey_leg(
+        grid,
+        plan=plan,
+        progress=progress,
+        registry=registry,
+        current_pose=current_pose,
+    )
+    if next_leg is None:
+        raise ValueError("startup reseal found no remaining coverage leg")
+    if next_leg.viewpoint.viewpoint_id != expected_target_viewpoint_id:
+        raise ValueError(
+            "startup reseal changed the committed coverage target: "
+            f"expected={expected_target_viewpoint_id} "
+            f"selected={next_leg.viewpoint.viewpoint_id}"
+        )
+
+    output_dir.mkdir(parents=True, exist_ok=False)
+    route_path = output_dir / "route.csv"
+    diagnostics_path = output_dir / "route_diagnostics.json"
+    summary_path = output_dir / "startup_reseal_summary.json"
+    write_route_csv(
+        route_path,
+        (next_leg.route_result,),
+        final_yaw_by_leg={0: next_leg.viewpoint.pose.yaw_rad},
+    )
+    write_diagnostics_json(
+        diagnostics_path,
+        (next_leg.route_result,),
+        metadata={
+            "schema_version": 1,
+            "route_kind": "stand_coverage_survey",
+            "motion_authorized": False,
+            "survey_id": plan.survey_id,
+            "plan_sha256": coverage_survey_plan_sha256(plan),
+            "map_bundle_sha256": plan.map_bundle_sha256,
+            "target_viewpoint_id": next_leg.viewpoint.viewpoint_id,
+            "target_pose": {
+                "x_m": next_leg.viewpoint.pose.x_m,
+                "y_m": next_leg.viewpoint.pose.y_m,
+                "yaw_rad": next_leg.viewpoint.pose.yaw_rad,
+            },
+            "candidate_keepout_count": sum(
+                1
+                for candidate in registry.candidates
+                if candidate.status != "rejected"
+            ),
+            "unreachable_viewpoint_ids_before_target": list(
+                next_leg.unreachable_viewpoint_ids
+            ),
+            "inflation_radius_m": plan.config.inflation_radius_m,
+            "exact_start_connector": (
+                next_leg.exact_start_connector.to_metadata()
+            ),
+            "arena_boundary_overlay": True,
+            "arena_bounds": plan.arena_bounds.to_metadata(),
+            "startup_reseal": True,
+            "startup_reseal_index": reseal_index,
+            "rejected_run_id": rejected_outcome.run_id,
+            "rejected_stop_details": rejected_outcome.stop_details,
+        },
+    )
+    summary = {
+        "schema_version": 1,
+        "status": "startup_route_replanned",
+        "motion_published": False,
+        "startup_reseal_index": reseal_index,
+        "rejected_run_id": rejected_outcome.run_id,
+        "target_viewpoint_id": next_leg.viewpoint.viewpoint_id,
+        "fresh_start_pose": {
+            "x_m": current_pose.x_m,
+            "y_m": current_pose.y_m,
+            "yaw_rad": current_pose.yaw_rad,
+        },
+        "route_csv": str(route_path),
+        "diagnostics_json": str(diagnostics_path),
+    }
+    _write_json(summary_path, summary)
+    return {
+        "route_csv": str(route_path),
+        "diagnostics_json": str(diagnostics_path),
+        "summary_json": str(summary_path),
+    }
+
+
 def _execute_coverage_leg_with_replans(
     *,
     profile,
@@ -702,9 +881,18 @@ def _execute_coverage_leg_with_replans(
     """Run one coverage leg with bounded stop-observe-A* recovery."""
 
     replan_index = 0
+    startup_reseal_index = 0
     adaptive_log = session_root / "adaptive_replans.jsonl"
     while True:
-        suffix = "" if replan_index == 0 else f"_replan_{replan_index:03d}"
+        blockage_suffix = (
+            "" if replan_index == 0 else f"_replan_{replan_index:03d}"
+        )
+        startup_suffix = (
+            ""
+            if startup_reseal_index == 0
+            else f"_startup_reseal_{startup_reseal_index:03d}"
+        )
+        suffix = blockage_suffix + startup_suffix
         run_id = f"{args.session_id}_coverage_{leg_index:03d}{suffix}"
         execution_root = (
             session_root
@@ -724,9 +912,65 @@ def _execute_coverage_leg_with_replans(
             session_root=session_root,
             execute=True,
             coverage_plan=plan_path,
+            require_fresh_confirmation=startup_reseal_index > 0,
         )
         if outcome.status == "completed":
             return
+        if _is_resealable_startup_mismatch(outcome):
+            if replan_index != 0:
+                raise RuntimeError(
+                    "startup pose changed after a stand-blockage replan; "
+                    "the dynamic obstacle overlay cannot be discarded by a "
+                    "generic coverage-route reseal"
+                )
+            if startup_reseal_index >= args.max_startup_reseals_per_leg:
+                raise RuntimeError(
+                    "startup reseal budget exhausted for coverage leg "
+                    f"{leg_index}: {outcome.stop_reason}"
+                )
+            startup_reseal_index += 1
+            rejected_pose = _startup_reseal_pose(outcome)
+            reseal_root = (
+                survey_root
+                / "startup_reseals"
+                / (
+                    f"leg_{leg_index:03d}{blockage_suffix}"
+                    f"_startup_reseal_{startup_reseal_index:03d}"
+                )
+            )
+            replanned = _replan_startup_source(
+                map_yaml=args.map,
+                semantic_map_id=args.semantic_map_id,
+                survey_root=survey_root,
+                plan_path=plan_path,
+                expected_target_viewpoint_id=target_viewpoint_id,
+                current_pose=rejected_pose,
+                rejected_outcome=outcome,
+                reseal_index=startup_reseal_index,
+                output_dir=reseal_root,
+            )
+            _append_jsonl(
+                adaptive_log,
+                {
+                    "schema_version": 1,
+                    "event": "startup_pose_route_resealed",
+                    "timestamp": time.time(),
+                    "leg_index": leg_index,
+                    "blockage_replan_index": replan_index,
+                    "startup_reseal_index": startup_reseal_index,
+                    "rejected_run_id": outcome.run_id,
+                    "rejected_stop_details": outcome.stop_details,
+                    "replacement_route_csv": replanned["route_csv"],
+                    "replacement_diagnostics_json": replanned[
+                        "diagnostics_json"
+                    ],
+                    "replacement_summary_json": replanned["summary_json"],
+                    "fresh_confirmation_required": True,
+                },
+            )
+            source_route = Path(replanned["route_csv"])
+            source_diagnostics = Path(replanned["diagnostics_json"])
+            continue
         if not _is_confirmable_stand_blockage(outcome):
             _require_completed_motion(outcome)
         if replan_index >= args.max_blockage_replans_per_leg:
@@ -781,6 +1025,7 @@ def _execute_coverage_leg_with_replans(
         )
         source_route = Path(replanned["route_csv"])
         source_diagnostics = Path(replanned["diagnostics_json"])
+        startup_reseal_index = 0
 
 
 def _capture_camera_recommendation(
@@ -1080,6 +1325,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--max-startup-reseals-per-leg",
+        type=int,
+        default=DEFAULT_MAX_STARTUP_RESEALS_PER_LEG,
+        help=(
+            "Maximum fresh-pose A* reseals after a route is rejected before "
+            "motion because AMCL left its certified startup segment. Every "
+            "successful reseal requires a new typed RUN."
+        ),
+    )
+    parser.add_argument(
         "--stop-after-coverage",
         action="store_true",
         help=(
@@ -1102,6 +1357,8 @@ def _validate_inputs(parser, args, profile, calibration) -> None:
         parser.error("--coverage-leg-limit must be non-negative")
     if args.max_blockage_replans_per_leg < 0:
         parser.error("--max-blockage-replans-per-leg must be non-negative")
+    if args.max_startup_reseals_per_leg < 0:
+        parser.error("--max-startup-reseals-per-leg must be non-negative")
     for name in (
         "inspection_stop_spacing_m",
         "lidar_epoch_sec",
@@ -1223,7 +1480,7 @@ def main(argv=None) -> int:
                 coverage_plan_path=plan_path,
                 output_dir=session_root / "execution/coverage_leg_000",
             )
-            _run_motion_leg(
+            first_dry_outcome = _run_motion_leg(
                 profile=profile,
                 sealed=first_sealed,
                 run_id=f"{args.session_id}_coverage_000_dry",
@@ -1231,6 +1488,11 @@ def main(argv=None) -> int:
                 execute=False,
                 coverage_plan=plan_path,
             )
+            if first_dry_outcome.status != "dry_run_ok":
+                raise RuntimeError(
+                    "first center-corridor dry-run rejected the sealed route: "
+                    f"{first_dry_outcome.stop_reason}"
+                )
             _write_json(
                 session_root / "mission_summary.json",
                 {
@@ -1266,7 +1528,9 @@ def main(argv=None) -> int:
             "beside the robot; Ctrl+C and physical stop ready; separate exact-topic "
             f"zero Twist terminal ready. This RUN authorizes {authorization_scope} "
             "and its bounded stop-observe-A* stand-blockage replans "
-            f"(maximum {args.max_blockage_replans_per_leg} per coverage leg)."
+            f"(maximum {args.max_blockage_replans_per_leg} per coverage leg). "
+            "A pre-motion AMCL/start mismatch never inherits this RUN: the "
+            "route is rebuilt and a fresh typed RUN is required."
         )
         if input("Type RUN to authorize the autonomous exploration mission: ").strip() != "RUN":
             raise RuntimeError("operator did not authorize the mission")
