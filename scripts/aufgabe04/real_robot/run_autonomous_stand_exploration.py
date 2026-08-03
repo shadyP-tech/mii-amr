@@ -107,6 +107,7 @@ from scripts.aufgabe04.stations.station_identity_registry import (
 
 DEFAULT_MAP = Path("maps/aufgabe03/arena_1p898x3p9_auto.yaml")
 DEFAULT_OUTPUT_ROOT = Path("results/aufgabe04/real/autonomous_exploration")
+STATIONARY_AMCL_TIMEOUT_SEC = 15.0
 DEFAULT_TRACKING_TUBE_RADIUS_M = 0.03
 DEFAULT_COLLISION_MARGIN_M = 0.02
 DEFAULT_LIDAR_STOP_DISTANCE_M = 0.20
@@ -954,7 +955,7 @@ def main(argv=None) -> int:
             namespace=profile.namespace,
             amcl_topic=profile.amcl_topic,
             map_frame=profile.map_frame,
-            timeout_sec=5.0,
+            timeout_sec=STATIONARY_AMCL_TIMEOUT_SEC,
             max_age_sec=2.0,
         )
         planning_status = plan_stand_coverage_survey(
@@ -1166,7 +1167,7 @@ def main(argv=None) -> int:
                 namespace=profile.namespace,
                 amcl_topic=profile.amcl_topic,
                 map_frame=profile.map_frame,
-                timeout_sec=5.0,
+                timeout_sec=STATIONARY_AMCL_TIMEOUT_SEC,
                 max_age_sec=2.0,
             )
             candidate = _nearest_candidate(snapshot, current, unresolved)
@@ -1221,7 +1222,7 @@ def main(argv=None) -> int:
                     namespace=profile.namespace,
                     amcl_topic=profile.amcl_topic,
                     map_frame=profile.map_frame,
-                    timeout_sec=5.0,
+                    timeout_sec=STATIONARY_AMCL_TIMEOUT_SEC,
                     max_age_sec=2.0,
                 )
                 opposite_source = candidate_root / "opposite_face_source"
@@ -1300,7 +1301,7 @@ def main(argv=None) -> int:
                 namespace=profile.namespace,
                 amcl_topic=profile.amcl_topic,
                 map_frame=profile.map_frame,
-                timeout_sec=5.0,
+                timeout_sec=STATIONARY_AMCL_TIMEOUT_SEC,
                 max_age_sec=2.0,
             )
             facing = _validate_facing_pose(

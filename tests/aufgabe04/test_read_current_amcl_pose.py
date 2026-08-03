@@ -1,6 +1,7 @@
 import math
 import sys
 import unittest
+from unittest.mock import patch
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -10,10 +11,12 @@ sys.path.insert(0, str(ROOT))
 
 from scripts.aufgabe04.navigation.read_current_amcl_pose import (  # noqa: E402
     CurrentAmclPose,
+    CurrentAmclPoseReader,
     planner_args_from_pose,
     validate_current_amcl_pose,
     yaw_from_quaternion,
 )
+from scripts.aufgabe04.navigation import read_current_amcl_pose as pose_reader  # noqa: E402
 
 
 class ReadCurrentAmclPoseTest(unittest.TestCase):
@@ -66,6 +69,41 @@ class ReadCurrentAmclPoseTest(unittest.TestCase):
         )
 
         self.assertAlmostEqual(yaw_from_quaternion(q), yaw)
+
+    def test_stationary_update_is_requested_once_after_client_is_ready(self):
+        future = object()
+        client = SimpleNamespace(
+            service_is_ready=lambda: True,
+            call_async=lambda _request: future,
+        )
+        messages = []
+        reader = CurrentAmclPoseReader.__new__(CurrentAmclPoseReader)
+        reader.nomotion_client = client
+        reader.nomotion_future = None
+        reader.get_logger = lambda: SimpleNamespace(info=messages.append)
+
+        class FakeEmpty:
+            class Request:
+                pass
+
+        with patch.object(pose_reader, "Empty", FakeEmpty):
+            self.assertTrue(reader.maybe_request_nomotion_update())
+            self.assertFalse(reader.maybe_request_nomotion_update())
+
+        self.assertIs(reader.nomotion_future, future)
+        self.assertEqual(messages, ["requested stationary AMCL update"])
+
+    def test_stationary_update_waits_for_service_readiness(self):
+        client = SimpleNamespace(
+            service_is_ready=lambda: False,
+            call_async=lambda _request: self.fail("service must not be called"),
+        )
+        reader = CurrentAmclPoseReader.__new__(CurrentAmclPoseReader)
+        reader.nomotion_client = client
+        reader.nomotion_future = None
+
+        self.assertFalse(reader.maybe_request_nomotion_update())
+        self.assertIsNone(reader.nomotion_future)
 
 
 if __name__ == "__main__":

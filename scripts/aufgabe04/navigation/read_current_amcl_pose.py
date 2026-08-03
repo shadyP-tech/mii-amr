@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import sys
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -20,11 +21,13 @@ try:  # pragma: no cover - exercised on ROS hosts.
     from geometry_msgs.msg import PoseWithCovarianceStamped
     from rclpy.node import Node
     from rclpy.time import Time
+    from std_srvs.srv import Empty
 except ImportError:  # pragma: no cover - keeps offline tests ROS-free.
     rclpy = None
     PoseWithCovarianceStamped = None
     Node = object
     Time = None
+    Empty = None
 
 
 @dataclass(frozen=True)
@@ -77,12 +80,37 @@ def validate_current_amcl_pose(
 
 
 class CurrentAmclPoseReader(Node):  # pragma: no cover - requires ROS runtime.
-    def __init__(self, *, topic: str) -> None:
+    def __init__(self, *, topic: str, nomotion_update_service: str | None) -> None:
         super().__init__("aufgabe04_current_amcl_pose_reader")
         self.topic = topic
         self.latest_msg = None
         self.latest_receipt = None
         self.create_subscription(PoseWithCovarianceStamped, topic, self._callback, 10)
+        self.nomotion_client = (
+            None
+            if nomotion_update_service is None
+            else self.create_client(Empty, nomotion_update_service)
+        )
+        self.nomotion_future = None
+
+    def maybe_request_nomotion_update(self) -> bool:
+        """Request one stationary AMCL publication after the subscriber exists."""
+
+        if (
+            self.nomotion_client is None
+            or self.nomotion_future is not None
+            or not self.nomotion_client.service_is_ready()
+        ):
+            return False
+        self.nomotion_future = self.nomotion_client.call_async(Empty.Request())
+        self.get_logger().info("requested stationary AMCL update")
+        return True
+
+    def nomotion_update_error(self) -> Exception | None:
+        future = self.nomotion_future
+        if future is None or not future.done():
+            return None
+        return future.exception()
 
     def _callback(self, msg) -> None:
         self.latest_msg = msg
@@ -114,22 +142,61 @@ def read_current_amcl_pose(
     map_frame: str,
     timeout_sec: float,
     max_age_sec: float,
+    nomotion_update_service: str | None = "/request_nomotion_update",
 ) -> CurrentAmclPose:
     _require_ros()
     resolved = resolve_runtime_config(RuntimeConfig(namespace=namespace, amcl_topic=amcl_topic, map_frame=map_frame))
     rclpy.init(args=None)
-    node = CurrentAmclPoseReader(topic=resolved.amcl_topic)
-    deadline = node.get_clock().now().nanoseconds / 1_000_000_000.0 + timeout_sec
+    node = CurrentAmclPoseReader(
+        topic=resolved.amcl_topic,
+        nomotion_update_service=nomotion_update_service,
+    )
+    # The subscriber and service client must exist before requesting the
+    # stationary update, otherwise AMCL's one publication can be missed.
+    deadline = time.monotonic() + timeout_sec
+    last_validation_error = None
     try:
         while rclpy.ok():
+            node.maybe_request_nomotion_update()
             rclpy.spin_once(node, timeout_sec=0.05)
             current = node.current_pose()
             if current is not None:
-                validate_current_amcl_pose(current, expected_frame=resolved.map_frame, max_age_sec=max_age_sec)
-                return current
-            now_sec = node.get_clock().now().nanoseconds / 1_000_000_000.0
-            if now_sec >= deadline:
-                raise RuntimeError(f"timed out waiting for AMCL pose on {resolved.amcl_topic}")
+                try:
+                    validate_current_amcl_pose(
+                        current,
+                        expected_frame=resolved.map_frame,
+                        max_age_sec=max_age_sec,
+                    )
+                except ValueError as exc:
+                    # A retained or just-expired sample can arrive before the
+                    # response to request_nomotion_update. Keep spinning for
+                    # the fresh stationary publication instead of failing it.
+                    last_validation_error = exc
+                else:
+                    return current
+            service_error = node.nomotion_update_error()
+            if service_error is not None:
+                raise RuntimeError(
+                    "stationary AMCL update service failed: "
+                    f"{service_error}"
+                )
+            if time.monotonic() >= deadline:
+                service_state = (
+                    "disabled"
+                    if nomotion_update_service is None
+                    else "requested"
+                    if node.nomotion_future is not None
+                    else f"unavailable on {nomotion_update_service}"
+                )
+                raise RuntimeError(
+                    f"timed out waiting for AMCL pose on {resolved.amcl_topic}; "
+                    f"stationary update={service_state}"
+                    + (
+                        ""
+                        if last_validation_error is None
+                        else f"; last sample invalid: {last_validation_error}"
+                    )
+                )
     finally:
         node.destroy_node()
         rclpy.shutdown()
@@ -143,6 +210,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--map-frame", default="map")
     parser.add_argument("--timeout-sec", type=float, default=3.0)
     parser.add_argument("--max-age-sec", type=float, default=2.0)
+    parser.add_argument(
+        "--nomotion-update-service",
+        default="/request_nomotion_update",
+        help=(
+            "AMCL service requested after the pose subscriber exists so a "
+            "stationary robot publishes a fresh pose."
+        ),
+    )
+    parser.add_argument(
+        "--skip-nomotion-update",
+        action="store_true",
+        help="Wait for an AMCL publication without requesting a stationary update.",
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON instead of planner CLI args")
     parser.add_argument("--precision", type=int, default=6)
     return parser
@@ -158,6 +238,11 @@ def main(argv: list[str] | None = None) -> int:
             map_frame=args.map_frame,
             timeout_sec=args.timeout_sec,
             max_age_sec=args.max_age_sec,
+            nomotion_update_service=(
+                None
+                if args.skip_nomotion_update
+                else args.nomotion_update_service
+            ),
         )
     except (RuntimeError, ValueError) as exc:
         parser.exit(2, f"error: {exc}\n")
