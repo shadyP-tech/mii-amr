@@ -45,6 +45,170 @@ def _metadata(payload: Mapping[str, object]) -> Mapping[str, object]:
     return metadata
 
 
+def _finite_metadata_float(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be numeric")
+    selected = float(value)
+    if not math.isfinite(selected):
+        raise ValueError(f"{name} must be finite")
+    return selected
+
+
+def _row_xy(row: Mapping[str, object], name: str) -> tuple[float, float]:
+    try:
+        selected = (float(row["world_x_m"]), float(row["world_y_m"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"{name} coordinates must be numeric") from exc
+    if not all(math.isfinite(value) for value in selected):
+        raise ValueError(f"{name} coordinates must be finite")
+    return selected
+
+
+def _metadata_xy(value: object, name: str) -> tuple[float, float]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{name} must be an object")
+    return (
+        _finite_metadata_float(value.get("x_m"), f"{name}.x_m"),
+        _finite_metadata_float(value.get("y_m"), f"{name}.y_m"),
+    )
+
+
+def _validate_source_start_connector(
+    metadata: Mapping[str, object],
+    rows: list[Mapping[str, object]],
+) -> None:
+    """Bind continuous start-clearance evidence to immutable route vertices."""
+
+    tolerance_m = 1.0e-7
+    connector = metadata.get("exact_start_connector")
+    if not isinstance(connector, Mapping):
+        # Adaptive blockage replans have a separate, stronger stand-egress
+        # proof because their start may intentionally lie inside a transit
+        # keepout.  Retain that explicit compatibility path only.
+        if metadata.get("adaptive_blockage_replan") is not True:
+            raise ValueError("source route lacks exact-start connector evidence")
+        if len(rows) < 2:
+            raise ValueError("adaptive egress route has fewer than two waypoints")
+        start_xy = _row_xy(rows[0], "route start")
+        anchor_xy = _row_xy(rows[1], "route egress anchor")
+        recorded_anchor = _metadata_xy(metadata.get("egress_anchor"), "egress_anchor")
+        if (
+            math.hypot(
+                anchor_xy[0] - recorded_anchor[0],
+                anchor_xy[1] - recorded_anchor[1],
+            )
+            > tolerance_m
+        ):
+            raise ValueError("adaptive egress anchor differs from route waypoint 1")
+        length_m = math.hypot(anchor_xy[0] - start_xy[0], anchor_xy[1] - start_xy[1])
+        recorded_length_m = _finite_metadata_float(
+            metadata.get("egress_distance_m"), "egress_distance_m"
+        )
+        if not math.isclose(
+            length_m,
+            recorded_length_m,
+            rel_tol=0.0,
+            abs_tol=tolerance_m,
+        ):
+            raise ValueError("adaptive egress distance differs from route segment 0->1")
+        hard_margin_m = _finite_metadata_float(
+            metadata.get("minimum_egress_hard_clearance_m"),
+            "minimum_egress_hard_clearance_m",
+        )
+        if hard_margin_m <= 0.0:
+            raise ValueError("adaptive egress hard-clearance margin is not positive")
+        return
+
+    if connector.get("validated") is not True:
+        raise ValueError("exact-start connector was not validated")
+    required = connector.get("required")
+    if not isinstance(required, bool):
+        raise ValueError("exact-start connector required flag must be boolean")
+    exact_xy = _metadata_xy(
+        connector.get("exact_start"),
+        "exact_start_connector.exact_start",
+    )
+    anchor_xy = _metadata_xy(
+        connector.get("anchor"),
+        "exact_start_connector.anchor",
+    )
+    route_start_xy = _row_xy(rows[0], "route start")
+    anchor_index = 1 if required else 0
+    if anchor_index >= len(rows):
+        raise ValueError("exact-start connector has no bound anchor waypoint")
+    route_anchor_xy = _row_xy(rows[anchor_index], "route anchor")
+    if (
+        math.hypot(
+            exact_xy[0] - route_start_xy[0],
+            exact_xy[1] - route_start_xy[1],
+        )
+        > tolerance_m
+    ):
+        raise ValueError("exact-start evidence differs from route waypoint 0")
+    if (
+        math.hypot(
+            anchor_xy[0] - route_anchor_xy[0],
+            anchor_xy[1] - route_anchor_xy[1],
+        )
+        > tolerance_m
+    ):
+        raise ValueError("exact-start anchor differs from its route waypoint")
+
+    length_m = math.hypot(anchor_xy[0] - exact_xy[0], anchor_xy[1] - exact_xy[1])
+    recorded_length_m = _finite_metadata_float(
+        connector.get("connector_length_m"),
+        "exact_start_connector.connector_length_m",
+    )
+    if not math.isclose(
+        length_m,
+        recorded_length_m,
+        rel_tol=0.0,
+        abs_tol=tolerance_m,
+    ):
+        raise ValueError("exact-start connector length differs from route geometry")
+    if required != (length_m > 1.0e-9):
+        raise ValueError("exact-start required flag differs from route geometry")
+
+    required_clearance_m = _finite_metadata_float(
+        connector.get("required_clearance_m"),
+        "exact_start_connector.required_clearance_m",
+    )
+    inflation_m = _finite_metadata_float(
+        metadata.get("inflation_radius_m"), "inflation_radius_m"
+    )
+    if not math.isclose(
+        required_clearance_m,
+        inflation_m,
+        rel_tol=0.0,
+        abs_tol=1.0e-12,
+    ):
+        raise ValueError("exact-start required clearance differs from route inflation")
+    continuous_m = _finite_metadata_float(
+        connector.get("minimum_continuous_clearance_m"),
+        "exact_start_connector.minimum_continuous_clearance_m",
+    )
+    margin_m = _finite_metadata_float(
+        connector.get("minimum_margin_m"),
+        "exact_start_connector.minimum_margin_m",
+    )
+    if continuous_m <= required_clearance_m or margin_m <= 0.0:
+        raise ValueError("exact-start continuous-clearance margin is not positive")
+    if not math.isclose(
+        continuous_m - required_clearance_m,
+        margin_m,
+        rel_tol=0.0,
+        abs_tol=1.0e-9,
+    ):
+        raise ValueError("exact-start clearance margin is internally inconsistent")
+    sample_count = connector.get("sample_count")
+    if (
+        isinstance(sample_count, bool)
+        or not isinstance(sample_count, int)
+        or sample_count < 2
+    ):
+        raise ValueError("exact-start connector requires at least two clearance samples")
+
+
 def validate_stand_discovery_route_binding(
     diagnostics_path: Path,
     leg: SelectedRouteLeg,
@@ -189,6 +353,7 @@ def seal_stand_discovery_route(
         fieldnames = list(reader.fieldnames)
     if len(rows) < 2:
         raise ValueError("source stand discovery route has fewer than two waypoints")
+    _validate_source_start_connector(source_metadata, rows)
     for field in ("protected", "corridor", "simulation_only", "route_kind"):
         if field not in fieldnames:
             fieldnames.append(field)

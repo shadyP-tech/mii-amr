@@ -176,12 +176,21 @@ class StandBlockageReplanTest(unittest.TestCase):
                     "schema_version": 1,
                     "route_kind": "stand_coverage_survey",
                     "motion_authorized": False,
+                    "adaptive_blockage_replan": True,
                     "survey_id": plan.survey_id,
                     "plan_sha256": coverage_survey_plan_sha256(plan),
                     "map_bundle_sha256": plan.map_bundle_sha256,
                     "target_viewpoint_id": target.viewpoint_id,
                     "inflation_radius_m": plan.config.inflation_radius_m,
                     "candidate_keepout_count": 1,
+                    "egress_anchor": {
+                        "x_m": replanned.egress_anchor.x_m,
+                        "y_m": replanned.egress_anchor.y_m,
+                    },
+                    "egress_distance_m": replanned.egress_distance_m,
+                    "minimum_egress_hard_clearance_m": (
+                        replanned.minimum_egress_hard_clearance_m
+                    ),
                     "arena_boundary_overlay": True,
                     "arena_bounds": plan.arena_bounds.to_metadata(),
                 },

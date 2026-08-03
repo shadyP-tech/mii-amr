@@ -16,6 +16,10 @@ from typing import Iterable, Mapping
 from scripts.aufgabe04.artifacts.content_store import payload_sha256
 from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds
 from scripts.aufgabe04.navigation.costmap import Costmap
+from scripts.aufgabe04.navigation.exact_start_connector import (
+    ExactStartConnectorEvidence,
+    prepend_certified_exact_start,
+)
 from scripts.aufgabe04.navigation.global_planner import PlanRouteResult, plan_route
 from scripts.aufgabe04.navigation.map_io import OccupancyGrid
 from scripts.aufgabe04.navigation.models import GridCell, Pose2D
@@ -204,6 +208,7 @@ class NextSurveyLeg:
     viewpoint: SurveyViewpoint
     route_result: PlanRouteResult
     unreachable_viewpoint_ids: tuple[str, ...]
+    exact_start_connector: ExactStartConnectorEvidence
 
 
 def build_coverage_survey_plan(
@@ -512,10 +517,10 @@ def plan_next_survey_leg(
     validate_survey_progress(progress, plan)
     validate_stand_survey_registry(registry, plan)
     _validate_pose(current_pose, "current_pose")
-    costmap = Costmap.from_occupancy_grid(
+    base_costmap = Costmap.from_occupancy_grid(
         occupancy_grid
     ).with_arena_bounds(plan.arena_bounds)
-    costmap = costmap.with_inflation(plan.config.inflation_radius_m)
+    costmap = base_costmap.with_inflation(plan.config.inflation_radius_m)
     keepouts = tuple(
         Station(
             station_id=candidate.candidate_uid,
@@ -540,10 +545,17 @@ def plan_next_survey_leg(
             snap_radius_m=plan.config.snap_radius_m,
         )
         if result.route is not None:
+            route_result, connector = prepend_certified_exact_start(
+                result,
+                base_costmap=base_costmap,
+                start=current_pose,
+                required_clearance_m=plan.config.inflation_radius_m,
+            )
             return NextSurveyLeg(
                 viewpoint=viewpoint,
-                route_result=result,
+                route_result=route_result,
                 unreachable_viewpoint_ids=tuple(unreachable),
+                exact_start_connector=connector,
             )
         unreachable.append(viewpoint.viewpoint_id)
     if unreachable:

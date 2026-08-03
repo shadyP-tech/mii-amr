@@ -9,6 +9,11 @@ import unittest
 from pathlib import Path
 
 from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds
+from scripts.aufgabe04.navigation.costmap import Costmap
+from scripts.aufgabe04.navigation.exact_start_connector import (
+    prepend_certified_exact_start,
+)
+from scripts.aufgabe04.navigation.global_planner import plan_route
 from scripts.aufgabe04.navigation.map_io import (
     CELL_FREE,
     MapMetadata,
@@ -16,6 +21,9 @@ from scripts.aufgabe04.navigation.map_io import (
     load_occupancy_grid_with_bundle,
 )
 from scripts.aufgabe04.navigation.models import Pose2D
+from scripts.aufgabe04.navigation.simple_waypoint_follower import (
+    certified_static_startup_decision,
+)
 from scripts.aufgabe04.navigation.stand_coverage_survey import (
     STATUS_CONFIRMED,
     STATUS_PENDING_CAMERA,
@@ -188,6 +196,89 @@ class CoverageSurveyPlanTest(unittest.TestCase):
         self.assertEqual(loaded_plan, survey)
         self.assertEqual(loaded_progress, progress)
         self.assertEqual(loaded_registry, registry)
+
+    def test_live_amcl_start_is_prepended_and_accepted_by_startup_gate(self):
+        map_path = Path("maps/aufgabe03/arena_1p898x3p9_auto.yaml")
+        grid, bundle = load_occupancy_grid_with_bundle(
+            map_path,
+            semantic_map_id="arena_1p898x3p9_auto",
+            planning_frame="map",
+        )
+        planned_start = Pose2D(
+            -0.4297676901761188,
+            -0.6484791305211309,
+            1.603697893943687,
+        )
+        survey = build_coverage_survey_plan(
+            grid,
+            map_bundle_sha256=bundle.bundle_sha256,
+            start=planned_start,
+            survey_id="live_start_regression",
+            config=CoverageSurveyConfig(lane_count=1, expected_stand_count=3),
+        )
+        leg = plan_next_survey_leg(
+            grid,
+            plan=survey,
+            progress=new_survey_progress(survey),
+            registry=new_stand_survey_registry(survey),
+            current_pose=planned_start,
+        )
+
+        self.assertIsNotNone(leg)
+        assert leg is not None and leg.route_result.route is not None
+        self.assertTrue(leg.exact_start_connector.required)
+        self.assertTrue(leg.exact_start_connector.validated)
+        self.assertGreater(leg.exact_start_connector.minimum_margin_m, 0.039)
+        self.assertEqual(leg.route_result.route.points[0].pose, planned_start)
+        runtime_pose = Pose2D(
+            -0.4074980823903188,
+            -0.6491407250805117,
+            1.6028881170512068,
+        )
+        startup = certified_static_startup_decision(
+            runtime_pose,
+            tuple(point.pose for point in leg.route_result.route.points),
+            tracking_tube_radius_m=0.03,
+        )
+        self.assertTrue(startup.ok)
+        self.assertEqual(startup.target_index, 1)
+
+    def test_exact_start_connector_fails_closed_near_arena_wall(self):
+        base = Costmap.from_occupancy_grid(free_grid()).with_arena_bounds(
+            ArenaBounds(length_m=4.0, width_m=2.0)
+        )
+        planning = base.with_inflation(0.20)
+        start = Pose2D(-1.0, -0.95, 0.0)
+        result = plan_route(planning, start, Pose2D(0.0, 0.0), snap_radius_m=0.5)
+        self.assertIsNotNone(result.route)
+
+        with self.assertRaisesRegex(ValueError, "lacks continuous static clearance"):
+            prepend_certified_exact_start(
+                result,
+                base_costmap=base,
+                start=start,
+                required_clearance_m=0.20,
+            )
+
+    def test_exact_cell_center_start_is_not_duplicated(self):
+        base = Costmap.from_occupancy_grid(free_grid()).with_arena_bounds(
+            ArenaBounds(length_m=4.0, width_m=2.0)
+        )
+        planning = base.with_inflation(0.20)
+        start = Pose2D(-1.45, 0.05, 0.0)
+        result = plan_route(planning, start, Pose2D(0.45, 0.05), snap_radius_m=0.3)
+        self.assertIsNotNone(result.route)
+        original_count = len(result.route.points)
+
+        joined, evidence = prepend_certified_exact_start(
+            result,
+            base_costmap=base,
+            start=start,
+            required_clearance_m=0.20,
+        )
+
+        self.assertFalse(evidence.required)
+        self.assertEqual(len(joined.route.points), original_count)
 
 
 class StandSurveyRegistryTest(unittest.TestCase):
