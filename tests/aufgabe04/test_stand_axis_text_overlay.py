@@ -132,10 +132,12 @@ class StandAxisTextOverlayTest(unittest.TestCase):
         handoff_origins = [
             origin
             for text, origin in cv2.text_calls
-            if text.startswith(("handoff=", "lidar=", "camera=", "axis_delta="))
+            if text.startswith(
+                ("handoff=", "lidar=", "camera=", "axis_delta=", "center_delta=")
+            )
         ]
         self.assertIs(returned, cursor)
-        self.assertEqual(len(handoff_origins), 4)
+        self.assertEqual(len(handoff_origins), 5)
         self.assertGreaterEqual(handoff_origins[0][1] - 11, viewer_bottom)
         self.assertEqual(
             [origin[1] for origin in handoff_origins],

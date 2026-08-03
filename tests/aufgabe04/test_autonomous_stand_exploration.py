@@ -10,6 +10,7 @@ from unittest.mock import patch
 from scripts.aufgabe04.navigation.plan_stand_coverage_survey import (
     main as plan_coverage,
 )
+from scripts.aufgabe04.navigation.models import Pose2D
 from scripts.aufgabe04.navigation.ros_preflight import RosPreflightResult
 from scripts.aufgabe04.navigation.run_single_station_segment import (
     main as run_segment,
@@ -32,8 +33,14 @@ from scripts.aufgabe04.navigation.stand_discovery_route import (
 from scripts.aufgabe04.navigation.waypoint_csv import load_route_leg
 from scripts.aufgabe04.real_robot.passive_viewpoint_node import _resolved_qr_id
 from scripts.aufgabe04.real_robot.run_autonomous_stand_exploration import (
+    _bounded_approach_offsets,
     _opposite_face_normal,
+    build_parser,
     candidate_snapshot_from_registry,
+    plan_candidate_preapproach,
+)
+from scripts.aufgabe04.stations.candidate_snapshot import (
+    write_candidate_snapshot,
 )
 
 
@@ -221,6 +228,120 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 math.cos(selected + math.pi / 2.0),
             )
             self.assertAlmostEqual(error, 0.0, places=6)
+
+    def test_real_hardware_checkpoint_options_are_explicit(self):
+        args = build_parser().parse_args(
+            [
+                "--robot-profile",
+                "robot.json",
+                "--camera-calibration",
+                "camera.json",
+                "--physical-site",
+                "site.json",
+                "--coverage-leg-limit",
+                "1",
+                "--stop-after-coverage",
+                "--execute",
+            ]
+        )
+        self.assertEqual(args.coverage_leg_limit, 1)
+        self.assertTrue(args.stop_after_coverage)
+        self.assertTrue(args.execute)
+
+    def test_opposite_inspection_offsets_never_cross_physical_minimum(self):
+        offsets = _bounded_approach_offsets(0.70, 0.32)
+        self.assertEqual(offsets[0], 0.70)
+        self.assertEqual(offsets[-1], 0.32)
+        self.assertTrue(all(value >= 0.32 for value in offsets))
+        self.assertEqual(tuple(sorted(offsets, reverse=True)), offsets)
+
+    def test_opposite_face_route_is_bound_to_axis_observation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            survey_root = root / "survey"
+            self._planned_center_corridor(survey_root)
+            plan = load_coverage_survey_plan(
+                survey_root / "coverage_plan.json"
+            )
+            registry_path = survey_root / "stand_registry.json"
+            registry = load_stand_survey_registry(registry_path, plan)
+            candidate = SurveyCandidate(
+                candidate_uid="survey_candidate_0001",
+                x_m=0.2,
+                y_m=0.0,
+                radius_m=0.06,
+                uncertainty_m=0.02,
+                keepout_radius_m=0.31,
+                confidence=0.9,
+                hit_count=5,
+                first_seen_sec=10.0,
+                last_seen_sec=12.0,
+                source_observation_ids=("obs_1", "obs_2"),
+                viewpoint_ids=("survey_vp_001", "survey_vp_002"),
+                status=STATUS_PENDING_CAMERA,
+            )
+            registry = type(registry)(
+                schema_version=registry.schema_version,
+                survey_id=registry.survey_id,
+                planning_frame=registry.planning_frame,
+                map_bundle_sha256=registry.map_bundle_sha256,
+                candidates=(candidate,),
+            )
+            write_stand_survey_registry(registry_path, registry, plan)
+            snapshot = candidate_snapshot_from_registry(
+                registry,
+                plan,
+                registry_path=registry_path,
+                snapshot_id="opposite_route_snapshot",
+            )
+            snapshot_path = root / "candidate_snapshot.json"
+            write_candidate_snapshot(snapshot_path, snapshot)
+            axis_path = root / "axis_observation.json"
+            axis_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "observation_kind": "real_stand_axis_without_qr",
+                        "stand_id": candidate.candidate_uid,
+                        "planning_frame": plan.planning_frame,
+                        "stand_center": {"x_m": 0.2, "y_m": 0.0},
+                        "robot_pose": {
+                            "x_m": 0.2,
+                            "y_m": 0.55,
+                            "yaw_rad": -math.pi / 2.0,
+                        },
+                        "stand_axis_rad": 0.0,
+                    }
+                )
+            )
+            outputs = plan_candidate_preapproach(
+                map_yaml=MAP,
+                semantic_map_id="arena_1p898x3p9_auto",
+                plan=plan,
+                snapshot=snapshot,
+                snapshot_path=snapshot_path,
+                candidate_uid=candidate.candidate_uid,
+                start=Pose2D(0.2, 0.55, -math.pi / 2.0),
+                output_dir=root / "opposite_route",
+                approach_offset_m=0.55,
+                inflation_radius_m=0.25,
+                candidate_transit_radius_m=0.31,
+                physical_clearance={
+                    "minimum_active_standoff_m": 0.26,
+                    "minimum_candidate_transit_radius_m": 0.31,
+                    "minimum_static_inflation_m": 0.25,
+                },
+                approach_normal_rad=-math.pi / 2.0,
+                axis_observation_path=axis_path,
+            )
+            diagnostics = json.loads(
+                Path(outputs["diagnostics_json"]).read_text()
+            )
+            self.assertEqual(
+                diagnostics["metadata"]["approach_bearing_mode"],
+                "camera-axis-face",
+            )
+            self.assertTrue(Path(outputs["route_certificate_json"]).exists())
 
 
 if __name__ == "__main__":

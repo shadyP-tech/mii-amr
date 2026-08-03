@@ -67,6 +67,15 @@ class StandModelProfile:
         )
 
     @property
+    def head_back_corners(self) -> tuple[ModelPoint3D, ...]:
+        """Back-plane corners for diagnostic cuboid projection."""
+
+        return tuple(
+            ModelPoint3D(point.x_m, point.y_m, self.head_depth_m)
+            for point in self.head_corners
+        )
+
+    @property
     def qr_corners(self) -> tuple[ModelPoint3D, ...]:
         half_width = self.qr_symbol_width_m / 2.0
         half_height = self.qr_symbol_height_m / 2.0
@@ -82,11 +91,16 @@ class StandModelProfile:
     @property
     def semantic_landmarks(self) -> dict[str, ModelPoint3D]:
         head = self.head_corners
+        head_back = self.head_back_corners
         points = {
             "head_top_left": head[0],
             "head_top_right": head[1],
             "head_bottom_right": head[2],
             "head_bottom_left": head[3],
+            "head_back_top_left": head_back[0],
+            "head_back_top_right": head_back[1],
+            "head_back_bottom_right": head_back[2],
+            "head_back_bottom_left": head_back[3],
         }
         for name, point in zip(
             ("qr_top_left", "qr_top_right", "qr_bottom_right", "qr_bottom_left"),

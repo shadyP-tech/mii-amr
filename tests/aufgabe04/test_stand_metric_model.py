@@ -24,6 +24,7 @@ from scripts.aufgabe04.perception.stand_axis.model_projection import (
     project_stand_model,
 )
 from scripts.aufgabe04.perception.stand_axis.model_refinement import (
+    model_corridor_half_width_px,
     refine_projected_head_border,
 )
 from scripts.aufgabe04.perception.stand_axis.pose_tracking import (
@@ -32,11 +33,18 @@ from scripts.aufgabe04.perception.stand_axis.pose_tracking import (
 from scripts.aufgabe04.perception.stand_axis.qr_pose_seed import (
     PlanarPoseHypothesis,
     PlanarPoseResult,
+    QrQuadDetection,
     RectifiedCameraMatrix,
+    detect_qr_quad,
     estimate_planar_pose_ippe,
+    select_temporally_consistent_pose,
 )
 from scripts.aufgabe04.perception.stand_axis_image import (
+    ImagePoint,
     estimate_stand_axis_from_metric_model,
+)
+from scripts.aufgabe04.perception.debug.stand_axis_viewer import (
+    annotate_projected_model_landmarks,
 )
 
 
@@ -94,7 +102,12 @@ class StandModelProfileTest(unittest.TestCase):
         self.assertEqual(loaded.sha256, digest)
         self.assertTrue(loaded.committable)
         self.assertEqual(loaded.head_corners[0], ModelPoint3D(-0.039, -0.039, 0.0))
+        self.assertEqual(
+            loaded.head_back_corners[0],
+            ModelPoint3D(-0.039, -0.039, 0.007),
+        )
         self.assertIn("stem_junction_left", loaded.semantic_landmarks)
+        self.assertIn("head_back_top_left", loaded.semantic_landmarks)
 
     def test_profile_rejects_qr_outside_head(self):
         payload = profile_payload()
@@ -134,6 +147,26 @@ class StandMetricGeometryTest(unittest.TestCase):
         self.assertLess(result.best.reprojection_rmse_px, 1.0e-4)
         self.assertGreater(result.best.translation_xyz_m[2], 0.0)
 
+    def test_qr_acquisition_restores_four_x_corners_to_input_pixels(self):
+        scaled_corners = (
+            ImagePoint(40.0, 80.0),
+            ImagePoint(120.0, 80.0),
+            ImagePoint(120.0, 160.0),
+            ImagePoint(40.0, 160.0),
+        )
+        frame = numpy.zeros((120, 160, 3), dtype=numpy.uint8)
+        with patch(
+            "scripts.aufgabe04.perception.stand_axis.qr_pose_seed."
+            "_detect_qr_quad_corners_native",
+            side_effect=(None, None, scaled_corners),
+        ):
+            detection = detect_qr_quad(cv2, frame)
+
+        self.assertIsNotNone(detection)
+        self.assertEqual(detection.scale, 4.0)
+        self.assertEqual(detection.corners[0], ImagePoint(10.0, 20.0))
+        self.assertEqual(detection.corners[2], ImagePoint(30.0, 40.0))
+
     def test_projection_corridor_refines_only_real_current_frame_edges(self):
         projected = project_stand_model(cv2, self.profile, frontal_pose(), self.camera)
         edges = numpy.zeros((480, 640), dtype=numpy.uint8)
@@ -155,8 +188,140 @@ class StandMetricGeometryTest(unittest.TestCase):
         self.assertFalse(blank.accepted)
         self.assertIsNone(blank.corners)
 
+    def test_projection_corridor_prefers_predicted_rails_over_parallel_clutter(self):
+        projected = project_stand_model(cv2, self.profile, oblique_pose(), self.camera)
+        edges = numpy.zeros((480, 640), dtype=numpy.uint8)
+        physical = numpy.asarray(
+            [[(round(point.u_px), round(point.v_px)) for point in projected.head_corners]],
+            dtype=numpy.int32,
+        )
+        distractor = physical + numpy.asarray([[[4, 0]]], dtype=numpy.int32)
+        cv2.polylines(edges, distractor, True, 255, 1)
+        cv2.polylines(edges, physical, True, 255, 2)
+
+        refined = refine_projected_head_border(
+            cv2,
+            edges,
+            projected.head_corners,
+            corridor_half_width_px=4.5,
+        )
+
+        self.assertTrue(refined.accepted, refined.reason)
+        self.assertLess(
+            max(
+                math.hypot(
+                    measured.u_px - predicted.u_px,
+                    measured.v_px - predicted.v_px,
+                )
+                for measured, predicted in zip(
+                    refined.corners,
+                    projected.head_corners,
+                )
+            ),
+            3.0,
+        )
+
+    def test_provisional_model_corridor_recovers_recorded_outer_rail_bias(self):
+        profile = stand_model_from_payload(profile_payload(status="provisional"))
+        camera = RectifiedCameraMatrix(640.0, 640.0, 400.0, 300.0)
+        projected = project_stand_model(cv2, profile, frontal_pose(), camera)
+        corridor = model_corridor_half_width_px(
+            projected.head_corners,
+            model_profile=profile,
+            pose_reprojection_rmse_px=0.28,
+        )
+        edges = numpy.zeros((600, 800), dtype=numpy.uint8)
+        predicted = projected.head_corners
+        # Reproduce the latest physical capture: the QR-seeded model is stable,
+        # but the right and lower outer rails are roughly 4-6 px inside it.
+        physical = numpy.asarray(
+            [[
+                (round(predicted[0].u_px + 1), round(predicted[0].v_px + 4)),
+                (round(predicted[1].u_px - 5), round(predicted[1].v_px + 4)),
+                (round(predicted[2].u_px - 5), round(predicted[2].v_px - 5)),
+                (round(predicted[3].u_px + 1), round(predicted[3].v_px - 5)),
+            ]],
+            dtype=numpy.int32,
+        )
+        # Long heater rails remain present but do not form a model-consistent
+        # four-sided head near the projection.
+        left = round(predicted[0].u_px) - 55
+        for x_px in range(left, left + 48, 12):
+            cv2.line(
+                edges,
+                (x_px, round(predicted[0].v_px) - 25),
+                (x_px, round(predicted[3].v_px) + 25),
+                255,
+                1,
+            )
+        cv2.polylines(edges, physical, True, 255, 2)
+
+        refined = refine_projected_head_border(
+            cv2,
+            edges,
+            projected.head_corners,
+            corridor_half_width_px=corridor,
+        )
+
+        self.assertGreaterEqual(corridor, 6.0)
+        self.assertLessEqual(corridor, 8.0)
+        self.assertTrue(refined.accepted, refined.reason)
+        self.assertIsNotNone(refined.corners)
+
+    def test_model_corridor_rejects_heater_rails_without_four_head_sides(self):
+        profile = stand_model_from_payload(profile_payload(status="provisional"))
+        camera = RectifiedCameraMatrix(640.0, 640.0, 400.0, 300.0)
+        projected = project_stand_model(cv2, profile, frontal_pose(), camera)
+        corridor = model_corridor_half_width_px(
+            projected.head_corners,
+            model_profile=profile,
+            pose_reprojection_rmse_px=0.28,
+        )
+        edges = numpy.zeros((600, 800), dtype=numpy.uint8)
+        top = round(projected.head_corners[0].v_px) - 25
+        bottom = round(projected.head_corners[3].v_px) + 25
+        for x_px in range(300, 501, 12):
+            cv2.line(edges, (x_px, top), (x_px, bottom), 255, 1)
+
+        refined = refine_projected_head_border(
+            cv2,
+            edges,
+            projected.head_corners,
+            corridor_half_width_px=corridor,
+        )
+
+        self.assertFalse(refined.accepted)
+        self.assertIsNone(refined.corners)
+
+    def test_projected_depth_and_stem_landmarks_render_as_diagnostics(self):
+        projected = project_stand_model(
+            cv2, self.profile, oblique_pose(), self.camera
+        )
+        frame = numpy.zeros((480, 640, 3), dtype=numpy.uint8)
+
+        annotate_projected_model_landmarks(
+            cv2,
+            frame,
+            projected.landmarks,
+        )
+
+        self.assertGreater(int(numpy.count_nonzero(frame)), 0)
+        self.assertNotEqual(
+            projected.head_corners[0],
+            projected.head_back_corners[0],
+        )
+
     def test_high_level_pipeline_separates_prediction_from_measurement(self):
-        projected = project_stand_model(cv2, self.profile, frontal_pose(), self.camera)
+        projected = project_stand_model(cv2, self.profile, oblique_pose(), self.camera)
+        qr_pixels = tuple(
+            projected.landmarks[name]
+            for name in (
+                "qr_top_left",
+                "qr_top_right",
+                "qr_bottom_right",
+                "qr_bottom_left",
+            )
+        )
         measured_frame = numpy.zeros((480, 640, 3), dtype=numpy.uint8)
         polygon = numpy.asarray(
             [[(round(point.u_px), round(point.v_px)) for point in projected.head_corners]],
@@ -175,8 +340,8 @@ class StandMetricGeometryTest(unittest.TestCase):
             canny_high=60,
         )
         with patch(
-            "scripts.aufgabe04.perception.stand_axis.model_pipeline.detect_qr_quad_corners",
-            return_value=self._qr_pixels(),
+            "scripts.aufgabe04.perception.stand_axis.model_pipeline.detect_qr_quad",
+            return_value=QrQuadDetection(qr_pixels, 4.0),
         ):
             measured, measured_debug = estimate_stand_axis_from_metric_model(
                 cv2, measured_frame, **options
@@ -185,13 +350,19 @@ class StandMetricGeometryTest(unittest.TestCase):
                 cv2, blank_frame, **options
             )
 
-        self.assertTrue(measured.usable)
+        self.assertTrue(measured.usable, measured.reason)
         self.assertEqual(measured.evidence_state, "fresh_refined")
         self.assertEqual(measured.source, "model_current_frame_refined")
         self.assertFalse(predicted.usable)
         self.assertEqual(predicted.evidence_state, "predicted_only")
         self.assertIsNotNone(predicted_debug.predicted_corners)
         self.assertEqual(measured_debug.model_profile_sha256, self.profile.sha256)
+        self.assertEqual(measured_debug.qr_detection_scale, 4.0)
+        self.assertEqual(measured_debug.pose_seed_source, "qr_pyramid_4x")
+        self.assertIsNotNone(measured_debug.model_corridor_half_width_px)
+        self.assertEqual(measured_debug.model_pose_fit_source, "joint_qr_head")
+        self.assertIn("head_back_top_left", measured_debug.projected_landmarks)
+        self.assertIn("stem_bottom_left", measured_debug.projected_landmarks)
 
     def test_model_pipeline_recovers_oblique_current_frame_axis(self):
         pose = oblique_pose()
@@ -212,8 +383,8 @@ class StandMetricGeometryTest(unittest.TestCase):
             )
         )
         with patch(
-            "scripts.aufgabe04.perception.stand_axis.model_pipeline.detect_qr_quad_corners",
-            return_value=qr_pixels,
+            "scripts.aufgabe04.perception.stand_axis.model_pipeline.detect_qr_quad",
+            return_value=QrQuadDetection(qr_pixels, 2.0),
         ):
             estimate, _debug = estimate_stand_axis_from_metric_model(
                 cv2,
@@ -249,6 +420,62 @@ class MetricPoseTrackerTest(unittest.TestCase):
         )
 
         self.assertTrue(result.axis_ambiguous())
+
+    def test_camera_history_resolves_planar_axis_ambiguity_without_lidar(self):
+        reference = oblique_pose()
+        flipped = PlanarPoseHypothesis(
+            rotation_vector=(0.0, -0.30, 0.0),
+            translation_xyz_m=(0.01, 0.0, 0.40),
+            face_normal_xyz=(-0.30, 0.0, 0.95),
+            yaw_deg=17.5,
+            reprojection_rmse_px=0.04,
+            positive_depth=True,
+        )
+        consistent = PlanarPoseHypothesis(
+            rotation_vector=reference.rotation_vector,
+            translation_xyz_m=(0.002, 0.0, 0.402),
+            face_normal_xyz=reference.face_normal_xyz,
+            yaw_deg=-24.5,
+            reprojection_rmse_px=0.05,
+            positive_depth=True,
+        )
+        result = PlanarPoseResult(
+            accepted=True,
+            reason="pose_estimated",
+            hypotheses=(flipped, consistent),
+            ambiguity_gap_px=0.01,
+        )
+
+        selected = select_temporally_consistent_pose(result, reference)
+
+        self.assertEqual(selected, consistent)
+
+    def test_camera_history_keeps_unclear_planar_pose_fail_closed(self):
+        reference = frontal_pose()
+        near_left = PlanarPoseHypothesis(
+            rotation_vector=(0.0, 0.02, 0.0),
+            translation_xyz_m=(0.002, 0.0, 0.40),
+            face_normal_xyz=(0.02, 0.0, 1.0),
+            yaw_deg=-1.0,
+            reprojection_rmse_px=0.04,
+            positive_depth=True,
+        )
+        near_right = PlanarPoseHypothesis(
+            rotation_vector=(0.0, -0.02, 0.0),
+            translation_xyz_m=(-0.002, 0.0, 0.40),
+            face_normal_xyz=(-0.02, 0.0, 1.0),
+            yaw_deg=1.0,
+            reprojection_rmse_px=0.05,
+            positive_depth=True,
+        )
+        result = PlanarPoseResult(
+            accepted=True,
+            reason="pose_estimated",
+            hypotheses=(near_left, near_right),
+            ambiguity_gap_px=0.01,
+        )
+
+        self.assertIsNone(select_temporally_consistent_pose(result, reference))
 
     def test_prediction_is_bounded_and_context_bound(self):
         tracker = MetricPoseTracker(prediction_ttl_sec=0.25)

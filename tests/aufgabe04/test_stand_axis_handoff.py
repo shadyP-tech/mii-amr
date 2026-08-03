@@ -157,6 +157,30 @@ class StandAxisHandoffGeometryTest(unittest.TestCase):
             math.radians(0.1),
         )
 
+    def test_metric_target_identity_allows_backside_consensus_without_qr(self):
+        accumulator = AxialConsensusAccumulator(
+            required_samples=2,
+            max_deviation_rad=math.radians(3.0),
+        )
+
+        first = accumulator.add(
+            angle_rad=math.radians(89.0),
+            source="model_current_frame_refined",
+            side="unknown_side",
+            qr_texts=(),
+            target_key="profile:x6:y0",
+        )
+        second = accumulator.add(
+            angle_rad=math.radians(-89.0),
+            source="model_current_frame_refined",
+            side="unknown_side",
+            qr_texts=(),
+            target_key="profile:x6:y0",
+        )
+
+        self.assertIsNone(first)
+        self.assertIsNotNone(second)
+
     def test_rectified_image_center_projects_to_scan_forward(self):
         bearing = rectified_pixel_bearing_in_scan(
             u_px=406.0,
@@ -244,6 +268,46 @@ class PooledLidarAxisTest(unittest.TestCase):
         self.assertFalse(estimate.usable)
         self.assertEqual(estimate.reason, "no_scans")
 
+    def test_per_scan_clustering_excludes_separate_heater_returns(self):
+        expected_axis = math.radians(72.0)
+        scans = []
+        for scan in synthetic_line_scans(axis_rad=expected_axis):
+            ranges = list(scan.ranges)
+            for degrees in (-7.0, -6.5, -6.0, -5.5, -5.0):
+                index = int(
+                    round(
+                        (math.radians(degrees) - scan.angle_min)
+                        / scan.angle_increment
+                    )
+                )
+                ranges[index] = 0.60
+            scans.append(
+                PlainLaserScan(
+                    ranges=tuple(ranges),
+                    angle_min=scan.angle_min,
+                    angle_increment=scan.angle_increment,
+                    range_min=scan.range_min,
+                    range_max=scan.range_max,
+                    scan_frame_id=scan.scan_frame_id,
+                    scan_stamp_sec=scan.scan_stamp_sec,
+                    receipt_sec=scan.receipt_sec,
+                )
+            )
+
+        estimate = estimate_pooled_lidar_axis(
+            tuple(scans),
+            target_bearing_rad=0.0,
+            target_range_m=0.60,
+            min_points=20,
+            min_linearity=0.85,
+        )
+
+        self.assertTrue(estimate.usable, estimate.reason)
+        self.assertLess(
+            math.degrees(axial_difference_rad(estimate.angle_rad, expected_axis)),
+            3.0,
+        )
+
 
 class AxisHandoffDecisionTest(unittest.TestCase):
     def setUp(self):
@@ -273,6 +337,29 @@ class AxisHandoffDecisionTest(unittest.TestCase):
         self.assertFalse(decision.motion_authorized)
         self.assertAlmostEqual(decision.approach_pose.x_m, 0.15, places=7)
         self.assertAlmostEqual(decision.approach_pose.yaw_rad, 0.0, places=7)
+
+    def test_matching_axis_but_different_sensor_center_is_rejected(self):
+        camera = CameraAxisEstimate(
+            True,
+            "camera_consensus_ready",
+            angle_rad=math.radians(90.0),
+            sample_count=5,
+            center_xy_m=(0.60, 0.18),
+        )
+
+        decision = evaluate_axis_handoff(
+            lidar=self.lidar,
+            camera=camera,
+            config=AxisHandoffConfig(max_center_difference_m=0.10),
+        )
+
+        self.assertFalse(decision.accepted)
+        self.assertEqual(decision.status, "target_inconsistent")
+        self.assertEqual(
+            decision.reason,
+            "camera_lidar_center_difference_above_gate",
+        )
+        self.assertAlmostEqual(decision.center_difference_m, 0.18, places=7)
 
     def test_sealed_post_battery_pair_passes_provisional_gate(self):
         lidar = LidarAxisEstimate(

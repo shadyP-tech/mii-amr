@@ -14,6 +14,7 @@ from scripts.aufgabe04.perception.stand_axis.geometry import (
 from scripts.aufgabe04.perception.stand_axis.model_profile import StandModelProfile
 from scripts.aufgabe04.perception.stand_axis.model_projection import project_stand_model
 from scripts.aufgabe04.perception.stand_axis.model_refinement import (
+    model_corridor_half_width_px,
     refine_projected_head_border,
 )
 from scripts.aufgabe04.perception.stand_axis.models import (
@@ -26,8 +27,9 @@ from scripts.aufgabe04.perception.stand_axis.preprocessing import (
 from scripts.aufgabe04.perception.stand_axis.qr_pose_seed import (
     PlanarPoseHypothesis,
     RectifiedCameraMatrix,
-    detect_qr_quad_corners,
+    detect_qr_quad,
     estimate_planar_pose_ippe,
+    select_temporally_consistent_pose,
 )
 
 
@@ -65,7 +67,16 @@ def estimate_stand_axis_from_metric_model(
         canny_low=canny_low,
         canny_high=canny_high,
     )
-    qr_corners = detect_qr_quad_corners(cv2, frame)
+    # A tracked pose already constrains the narrow refinement corridors.  In
+    # that state, avoid paying for the 4x acquisition pyramid on every frame;
+    # a native QR observation may still refresh the seed.  Once tracking
+    # expires, the full pyramid reacquires the stand.
+    qr_detection = detect_qr_quad(
+        cv2,
+        frame,
+        scales=((1.0,) if pose_hint is not None else (1.0, 2.0, 4.0)),
+    )
+    qr_corners = None if qr_detection is None else qr_detection.corners
     qr_pose = None
     if qr_corners is not None:
         qr_pose = estimate_planar_pose_ippe(
@@ -75,10 +86,18 @@ def estimate_stand_axis_from_metric_model(
             camera,
             max_reprojection_rmse_px=max_reprojection_rmse_px,
         )
-    seed_pose = (
-        qr_pose.best
-        if qr_pose is not None and qr_pose.best is not None
-        else pose_hint
+    qr_seed = None if qr_pose is None else qr_pose.best
+    if (
+        qr_pose is not None
+        and qr_pose.axis_ambiguous()
+        and pose_hint is not None
+    ):
+        qr_seed = select_temporally_consistent_pose(qr_pose, pose_hint)
+    seed_pose = qr_seed if qr_seed is not None else pose_hint
+    pose_seed_source = (
+        f"qr_pyramid_{qr_detection.scale:g}x"
+        if qr_seed is not None and qr_detection is not None
+        else ("tracked_pose" if pose_hint is not None else "none")
     )
     if seed_pose is None:
         estimate = replace(
@@ -93,13 +112,25 @@ def estimate_stand_axis_from_metric_model(
             evidence_state="unobservable",
             model_profile_sha256=model_profile.sha256,
             qr_detected=qr_corners is not None,
+            qr_detection_scale=(
+                None if qr_detection is None else qr_detection.scale
+            ),
+            pose_seed_source=pose_seed_source,
+            model_reason=estimate.reason,
+            model_measurement_status=model_profile.measurement_status,
         )
 
     projected = project_stand_model(cv2, model_profile, seed_pose, camera)
+    corridor_half_width_px = model_corridor_half_width_px(
+        projected.head_corners,
+        model_profile=model_profile,
+        pose_reprojection_rmse_px=seed_pose.reprojection_rmse_px,
+    )
     refinement = refine_projected_head_border(
         cv2,
         raw_edges,
         projected.head_corners,
+        corridor_half_width_px=corridor_half_width_px,
     )
     seed_rmse = (
         None
@@ -133,22 +164,63 @@ def estimate_stand_axis_from_metric_model(
             refinement_support_mean=(
                 None if refinement.support is None else refinement.support.mean
             ),
+            model_corridor_half_width_px=corridor_half_width_px,
             model_pose=seed_pose,
             qr_detected=qr_corners is not None,
+            qr_detection_scale=(
+                None if qr_detection is None else qr_detection.scale
+            ),
+            pose_seed_source=pose_seed_source,
+            model_reason=estimate.reason,
+            model_measurement_status=model_profile.measurement_status,
+            projected_landmarks=dict(projected.landmarks),
         )
 
+    pose_image_points = tuple(refinement.corners)
+    pose_model_points = tuple(model_profile.head_corners)
+    pose_fit_source = (
+        "head_only_provisional"
+        if not model_profile.committable
+        else "head_only_qr_unavailable"
+    )
+    if qr_corners is not None and model_profile.committable:
+        # QR corners and outer-head corners are independent semantic
+        # observations of one measured plane. Their joint fit is much harder
+        # for a background rail to satisfy than the head rectangle alone.
+        pose_image_points += tuple(qr_corners)
+        pose_model_points += tuple(model_profile.qr_corners)
+        pose_fit_source = "joint_qr_head"
     refined_pose = estimate_planar_pose_ippe(
         cv2,
-        refinement.corners,
-        model_profile.head_corners,
+        pose_image_points,
+        pose_model_points,
         camera,
         max_reprojection_rmse_px=max_reprojection_rmse_px,
     )
     refined_axis_ambiguous = refined_pose.axis_ambiguous()
+    selected_pose = refined_pose.best
+    ambiguity_resolved = False
+    ambiguity_reference = pose_hint
+    if (
+        ambiguity_reference is None
+        and qr_pose is not None
+        and qr_seed is not None
+        and not qr_pose.axis_ambiguous()
+    ):
+        # On acquisition, an unambiguous direct QR pose can resolve the refined
+        # head pose. If QR itself is ambiguous, no same-frame model prediction
+        # is allowed to manufacture certainty.
+        ambiguity_reference = qr_seed
+    if refined_axis_ambiguous and ambiguity_reference is not None:
+        selected_pose = select_temporally_consistent_pose(
+            refined_pose,
+            ambiguity_reference,
+        )
+        ambiguity_resolved = selected_pose is not None
     if (
         not refined_pose.accepted
-        or refined_pose.best is None
-        or refined_axis_ambiguous
+        or selected_pose is None
+        or (refined_axis_ambiguous and not ambiguity_resolved)
     ):
         estimate = replace(
             _unusable(
@@ -183,11 +255,20 @@ def estimate_stand_axis_from_metric_model(
             refinement_support_mean=(
                 None if refinement.support is None else refinement.support.mean
             ),
+            model_corridor_half_width_px=corridor_half_width_px,
+            model_pose_fit_source=pose_fit_source,
             model_pose=seed_pose,
             qr_detected=qr_corners is not None,
+            qr_detection_scale=(
+                None if qr_detection is None else qr_detection.scale
+            ),
+            pose_seed_source=pose_seed_source,
+            model_reason=estimate.reason,
+            model_measurement_status=model_profile.measurement_status,
+            projected_landmarks=dict(projected.landmarks),
         )
 
-    best = refined_pose.best
+    best = selected_pose
     estimate = estimate_stand_axis_from_corners(
         refinement.corners,
         min_edge_height_px=min_edge_height_px,
@@ -233,6 +314,15 @@ def estimate_stand_axis_from_metric_model(
         refinement_support_mean=(
             None if refinement.support is None else refinement.support.mean
         ),
+        model_corridor_half_width_px=corridor_half_width_px,
+        model_pose_fit_source=pose_fit_source,
         model_pose=best,
         qr_detected=qr_corners is not None,
+        qr_detection_scale=(
+            None if qr_detection is None else qr_detection.scale
+        ),
+        pose_seed_source=pose_seed_source,
+        model_reason=estimate.reason,
+        model_measurement_status=model_profile.measurement_status,
+        projected_landmarks=dict(projected.landmarks),
     )

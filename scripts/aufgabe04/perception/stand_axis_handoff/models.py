@@ -39,6 +39,7 @@ class CameraAxisEstimate:
     sample_count: int = 0
     max_deviation_rad: float | None = None
     source: str = ""
+    center_xy_m: tuple[float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,7 @@ class ApproachPose:
 @dataclass(frozen=True)
 class AxisHandoffConfig:
     max_axis_difference_rad: float = math.radians(15.0)
+    max_center_difference_m: float = 0.10
     approach_stand_off_m: float = 0.45
 
 
@@ -63,6 +65,7 @@ class AxisHandoffDecision:
     lidar: LidarAxisEstimate
     camera: CameraAxisEstimate
     axial_difference_rad: float | None = None
+    center_difference_m: float | None = None
     accepted_axis_rad: float | None = None
     approach_pose: ApproachPose | None = None
     observe_only: bool = True

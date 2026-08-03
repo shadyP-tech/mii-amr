@@ -29,6 +29,12 @@ from scripts.aufgabe04.perception.debug.stand_axis_capture_store import (
     save_structural_capture,
     sensor_frame_status,
 )
+from scripts.aufgabe04.perception.debug.stand_model_overlay import (
+    annotate_metric_model_status,
+    annotate_model_prediction,
+    annotate_projected_model_landmarks,
+    draw_dashed_polygon as _draw_dashed_polygon,
+)
 from scripts.aufgabe04.perception.debug.text_overlay import OverlayTextCursor
 from scripts.aufgabe04.perception.mask_processing import apply_morphology, build_mask_for_ranges
 from scripts.aufgabe04.perception.camera_stand_observation import (
@@ -78,7 +84,12 @@ from scripts.aufgabe04.perception.stand_axis_image import (
     estimate_stand_axis_from_metric_model,
 )
 from scripts.aufgabe04.perception.stand_axis.model_profile import (
+    StandModelProfile,
     load_stand_model,
+)
+from scripts.aufgabe04.perception.stand_axis.model_diagnostics import (
+    metric_model_status_payload as _metric_model_status_payload,
+    resolved_fallback_face_to_qr_ratio as _resolved_fallback_face_to_qr_ratio,
 )
 from scripts.aufgabe04.perception.stand_axis.pose_tracking import (
     MetricPoseTracker,
@@ -548,7 +559,9 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Known physical holder/front-face width divided by detected "
             "QR-code width. The Aufgabe 04 real stand default is 1.30; "
-            "use 1.0 to disable QR-anchored head geometry."
+            "use 1.0 to disable QR-anchored head geometry when no stand "
+            "model profile is loaded. A loaded profile supplies its own "
+            "consistent fallback ratio."
         ),
     )
     parser.add_argument(
@@ -573,6 +586,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Content-hashed metric stand profile. QR/IPPE projects the known "
             "head and current raw edges must independently refine it."
+        ),
+    )
+    parser.add_argument(
+        "--legacy-edge-fallback",
+        action="store_true",
+        help=(
+            "Diagnostic only: when a real-camera stand model profile is loaded, "
+            "also run the legacy global edge detector and its adaptive background "
+            "colour gate. By default the metric model is the only axis source."
         ),
     )
     parser.add_argument(
@@ -645,6 +667,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--handoff-max-axis-difference-deg",
         type=float,
         default=15.0,
+    )
+    parser.add_argument(
+        "--handoff-max-center-difference-m",
+        type=float,
+        default=0.10,
+        help=(
+            "Maximum camera-PnP to pooled-LiDAR target-center disagreement "
+            "before the diagnostic handoff fails closed (default: 0.10 m)."
+        ),
     )
     parser.add_argument(
         "--handoff-approach-stand-off-m",
@@ -1684,9 +1715,13 @@ def _write_handoff_status(
     decision: AxisHandoffDecision,
     calibration: CalibrationRuntimeSnapshot,
     observed_at_sec: float,
+    model_profile: StandModelProfile | None = None,
+    model_inputs_ready: bool = False,
+    model_estimate: StandAxisImageEstimate | None = None,
+    model_artifacts: StandAxisEdgeDebugArtifacts | None = None,
 ) -> None:
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "observed_at_sec": observed_at_sec,
         "observe_only": True,
         "motion_authorized": False,
@@ -1705,6 +1740,12 @@ def _write_handoff_status(
                 else calibration.scan_from_camera.parent_frame
             ),
         },
+        "model": _metric_model_status_payload(
+            profile=model_profile,
+            inputs_ready=model_inputs_ready,
+            estimate=model_estimate,
+            artifacts=model_artifacts,
+        ),
         "decision": asdict(decision),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1976,43 +2017,6 @@ def annotate_frame(
     return cursor
 
 
-def _draw_dashed_polygon(cv2, frame, points, color, thickness: int) -> None:
-    """Render a model prediction without making it look measured."""
-
-    for start, end in zip(points, points[1:] + points[:1]):
-        dx = end[0] - start[0]
-        dy = end[1] - start[1]
-        length = max(1.0, math.hypot(dx, dy))
-        dash_count = max(1, int(math.ceil(length / 8.0)))
-        for index in range(0, dash_count, 2):
-            first = index / dash_count
-            second = min(1.0, (index + 1) / dash_count)
-            cv2.line(
-                frame,
-                (round(start[0] + first * dx), round(start[1] + first * dy)),
-                (round(start[0] + second * dx), round(start[1] + second * dy)),
-                color,
-                thickness,
-            )
-
-
-def annotate_model_prediction(
-    cv2,
-    frame,
-    corners,
-    *,
-    x_offset: int = 0,
-    y_offset: int = 0,
-) -> None:
-    if corners is None:
-        return
-    points = [
-        (round(point.u_px + x_offset), round(point.v_px + y_offset))
-        for point in corners
-    ]
-    _draw_dashed_polygon(cv2, frame, points, (255, 0, 255), 1)
-
-
 def annotate_recording_indicator(cv2, frame, recording_active: bool) -> None:
     """Draw a compact red dot only while diagnostic recording is active."""
 
@@ -2203,6 +2207,92 @@ def _unavailable_target_estimate(reason: str) -> StandAxisImageEstimate:
     )
 
 
+def _metric_model_only_mode(
+    args,
+    stand_model_profile: StandModelProfile | None,
+) -> bool:
+    """Make a loaded real-camera metric model the sole axis source by default."""
+
+    return bool(
+        stand_model_profile is not None
+        and not args.sim_raw_image_topic
+        and not args.structural_diagnostic
+        and not args.legacy_edge_fallback
+    )
+
+
+def _select_axis_pipeline_result(
+    *,
+    model_only: bool,
+    metric_estimate: StandAxisImageEstimate | None,
+    metric_artifacts: StandAxisEdgeDebugArtifacts | None,
+    fallback_estimate: StandAxisImageEstimate | None,
+    fallback_artifacts: StandAxisEdgeDebugArtifacts | None,
+) -> tuple[StandAxisImageEstimate, StandAxisEdgeDebugArtifacts]:
+    """Select one authoritative result without model-to-legacy fallthrough."""
+
+    if model_only:
+        if metric_estimate is None:
+            return (
+                _unavailable_target_estimate("metric_model_inputs_unavailable"),
+                StandAxisEdgeDebugArtifacts(edges=None),
+            )
+        return metric_estimate, (
+            metric_artifacts
+            if metric_artifacts is not None
+            else StandAxisEdgeDebugArtifacts(edges=None)
+        )
+
+    if fallback_estimate is None:
+        fallback_estimate = _unavailable_target_estimate(
+            "legacy_edge_fallback_unavailable"
+        )
+    if fallback_artifacts is None:
+        fallback_artifacts = StandAxisEdgeDebugArtifacts(edges=None)
+    if metric_estimate is not None and metric_estimate.usable:
+        return metric_estimate, (
+            metric_artifacts
+            if metric_artifacts is not None
+            else StandAxisEdgeDebugArtifacts(edges=None)
+        )
+    if (
+        metric_estimate is not None
+        and metric_estimate.evidence_state in ("predicted_only", "ambiguous")
+    ):
+        # A valid model seed owns this target. A global rectangle outside its
+        # unsupported corridor must not override the fail-closed distinction.
+        return metric_estimate, (
+            metric_artifacts
+            if metric_artifacts is not None
+            else StandAxisEdgeDebugArtifacts(edges=None)
+        )
+    if fallback_estimate.usable:
+        if metric_artifacts is not None:
+            fallback_artifacts = replace(
+                fallback_artifacts,
+                predicted_corners=metric_artifacts.predicted_corners,
+                model_profile_sha256=metric_artifacts.model_profile_sha256,
+                pose_reprojection_rmse_px=(
+                    metric_artifacts.pose_reprojection_rmse_px
+                ),
+                pose_ambiguity_gap_px=metric_artifacts.pose_ambiguity_gap_px,
+                model_corridor_half_width_px=(
+                    metric_artifacts.model_corridor_half_width_px
+                ),
+                model_pose_fit_source=metric_artifacts.model_pose_fit_source,
+                qr_detected=metric_artifacts.qr_detected,
+                qr_detection_scale=metric_artifacts.qr_detection_scale,
+                pose_seed_source=metric_artifacts.pose_seed_source,
+                model_reason=metric_artifacts.model_reason,
+                model_measurement_status=(
+                    metric_artifacts.model_measurement_status
+                ),
+                projected_landmarks=metric_artifacts.projected_landmarks,
+            )
+        return fallback_estimate, fallback_artifacts
+    return fallback_estimate, fallback_artifacts
+
+
 def _diagnostic_roi_image(image, target_roi):
     """Return the target pixel domain shared by mask/edge diagnostics."""
     if image is None or target_roi is None:
@@ -2362,6 +2452,8 @@ def _standalone_head_geometry_reason(
 def _validate_runtime_args(args) -> None:
     if args.diagnostic_window_size_px <= 0:
         raise ValueError("--diagnostic-window-size-px must be positive")
+    if args.stand_model_profile is not None and args.axis_source != "edges":
+        raise ValueError("--stand-model-profile requires --axis-source edges")
     if args.calibrated_handoff:
         if args.sim_raw_image_topic:
             raise ValueError("--calibrated-handoff is real-camera-only")
@@ -2382,6 +2474,7 @@ def _validate_runtime_args(args) -> None:
             args.handoff_min_lidar_length_m,
             args.handoff_max_lidar_length_m,
             args.handoff_max_axis_difference_deg,
+            args.handoff_max_center_difference_m,
             args.handoff_approach_stand_off_m,
         )
         if not all(math.isfinite(value) and value > 0.0 for value in positive_values):
@@ -2575,6 +2668,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "--stand-face-size-m disagrees with the hashed stand model profile"
             )
         stand_width_m = stand_model_profile.head_width_m
+    fallback_face_to_qr_width_ratio = _resolved_fallback_face_to_qr_ratio(
+        args.front_face_to_qr_width_ratio,
+        stand_model_profile,
+    )
+    metric_model_only = _metric_model_only_mode(args, stand_model_profile)
+    if metric_model_only:
+        print(
+            "Metric stand model mode: model_only=true "
+            "background_colour_sampling=false legacy_edge_fallback=false"
+        )
+    if (
+        stand_model_profile is not None
+        and args.front_face_to_qr_width_ratio is not None
+        and not math.isclose(
+            args.front_face_to_qr_width_ratio,
+            fallback_face_to_qr_width_ratio,
+            rel_tol=0.0,
+            abs_tol=1.0e-6,
+        )
+    ):
+        print(
+            "WARNING: --front-face-to-qr-width-ratio is overridden by the "
+            f"stand model profile ({fallback_face_to_qr_width_ratio:.3f})"
+        )
     camera_fx_px = args.camera_fx_px
     camera_fy_px = args.camera_fy_px
     camera_cx_px = args.camera_cx_px
@@ -2646,6 +2763,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_axis_difference_rad=math.radians(
             args.handoff_max_axis_difference_deg
         ),
+        max_center_difference_m=args.handoff_max_center_difference_m,
         approach_stand_off_m=args.handoff_approach_stand_off_m,
     )
     qr_decoder = None if args.no_qr_decode or args.sim_raw_image_topic else BackgroundQrDecoder(
@@ -2745,7 +2863,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         outer_inset_min_scale=0.05,
         geometry_filter_alpha=(1.0 if args.sim_raw_image_topic else 0.55),
     )
-    foreground_gate_tracker = AdaptiveForegroundGateTracker(model_ttl_sec=0.75)
+    foreground_gate_tracker = (
+        None
+        if metric_model_only
+        else AdaptiveForegroundGateTracker(model_ttl_sec=0.75)
+    )
     last_accepted_head_display_snapshot = None
 
     try:
@@ -2907,6 +3029,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             raw_proposal_overlay = None
             edge_artifacts = StandAxisEdgeDebugArtifacts(edges=None)
             detector_estimate = None
+            metric_estimate = None
+            metric_artifacts = None
+            metric_inputs_ready = False
             wall_edge_mask = None
             wall_edge_mask_result = None
             lidar_query = None
@@ -3200,7 +3325,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if (
                     not args.sim_raw_image_topic
                     and args.adaptive_foreground_gate
+                    and not metric_model_only
                 ):
+                    assert foreground_gate_tracker is not None
                     # This is a background *sample region*, never a Canny
                     # exclusion. It must not be able to erase a stand edge.
                     radiator_background_region = repeated_vertical_rib_exclusion_mask(
@@ -3251,7 +3378,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     min_edge_height_px=args.min_edge_height_px,
                     min_aspect_ratio=args.min_aspect_ratio,
                     max_aspect_ratio=args.max_aspect_ratio,
-                    front_face_to_qr_width_ratio=args.front_face_to_qr_width_ratio,
+                    front_face_to_qr_width_ratio=(
+                        fallback_face_to_qr_width_ratio
+                    ),
                     stand_width_m=(
                         None if args.structural_diagnostic else stand_width_m
                     ),
@@ -3280,8 +3409,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                         (0.0, 1.0) if args.sim_raw_image_topic else None
                     ),
                 )
-                metric_estimate = None
-                metric_artifacts = None
                 metric_inputs_ready = (
                     stand_model_profile is not None
                     and not args.sim_raw_image_topic
@@ -3334,59 +3461,40 @@ def main(argv: Sequence[str] | None = None) -> int:
                             camera_signature=camera_signature,
                         )
 
-                if foreground_gate_required_but_unavailable:
-                    fallback_estimate = _unavailable_target_estimate(
-                        "foreground_gate_unavailable"
-                    )
-                    empty_edges = numpy.zeros(
-                        axis_frame.shape[:2],
-                        dtype=numpy.uint8,
-                    )
-                    fallback_artifacts = StandAxisEdgeDebugArtifacts(
-                        edges=empty_edges
-                    )
-                else:
-                    fallback_estimate, fallback_artifacts = (
-                        estimate_stand_axis_from_edges(
-                            cv2,
-                            axis_frame,
-                            edge_exclusion_mask=edge_exclusion_mask,
-                            topology_edge_exclusion_mask=topology_edge_exclusion_mask,
-                            **edge_estimator_options,
+                fallback_estimate = None
+                fallback_artifacts = None
+                if not metric_model_only:
+                    if foreground_gate_required_but_unavailable:
+                        fallback_estimate = _unavailable_target_estimate(
+                            "foreground_gate_unavailable"
                         )
-                    )
+                        empty_edges = numpy.zeros(
+                            axis_frame.shape[:2],
+                            dtype=numpy.uint8,
+                        )
+                        fallback_artifacts = StandAxisEdgeDebugArtifacts(
+                            edges=empty_edges
+                        )
+                    else:
+                        fallback_estimate, fallback_artifacts = (
+                            estimate_stand_axis_from_edges(
+                                cv2,
+                                axis_frame,
+                                edge_exclusion_mask=edge_exclusion_mask,
+                                topology_edge_exclusion_mask=(
+                                    topology_edge_exclusion_mask
+                                ),
+                                **edge_estimator_options,
+                            )
+                        )
 
-                if metric_estimate is not None and metric_estimate.usable:
-                    estimate, edge_artifacts = metric_estimate, metric_artifacts
-                elif (
-                    metric_estimate is not None
-                    and metric_estimate.evidence_state
-                    in ("predicted_only", "ambiguous")
-                ):
-                    # A valid model seed owns this target. A global rectangle
-                    # outside its unsupported corridor must not override the
-                    # fail-closed prediction/measurement distinction.
-                    estimate, edge_artifacts = metric_estimate, metric_artifacts
-                elif fallback_estimate.usable:
-                    estimate = fallback_estimate
-                    edge_artifacts = fallback_artifacts
-                    if metric_artifacts is not None:
-                        edge_artifacts = replace(
-                            edge_artifacts,
-                            predicted_corners=metric_artifacts.predicted_corners,
-                            model_profile_sha256=(
-                                metric_artifacts.model_profile_sha256
-                            ),
-                            pose_reprojection_rmse_px=(
-                                metric_artifacts.pose_reprojection_rmse_px
-                            ),
-                            pose_ambiguity_gap_px=(
-                                metric_artifacts.pose_ambiguity_gap_px
-                            ),
-                            qr_detected=metric_artifacts.qr_detected,
-                        )
-                else:
-                    estimate, edge_artifacts = fallback_estimate, fallback_artifacts
+                estimate, edge_artifacts = _select_axis_pipeline_result(
+                    model_only=metric_model_only,
+                    metric_estimate=metric_estimate,
+                    metric_artifacts=metric_artifacts,
+                    fallback_estimate=fallback_estimate,
+                    fallback_artifacts=fallback_artifacts,
+                )
                 edges = edge_artifacts.edges
                 face_mask = edge_artifacts.face_mask
                 rectangle_mask = edge_artifacts.rectangle_mask
@@ -3699,6 +3807,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
             calibrated_target_bearing_rad = None
             calibrated_target_range_m = None
+            calibrated_camera_center_xy_m = None
             if (
                 args.calibrated_handoff
                 and calibration_snapshot.ready
@@ -3750,6 +3859,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     except ValueError:
                         pass
                     else:
+                        calibrated_camera_center_xy_m = (
+                            target_center_scan[0],
+                            target_center_scan[1],
+                        )
                         calibrated_target_range_m = math.hypot(
                             target_center_scan[0],
                             target_center_scan[1],
@@ -3886,6 +3999,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                     == stand_model_profile.sha256
                 )
             )
+            metric_target_key = None
+            if (
+                stand_model_profile is not None
+                and calibrated_camera_center_xy_m is not None
+            ):
+                # Stable geometric identity decouples axis continuity from QR
+                # decoding and front/back colour classification. Coarse spatial
+                # cells tolerate frame jitter while separating station stands.
+                target_x, target_y = calibrated_camera_center_xy_m
+                metric_target_key = (
+                    f"{stand_model_profile.sha256}:"
+                    f"x{round(target_x / 0.25)}:y{round(target_y / 0.25)}"
+                )
             consensus = None
             if (
                 orientation_yaw_rad is not None
@@ -3899,6 +4025,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     source=estimate.source,
                     side=side.side,
                     qr_texts=tuple(qr_texts),
+                    target_key=metric_target_key,
                 )
             elif not head_estimate_held:
                 axis_consensus.reset()
@@ -3930,6 +4057,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         source=estimate.source,
                         side=side.side,
                         qr_texts=tuple(qr_texts),
+                        target_key=metric_target_key,
                     )
             elif args.calibrated_handoff and not head_estimate_held:
                 handoff_axis_consensus.reset()
@@ -4022,6 +4150,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 handoff_camera_consensus.max_deviation_rad
                             ),
                             source=handoff_camera_consensus.source,
+                            center_xy_m=calibrated_camera_center_xy_m,
                         )
                     elif conditioning is not None:
                         camera_axis = CameraAxisEstimate(
@@ -4046,6 +4175,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         decision=handoff_decision,
                         calibration=calibration_snapshot,
                         observed_at_sec=last_display_sec,
+                        model_profile=stand_model_profile,
+                        model_inputs_ready=metric_inputs_ready,
+                        model_estimate=metric_estimate,
+                        model_artifacts=metric_artifacts,
                     )
                     last_handoff_write_sec = last_display_sec
             if conditioning is not None and args.observation_status_json is not None:
@@ -4144,6 +4277,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                     else foreground_gate_result.reason
                 ),
             )
+            text_cursor = annotate_metric_model_status(
+                cv2,
+                annotated,
+                profile=stand_model_profile,
+                inputs_ready=metric_inputs_ready,
+                estimate=metric_estimate,
+                artifacts=metric_artifacts,
+                text_cursor=text_cursor,
+            )
             if (
                 edge_artifacts.predicted_corners is not None
                 and estimate.evidence_state != "predicted_only"
@@ -4152,6 +4294,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     cv2,
                     annotated,
                     edge_artifacts.predicted_corners,
+                    x_offset=(0 if target_roi is None else target_roi.x0),
+                    y_offset=(0 if target_roi is None else target_roi.y0),
+                )
+            if edge_artifacts.projected_landmarks is not None:
+                annotate_projected_model_landmarks(
+                    cv2,
+                    annotated,
+                    edge_artifacts.projected_landmarks,
                     x_offset=(0 if target_roi is None else target_roi.x0),
                     y_offset=(0 if target_roi is None else target_roi.y0),
                 )
@@ -4263,7 +4413,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         f"camera_axis_deg="
                         f"{format_optional_float(None if handoff_decision.camera.angle_rad is None else math.degrees(handoff_decision.camera.angle_rad), precision=1)} "
                         f"axis_delta_deg="
-                        f"{format_optional_float(None if handoff_decision.axial_difference_rad is None else math.degrees(handoff_decision.axial_difference_rad), precision=1)}"
+                        f"{format_optional_float(None if handoff_decision.axial_difference_rad is None else math.degrees(handoff_decision.axial_difference_rad), precision=1)} "
+                        f"center_delta_m="
+                        f"{format_optional_float(handoff_decision.center_difference_m, precision=3)}"
                     )
 
             if not args.headless:

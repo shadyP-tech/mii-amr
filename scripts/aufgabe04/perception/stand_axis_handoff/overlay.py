@@ -36,6 +36,14 @@ def annotate_axis_handoff(
             f"n={decision.camera.sample_count}"
         ),
         f"axis_delta={_degrees(decision.axial_difference_rad)}",
+        (
+            "center_delta="
+            + (
+                "n/a"
+                if decision.center_difference_m is None
+                else f"{decision.center_difference_m:.3f}m"
+            )
+        ),
     ]
     cursor = text_cursor or OverlayTextCursor()
     for line in lines:
@@ -61,9 +69,16 @@ def annotate_axis_handoff(
         int(round(origin[1] - scale * center_y)),
     )
     cv2.circle(frame, center_px, 5, (0, 215, 255), -1)
-    for angle, axis_color in (
-        (decision.lidar.angle_rad, (0, 215, 255)),
-        (decision.camera.angle_rad, (255, 255, 0)),
+    camera_center_px = center_px
+    if decision.camera.center_xy_m is not None:
+        camera_center_px = (
+            int(round(origin[0] + scale * decision.camera.center_xy_m[0])),
+            int(round(origin[1] - scale * decision.camera.center_xy_m[1])),
+        )
+        cv2.circle(frame, camera_center_px, 4, (255, 255, 0), 1)
+    for angle, axis_color, axis_center_px in (
+        (decision.lidar.angle_rad, (0, 215, 255), center_px),
+        (decision.camera.angle_rad, (255, 255, 0), camera_center_px),
     ):
         if angle is None:
             continue
@@ -71,8 +86,8 @@ def annotate_axis_handoff(
         dy = int(round(32.0 * math.sin(angle)))
         cv2.line(
             frame,
-            (center_px[0] - dx, center_px[1] + dy),
-            (center_px[0] + dx, center_px[1] - dy),
+            (axis_center_px[0] - dx, axis_center_px[1] + dy),
+            (axis_center_px[0] + dx, axis_center_px[1] - dy),
             axis_color,
             2,
         )

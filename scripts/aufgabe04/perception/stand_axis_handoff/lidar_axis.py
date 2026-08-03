@@ -53,6 +53,45 @@ def _valid_ranges_in_cone(
     return tuple(selected)
 
 
+def _contiguous_return_clusters(
+    selected: Sequence[tuple[float, float]],
+    *,
+    angle_increment_rad: float,
+    max_range_jump_m: float,
+    max_point_gap_m: float,
+) -> tuple[tuple[tuple[float, float], ...], ...]:
+    """Split one scan into local surfaces before temporal pooling."""
+
+    if not selected:
+        return ()
+    ordered = sorted(selected)
+    clusters: list[list[tuple[float, float]]] = [[ordered[0]]]
+    maximum_angle_gap = 3.5 * max(abs(angle_increment_rad), 1.0e-6)
+    for current in ordered[1:]:
+        previous = clusters[-1][-1]
+        previous_xy = (
+            previous[1] * math.cos(previous[0]),
+            previous[1] * math.sin(previous[0]),
+        )
+        current_xy = (
+            current[1] * math.cos(current[0]),
+            current[1] * math.sin(current[0]),
+        )
+        point_gap = math.hypot(
+            current_xy[0] - previous_xy[0],
+            current_xy[1] - previous_xy[1],
+        )
+        if (
+            current[0] - previous[0] > maximum_angle_gap
+            or abs(current[1] - previous[1]) > max_range_jump_m
+            or point_gap > max_point_gap_m
+        ):
+            clusters.append([current])
+        else:
+            clusters[-1].append(current)
+    return tuple(tuple(cluster) for cluster in clusters)
+
+
 def estimate_pooled_lidar_axis(
     scans: Sequence[PlainLaserScan],
     *,
@@ -64,6 +103,8 @@ def estimate_pooled_lidar_axis(
     min_linearity: float = 0.90,
     min_length_m: float = 0.04,
     max_length_m: float = 0.12,
+    cluster_range_jump_m: float = 0.05,
+    cluster_point_gap_m: float = 0.04,
 ) -> LidarAxisEstimate:
     """Fit a PCA tangent from associated returns across stationary scans."""
 
@@ -75,6 +116,13 @@ def estimate_pooled_lidar_axis(
         raise ValueError("bearing half-angle must be finite and positive")
     if not math.isfinite(range_tolerance_m) or range_tolerance_m <= 0.0:
         raise ValueError("range tolerance must be finite and positive")
+    if (
+        not math.isfinite(cluster_range_jump_m)
+        or cluster_range_jump_m <= 0.0
+        or not math.isfinite(cluster_point_gap_m)
+        or cluster_point_gap_m <= 0.0
+    ):
+        raise ValueError("LiDAR cluster gates must be finite and positive")
     frames = {scan.scan_frame_id for scan in scans if scan.scan_frame_id}
     if len(frames) > 1:
         return LidarAxisEstimate(False, "scan_frame_mismatch")
@@ -101,11 +149,37 @@ def estimate_pooled_lidar_axis(
 
     points = []
     contributing_scans = 0
-    for selected in cone_returns:
-        scan_points = [
-            (distance * math.cos(angle), distance * math.sin(angle))
+    for scan, selected in zip(scans, cone_returns):
+        range_matched = tuple(
+            (angle, distance)
             for angle, distance in selected
             if abs(distance - target_range_m) <= range_tolerance_m
+        )
+        clusters = _contiguous_return_clusters(
+            range_matched,
+            angle_increment_rad=scan.angle_increment,
+            max_range_jump_m=cluster_range_jump_m,
+            max_point_gap_m=cluster_point_gap_m,
+        )
+        selected_cluster = None
+        if clusters:
+            def cluster_score(cluster):
+                median_range = statistics.median(
+                    distance for _angle, distance in cluster
+                )
+                mean_bearing = sum(angle for angle, _distance in cluster) / len(cluster)
+                return (
+                    abs(median_range - target_range_m)
+                    + 0.25
+                    * target_range_m
+                    * abs(_normalize_angle(mean_bearing - target_bearing_rad))
+                    - 0.001 * min(len(cluster), 20)
+                )
+
+            selected_cluster = min(clusters, key=cluster_score)
+        scan_points = [] if selected_cluster is None else [
+            (distance * math.cos(angle), distance * math.sin(angle))
+            for angle, distance in selected_cluster
         ]
         if scan_points:
             contributing_scans += 1

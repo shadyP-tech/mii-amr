@@ -252,11 +252,33 @@ scripts/aufgabe04/perception/debug/run_stand_axis_viewer.sh \
 
 ### Metric model-seeded head refinement
 
-The model-seeded path detects QR corners without requiring payload decode,
-estimates both IPPE planar pose hypotheses, projects the physical outer head,
-and searches only narrow raw-Canny corridors around that projection. A dashed
-magenta outline is prediction-only. The normal solid rectangle appears only
-after all four physical sides have fresh current-frame support.
+The model-seeded path detects QR corners without requiring payload decode. It
+uses a bounded 1x/2x/4x acquisition pyramid, restores corners to native image
+coordinates, estimates both IPPE planar pose hypotheses, and then tracks the
+refined pose without paying the 4x acquisition cost on every frame. It
+projects the physical outer head, head depth, and profile-defined stem
+landmarks and searches only narrow raw-Canny corridors around the front-head
+projection. A
+dashed magenta model is prediction-only. The normal solid front rectangle
+appears only after all four physical sides have fresh current-frame support.
+Model corridors select the current edge nearest the predicted physical rail,
+remain bounded by projected head size, profile status/tolerance, and seed
+reprojection residual, and reject refinements whose scale, centre, or corner
+displacement no longer agrees with the projection. Metric-model corridors may
+reach 8 px; legacy/global edge paths retain their previous 6 px ceiling.
+With a measured profile, visible QR and refined outer-head landmarks enter one
+joint planar fit. A provisional profile uses QR only as the pose seed and fits
+the displayed pose from the freshly supported outer head, avoiding a false
+joint residual caused by dimensions that are explicitly still assumptions.
+Similar IPPE solutions are resolved only by an unambiguous QR seed or recent
+camera pose; otherwise the frame remains ambiguous. LiDAR is not used to
+resolve camera-pose hypotheses.
+The overlay always reports the model evidence state, failure reason, QR scale,
+pose seed, profile status, PnP residual, corridor width, and rail-support score. Loading a
+real-camera model profile enables model-only mode by default: background-colour
+sampling and the legacy global edge detector are skipped, and an unobservable
+model produces no stand axis. Use `--legacy-edge-fallback` only for an explicit
+diagnostic comparison.
 
 The checked-in profile is intentionally marked `provisional`: it captures the
 existing 78 mm head, 60 mm QR, and 7 mm depth assumptions so the viewer can be
@@ -278,7 +300,7 @@ scripts/aufgabe04/perception/debug/run_stand_axis_viewer.sh \
   --axis-source edges \
   --stand-model-profile configs/aufgabe04/stand_models/physical_stand_assumptions_v1.json \
   --stand-face-size-m 0.078 \
-  --front-face-to-qr-width-ratio 1.0 \
+  --front-face-to-qr-width-ratio 1.30 \
   --edge-preprocess channel-union \
   --canny-low 20 \
   --canny-high 60 \
@@ -293,8 +315,15 @@ scripts/aufgabe04/perception/debug/run_stand_axis_viewer.sh \
   --max-display-fps 10 \
   --display-edges \
   --display-face-mask \
-  --display-rectangle-mask
+  --display-rectangle-mask \
+  --handoff-status-json results/aufgabe04/stand_axis_handoff/latest.json
 ```
+
+When `--legacy-edge-fallback` is requested, the model profile's head-to-QR
+ratio overrides an inconsistent fallback CLI ratio so the diagnostic detector
+cannot silently collapse onto the inner QR symbol. Handoff JSON schema version
+2 includes a `model` object with the same acquisition and refinement evidence
+shown by the overlay.
 
 For the expanded real-camera ROI that includes the complete stand base, enable
 the observe-only structural gate. It accepts a missing lower head edge only
@@ -517,14 +546,20 @@ mode it:
 2. transforms the metric PnP head centre through the full
    `base_scan <- camera` TF, including translation, roll, and pitch (with the
    rectified centre ray retained only as an association fallback);
-3. associates returns in that LiDAR bearing corridor and fits a temporally
-   pooled PCA tangent as the coarse stand axis;
+3. splits each scan into contiguous range surfaces, selects the cluster nearest
+   the metric camera target, and fits a temporally pooled PCA tangent as the
+   coarse stand axis;
 4. computes an observe-only perpendicular approach-pose proposal from that
    coarse axis;
 5. transforms each 3D PnP face normal into a `base_scan` tangent, reaches
    multi-frame axial consensus there, and accepts it as the refined axis only
    when its 180-degree-symmetric difference from the LiDAR estimate is at most
-   15 degrees by default.
+   15 degrees and the two estimated target centres differ by at most `0.10 m`
+   by default. A matching heater axis at another range therefore fails closed.
+
+Metric target identity, rather than QR decode or front/back colour, keys the
+camera consensus. This preserves backside continuity while still resetting
+when the calibrated target moves to another coarse spatial cell.
 
 Run the current real-camera handoff from the workstation container with:
 
@@ -536,6 +571,7 @@ scripts/aufgabe04/perception/debug/run_stand_axis_viewer.sh \
   --scan-topic /scan \
   --scan-frame base_scan \
   --calibrated-handoff \
+  --handoff-max-center-difference-m 0.10 \
   --axis-source edges \
   --edge-preprocess channel-union \
   --canny-low 20 \

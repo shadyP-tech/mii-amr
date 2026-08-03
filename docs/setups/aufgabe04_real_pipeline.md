@@ -20,6 +20,7 @@ loaded logistics mission or a two-robot run; see
 | `perception/stand_axis/geometry.py` | Quadrilateral geometry, square-head pose estimation, and debug rendering | None |
 | `perception/stand_axis/real_camera_profile.py` | Validate and resolve the offline-candidate real-camera edge recipe | None |
 | `real_robot/passive_viewpoint_node.py` | Synchronize image, scan, and exact-time TF; rectify the image; validate LiDAR/QR/silhouette evidence | None |
+| `real_robot/run_autonomous_stand_exploration.py` | Plan and execute the unloaded center-corridor discovery, candidate inspection, and QR-facing pose catalog | Dry-run by default; explicit physical gate |
 | `real_robot/prepare_passive_survey.py` | Produce immutable per-candidate observer and catalog-validation commands | None |
 | `real_robot/finalize_passive_survey.py` | Freeze a complete real arrival catalog and write a real `SurveyManifest` | None |
 | `real_robot/run_unloaded_segment.py` | Bind one certified route leg to the sealed hardware/site profile and existing preflight runner | Dry-run by default; explicit physical gate |
@@ -106,7 +107,117 @@ The profile requires `map` and `odom` to be distinct, forces
 `use_sim_time=false`, resolves six distinct topics, and binds the calibration
 and physical-site hashes.
 
-## 3. Prepare and Collect a Passive Survey
+## 3. Autonomous Stand Discovery and Facing-Pose Survey
+
+`run_autonomous_stand_exploration.py` is the single-entry real-robot pipeline.
+It plans an A* route from the live AMCL pose to a sequence of stopped inspection
+poses on one center corridor, fuses LiDAR candidates across the complete
+corridor, visits each stable candidate at a 0.7 m pre-approach, and saves the
+validated QR-facing pose. If the first camera view observes a stable stand axis
+but not the QR, it plans one evidence-bound A* visit to the opposite face and
+tries again. That visit starts at the requested 0.7 m standoff; only if the
+inflated map blocks that exact pose may it step inward in 0.05 m increments,
+never below the profile-derived physical minimum. It fails closed if the
+expected candidate count, stand axis,
+unique QR identity, clearance, or A* reachability cannot be established.
+If a directly measured, content-hashed stand model is available, add
+`--stand-model-profile <measured_stand_model.json>`; provisional CAD dimensions
+are rejected for operational pose commitment.
+
+Use a new `--session-id` for every command below; sessions are immutable. These
+are live-ROS checks, not simulation runs.
+
+First verify the exact runtime graph without authorizing motion:
+
+```bash
+ros2 topic echo --once /robot1/amcl_pose
+ros2 topic echo --once /robot1/scan
+ros2 topic echo --once /robot1/camera/camera_info
+ros2 topic info /robot1/cmd_vel -v
+
+python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
+  --robot-profile results/aufgabe04/real/profiles/<robot_profile>.json \
+  --camera-calibration results/aufgabe04/real/profiles/<camera_calibration>.json \
+  --physical-site docs/setups/<physical_site>.json \
+  --map maps/aufgabe03/<real_map>.yaml \
+  --semantic-map-id <real_map_id> \
+  --expected-stand-count 3 \
+  --session-id stand_explore_dry_001
+```
+
+Without `--execute`, the script reads live AMCL, creates the center-corridor
+coverage plan, seals the first physical route, and runs the full route/ROS
+preflight without publishing velocity. Require
+`status=first_leg_dry_run_ok` and `motion_published=false` in
+`mission_summary.json`. Inspect the coverage plan, first sealed route,
+route diagnostics, and preflight JSON before proceeding.
+
+For the first physical checkpoint, clear the arena, keep the unloaded robot in
+view, prepare Ctrl+C plus the physical stop, and keep a second terminal ready
+to publish one zero `Twist` to the profile's exact resolved command topic. Then
+authorize only one center-corridor leg:
+
+```bash
+python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
+  --robot-profile results/aufgabe04/real/profiles/<robot_profile>.json \
+  --camera-calibration results/aufgabe04/real/profiles/<camera_calibration>.json \
+  --physical-site docs/setups/<physical_site>.json \
+  --map maps/aufgabe03/<real_map>.yaml \
+  --semantic-map-id <real_map_id> \
+  --expected-stand-count 3 \
+  --coverage-leg-limit 1 \
+  --session-id stand_explore_leg_001 \
+  --execute
+```
+
+Type `RUN` only after the separate no-motion run has passed and the live
+velocity owner is unambiguous. After that mission-level authorization, the
+script still requires the leg's own dry-run/preflight to pass before motion. A
+successful checkpoint writes
+`status=coverage_leg_checkpoint_complete`, the stopped LiDAR epoch, run events,
+preflight evidence, and the next viewpoint ID.
+
+Next validate the complete center-corridor discovery without approaching any
+candidate:
+
+```bash
+python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
+  --robot-profile results/aufgabe04/real/profiles/<robot_profile>.json \
+  --camera-calibration results/aufgabe04/real/profiles/<camera_calibration>.json \
+  --physical-site docs/setups/<physical_site>.json \
+  --map maps/aufgabe03/<real_map>.yaml \
+  --semantic-map-id <real_map_id> \
+  --expected-stand-count 3 \
+  --stop-after-coverage \
+  --session-id stand_explore_coverage_001 \
+  --execute
+```
+
+Require `status=coverage_complete`, the exact expected stand count, and a
+content-hashed `candidate_snapshot.json`. Review the fused candidates in the
+map frame before running the complete mission with a fresh session ID:
+
+```bash
+python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
+  --robot-profile results/aufgabe04/real/profiles/<robot_profile>.json \
+  --camera-calibration results/aufgabe04/real/profiles/<camera_calibration>.json \
+  --physical-site docs/setups/<physical_site>.json \
+  --map maps/aufgabe03/<real_map>.yaml \
+  --semantic-map-id <real_map_id> \
+  --expected-stand-count 3 \
+  --session-id stand_explore_full_001 \
+  --execute
+```
+
+The complete run writes `stand_facing_catalog.json`,
+`station_identity_registry.json`, `candidate_snapshot.json`, per-leg evidence
+bundles, camera/LiDAR debug artifacts, and `mission_summary.json`. The catalog
+authorizes no motion to the final QR-facing poses; it stores those poses for a
+later logistics planner. Any failure writes `mission_failure.json` and stops
+the mission. Do not add `/behavior_server`, `/velocity_smoother`, or any other
+unexpected `/cmd_vel` publisher to an allowlist; resolve ownership instead.
+
+## 4. Prepare and Collect a Passive Survey
 
 Use the frozen map, detector-produced candidate snapshot, and complete station
 identity registry from the successful sealed workflow:
@@ -186,7 +297,7 @@ After all expected candidates are resolved, run the plan's
 differs from the sealed map, snapshot, identity registry, site, profile,
 calibration, or survey configuration.
 
-## 4. Unloaded Single-Leg Validation
+## 5. Unloaded Single-Leg Validation
 
 `run_unloaded_segment.py` accepts the full certified mission artifact chain and
 derives namespace, topics, frames, footprint, and speed limits only from the

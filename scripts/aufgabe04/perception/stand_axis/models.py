@@ -65,8 +65,15 @@ class StandAxisEdgeDebugArtifacts:
     pose_reprojection_rmse_px: float | None = None
     pose_ambiguity_gap_px: float | None = None
     refinement_support_mean: float | None = None
+    model_corridor_half_width_px: float | None = None
+    model_pose_fit_source: str | None = None
     model_pose: object | None = None
     qr_detected: bool = False
+    qr_detection_scale: float | None = None
+    pose_seed_source: str | None = None
+    model_reason: str | None = None
+    model_measurement_status: str | None = None
+    projected_landmarks: dict[str, ImagePoint] | None = None
 
 
 @dataclass(frozen=True)

@@ -20,6 +20,7 @@ from scripts.aufgabe04.perception.stand_axis.qr_pose_seed import (
 class ProjectedStandModel:
     landmarks: Mapping[str, ImagePoint]
     head_corners: tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint]
+    head_back_corners: tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint]
 
 
 def project_model_points(
@@ -79,4 +80,17 @@ def project_stand_model(
             "head_bottom_left",
         )
     )
-    return ProjectedStandModel(landmarks=landmarks, head_corners=head)
+    head_back = tuple(
+        landmarks[name]
+        for name in (
+            "head_back_top_left",
+            "head_back_top_right",
+            "head_back_bottom_right",
+            "head_back_bottom_left",
+        )
+    )
+    return ProjectedStandModel(
+        landmarks=landmarks,
+        head_corners=head,
+        head_back_corners=head_back,
+    )

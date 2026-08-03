@@ -30,6 +30,14 @@ class RectifiedCameraMatrix:
 
 
 @dataclass(frozen=True)
+class QrQuadDetection:
+    """QR symbol corners restored to the input image pixel domain."""
+
+    corners: tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint]
+    scale: float
+
+
+@dataclass(frozen=True)
 class PlanarPoseHypothesis:
     rotation_vector: tuple[float, float, float]
     translation_xyz_m: tuple[float, float, float]
@@ -70,6 +78,66 @@ class PlanarPoseResult:
         )
 
 
+def select_temporally_consistent_pose(
+    result: PlanarPoseResult,
+    reference: PlanarPoseHypothesis,
+    *,
+    max_axial_yaw_jump_deg: float = 8.0,
+    max_translation_jump_m: float = 0.08,
+    minimum_score_margin: float = 0.25,
+) -> PlanarPoseHypothesis | None:
+    """Resolve an IPPE ambiguity only when camera history clearly does so.
+
+    LiDAR is deliberately excluded here: the camera pose must be independently
+    estimated before it can be compared with the LiDAR axis.  Scores normalize
+    axial yaw and translation changes by explicit temporal gates.  A candidate
+    must pass both gates and be clearly closer than the runner-up; otherwise the
+    ambiguity remains fail-closed.
+    """
+
+    if not result.accepted or not result.hypotheses:
+        return None
+    if (
+        not math.isfinite(max_axial_yaw_jump_deg)
+        or max_axial_yaw_jump_deg <= 0.0
+        or not math.isfinite(max_translation_jump_m)
+        or max_translation_jump_m <= 0.0
+        or not math.isfinite(minimum_score_margin)
+        or minimum_score_margin < 0.0
+    ):
+        raise ValueError("temporal pose gates must be finite and positive")
+
+    ranked = []
+    for hypothesis in result.hypotheses:
+        yaw_jump = abs(
+            (hypothesis.yaw_deg - reference.yaw_deg + 90.0) % 180.0 - 90.0
+        )
+        translation_jump = math.sqrt(
+            sum(
+                (current - previous) ** 2
+                for current, previous in zip(
+                    hypothesis.translation_xyz_m,
+                    reference.translation_xyz_m,
+                )
+            )
+        )
+        score = (
+            yaw_jump / max_axial_yaw_jump_deg
+            + translation_jump / max_translation_jump_m
+        )
+        ranked.append((score, yaw_jump, translation_jump, hypothesis))
+    ranked.sort(key=lambda item: item[0])
+    best_score, yaw_jump, translation_jump, best = ranked[0]
+    if (
+        yaw_jump > max_axial_yaw_jump_deg
+        or translation_jump > max_translation_jump_m
+    ):
+        return None
+    if len(ranked) > 1 and ranked[1][0] - best_score < minimum_score_margin:
+        return None
+    return best
+
+
 def _qr_quad_candidates(points) -> tuple[tuple[ImagePoint, ...], ...]:
     if points is None:
         return ()
@@ -88,11 +156,11 @@ def _qr_quad_candidates(points) -> tuple[tuple[ImagePoint, ...], ...]:
     )
 
 
-def detect_qr_quad_corners(
+def _detect_qr_quad_corners_native(
     cv2,
     frame,
 ) -> tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint] | None:
-    """Detect the largest QR symbol boundary without requiring payload decode."""
+    """Run OpenCV's QR detector once in the supplied pixel domain."""
 
     detector = cv2.QRCodeDetector()
     try:
@@ -117,6 +185,57 @@ def detect_qr_quad_corners(
         multi_result = ()
     points = multi_result[2] if len(multi_result) > 2 else None
     return _largest_qr_quad(_qr_quad_candidates(points))
+
+
+def detect_qr_quad(
+    cv2,
+    frame,
+    *,
+    scales: Sequence[float] = (1.0, 2.0, 4.0),
+) -> QrQuadDetection | None:
+    """Acquire QR corners through a bounded image pyramid.
+
+    The real 800x600 camera often renders the QR symbol too small for OpenCV
+    4.5's native detector.  Upscaling is used only for acquisition; returned
+    corners are always mapped back to the caller's original pixel domain.
+    """
+
+    if frame is None or not hasattr(frame, "shape") or len(frame.shape) < 2:
+        raise ValueError("QR detection requires a non-empty image")
+    if not scales:
+        raise ValueError("QR detection scales must not be empty")
+    for raw_scale in scales:
+        scale = float(raw_scale)
+        if not math.isfinite(scale) or scale < 1.0:
+            raise ValueError("QR detection scales must be finite and at least 1.0")
+        scaled = frame
+        if scale != 1.0:
+            scaled = cv2.resize(
+                frame,
+                None,
+                fx=scale,
+                fy=scale,
+                interpolation=cv2.INTER_CUBIC,
+            )
+        corners = _detect_qr_quad_corners_native(cv2, scaled)
+        if corners is None:
+            continue
+        restored = tuple(
+            ImagePoint(point.u_px / scale, point.v_px / scale)
+            for point in corners
+        )
+        return QrQuadDetection(restored, scale)
+    return None
+
+
+def detect_qr_quad_corners(
+    cv2,
+    frame,
+) -> tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint] | None:
+    """Compatibility wrapper returning multi-scale QR symbol corners only."""
+
+    detection = detect_qr_quad(cv2, frame)
+    return None if detection is None else detection.corners
 
 
 def estimate_planar_pose_ippe(

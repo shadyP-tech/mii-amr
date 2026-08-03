@@ -49,13 +49,29 @@ class AxisConsensusAccumulator:
         self.required_samples = required_samples
         self.max_deviation_rad = max_deviation_rad
         self._values: deque[float] = deque(maxlen=required_samples)
-        self._key: tuple[str, str, tuple[str, ...]] | None = None
+        self._key: tuple[str, str, object] | None = None
 
-    def add(self, *, yaw_rad: float, source: str, side: str, qr_texts: tuple[str, ...]) -> AxisConsensus | None:
-        if not math.isfinite(yaw_rad) or not source or side == "unknown_side":
+    def add(
+        self,
+        *,
+        yaw_rad: float,
+        source: str,
+        side: str,
+        qr_texts: tuple[str, ...],
+        target_key: str | None = None,
+    ) -> AxisConsensus | None:
+        if (
+            not math.isfinite(yaw_rad)
+            or not source
+            or (side == "unknown_side" and not target_key)
+        ):
             self.reset()
             return None
-        key = (source, side, tuple(qr_texts))
+        key = (
+            (source, "metric_target", target_key)
+            if target_key
+            else (source, side, tuple(qr_texts))
+        )
         if key != self._key:
             self._key = key
             self._values.clear()

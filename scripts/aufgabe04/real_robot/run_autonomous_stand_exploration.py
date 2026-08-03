@@ -75,6 +75,9 @@ from scripts.aufgabe04.navigation.viewpoint_recommendation import (
     load_recommendation,
     normalize_angle,
 )
+from scripts.aufgabe04.perception.stand_axis.model_profile import (
+    load_stand_model,
+)
 from scripts.aufgabe04.real_robot.hardware_profile import (
     camera_calibration_sha256,
     load_camera_calibration,
@@ -615,6 +618,16 @@ def _capture_camera_recommendation(
         str(output_dir / "perception_debug"),
         "--once",
     ]
+    if args.stand_model_profile is not None:
+        stand_model = load_stand_model(args.stand_model_profile)
+        command.extend(
+            [
+                "--stand-model-profile",
+                str(args.stand_model_profile),
+                "--stand-face-size-m",
+                str(stand_model.head_width_m),
+            ]
+        )
     process = subprocess.Popen(command)
     deadline = time.monotonic() + args.camera_timeout_sec
     try:
@@ -679,6 +692,39 @@ def _opposite_face_normal(axis_observation_path: Path) -> float:
             "stand axis does not resolve a sufficiently opposite inspection face"
         )
     return selected
+
+
+def _bounded_approach_offsets(
+    requested_m: float,
+    minimum_m: float,
+    *,
+    step_m: float = 0.05,
+) -> tuple[float, ...]:
+    """Return descending standoffs without crossing the physical minimum."""
+
+    if not all(
+        math.isfinite(value) and value > 0.0
+        for value in (requested_m, minimum_m, step_m)
+    ):
+        raise ValueError("approach offsets and step must be finite and positive")
+    if requested_m + 1.0e-9 < minimum_m:
+        raise ValueError("requested approach offset is below physical minimum")
+    values = []
+    current = requested_m
+    while current > minimum_m + 1.0e-9:
+        values.append(round(current, 6))
+        current -= step_m
+    if not values or abs(values[-1] - minimum_m) > 1.0e-9:
+        values.append(round(minimum_m, 6))
+    return tuple(values)
+
+
+def _is_approach_feasibility_failure(exc: ValueError) -> bool:
+    message = str(exc)
+    return (
+        "candidate pre-approach A* failed" in message
+        or "target is blocked" in message
+    )
 
 
 def _validate_facing_pose(
@@ -799,6 +845,29 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--axis-sample-count", type=int, default=7)
     parser.add_argument("--camera-timeout-sec", type=float, default=90.0)
     parser.add_argument(
+        "--stand-model-profile",
+        type=Path,
+        default=None,
+        help="Optional content-hashed measured physical stand model.",
+    )
+    parser.add_argument(
+        "--coverage-leg-limit",
+        type=int,
+        default=0,
+        help=(
+            "Real-test checkpoint: stop successfully after this many coverage "
+            "legs; zero means run the complete mission."
+        ),
+    )
+    parser.add_argument(
+        "--stop-after-coverage",
+        action="store_true",
+        help=(
+            "Real-test checkpoint: finish the center-corridor LiDAR survey and "
+            "candidate snapshot, then stop before candidate approaches."
+        ),
+    )
+    parser.add_argument(
         "--execute",
         action="store_true",
         help="After every dry-run passes, permit physical motion.",
@@ -809,6 +878,8 @@ def build_parser() -> argparse.ArgumentParser:
 def _validate_inputs(parser, args, profile, calibration) -> None:
     if args.expected_stand_count <= 0:
         parser.error("--expected-stand-count must be positive")
+    if args.coverage_leg_limit < 0:
+        parser.error("--coverage-leg-limit must be non-negative")
     for name in (
         "inspection_stop_spacing_m",
         "lidar_epoch_sec",
@@ -832,6 +903,15 @@ def _validate_inputs(parser, args, profile, calibration) -> None:
         parser.error("physical site descriptor differs from robot profile")
     if profile.localization_source != "amcl":
         parser.error("autonomous real exploration requires AMCL localization")
+    if args.stand_model_profile is not None:
+        try:
+            stand_model = load_stand_model(args.stand_model_profile)
+        except (OSError, ValueError) as exc:
+            parser.error(f"invalid stand model profile: {exc}")
+        if not stand_model.committable:
+            parser.error(
+                "--stand-model-profile must have measurement_status=measured"
+            )
 
 
 def main(argv=None) -> int:
@@ -945,11 +1025,24 @@ def main(argv=None) -> int:
             )
             return 0
 
+        if args.coverage_leg_limit > 0:
+            authorization_scope = (
+                f"at most {args.coverage_leg_limit} center-corridor "
+                "coverage leg(s)"
+            )
+        elif args.stop_after_coverage:
+            authorization_scope = (
+                "the complete center-corridor coverage pass, with no "
+                "candidate-approach legs"
+            )
+        else:
+            authorization_scope = (
+                "the complete multi-leg stand exploration mission"
+            )
         print(
             "Physical safety requirements: clear arena; unloaded robot; operator "
             "beside the robot; Ctrl+C and physical stop ready; separate exact-topic "
-            "zero Twist terminal ready. This authorizes a multi-leg autonomous "
-            "stand exploration, not one isolated segment."
+            f"zero Twist terminal ready. This RUN authorizes {authorization_scope}."
         )
         if input("Type RUN to authorize the autonomous exploration mission: ").strip() != "RUN":
             raise RuntimeError("operator did not authorize the mission")
@@ -1005,6 +1098,26 @@ def main(argv=None) -> int:
             if status != 0:
                 raise RuntimeError(f"failed to fuse coverage stop {viewpoint_id}")
             leg_index += 1
+            if (
+                args.coverage_leg_limit > 0
+                and leg_index >= args.coverage_leg_limit
+            ):
+                checkpoint_summary = json.loads(
+                    (survey_root / "survey_summary.json").read_text()
+                )
+                result = {
+                    "schema_version": 1,
+                    "status": "coverage_leg_checkpoint_complete",
+                    "motion_published": True,
+                    "completed_coverage_legs": leg_index,
+                    "next_viewpoint_id": checkpoint_summary.get(
+                        "next_viewpoint_id"
+                    ),
+                    "survey_root": str(survey_root),
+                }
+                _write_json(session_root / "mission_summary.json", result)
+                print(json.dumps(result, indent=2, sort_keys=True))
+                return 0
 
         registry_path = survey_root / "stand_registry.json"
         registry = load_stand_survey_registry(registry_path, plan)
@@ -1027,6 +1140,22 @@ def main(argv=None) -> int:
         )
         snapshot_path = session_root / "candidate_snapshot.json"
         write_candidate_snapshot(snapshot_path, snapshot)
+
+        if args.stop_after_coverage:
+            result = {
+                "schema_version": 1,
+                "status": "coverage_complete",
+                "motion_published": True,
+                "stand_count": len(snapshot.candidates),
+                "candidate_snapshot": str(snapshot_path),
+                "candidate_snapshot_sha256": candidate_snapshot_sha256(
+                    snapshot
+                ),
+                "survey_root": str(survey_root),
+            }
+            _write_json(session_root / "mission_summary.json", result)
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0
 
         unresolved = set(snapshot.candidate_uids)
         facing_records = []
@@ -1096,26 +1225,47 @@ def main(argv=None) -> int:
                     max_age_sec=2.0,
                 )
                 opposite_source = candidate_root / "opposite_face_source"
-                opposite_sealed = plan_candidate_preapproach(
-                    map_yaml=args.map,
-                    semantic_map_id=args.semantic_map_id,
-                    plan=plan,
-                    snapshot=snapshot,
-                    snapshot_path=snapshot_path,
-                    candidate_uid=candidate.candidate_uid,
-                    start=Pose2D(
-                        opposite_start.x_m,
-                        opposite_start.y_m,
-                        opposite_start.yaw_rad,
-                    ),
-                    output_dir=opposite_source,
-                    approach_offset_m=args.candidate_approach_offset_m,
-                    inflation_radius_m=inflation_radius_m,
-                    candidate_transit_radius_m=candidate_keepout_radius_m,
-                    physical_clearance=clearance,
-                    approach_normal_rad=opposite_normal,
-                    axis_observation_path=axis_observation_path,
-                )
+                opposite_sealed = None
+                feasibility_failures = []
+                for inspection_offset_m in _bounded_approach_offsets(
+                    args.candidate_approach_offset_m,
+                    clearance["minimum_active_standoff_m"],
+                ):
+                    try:
+                        opposite_sealed = plan_candidate_preapproach(
+                            map_yaml=args.map,
+                            semantic_map_id=args.semantic_map_id,
+                            plan=plan,
+                            snapshot=snapshot,
+                            snapshot_path=snapshot_path,
+                            candidate_uid=candidate.candidate_uid,
+                            start=Pose2D(
+                                opposite_start.x_m,
+                                opposite_start.y_m,
+                                opposite_start.yaw_rad,
+                            ),
+                            output_dir=opposite_source,
+                            approach_offset_m=inspection_offset_m,
+                            inflation_radius_m=inflation_radius_m,
+                            candidate_transit_radius_m=(
+                                candidate_keepout_radius_m
+                            ),
+                            physical_clearance=clearance,
+                            approach_normal_rad=opposite_normal,
+                            axis_observation_path=axis_observation_path,
+                        )
+                        break
+                    except ValueError as exc:
+                        if not _is_approach_feasibility_failure(exc):
+                            raise
+                        feasibility_failures.append(
+                            f"{inspection_offset_m:.3f} m: {exc}"
+                        )
+                if opposite_sealed is None:
+                    raise RuntimeError(
+                        "no physically allowed opposite-face approach was "
+                        "A*-reachable: " + "; ".join(feasibility_failures)
+                    )
                 _run_motion_leg(
                     profile=profile,
                     sealed=opposite_sealed,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from scripts.aufgabe04.perception.stand_axis_handoff.geometry import (
     approach_pose_from_axis,
     axial_difference_rad,
@@ -46,6 +48,22 @@ def evaluate_axis_handoff(
             camera,
             approach_pose=approach,
         )
+    center_difference = None
+    if lidar.center_xy_m is not None and camera.center_xy_m is not None:
+        center_difference = math.hypot(
+            camera.center_xy_m[0] - lidar.center_xy_m[0],
+            camera.center_xy_m[1] - lidar.center_xy_m[1],
+        )
+        if center_difference > config.max_center_difference_m:
+            return AxisHandoffDecision(
+                "target_inconsistent",
+                False,
+                "camera_lidar_center_difference_above_gate",
+                lidar,
+                camera,
+                center_difference_m=center_difference,
+                approach_pose=approach,
+            )
     difference = axial_difference_rad(camera.angle_rad, lidar.angle_rad)
     if difference > config.max_axis_difference_rad:
         return AxisHandoffDecision(
@@ -55,6 +73,7 @@ def evaluate_axis_handoff(
             lidar,
             camera,
             axial_difference_rad=difference,
+            center_difference_m=center_difference,
             approach_pose=approach,
         )
     return AxisHandoffDecision(
@@ -64,6 +83,7 @@ def evaluate_axis_handoff(
         lidar,
         camera,
         axial_difference_rad=difference,
+        center_difference_m=center_difference,
         accepted_axis_rad=camera.angle_rad,
         approach_pose=approach,
     )

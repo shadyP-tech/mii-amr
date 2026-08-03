@@ -677,6 +677,9 @@ def _raw_side_evidence_and_corners(
     edge_points=None,
     real_camera_endpoint_fraction: float | None = None,
     maximum_parallel_side_length_ratio: float | None = None,
+    prefer_prediction: bool = False,
+    maximum_band_px: float | None = None,
+    recover_parallel_endpoints: bool = True,
 ):
     """Refit a common-sided head trapezoid from outer raw-Canny evidence.
 
@@ -706,7 +709,24 @@ def _raw_side_evidence_and_corners(
         _distance(top_right, bottom_right),
     )
     minimum_extent = min((*widths, *heights))
-    band_px = float(max(3, min(6, int(round(0.08 * minimum_extent)))))
+    # Metric model callers already select the edge nearest the projection and
+    # apply a strict post-fit geometry gate. They may therefore search up to
+    # eight pixels when projected-size uncertainty requires it. Legacy/global
+    # paths retain the previous six-pixel ceiling.
+    natural_maximum_band_px = 8 if prefer_prediction else 6
+    band_px = float(
+        max(
+            3,
+            min(
+                natural_maximum_band_px,
+                int(round(0.08 * minimum_extent)),
+            ),
+        )
+    )
+    if maximum_band_px is not None:
+        if not math.isfinite(maximum_band_px) or maximum_band_px <= 0.0:
+            raise ValueError("maximum_band_px must be finite and positive")
+        band_px = min(band_px, float(maximum_band_px))
     parallel_side_band_px = band_px
     if fixed_parallel_side_direction is not None:
         # At close simulation viewpoints the connected topology can describe
@@ -743,6 +763,11 @@ def _raw_side_evidence_and_corners(
 
     def fit_side(name: str, *, fixed_direction=None):
         start, end, intervals, outward_sign, minimum_coverage = side_specs[name]
+        if prefer_prediction:
+            # A metric projection identifies which of several nearby parallel
+            # rails belongs to the stand. Select the closest current-frame edge
+            # in each tangent bin instead of the outermost heater/QR edge.
+            outward_sign = 0.0
         side_band_px = (
             parallel_side_band_px
             if name in ("left", "right")
@@ -797,7 +822,12 @@ def _raw_side_evidence_and_corners(
         )
 
     parallel_endpoint_corners = None
-    if shared_direction is not None and right is not None and left is not None:
+    if (
+        recover_parallel_endpoints
+        and shared_direction is not None
+        and right is not None
+        and left is not None
+    ):
         # The two fitted outer rails are the most stable physical head
         # evidence, whether their common direction was calibrated or learned
         # from this real-camera frame. Recover their complete raw runs and use
