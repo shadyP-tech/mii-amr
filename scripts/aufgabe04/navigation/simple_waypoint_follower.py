@@ -13,6 +13,7 @@ from scripts.aufgabe04.navigation.dynamic_route_handoff import (
     RouteUpdateKind,
 )
 from scripts.aufgabe04.navigation.execution_route_certificate import (
+    ExecutionRouteCheck,
     check_execution_route_tube,
 )
 from scripts.aufgabe04.navigation.follower_models import FollowerResult
@@ -333,6 +334,15 @@ class CertifiedStartupRouteState:
     egress_lock_index: int | None
 
 
+@dataclass(frozen=True)
+class CertifiedStaticStartupDecision:
+    """Bounded initial target selection for a sealed static route."""
+
+    ok: bool
+    target_index: int | None
+    route_check: ExecutionRouteCheck
+
+
 def certified_startup_route_state(
     config: FollowerConfig,
     waypoint_count: int,
@@ -360,10 +370,61 @@ CATALOG_PHYSICAL_ROUTE_KINDS = frozenset({"catalog_face_approach"})
 STATIC_PHYSICAL_ROUTE_KINDS = CATALOG_PHYSICAL_ROUTE_KINDS | frozenset(
     {"detected_stand_preapproach", "stand_discovery_corridor"}
 )
+STATIC_STARTUP_SEGMENT_JOIN_ROUTE_KINDS = frozenset(
+    {"detected_stand_preapproach", "stand_discovery_corridor"}
+)
 PHYSICAL_ROUTE_KINDS = DYNAMIC_PHYSICAL_ROUTE_KINDS | STATIC_PHYSICAL_ROUTE_KINDS
 DYNAMIC_VIEWPOINT_ROUTE_KINDS = (
     INTERMEDIATE_ROUTE_KINDS | DYNAMIC_PHYSICAL_ROUTE_KINDS
 )
+
+
+def certified_static_startup_decision(
+    pose: Pose2D,
+    waypoints: Sequence[Pose2D],
+    *,
+    tracking_tube_radius_m: float,
+    chord_sample_spacing_m: float = 0.01,
+) -> CertifiedStaticStartupDecision:
+    """Select waypoint 0 or 1 without leaving the certified first segment.
+
+    A* route vertices are map-cell centers while the live localization pose is
+    continuous.  At startup the robot can therefore be inside the first sealed
+    segment but slightly farther than the tracking radius from vertex 0.  The
+    ordinary target-0 route check treats that vertex as a zero-length segment.
+    This gate first preserves target 0 when it is valid, then permits only the
+    exact next vertex when both the live pose and its pursuit chord fit inside
+    the already-certified first route segment.
+    """
+
+    at_first_vertex = check_execution_route_tube(
+        pose,
+        waypoints,
+        target_index=0,
+        pursuit_index=0,
+        tracking_tube_radius_m=tracking_tube_radius_m,
+        chord_sample_spacing_m=chord_sample_spacing_m,
+    )
+    if at_first_vertex.ok:
+        return CertifiedStaticStartupDecision(
+            ok=True,
+            target_index=0,
+            route_check=at_first_vertex,
+        )
+
+    on_first_segment = check_execution_route_tube(
+        pose,
+        waypoints,
+        target_index=1,
+        pursuit_index=1,
+        tracking_tube_radius_m=tracking_tube_radius_m,
+        chord_sample_spacing_m=chord_sample_spacing_m,
+    )
+    return CertifiedStaticStartupDecision(
+        ok=on_first_segment.ok,
+        target_index=1 if on_first_segment.ok else None,
+        route_check=on_first_segment,
+    )
 
 
 @dataclass(frozen=True)
@@ -1112,6 +1173,10 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         self.dynamic_join_limit_m = startup_state.join_limit_m
         self.start_egress_lock_index = startup_state.egress_lock_index
         self.current_route_kind = follower_config.initial_route_kind
+        self.certified_static_start_pending = (
+            self.current_route_kind in STATIC_STARTUP_SEGMENT_JOIN_ROUTE_KINDS
+            and not startup_state.join_pending
+        )
         self.intermediate_terminal_heading_latch: (
             IntermediateTerminalHeadingLatch | None
         ) = None
@@ -1513,6 +1578,50 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                             self.distance_estimate_m,
                             self.motion_published,
                         )
+                    if self.certified_static_start_pending:
+                        startup_decision = certified_static_startup_decision(
+                            pose,
+                            self.waypoints,
+                            tracking_tube_radius_m=(
+                                self.follower_config.certified_route_tube_radius_m
+                            ),
+                            chord_sample_spacing_m=(
+                                self.follower_config
+                                .certified_route_chord_sample_spacing_m
+                            ),
+                        )
+                        self.certified_static_start_pending = False
+                        if not startup_decision.ok:
+                            self.latest_stop_details = {
+                                **startup_decision.route_check.to_log_dict(),
+                                "reason": "pose outside certified startup segment",
+                                "certificate_reason": (
+                                    startup_decision.route_check.reason
+                                ),
+                                "startup_target_candidates": [0, 1],
+                                "source": "execution_route_certificate",
+                                "fail_closed": True,
+                            }
+                            self.publish_repeated_zero()
+                            return FollowerResult(
+                                "stopped",
+                                "pose outside certified startup segment",
+                                time.monotonic() - started_at,
+                                self.distance_estimate_m,
+                                self.motion_published,
+                                self.latest_stop_details,
+                            )
+                        if startup_decision.target_index == 1:
+                            self.target_index = 1
+                            self.target_started_at = time.monotonic()
+                            self._reset_progress_watchdog(time.monotonic())
+                            # Make the bounded startup handoff observable as a
+                            # complete zero-command control period.  No motion
+                            # is published until the next loop rechecks all
+                            # runtime safety inputs and the route tube.
+                            self.publish_zero()
+                            time.sleep(loop_sleep_sec)
+                            continue
                 if self.dynamic_join_pending:
                     join_action, join_failure = certified_startup_join_action(
                         pose,
