@@ -392,10 +392,26 @@ def certified_static_startup_decision(
     continuous.  At startup the robot can therefore be inside the first sealed
     segment but slightly farther than the tracking radius from vertex 0.  The
     ordinary target-0 route check treats that vertex as a zero-length segment.
-    This gate first preserves target 0 when it is valid, then permits only the
-    exact next vertex when both the live pose and its pursuit chord fit inside
-    the already-certified first route segment.
+    This gate prefers the exact next vertex when both the live pose and its
+    pursuit chord fit inside the already-certified first route segment.  That
+    prevents a small localization update from returning execution to the
+    degenerate vertex-0 tube after startup.
     """
+
+    on_first_segment = check_execution_route_tube(
+        pose,
+        waypoints,
+        target_index=1,
+        pursuit_index=1,
+        tracking_tube_radius_m=tracking_tube_radius_m,
+        chord_sample_spacing_m=chord_sample_spacing_m,
+    )
+    if on_first_segment.ok:
+        return CertifiedStaticStartupDecision(
+            ok=True,
+            target_index=1,
+            route_check=on_first_segment,
+        )
 
     at_first_vertex = check_execution_route_tube(
         pose,
@@ -411,18 +427,9 @@ def certified_static_startup_decision(
             target_index=0,
             route_check=at_first_vertex,
         )
-
-    on_first_segment = check_execution_route_tube(
-        pose,
-        waypoints,
-        target_index=1,
-        pursuit_index=1,
-        tracking_tube_radius_m=tracking_tube_radius_m,
-        chord_sample_spacing_m=chord_sample_spacing_m,
-    )
     return CertifiedStaticStartupDecision(
-        ok=on_first_segment.ok,
-        target_index=1 if on_first_segment.ok else None,
+        ok=False,
+        target_index=None,
         route_check=on_first_segment,
     )
 

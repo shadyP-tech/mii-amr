@@ -12,6 +12,7 @@ route, ROS, obstacle, localization, and exclusive-velocity-owner gates.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import hashlib
 import json
 import math
@@ -68,6 +69,9 @@ from scripts.aufgabe04.navigation.stand_coverage_survey import (
     load_coverage_survey_plan,
     load_stand_survey_registry,
 )
+from scripts.aufgabe04.navigation.stand_blockage_replan import (
+    record_blockage_replan,
+)
 from scripts.aufgabe04.navigation.stand_discovery_route import (
     seal_stand_discovery_route,
 )
@@ -112,6 +116,19 @@ DEFAULT_TRACKING_TUBE_RADIUS_M = 0.03
 DEFAULT_COLLISION_MARGIN_M = 0.02
 DEFAULT_LIDAR_STOP_DISTANCE_M = 0.20
 DEFAULT_LIDAR_CLEARANCE_MARGIN_M = 0.02
+DEFAULT_FRONT_OBSTACLE_SLOW_DISTANCE_M = 0.38
+DEFAULT_MAX_BLOCKAGE_REPLANS_PER_LEG = 3
+
+
+@dataclass(frozen=True)
+class MotionLegOutcome:
+    run_id: str
+    status: str
+    stop_reason: str
+    stop_details: dict[str, object]
+    motion_published: bool
+    returncode: int
+    semantic_log_path: Path
 
 
 def _file_sha256(path: Path) -> str:
@@ -486,6 +503,77 @@ def _bundle_command(profile, run_id: str, runner: list[str]) -> list[str]:
     ]
 
 
+def _motion_outcome_from_log(
+    semantic_log_path: Path,
+    *,
+    run_id: str,
+    returncode: int,
+) -> MotionLegOutcome:
+    try:
+        events = [
+            json.loads(line)
+            for line in Path(semantic_log_path).read_text().splitlines()
+            if line.strip()
+        ]
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"invalid motion semantic log for {run_id}: {exc}") from exc
+    motion_events = [
+        event
+        for event in events
+        if event.get("run_id") == run_id
+        and event.get("event") in {"motion_completed", "safety_stop"}
+    ]
+    if not motion_events:
+        raise RuntimeError(f"motion runner produced no terminal motion event for {run_id}")
+    event = motion_events[-1]
+    status = str(event.get("status", ""))
+    if status not in {"completed", "stopped"}:
+        raise RuntimeError(f"motion runner returned invalid status {status!r} for {run_id}")
+    if (status == "completed") != (returncode == 0):
+        raise RuntimeError(
+            f"motion runner exit/status mismatch for {run_id}: "
+            f"returncode={returncode} status={status}"
+        )
+    details = event.get("stop_details", {})
+    if not isinstance(details, dict):
+        raise RuntimeError(f"motion runner stop details are invalid for {run_id}")
+    return MotionLegOutcome(
+        run_id=run_id,
+        status=status,
+        stop_reason=str(event.get("stop_reason", "")),
+        stop_details=dict(details),
+        motion_published=bool(event.get("motion_published", False)),
+        returncode=returncode,
+        semantic_log_path=Path(semantic_log_path),
+    )
+
+
+def _front_clearance_from_outcome(outcome: MotionLegOutcome) -> float | None:
+    details = outcome.stop_details
+    front = details.get("front_clearance")
+    if isinstance(front, dict):
+        raw = front.get("nearest_valid_range_m")
+    else:
+        raw = details.get("nearest_valid_range_m")
+    try:
+        parsed = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _is_confirmable_stand_blockage(outcome: MotionLegOutcome) -> bool:
+    if outcome.status != "stopped" or not outcome.motion_published:
+        return False
+    if outcome.stop_reason not in {"obstacle too close", "stuck no progress"}:
+        return False
+    clearance_m = _front_clearance_from_outcome(outcome)
+    return (
+        clearance_m is not None
+        and clearance_m <= DEFAULT_FRONT_OBSTACLE_SLOW_DISTANCE_M + 1.0e-9
+    )
+
+
 def _run_motion_leg(
     *,
     profile,
@@ -495,7 +583,7 @@ def _run_motion_leg(
     execute: bool,
     coverage_plan: Path | None = None,
     candidate_snapshot: Path | None = None,
-) -> None:
+) -> MotionLegOutcome:
     common = {
         "profile": profile,
         "route_csv": Path(sealed["route_csv"]),
@@ -510,7 +598,17 @@ def _run_motion_leg(
     if subprocess.run(dry, check=False).returncode != 0:
         raise RuntimeError(f"dry-run failed for {run_id}")
     if not execute:
-        return
+        return MotionLegOutcome(
+            run_id=run_id,
+            status="dry_run_ok",
+            stop_reason="",
+            stop_details={},
+            motion_published=False,
+            returncode=0,
+            semantic_log_path=(
+                session_root / "run_events" / f"{run_id}.jsonl"
+            ),
+        )
     runner = _runner_command(**common, dry_run=False)
     wrapped = _bundle_command(profile, run_id, runner)
     result = subprocess.run(
@@ -519,8 +617,18 @@ def _run_motion_leg(
         text=True,
         check=False,
     )
-    if result.returncode != 0:
-        raise RuntimeError(f"physical route failed for {run_id}")
+    return _motion_outcome_from_log(
+        session_root / "run_events" / f"{run_id}.jsonl",
+        run_id=run_id,
+        returncode=result.returncode,
+    )
+
+
+def _require_completed_motion(outcome: MotionLegOutcome) -> None:
+    if outcome.status != "completed":
+        raise RuntimeError(
+            f"physical route failed for {outcome.run_id}: {outcome.stop_reason}"
+        )
 
 
 def _capture_lidar_epoch(
@@ -571,6 +679,108 @@ def _capture_lidar_epoch(
     if int(payload.get("processed_scan_count", 0)) <= 0:
         raise RuntimeError(f"LiDAR epoch processed no scans at {viewpoint_id}")
     return summary
+
+
+def _append_jsonl(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+
+
+def _execute_coverage_leg_with_replans(
+    *,
+    profile,
+    args,
+    session_root: Path,
+    survey_root: Path,
+    plan_path: Path,
+    leg_index: int,
+    target_viewpoint_id: str,
+    source_route: Path,
+    source_diagnostics: Path,
+) -> None:
+    """Run one coverage leg with bounded stop-observe-A* recovery."""
+
+    replan_index = 0
+    adaptive_log = session_root / "adaptive_replans.jsonl"
+    while True:
+        suffix = "" if replan_index == 0 else f"_replan_{replan_index:03d}"
+        run_id = f"{args.session_id}_coverage_{leg_index:03d}{suffix}"
+        execution_root = (
+            session_root
+            / "execution"
+            / f"coverage_leg_{leg_index:03d}{suffix}"
+        )
+        sealed = seal_stand_discovery_route(
+            source_route_csv=source_route,
+            source_diagnostics_json=source_diagnostics,
+            coverage_plan_path=plan_path,
+            output_dir=execution_root,
+        )
+        outcome = _run_motion_leg(
+            profile=profile,
+            sealed=sealed,
+            run_id=run_id,
+            session_root=session_root,
+            execute=True,
+            coverage_plan=plan_path,
+        )
+        if outcome.status == "completed":
+            return
+        if not _is_confirmable_stand_blockage(outcome):
+            _require_completed_motion(outcome)
+        if replan_index >= args.max_blockage_replans_per_leg:
+            raise RuntimeError(
+                f"blockage replan budget exhausted for coverage leg {leg_index}: "
+                f"{outcome.stop_reason}"
+            )
+
+        replan_index += 1
+        blockage_id = (
+            f"blockage_leg_{leg_index:03d}_replan_{replan_index:03d}"
+        )
+        observer_summary = _capture_lidar_epoch(
+            profile=profile,
+            args=args,
+            survey_root=survey_root,
+            viewpoint_id=blockage_id,
+        )
+        replan_root = (
+            survey_root
+            / "replans"
+            / f"leg_{leg_index:03d}_replan_{replan_index:03d}"
+        )
+        replanned = record_blockage_replan(
+            survey_root=survey_root,
+            map_yaml=args.map,
+            semantic_map_id=args.semantic_map_id,
+            target_viewpoint_id=target_viewpoint_id,
+            blockage_id=blockage_id,
+            observer_summary_path=observer_summary,
+            output_dir=replan_root,
+            robot_radius_m=profile.robot_radius_m,
+        )
+        _append_jsonl(
+            adaptive_log,
+            {
+                "schema_version": 1,
+                "event": "stand_blockage_replanned",
+                "timestamp": time.time(),
+                "leg_index": leg_index,
+                "replan_index": replan_index,
+                "blocked_run_id": outcome.run_id,
+                "blocked_stop_reason": outcome.stop_reason,
+                "blocked_stop_details": outcome.stop_details,
+                "observer_summary_json": str(observer_summary),
+                "replacement_route_csv": replanned["route_csv"],
+                "replacement_diagnostics_json": replanned[
+                    "diagnostics_json"
+                ],
+                "replacement_summary_json": replanned["summary_json"],
+            },
+        )
+        source_route = Path(replanned["route_csv"])
+        source_diagnostics = Path(replanned["diagnostics_json"])
 
 
 def _capture_camera_recommendation(
@@ -861,6 +1071,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--max-blockage-replans-per-leg",
+        type=int,
+        default=DEFAULT_MAX_BLOCKAGE_REPLANS_PER_LEG,
+        help=(
+            "Maximum stopped stand-confirmation and A* recovery attempts for "
+            "one coverage leg. Zero disables adaptive blockage recovery."
+        ),
+    )
+    parser.add_argument(
         "--stop-after-coverage",
         action="store_true",
         help=(
@@ -881,6 +1100,8 @@ def _validate_inputs(parser, args, profile, calibration) -> None:
         parser.error("--expected-stand-count must be positive")
     if args.coverage_leg_limit < 0:
         parser.error("--coverage-leg-limit must be non-negative")
+    if args.max_blockage_replans_per_leg < 0:
+        parser.error("--max-blockage-replans-per-leg must be non-negative")
     for name in (
         "inspection_stop_spacing_m",
         "lidar_epoch_sec",
@@ -1043,7 +1264,9 @@ def main(argv=None) -> int:
         print(
             "Physical safety requirements: clear arena; unloaded robot; operator "
             "beside the robot; Ctrl+C and physical stop ready; separate exact-topic "
-            f"zero Twist terminal ready. This RUN authorizes {authorization_scope}."
+            f"zero Twist terminal ready. This RUN authorizes {authorization_scope} "
+            "and its bounded stop-observe-A* stand-blockage replans "
+            f"(maximum {args.max_blockage_replans_per_leg} per coverage leg)."
         )
         if input("Type RUN to authorize the autonomous exploration mission: ").strip() != "RUN":
             raise RuntimeError("operator did not authorize the mission")
@@ -1058,21 +1281,16 @@ def main(argv=None) -> int:
             source_diagnostics = (
                 survey_root / "legs" / f"leg_{leg_index:03d}_diagnostics.json"
             )
-            sealed = seal_stand_discovery_route(
-                source_route_csv=source_route,
-                source_diagnostics_json=source_diagnostics,
-                coverage_plan_path=plan_path,
-                output_dir=(
-                    session_root / "execution" / f"coverage_leg_{leg_index:03d}"
-                ),
-            )
-            _run_motion_leg(
+            _execute_coverage_leg_with_replans(
                 profile=profile,
-                sealed=sealed,
-                run_id=f"{args.session_id}_coverage_{leg_index:03d}",
+                args=args,
                 session_root=session_root,
-                execute=True,
-                coverage_plan=plan_path,
+                survey_root=survey_root,
+                plan_path=plan_path,
+                leg_index=leg_index,
+                target_viewpoint_id=str(viewpoint_id),
+                source_route=source_route,
+                source_diagnostics=source_diagnostics,
             )
             observer_summary = _capture_lidar_epoch(
                 profile=profile,
@@ -1192,7 +1410,7 @@ def main(argv=None) -> int:
                 candidate_transit_radius_m=candidate_keepout_radius_m,
                 physical_clearance=clearance,
             )
-            _run_motion_leg(
+            candidate_outcome = _run_motion_leg(
                 profile=profile,
                 sealed=sealed,
                 run_id=(
@@ -1202,6 +1420,7 @@ def main(argv=None) -> int:
                 execute=True,
                 candidate_snapshot=source_root / "candidate_snapshot.json",
             )
+            _require_completed_motion(candidate_outcome)
             recommendation_path, qr_id, axis_observation_path = (
                 _capture_camera_recommendation(
                     profile=profile,
@@ -1267,7 +1486,7 @@ def main(argv=None) -> int:
                         "no physically allowed opposite-face approach was "
                         "A*-reachable: " + "; ".join(feasibility_failures)
                     )
-                _run_motion_leg(
+                opposite_outcome = _run_motion_leg(
                     profile=profile,
                     sealed=opposite_sealed,
                     run_id=(
@@ -1280,6 +1499,7 @@ def main(argv=None) -> int:
                         opposite_source / "candidate_snapshot.json"
                     ),
                 )
+                _require_completed_motion(opposite_outcome)
                 recommendation_path, qr_id, _ = (
                     _capture_camera_recommendation(
                         profile=profile,

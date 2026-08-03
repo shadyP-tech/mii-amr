@@ -124,6 +124,18 @@ If a directly measured, content-hashed stand model is available, add
 `--stand-model-profile <measured_stand_model.json>`; provisional CAD dimensions
 are rejected for operational pose commitment.
 
+The saved occupancy map is not assumed to contain movable stands. During a
+coverage leg the follower first stops on its normal LiDAR clearance or stuck
+watchdog. Only a stopped run with a near frontal obstacle may enter adaptive
+recovery. The script then records a stationary LiDAR epoch, requires that epoch
+to confirm and bind a stand candidate, adds every non-rejected candidate as a
+keepout in a new A* costmap, and plans back to the same inspection viewpoint.
+The exact stopped pose-to-A* connector must move away from the blocker and pass
+continuous hard-clearance checks. The replacement route is sealed by the same
+immutable route-certificate gate before it can move. Confirmation, clearance,
+sealing, or A* failure leaves the robot stopped. Recovery is bounded by
+`--max-blockage-replans-per-leg` (default `3`; set `0` to disable it).
+
 Use a new `--session-id` for every command below; sessions are immutable. These
 are live-ROS checks, not simulation runs.
 
@@ -165,6 +177,7 @@ python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
   --map maps/aufgabe03/<real_map>.yaml \
   --semantic-map-id <real_map_id> \
   --expected-stand-count 3 \
+  --max-blockage-replans-per-leg 3 \
   --coverage-leg-limit 1 \
   --session-id stand_explore_leg_001 \
   --execute
@@ -175,7 +188,11 @@ velocity owner is unambiguous. After that mission-level authorization, the
 script still requires the leg's own dry-run/preflight to pass before motion. A
 successful checkpoint writes
 `status=coverage_leg_checkpoint_complete`, the stopped LiDAR epoch, run events,
-preflight evidence, and the next viewpoint ID.
+preflight evidence, and the next viewpoint ID. If stand recovery occurred,
+also inspect `adaptive_replans.jsonl`, `coverage/replans/`, and the suffixed
+`execution/coverage_leg_<index>_replan_<index>/` certificate bundle. A stop
+reason such as route-tube departure, stale TF, or ambiguous velocity ownership
+is not classified as a stand and is never auto-replanned.
 
 Next validate the complete center-corridor discovery without approaching any
 candidate:

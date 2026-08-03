@@ -14,7 +14,7 @@ class CertifiedStaticStartupDecisionTest(unittest.TestCase):
             Pose2D(0.10, 0.00),
         )
 
-    def test_preserves_vertex_zero_when_pose_is_inside_its_tube(self):
+    def test_prefers_the_certified_first_segment_near_vertex_zero(self):
         decision = certified_static_startup_decision(
             Pose2D(-0.01, 0.01),
             self.route,
@@ -22,9 +22,9 @@ class CertifiedStaticStartupDecisionTest(unittest.TestCase):
         )
 
         self.assertTrue(decision.ok)
-        self.assertEqual(decision.target_index, 0)
+        self.assertEqual(decision.target_index, 1)
         self.assertEqual(decision.route_check.active_segment_start_index, 0)
-        self.assertEqual(decision.route_check.active_segment_end_index, 0)
+        self.assertEqual(decision.route_check.active_segment_end_index, 1)
 
     def test_joins_only_the_certified_first_segment(self):
         decision = certified_static_startup_decision(

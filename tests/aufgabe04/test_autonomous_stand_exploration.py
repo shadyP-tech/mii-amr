@@ -5,6 +5,7 @@ import math
 from pathlib import Path
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts.aufgabe04.navigation.plan_stand_coverage_survey import (
@@ -33,7 +34,10 @@ from scripts.aufgabe04.navigation.stand_discovery_route import (
 from scripts.aufgabe04.navigation.waypoint_csv import load_route_leg
 from scripts.aufgabe04.real_robot.passive_viewpoint_node import _resolved_qr_id
 from scripts.aufgabe04.real_robot.run_autonomous_stand_exploration import (
+    MotionLegOutcome,
     _bounded_approach_offsets,
+    _execute_coverage_leg_with_replans,
+    _is_confirmable_stand_blockage,
     _opposite_face_normal,
     build_parser,
     candidate_snapshot_from_registry,
@@ -247,6 +251,125 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         self.assertEqual(args.coverage_leg_limit, 1)
         self.assertTrue(args.stop_after_coverage)
         self.assertTrue(args.execute)
+
+    def test_near_front_stuck_stop_is_eligible_for_stand_confirmation(self):
+        outcome = MotionLegOutcome(
+            run_id="blocked",
+            status="stopped",
+            stop_reason="stuck no progress",
+            stop_details={
+                "front_clearance": {"nearest_valid_range_m": 0.248},
+            },
+            motion_published=True,
+            returncode=1,
+            semantic_log_path=Path("events.jsonl"),
+        )
+        route_tube = MotionLegOutcome(
+            **{
+                **outcome.__dict__,
+                "stop_reason": "pose left certified route tube",
+            }
+        )
+        far_obstacle = MotionLegOutcome(
+            **{
+                **outcome.__dict__,
+                "stop_details": {
+                    "front_clearance": {"nearest_valid_range_m": 0.50},
+                },
+            }
+        )
+
+        self.assertTrue(_is_confirmable_stand_blockage(outcome))
+        self.assertFalse(_is_confirmable_stand_blockage(route_tube))
+        self.assertFalse(_is_confirmable_stand_blockage(far_obstacle))
+
+    def test_coverage_leg_stops_observes_replans_and_resumes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_route = root / "route.csv"
+            source_diagnostics = root / "diagnostics.json"
+            source_route.write_text("source\n")
+            source_diagnostics.write_text("{}\n")
+            replacement_route = root / "replacement_route.csv"
+            replacement_diagnostics = root / "replacement_diagnostics.json"
+            replacement_route.write_text("replacement\n")
+            replacement_diagnostics.write_text("{}\n")
+            blocked = MotionLegOutcome(
+                run_id="mission_coverage_000",
+                status="stopped",
+                stop_reason="stuck no progress",
+                stop_details={
+                    "front_clearance": {"nearest_valid_range_m": 0.248},
+                },
+                motion_published=True,
+                returncode=1,
+                semantic_log_path=root / "blocked.jsonl",
+            )
+            completed = MotionLegOutcome(
+                run_id="mission_coverage_000_replan_001",
+                status="completed",
+                stop_reason="",
+                stop_details={},
+                motion_published=True,
+                returncode=0,
+                semantic_log_path=root / "completed.jsonl",
+            )
+            args = SimpleNamespace(
+                session_id="mission",
+                max_blockage_replans_per_leg=2,
+                map=MAP,
+                semantic_map_id="arena_1p898x3p9_auto",
+            )
+            profile = SimpleNamespace(robot_radius_m=0.105)
+            sealed = {
+                "route_csv": str(source_route),
+                "diagnostics_json": str(source_diagnostics),
+                "route_certificate_json": str(root / "certificate.json"),
+            }
+            with patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "seal_stand_discovery_route",
+                return_value=sealed,
+            ) as seal, patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "_run_motion_leg",
+                side_effect=(blocked, completed),
+            ) as run, patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "_capture_lidar_epoch",
+                return_value=root / "observer_summary.json",
+            ) as observe, patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "record_blockage_replan",
+                return_value={
+                    "route_csv": str(replacement_route),
+                    "diagnostics_json": str(replacement_diagnostics),
+                    "summary_json": str(root / "replan_summary.json"),
+                    "blockage_epoch_json": str(root / "epoch.json"),
+                },
+            ) as replan:
+                _execute_coverage_leg_with_replans(
+                    profile=profile,
+                    args=args,
+                    session_root=root / "session",
+                    survey_root=root / "survey",
+                    plan_path=root / "coverage_plan.json",
+                    leg_index=0,
+                    target_viewpoint_id="survey_vp_001",
+                    source_route=source_route,
+                    source_diagnostics=source_diagnostics,
+                )
+
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual(seal.call_count, 2)
+            observe.assert_called_once()
+            replan.assert_called_once()
+            second_seal = seal.call_args_list[1].kwargs
+            self.assertEqual(second_seal["source_route_csv"], replacement_route)
+            self.assertEqual(
+                second_seal["source_diagnostics_json"],
+                replacement_diagnostics,
+            )
 
     def test_opposite_inspection_offsets_never_cross_physical_minimum(self):
         offsets = _bounded_approach_offsets(0.70, 0.32)
