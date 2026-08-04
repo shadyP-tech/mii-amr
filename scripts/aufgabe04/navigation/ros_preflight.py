@@ -586,7 +586,12 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             future = self.nomotion_client.call_async(Empty.Request())
             service_request_count += 1
             sample = None
-            while rclpy.ok() and time.monotonic() < deadline:
+            sample_deadline = min(
+                deadline,
+                time.monotonic()
+                + max(1.0, 2.0 * self.stationary_amcl_sample_interval_sec),
+            )
+            while rclpy.ok() and time.monotonic() < sample_deadline:
                 rclpy.spin_once(self, timeout_sec=0.05)
                 if future.done() and future.exception() is not None:
                     service_failures.append(str(future.exception()))
@@ -610,8 +615,11 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                     sample = self._stationary_amcl_sample()
                     break
             if sample is None:
-                break
-            samples.append(sample)
+                service_failures.append(
+                    "no fresh AMCL publication followed no-motion request"
+                )
+            else:
+                samples.append(sample)
             interval_deadline = min(
                 deadline,
                 time.monotonic() + self.stationary_amcl_sample_interval_sec,
