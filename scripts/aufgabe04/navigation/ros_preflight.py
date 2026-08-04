@@ -85,6 +85,114 @@ class RosObservation:
 
 
 @dataclass(frozen=True)
+class StationaryAmclPoseSample:
+    x_m: float
+    y_m: float
+    yaw_rad: float
+    covariance: Tuple[float, ...] = ()
+
+
+def _angular_distance_rad(first: float, second: float) -> float:
+    return abs((first - second + math.pi) % (2.0 * math.pi) - math.pi)
+
+
+def _maximum_position_std_m(sample: StationaryAmclPoseSample) -> float | None:
+    if len(sample.covariance) < 8:
+        return None
+    covariance_xx = float(sample.covariance[0])
+    covariance_xy = float(sample.covariance[1])
+    covariance_yy = float(sample.covariance[7])
+    if not all(
+        math.isfinite(value)
+        for value in (covariance_xx, covariance_xy, covariance_yy)
+    ):
+        return None
+    discriminant = max(
+        0.0,
+        (covariance_xx - covariance_yy) ** 2 + 4.0 * covariance_xy**2,
+    )
+    maximum_eigenvalue = 0.5 * (
+        covariance_xx + covariance_yy + math.sqrt(discriminant)
+    )
+    return math.sqrt(max(0.0, maximum_eigenvalue))
+
+
+def evaluate_stationary_amcl_stability(
+    samples: Sequence[StationaryAmclPoseSample],
+    *,
+    required_sample_count: int,
+    max_position_spread_m: float,
+    max_yaw_spread_rad: float,
+) -> RosObservation:
+    """Evaluate repeated no-motion AMCL means before physical authorization."""
+
+    if (
+        not isinstance(required_sample_count, int)
+        or isinstance(required_sample_count, bool)
+        or required_sample_count < 2
+    ):
+        raise ValueError("required_sample_count must be an integer >= 2")
+    for name, value in {
+        "max_position_spread_m": max_position_spread_m,
+        "max_yaw_spread_rad": max_yaw_spread_rad,
+    }.items():
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{name} must be finite and positive")
+
+    position_spread_m = 0.0
+    yaw_spread_rad = 0.0
+    for first in samples:
+        for second in samples:
+            position_spread_m = max(
+                position_spread_m,
+                math.hypot(first.x_m - second.x_m, first.y_m - second.y_m),
+            )
+            yaw_spread_rad = max(
+                yaw_spread_rad,
+                _angular_distance_rad(first.yaw_rad, second.yaw_rad),
+            )
+    position_stds = [
+        value
+        for value in (_maximum_position_std_m(sample) for sample in samples)
+        if value is not None
+    ]
+    yaw_stds = [
+        math.sqrt(max(0.0, float(sample.covariance[35])))
+        for sample in samples
+        if len(sample.covariance) >= 36
+        and math.isfinite(float(sample.covariance[35]))
+    ]
+    enough_samples = len(samples) >= required_sample_count
+    position_ok = position_spread_m <= max_position_spread_m
+    yaw_ok = yaw_spread_rad <= max_yaw_spread_rad
+    ok = enough_samples and position_ok and yaw_ok
+    detail = (
+        f"samples={len(samples)}/{required_sample_count} "
+        f"position_spread={position_spread_m:.4f}m "
+        f"yaw_spread={yaw_spread_rad:.4f}rad"
+    )
+    return RosObservation(
+        "stationary AMCL stability",
+        ok,
+        detail,
+        {
+            "sample_count": len(samples),
+            "required_sample_count": required_sample_count,
+            "maximum_position_spread_m": position_spread_m,
+            "maximum_yaw_spread_rad": yaw_spread_rad,
+            "max_allowed_position_spread_m": max_position_spread_m,
+            "max_allowed_yaw_spread_rad": max_yaw_spread_rad,
+            "maximum_reported_position_std_m": (
+                max(position_stds) if position_stds else None
+            ),
+            "maximum_reported_yaw_std_rad": (
+                max(yaw_stds) if yaw_stds else None
+            ),
+        },
+    )
+
+
+@dataclass(frozen=True)
 class RosPreflightResult:
     ok: bool
     failures: List[str]
@@ -152,6 +260,10 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         request_nomotion_update: bool,
         nomotion_update_service: str,
         nomotion_update_timeout_sec: float,
+        stationary_amcl_sample_count: int,
+        stationary_amcl_sample_interval_sec: float,
+        max_stationary_amcl_position_spread_m: float,
+        max_stationary_amcl_yaw_spread_rad: float,
     ) -> None:
         super().__init__(
             "aufgabe04_ros_preflight",
@@ -169,6 +281,16 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         self.allowed_cmd_vel_publishers = tuple(allowed_cmd_vel_publishers)
         self.require_real_time = require_real_time
         self.nomotion_update_timeout_sec = nomotion_update_timeout_sec
+        self.stationary_amcl_sample_count = stationary_amcl_sample_count
+        self.stationary_amcl_sample_interval_sec = (
+            stationary_amcl_sample_interval_sec
+        )
+        self.max_stationary_amcl_position_spread_m = (
+            max_stationary_amcl_position_spread_m
+        )
+        self.max_stationary_amcl_yaw_spread_rad = (
+            max_stationary_amcl_yaw_spread_rad
+        )
         self.latest_scan = None
         self.latest_scan_receipt = None
         self.latest_odom = None
@@ -258,6 +380,12 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         failures: List[str] = []
         if self.nomotion_client is not None:
             observations.append(self._refresh_stationary_amcl())
+            stability = self._observe_stationary_amcl_stability()
+            observations.append(stability)
+            if not stability.ok:
+                failures.append(
+                    f"stationary AMCL stability: {stability.detail}"
+                )
 
         self._observe_topic(
             observations,
@@ -405,6 +533,122 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         except TransformException:
             return False
         return True
+
+    def _stationary_amcl_sample(self) -> StationaryAmclPoseSample | None:
+        msg = self.latest_amcl
+        if msg is None:
+            return None
+        pose = msg.pose.pose
+        orientation = pose.orientation
+        yaw_rad = math.atan2(
+            2.0
+            * (
+                orientation.w * orientation.z
+                + orientation.x * orientation.y
+            ),
+            1.0
+            - 2.0
+            * (
+                orientation.y * orientation.y
+                + orientation.z * orientation.z
+            ),
+        )
+        return StationaryAmclPoseSample(
+            x_m=float(pose.position.x),
+            y_m=float(pose.position.y),
+            yaw_rad=yaw_rad,
+            covariance=tuple(float(value) for value in msg.pose.covariance),
+        )
+
+    def _observe_stationary_amcl_stability(self) -> RosObservation:
+        deadline = time.monotonic() + self.nomotion_update_timeout_sec
+        samples: List[StationaryAmclPoseSample] = []
+        service_failures: List[str] = []
+        service_request_count = 0
+        while (
+            rclpy.ok()
+            and len(samples) < self.stationary_amcl_sample_count
+            and time.monotonic() < deadline
+        ):
+            while (
+                rclpy.ok()
+                and not self.nomotion_client.service_is_ready()
+                and time.monotonic() < deadline
+            ):
+                rclpy.spin_once(self, timeout_sec=0.05)
+            if not self.nomotion_client.service_is_ready():
+                break
+            baseline_receipt_ns = (
+                None
+                if self.latest_amcl_receipt is None
+                else self.latest_amcl_receipt.nanoseconds
+            )
+            future = self.nomotion_client.call_async(Empty.Request())
+            service_request_count += 1
+            sample = None
+            sample_deadline = min(
+                deadline,
+                time.monotonic()
+                + max(1.0, 2.0 * self.stationary_amcl_sample_interval_sec),
+            )
+            while rclpy.ok() and time.monotonic() < sample_deadline:
+                rclpy.spin_once(self, timeout_sec=0.05)
+                if future.done() and future.exception() is not None:
+                    service_failures.append(str(future.exception()))
+                    break
+                receipt_ns = (
+                    None
+                    if self.latest_amcl_receipt is None
+                    else self.latest_amcl_receipt.nanoseconds
+                )
+                fresh, _data = self._message_freshness(
+                    self.latest_amcl,
+                    self.latest_amcl_receipt,
+                    self.max_amcl_age_sec,
+                )
+                if (
+                    receipt_ns is not None
+                    and receipt_ns != baseline_receipt_ns
+                    and fresh
+                    and self._route_transform_available()
+                ):
+                    sample = self._stationary_amcl_sample()
+                    break
+            if sample is None:
+                service_failures.append(
+                    "no fresh AMCL publication followed no-motion request"
+                )
+            else:
+                samples.append(sample)
+            interval_deadline = min(
+                deadline,
+                time.monotonic() + self.stationary_amcl_sample_interval_sec,
+            )
+            while rclpy.ok() and time.monotonic() < interval_deadline:
+                rclpy.spin_once(self, timeout_sec=0.05)
+
+        observation = evaluate_stationary_amcl_stability(
+            samples,
+            required_sample_count=self.stationary_amcl_sample_count,
+            max_position_spread_m=(
+                self.max_stationary_amcl_position_spread_m
+            ),
+            max_yaw_spread_rad=self.max_stationary_amcl_yaw_spread_rad,
+        )
+        return RosObservation(
+            observation.name,
+            observation.ok,
+            observation.detail,
+            {
+                **observation.data,
+                "service_request_count": service_request_count,
+                "service_failures": service_failures,
+                "timeout_sec": self.nomotion_update_timeout_sec,
+                "sample_interval_sec": (
+                    self.stationary_amcl_sample_interval_sec
+                ),
+            },
+        )
 
     def _observe_topic(
         self,
@@ -686,6 +930,10 @@ def run_ros_preflight(
     request_nomotion_update: bool = False,
     nomotion_update_service: str = "/request_nomotion_update",
     nomotion_update_timeout_sec: float = 15.0,
+    stationary_amcl_sample_count: int = 5,
+    stationary_amcl_sample_interval_sec: float = 0.5,
+    max_stationary_amcl_position_spread_m: float = 0.015,
+    max_stationary_amcl_yaw_spread_rad: float = 0.03,
 ) -> RosPreflightResult:
     if (
         not math.isfinite(max_future_timestamp_sec)
@@ -709,6 +957,25 @@ def run_ros_preflight(
         or nomotion_update_timeout_sec <= 0.0
     ):
         raise ValueError("nomotion_update_timeout_sec must be finite and positive")
+    if (
+        not isinstance(stationary_amcl_sample_count, int)
+        or isinstance(stationary_amcl_sample_count, bool)
+        or stationary_amcl_sample_count < 2
+    ):
+        raise ValueError("stationary_amcl_sample_count must be an integer >= 2")
+    for name, value in {
+        "stationary_amcl_sample_interval_sec": (
+            stationary_amcl_sample_interval_sec
+        ),
+        "max_stationary_amcl_position_spread_m": (
+            max_stationary_amcl_position_spread_m
+        ),
+        "max_stationary_amcl_yaw_spread_rad": (
+            max_stationary_amcl_yaw_spread_rad
+        ),
+    }.items():
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{name} must be finite and positive")
     _require_ros()
     rclpy.init(args=None)
     node = RosPreflightNode(
@@ -726,6 +993,16 @@ def run_ros_preflight(
         request_nomotion_update=request_nomotion_update,
         nomotion_update_service=nomotion_update_service,
         nomotion_update_timeout_sec=nomotion_update_timeout_sec,
+        stationary_amcl_sample_count=stationary_amcl_sample_count,
+        stationary_amcl_sample_interval_sec=(
+            stationary_amcl_sample_interval_sec
+        ),
+        max_stationary_amcl_position_spread_m=(
+            max_stationary_amcl_position_spread_m
+        ),
+        max_stationary_amcl_yaw_spread_rad=(
+            max_stationary_amcl_yaw_spread_rad
+        ),
     )
     try:
         return node.collect()

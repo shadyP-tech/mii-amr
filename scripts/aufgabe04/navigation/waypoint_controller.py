@@ -67,7 +67,9 @@ class CertifiedCornerControlConfig:
     turn_threshold_rad: float = 0.20
     release_tolerance_m: float = 0.01
     hold_tolerance_m: float = 0.025
+    hard_tolerance_m: float = 0.03
     alignment_tolerance_rad: float = 0.10
+    max_reacquire_attempts: int = 2
 
     def __post_init__(self) -> None:
         angular = {
@@ -80,6 +82,7 @@ class CertifiedCornerControlConfig:
         distances = {
             "release_tolerance_m": self.release_tolerance_m,
             "hold_tolerance_m": self.hold_tolerance_m,
+            "hard_tolerance_m": self.hard_tolerance_m,
         }
         for name, value in distances.items():
             if not math.isfinite(value) or value <= 0.0:
@@ -88,6 +91,16 @@ class CertifiedCornerControlConfig:
             raise ValueError(
                 "release_tolerance_m must not exceed hold_tolerance_m"
             )
+        if self.hold_tolerance_m >= self.hard_tolerance_m:
+            raise ValueError(
+                "hold_tolerance_m must remain strictly inside hard_tolerance_m"
+            )
+        if (
+            not isinstance(self.max_reacquire_attempts, int)
+            or isinstance(self.max_reacquire_attempts, bool)
+            or self.max_reacquire_attempts < 0
+        ):
+            raise ValueError("max_reacquire_attempts must be a non-negative integer")
         if self.alignment_tolerance_rad >= self.turn_threshold_rad:
             raise ValueError(
                 "alignment_tolerance_rad must be smaller than "
@@ -98,6 +111,8 @@ class CertifiedCornerControlConfig:
 @dataclass(frozen=True)
 class CertifiedCornerTransitionLatch:
     vertex_index: int
+    reacquire_attempts: int = 0
+    reacquiring: bool = False
 
 
 @dataclass(frozen=True)
@@ -202,7 +217,7 @@ def compute_certified_corner_transition(
         following.x_m - vertex.x_m,
     )
     heading_error_rad = normalize_angle(outgoing_heading_rad - pose.yaw_rad)
-    if distance_to_vertex_m > corner_config.hold_tolerance_m:
+    if distance_to_vertex_m > corner_config.hard_tolerance_m:
         return CertifiedCornerTransitionDecision(
             ControllerStep(
                 VelocityCommand(0.0, 0.0),
@@ -211,10 +226,71 @@ def compute_certified_corner_transition(
                 distance_to_vertex_m,
                 target_index,
                 heading_error_rad,
-                "certified_corner_hold_exceeded",
+                "certified_corner_hard_limit_exceeded",
             ),
             latch,
-            "certified corner hold tolerance exceeded",
+            "certified corner hard tolerance exceeded",
+        )
+    if latch.reacquiring:
+        if distance_to_vertex_m > corner_config.release_tolerance_m:
+            reacquire = compute_waypoint_command(
+                pose,
+                waypoints,
+                target_index,
+                controller_config,
+                locked_pursuit_index=target_index,
+            )
+            return CertifiedCornerTransitionDecision(
+                replace(reacquire, progress_mode="certified_corner_reacquire"),
+                latch,
+            )
+        recovered_latch = replace(latch, reacquiring=False)
+        return CertifiedCornerTransitionDecision(
+            ControllerStep(
+                VelocityCommand(0.0, 0.0),
+                target_index,
+                False,
+                distance_to_vertex_m,
+                target_index,
+                heading_error_rad,
+                "certified_corner_reacquired",
+            ),
+            recovered_latch,
+        )
+    if distance_to_vertex_m > corner_config.hold_tolerance_m:
+        if latch.reacquire_attempts >= corner_config.max_reacquire_attempts:
+            return CertifiedCornerTransitionDecision(
+                ControllerStep(
+                    VelocityCommand(0.0, 0.0),
+                    target_index,
+                    False,
+                    distance_to_vertex_m,
+                    target_index,
+                    heading_error_rad,
+                    "certified_corner_reacquire_exhausted",
+                ),
+                latch,
+                "certified corner reacquire budget exhausted",
+            )
+        reacquire_latch = replace(
+            latch,
+            reacquire_attempts=latch.reacquire_attempts + 1,
+            reacquiring=True,
+        )
+        # Consume one complete zero-command cycle before any corrective
+        # translation.  The follower's ordinary certificate check then proves
+        # the live pose and exact-vertex chord remain inside the hard tube.
+        return CertifiedCornerTransitionDecision(
+            ControllerStep(
+                VelocityCommand(0.0, 0.0),
+                target_index,
+                False,
+                distance_to_vertex_m,
+                target_index,
+                heading_error_rad,
+                "certified_corner_reacquire_start",
+            ),
+            reacquire_latch,
         )
     if abs(heading_error_rad) > corner_config.alignment_tolerance_rad:
         angular_z_radps = _clamp(
