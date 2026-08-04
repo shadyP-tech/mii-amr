@@ -4,6 +4,7 @@ from dataclasses import replace
 from contextlib import redirect_stdout
 from io import StringIO
 import json
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -279,6 +280,88 @@ class CoverageSurveyPlanTest(unittest.TestCase):
 
         self.assertFalse(evidence.required)
         self.assertEqual(len(joined.route.points), original_count)
+
+    def test_off_center_start_bypasses_same_cell_grid_center(self):
+        base = Costmap.from_occupancy_grid(free_grid()).with_arena_bounds(
+            ArenaBounds(length_m=4.0, width_m=2.0)
+        )
+        planning = base.with_inflation(0.20)
+        start = Pose2D(-1.47, 0.03, 0.0)
+        result = plan_route(planning, start, Pose2D(0.45, 0.05), snap_radius_m=0.3)
+        self.assertIsNotNone(result.route)
+        assert result.route is not None
+        original_count = len(result.route.points)
+        redundant_center = result.route.points[0]
+        first_forward_vertex = result.route.points[1]
+        self.assertEqual(redundant_center.cell, base.world_to_grid(start))
+
+        joined, evidence = prepend_certified_exact_start(
+            result,
+            base_costmap=base,
+            start=start,
+            required_clearance_m=0.20,
+        )
+
+        assert joined.route is not None
+        self.assertTrue(evidence.required)
+        self.assertTrue(evidence.validated)
+        self.assertEqual(evidence.anchor, first_forward_vertex.pose)
+        self.assertEqual(joined.route.points[0].pose, start)
+        self.assertEqual(joined.route.points[1].pose, first_forward_vertex.pose)
+        self.assertNotEqual(joined.route.points[0].cell, joined.route.points[1].cell)
+        self.assertNotIn(
+            redundant_center.pose,
+            tuple(point.pose for point in joined.route.points[1:]),
+        )
+        self.assertEqual(len(joined.route.points), original_count)
+
+    def test_physical_start_regression_has_no_same_cell_reversal(self):
+        map_path = Path("maps/aufgabe03/arena_1p898x3p9_auto.yaml")
+        grid, bundle = load_occupancy_grid_with_bundle(
+            map_path,
+            semantic_map_id="arena_1p898x3p9_auto",
+            planning_frame="map",
+        )
+        physical_start = Pose2D(
+            -0.3674933407222252,
+            -0.6078591295582066,
+            1.660126876187633,
+        )
+        survey = build_coverage_survey_plan(
+            grid,
+            map_bundle_sha256=bundle.bundle_sha256,
+            start=physical_start,
+            survey_id="same_cell_reversal_regression",
+            config=CoverageSurveyConfig(lane_count=1, expected_stand_count=5),
+        )
+        leg = plan_next_survey_leg(
+            grid,
+            plan=survey,
+            progress=new_survey_progress(survey),
+            registry=new_stand_survey_registry(survey),
+            current_pose=physical_start,
+        )
+
+        self.assertIsNotNone(leg)
+        assert leg is not None and leg.route_result.route is not None
+        points = leg.route_result.route.points
+        self.assertGreaterEqual(len(points), 3)
+        self.assertEqual(points[0].pose, physical_start)
+        self.assertNotEqual(points[0].cell, points[1].cell)
+        first_heading = math.atan2(
+            points[1].pose.y_m - points[0].pose.y_m,
+            points[1].pose.x_m - points[0].pose.x_m,
+        )
+        second_heading = math.atan2(
+            points[2].pose.y_m - points[1].pose.y_m,
+            points[2].pose.x_m - points[1].pose.x_m,
+        )
+        turn_rad = abs(
+            (second_heading - first_heading + math.pi)
+            % (2.0 * math.pi)
+            - math.pi
+        )
+        self.assertLess(turn_rad, math.pi / 2.0)
 
 
 class StandSurveyRegistryTest(unittest.TestCase):

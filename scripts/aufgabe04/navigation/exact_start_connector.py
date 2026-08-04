@@ -113,7 +113,26 @@ def prepend_certified_exact_start(
 
     if result.route is None or not result.route.points:
         raise ValueError("cannot certify an exact start for a failed or empty route")
-    anchor = result.route.points[0].pose
+    original = result.route
+    anchor_index = 0
+    first = original.points[0]
+    exact_to_first_m = math.hypot(
+        first.pose.x_m - start.x_m,
+        first.pose.y_m - start.y_m,
+    )
+    if (
+        len(original.points) >= 2
+        and exact_to_first_m > _EPSILON_M
+        and first.cell == base_costmap.world_to_grid(start)
+    ):
+        # The exact pose already occupies the A* start cell. Executing a short
+        # detour to that cell's centre can create a near reversal before the
+        # first real A* edge (152.61 degrees in the physical regression). Skip
+        # only this redundant centre and certify the complete metric segment
+        # directly to the first neighboring A* vertex. If that segment lacks
+        # clearance, _segment_clearance_evidence fails closed.
+        anchor_index = 1
+    anchor = original.points[anchor_index].pose
     evidence = _segment_clearance_evidence(
         base_costmap,
         start,
@@ -124,7 +143,10 @@ def prepend_certified_exact_start(
         return result, evidence
 
     poses_and_cells = [(start, base_costmap.world_to_grid(start))]
-    poses_and_cells.extend((point.pose, point.cell) for point in result.route.points)
+    poses_and_cells.extend(
+        (point.pose, point.cell)
+        for point in original.points[anchor_index:]
+    )
     points = []
     cumulative_m = 0.0
     previous_pose = None
@@ -149,7 +171,6 @@ def prepend_certified_exact_start(
         )
         previous_pose = pose
 
-    original = result.route
     route = Route(
         points=tuple(points),
         requested_start=start,
