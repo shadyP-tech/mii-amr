@@ -409,6 +409,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.01,
         help="Sampling spacing for runtime pursuit-chord certificate checks.",
     )
+    parser.add_argument(
+        "--certified-corner-max-reacquire-attempts",
+        type=int,
+        default=2,
+        help=(
+            "Maximum bounded exact-vertex reacquisitions while a discovery "
+            "corner remains inside the certified route tube."
+        ),
+    )
     parser.add_argument("--preflight-observation-window-sec", type=float, default=2.0)
     parser.add_argument(
         "--nomotion-update-service",
@@ -419,6 +428,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--nomotion-update-timeout-sec",
         type=float,
         default=15.0,
+    )
+    parser.add_argument(
+        "--stationary-amcl-sample-count",
+        type=int,
+        default=5,
+        help="Forced no-motion AMCL samples required before physical motion.",
+    )
+    parser.add_argument(
+        "--stationary-amcl-sample-interval-sec",
+        type=float,
+        default=0.5,
+    )
+    parser.add_argument(
+        "--max-stationary-amcl-position-spread-m",
+        type=float,
+        default=0.015,
+    )
+    parser.add_argument(
+        "--max-stationary-amcl-yaw-spread-rad",
+        type=float,
+        default=0.03,
     )
     parser.add_argument(
         "--skip-nomotion-update-before-preflight",
@@ -905,6 +935,32 @@ def main(argv: list[str] | None = None) -> int:
         or args.nomotion_update_timeout_sec <= 0.0
     ):
         parser.error("--nomotion-update-timeout-sec must be positive")
+    if args.stationary_amcl_sample_count < 2:
+        parser.error("--stationary-amcl-sample-count must be at least 2")
+    if (
+        args.skip_nomotion_update_before_preflight
+        and not args.allow_sim_time
+        and args.localization_source == "amcl"
+    ):
+        parser.error(
+            "real AMCL runs may not skip the stationary localization gate"
+        )
+    for flag, value in (
+        (
+            "--stationary-amcl-sample-interval-sec",
+            args.stationary_amcl_sample_interval_sec,
+        ),
+        (
+            "--max-stationary-amcl-position-spread-m",
+            args.max_stationary_amcl_position_spread_m,
+        ),
+        (
+            "--max-stationary-amcl-yaw-spread-rad",
+            args.max_stationary_amcl_yaw_spread_rad,
+        ),
+    ):
+        if not math.isfinite(value) or value <= 0.0:
+            parser.error(f"{flag} must be positive")
     if (
         not math.isfinite(args.certified_route_tube_radius_m)
         or args.certified_route_tube_radius_m <= 0.0
@@ -928,6 +984,10 @@ def main(argv: list[str] | None = None) -> int:
         or args.certified_route_chord_sample_spacing_m <= 0.0
     ):
         parser.error("--certified-route-chord-sample-spacing-m must be positive")
+    if args.certified_corner_max_reacquire_attempts < 0:
+        parser.error(
+            "--certified-corner-max-reacquire-attempts must be non-negative"
+        )
     if (
         not math.isfinite(args.viewpoint_sampling_goal_tolerance_m)
         or args.viewpoint_sampling_goal_tolerance_m <= 0.0
@@ -1486,6 +1546,18 @@ def main(argv: list[str] | None = None) -> int:
             ),
             nomotion_update_service=args.nomotion_update_service,
             nomotion_update_timeout_sec=args.nomotion_update_timeout_sec,
+            stationary_amcl_sample_count=(
+                args.stationary_amcl_sample_count
+            ),
+            stationary_amcl_sample_interval_sec=(
+                args.stationary_amcl_sample_interval_sec
+            ),
+            max_stationary_amcl_position_spread_m=(
+                args.max_stationary_amcl_position_spread_m
+            ),
+            max_stationary_amcl_yaw_spread_rad=(
+                args.max_stationary_amcl_yaw_spread_rad
+            ),
         )
     except RuntimeError as exc:
         stop_reason = str(exc)
@@ -1844,6 +1916,9 @@ def main(argv: list[str] | None = None) -> int:
         certified_route_chord_sample_spacing_m=(
             args.certified_route_chord_sample_spacing_m
         ),
+        certified_corner_max_reacquire_attempts=(
+            args.certified_corner_max_reacquire_attempts
+        ),
     )
     resolved_controller_config = controller_config_for_route_kind(
         follower_config.controller,
@@ -1955,6 +2030,9 @@ def main(argv: list[str] | None = None) -> int:
         ),
         certified_corner_alignment_tolerance_rad=(
             follower_config.certified_corner_alignment_tolerance_rad
+        ),
+        certified_corner_max_reacquire_attempts=(
+            follower_config.certified_corner_max_reacquire_attempts
         ),
         allow_simulation_odom_after_stale_tf=(
             follower_config.allow_simulation_odom_after_stale_tf

@@ -159,6 +159,7 @@ class FollowerConfig:
     certified_corner_release_tolerance_m: float = 0.01
     certified_corner_hold_tolerance_m: float = 0.025
     certified_corner_alignment_tolerance_rad: float = 0.10
+    certified_corner_max_reacquire_attempts: int = 2
 
     def __post_init__(self) -> None:
         if not isinstance(
@@ -325,8 +326,12 @@ class FollowerConfig:
             turn_threshold_rad=self.certified_corner_turn_threshold_rad,
             release_tolerance_m=self.certified_corner_release_tolerance_m,
             hold_tolerance_m=self.certified_corner_hold_tolerance_m,
+            hard_tolerance_m=self.certified_route_tube_radius_m,
             alignment_tolerance_rad=(
                 self.certified_corner_alignment_tolerance_rad
+            ),
+            max_reacquire_attempts=(
+                self.certified_corner_max_reacquire_attempts
             ),
         )
         if (
@@ -1465,9 +1470,16 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                 hold_tolerance_m=(
                     self.follower_config.certified_corner_hold_tolerance_m
                 ),
+                hard_tolerance_m=(
+                    self.follower_config.certified_route_tube_radius_m
+                ),
                 alignment_tolerance_rad=(
                     self.follower_config
                     .certified_corner_alignment_tolerance_rad
+                ),
+                max_reacquire_attempts=(
+                    self.follower_config
+                    .certified_corner_max_reacquire_attempts
                 ),
             ),
         )
@@ -1489,13 +1501,19 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
             logger = self.get_logger()
         except Exception:
             return
+        reacquire_attempts = (
+            0
+            if self.certified_corner_latch is None
+            else self.certified_corner_latch.reacquire_attempts
+        )
         logger.info(
             "certified sharp-corner transition: "
             f"phase={step.progress_mode} target_index={step.target_index} "
             f"distance_m={step.distance_to_target_m:.6f} "
             f"heading_error_rad={step.controlled_heading_error_rad:.6f} "
             f"linear_mps={step.command.linear_x_mps:.6f} "
-            f"angular_radps={step.command.angular_z_radps:.6f}"
+            f"angular_radps={step.command.angular_z_radps:.6f} "
+            f"reacquire_attempts={reacquire_attempts}"
         )
 
     def _reset_progress_watchdog(self, now_monotonic: float) -> None:
@@ -1834,6 +1852,15 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                                 "tracking_tube_radius_m": (
                                     self.follower_config
                                     .certified_route_tube_radius_m
+                                ),
+                                "reacquire_attempts": (
+                                    0
+                                    if self.certified_corner_latch is None
+                                    else self.certified_corner_latch.reacquire_attempts
+                                ),
+                                "max_reacquire_attempts": (
+                                    self.follower_config
+                                    .certified_corner_max_reacquire_attempts
                                 ),
                                 "fail_closed": True,
                             }

@@ -140,7 +140,46 @@ class WaypointControllerTest(unittest.TestCase):
         self.assertTrue(route_check.ok)
         self.assertLess(route_check.pose_distance_to_segment_m, 0.013)
 
-    def test_latched_corner_fails_closed_before_consuming_route_tube(self):
+    def test_latched_corner_starts_bounded_reacquire_inside_route_tube(self):
+        waypoints = (
+            Pose2D(0.0, 0.0, math.nan),
+            Pose2D(0.05, 0.0, math.nan),
+            Pose2D(0.05, 0.05, math.nan),
+        )
+        controller = ControllerConfig(exact_vertex_pursuit=True)
+        # Tuned-AMCL physical run 20260804T115324Z stopped at this radial
+        # distance even though it remained inside the 30 mm certified tube.
+        recorded_soft_exceedance_m = 0.02571478244056407
+        entered = compute_certified_corner_transition(
+            Pose2D(0.05, 0.0, 0.0),
+            waypoints,
+            1,
+            controller,
+        )
+        drifted = compute_certified_corner_transition(
+            Pose2D(0.05 + recorded_soft_exceedance_m, 0.0, 0.0),
+            waypoints,
+            1,
+            controller,
+            entered.latch,
+        )
+
+        self.assertIsNotNone(entered.latch)
+        self.assertEqual(drifted.failure, "")
+        self.assertEqual(
+            (drifted.step.command.linear_x_mps, drifted.step.command.angular_z_radps),
+            (0.0, 0.0),
+        )
+        self.assertEqual(
+            drifted.step.progress_mode,
+            "certified_corner_reacquire_start",
+        )
+        self.assertEqual(drifted.step.target_index, 1)
+        self.assertEqual(drifted.step.pursuit_index, 1)
+        self.assertTrue(drifted.latch.reacquiring)
+        self.assertEqual(drifted.latch.reacquire_attempts, 1)
+
+    def test_latched_corner_reacquires_exact_vertex_before_alignment(self):
         waypoints = (
             Pose2D(0.0, 0.0, math.nan),
             Pose2D(0.05, 0.0, math.nan),
@@ -153,25 +192,134 @@ class WaypointControllerTest(unittest.TestCase):
             1,
             controller,
         )
-        drifted = compute_certified_corner_transition(
+        started = compute_certified_corner_transition(
             Pose2D(0.076, 0.0, 0.0),
             waypoints,
             1,
             controller,
             entered.latch,
         )
+        reacquiring = compute_certified_corner_transition(
+            Pose2D(0.07, 0.0, math.pi),
+            waypoints,
+            1,
+            controller,
+            started.latch,
+        )
+        reacquired = compute_certified_corner_transition(
+            Pose2D(0.059, 0.0, math.pi),
+            waypoints,
+            1,
+            controller,
+            reacquiring.latch,
+        )
 
-        self.assertIsNotNone(entered.latch)
         self.assertEqual(
-            drifted.failure,
-            "certified corner hold tolerance exceeded",
+            reacquiring.step.progress_mode,
+            "certified_corner_reacquire",
+        )
+        self.assertEqual(reacquiring.step.target_index, 1)
+        self.assertEqual(reacquiring.step.pursuit_index, 1)
+        self.assertGreater(reacquiring.step.command.linear_x_mps, 0.0)
+        self.assertEqual(
+            reacquired.step.progress_mode,
+            "certified_corner_reacquired",
         )
         self.assertEqual(
-            (drifted.step.command.linear_x_mps, drifted.step.command.angular_z_radps),
+            (
+                reacquired.step.command.linear_x_mps,
+                reacquired.step.command.angular_z_radps,
+            ),
             (0.0, 0.0),
         )
-        self.assertEqual(drifted.step.target_index, 1)
-        self.assertEqual(drifted.step.pursuit_index, 1)
+        self.assertFalse(reacquired.latch.reacquiring)
+        self.assertEqual(reacquired.latch.reacquire_attempts, 1)
+
+    def test_latched_corner_fails_immediately_outside_hard_tube(self):
+        waypoints = (
+            Pose2D(0.0, 0.0, math.nan),
+            Pose2D(0.05, 0.0, math.nan),
+            Pose2D(0.05, 0.05, math.nan),
+        )
+        controller = ControllerConfig(exact_vertex_pursuit=True)
+        # The earlier physical run escaped beyond the hard route tube and
+        # must remain an immediate fail-closed case.
+        recorded_hard_exceedance_m = 0.030778370354233135
+        entered = compute_certified_corner_transition(
+            Pose2D(0.05, 0.0, 0.0),
+            waypoints,
+            1,
+            controller,
+        )
+        escaped = compute_certified_corner_transition(
+            Pose2D(0.05 + recorded_hard_exceedance_m, 0.0, 0.0),
+            waypoints,
+            1,
+            controller,
+            entered.latch,
+        )
+
+        self.assertEqual(
+            escaped.failure,
+            "certified corner hard tolerance exceeded",
+        )
+        self.assertEqual(
+            escaped.step.progress_mode,
+            "certified_corner_hard_limit_exceeded",
+        )
+        self.assertEqual(
+            (escaped.step.command.linear_x_mps, escaped.step.command.angular_z_radps),
+            (0.0, 0.0),
+        )
+
+    def test_latched_corner_fails_after_reacquire_budget_is_exhausted(self):
+        waypoints = (
+            Pose2D(0.0, 0.0, math.nan),
+            Pose2D(0.05, 0.0, math.nan),
+            Pose2D(0.05, 0.05, math.nan),
+        )
+        controller = ControllerConfig(exact_vertex_pursuit=True)
+        corner = CertifiedCornerControlConfig(max_reacquire_attempts=1)
+        entered = compute_certified_corner_transition(
+            Pose2D(0.05, 0.0, 0.0),
+            waypoints,
+            1,
+            controller,
+            corner_config=corner,
+        )
+        first_reacquire = compute_certified_corner_transition(
+            Pose2D(0.076, 0.0, 0.0),
+            waypoints,
+            1,
+            controller,
+            entered.latch,
+            corner,
+        )
+        recovered = compute_certified_corner_transition(
+            Pose2D(0.05, 0.0, 0.0),
+            waypoints,
+            1,
+            controller,
+            first_reacquire.latch,
+            corner,
+        )
+        exhausted = compute_certified_corner_transition(
+            Pose2D(0.076, 0.0, 0.0),
+            waypoints,
+            1,
+            controller,
+            recovered.latch,
+            corner,
+        )
+
+        self.assertEqual(
+            exhausted.failure,
+            "certified corner reacquire budget exhausted",
+        )
+        self.assertEqual(
+            exhausted.step.progress_mode,
+            "certified_corner_reacquire_exhausted",
+        )
 
     def test_straight_certified_vertex_does_not_activate_corner_contract(self):
         decision = compute_certified_corner_transition(
