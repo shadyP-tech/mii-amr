@@ -6,7 +6,7 @@ import math
 import threading
 import time
 from dataclasses import dataclass, replace
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 from scripts.aufgabe04.navigation.dynamic_route_handoff import (
     RouteUpdate,
@@ -112,6 +112,7 @@ except ImportError:  # pragma: no cover - keeps offline tests ROS-free.
 class FollowerConfig:
     controller: ControllerConfig
     min_obstacle_distance_m: float = 0.20
+    omnidirectional_hard_stop_distance_m: float = 0.12
     front_obstacle_slow_distance_m: float = 0.38
     front_obstacle_sector_rad: float = math.radians(35.0)
     max_scan_age_sec: float = 1.0
@@ -162,6 +163,16 @@ class FollowerConfig:
     certified_corner_max_reacquire_attempts: int = 2
 
     def __post_init__(self) -> None:
+        if (
+            not math.isfinite(self.omnidirectional_hard_stop_distance_m)
+            or self.omnidirectional_hard_stop_distance_m <= 0.0
+            or self.omnidirectional_hard_stop_distance_m
+            >= self.min_obstacle_distance_m
+        ):
+            raise ValueError(
+                "omnidirectional_hard_stop_distance_m must be finite, positive, "
+                "and smaller than min_obstacle_distance_m"
+            )
         if not isinstance(
             self.allow_simulation_odom_after_stale_tf,
             bool,
@@ -868,6 +879,14 @@ def dynamic_route_kind_transition_failure(
 ) -> str:
     """Validate monotonic acquisition -> sampling -> physical handoffs."""
 
+    if (
+        current_route_kind == "stand_discovery_corridor"
+        and next_route_kind == current_route_kind
+    ):
+        # A physical coverage blockage changes only the certified geometric
+        # route.  The mission phase and committed inspection target stay the
+        # same, so this is the only static-route hot handoff admitted here.
+        return ""
     if not next_route_kind:
         return "missing dynamic route kind"
     if next_route_kind not in DYNAMIC_VIEWPOINT_ROUTE_KINDS:
@@ -1189,6 +1208,13 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         follower_config: FollowerConfig,
         waypoint_provider: Callable[[Pose2D], RouteUpdate | None] | None = None,
         route_update_callback: Callable[[RouteUpdate], None] | None = None,
+        blockage_recovery_provider: (
+            Callable[
+                [Pose2D, str, Mapping[str, object]],
+                RouteUpdate | None,
+            ]
+            | None
+        ) = None,
         *,
         tf_buffer=None,
     ) -> None:
@@ -1204,6 +1230,8 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         self.follower_config = follower_config
         self.waypoint_provider = waypoint_provider
         self.route_update_callback = route_update_callback
+        self.blockage_recovery_provider = blockage_recovery_provider
+        self.queued_route_update: RouteUpdate | None = None
         self.last_route_refresh_at = 0.0
         self.initial_route_refresh_pending = waypoint_provider is not None
         startup_state = certified_startup_route_state(
@@ -1213,6 +1241,7 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         self.dynamic_join_pending = startup_state.join_pending
         self.dynamic_join_limit_m = startup_state.join_limit_m
         self.start_egress_lock_index = startup_state.egress_lock_index
+        self.start_egress_reverse = False
         self.current_route_kind = follower_config.initial_route_kind
         self.certified_static_start_pending = (
             self.current_route_kind in STATIC_STARTUP_SEGMENT_JOIN_ROUTE_KINDS
@@ -1431,10 +1460,12 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                 ),
                 max_linear_mps=self.follower_config.start_egress_max_linear_mps,
             ),
+            reverse=getattr(self, "start_egress_reverse", False),
         )
         if step is not None:
             return step
         self.start_egress_lock_index = None
+        self.start_egress_reverse = False
         if waypoint_index != self.target_index:
             self._clear_intermediate_terminal_heading_latch(
                 target_changed=True,
@@ -1564,6 +1595,30 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                 self._drain_runtime_callbacks()
                 safety_failure = self._safety_failure()
                 if safety_failure:
+                    if (
+                        safety_failure == OBSTACLE_TOO_CLOSE
+                        and self.blockage_recovery_provider is not None
+                    ):
+                        self.publish_repeated_zero()
+                        recovery_pose = (
+                            self._current_pose_lookup_with_stale_recovery().pose
+                        )
+                        if recovery_pose is not None:
+                            recovery = self._attempt_blockage_recovery(
+                                recovery_pose,
+                                safety_failure,
+                                self.latest_stop_details or {},
+                            )
+                            if recovery == "adopted":
+                                time.sleep(loop_sleep_sec)
+                                continue
+                            if recovery == "stopped":
+                                safety_failure = str(
+                                    (self.latest_stop_details or {}).get(
+                                        "reason",
+                                        safety_failure,
+                                    )
+                                )
                     self.publish_repeated_zero()
                     return FollowerResult(
                         "stopped",
@@ -2131,6 +2186,21 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                         ),
                     )
                     self.publish_repeated_zero()
+                    recovery = self._attempt_blockage_recovery(
+                        pose,
+                        progress_failure,
+                        self.latest_stop_details,
+                    )
+                    if recovery == "adopted":
+                        time.sleep(loop_sleep_sec)
+                        continue
+                    if recovery == "stopped":
+                        progress_failure = str(
+                            (self.latest_stop_details or {}).get(
+                                "reason",
+                                progress_failure,
+                            )
+                        )
                     return FollowerResult(
                         "stopped",
                         progress_failure,
@@ -2148,33 +2218,72 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         finally:
             self.publish_repeated_zero()
 
+    def _attempt_blockage_recovery(
+        self,
+        pose: Pose2D,
+        stop_reason: str,
+        stop_details: Mapping[str, object],
+    ) -> str:
+        """Plan and atomically adopt one physical coverage route revision."""
+
+        provider = self.blockage_recovery_provider
+        if provider is None:
+            return ""
+        # Motion must already be zero before synchronous planning, artifact
+        # sealing, or event logging begins. Sensor callbacks continue on the
+        # background executor while the planner runs.
+        self.publish_repeated_zero()
+        try:
+            update = provider(pose, stop_reason, dict(stop_details))
+        except Exception as exc:
+            self.latest_stop_details = {
+                **dict(stop_details),
+                "reason": f"blockage recovery provider failed: {exc}",
+                "fault_code": "blockage_recovery_provider_exception",
+                "original_stop_reason": stop_reason,
+                "fail_closed": True,
+            }
+            return "stopped"
+        if update is None:
+            return ""
+        self.queued_route_update = update
+        return self._refresh_dynamic_route(pose)
+
     def _refresh_dynamic_route(self, pose: Pose2D) -> str:
-        if self.waypoint_provider is None:
+        queued_update = getattr(self, "queued_route_update", None)
+        if queued_update is None and self.waypoint_provider is None:
             return ""
         now = time.monotonic()
         initial_refresh = self.initial_route_refresh_pending
         if (
-            not initial_refresh
+            queued_update is None
+            and not initial_refresh
             and self.follower_config.dynamic_route_refresh_sec <= 0.0
         ):
             return ""
         if (
-            not initial_refresh
+            queued_update is None
+            and not initial_refresh
             and now - self.last_route_refresh_at
             < self.follower_config.dynamic_route_refresh_sec
         ):
             return ""
         self.initial_route_refresh_pending = False
         self.last_route_refresh_at = now
-        try:
-            update = self.waypoint_provider(pose)
-        except Exception as exc:
-            self.latest_stop_details = {
-                "reason": f"dynamic route provider failed: {exc}",
-                "fault_code": "route_provider_exception",
-                "fail_closed": True,
-            }
-            return "stopped"
+        if queued_update is not None:
+            update = queued_update
+            self.queued_route_update = None
+        else:
+            try:
+                assert self.waypoint_provider is not None
+                update = self.waypoint_provider(pose)
+            except Exception as exc:
+                self.latest_stop_details = {
+                    "reason": f"dynamic route provider failed: {exc}",
+                    "fault_code": "route_provider_exception",
+                    "fail_closed": True,
+                }
+                return "stopped"
         if update is None:
             return ""
         if update.kind is RouteUpdateKind.UNCHANGED:
@@ -2275,6 +2384,7 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
             }
             return "stopped"
         next_egress_lock_index = None
+        next_egress_reverse = False
         if raw_egress_lock:
             raw_lock_index = update.event_fields.get(
                 "start_egress_waypoint_index"
@@ -2297,6 +2407,19 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                 }
                 return "stopped"
             next_egress_lock_index = raw_lock_index
+            raw_egress_motion = update.event_fields.get(
+                "start_egress_motion",
+                "forward",
+            )
+            if raw_egress_motion not in {"forward", "reverse"}:
+                self.publish_zero()
+                self.latest_stop_details = {
+                    "reason": "dynamic route start-egress motion is invalid",
+                    "fault_code": "invalid_route_update",
+                    "fail_closed": True,
+                }
+                return "stopped"
+            next_egress_reverse = raw_egress_motion == "reverse"
         previous_route_kind = self.current_route_kind
         self.publish_zero()
         self._clear_intermediate_terminal_heading_latch(
@@ -2308,9 +2431,11 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         # Every route replacement owns a fresh lock decision. Ordinary routes
         # explicitly clear any lock retained from the previous revision.
         self.start_egress_lock_index = next_egress_lock_index
+        self.start_egress_reverse = next_egress_reverse
         self.current_route_kind = next_route_kind
         self.reverse_staging = (
             next_route_kind in PHYSICAL_ROUTE_KINDS
+            and next_route_kind != "stand_discovery_corridor"
             and reverse_staging_is_preferred(pose, replacement)
         )
         if next_route_kind in PHYSICAL_ROUTE_KINDS:
@@ -2511,6 +2636,44 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         return float(getattr(self.latest_scan, "range_max")) if hasattr(self.latest_scan, "range_max") else None
 
     def _obstacle_failure(self) -> str:
+        if getattr(self, "blockage_recovery_provider", None) is not None:
+            hard = obstacle_decision(
+                getattr(self.latest_scan, "ranges", None),
+                self.follower_config.omnidirectional_hard_stop_distance_m,
+                range_min_m=self._scan_range_min(),
+                range_max_m=self._scan_range_max(),
+                source="global_hard_scan",
+            )
+            if hard.stop_reason:
+                self.latest_stop_details = hard.to_log_dict()
+                return hard.stop_reason
+            reversing = self.start_egress_reverse
+            directional = front_sector_decision(
+                getattr(self.latest_scan, "ranges", None),
+                float(getattr(self.latest_scan, "angle_min", 0.0)),
+                float(getattr(self.latest_scan, "angle_increment", 0.0)),
+                math.pi if reversing else 0.0,
+                self.follower_config.front_obstacle_sector_rad,
+                self.follower_config.min_obstacle_distance_m,
+                range_min_m=self._scan_range_min(),
+                range_max_m=self._scan_range_max(),
+                source="rear_sector" if reversing else "front_sector",
+            )
+            if directional.stop_reason:
+                directional_details = directional.to_log_dict()
+                self.latest_stop_details = {
+                    **directional_details,
+                    # The transient planner accepts only explicitly bounded
+                    # front evidence. Rear blockage during a reverse escape is
+                    # an unrecoverable safety stop, never a new forward keepout.
+                    **(
+                        {"front_clearance": directional_details}
+                        if not reversing
+                        else {}
+                    ),
+                }
+                return directional.stop_reason
+            return ""
         decision = obstacle_decision(
             getattr(self.latest_scan, "ranges", None),
             self.follower_config.min_obstacle_distance_m,
@@ -3276,6 +3439,13 @@ def run_simple_waypoint_follower(
     follower_config: FollowerConfig,
     waypoint_provider: Callable[[Pose2D], RouteUpdate | None] | None = None,
     route_update_callback: Callable[[RouteUpdate], None] | None = None,
+    blockage_recovery_provider: (
+        Callable[
+            [Pose2D, str, Mapping[str, object]],
+            RouteUpdate | None,
+        ]
+        | None
+    ) = None,
 ) -> FollowerResult:
     _require_ros()
     rclpy.init(args=None)
@@ -3298,6 +3468,7 @@ def run_simple_waypoint_follower(
             follower_config,
             waypoint_provider,
             route_update_callback,
+            blockage_recovery_provider,
             tf_buffer=tf_buffer,
         )
         follower_executor = MultiThreadedExecutor(

@@ -69,6 +69,64 @@ def bare_follower(update: RouteUpdate, callback):
 
 
 class DynamicFollowerHandoffTest(unittest.TestCase):
+    def test_discovery_replan_adopts_reverse_egress_without_phase_restart(self):
+        update = RouteUpdate(
+            kind=RouteUpdateKind.ADOPT,
+            waypoints=(
+                Pose2D(-0.86, -0.46, math.nan),
+                Pose2D(-0.74, -0.46, math.nan),
+                Pose2D(-1.59, -0.01, 0.0),
+            ),
+            target_index=0,
+            event_fields={
+                "effective_join_limit_m": 0.03,
+                "route_kind": "stand_discovery_corridor",
+                "start_egress_vertex_lock": True,
+                "start_egress_waypoint_index": 1,
+                "start_egress_continuous_clearance_validated": True,
+                "start_egress_motion": "reverse",
+            },
+        )
+        node = bare_follower(update, None)
+        node.current_route_kind = "stand_discovery_corridor"
+        node.publish_zero = lambda: None
+
+        result = node._refresh_dynamic_route(
+            Pose2D(-0.86, -0.46, math.pi)
+        )
+
+        self.assertEqual(result, "adopted")
+        self.assertEqual(node.current_route_kind, "stand_discovery_corridor")
+        self.assertEqual(node.start_egress_lock_index, 1)
+        self.assertTrue(node.start_egress_reverse)
+        self.assertFalse(node.reverse_staging)
+
+    def test_reverse_egress_uses_rear_sector_not_front_blocker(self):
+        node = bare_follower(
+            RouteUpdate(kind=RouteUpdateKind.UNCHANGED),
+            None,
+        )
+        ranges = [1.0] * 360
+        ranges[180] = 0.19
+        node.latest_scan = SimpleNamespace(
+            ranges=ranges,
+            angle_min=-math.pi,
+            angle_increment=2.0 * math.pi / 360.0,
+            range_min=0.02,
+            range_max=12.0,
+        )
+        node.blockage_recovery_provider = lambda *_args: None
+        node.start_egress_reverse = True
+
+        self.assertEqual(node._obstacle_failure(), "")
+
+        node.start_egress_reverse = False
+        self.assertEqual(node._obstacle_failure(), "obstacle too close")
+        self.assertEqual(
+            node.latest_stop_details["front_clearance"]["source"],
+            "front_sector",
+        )
+
     def test_discovery_route_node_uses_corner_contract_only_for_material_bend(self):
         node = bare_follower(RouteUpdate(kind=RouteUpdateKind.UNCHANGED), None)
         node.current_route_kind = "stand_discovery_corridor"

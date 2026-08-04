@@ -716,6 +716,7 @@ def compute_start_egress_vertex_command(
     *,
     reach_tolerance_m: float = 0.02,
     egress_config: StartEgressControlConfig = StartEgressControlConfig(),
+    reverse: bool = False,
 ) -> ControllerStep | None:
     """Pursue one certified egress vertex without lookahead or advancement.
 
@@ -732,6 +733,8 @@ def compute_start_egress_vertex_command(
         raise ValueError("waypoint_index is outside the route")
     if distance(pose, waypoints[waypoint_index]) <= reach_tolerance_m:
         return None
+    if not isinstance(reverse, bool):
+        raise ValueError("reverse must be boolean")
     step = compute_waypoint_command(
         pose,
         waypoints,
@@ -742,7 +745,12 @@ def compute_start_egress_vertex_command(
             terminal_goal_tolerance_m=None,
             lookahead_distance_m=0.0,
             max_progress_advance_m=0.0,
-            reverse_staging=False,
+            # A transient obstacle can leave the robot inside the newly
+            # inflated keepout with the only certified escape vertex behind
+            # it.  Reverse only this locked, continuously checked segment so
+            # the robot does not rotate beside the blocker.  Ordinary route
+            # tracking resumes in forward mode after the exact vertex.
+            reverse_staging=reverse,
         ),
         locked_pursuit_index=waypoint_index,
     )

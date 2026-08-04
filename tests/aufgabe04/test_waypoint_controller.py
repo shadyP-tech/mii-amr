@@ -941,6 +941,28 @@ class WaypointControllerTest(unittest.TestCase):
             reverse_staging_is_preferred(Pose2D(0.0, 0.0, 0.0), waypoints)
         )
 
+    def test_locked_reverse_egress_backs_away_without_turning(self):
+        waypoints = (
+            Pose2D(-0.86, -0.46, float("nan")),
+            Pose2D(-0.74, -0.46, float("nan")),
+            Pose2D(-1.59, -0.01, 0.0),
+        )
+        step = compute_start_egress_vertex_command(
+            Pose2D(-0.86, -0.46, math.pi),
+            waypoints,
+            1,
+            ControllerConfig(
+                goal_tolerance_m=0.02,
+                exact_vertex_pursuit=True,
+            ),
+            reverse=True,
+        )
+
+        self.assertIsNotNone(step)
+        self.assertLess(step.command.linear_x_mps, 0.0)
+        self.assertAlmostEqual(step.command.angular_z_radps, 0.0, places=6)
+        self.assertEqual(step.pursuit_index, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

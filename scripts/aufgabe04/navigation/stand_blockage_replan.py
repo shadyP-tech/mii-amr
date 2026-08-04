@@ -968,8 +968,10 @@ def record_transient_blockage_replan(
     write ``stand_registry.json`` or coverage progress.
     """
 
-    if stop_reason != "stuck no progress":
-        raise ValueError("only a front-sector stuck stop can create an overlay")
+    if stop_reason not in {"stuck no progress", "obstacle too close"}:
+        raise ValueError(
+            "only a front-sector blockage stop can create an overlay"
+        )
     clearance_m = _front_clearance_m(stop_details)
     bearing_rad = _front_bearing_rad(stop_details)
     survey_root = Path(survey_root)

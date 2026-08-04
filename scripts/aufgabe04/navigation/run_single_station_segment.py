@@ -28,6 +28,9 @@ from scripts.aufgabe04.navigation.dynamic_route_handoff import (
     DynamicRouteSource,
     validate_arena_boundary_evidence,
 )
+from scripts.aufgabe04.navigation.coverage_replan_coordinator import (
+    CoverageReplanCoordinator,
+)
 from scripts.aufgabe04.navigation.route_revision_store import (
     LoadedRouteRevision,
     RouteRevisionError,
@@ -318,6 +321,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--runtime-environment", type=Path, default=None)
     parser.add_argument("--candidate-snapshot", type=Path, default=None)
     parser.add_argument("--coverage-plan", type=Path, default=None)
+    parser.add_argument("--coverage-transient-replan-survey-root", type=Path)
+    parser.add_argument("--coverage-transient-replan-session-root", type=Path)
+    parser.add_argument("--coverage-transient-replan-map", type=Path)
+    parser.add_argument("--coverage-transient-replan-semantic-map-id", default="")
+    parser.add_argument("--coverage-transient-replan-target-viewpoint-id", default="")
+    parser.add_argument("--coverage-transient-replan-robot-radius-m", type=float)
+    parser.add_argument("--coverage-transient-replan-max-count", type=int, default=0)
+    parser.add_argument("--coverage-transient-replan-leg-index", type=int)
     parser.add_argument("--station-identity-registry", type=Path, default=None)
     parser.add_argument("--arrival-pose-catalog", type=Path, default=None)
     parser.add_argument("--task-snapshot", type=Path, default=None)
@@ -372,6 +383,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-linear-speed-scale", type=float, default=0.35)
     parser.add_argument("--max-progress-advance-m", type=float, default=0.45)
     parser.add_argument("--min-obstacle-distance-m", type=float, default=0.20)
+    parser.add_argument(
+        "--omnidirectional-hard-stop-distance-m",
+        type=float,
+        default=0.12,
+        help=(
+            "Unconditional all-angle LiDAR stop used during certified "
+            "directional blockage recovery. Normal translation retains "
+            "--min-obstacle-distance-m in its commanded-motion sector."
+        ),
+    )
     parser.add_argument("--front-obstacle-slow-distance-m", type=float, default=0.38)
     parser.add_argument("--front-obstacle-sector-rad", type=float, default=0.6108652381980153)
     parser.add_argument("--thinning-min-spacing-m", type=float, default=0.15)
@@ -887,6 +908,31 @@ def _revalidate_authoritative_route_before_motion(
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    recovery_fields = (
+        args.coverage_transient_replan_survey_root,
+        args.coverage_transient_replan_session_root,
+        args.coverage_transient_replan_map,
+        args.coverage_transient_replan_robot_radius_m,
+        args.coverage_transient_replan_leg_index,
+    )
+    args.coverage_transient_replan_enabled = any(
+        value is not None for value in recovery_fields
+    ) or bool(
+        args.coverage_transient_replan_semantic_map_id
+        or args.coverage_transient_replan_target_viewpoint_id
+        or args.coverage_transient_replan_max_count
+    )
+    if args.coverage_transient_replan_enabled and (
+        any(value is None for value in recovery_fields)
+        or not args.coverage_transient_replan_semantic_map_id
+        or not args.coverage_transient_replan_target_viewpoint_id
+        or args.coverage_transient_replan_max_count <= 0
+    ):
+        parser.error(
+            "physical coverage transient replanning requires survey root, "
+            "session root, map, semantic map ID, target viewpoint ID, positive "
+            "robot radius, and positive max count"
+        )
     if args.dynamic_route_refresh_sec < 0.0:
         parser.error("--dynamic-route-refresh-sec must be non-negative")
     if args.dynamic_route_refresh_sec > 0.0 and not args.allow_sim_time:
@@ -1251,6 +1297,20 @@ def main(argv: list[str] | None = None) -> int:
         )
     if leg.route_kind in DYNAMIC_VIEWPOINT_ROUTE_KINDS and not leg.simulation_only:
         parser.exit(2, "error: dynamic viewpoint route is missing simulation_only provenance\n")
+    if (
+        args.coverage_transient_replan_enabled
+        and leg.route_kind != STAND_DISCOVERY_ROUTE_KIND
+    ):
+        parser.exit(
+            2,
+            "error: physical transient replanning is restricted to "
+            "stand_discovery_corridor\n",
+        )
+    if args.coverage_transient_replan_enabled and args.allow_sim_time:
+        parser.exit(
+            2,
+            "error: physical transient replanning is not a simulation route mode\n",
+        )
     if leg.route_kind in DYNAMIC_VIEWPOINT_ROUTE_KINDS and committed_route is None:
         parser.exit(2, "error: dynamic viewpoint route requires its authoritative manifest\n")
     if leg.simulation_only and not args.allow_sim_time:
@@ -1855,6 +1915,9 @@ def main(argv: list[str] | None = None) -> int:
             exact_vertex_pursuit=leg.route_kind in PHYSICAL_ROUTE_KINDS,
         ),
         min_obstacle_distance_m=args.min_obstacle_distance_m,
+        omnidirectional_hard_stop_distance_m=(
+            args.omnidirectional_hard_stop_distance_m
+        ),
         front_obstacle_slow_distance_m=args.front_obstacle_slow_distance_m,
         front_obstacle_sector_rad=args.front_obstacle_sector_rad,
         max_scan_age_sec=args.max_scan_age_sec,
@@ -1947,6 +2010,16 @@ def main(argv: list[str] | None = None) -> int:
         route_kind=leg.route_kind,
         max_linear_mps=follower_config.controller.max_linear_mps,
         max_angular_radps=follower_config.controller.max_angular_radps,
+        min_obstacle_distance_m=follower_config.min_obstacle_distance_m,
+        omnidirectional_hard_stop_distance_m=(
+            follower_config.omnidirectional_hard_stop_distance_m
+        ),
+        coverage_transient_replan_enabled=(
+            args.coverage_transient_replan_enabled
+        ),
+        coverage_transient_replan_max_count=(
+            args.coverage_transient_replan_max_count
+        ),
         effective_goal_tolerance_m=resolved_terminal_goal_tolerance_m,
         effective_intermediate_goal_tolerance_m=(
             resolved_controller_config.goal_tolerance_m
@@ -2041,6 +2114,7 @@ def main(argv: list[str] | None = None) -> int:
         route_simulation_only=leg.simulation_only,
     )
     waypoint_provider = None
+    blockage_recovery_provider = None
 
     def route_update_callback(update):
         event_name = {
@@ -2058,6 +2132,24 @@ def main(argv: list[str] | None = None) -> int:
             run_id=args.run_id,
             leg_index=args.leg_index,
             **dict(update.event_fields),
+        )
+
+    if args.coverage_transient_replan_enabled:
+        blockage_recovery_provider = CoverageReplanCoordinator(
+            survey_root=args.coverage_transient_replan_survey_root,
+            session_root=args.coverage_transient_replan_session_root,
+            map_yaml=args.coverage_transient_replan_map,
+            semantic_map_id=args.coverage_transient_replan_semantic_map_id,
+            target_viewpoint_id=(
+                args.coverage_transient_replan_target_viewpoint_id
+            ),
+            run_id=args.run_id,
+            coverage_leg_index=args.coverage_transient_replan_leg_index,
+            route_leg_index=leg.leg_index,
+            command_owner=_runtime_command_owner(resolved.namespace),
+            robot_radius_m=args.coverage_transient_replan_robot_radius_m,
+            max_replans=args.coverage_transient_replan_max_count,
+            tracking_tube_radius_m=args.certified_route_tube_radius_m,
         )
 
     if committed_route is not None:
@@ -2088,12 +2180,18 @@ def main(argv: list[str] | None = None) -> int:
         leg_index=leg.leg_index,
         resolved_cmd_vel_topic=resolved.cmd_vel_topic,
     )
+    follower_kwargs = {}
+    if blockage_recovery_provider is not None:
+        follower_kwargs["blockage_recovery_provider"] = (
+            blockage_recovery_provider
+        )
     result = run_simple_waypoint_follower(
         resolved,
         poses_from_waypoints(leg.executable_waypoints),
         follower_config,
         waypoint_provider,
         route_update_callback,
+        **follower_kwargs,
     )
     _append_result(args, resolved, leg, preflight_ok=True, result=result)
     motion_event_fields = {
