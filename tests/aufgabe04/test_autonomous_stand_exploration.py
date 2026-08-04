@@ -37,8 +37,8 @@ from scripts.aufgabe04.real_robot.run_autonomous_stand_exploration import (
     MotionLegOutcome,
     _bounded_approach_offsets,
     _execute_coverage_leg_with_replans,
-    _is_confirmable_stand_blockage,
     _is_resealable_startup_mismatch,
+    _is_transient_front_blockage,
     _opposite_face_normal,
     _replan_startup_source,
     _run_motion_leg,
@@ -351,13 +351,17 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         self.assertTrue(args.stop_after_coverage)
         self.assertTrue(args.execute)
 
-    def test_near_front_stuck_stop_is_eligible_for_stand_confirmation(self):
+    def test_only_near_front_stuck_stop_is_eligible_for_transient_overlay(self):
         outcome = MotionLegOutcome(
             run_id="blocked",
             status="stopped",
             stop_reason="stuck no progress",
             stop_details={
-                "front_clearance": {"nearest_valid_range_m": 0.248},
+                "front_clearance": {
+                    "nearest_valid_range_m": 0.248,
+                    "nearest_valid_bearing_rad": 0.0,
+                    "source": "front_sector",
+                },
             },
             motion_published=True,
             returncode=1,
@@ -373,16 +377,32 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             **{
                 **outcome.__dict__,
                 "stop_details": {
-                    "front_clearance": {"nearest_valid_range_m": 0.50},
+                    "front_clearance": {
+                        "nearest_valid_range_m": 0.50,
+                        "nearest_valid_bearing_rad": 0.0,
+                        "source": "front_sector",
+                    },
                 },
             }
         )
 
-        self.assertTrue(_is_confirmable_stand_blockage(outcome))
-        self.assertFalse(_is_confirmable_stand_blockage(route_tube))
-        self.assertFalse(_is_confirmable_stand_blockage(far_obstacle))
+        global_obstacle = MotionLegOutcome(
+            **{
+                **outcome.__dict__,
+                "stop_reason": "obstacle too close",
+                "stop_details": {
+                    "nearest_valid_range_m": 0.10,
+                    "source": "global_scan",
+                },
+            }
+        )
 
-    def test_coverage_leg_stops_observes_replans_and_resumes(self):
+        self.assertTrue(_is_transient_front_blockage(outcome))
+        self.assertFalse(_is_transient_front_blockage(route_tube))
+        self.assertFalse(_is_transient_front_blockage(far_obstacle))
+        self.assertFalse(_is_transient_front_blockage(global_obstacle))
+
+    def test_coverage_leg_replans_without_semantic_lidar_epoch(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source_route = root / "route.csv"
@@ -398,7 +418,11 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 status="stopped",
                 stop_reason="stuck no progress",
                 stop_details={
-                    "front_clearance": {"nearest_valid_range_m": 0.248},
+                    "front_clearance": {
+                        "nearest_valid_range_m": 0.248,
+                        "nearest_valid_bearing_rad": 0.0,
+                        "source": "front_sector",
+                    },
                 },
                 motion_published=True,
                 returncode=1,
@@ -419,7 +443,12 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 map=MAP,
                 semantic_map_id="arena_1p898x3p9_auto",
             )
-            profile = SimpleNamespace(robot_radius_m=0.105)
+            profile = SimpleNamespace(
+                robot_radius_m=0.105,
+                namespace="",
+                amcl_topic="amcl_pose",
+                map_frame="map",
+            )
             sealed = {
                 "route_csv": str(source_route),
                 "diagnostics_json": str(source_diagnostics),
@@ -436,15 +465,20 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             ) as run, patch(
                 "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
                 "_capture_lidar_epoch",
-                return_value=root / "observer_summary.json",
             ) as observe, patch(
                 "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
-                "record_blockage_replan",
+                "read_current_amcl_pose",
+                return_value=SimpleNamespace(x_m=-0.8, y_m=-0.46, yaw_rad=math.pi),
+            ) as read_pose, patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "record_transient_blockage_replan",
                 return_value={
                     "route_csv": str(replacement_route),
                     "diagnostics_json": str(replacement_diagnostics),
                     "summary_json": str(root / "replan_summary.json"),
-                    "blockage_epoch_json": str(root / "epoch.json"),
+                    "transient_obstacle_overlay_json": str(
+                        root / "transient_overlay.json"
+                    ),
                 },
             ) as replan:
                 _execute_coverage_leg_with_replans(
@@ -461,8 +495,10 @@ class AutonomousStandExplorationTest(unittest.TestCase):
 
             self.assertEqual(run.call_count, 2)
             self.assertEqual(seal.call_count, 2)
-            observe.assert_called_once()
+            observe.assert_not_called()
+            read_pose.assert_called_once()
             replan.assert_called_once()
+            self.assertFalse(replan.call_args.kwargs["existing_overlay_path"])
             second_seal = seal.call_args_list[1].kwargs
             self.assertEqual(second_seal["source_route_csv"], replacement_route)
             self.assertEqual(
@@ -578,6 +614,156 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 adaptive[-1]["event"], "startup_pose_route_resealed"
             )
             self.assertTrue(adaptive[-1]["fresh_confirmation_required"])
+
+    def test_startup_mismatch_after_blockage_preserves_transient_overlay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_route = root / "route.csv"
+            source_diagnostics = root / "diagnostics.json"
+            replacement_route = root / "replacement_route.csv"
+            replacement_diagnostics = root / "replacement_diagnostics.json"
+            resealed_route = root / "resealed_route.csv"
+            resealed_diagnostics = root / "resealed_diagnostics.json"
+            for path in (
+                source_route,
+                replacement_route,
+                resealed_route,
+            ):
+                path.write_text("route\n")
+            for path in (
+                source_diagnostics,
+                replacement_diagnostics,
+                resealed_diagnostics,
+            ):
+                path.write_text("{}\n")
+            overlay = root / "transient_overlay.json"
+            resealed_overlay = root / "resealed_overlay.json"
+            blocked = MotionLegOutcome(
+                run_id="mission_coverage_000",
+                status="stopped",
+                stop_reason="stuck no progress",
+                stop_details={
+                    "front_clearance": {
+                        "nearest_valid_range_m": 0.248,
+                        "nearest_valid_bearing_rad": 0.0,
+                        "source": "front_sector",
+                    },
+                },
+                motion_published=True,
+                returncode=1,
+                semantic_log_path=root / "blocked.jsonl",
+            )
+            rejected = MotionLegOutcome(
+                run_id="mission_coverage_000_replan_001",
+                status="stopped",
+                stop_reason="pose outside certified startup segment",
+                stop_details={
+                    "source": "execution_route_certificate",
+                    "phase": "before_motion_confirmation",
+                    "route_pose": {
+                        "frame_id": "map",
+                        "child_frame_id": "base_footprint",
+                        "x_m": -0.79,
+                        "y_m": -0.46,
+                        "yaw_rad": math.pi,
+                    },
+                },
+                motion_published=False,
+                returncode=1,
+                semantic_log_path=root / "rejected.jsonl",
+            )
+            completed = MotionLegOutcome(
+                run_id=(
+                    "mission_coverage_000_replan_001_startup_reseal_001"
+                ),
+                status="completed",
+                stop_reason="",
+                stop_details={},
+                motion_published=True,
+                returncode=0,
+                semantic_log_path=root / "completed.jsonl",
+            )
+            args = SimpleNamespace(
+                session_id="mission",
+                max_blockage_replans_per_leg=2,
+                max_startup_reseals_per_leg=2,
+                map=MAP,
+                semantic_map_id="arena_1p898x3p9_auto",
+            )
+            profile = SimpleNamespace(
+                robot_radius_m=0.105,
+                namespace="",
+                amcl_topic="amcl_pose",
+                map_frame="map",
+            )
+            sealed = {
+                "route_csv": str(source_route),
+                "diagnostics_json": str(source_diagnostics),
+                "route_certificate_json": str(root / "certificate.json"),
+            }
+            with patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "seal_stand_discovery_route",
+                return_value=sealed,
+            ) as seal, patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "_run_motion_leg",
+                side_effect=(blocked, rejected, completed),
+            ) as run, patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "read_current_amcl_pose",
+                return_value=SimpleNamespace(
+                    x_m=-0.8,
+                    y_m=-0.46,
+                    yaw_rad=math.pi,
+                ),
+            ), patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "record_transient_blockage_replan",
+                return_value={
+                    "route_csv": str(replacement_route),
+                    "diagnostics_json": str(replacement_diagnostics),
+                    "summary_json": str(root / "replan_summary.json"),
+                    "transient_obstacle_overlay_json": str(overlay),
+                },
+            ) as blockage_replan, patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "replan_transient_blockage_from_overlay",
+                return_value={
+                    "route_csv": str(resealed_route),
+                    "diagnostics_json": str(resealed_diagnostics),
+                    "summary_json": str(root / "reseal_summary.json"),
+                    "transient_obstacle_overlay_json": str(resealed_overlay),
+                },
+            ) as overlay_replan, patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "_capture_lidar_epoch"
+            ) as observe:
+                _execute_coverage_leg_with_replans(
+                    profile=profile,
+                    args=args,
+                    session_root=root / "session",
+                    survey_root=root / "survey",
+                    plan_path=root / "coverage_plan.json",
+                    leg_index=0,
+                    target_viewpoint_id="survey_vp_001",
+                    source_route=source_route,
+                    source_diagnostics=source_diagnostics,
+                )
+
+            self.assertEqual(run.call_count, 3)
+            self.assertEqual(seal.call_count, 3)
+            blockage_replan.assert_called_once()
+            overlay_replan.assert_called_once()
+            self.assertEqual(
+                overlay_replan.call_args.kwargs["overlay_path"],
+                overlay,
+            )
+            self.assertEqual(
+                seal.call_args_list[2].kwargs["source_route_csv"],
+                resealed_route,
+            )
+            observe.assert_not_called()
 
     def test_dry_precheck_mismatch_is_returned_without_execution_attempt(self):
         with tempfile.TemporaryDirectory() as tmp:

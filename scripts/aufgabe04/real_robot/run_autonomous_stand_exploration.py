@@ -74,7 +74,8 @@ from scripts.aufgabe04.navigation.stand_coverage_survey import (
     plan_next_survey_leg,
 )
 from scripts.aufgabe04.navigation.stand_blockage_replan import (
-    record_blockage_replan,
+    record_transient_blockage_replan,
+    replan_transient_blockage_from_overlay,
 )
 from scripts.aufgabe04.navigation.stand_discovery_route import (
     seal_stand_discovery_route,
@@ -567,10 +568,21 @@ def _front_clearance_from_outcome(outcome: MotionLegOutcome) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
-def _is_confirmable_stand_blockage(outcome: MotionLegOutcome) -> bool:
+def _is_transient_front_blockage(outcome: MotionLegOutcome) -> bool:
+    """Accept only scan-backed front blockage, never semantic stand evidence."""
+
     if outcome.status != "stopped" or not outcome.motion_published:
         return False
-    if outcome.stop_reason not in {"obstacle too close", "stuck no progress"}:
+    if outcome.stop_reason != "stuck no progress":
+        return False
+    front = outcome.stop_details.get("front_clearance")
+    if not isinstance(front, dict) or front.get("source") != "front_sector":
+        return False
+    try:
+        bearing_rad = float(front.get("nearest_valid_bearing_rad"))
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(bearing_rad):
         return False
     clearance_m = _front_clearance_from_outcome(outcome)
     return (
@@ -878,10 +890,11 @@ def _execute_coverage_leg_with_replans(
     source_route: Path,
     source_diagnostics: Path,
 ) -> None:
-    """Run one coverage leg with bounded stop-observe-A* recovery."""
+    """Run one coverage leg with bounded transient-overlay A* recovery."""
 
     replan_index = 0
     startup_reseal_index = 0
+    transient_overlay_path: Path | None = None
     adaptive_log = session_root / "adaptive_replans.jsonl"
     while True:
         blockage_suffix = (
@@ -917,12 +930,6 @@ def _execute_coverage_leg_with_replans(
         if outcome.status == "completed":
             return
         if _is_resealable_startup_mismatch(outcome):
-            if replan_index != 0:
-                raise RuntimeError(
-                    "startup pose changed after a stand-blockage replan; "
-                    "the dynamic obstacle overlay cannot be discarded by a "
-                    "generic coverage-route reseal"
-                )
             if startup_reseal_index >= args.max_startup_reseals_per_leg:
                 raise RuntimeError(
                     "startup reseal budget exhausted for coverage leg "
@@ -938,17 +945,34 @@ def _execute_coverage_leg_with_replans(
                     f"_startup_reseal_{startup_reseal_index:03d}"
                 )
             )
-            replanned = _replan_startup_source(
-                map_yaml=args.map,
-                semantic_map_id=args.semantic_map_id,
-                survey_root=survey_root,
-                plan_path=plan_path,
-                expected_target_viewpoint_id=target_viewpoint_id,
-                current_pose=rejected_pose,
-                rejected_outcome=outcome,
-                reseal_index=startup_reseal_index,
-                output_dir=reseal_root,
-            )
+            if transient_overlay_path is None:
+                replanned = _replan_startup_source(
+                    map_yaml=args.map,
+                    semantic_map_id=args.semantic_map_id,
+                    survey_root=survey_root,
+                    plan_path=plan_path,
+                    expected_target_viewpoint_id=target_viewpoint_id,
+                    current_pose=rejected_pose,
+                    rejected_outcome=outcome,
+                    reseal_index=startup_reseal_index,
+                    output_dir=reseal_root,
+                )
+            else:
+                replanned = replan_transient_blockage_from_overlay(
+                    survey_root=survey_root,
+                    map_yaml=args.map,
+                    semantic_map_id=args.semantic_map_id,
+                    target_viewpoint_id=target_viewpoint_id,
+                    current_pose=rejected_pose,
+                    overlay_path=transient_overlay_path,
+                    output_dir=reseal_root,
+                    robot_radius_m=profile.robot_radius_m,
+                    rejected_run_id=outcome.run_id,
+                    rejected_stop_details=outcome.stop_details,
+                )
+                transient_overlay_path = Path(
+                    replanned["transient_obstacle_overlay_json"]
+                )
             _append_jsonl(
                 adaptive_log,
                 {
@@ -965,13 +989,21 @@ def _execute_coverage_leg_with_replans(
                         "diagnostics_json"
                     ],
                     "replacement_summary_json": replanned["summary_json"],
+                    "transient_obstacle_overlay_json": (
+                        ""
+                        if transient_overlay_path is None
+                        else str(transient_overlay_path)
+                    ),
+                    "dynamic_overlay_preserved": (
+                        transient_overlay_path is not None
+                    ),
                     "fresh_confirmation_required": True,
                 },
             )
             source_route = Path(replanned["route_csv"])
             source_diagnostics = Path(replanned["diagnostics_json"])
             continue
-        if not _is_confirmable_stand_blockage(outcome):
+        if not _is_transient_front_blockage(outcome):
             _require_completed_motion(outcome)
         if replan_index >= args.max_blockage_replans_per_leg:
             raise RuntimeError(
@@ -983,39 +1015,49 @@ def _execute_coverage_leg_with_replans(
         blockage_id = (
             f"blockage_leg_{leg_index:03d}_replan_{replan_index:03d}"
         )
-        observer_summary = _capture_lidar_epoch(
-            profile=profile,
-            args=args,
-            survey_root=survey_root,
-            viewpoint_id=blockage_id,
+        stopped = read_current_amcl_pose(
+            namespace=profile.namespace,
+            amcl_topic=profile.amcl_topic,
+            map_frame=profile.map_frame,
+            timeout_sec=STATIONARY_AMCL_TIMEOUT_SEC,
+            max_age_sec=2.0,
         )
         replan_root = (
             survey_root
             / "replans"
             / f"leg_{leg_index:03d}_replan_{replan_index:03d}"
         )
-        replanned = record_blockage_replan(
+        replanned = record_transient_blockage_replan(
             survey_root=survey_root,
             map_yaml=args.map,
             semantic_map_id=args.semantic_map_id,
             target_viewpoint_id=target_viewpoint_id,
             blockage_id=blockage_id,
-            observer_summary_path=observer_summary,
+            stop_pose=Pose2D(stopped.x_m, stopped.y_m, stopped.yaw_rad),
+            stop_reason=outcome.stop_reason,
+            stop_details=outcome.stop_details,
             output_dir=replan_root,
             robot_radius_m=profile.robot_radius_m,
+            existing_overlay_path=transient_overlay_path,
+        )
+        transient_overlay_path = Path(
+            replanned["transient_obstacle_overlay_json"]
         )
         _append_jsonl(
             adaptive_log,
             {
                 "schema_version": 1,
-                "event": "stand_blockage_replanned",
+                "event": "transient_navigation_blockage_replanned",
                 "timestamp": time.time(),
                 "leg_index": leg_index,
                 "replan_index": replan_index,
                 "blocked_run_id": outcome.run_id,
                 "blocked_stop_reason": outcome.stop_reason,
                 "blocked_stop_details": outcome.stop_details,
-                "observer_summary_json": str(observer_summary),
+                "semantic_survey_evidence": False,
+                "transient_obstacle_overlay_json": str(
+                    transient_overlay_path
+                ),
                 "replacement_route_csv": replanned["route_csv"],
                 "replacement_diagnostics_json": replanned[
                     "diagnostics_json"
@@ -1320,7 +1362,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_MAX_BLOCKAGE_REPLANS_PER_LEG,
         help=(
-            "Maximum stopped stand-confirmation and A* recovery attempts for "
+            "Maximum front-LiDAR transient-overlay A* recovery attempts for "
             "one coverage leg. Zero disables adaptive blockage recovery."
         ),
     )
@@ -1527,7 +1569,7 @@ def main(argv=None) -> int:
             "Physical safety requirements: clear arena; unloaded robot; operator "
             "beside the robot; Ctrl+C and physical stop ready; separate exact-topic "
             f"zero Twist terminal ready. This RUN authorizes {authorization_scope} "
-            "and its bounded stop-observe-A* stand-blockage replans "
+            "and its bounded scan-backed transient-obstacle A* replans "
             f"(maximum {args.max_blockage_replans_per_leg} per coverage leg). "
             "A pre-motion AMCL/start mismatch never inherits this RUN: the "
             "route is rebuilt and a fresh typed RUN is required."

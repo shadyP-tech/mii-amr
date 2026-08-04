@@ -82,6 +82,7 @@ class FollowerSafetyTest(unittest.TestCase):
 
         self.assertEqual(decision.stop_reason, "")
         self.assertEqual(decision.nearest_valid_range_m, 0.30)
+        self.assertIsNone(decision.nearest_valid_bearing_rad)
         self.assertEqual(decision.valid_sample_count, 1)
         self.assertEqual(decision.rejected_below_min_count, 1)
         self.assertEqual(decision.threshold_m, 0.20)
@@ -92,6 +93,7 @@ class FollowerSafetyTest(unittest.TestCase):
 
         self.assertEqual(decision.stop_reason, OBSTACLE_TOO_CLOSE)
         self.assertEqual(decision.nearest_valid_range_m, 0.19)
+        self.assertIsNone(decision.nearest_valid_bearing_rad)
         self.assertEqual(obstacle_failure([0.19, 0.30], 0.20, range_min_m=0.12), OBSTACLE_TOO_CLOSE)
 
     def test_scan_obstacle_decision_counts_above_max_and_non_finite(self):
@@ -170,6 +172,10 @@ class FollowerSafetyTest(unittest.TestCase):
 
         self.assertEqual(decision.stop_reason, OBSTACLE_TOO_CLOSE)
         self.assertEqual(decision.nearest_valid_range_m, 0.19)
+        self.assertAlmostEqual(
+            decision.nearest_valid_bearing_rad,
+            -math.pi / 2.0,
+        )
 
     def test_sector_decision_supports_fail_closed_rear_motion_source(self):
         # 0 rad is index 2 and pi/-pi is index 0/4 for this synthetic scan.

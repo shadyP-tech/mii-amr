@@ -29,6 +29,7 @@ class RangeSummary:
 class ObstacleDecision:
     stop_reason: str
     nearest_valid_range_m: float | None
+    nearest_valid_bearing_rad: float | None
     valid_sample_count: int
     rejected_below_min_count: int
     rejected_above_max_count: int
@@ -42,6 +43,7 @@ class ObstacleDecision:
         return {
             "stop_reason": self.stop_reason,
             "nearest_valid_range_m": self.nearest_valid_range_m,
+            "nearest_valid_bearing_rad": self.nearest_valid_bearing_rad,
             "valid_sample_count": self.valid_sample_count,
             "rejected_below_min_count": self.rejected_below_min_count,
             "rejected_above_max_count": self.rejected_above_max_count,
@@ -174,6 +176,7 @@ def obstacle_decision(
     return ObstacleDecision(
         stop_reason=stop_reason,
         nearest_valid_range_m=summary.nearest_valid_range_m,
+        nearest_valid_bearing_rad=None,
         valid_sample_count=summary.valid_sample_count,
         rejected_below_min_count=summary.rejected_below_min_count,
         rejected_above_max_count=summary.rejected_above_max_count,
@@ -238,15 +241,23 @@ def front_sector_decision(
     range_max_m: float | None = None,
     source: str = "front_sector",
 ) -> ObstacleDecision:
+    nearest_valid_bearing_rad = None
     if not ranges or angle_increment_rad == 0.0:
         sector_ranges: list[float] = []
     else:
         sector_ranges = []
+        nearest_valid_range_m = math.inf
         for index, value in enumerate(ranges):
             angle = angle_min_rad + index * angle_increment_rad
             delta = math.atan2(math.sin(angle - center_rad), math.cos(angle - center_rad))
             if abs(delta) <= half_width_rad:
                 sector_ranges.append(value)
+                if (
+                    _scan_range_is_valid(value, range_min_m, range_max_m)
+                    and float(value) < nearest_valid_range_m
+                ):
+                    nearest_valid_range_m = float(value)
+                    nearest_valid_bearing_rad = angle
     summary = summarize_valid_ranges(
         sector_ranges,
         range_min_m=range_min_m,
@@ -263,6 +274,7 @@ def front_sector_decision(
     return ObstacleDecision(
         stop_reason=stop_reason,
         nearest_valid_range_m=summary.nearest_valid_range_m,
+        nearest_valid_bearing_rad=nearest_valid_bearing_rad,
         valid_sample_count=summary.valid_sample_count,
         rejected_below_min_count=summary.rejected_below_min_count,
         rejected_above_max_count=summary.rejected_above_max_count,

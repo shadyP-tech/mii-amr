@@ -1,3 +1,4 @@
+import json
 import math
 import tempfile
 import unittest
@@ -16,11 +17,15 @@ from scripts.aufgabe04.navigation.plan_stand_coverage_survey import (
 )
 from scripts.aufgabe04.navigation.stand_blockage_replan import (
     blocker_candidate_uids,
+    load_transient_obstacle_overlay,
     plan_blockage_route_to_viewpoint,
+    record_transient_blockage_replan,
+    replan_transient_blockage_from_overlay,
 )
 from scripts.aufgabe04.navigation.stand_discovery_route import (
     seal_stand_discovery_route,
 )
+from scripts.aufgabe04.navigation.waypoint_csv import load_route_leg
 from scripts.aufgabe04.navigation.stand_coverage_survey import (
     STATUS_PROVISIONAL,
     StandSurveyRegistry,
@@ -263,6 +268,96 @@ class StandBlockageReplanTest(unittest.TestCase):
         )
 
         self.assertEqual(selected, (candidate.candidate_uid,))
+
+    def test_transient_replan_never_mutates_semantic_survey_registry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "survey"
+            plan = self._plan(root)
+            registry_path = root / "stand_registry.json"
+            registry_before = registry_path.read_text()
+
+            outputs = record_transient_blockage_replan(
+                survey_root=root,
+                map_yaml=MAP,
+                semantic_map_id="arena_1p898x3p9_auto",
+                target_viewpoint_id=plan.viewpoints[0].viewpoint_id,
+                blockage_id="blockage_leg_000_replan_001",
+                stop_pose=Pose2D(-0.80, -0.465, math.pi),
+                stop_reason="stuck no progress",
+                stop_details={
+                    "front_clearance": {
+                        "nearest_valid_range_m": 0.248,
+                        "nearest_valid_bearing_rad": 0.0,
+                        "source": "front_sector",
+                    }
+                },
+                output_dir=Path(tmp) / "transient_replan",
+                robot_radius_m=0.105,
+            )
+
+            self.assertEqual(registry_path.read_text(), registry_before)
+            self.assertFalse((root / "raw_epochs").exists())
+            overlay_path = Path(outputs["transient_obstacle_overlay_json"])
+            overlay_payload = json.loads(overlay_path.read_text())
+            self.assertFalse(overlay_payload["semantic_survey_evidence"])
+            overlay = load_transient_obstacle_overlay(overlay_path, plan=plan)
+            self.assertEqual(len(overlay.candidates), 1)
+            self.assertEqual(overlay.candidates[0].viewpoint_ids, ())
+            self.assertTrue(Path(outputs["route_csv"]).is_file())
+
+    def test_fresh_start_replan_preserves_transient_overlay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "survey"
+            plan = self._plan(root)
+            initial = record_transient_blockage_replan(
+                survey_root=root,
+                map_yaml=MAP,
+                semantic_map_id="arena_1p898x3p9_auto",
+                target_viewpoint_id=plan.viewpoints[0].viewpoint_id,
+                blockage_id="blockage_leg_000_replan_001",
+                stop_pose=Pose2D(-0.80, -0.465, math.pi),
+                stop_reason="stuck no progress",
+                stop_details={
+                    "front_clearance": {
+                        "nearest_valid_range_m": 0.248,
+                        "nearest_valid_bearing_rad": 0.0,
+                        "source": "front_sector",
+                    }
+                },
+                output_dir=Path(tmp) / "initial",
+                robot_radius_m=0.105,
+            )
+            fresh_pose = Pose2D(-0.79, -0.46, math.pi)
+            resealed = replan_transient_blockage_from_overlay(
+                survey_root=root,
+                map_yaml=MAP,
+                semantic_map_id="arena_1p898x3p9_auto",
+                target_viewpoint_id=plan.viewpoints[0].viewpoint_id,
+                current_pose=fresh_pose,
+                overlay_path=Path(
+                    initial["transient_obstacle_overlay_json"]
+                ),
+                output_dir=Path(tmp) / "resealed",
+                robot_radius_m=0.105,
+                rejected_run_id="rejected",
+                rejected_stop_details={"phase": "before_motion_confirmation"},
+            )
+
+            initial_overlay = load_transient_obstacle_overlay(
+                Path(initial["transient_obstacle_overlay_json"]),
+                plan=plan,
+            )
+            resealed_overlay = load_transient_obstacle_overlay(
+                Path(resealed["transient_obstacle_overlay_json"]),
+                plan=plan,
+            )
+            self.assertEqual(
+                resealed_overlay.candidates,
+                initial_overlay.candidates,
+            )
+            route = load_route_leg(Path(resealed["route_csv"]), 0)
+            self.assertAlmostEqual(route.raw_waypoints[0].pose.x_m, fresh_pose.x_m)
+            self.assertAlmostEqual(route.raw_waypoints[0].pose.y_m, fresh_pose.y_m)
 
 
 if __name__ == "__main__":
