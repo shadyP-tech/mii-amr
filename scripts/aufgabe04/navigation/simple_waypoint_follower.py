@@ -50,6 +50,7 @@ from scripts.aufgabe04.navigation.waypoint_controller import (
     VelocityCommand,
     compute_certified_corner_transition,
     compute_join_anchor_command,
+    compute_reverse_egress_forward_alignment_command,
     compute_start_egress_vertex_command,
     compute_waypoint_command,
     normalize_angle,
@@ -1242,6 +1243,8 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         self.dynamic_join_limit_m = startup_state.join_limit_m
         self.start_egress_lock_index = startup_state.egress_lock_index
         self.start_egress_reverse = False
+        self.start_egress_reverse_until_index: int | None = None
+        self.start_egress_forward_alignment_index: int | None = None
         self.current_route_kind = follower_config.initial_route_kind
         self.certified_static_start_pending = (
             self.current_route_kind in STATIC_STARTUP_SEGMENT_JOIN_ROUTE_KINDS
@@ -1464,8 +1467,28 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         )
         if step is not None:
             return step
+        reverse_until_index = self.start_egress_reverse_until_index
+        if (
+            self.start_egress_reverse
+            and reverse_until_index is not None
+            and waypoint_index < reverse_until_index
+        ):
+            # Consume a zero-command cycle at every certified reverse vertex.
+            # The next tick locks to the immediately following vertex, so the
+            # route checker switches to that exact segment without lookahead.
+            self.start_egress_lock_index = waypoint_index + 1
+            if waypoint_index != self.target_index:
+                self._clear_intermediate_terminal_heading_latch(
+                    target_changed=True,
+                )
+            self.target_index = waypoint_index
+            self.target_started_at = time.monotonic()
+            self._reset_progress_watchdog(time.monotonic())
+            return None
+        was_reverse = self.start_egress_reverse
         self.start_egress_lock_index = None
         self.start_egress_reverse = False
+        self.start_egress_reverse_until_index = None
         if waypoint_index != self.target_index:
             self._clear_intermediate_terminal_heading_latch(
                 target_changed=True,
@@ -1473,7 +1496,36 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         self.target_index = waypoint_index
         self.target_started_at = time.monotonic()
         self._reset_progress_watchdog(time.monotonic())
+        if not was_reverse:
+            self.start_egress_forward_alignment_index = None
         return None
+
+    def _reverse_egress_forward_alignment_command(
+        self,
+        pose: Pose2D,
+        controller_config: ControllerConfig,
+    ) -> ControllerStep:
+        """Rotate onto the certified outgoing segment after reverse escape."""
+
+        waypoint_index = self.start_egress_forward_alignment_index
+        if waypoint_index is None:
+            raise ValueError(
+                "reverse-egress forward alignment requested without an index"
+            )
+        step = compute_reverse_egress_forward_alignment_command(
+            pose,
+            self.waypoints,
+            waypoint_index,
+            controller_config,
+            alignment_tolerance_rad=(
+                self.follower_config.start_egress_alignment_tolerance_rad
+            ),
+        )
+        if step.progress_mode == "reverse_egress_forward_handoff":
+            # The caller still runs the outgoing-segment route-tube check for
+            # this zero-command handoff cycle before ordinary tracking resumes.
+            self.start_egress_forward_alignment_index = None
+        return step
 
     def _certified_corner_decision(
         self,
@@ -1878,6 +1930,11 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                             self.publish_zero()
                             time.sleep(loop_sleep_sec)
                             continue
+                    elif self.start_egress_forward_alignment_index is not None:
+                        step = self._reverse_egress_forward_alignment_command(
+                            pose,
+                            route_controller_config,
+                        )
                     else:
                         corner_decision = self._certified_corner_decision(
                             pose,
@@ -2385,6 +2442,8 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
             return "stopped"
         next_egress_lock_index = None
         next_egress_reverse = False
+        next_reverse_until_index = None
+        next_forward_alignment_index = None
         if raw_egress_lock:
             raw_lock_index = update.event_fields.get(
                 "start_egress_waypoint_index"
@@ -2420,6 +2479,36 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                 }
                 return "stopped"
             next_egress_reverse = raw_egress_motion == "reverse"
+            if next_egress_reverse:
+                raw_reverse_until_index = update.event_fields.get(
+                    "start_egress_reverse_until_waypoint_index"
+                )
+                raw_forward_alignment_index = update.event_fields.get(
+                    "start_egress_forward_alignment_waypoint_index"
+                )
+                if (
+                    not isinstance(raw_reverse_until_index, int)
+                    or isinstance(raw_reverse_until_index, bool)
+                    or raw_reverse_until_index < raw_lock_index + 1
+                    or raw_reverse_until_index >= len(replacement) - 1
+                    or not isinstance(raw_forward_alignment_index, int)
+                    or isinstance(raw_forward_alignment_index, bool)
+                    or raw_forward_alignment_index
+                    != raw_reverse_until_index + 1
+                    or raw_forward_alignment_index >= len(replacement)
+                ):
+                    self.publish_zero()
+                    self.latest_stop_details = {
+                        "reason": (
+                            "dynamic route reverse-egress handoff "
+                            "certificate is malformed"
+                        ),
+                        "fault_code": "invalid_route_update",
+                        "fail_closed": True,
+                    }
+                    return "stopped"
+                next_reverse_until_index = raw_reverse_until_index
+                next_forward_alignment_index = raw_forward_alignment_index
         previous_route_kind = self.current_route_kind
         self.publish_zero()
         self._clear_intermediate_terminal_heading_latch(
@@ -2432,6 +2521,10 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         # explicitly clear any lock retained from the previous revision.
         self.start_egress_lock_index = next_egress_lock_index
         self.start_egress_reverse = next_egress_reverse
+        self.start_egress_reverse_until_index = next_reverse_until_index
+        self.start_egress_forward_alignment_index = (
+            next_forward_alignment_index
+        )
         self.current_route_kind = next_route_kind
         self.reverse_staging = (
             next_route_kind in PHYSICAL_ROUTE_KINDS

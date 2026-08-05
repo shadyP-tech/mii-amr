@@ -56,6 +56,9 @@ def bare_follower(update: RouteUpdate, callback):
     node.dynamic_join_pending = False
     node.dynamic_join_limit_m = None
     node.start_egress_lock_index = None
+    node.start_egress_reverse = False
+    node.start_egress_reverse_until_index = None
+    node.start_egress_forward_alignment_index = None
     node.certified_corner_latch = None
     node._last_certified_corner_phase = None
     node.current_route_kind = "axis_acquisition"
@@ -75,7 +78,45 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
             waypoints=(
                 Pose2D(-0.86, -0.46, math.nan),
                 Pose2D(-0.74, -0.46, math.nan),
-                Pose2D(-1.59, -0.01, 0.0),
+                Pose2D(-0.69, -0.46, math.nan),
+                Pose2D(-0.69, -0.41, 0.0),
+            ),
+            target_index=0,
+            event_fields={
+                "effective_join_limit_m": 0.03,
+                "route_kind": "stand_discovery_corridor",
+                "start_egress_vertex_lock": True,
+                "start_egress_waypoint_index": 1,
+                "start_egress_continuous_clearance_validated": True,
+                "start_egress_motion": "reverse",
+                "start_egress_reverse_until_waypoint_index": 2,
+                "start_egress_forward_alignment_waypoint_index": 3,
+            },
+        )
+        node = bare_follower(update, None)
+        node.current_route_kind = "stand_discovery_corridor"
+        node.publish_zero = lambda: None
+
+        result = node._refresh_dynamic_route(
+            Pose2D(-0.86, -0.46, math.pi)
+        )
+
+        self.assertEqual(result, "adopted")
+        self.assertEqual(node.current_route_kind, "stand_discovery_corridor")
+        self.assertEqual(node.start_egress_lock_index, 1)
+        self.assertTrue(node.start_egress_reverse)
+        self.assertEqual(node.start_egress_reverse_until_index, 2)
+        self.assertEqual(node.start_egress_forward_alignment_index, 3)
+        self.assertFalse(node.reverse_staging)
+
+    def test_reverse_egress_without_forward_handoff_certificate_is_rejected(self):
+        update = RouteUpdate(
+            kind=RouteUpdateKind.ADOPT,
+            waypoints=(
+                Pose2D(-0.86, -0.46, math.nan),
+                Pose2D(-0.74, -0.46, math.nan),
+                Pose2D(-0.69, -0.46, math.nan),
+                Pose2D(-0.69, -0.41, 0.0),
             ),
             target_index=0,
             event_fields={
@@ -91,15 +132,15 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         node.current_route_kind = "stand_discovery_corridor"
         node.publish_zero = lambda: None
 
-        result = node._refresh_dynamic_route(
-            Pose2D(-0.86, -0.46, math.pi)
+        self.assertEqual(
+            node._refresh_dynamic_route(Pose2D(-0.86, -0.46, math.pi)),
+            "stopped",
         )
-
-        self.assertEqual(result, "adopted")
-        self.assertEqual(node.current_route_kind, "stand_discovery_corridor")
-        self.assertEqual(node.start_egress_lock_index, 1)
-        self.assertTrue(node.start_egress_reverse)
-        self.assertFalse(node.reverse_staging)
+        self.assertEqual(
+            node.latest_stop_details["reason"],
+            "dynamic route reverse-egress handoff certificate is malformed",
+        )
+        self.assertTrue(node.latest_stop_details["fail_closed"])
 
     def test_reverse_egress_uses_rear_sector_not_front_blocker(self):
         node = bare_follower(
@@ -126,6 +167,77 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
             node.latest_stop_details["front_clearance"]["source"],
             "front_sector",
         )
+
+    def test_reverse_egress_crosses_later_anchor_before_forward_handoff(self):
+        """Regression for the 20260805T120749Z recovery-mode discontinuity."""
+
+        waypoints = (
+            Pose2D(-0.8215194236642129, -0.515331012111416, math.nan),
+            Pose2D(-0.7449999999999997, -0.565, math.nan),
+            Pose2D(-0.6949999999999998, -0.565, math.nan),
+            Pose2D(-0.6949999999999998, -0.5149999999999999, math.nan),
+        )
+        update = RouteUpdate(
+            kind=RouteUpdateKind.ADOPT,
+            waypoints=waypoints,
+            target_index=0,
+            event_fields={
+                "effective_join_limit_m": 0.03,
+                "route_kind": "stand_discovery_corridor",
+                "start_egress_vertex_lock": True,
+                "start_egress_waypoint_index": 1,
+                "start_egress_continuous_clearance_validated": True,
+                "start_egress_motion": "reverse",
+                "start_egress_reverse_until_waypoint_index": 2,
+                "start_egress_forward_alignment_waypoint_index": 3,
+            },
+        )
+        node = bare_follower(update, None)
+        node.current_route_kind = "stand_discovery_corridor"
+        node.publish_zero = lambda: None
+        self.assertEqual(node._refresh_dynamic_route(waypoints[0]), "adopted")
+        node.dynamic_join_pending = False
+
+        with patch(
+            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            side_effect=(10.0, 10.1, 11.0, 11.1),
+        ):
+            first_vertex = node._start_egress_command(
+                Pose2D(waypoints[1].x_m, waypoints[1].y_m, 2.565848),
+                node.follower_config.controller,
+            )
+            second_vertex = node._start_egress_command(
+                Pose2D(waypoints[2].x_m, waypoints[2].y_m, math.pi),
+                node.follower_config.controller,
+            )
+
+        self.assertIsNone(first_vertex)
+        self.assertIsNone(second_vertex)
+        self.assertIsNone(node.start_egress_lock_index)
+        self.assertFalse(node.start_egress_reverse)
+        self.assertEqual(node.target_index, 2)
+        self.assertEqual(node.start_egress_forward_alignment_index, 3)
+
+        aligning = node._reverse_egress_forward_alignment_command(
+            Pose2D(waypoints[2].x_m, waypoints[2].y_m, math.pi),
+            node.follower_config.controller,
+        )
+        self.assertEqual(aligning.target_index, 3)
+        self.assertEqual(
+            aligning.progress_mode,
+            "reverse_egress_forward_alignment",
+        )
+        self.assertEqual(node.start_egress_forward_alignment_index, 3)
+
+        handoff = node._reverse_egress_forward_alignment_command(
+            Pose2D(waypoints[2].x_m, waypoints[2].y_m, math.pi / 2.0),
+            node.follower_config.controller,
+        )
+        self.assertEqual(
+            handoff.progress_mode,
+            "reverse_egress_forward_handoff",
+        )
+        self.assertIsNone(node.start_egress_forward_alignment_index)
 
     def test_discovery_route_node_uses_corner_contract_only_for_material_bend(self):
         node = bare_follower(RouteUpdate(kind=RouteUpdateKind.UNCHANGED), None)

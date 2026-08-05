@@ -772,6 +772,68 @@ def compute_start_egress_vertex_command(
     )
 
 
+def compute_reverse_egress_forward_alignment_command(
+    pose: Pose2D,
+    waypoints: Sequence[Pose2D],
+    forward_target_index: int,
+    config: ControllerConfig,
+    *,
+    alignment_tolerance_rad: float = 0.10,
+) -> ControllerStep:
+    """Align forward on the outgoing certified segment after reverse egress.
+
+    The returned target and pursuit indices both name the outgoing segment's
+    end vertex.  The execution-route checker therefore validates the live pose
+    and pursuit chord against that segment while the robot rotates, instead of
+    incorrectly retaining the reverse incoming segment as the active tube.
+    Translation remains zero for the complete transition.
+    """
+
+    if not isinstance(forward_target_index, int) or isinstance(
+        forward_target_index, bool
+    ):
+        raise ValueError("forward_target_index must be an integer")
+    if not 0 < forward_target_index < len(waypoints):
+        raise ValueError("forward_target_index is outside the route")
+    if (
+        not math.isfinite(alignment_tolerance_rad)
+        or alignment_tolerance_rad <= 0.0
+        or alignment_tolerance_rad > math.pi / 2.0
+    ):
+        raise ValueError(
+            "alignment_tolerance_rad must be finite and in (0, pi/2]"
+        )
+    segment_start = waypoints[forward_target_index - 1]
+    segment_end = waypoints[forward_target_index]
+    dx = segment_end.x_m - segment_start.x_m
+    dy = segment_end.y_m - segment_start.y_m
+    if math.hypot(dx, dy) <= 1.0e-9:
+        raise ValueError("forward-alignment segment has zero length")
+    outgoing_heading_rad = math.atan2(dy, dx)
+    heading_error_rad = normalize_angle(outgoing_heading_rad - pose.yaw_rad)
+    aligned = abs(heading_error_rad) <= alignment_tolerance_rad
+    angular_z_radps = 0.0
+    if not aligned:
+        angular_z_radps = _clamp(
+            heading_error_rad * config.rotate_gain,
+            -config.max_angular_radps,
+            config.max_angular_radps,
+        )
+    return ControllerStep(
+        VelocityCommand(0.0, angular_z_radps),
+        forward_target_index,
+        False,
+        distance(pose, segment_end),
+        forward_target_index,
+        heading_error_rad,
+        (
+            "reverse_egress_forward_handoff"
+            if aligned
+            else "reverse_egress_forward_alignment"
+        ),
+    )
+
+
 def compute_join_anchor_command(
     pose: Pose2D,
     anchor: Pose2D,

@@ -11,6 +11,7 @@ from unittest.mock import patch
 from scripts.aufgabe04.navigation.coverage_replan_coordinator import (
     CoverageReplanCoordinator,
     _front_evidence,
+    _reverse_egress_transition_indices,
 )
 from scripts.aufgabe04.navigation.dynamic_route_handoff import RouteUpdateKind
 from scripts.aufgabe04.navigation.models import Pose2D
@@ -73,12 +74,14 @@ class CoverageReplanCoordinatorTest(unittest.TestCase):
             route_1 = (
                 Pose2D(pose.x_m, pose.y_m),
                 Pose2D(-0.74, -0.46),
-                Pose2D(-1.59, -0.01, 0.0),
+                Pose2D(-0.69, -0.46),
+                Pose2D(-0.69, -0.41, 0.0),
             )
             route_2 = (
                 Pose2D(-0.74, -0.46),
                 Pose2D(-0.64, -0.46),
-                Pose2D(-1.59, -0.01, 0.0),
+                Pose2D(-0.59, -0.46),
+                Pose2D(-0.59, -0.41, 0.0),
             )
             legs = [
                 SimpleNamespace(
@@ -100,7 +103,10 @@ class CoverageReplanCoordinatorTest(unittest.TestCase):
             def transient_artifacts(**kwargs):
                 index = coordinator.replan_count
                 overlay = root / f"overlay_{index}.json"
-                overlay.write_text("{}\n")
+                overlay.write_text(
+                    '{"candidates":[{"x_m":-1.10,"y_m":-0.46,'
+                    '"keepout_radius_m":0.30}]}\n'
+                )
                 return {
                     "route_csv": str(root / f"source_route_{index}.csv"),
                     "diagnostics_json": str(root / f"source_diag_{index}.json"),
@@ -147,6 +153,18 @@ class CoverageReplanCoordinatorTest(unittest.TestCase):
 
             self.assertEqual(first.kind, RouteUpdateKind.ADOPT)
             self.assertEqual(first.event_fields["start_egress_motion"], "reverse")
+            self.assertEqual(
+                first.event_fields[
+                    "start_egress_reverse_until_waypoint_index"
+                ],
+                2,
+            )
+            self.assertEqual(
+                first.event_fields[
+                    "start_egress_forward_alignment_waypoint_index"
+                ],
+                3,
+            )
             self.assertEqual(
                 first.event_fields["target_viewpoint_id"],
                 "survey_vp_001",
@@ -234,6 +252,16 @@ class CoverageReplanCoordinatorTest(unittest.TestCase):
 
             self.assertEqual(update.kind, RouteUpdateKind.ADOPT)
             self.assertEqual(update.event_fields["start_egress_motion"], "reverse")
+            reverse_until = update.event_fields[
+                "start_egress_reverse_until_waypoint_index"
+            ]
+            self.assertGreaterEqual(reverse_until, 2)
+            self.assertEqual(
+                update.event_fields[
+                    "start_egress_forward_alignment_waypoint_index"
+                ],
+                reverse_until + 1,
+            )
             self.assertTrue(
                 Path(update.event_fields["replacement_route_csv"]).is_file()
             )
@@ -244,6 +272,60 @@ class CoverageReplanCoordinatorTest(unittest.TestCase):
                     ]
                 ).is_file()
             )
+
+    def test_recorded_physical_route_uses_second_vertex_as_transition_anchor(self):
+        waypoints = (
+            Pose2D(-0.8215194236642129, -0.515331012111416),
+            Pose2D(-0.7449999999999997, -0.565),
+            Pose2D(-0.6949999999999998, -0.565),
+            Pose2D(-0.6949999999999998, -0.5149999999999999),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            overlay = Path(tmp) / "transient_obstacle_overlay.json"
+            overlay.write_text(
+                """{
+  "candidates": [
+    {
+      "x_m": -1.1305176773539973,
+      "y_m": -0.5163692626837199,
+      "keepout_radius_m": 0.33999999999999997
+    }
+  ]
+}\n"""
+            )
+
+            self.assertEqual(
+                _reverse_egress_transition_indices(
+                    waypoints,
+                    overlay,
+                    0.03,
+                ),
+                (2, 3),
+            )
+
+    def test_reverse_transition_fails_closed_without_tube_clearance(self):
+        waypoints = (
+            Pose2D(0.0, 0.0),
+            Pose2D(0.10, 0.0),
+            Pose2D(0.15, 0.0),
+            Pose2D(0.20, 0.0),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            overlay = Path(tmp) / "transient_obstacle_overlay.json"
+            overlay.write_text(
+                '{"candidates":[{"x_m":0.15,"y_m":0.02,'
+                '"keepout_radius_m":0.10}]}\n'
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "no clearance-certified reverse-to-forward transition anchor",
+            ):
+                _reverse_egress_transition_indices(
+                    waypoints,
+                    overlay,
+                    0.03,
+                )
 
 
 if __name__ == "__main__":

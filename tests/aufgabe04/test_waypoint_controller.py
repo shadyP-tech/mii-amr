@@ -16,6 +16,7 @@ from scripts.aufgabe04.navigation.waypoint_controller import (  # noqa: E402
     ControllerConfig,
     StartEgressControlConfig,
     compute_certified_corner_transition,
+    compute_reverse_egress_forward_alignment_command,
     compute_start_egress_vertex_command,
     compute_waypoint_command,
     normalize_angle,
@@ -453,6 +454,79 @@ class WaypointControllerTest(unittest.TestCase):
         self.assertEqual(large_error.pursuit_index, 1)
         self.assertEqual(moderate_error.pursuit_index, 1)
         self.assertEqual(aligned.pursuit_index, 1)
+
+    def test_reverse_egress_forward_alignment_uses_outgoing_route_tube(self):
+        """Regression for physical run 20260805T120749Z.
+
+        The recorded 31.1 mm displacement may lie along the newly active
+        outgoing segment.  It must not be treated as radial escape from the
+        old reverse vertex, while the same displacement perpendicular to the
+        outgoing segment must still fail the route certificate.
+        """
+
+        waypoints = (
+            Pose2D(-0.8215194236642129, -0.515331012111416, math.nan),
+            Pose2D(-0.7449999999999997, -0.565, math.nan),
+            Pose2D(-0.6949999999999998, -0.565, math.nan),
+            Pose2D(-0.6949999999999998, -0.5149999999999999, math.nan),
+        )
+        recorded_displacement_m = 0.031114477118381244
+        along_outgoing = Pose2D(
+            waypoints[2].x_m,
+            waypoints[2].y_m + recorded_displacement_m,
+            math.pi,
+        )
+        step = compute_reverse_egress_forward_alignment_command(
+            along_outgoing,
+            waypoints,
+            3,
+            ControllerConfig(exact_vertex_pursuit=True),
+        )
+
+        self.assertEqual(step.progress_mode, "reverse_egress_forward_alignment")
+        self.assertEqual(step.target_index, 3)
+        self.assertEqual(step.pursuit_index, 3)
+        self.assertEqual(step.command.linear_x_mps, 0.0)
+        self.assertLess(step.command.angular_z_radps, 0.0)
+        outgoing_check = check_execution_route_tube(
+            along_outgoing,
+            waypoints,
+            target_index=step.target_index,
+            pursuit_index=step.pursuit_index,
+            tracking_tube_radius_m=0.03,
+        )
+        self.assertTrue(outgoing_check.ok)
+
+        aligned = compute_reverse_egress_forward_alignment_command(
+            Pose2D(
+                along_outgoing.x_m,
+                along_outgoing.y_m,
+                math.pi / 2.0,
+            ),
+            waypoints,
+            3,
+            ControllerConfig(exact_vertex_pursuit=True),
+        )
+        self.assertEqual(aligned.progress_mode, "reverse_egress_forward_handoff")
+        self.assertEqual(
+            (aligned.command.linear_x_mps, aligned.command.angular_z_radps),
+            (0.0, 0.0),
+        )
+
+        outside_outgoing = Pose2D(
+            waypoints[2].x_m + recorded_displacement_m,
+            waypoints[2].y_m,
+            math.pi,
+        )
+        outside_check = check_execution_route_tube(
+            outside_outgoing,
+            waypoints,
+            target_index=3,
+            pursuit_index=3,
+            tracking_tube_radius_m=0.03,
+        )
+        self.assertFalse(outside_check.ok)
+        self.assertEqual(outside_check.reason, "pose left certified route tube")
 
     def test_blends_forward_motion_through_corner(self):
         config = ControllerConfig(

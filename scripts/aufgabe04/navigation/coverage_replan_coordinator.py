@@ -20,6 +20,9 @@ from scripts.aufgabe04.navigation.dynamic_route_handoff import (
     RouteUpdate,
     RouteUpdateKind,
 )
+from scripts.aufgabe04.navigation.execution_route_certificate import (
+    point_to_segment_distance_m,
+)
 from scripts.aufgabe04.navigation.models import Pose2D
 from scripts.aufgabe04.navigation.stand_blockage_replan import (
     record_transient_blockage_replan,
@@ -78,6 +81,90 @@ def _reverse_egress_required(pose: Pose2D, waypoints: tuple[Pose2D, ...]) -> boo
         math.cos(heading - pose.yaw_rad),
     )
     return abs(error) > math.pi / 2.0
+
+
+def _transient_keepouts(
+    overlay_path: Path,
+) -> tuple[tuple[float, float, float], ...]:
+    try:
+        payload = json.loads(Path(overlay_path).read_text(encoding="utf-8"))
+        candidates = payload["candidates"]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid transient obstacle overlay: {exc}") from exc
+    if not isinstance(candidates, list) or not candidates:
+        raise ValueError("transient obstacle overlay contains no candidates")
+    keepouts: list[tuple[float, float, float]] = []
+    for index, candidate in enumerate(candidates):
+        if not isinstance(candidate, Mapping):
+            raise ValueError(
+                f"transient obstacle candidate {index} is not an object"
+            )
+        try:
+            x_m = float(candidate["x_m"])
+            y_m = float(candidate["y_m"])
+            keepout_radius_m = float(candidate["keepout_radius_m"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"invalid transient obstacle candidate {index}: {exc}"
+            ) from exc
+        if (
+            not math.isfinite(x_m)
+            or not math.isfinite(y_m)
+            or not math.isfinite(keepout_radius_m)
+            or keepout_radius_m <= 0.0
+        ):
+            raise ValueError(
+                f"transient obstacle candidate {index} is not finite and positive"
+            )
+        keepouts.append((x_m, y_m, keepout_radius_m))
+    return tuple(keepouts)
+
+
+def _reverse_egress_transition_indices(
+    waypoints: tuple[Pose2D, ...],
+    overlay_path: Path,
+    tracking_tube_radius_m: float,
+) -> tuple[int, int]:
+    """Select a clearance-certified reverse-to-forward transition.
+
+    Waypoint 1 is the first escape vertex and may sit just outside the
+    transient keepout.  A reverse recovery must traverse at least one more
+    certified segment before rotating into forward mode.  The transition
+    anchor and its outgoing segment must remain outside every keepout by the
+    full execution-tube radius.
+    """
+
+    if len(waypoints) < 4:
+        raise ValueError(
+            "reverse transient egress requires at least four sealed waypoints"
+        )
+    if (
+        not math.isfinite(tracking_tube_radius_m)
+        or tracking_tube_radius_m <= 0.0
+    ):
+        raise ValueError("tracking_tube_radius_m must be finite and positive")
+    keepouts = _transient_keepouts(overlay_path)
+    for anchor_index in range(2, len(waypoints) - 1):
+        # The special p0->p1 escape chord is certified separately by the
+        # transient planner.  From p1 onward, every reverse segment and the
+        # first forward segment must carry the normal route-tube margin.
+        segment_indices = range(2, anchor_index + 2)
+        if all(
+            point_to_segment_distance_m(
+                Pose2D(obstacle_x_m, obstacle_y_m),
+                waypoints[end_index - 1],
+                waypoints[end_index],
+            )
+            + 1.0e-9
+            >= keepout_radius_m + tracking_tube_radius_m
+            for end_index in segment_indices
+            for obstacle_x_m, obstacle_y_m, keepout_radius_m in keepouts
+        ):
+            return anchor_index, anchor_index + 1
+    raise ValueError(
+        "sealed transient replan has no clearance-certified "
+        "reverse-to-forward transition anchor"
+    )
 
 
 @dataclass
@@ -209,6 +296,13 @@ class CoverageReplanCoordinator:
         self.adopted_route_hashes.add(leg.source_sha256)
 
         reverse_egress = _reverse_egress_required(pose, waypoints)
+        reverse_transition_indices: tuple[int, int] | None = None
+        if reverse_egress:
+            reverse_transition_indices = _reverse_egress_transition_indices(
+                waypoints,
+                self.overlay_path,
+                self.tracking_tube_radius_m,
+            )
         event_fields = {
             "replan_index": replan_index,
             "original_stop_reason": stop_reason,
@@ -229,6 +323,20 @@ class CoverageReplanCoordinator:
             "front_clearance_m": float(front["nearest_valid_range_m"]),
             "front_bearing_rad": float(front["nearest_valid_bearing_rad"]),
         }
+        if reverse_transition_indices is not None:
+            reverse_until_index, forward_alignment_index = (
+                reverse_transition_indices
+            )
+            event_fields.update(
+                {
+                    "start_egress_reverse_until_waypoint_index": (
+                        reverse_until_index
+                    ),
+                    "start_egress_forward_alignment_waypoint_index": (
+                        forward_alignment_index
+                    ),
+                }
+            )
         _append_jsonl(
             self.adaptive_log_path,
             {
