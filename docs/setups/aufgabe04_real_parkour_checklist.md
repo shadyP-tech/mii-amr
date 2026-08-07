@@ -50,6 +50,10 @@ belong to the same run:
 - robot namespace and runtime command-owner identity match the certificate;
 - controller profile, footprint, localization uncertainty, and clearance margin
   are the measured values intended for this run.
+- for uncertainty-aware odom execution, the branch-proof ID identifies a known
+  physical start or asymmetric landmark, the frozen `map <- odom` certificate
+  matches the route, and every segment retains a strictly positive uncertainty
+  margin; five stable AMCL means alone do not establish absolute accuracy.
 
 For loaded motion, additionally require a measured carrier profile, confirmed
 retention, current fenced puck custody, loaded stopping-distance evidence, and
@@ -67,6 +71,11 @@ future commands, clock rollback, and process termination.
 2. Start saved-map localization or another explicit `map -> base_footprint`
    localization source.
 3. Set the initial pose in RViz and verify the LiDAR overlay aligns with the map.
+   If RViz reports `base_scan` message-filter queue overflow, treat it as a TF
+   or visualization backlog symptom, not as the controller's stop cause. Verify
+   `base_footprint <- base_scan` with
+   `ros2 run tf2_ros tf2_echo base_footprint base_scan`, and do not continue if
+   the static edge is absent or changes.
 4. Confirm there is no active Nav2 goal before handing off to the custom
    Aufgabe 04 follower.
 5. Do not feed the old `station_route.csv` artifacts to the segment runner.
@@ -93,6 +102,13 @@ velocity topic under a namespace.
 Every physical validation requires typing `RUN` before motion. There is no
 `--yes` bypass for `run_single_station_segment.py`; repeated runs still require
 the same dry-run/preflight sequence and an operator beside the robot.
+
+For the next operator-authorized trial, disable nonessential RViz LaserScan,
+Path, and long-history displays. Start an observe-only external capture of
+`/tf` and `/tf_static` before motion and preserve it with the bundle so the
+failure interval can be split into `map -> odom` and
+`odom -> base_footprint`. The bundle's one-shot pre/post TF probes cannot prove
+which edge paused during the run. This capture must never publish `/cmd_vel`.
 
 Every physical run should also be wrapped in a real-run debug bundle. The
 bundle records evidence only; it does not replace the strict dry-run/preflight
@@ -127,6 +143,13 @@ Before using a `safety_stop` as evidence that the robot was physically too
 close to an obstacle, inspect the semantic JSONL details for the stop. A valid
 `obstacle too close` claim must include a `nearest_valid_range_m` below the
 configured threshold and the reported `/scan` `range_min_m`/`range_max_m`.
+That one range is sufficient to stop immediately, but it is not sufficient to
+modify the route. A transient keepout additionally requires the structured
+`stationary_obstacle_confirmation` evidence: at least three fresh, distinct
+post-stop samples, a bounded front-range/map-hit cluster, stationary map and
+odom poses, and bounded map/odom offset and yaw-offset spread. Inspect the
+thresholds and measured spreads rather than treating `confirmed=true` alone as
+the claim.
 
 Invalid LiDAR samples are evidence too, but they are a different claim:
 
@@ -139,6 +162,10 @@ Invalid LiDAR samples are evidence too, but they are a different claim:
 - Rejected below-min, above-max, and non-finite sample counts must be recorded
   before concluding whether a near-zero reading was a real obstacle or a scan
   artifact.
+- `clearance-limited motion floor` means obstacle scaling would have requested
+  nonzero motion below the configured physical floor. The emitted command must
+  be exactly zero while the same stationary confirmation gate decides between
+  a bounded replan, a separately confirmed clear front, or a fail-closed stop.
 
 For real TurtleBot3 runs, record live `/scan` diagnostics confirming
 `range_min`, `range_max`, invalid sample counts, and front-sector clamp behavior
@@ -146,6 +173,13 @@ before making real-robot safety claims. Offline unit tests only prove the pure
 filtering logic; workstation/ROS validation must confirm that `safety_stop`
 JSONL carries the structured details while the CSV `stop_reason` remains
 compact.
+
+For bundled physical motion, also inspect `controller_trace.jsonl`. It records
+the map/odom poses, route revision, target and pursuit indices, nominal and
+effective commands, front-clearance summary, active certified segment, and
+route-tube distances for motion cycles and critical zero/stop transitions. A
+missing trace on an authorized bundled run is missing evidence, not permission
+to infer controller behavior from the compact CSV.
 
 ## Preflight Gate
 
@@ -163,6 +197,9 @@ The preflight must pass before follower motion starts:
   resolved velocity topic
 - Nav2 publisher count alone is not enough; check active NavigateToPose or
   controller state where possible
+- the preflight AMCL no-motion request retains its own service and readiness
+  timeout; the separate runtime request defaults to the namespace-relative
+  `request_nomotion_update` service and a fail-closed budget of 2.0 s or less
 
 The runner writes semantic events such as `run_started`, `runtime_resolved`,
 `preflight_passed` or `preflight_failed`, `motion_started`, `safety_stop`, and
@@ -170,6 +207,11 @@ The runner writes semantic events such as `run_started`, `runtime_resolved`,
 the semantic log and preflight JSON paths. The bundle remains external evidence
 capture only: terminal output, command, environment/git/ROS diagnostics, and
 pre/post topic state.
+
+A successful dry run, parser/unit tests, and a no-motion preflight show only
+that the gates and configuration are wired correctly. They do not physically
+validate AMCL refresh recovery, certified-route continuation, obstacle
+detection, or adaptive replanning.
 
 Zero-length legs are no-op evidence only. They must be run with `--allow-noop`;
 the runner logs `motion_published=false` and does not publish motion.

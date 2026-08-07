@@ -6,7 +6,10 @@ front-clearance sample that already stopped the follower into a run-local
 keepout and replans without performing a semantic stand-observation epoch or
 changing the persistent survey registry.  If the robot is inside the
 conservative transit keepout, the replacement begins with a short,
-continuously checked segment that moves away from the blocker.
+continuously checked connector that moves away from the blocker.  Forward
+motion is preferred within the controller's translation-heading envelope; a
+reverse recovery instead keeps one straight prefix through a farther,
+rotation-safe forward-transition anchor.
 
 The older stationary stand-observation entrypoint remains available for
 artifact compatibility, but the autonomous coverage orchestrator must not use
@@ -19,15 +22,25 @@ from dataclasses import dataclass, replace
 import json
 import math
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Sequence
 
 from scripts.aufgabe04.navigation.artifacts import (
     write_diagnostics_json,
     write_route_csv,
 )
 from scripts.aufgabe04.navigation.costmap import Costmap
+from scripts.aufgabe04.navigation.coverage_escape_geometry import (
+    DEFAULT_FORWARD_TRANSLATION_HEADING_LIMIT_RAD,
+    DEFAULT_REVERSE_CONNECTOR_ALIGNMENT_TOLERANCE_RAD,
+    EGRESS_MODE_FORWARD,
+    CircularEscapeKeepout,
+    ExecutableEscapeGeometry,
+    choose_egress_connectors,
+    find_reverse_transition_anchors,
+    validate_executable_escape_route,
+)
 from scripts.aufgabe04.navigation.dynamic_approach_planner import (
-    segment_is_collision_free,
+    greedy_line_of_sight_shortcut,
 )
 from scripts.aufgabe04.navigation.global_planner import PlanRouteResult, plan_route
 from scripts.aufgabe04.navigation.map_io import (
@@ -35,7 +48,6 @@ from scripts.aufgabe04.navigation.map_io import (
     load_occupancy_grid_with_bundle,
 )
 from scripts.aufgabe04.navigation.models import (
-    GridCell,
     Pose2D,
     Route,
     RoutePoint,
@@ -56,6 +68,9 @@ from scripts.aufgabe04.navigation.stand_coverage_survey import (
     load_stand_survey_registry,
     load_survey_progress,
     write_stand_survey_registry,
+)
+from scripts.aufgabe04.navigation.transient_blockage_policy import (
+    CLEARANCE_LIMITED_MOTION_FLOOR,
 )
 from scripts.aufgabe04.perception.stand_confirmation import ConfirmedStand
 from scripts.aufgabe04.stations.models import Station, StationPose
@@ -80,6 +95,18 @@ class BlockageRoutePlan:
     egress_anchor: Pose2D
     egress_distance_m: float
     minimum_egress_hard_clearance_m: float
+    egress_mode: str
+    egress_transition_anchor: Pose2D
+    egress_transition_waypoint_index: int
+    egress_forward_waypoint_index: int | None
+    egress_connector_heading_error_rad: float
+    forward_translation_heading_limit_rad: float
+    reverse_connector_alignment_tolerance_rad: float
+    reverse_connector_heading_error_rad: float | None
+    minimum_transition_keepout_tube_clearance_m: float | None
+    tracking_tube_radius_m: float
+    astar_tail_raw_point_count: int
+    astar_tail_smoothed_point_count: int
 
 
 @dataclass(frozen=True)
@@ -422,143 +449,71 @@ def _planning_costmap(
     )
 
 
-def _minimum_hard_segment_clearance_m(
-    start: Pose2D,
-    end: Pose2D,
+def _escape_keepouts(
     candidates: Sequence[SurveyCandidate],
     *,
     robot_radius_m: float,
     collision_margin_m: float,
     tracking_tube_radius_m: float,
-) -> float:
-    if not candidates:
-        return math.inf
-    return min(
-        _point_to_segment_distance_m(
-            Pose2D(candidate.x_m, candidate.y_m, 0.0),
-            start,
-            end,
-        )
-        - _hard_exclusion_radius_m(
-            candidate,
-            robot_radius_m=robot_radius_m,
-            collision_margin_m=collision_margin_m,
-            tracking_tube_radius_m=tracking_tube_radius_m,
+) -> tuple[CircularEscapeKeepout, ...]:
+    return tuple(
+        CircularEscapeKeepout(
+            candidate_uid=candidate.candidate_uid,
+            center=Pose2D(candidate.x_m, candidate.y_m, 0.0),
+            hard_exclusion_radius_m=_hard_exclusion_radius_m(
+                candidate,
+                robot_radius_m=robot_radius_m,
+                collision_margin_m=collision_margin_m,
+                tracking_tube_radius_m=tracking_tube_radius_m,
+            ),
+            route_keepout_radius_m=candidate.keepout_radius_m,
         )
         for candidate in candidates
     )
 
 
-def _candidate_anchor_cells(
+def _same_position(a: Pose2D, b: Pose2D) -> bool:
+    return math.hypot(a.x_m - b.x_m, a.y_m - b.y_m) <= 1.0e-8
+
+
+def _simplified_astar_tail(
+    result: PlanRouteResult,
+    *,
     costmap: Costmap,
-    start: Pose2D,
-    *,
-    search_radius_cells: int,
-) -> Iterable[tuple[float, GridCell, Pose2D]]:
-    start_cell = costmap.world_to_grid(start)
-    candidates = []
-    for dy in range(-search_radius_cells, search_radius_cells + 1):
-        for dx in range(-search_radius_cells, search_radius_cells + 1):
-            cell = GridCell(start_cell.x + dx, start_cell.y + dy)
-            if not costmap.is_traversable(cell):
-                continue
-            anchor = costmap.grid_to_world(cell)
-            distance_m = math.hypot(anchor.x_m - start.x_m, anchor.y_m - start.y_m)
-            if distance_m <= _EPSILON_M:
-                continue
-            candidates.append((distance_m, cell, anchor))
-    return tuple(sorted(candidates, key=lambda item: (item[0], item[1])))
+) -> tuple[Pose2D, ...]:
+    if result.route is None:
+        raise ValueError("cannot simplify a failed blockage A* route")
+    poses = tuple(point.pose for point in result.route.points)
+    if not poses:
+        raise ValueError("A* blockage replan returned no route points")
+    # Only the A* tail is eligible for smoothing.  The exact stopped pose and
+    # its exceptional connector are prepended afterwards and can never be
+    # removed by a line-of-sight shortcut.
+    return greedy_line_of_sight_shortcut(costmap, poses)
 
 
-def _find_safe_egress_anchor(
-    static_costmap: Costmap,
-    planning_costmap: Costmap,
-    start: Pose2D,
-    candidates: Sequence[SurveyCandidate],
-    blockers: Sequence[SurveyCandidate],
-    *,
-    robot_radius_m: float,
-    collision_margin_m: float,
-    tracking_tube_radius_m: float,
-    search_radius_m: float,
-) -> tuple[Pose2D, float]:
-    for candidate in candidates:
-        start_clearance_m = (
-            _candidate_distance(candidate, start)
-            - _hard_exclusion_radius_m(
-                candidate,
-                robot_radius_m=robot_radius_m,
-                collision_margin_m=collision_margin_m,
-                tracking_tube_radius_m=tracking_tube_radius_m,
-            )
-        )
-        if start_clearance_m <= _EPSILON_M:
-            raise ValueError(
-                "blockage pose is inside the hard stand exclusion envelope: "
-                f"candidate={candidate.candidate_uid} "
-                f"clearance={start_clearance_m:.6f} m"
-            )
-
-    search_radius_cells = max(
-        1,
-        int(math.ceil(search_radius_m / static_costmap.resolution)),
-    )
-    for _distance_m, _cell, anchor in _candidate_anchor_cells(
-        planning_costmap,
-        start,
-        search_radius_cells=search_radius_cells,
-    ):
-        if not segment_is_collision_free(static_costmap, start, anchor):
-            continue
-        # When starting inside a conservative transit keepout, the connector
-        # must make non-negative progress away from every blocking stand.
-        moves_away = all(
-            (
-                (anchor.x_m - start.x_m) * (start.x_m - blocker.x_m)
-                + (anchor.y_m - start.y_m) * (start.y_m - blocker.y_m)
-            )
-            > _EPSILON_M
-            for blocker in blockers
-        )
-        if blockers and not moves_away:
-            continue
-        minimum_clearance_m = _minimum_hard_segment_clearance_m(
-            start,
-            anchor,
-            candidates,
-            robot_radius_m=robot_radius_m,
-            collision_margin_m=collision_margin_m,
-            tracking_tube_radius_m=tracking_tube_radius_m,
-        )
-        if minimum_clearance_m <= _EPSILON_M:
-            continue
-        return anchor, minimum_clearance_m
-    raise ValueError("no continuously safe stand-blockage egress anchor")
-
-
-def _prepend_exact_egress(
+def _rebuild_escape_route(
     result: PlanRouteResult,
     *,
     start: Pose2D,
-    anchor: Pose2D,
+    connector_anchor: Pose2D,
+    simplified_tail: Sequence[Pose2D],
     costmap: Costmap,
 ) -> PlanRouteResult:
     if result.route is None:
         return result
-    original = list(result.route.points)
-    if not original:
-        raise ValueError("A* blockage replan returned no route points")
-    if math.hypot(
-        original[0].pose.x_m - anchor.x_m,
-        original[0].pose.y_m - anchor.y_m,
-    ) > 1.0e-8:
-        raise ValueError("A* blockage replan lost its certified egress anchor")
-    poses_and_cells = [(start, costmap.world_to_grid(start))]
-    poses_and_cells.extend((point.pose, point.cell) for point in original)
+    if not simplified_tail:
+        raise ValueError("simplified blockage A* tail is empty")
+    poses = [start, connector_anchor]
+    for pose in simplified_tail:
+        if not _same_position(poses[-1], pose):
+            poses.append(pose)
+    if len(poses) < 2:
+        raise ValueError("reconstructed blockage route has fewer than two points")
     points = []
     cumulative_m = 0.0
     previous = None
-    for index, (pose, cell) in enumerate(poses_and_cells):
+    for index, pose in enumerate(poses):
         segment_m = (
             0.0
             if previous is None
@@ -568,7 +523,7 @@ def _prepend_exact_egress(
         points.append(
             RoutePoint(
                 index=index,
-                cell=cell,
+                cell=costmap.world_to_grid(pose),
                 pose=pose,
                 segment_length_m=segment_m,
                 cumulative_length_m=cumulative_m,
@@ -579,7 +534,10 @@ def _prepend_exact_egress(
         points=tuple(points),
         requested_start=start,
         requested_goal=result.route.requested_goal,
-        snapped_start=anchor,
+        # Preserve the raw A* start.  On a reverse escape this is the farther
+        # transition cell, while waypoint 1 remains the separately certified
+        # exact-start connector anchor used by the sealer.
+        snapped_start=result.route.snapped_start,
         snapped_goal=result.route.snapped_goal,
         length_m=cumulative_m,
     )
@@ -641,7 +599,22 @@ def plan_blockage_route_to_viewpoint(
     collision_margin_m: float = DEFAULT_COLLISION_MARGIN_M,
     tracking_tube_radius_m: float = DEFAULT_TRACKING_TUBE_RADIUS_M,
     egress_search_radius_m: float = 0.60,
+    forward_translation_heading_limit_rad: float = (
+        DEFAULT_FORWARD_TRANSLATION_HEADING_LIMIT_RAD
+    ),
+    reverse_connector_alignment_tolerance_rad: float = (
+        DEFAULT_REVERSE_CONNECTOR_ALIGNMENT_TOLERANCE_RAD
+    ),
 ) -> BlockageRoutePlan:
+    if not math.isfinite(robot_radius_m) or robot_radius_m <= 0.0:
+        raise ValueError("robot radius must be finite and positive")
+    if not math.isfinite(collision_margin_m) or collision_margin_m < 0.0:
+        raise ValueError("collision margin must be finite and non-negative")
+    if (
+        not math.isfinite(tracking_tube_radius_m)
+        or tracking_tube_radius_m <= 0.0
+    ):
+        raise ValueError("tracking tube radius must be finite and positive")
     candidates = _known_candidates(registry)
     by_uid = {candidate.candidate_uid: candidate for candidate in candidates}
     blockers = tuple(by_uid[uid] for uid in blocker_uids if uid in by_uid)
@@ -652,32 +625,170 @@ def plan_blockage_route_to_viewpoint(
         raise ValueError(f"unknown blockage target viewpoint {target_viewpoint_id!r}")
     static_costmap = _static_costmap(occupancy_grid, plan)
     planning_costmap = _planning_costmap(static_costmap, candidates)
-    anchor, minimum_clearance_m = _find_safe_egress_anchor(
-        static_costmap,
-        planning_costmap,
-        start,
+    keepouts = _escape_keepouts(
         candidates,
-        blockers,
         robot_radius_m=robot_radius_m,
         collision_margin_m=collision_margin_m,
         tracking_tube_radius_m=tracking_tube_radius_m,
-        search_radius_m=egress_search_radius_m,
     )
-    planned = plan_route(
+    connector_choices = choose_egress_connectors(
+        static_costmap,
         planning_costmap,
-        anchor,
-        target.pose,
-        snap_radius_m=plan.config.snap_radius_m,
+        start,
+        keepouts,
+        blocker_candidate_uids=(
+            candidate.candidate_uid for candidate in blockers
+        ),
+        search_radius_m=egress_search_radius_m,
+        forward_translation_heading_limit_rad=(
+            forward_translation_heading_limit_rad
+        ),
+        reverse_alignment_tolerance_rad=(
+            reverse_connector_alignment_tolerance_rad
+        ),
     )
-    if planned.route is None:
-        reason = planned.failure.reason if planned.failure is not None else "no_path"
-        raise ValueError(f"stand-blockage A* failed: {reason}")
-    replacement = _prepend_exact_egress(
-        planned,
-        start=start,
-        anchor=anchor,
-        costmap=static_costmap,
-    )
+    if not connector_choices:
+        raise ValueError(
+            "no kinematically executable stand-blockage egress connector"
+        )
+
+    replacement: PlanRouteResult | None = None
+    geometry: ExecutableEscapeGeometry | None = None
+    selected_raw_tail_count = 0
+    selected_smoothed_tail_count = 0
+    rejection_reasons: list[str] = []
+    for connector in connector_choices:
+        if connector.mode == EGRESS_MODE_FORWARD:
+            planned = plan_route(
+                planning_costmap,
+                connector.anchor,
+                target.pose,
+                snap_radius_m=plan.config.snap_radius_m,
+            )
+            if planned.route is None:
+                reason = (
+                    planned.failure.reason
+                    if planned.failure is not None
+                    else "no_path"
+                )
+                rejection_reasons.append(f"forward_astar:{reason}")
+                continue
+            try:
+                tail = _simplified_astar_tail(
+                    planned,
+                    costmap=planning_costmap,
+                )
+                candidate_result = _rebuild_escape_route(
+                    planned,
+                    start=start,
+                    connector_anchor=connector.anchor,
+                    simplified_tail=tail,
+                    costmap=planning_costmap,
+                )
+                assert candidate_result.route is not None
+                candidate_geometry = validate_executable_escape_route(
+                    static_costmap,
+                    planning_costmap,
+                    start,
+                    connector,
+                    tuple(
+                        point.pose for point in candidate_result.route.points
+                    ),
+                    keepouts,
+                    transition_waypoint_index=1,
+                    tracking_tube_radius_m=tracking_tube_radius_m,
+                    forward_translation_heading_limit_rad=(
+                        forward_translation_heading_limit_rad
+                    ),
+                    reverse_alignment_tolerance_rad=(
+                        reverse_connector_alignment_tolerance_rad
+                    ),
+                )
+            except ValueError as exc:
+                rejection_reasons.append(f"forward_geometry:{exc}")
+                continue
+            replacement = candidate_result
+            geometry = candidate_geometry
+            selected_raw_tail_count = len(planned.route.points)
+            selected_smoothed_tail_count = len(tail)
+            break
+
+        transitions = find_reverse_transition_anchors(
+            planning_costmap,
+            start,
+            connector,
+            keepouts,
+            tracking_tube_radius_m=tracking_tube_radius_m,
+            search_radius_m=egress_search_radius_m,
+            reverse_alignment_tolerance_rad=(
+                reverse_connector_alignment_tolerance_rad
+            ),
+        )
+        if not transitions:
+            rejection_reasons.append("reverse_transition:no_straight_anchor")
+            continue
+        for transition in transitions:
+            planned = plan_route(
+                planning_costmap,
+                transition.anchor,
+                target.pose,
+                snap_radius_m=plan.config.snap_radius_m,
+            )
+            if planned.route is None:
+                reason = (
+                    planned.failure.reason
+                    if planned.failure is not None
+                    else "no_path"
+                )
+                rejection_reasons.append(f"reverse_astar:{reason}")
+                continue
+            try:
+                tail = _simplified_astar_tail(
+                    planned,
+                    costmap=planning_costmap,
+                )
+                candidate_result = _rebuild_escape_route(
+                    planned,
+                    start=start,
+                    connector_anchor=connector.anchor,
+                    simplified_tail=tail,
+                    costmap=planning_costmap,
+                )
+                assert candidate_result.route is not None
+                candidate_geometry = validate_executable_escape_route(
+                    static_costmap,
+                    planning_costmap,
+                    start,
+                    connector,
+                    tuple(
+                        point.pose for point in candidate_result.route.points
+                    ),
+                    keepouts,
+                    transition_waypoint_index=2,
+                    tracking_tube_radius_m=tracking_tube_radius_m,
+                    forward_translation_heading_limit_rad=(
+                        forward_translation_heading_limit_rad
+                    ),
+                    reverse_alignment_tolerance_rad=(
+                        reverse_connector_alignment_tolerance_rad
+                    ),
+                )
+            except ValueError as exc:
+                rejection_reasons.append(f"reverse_geometry:{exc}")
+                continue
+            replacement = candidate_result
+            geometry = candidate_geometry
+            selected_raw_tail_count = len(planned.route.points)
+            selected_smoothed_tail_count = len(tail)
+            break
+        if replacement is not None:
+            break
+
+    if replacement is None or geometry is None:
+        detail = rejection_reasons[-1] if rejection_reasons else "no_candidate"
+        raise ValueError(
+            "no executable stand-blockage replacement route: " + detail
+        )
     assert replacement.route is not None
     _validate_route_keepout_clearance(
         replacement.route,
@@ -693,10 +804,93 @@ def plan_blockage_route_to_viewpoint(
         target_pose=target.pose,
         blocker_candidate_uids=tuple(candidate.candidate_uid for candidate in blockers),
         start_pose=start,
-        egress_anchor=anchor,
-        egress_distance_m=math.hypot(anchor.x_m - start.x_m, anchor.y_m - start.y_m),
-        minimum_egress_hard_clearance_m=minimum_clearance_m,
+        egress_anchor=geometry.connector_anchor,
+        egress_distance_m=math.hypot(
+            geometry.connector_anchor.x_m - start.x_m,
+            geometry.connector_anchor.y_m - start.y_m,
+        ),
+        minimum_egress_hard_clearance_m=(
+            geometry.minimum_connector_hard_clearance_m
+        ),
+        egress_mode=geometry.mode,
+        egress_transition_anchor=geometry.transition_anchor,
+        egress_transition_waypoint_index=(
+            geometry.transition_waypoint_index
+        ),
+        egress_forward_waypoint_index=geometry.forward_waypoint_index,
+        egress_connector_heading_error_rad=(
+            geometry.connector_heading_error_rad
+        ),
+        forward_translation_heading_limit_rad=(
+            geometry.forward_translation_heading_limit_rad
+        ),
+        reverse_connector_alignment_tolerance_rad=(
+            geometry.reverse_alignment_tolerance_rad
+        ),
+        reverse_connector_heading_error_rad=(
+            geometry.connector_heading_error_rad
+            if geometry.mode != EGRESS_MODE_FORWARD
+            else None
+        ),
+        minimum_transition_keepout_tube_clearance_m=(
+            geometry.minimum_transition_keepout_tube_clearance_m
+        ),
+        tracking_tube_radius_m=tracking_tube_radius_m,
+        astar_tail_raw_point_count=selected_raw_tail_count,
+        astar_tail_smoothed_point_count=selected_smoothed_tail_count,
     )
+
+
+def _egress_metadata(route_plan: BlockageRoutePlan) -> dict[str, object]:
+    return {
+        "egress_anchor": {
+            "x_m": route_plan.egress_anchor.x_m,
+            "y_m": route_plan.egress_anchor.y_m,
+        },
+        "egress_distance_m": route_plan.egress_distance_m,
+        "minimum_egress_hard_clearance_m": (
+            route_plan.minimum_egress_hard_clearance_m
+        ),
+        "egress_mode": route_plan.egress_mode,
+        "egress_transition_anchor": {
+            "x_m": route_plan.egress_transition_anchor.x_m,
+            "y_m": route_plan.egress_transition_anchor.y_m,
+        },
+        "egress_transition_waypoint_index": (
+            route_plan.egress_transition_waypoint_index
+        ),
+        "egress_forward_waypoint_index": (
+            route_plan.egress_forward_waypoint_index
+        ),
+        "egress_connector_heading_error_rad": (
+            route_plan.egress_connector_heading_error_rad
+        ),
+        "forward_translation_heading_limit_rad": (
+            route_plan.forward_translation_heading_limit_rad
+        ),
+        "reverse_connector_alignment_tolerance_rad": (
+            route_plan.reverse_connector_alignment_tolerance_rad
+        ),
+        "reverse_connector_heading_error_rad": (
+            route_plan.reverse_connector_heading_error_rad
+        ),
+        "minimum_transition_keepout_tube_clearance_m": (
+            route_plan.minimum_transition_keepout_tube_clearance_m
+        ),
+        "tracking_tube_radius_m": route_plan.tracking_tube_radius_m,
+        "raw_astar_path_cell_count": (
+            route_plan.route_result.diagnostics.path_cell_count
+        ),
+        "astar_tail_raw_point_count": route_plan.astar_tail_raw_point_count,
+        "astar_tail_smoothed_point_count": (
+            route_plan.astar_tail_smoothed_point_count
+        ),
+        "executable_route_point_count": (
+            0
+            if route_plan.route_result.route is None
+            else len(route_plan.route_result.route.points)
+        ),
+    }
 
 
 def record_blockage_replan(
@@ -709,6 +903,13 @@ def record_blockage_replan(
     observer_summary_path: Path,
     output_dir: Path,
     robot_radius_m: float,
+    tracking_tube_radius_m: float = DEFAULT_TRACKING_TUBE_RADIUS_M,
+    forward_translation_heading_limit_rad: float = (
+        DEFAULT_FORWARD_TRANSLATION_HEADING_LIMIT_RAD
+    ),
+    reverse_connector_alignment_tolerance_rad: float = (
+        DEFAULT_REVERSE_CONNECTOR_ALIGNMENT_TOLERANCE_RAD
+    ),
 ) -> dict[str, str]:
     """Validate one stationary blockage epoch and atomically expose a replan."""
 
@@ -765,6 +966,13 @@ def record_blockage_replan(
         target_viewpoint_id=target_viewpoint_id,
         blocker_uids=blocker_uids,
         robot_radius_m=robot_radius_m,
+        tracking_tube_radius_m=tracking_tube_radius_m,
+        forward_translation_heading_limit_rad=(
+            forward_translation_heading_limit_rad
+        ),
+        reverse_connector_alignment_tolerance_rad=(
+            reverse_connector_alignment_tolerance_rad
+        ),
     )
 
     output_dir.mkdir(parents=True, exist_ok=False)
@@ -798,14 +1006,7 @@ def record_blockage_replan(
             "blocker_candidate_uids": list(blocker_uids),
             "blockage_id": blockage_id,
             "blockage_observer_summary": str(observer_summary_path),
-            "egress_anchor": {
-                "x_m": blockage_plan.egress_anchor.x_m,
-                "y_m": blockage_plan.egress_anchor.y_m,
-            },
-            "egress_distance_m": blockage_plan.egress_distance_m,
-            "minimum_egress_hard_clearance_m": (
-                blockage_plan.minimum_egress_hard_clearance_m
-            ),
+            **_egress_metadata(blockage_plan),
             "inflation_radius_m": plan.config.inflation_radius_m,
             "arena_boundary_overlay": True,
             "arena_bounds": plan.arena_bounds.to_metadata(),
@@ -902,14 +1103,7 @@ def _write_transient_replan_artifacts(
             "blocker_candidate_uids": list(
                 route_plan.blocker_candidate_uids
             ),
-            "egress_anchor": {
-                "x_m": route_plan.egress_anchor.x_m,
-                "y_m": route_plan.egress_anchor.y_m,
-            },
-            "egress_distance_m": route_plan.egress_distance_m,
-            "minimum_egress_hard_clearance_m": (
-                route_plan.minimum_egress_hard_clearance_m
-            ),
+            **_egress_metadata(route_plan),
             "inflation_radius_m": plan.config.inflation_radius_m,
             "arena_boundary_overlay": True,
             "arena_bounds": plan.arena_bounds.to_metadata(),
@@ -961,6 +1155,13 @@ def record_transient_blockage_replan(
     output_dir: Path,
     robot_radius_m: float,
     existing_overlay_path: Path | None = None,
+    tracking_tube_radius_m: float = DEFAULT_TRACKING_TUBE_RADIUS_M,
+    forward_translation_heading_limit_rad: float = (
+        DEFAULT_FORWARD_TRANSLATION_HEADING_LIMIT_RAD
+    ),
+    reverse_connector_alignment_tolerance_rad: float = (
+        DEFAULT_REVERSE_CONNECTOR_ALIGNMENT_TOLERANCE_RAD
+    ),
 ) -> dict[str, str]:
     """Create a run-local A* keepout from the follower's existing scan sample.
 
@@ -968,7 +1169,11 @@ def record_transient_blockage_replan(
     write ``stand_registry.json`` or coverage progress.
     """
 
-    if stop_reason not in {"stuck no progress", "obstacle too close"}:
+    if stop_reason not in {
+        "stuck no progress",
+        "obstacle too close",
+        CLEARANCE_LIMITED_MOTION_FLOOR,
+    }:
         raise ValueError(
             "only a front-sector blockage stop can create an overlay"
         )
@@ -1026,6 +1231,13 @@ def record_transient_blockage_replan(
         target_viewpoint_id=target_viewpoint_id,
         blocker_uids=(blocker_uid,),
         robot_radius_m=robot_radius_m,
+        tracking_tube_radius_m=tracking_tube_radius_m,
+        forward_translation_heading_limit_rad=(
+            forward_translation_heading_limit_rad
+        ),
+        reverse_connector_alignment_tolerance_rad=(
+            reverse_connector_alignment_tolerance_rad
+        ),
     )
     return _write_transient_replan_artifacts(
         plan=plan,
@@ -1061,6 +1273,13 @@ def replan_transient_blockage_from_overlay(
     robot_radius_m: float,
     rejected_run_id: str,
     rejected_stop_details: dict[str, object],
+    tracking_tube_radius_m: float = DEFAULT_TRACKING_TUBE_RADIUS_M,
+    forward_translation_heading_limit_rad: float = (
+        DEFAULT_FORWARD_TRANSLATION_HEADING_LIMIT_RAD
+    ),
+    reverse_connector_alignment_tolerance_rad: float = (
+        DEFAULT_REVERSE_CONNECTOR_ALIGNMENT_TOLERANCE_RAD
+    ),
 ) -> dict[str, str]:
     """Rebuild from fresh AMCL while preserving the dynamic obstacle overlay."""
 
@@ -1092,6 +1311,13 @@ def replan_transient_blockage_from_overlay(
         target_viewpoint_id=target_viewpoint_id,
         blocker_uids=(blocker.candidate_uid,),
         robot_radius_m=robot_radius_m,
+        tracking_tube_radius_m=tracking_tube_radius_m,
+        forward_translation_heading_limit_rad=(
+            forward_translation_heading_limit_rad
+        ),
+        reverse_connector_alignment_tolerance_rad=(
+            reverse_connector_alignment_tolerance_rad
+        ),
     )
     return _write_transient_replan_artifacts(
         plan=plan,

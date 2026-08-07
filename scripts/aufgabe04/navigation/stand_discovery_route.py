@@ -235,6 +235,13 @@ def validate_stand_discovery_route_binding(
         failures.append("stand discovery final waypoint must be protected and corridor")
     if not math.isfinite(final.pose.yaw_rad):
         failures.append("stand discovery final waypoint yaw is unconstrained")
+    if any(
+        math.isfinite(waypoint.pose.yaw_rad)
+        for waypoint in leg.raw_waypoints[:-1]
+    ):
+        failures.append(
+            "stand discovery non-final waypoint yaw must be unconstrained"
+        )
 
     try:
         payload = (

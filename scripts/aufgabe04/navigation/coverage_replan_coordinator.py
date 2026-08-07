@@ -16,12 +16,15 @@ from pathlib import Path
 import time
 from typing import Mapping
 
+from scripts.aufgabe04.navigation.coverage_escape_geometry import (
+    DEFAULT_FORWARD_TRANSLATION_HEADING_LIMIT_RAD,
+    DEFAULT_REVERSE_CONNECTOR_ALIGNMENT_TOLERANCE_RAD,
+    EGRESS_MODE_FORWARD,
+    EGRESS_MODE_STRAIGHT_REVERSE,
+)
 from scripts.aufgabe04.navigation.dynamic_route_handoff import (
     RouteUpdate,
     RouteUpdateKind,
-)
-from scripts.aufgabe04.navigation.execution_route_certificate import (
-    point_to_segment_distance_m,
 )
 from scripts.aufgabe04.navigation.models import Pose2D
 from scripts.aufgabe04.navigation.stand_blockage_replan import (
@@ -31,6 +34,9 @@ from scripts.aufgabe04.navigation.stand_discovery_route import (
     STAND_DISCOVERY_ROUTE_KIND,
     seal_stand_discovery_route,
 )
+from scripts.aufgabe04.navigation.transient_blockage_policy import (
+    CLEARANCE_LIMITED_MOTION_FLOOR,
+)
 from scripts.aufgabe04.navigation.waypoint_csv import (
     load_route_leg,
     poses_from_waypoints,
@@ -38,7 +44,11 @@ from scripts.aufgabe04.navigation.waypoint_csv import (
 
 
 RECOVERABLE_STOP_REASONS = frozenset(
-    {"stuck no progress", "obstacle too close"}
+    {
+        "stuck no progress",
+        "obstacle too close",
+        CLEARANCE_LIMITED_MOTION_FLOOR,
+    }
 )
 
 
@@ -53,6 +63,29 @@ def _front_evidence(
     stop_details: Mapping[str, object],
 ) -> dict[str, object] | None:
     if stop_reason not in RECOVERABLE_STOP_REASONS:
+        return None
+    confirmation = stop_details.get("stationary_obstacle_confirmation")
+    if (
+        not isinstance(confirmation, Mapping)
+        or confirmation.get("confirmed") is not True
+        or confirmation.get("fail_closed") is not False
+    ):
+        return None
+    distinct_sample_count = confirmation.get("distinct_sample_count")
+    thresholds = confirmation.get("thresholds")
+    if (
+        not isinstance(distinct_sample_count, int)
+        or isinstance(distinct_sample_count, bool)
+        or not isinstance(thresholds, Mapping)
+    ):
+        return None
+    minimum_samples = thresholds.get("min_distinct_samples")
+    if (
+        not isinstance(minimum_samples, int)
+        or isinstance(minimum_samples, bool)
+        or minimum_samples < 3
+        or distinct_sample_count < minimum_samples
+    ):
         return None
     front = stop_details.get("front_clearance")
     if not isinstance(front, Mapping) or front.get("source") != "front_sector":
@@ -71,100 +104,128 @@ def _front_evidence(
     return dict(front)
 
 
-def _reverse_egress_required(pose: Pose2D, waypoints: tuple[Pose2D, ...]) -> bool:
-    if len(waypoints) < 2:
-        return False
-    egress = waypoints[1]
-    heading = math.atan2(egress.y_m - pose.y_m, egress.x_m - pose.x_m)
-    error = math.atan2(
-        math.sin(heading - pose.yaw_rad),
-        math.cos(heading - pose.yaw_rad),
-    )
-    return abs(error) > math.pi / 2.0
-
-
-def _transient_keepouts(
-    overlay_path: Path,
-) -> tuple[tuple[float, float, float], ...]:
-    try:
-        payload = json.loads(Path(overlay_path).read_text(encoding="utf-8"))
-        candidates = payload["candidates"]
-    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
-        raise ValueError(f"invalid transient obstacle overlay: {exc}") from exc
-    if not isinstance(candidates, list) or not candidates:
-        raise ValueError("transient obstacle overlay contains no candidates")
-    keepouts: list[tuple[float, float, float]] = []
-    for index, candidate in enumerate(candidates):
-        if not isinstance(candidate, Mapping):
-            raise ValueError(
-                f"transient obstacle candidate {index} is not an object"
-            )
-        try:
-            x_m = float(candidate["x_m"])
-            y_m = float(candidate["y_m"])
-            keepout_radius_m = float(candidate["keepout_radius_m"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError(
-                f"invalid transient obstacle candidate {index}: {exc}"
-            ) from exc
-        if (
-            not math.isfinite(x_m)
-            or not math.isfinite(y_m)
-            or not math.isfinite(keepout_radius_m)
-            or keepout_radius_m <= 0.0
-        ):
-            raise ValueError(
-                f"transient obstacle candidate {index} is not finite and positive"
-            )
-        keepouts.append((x_m, y_m, keepout_radius_m))
-    return tuple(keepouts)
-
-
-def _reverse_egress_transition_indices(
+def _load_escape_metadata(
+    diagnostics_path: Path,
     waypoints: tuple[Pose2D, ...],
-    overlay_path: Path,
+    *,
     tracking_tube_radius_m: float,
-) -> tuple[int, int]:
-    """Select a clearance-certified reverse-to-forward transition.
+    forward_translation_heading_limit_rad: float,
+    reverse_connector_alignment_tolerance_rad: float,
+) -> dict[str, object]:
+    """Bind the sealed handoff to the planner's executable prefix proof."""
 
-    Waypoint 1 is the first escape vertex and may sit just outside the
-    transient keepout.  A reverse recovery must traverse at least one more
-    certified segment before rotating into forward mode.  The transition
-    anchor and its outgoing segment must remain outside every keepout by the
-    full execution-tube radius.
-    """
-
-    if len(waypoints) < 4:
+    try:
+        payload = json.loads(Path(diagnostics_path).read_text(encoding="utf-8"))
+        metadata = payload["metadata"]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid transient replan diagnostics: {exc}") from exc
+    if not isinstance(metadata, Mapping):
+        raise ValueError("transient replan diagnostics metadata is not an object")
+    mode = metadata.get("egress_mode")
+    if mode not in {EGRESS_MODE_FORWARD, EGRESS_MODE_STRAIGHT_REVERSE}:
+        raise ValueError("transient replan has no executable egress mode")
+    try:
+        certified_tube_m = float(metadata["tracking_tube_radius_m"])
+        certified_forward_limit_rad = float(
+            metadata["forward_translation_heading_limit_rad"]
+        )
+        certified_reverse_tolerance_rad = float(
+            metadata["reverse_connector_alignment_tolerance_rad"]
+        )
+        raw_transition_index = metadata[
+            "egress_transition_waypoint_index"
+        ]
+        raw_forward_index = metadata.get("egress_forward_waypoint_index")
+        anchor = metadata["egress_anchor"]
+        transition_anchor = metadata["egress_transition_anchor"]
+        if not isinstance(anchor, Mapping) or not isinstance(
+            transition_anchor,
+            Mapping,
+        ):
+            raise TypeError("egress anchors must be objects")
+        anchor_x_m = float(anchor["x_m"])
+        anchor_y_m = float(anchor["y_m"])
+        transition_x_m = float(transition_anchor["x_m"])
+        transition_y_m = float(transition_anchor["y_m"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"transient replan egress metadata is malformed: {exc}") from exc
+    if not isinstance(raw_transition_index, int) or isinstance(
+        raw_transition_index,
+        bool,
+    ):
+        raise ValueError("transient replan transition index is not an integer")
+    transition_index = raw_transition_index
+    if raw_forward_index is None:
+        forward_index = None
+    elif isinstance(raw_forward_index, int) and not isinstance(
+        raw_forward_index,
+        bool,
+    ):
+        forward_index = raw_forward_index
+    else:
+        raise ValueError("transient replan forward index is not an integer")
+    if (
+        not math.isfinite(certified_tube_m)
+        or abs(certified_tube_m - tracking_tube_radius_m) > 1.0e-12
+    ):
+        raise ValueError("transient replan tracking tube differs from execution")
+    if (
+        not math.isfinite(certified_forward_limit_rad)
+        or abs(
+            certified_forward_limit_rad
+            - forward_translation_heading_limit_rad
+        )
+        > 1.0e-12
+    ):
         raise ValueError(
-            "reverse transient egress requires at least four sealed waypoints"
+            "transient replan forward-heading limit differs from execution"
         )
     if (
-        not math.isfinite(tracking_tube_radius_m)
-        or tracking_tube_radius_m <= 0.0
+        not math.isfinite(certified_reverse_tolerance_rad)
+        or abs(
+            certified_reverse_tolerance_rad
+            - reverse_connector_alignment_tolerance_rad
+        )
+        > 1.0e-12
     ):
-        raise ValueError("tracking_tube_radius_m must be finite and positive")
-    keepouts = _transient_keepouts(overlay_path)
-    for anchor_index in range(2, len(waypoints) - 1):
-        # The special p0->p1 escape chord is certified separately by the
-        # transient planner.  From p1 onward, every reverse segment and the
-        # first forward segment must carry the normal route-tube margin.
-        segment_indices = range(2, anchor_index + 2)
-        if all(
-            point_to_segment_distance_m(
-                Pose2D(obstacle_x_m, obstacle_y_m),
-                waypoints[end_index - 1],
-                waypoints[end_index],
-            )
-            + 1.0e-9
-            >= keepout_radius_m + tracking_tube_radius_m
-            for end_index in segment_indices
-            for obstacle_x_m, obstacle_y_m, keepout_radius_m in keepouts
+        raise ValueError(
+            "transient replan reverse-alignment tolerance differs from execution"
+        )
+    if not all(
+        math.isfinite(value)
+        for value in (
+            anchor_x_m,
+            anchor_y_m,
+            transition_x_m,
+            transition_y_m,
+        )
+    ):
+        raise ValueError("transient replan egress anchors are not finite")
+    if not 1 <= transition_index < len(waypoints):
+        raise ValueError("transient replan transition index is outside the route")
+    if math.hypot(
+        waypoints[1].x_m - anchor_x_m,
+        waypoints[1].y_m - anchor_y_m,
+    ) > 1.0e-8:
+        raise ValueError("sealed route lost the certified egress anchor")
+    if math.hypot(
+        waypoints[transition_index].x_m - transition_x_m,
+        waypoints[transition_index].y_m - transition_y_m,
+    ) > 1.0e-8:
+        raise ValueError("sealed route lost the certified transition anchor")
+    if mode == EGRESS_MODE_FORWARD:
+        if transition_index != 1 or (
+            forward_index is not None
+            and (forward_index != 2 or forward_index >= len(waypoints))
         ):
-            return anchor_index, anchor_index + 1
-    raise ValueError(
-        "sealed transient replan has no clearance-certified "
-        "reverse-to-forward transition anchor"
-    )
+            raise ValueError("forward egress transition must be waypoint 1")
+    elif (
+        transition_index < 2
+        or forward_index != transition_index + 1
+        or forward_index >= len(waypoints)
+    ):
+        raise ValueError("straight reverse egress handoff indices are malformed")
+    return dict(metadata)
 
 
 @dataclass
@@ -179,6 +240,12 @@ class CoverageReplanCoordinator:
     robot_radius_m: float
     max_replans: int
     tracking_tube_radius_m: float
+    forward_translation_heading_limit_rad: float = (
+        DEFAULT_FORWARD_TRANSLATION_HEADING_LIMIT_RAD
+    )
+    reverse_connector_alignment_tolerance_rad: float = (
+        DEFAULT_REVERSE_CONNECTOR_ALIGNMENT_TOLERANCE_RAD
+    )
     route_leg_index: int = 0
     command_owner: str = "/aufgabe04_simple_waypoint_follower"
     replan_count: int = 0
@@ -203,6 +270,25 @@ class CoverageReplanCoordinator:
         ):
             raise ValueError(
                 "tracking_tube_radius_m must be finite and positive"
+            )
+        if (
+            not math.isfinite(self.forward_translation_heading_limit_rad)
+            or self.forward_translation_heading_limit_rad <= 0.0
+            or self.forward_translation_heading_limit_rad > math.pi / 2.0
+        ):
+            raise ValueError(
+                "forward_translation_heading_limit_rad must be in (0, pi/2]"
+            )
+        if (
+            not math.isfinite(
+                self.reverse_connector_alignment_tolerance_rad
+            )
+            or self.reverse_connector_alignment_tolerance_rad <= 0.0
+            or self.reverse_connector_alignment_tolerance_rad > math.pi / 2.0
+        ):
+            raise ValueError(
+                "reverse_connector_alignment_tolerance_rad must be in "
+                "(0, pi/2]"
             )
 
     @property
@@ -262,6 +348,13 @@ class CoverageReplanCoordinator:
             output_dir=source_root,
             robot_radius_m=self.robot_radius_m,
             existing_overlay_path=self.overlay_path,
+            tracking_tube_radius_m=self.tracking_tube_radius_m,
+            forward_translation_heading_limit_rad=(
+                self.forward_translation_heading_limit_rad
+            ),
+            reverse_connector_alignment_tolerance_rad=(
+                self.reverse_connector_alignment_tolerance_rad
+            ),
         )
         self.overlay_path = Path(artifacts["transient_obstacle_overlay_json"])
 
@@ -295,14 +388,20 @@ class CoverageReplanCoordinator:
             raise ValueError("transient replanner repeated an adopted route")
         self.adopted_route_hashes.add(leg.source_sha256)
 
-        reverse_egress = _reverse_egress_required(pose, waypoints)
-        reverse_transition_indices: tuple[int, int] | None = None
-        if reverse_egress:
-            reverse_transition_indices = _reverse_egress_transition_indices(
-                waypoints,
-                self.overlay_path,
-                self.tracking_tube_radius_m,
-            )
+        escape_metadata = _load_escape_metadata(
+            Path(artifacts["diagnostics_json"]),
+            waypoints,
+            tracking_tube_radius_m=self.tracking_tube_radius_m,
+            forward_translation_heading_limit_rad=(
+                self.forward_translation_heading_limit_rad
+            ),
+            reverse_connector_alignment_tolerance_rad=(
+                self.reverse_connector_alignment_tolerance_rad
+            ),
+        )
+        reverse_egress = (
+            escape_metadata["egress_mode"] == EGRESS_MODE_STRAIGHT_REVERSE
+        )
         event_fields = {
             "replan_index": replan_index,
             "original_stop_reason": stop_reason,
@@ -322,10 +421,38 @@ class CoverageReplanCoordinator:
             "transient_obstacle_overlay_json": str(self.overlay_path),
             "front_clearance_m": float(front["nearest_valid_range_m"]),
             "front_bearing_rad": float(front["nearest_valid_bearing_rad"]),
+            "stationary_obstacle_confirmation": dict(
+                stop_details["stationary_obstacle_confirmation"]
+            ),
+            "egress_mode": escape_metadata["egress_mode"],
+            "egress_transition_waypoint_index": escape_metadata[
+                "egress_transition_waypoint_index"
+            ],
+            "egress_forward_waypoint_index": escape_metadata[
+                "egress_forward_waypoint_index"
+            ],
+            "forward_translation_heading_limit_rad": escape_metadata[
+                "forward_translation_heading_limit_rad"
+            ],
+            "reverse_connector_alignment_tolerance_rad": escape_metadata[
+                "reverse_connector_alignment_tolerance_rad"
+            ],
+            "reverse_connector_heading_error_rad": escape_metadata[
+                "reverse_connector_heading_error_rad"
+            ],
+            "minimum_transition_keepout_tube_clearance_m": escape_metadata[
+                "minimum_transition_keepout_tube_clearance_m"
+            ],
+            "tracking_tube_radius_m": escape_metadata[
+                "tracking_tube_radius_m"
+            ],
         }
-        if reverse_transition_indices is not None:
-            reverse_until_index, forward_alignment_index = (
-                reverse_transition_indices
+        if reverse_egress:
+            reverse_until_index = int(
+                escape_metadata["egress_transition_waypoint_index"]
+            )
+            forward_alignment_index = int(
+                escape_metadata["egress_forward_waypoint_index"]
             )
             event_fields.update(
                 {

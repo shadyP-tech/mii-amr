@@ -678,7 +678,10 @@ def compute_waypoint_command(
     )
     exact_vertex_alignment = (
         config.exact_vertex_pursuit
-        and not math.isfinite(pursuit.yaw_rad)
+        and (
+            not math.isfinite(pursuit.yaw_rad)
+            or not config.enforce_heading_corridor
+        )
         and abs(heading_error) > config.heading_tolerance_rad
     )
     linear = (

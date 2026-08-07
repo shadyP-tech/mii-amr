@@ -1,5 +1,6 @@
 import json
 from contextlib import redirect_stdout
+from dataclasses import replace
 from io import StringIO
 import math
 from pathlib import Path
@@ -35,9 +36,12 @@ from scripts.aufgabe04.navigation.waypoint_csv import load_route_leg
 from scripts.aufgabe04.real_robot.passive_viewpoint_node import _resolved_qr_id
 from scripts.aufgabe04.real_robot.run_autonomous_stand_exploration import (
     MotionLegOutcome,
+    _admit_preplanning_localization,
     _bounded_approach_offsets,
+    _capture_lidar_epoch,
     _execute_coverage_leg_with_replans,
     _is_resealable_startup_mismatch,
+    _motion_outcome_from_log,
     _opposite_face_normal,
     _replan_startup_source,
     _runner_command,
@@ -70,7 +74,111 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             localization_source="amcl",
             max_linear_speed_mps=0.055,
             max_angular_speed_radps=0.18,
+            robot_radius_m=0.105,
         )
+
+    def test_motion_outcome_preserves_preflight_failure_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            semantic_log = Path(tmp) / "events.jsonl"
+            semantic_log.write_text(
+                json.dumps(
+                    {
+                        "event": "preflight_failed",
+                        "run_id": "coverage_000",
+                        "failures": [
+                            "stationary AMCL stability: position_std=0.0940m/0.0150m"
+                        ],
+                        "observations": [],
+                        "runtime_config": {"localization_source": "amcl"},
+                    }
+                )
+                + "\n"
+            )
+
+            outcome = _motion_outcome_from_log(
+                semantic_log,
+                run_id="coverage_000",
+                returncode=1,
+            )
+
+        self.assertEqual(outcome.status, "preflight_failed")
+        self.assertIn("position_std=0.0940m", outcome.stop_reason)
+        self.assertFalse(outcome.motion_published)
+        self.assertTrue(outcome.stop_details["fail_closed"])
+
+    def test_preplanning_localization_binds_start_to_admitted_pose(self):
+        runtime = SimpleNamespace(namespace="")
+        preflight = RosPreflightResult(
+            ok=True,
+            failures=[],
+            observations=[],
+            runtime_config={"localization_source": "amcl"},
+            route_pose={
+                "frame_id": "map",
+                "child_frame_id": "base_footprint",
+                "x_m": -0.4,
+                "y_m": -0.6,
+                "yaw_rad": 1.7,
+            },
+        )
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+            "run_ros_preflight",
+            return_value=preflight,
+        ) as run_preflight:
+            root = Path(tmp)
+            start = _admit_preplanning_localization(runtime, root)
+            evidence = json.loads(
+                (root / "preflight/preplanning_localization.json").read_text()
+            )
+
+        self.assertEqual(start, Pose2D(-0.4, -0.6, 1.7))
+        self.assertTrue(evidence["ok"])
+        self.assertEqual(
+            run_preflight.call_args.kwargs[
+                "max_stationary_amcl_position_std_m"
+            ],
+            0.30,
+        )
+        self.assertEqual(
+            run_preflight.call_args.kwargs[
+                "max_stationary_amcl_position_spread_m"
+            ],
+            0.015,
+        )
+        self.assertEqual(
+            run_preflight.call_args.kwargs[
+                "max_localization_tf_future_sec"
+            ],
+            1.1,
+        )
+
+    def test_preplanning_localization_fails_before_route_planning(self):
+        runtime = SimpleNamespace(namespace="")
+        preflight = RosPreflightResult(
+            ok=False,
+            failures=["stationary AMCL stability: position_std=0.049m/0.015m"],
+            observations=[],
+            runtime_config={"localization_source": "amcl"},
+            route_pose=None,
+        )
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+            "run_ros_preflight",
+            return_value=preflight,
+        ):
+            root = Path(tmp)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "preplanning localization admission failed",
+            ):
+                _admit_preplanning_localization(runtime, root)
+            evidence = json.loads(
+                (root / "preflight/preplanning_localization.json").read_text()
+            )
+
+        self.assertFalse(evidence["ok"])
+        self.assertIn("position_std=0.049m", evidence["failures"][0])
 
     def _planned_center_corridor(self, root: Path) -> None:
         with redirect_stdout(StringIO()):
@@ -186,6 +294,48 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 )
             self.assertEqual(runner_status, 0)
             follower.assert_not_called()
+
+    def test_center_corridor_rejects_nonfinal_heading_constraints(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "survey"
+            sealed_root = Path(tmp) / "sealed"
+            self._planned_center_corridor(root)
+            outputs = seal_stand_discovery_route(
+                source_route_csv=root / "legs/leg_000_route.csv",
+                source_diagnostics_json=root / "legs/leg_000_diagnostics.json",
+                coverage_plan_path=root / "coverage_plan.json",
+                output_dir=sealed_root,
+            )
+            leg = load_route_leg(Path(outputs["route_csv"]), 0)
+            intermediate = leg.raw_waypoints[1]
+            malformed_waypoint = replace(
+                intermediate,
+                pose=Pose2D(
+                    intermediate.pose.x_m,
+                    intermediate.pose.y_m,
+                    0.0,
+                ),
+            )
+            malformed_leg = replace(
+                leg,
+                raw_waypoints=(
+                    leg.raw_waypoints[0],
+                    malformed_waypoint,
+                    *leg.raw_waypoints[2:],
+                ),
+            )
+
+            status = validate_stand_discovery_route_binding(
+                Path(outputs["diagnostics_json"]),
+                malformed_leg,
+                coverage_plan_path=root / "coverage_plan.json",
+            )
+
+        self.assertFalse(status.ok)
+        self.assertIn(
+            "stand discovery non-final waypoint yaw must be unconstrained",
+            status.failures,
+        )
 
     def test_discovery_dry_run_rejects_stale_start_before_confirmation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -388,6 +538,96 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             ),
             0.125,
         )
+
+    def test_runner_command_enables_complete_uncertainty_aware_odom_contract(self):
+        command = _runner_command(
+            profile=self._profile(),
+            route_csv=Path("route.csv"),
+            diagnostics_json=Path("diagnostics.json"),
+            certificate_json=Path("map_certificate.json"),
+            run_id="mission_coverage_000",
+            session_root=Path("session"),
+            dry_run=True,
+            uncertainty_map_yaml=MAP,
+            localization_branch_proof_id="known_start_marker_20260807",
+            odom_execution_certificate_json=Path("odom_certificate.json"),
+            uncertainty_budget_json=Path("uncertainty_budget.json"),
+        )
+
+        self.assertEqual(
+            command[command.index("--execution-pose-frame") + 1], "odom"
+        )
+        self.assertEqual(
+            command[
+                command.index("--localization-branch-proof-id") + 1
+            ],
+            "known_start_marker_20260807",
+        )
+        self.assertEqual(
+            command[command.index("--uncertainty-robot-radius-m") + 1],
+            "0.105",
+        )
+        self.assertEqual(
+            command[command.index("--max-stationary-amcl-position-std-m") + 1],
+            "0.30",
+        )
+        self.assertEqual(
+            command[command.index("--preflight-json") + 1],
+            "session/preflight/mission_coverage_000_dry.json",
+        )
+
+    def test_runner_command_rejects_partial_odom_contract(self):
+        with self.assertRaisesRegex(ValueError, "must be complete"):
+            _runner_command(
+                profile=self._profile(),
+                route_csv=Path("route.csv"),
+                diagnostics_json=Path("diagnostics.json"),
+                certificate_json=Path("map_certificate.json"),
+                run_id="mission_coverage_000",
+                session_root=Path("session"),
+                dry_run=True,
+                uncertainty_map_yaml=MAP,
+            )
+
+    def test_lidar_epoch_uses_completed_odom_execution_certificate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            certificate = root / "execute_certificate.json"
+            certificate.write_text("{}\n")
+            args = SimpleNamespace(
+                map=MAP,
+                semantic_map_id="arena_1p898x3p9_auto",
+                lidar_epoch_sec=1.0,
+            )
+
+            def write_summary(command, **_kwargs):
+                summary = Path(command[command.index("--summary-json") + 1])
+                summary.write_text(
+                    json.dumps({"processed_scan_count": 1}) + "\n"
+                )
+                return SimpleNamespace(returncode=0)
+
+            with patch(
+                "scripts.aufgabe04.real_robot."
+                "run_autonomous_stand_exploration.subprocess.run",
+                side_effect=write_summary,
+            ) as run:
+                summary = _capture_lidar_epoch(
+                    profile=self._profile(),
+                    args=args,
+                    survey_root=root / "survey",
+                    viewpoint_id="survey_vp_001",
+                    odom_execution_certificate_path=certificate,
+                )
+
+        command = run.call_args.args[0]
+        self.assertEqual(
+            command[
+                command.index("--odom-execution-certificate-json") + 1
+            ],
+            str(certificate),
+        )
+        self.assertEqual(summary.name, "observer_summary.json")
 
     def test_coverage_leg_uses_one_runner_with_in_process_replanning(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -704,6 +944,55 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                     )
 
             self.assertEqual(run.call_count, 1)
+
+    def test_live_leg_keeps_child_runner_typed_run_interactive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "interactive_live_leg"
+            sealed = {
+                "route_csv": str(root / "route.csv"),
+                "diagnostics_json": str(root / "diagnostics.json"),
+                "route_certificate_json": str(root / "certificate.json"),
+            }
+            calls = 0
+
+            def run_process(_command, **_kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    event_path = root / "run_events" / f"{run_id}.jsonl"
+                    event_path.parent.mkdir(parents=True, exist_ok=True)
+                    event_path.write_text(
+                        json.dumps(
+                            {
+                                "event": "motion_completed",
+                                "run_id": run_id,
+                                "status": "completed",
+                                "stop_reason": "",
+                                "stop_details": {},
+                                "motion_published": True,
+                            }
+                        )
+                        + "\n"
+                    )
+                return SimpleNamespace(returncode=0)
+
+            with patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "subprocess.run",
+                side_effect=run_process,
+            ) as run:
+                outcome = _run_motion_leg(
+                    profile=self._profile(),
+                    sealed=sealed,
+                    run_id=run_id,
+                    session_root=root,
+                    execute=True,
+                )
+
+        self.assertEqual(outcome.status, "completed")
+        self.assertEqual(run.call_count, 2)
+        self.assertNotIn("input", run.call_args_list[1].kwargs)
 
     def test_startup_reseal_replans_full_a_star_leg_from_rejected_pose(self):
         with tempfile.TemporaryDirectory() as tmp:

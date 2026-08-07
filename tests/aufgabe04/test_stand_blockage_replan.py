@@ -22,6 +22,9 @@ from scripts.aufgabe04.navigation.stand_blockage_replan import (
     record_transient_blockage_replan,
     replan_transient_blockage_from_overlay,
 )
+from scripts.aufgabe04.navigation.coverage_escape_geometry import (
+    EGRESS_MODE_STRAIGHT_REVERSE,
+)
 from scripts.aufgabe04.navigation.stand_discovery_route import (
     seal_stand_discovery_route,
 )
@@ -136,6 +139,49 @@ class StandBlockageReplanTest(unittest.TestCase):
             )
             self.assertGreater(anchor_distance, start_distance)
             self.assertGreater(replanned.minimum_egress_hard_clearance_m, 0.0)
+            self.assertEqual(
+                replanned.egress_mode,
+                EGRESS_MODE_STRAIGHT_REVERSE,
+            )
+            self.assertEqual(replanned.egress_transition_waypoint_index, 2)
+            self.assertEqual(replanned.egress_forward_waypoint_index, 3)
+            self.assertEqual(
+                route.points[replanned.egress_transition_waypoint_index].pose,
+                replanned.egress_transition_anchor,
+            )
+            self.assertLessEqual(
+                abs(replanned.reverse_connector_heading_error_rad),
+                replanned.reverse_connector_alignment_tolerance_rad,
+            )
+            self.assertAlmostEqual(
+                replanned.egress_connector_heading_error_rad,
+                replanned.reverse_connector_heading_error_rad,
+            )
+            self.assertGreater(
+                replanned.minimum_transition_keepout_tube_clearance_m,
+                0.0,
+            )
+            first_heading = math.atan2(
+                route.points[1].pose.y_m - route.points[0].pose.y_m,
+                route.points[1].pose.x_m - route.points[0].pose.x_m,
+            )
+            continuation_heading = math.atan2(
+                route.points[2].pose.y_m - route.points[1].pose.y_m,
+                route.points[2].pose.x_m - route.points[1].pose.x_m,
+            )
+            self.assertLessEqual(
+                abs(
+                    math.atan2(
+                        math.sin(continuation_heading - first_heading),
+                        math.cos(continuation_heading - first_heading),
+                    )
+                ),
+                replanned.reverse_connector_alignment_tolerance_rad,
+            )
+            self.assertGreater(
+                replanned.astar_tail_raw_point_count,
+                replanned.astar_tail_smoothed_point_count,
+            )
             self.assertAlmostEqual(route.points[-1].pose.x_m, target.pose.x_m)
             self.assertAlmostEqual(route.points[-1].pose.y_m, target.pose.y_m)
 
@@ -210,6 +256,82 @@ class StandBlockageReplanTest(unittest.TestCase):
 
             self.assertTrue(Path(sealed["route_csv"]).is_file())
             self.assertTrue(Path(sealed["route_certificate_json"]).is_file())
+
+    def test_recorded_failed_escape_is_replanned_as_straight_reverse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "survey"
+            plan = self._plan(root)
+            candidate = self._candidate(x_m=-1.13, y_m=-0.467)
+            registry = StandSurveyRegistry(
+                schema_version=1,
+                survey_id=plan.survey_id,
+                planning_frame=plan.planning_frame,
+                map_bundle_sha256=plan.map_bundle_sha256,
+                candidates=(candidate,),
+            )
+            grid, _bundle = load_occupancy_grid_with_bundle(
+                MAP,
+                semantic_map_id="arena_1p898x3p9_auto",
+                planning_frame="map",
+            )
+            start = Pose2D(
+                -0.8636705568,
+                -0.4674798031,
+                3.06736,
+            )
+
+            replanned = plan_blockage_route_to_viewpoint(
+                grid,
+                plan=plan,
+                registry=registry,
+                start=start,
+                target_viewpoint_id=plan.viewpoints[0].viewpoint_id,
+                blocker_uids=(candidate.candidate_uid,),
+                robot_radius_m=0.105,
+                forward_translation_heading_limit_rad=1.25,
+            )
+
+            route = replanned.route_result.route
+            self.assertIsNotNone(route)
+            assert route is not None
+            self.assertEqual(
+                replanned.egress_mode,
+                EGRESS_MODE_STRAIGHT_REVERSE,
+            )
+            self.assertFalse(
+                math.isclose(route.points[2].pose.x_m, -0.745, abs_tol=1.0e-9)
+                and math.isclose(
+                    route.points[2].pose.y_m,
+                    -0.415,
+                    abs_tol=1.0e-9,
+                )
+            )
+            self.assertGreater(
+                math.hypot(
+                    route.points[2].pose.x_m - start.x_m,
+                    route.points[2].pose.y_m - start.y_m,
+                ),
+                math.hypot(
+                    route.points[1].pose.x_m - start.x_m,
+                    route.points[1].pose.y_m - start.y_m,
+                ),
+            )
+            for segment_start, segment_end in zip(
+                route.points[: replanned.egress_transition_waypoint_index],
+                route.points[1 : replanned.egress_transition_waypoint_index + 1],
+            ):
+                travel_heading = math.atan2(
+                    segment_end.pose.y_m - segment_start.pose.y_m,
+                    segment_end.pose.x_m - segment_start.pose.x_m,
+                )
+                reverse_error = math.atan2(
+                    math.sin(travel_heading + math.pi - start.yaw_rad),
+                    math.cos(travel_heading + math.pi - start.yaw_rad),
+                )
+                self.assertLessEqual(
+                    abs(reverse_error),
+                    replanned.reverse_connector_alignment_tolerance_rad,
+                )
 
     def test_fails_closed_inside_hard_stand_exclusion(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -293,6 +415,7 @@ class StandBlockageReplanTest(unittest.TestCase):
                 },
                 output_dir=Path(tmp) / "transient_replan",
                 robot_radius_m=0.105,
+                reverse_connector_alignment_tolerance_rad=0.12,
             )
 
             self.assertEqual(registry_path.read_text(), registry_before)
@@ -304,6 +427,31 @@ class StandBlockageReplanTest(unittest.TestCase):
             self.assertEqual(len(overlay.candidates), 1)
             self.assertEqual(overlay.candidates[0].viewpoint_ids, ())
             self.assertTrue(Path(outputs["route_csv"]).is_file())
+            diagnostics = json.loads(Path(outputs["diagnostics_json"]).read_text())
+            metadata = diagnostics["metadata"]
+            self.assertEqual(
+                metadata["egress_mode"],
+                EGRESS_MODE_STRAIGHT_REVERSE,
+            )
+            self.assertEqual(metadata["egress_transition_waypoint_index"], 2)
+            self.assertEqual(metadata["egress_forward_waypoint_index"], 3)
+            self.assertAlmostEqual(metadata["tracking_tube_radius_m"], 0.03)
+            self.assertAlmostEqual(
+                metadata["forward_translation_heading_limit_rad"],
+                1.25,
+            )
+            self.assertAlmostEqual(
+                metadata["reverse_connector_alignment_tolerance_rad"],
+                0.12,
+            )
+            self.assertGreater(
+                metadata["minimum_transition_keepout_tube_clearance_m"],
+                0.0,
+            )
+            self.assertGreater(
+                metadata["astar_tail_raw_point_count"],
+                metadata["astar_tail_smoothed_point_count"],
+            )
 
     def test_fresh_start_replan_preserves_transient_overlay(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -6,8 +6,13 @@ import math
 import threading
 import time
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
+from scripts.aufgabe04.navigation.controller_trace import (
+    ControllerTraceRecord,
+    ControllerTraceWriter,
+)
 from scripts.aufgabe04.navigation.dynamic_route_handoff import (
     RouteUpdate,
     RouteUpdateKind,
@@ -15,6 +20,17 @@ from scripts.aufgabe04.navigation.dynamic_route_handoff import (
 from scripts.aufgabe04.navigation.execution_route_certificate import (
     ExecutionRouteCheck,
     check_execution_route_tube,
+)
+from scripts.aufgabe04.navigation.localization_ownership import (
+    MONITOR_ACTION_FORCE_ZERO_RESEAL,
+    evaluate_global_consistency_monitor,
+)
+from scripts.aufgabe04.navigation.odom_execution_certificate import (
+    PlanarTransform2D,
+)
+from scripts.aufgabe04.navigation.odom_route_adapter import (
+    OdomExecutionContext,
+    evaluate_map_odom_continuity,
 )
 from scripts.aufgabe04.navigation.follower_models import FollowerResult
 from scripts.aufgabe04.navigation.follower_safety import (
@@ -30,7 +46,30 @@ from scripts.aufgabe04.navigation.follower_safety import (
     waypoint_timeout_failure,
 )
 from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.ros_runtime_config import ResolvedRuntimeConfig
+from scripts.aufgabe04.navigation.ros_runtime_config import (
+    ResolvedRuntimeConfig,
+    resolve_topic,
+)
+from scripts.aufgabe04.navigation.tf_stale_recovery_policy import (
+    OdomStationaritySample,
+    StationarityDecision,
+    TfEdgeSample,
+    evaluate_recovery_acceptance,
+    evaluate_recovery_eligibility,
+    evaluate_stationarity,
+)
+from scripts.aufgabe04.navigation.transient_blockage_admission import (
+    StationaryBlockageAdmission,
+    collect_stationary_blockage_admission,
+)
+from scripts.aufgabe04.navigation.transient_blockage_policy import (
+    CLEARANCE_LIMITED_MOTION_FLOOR,
+    DEFAULT_LINEAR_MOTION_FLOOR_MPS,
+    PersistentObstacleConfig,
+    StationaryFrontSectorSample,
+    classify_linear_command,
+    reachable_distance_progress_epsilon,
+)
 from scripts.aufgabe04.navigation.viewpoint_sampling_contract import (
     DEFAULT_VIEWPOINT_SAMPLING_TARGET_DISTANCE_M,
     INTERMEDIATE_TERMINAL_HEADING_DISTANCE_COMPARISON_EPSILON_M,
@@ -61,6 +100,7 @@ from scripts.aufgabe04.navigation.waypoint_controller import (
 STALE_TF_RECOVERY_MAX_DURATION_SEC = 0.18
 STALE_TF_RECOVERY_MAX_CALLBACKS = 48
 STALE_TF_RECOVERY_SPIN_TIMEOUT_SEC = 0.005
+AMCL_STALE_TF_RECOVERY_POLL_SEC = 0.05
 # Gazebo odometry quaternions are unit normalized.  A 1e-3 norm tolerance
 # admits only floating-point serialization drift; it is not a normalization
 # or malformed-pose repair path.
@@ -91,12 +131,14 @@ try:  # pragma: no cover - exercised on ROS hosts.
     from rclpy.qos import qos_profile_sensor_data
     from rclpy.time import Time
     from sensor_msgs.msg import LaserScan
+    from std_srvs.srv import Empty
     from tf2_ros import Buffer, TransformException, TransformListener
 except ImportError:  # pragma: no cover - keeps offline tests ROS-free.
     rclpy = None
     Twist = None
     LaserScan = None
     Odometry = None
+    Empty = None
     Duration = None
     MultiThreadedExecutor = None
     SingleThreadedExecutor = None
@@ -120,12 +162,18 @@ class FollowerConfig:
     max_odom_age_sec: float = 1.0
     max_tf_age_sec: float = 1.0
     max_future_timestamp_sec: float = 0.25
+    runtime_nomotion_update_service: str = "request_nomotion_update"
+    runtime_nomotion_update_timeout_sec: float = 2.0
+    amcl_edge_future_tolerance_sec: float = 1.1
     allow_simulation_odom_after_stale_tf: bool = False
     initial_sensor_wait_sec: float = 2.0
     waypoint_timeout_sec: float = 45.0
     stuck_timeout_sec: float = 8.0
     stuck_progress_epsilon_m: float = 0.03
     stuck_heading_progress_epsilon_rad: float = 0.10
+    linear_motion_floor_mps: float = DEFAULT_LINEAR_MOTION_FLOOR_MPS
+    blockage_confirmation_timeout_sec: float = 1.2
+    persistent_obstacle_config: PersistentObstacleConfig | None = None
     initial_distance_limit_m: float = 0.35
     control_rate_hz: float = 10.0
     allowed_cmd_vel_publishers: Sequence[str] = ()
@@ -164,6 +212,53 @@ class FollowerConfig:
     certified_corner_max_reacquire_attempts: int = 2
 
     def __post_init__(self) -> None:
+        if (
+            not math.isfinite(self.linear_motion_floor_mps)
+            or self.linear_motion_floor_mps <= 0.0
+        ):
+            raise ValueError("linear_motion_floor_mps must be finite and positive")
+        if (
+            not math.isfinite(self.blockage_confirmation_timeout_sec)
+            or self.blockage_confirmation_timeout_sec <= 0.0
+        ):
+            raise ValueError(
+                "blockage_confirmation_timeout_sec must be finite and positive"
+            )
+        obstacle_config = self.persistent_obstacle_config
+        if obstacle_config is None:
+            obstacle_config = PersistentObstacleConfig(
+                min_front_range_m=self.omnidirectional_hard_stop_distance_m,
+                max_front_range_m=self.front_obstacle_slow_distance_m,
+                front_sector_half_width_rad=self.front_obstacle_sector_rad,
+            )
+            object.__setattr__(
+                self,
+                "persistent_obstacle_config",
+                obstacle_config,
+            )
+        elif not isinstance(obstacle_config, PersistentObstacleConfig):
+            raise ValueError(
+                "persistent_obstacle_config must be a PersistentObstacleConfig"
+            )
+        if (
+            obstacle_config.min_front_range_m
+            < self.omnidirectional_hard_stop_distance_m
+            or obstacle_config.max_front_range_m
+            > self.front_obstacle_slow_distance_m
+            or obstacle_config.front_sector_half_width_rad
+            > self.front_obstacle_sector_rad
+        ):
+            raise ValueError(
+                "persistent obstacle bounds must remain inside the follower's "
+                "hard-stop, slow-distance, and front-sector bounds"
+            )
+        if (
+            self.blockage_confirmation_timeout_sec
+            < obstacle_config.max_sample_window_sec
+        ):
+            raise ValueError(
+                "blockage confirmation timeout must cover the sample window"
+            )
         if (
             not math.isfinite(self.omnidirectional_hard_stop_distance_m)
             or self.omnidirectional_hard_stop_distance_m <= 0.0
@@ -320,6 +415,30 @@ class FollowerConfig:
             or self.max_future_timestamp_sec < 0.0
         ):
             raise ValueError("max_future_timestamp_sec must be finite and non-negative")
+        runtime_service = str(self.runtime_nomotion_update_service).strip()
+        if not runtime_service:
+            raise ValueError("runtime_nomotion_update_service must not be empty")
+        object.__setattr__(
+            self,
+            "runtime_nomotion_update_service",
+            runtime_service,
+        )
+        if (
+            not math.isfinite(self.runtime_nomotion_update_timeout_sec)
+            or self.runtime_nomotion_update_timeout_sec <= 0.0
+            or self.runtime_nomotion_update_timeout_sec > 2.0
+        ):
+            raise ValueError(
+                "runtime_nomotion_update_timeout_sec must be finite, positive, "
+                "and no greater than 2.0"
+            )
+        if (
+            not math.isfinite(self.amcl_edge_future_tolerance_sec)
+            or self.amcl_edge_future_tolerance_sec < 0.0
+        ):
+            raise ValueError(
+                "amcl_edge_future_tolerance_sec must be finite and non-negative"
+            )
         if (
             not math.isfinite(self.certified_route_tube_radius_m)
             or self.certified_route_tube_radius_m <= 0.0
@@ -420,6 +539,9 @@ STATIC_STARTUP_SEGMENT_JOIN_ROUTE_KINDS = frozenset(
     {"detected_stand_preapproach", "stand_discovery_corridor"}
 )
 PHYSICAL_ROUTE_KINDS = DYNAMIC_PHYSICAL_ROUTE_KINDS | STATIC_PHYSICAL_ROUTE_KINDS
+HEADING_CORRIDOR_ROUTE_KINDS = PHYSICAL_ROUTE_KINDS - frozenset(
+    {"stand_discovery_corridor"}
+)
 DYNAMIC_VIEWPOINT_ROUTE_KINDS = (
     INTERMEDIATE_ROUTE_KINDS | DYNAMIC_PHYSICAL_ROUTE_KINDS
 )
@@ -811,12 +933,18 @@ def controller_config_for_route_kind(
     physical_waypoint_tolerance_m: float | None = None,
     physical_goal_tolerance_m: float | None = None,
 ) -> ControllerConfig:
-    """Apply terminal-heading constraints only to physical face approaches.
+    """Resolve translation and terminal-heading behavior for one route kind.
 
     Acquisition and viewpoint-sampling waypoints may carry a finite terminal
     yaw, but enforcing that yaw throughout translation conflicts with pursuit
     of the geometric segment.  The normal final-position alignment still
     enforces the yaw once the sampling point has actually been reached.
+
+    Stand-discovery viewpoints have the same terminal-only yaw contract.  Their
+    center-corridor A* path may approach an inspection stop from either travel
+    direction, so the stopped inspection yaw is not a certified segment-heading
+    constraint.  Exact-vertex pursuit and every physical route-tube gate remain
+    enabled for that route kind.
     """
 
     if route_kind not in DYNAMIC_VIEWPOINT_ROUTE_KINDS | STATIC_PHYSICAL_ROUTE_KINDS:
@@ -869,7 +997,7 @@ def controller_config_for_route_kind(
         goal_tolerance_m=goal_tolerance,
         terminal_goal_tolerance_m=terminal_goal_tolerance,
         heading_tolerance_rad=heading_tolerance,
-        enforce_heading_corridor=physical,
+        enforce_heading_corridor=route_kind in HEADING_CORRIDOR_ROUTE_KINDS,
         reverse_staging=physical and reverse_staging,
         exact_vertex_pursuit=physical,
     )
@@ -1008,6 +1136,71 @@ def _yaw_from_quaternion(q) -> float:
     siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
     cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
     return math.atan2(siny_cosp, cosy_cosp)
+
+
+def _normalized_tf_frame_id(value: object) -> str:
+    if not isinstance(value, str) or not value.strip("/"):
+        raise ValueError("TF frame ID is missing")
+    return value.strip("/")
+
+
+def _validated_planar_pose_from_tf(
+    transform,
+    *,
+    expected_target_frame: str,
+    expected_source_frame: str,
+) -> Pose2D:
+    """Extract one finite planar pose from an exact configured TF edge."""
+
+    observed_target = _normalized_tf_frame_id(
+        getattr(getattr(transform, "header", None), "frame_id", None)
+    )
+    observed_source = _normalized_tf_frame_id(
+        getattr(transform, "child_frame_id", None)
+    )
+    expected_target = _normalized_tf_frame_id(expected_target_frame)
+    expected_source = _normalized_tf_frame_id(expected_source_frame)
+    if observed_target != expected_target or observed_source != expected_source:
+        raise ValueError(
+            "TF frame identity mismatch: "
+            f"observed={observed_target}<-{observed_source}, "
+            f"expected={expected_target}<-{expected_source}"
+        )
+    try:
+        translation = transform.transform.translation
+        rotation = transform.transform.rotation
+        translation_values = tuple(
+            float(value)
+            for value in (translation.x, translation.y, translation.z)
+        )
+        quaternion = tuple(
+            float(value)
+            for value in (rotation.x, rotation.y, rotation.z, rotation.w)
+        )
+    except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("TF pose payload is malformed") from exc
+    if not all(
+        math.isfinite(value) for value in (*translation_values, *quaternion)
+    ):
+        raise ValueError("TF pose payload is non-finite")
+    quaternion_norm = math.sqrt(sum(value * value for value in quaternion))
+    if (
+        abs(quaternion_norm - 1.0)
+        > SIMULATION_ODOM_FALLBACK_QUATERNION_NORM_TOLERANCE
+    ):
+        raise ValueError("TF pose quaternion is not normalized")
+    yaw_rad = _yaw_from_quaternion(rotation)
+    if not math.isfinite(yaw_rad):
+        raise ValueError("TF pose yaw is non-finite")
+    return Pose2D(translation_values[0], translation_values[1], yaw_rad)
+
+
+def _finite_velocity_command(linear_x_mps: object, angular_z_radps: object) -> bool:
+    try:
+        values = (float(linear_x_mps), float(angular_z_radps))
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return all(math.isfinite(value) for value in values)
 
 
 def _ros_stamp_sec(stamp) -> float | None:
@@ -1217,6 +1410,8 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
             | None
         ) = None,
         *,
+        controller_trace_path: Path | None = None,
+        odom_execution_context: OdomExecutionContext | None = None,
         tf_buffer=None,
     ) -> None:
         # Topic resolution alone does not namespace the ROS node identity.
@@ -1232,6 +1427,24 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         self.waypoint_provider = waypoint_provider
         self.route_update_callback = route_update_callback
         self.blockage_recovery_provider = blockage_recovery_provider
+        if odom_execution_context is not None:
+            if (
+                odom_execution_context.map_frame != runtime_config.map_frame
+                or odom_execution_context.odom_frame
+                != runtime_config.odom_frame
+                or odom_execution_context.base_frame
+                != runtime_config.base_frame
+            ):
+                raise ValueError(
+                    "odom execution context frames differ from runtime frames"
+                )
+        self.odom_execution_context = odom_execution_context
+        self.controller_trace_writer = (
+            None
+            if controller_trace_path is None
+            else ControllerTraceWriter(Path(controller_trace_path))
+        )
+        self.controller_route_revision = 0
         self.queued_route_update: RouteUpdate | None = None
         self.last_route_refresh_at = 0.0
         self.initial_route_refresh_pending = waypoint_provider is not None
@@ -1285,6 +1498,23 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         self._simulation_odom_fallback_episode = 0
         self._background_callback_service_enabled = False
         self._configure_sim_time(runtime_config.use_sim_time)
+
+        # Service names follow the same ROS graph-name resolution rules as
+        # topics.  A relative default therefore follows the robot namespace,
+        # while an explicitly absolute operator value remains global.
+        self.runtime_nomotion_update_service = resolve_topic(
+            follower_config.runtime_nomotion_update_service,
+            runtime_config.namespace,
+        )
+        self.runtime_nomotion_update_client = None
+        if (
+            runtime_config.localization_source == "amcl"
+            and not runtime_config.use_sim_time
+        ):
+            self.runtime_nomotion_update_client = self.create_client(
+                Empty,
+                self.runtime_nomotion_update_service,
+            )
 
         self.cmd_vel_pub = self.create_publisher(Twist, runtime_config.cmd_vel_topic, 10)
         self.create_subscription(
@@ -1358,6 +1588,244 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         for _ in range(count):
             self.publish_zero()
             self._service_or_wait_for_callbacks(0.02)
+
+    def _latest_odom_pose(self) -> Pose2D | None:
+        """Return a finite unit-quaternion odom pose for stationarity checks."""
+
+        try:
+            raw_pose = self.latest_odom.pose.pose
+            position = raw_pose.position
+            orientation = raw_pose.orientation
+            quaternion = (
+                float(orientation.x),
+                float(orientation.y),
+                float(orientation.z),
+                float(orientation.w),
+            )
+            x_m = float(position.x)
+            y_m = float(position.y)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return None
+        if not all(math.isfinite(value) for value in (x_m, y_m, *quaternion)):
+            return None
+        norm = math.sqrt(sum(value * value for value in quaternion))
+        if abs(norm - 1.0) > SIMULATION_ODOM_FALLBACK_QUATERNION_NORM_TOLERANCE:
+            return None
+        yaw_rad = _yaw_from_quaternion(orientation)
+        if not math.isfinite(yaw_rad):
+            return None
+        return Pose2D(x_m, y_m, yaw_rad)
+
+    def _stationary_front_sample(
+        self,
+    ) -> tuple[StationaryFrontSectorSample | None, dict[str, object]]:
+        """Capture one fresh front ray with simultaneous map/odom poses."""
+
+        scan_failure = self._freshness_failure(
+            "scan",
+            self.latest_scan,
+            self.latest_scan_receipt,
+            self.follower_config.max_scan_age_sec,
+        )
+        if scan_failure:
+            return None, dict(self.latest_stop_details or {})
+        odom_failure = self._freshness_failure(
+            "odom",
+            self.latest_odom,
+            self.latest_odom_receipt,
+            self.follower_config.max_odom_age_sec,
+        )
+        if odom_failure:
+            return None, dict(self.latest_stop_details or {})
+        decision = front_sector_decision(
+            getattr(self.latest_scan, "ranges", None),
+            float(getattr(self.latest_scan, "angle_min", 0.0)),
+            float(getattr(self.latest_scan, "angle_increment", 0.0)),
+            0.0,
+            self.follower_config.front_obstacle_sector_rad,
+            self.follower_config.min_obstacle_distance_m,
+            range_min_m=self._scan_range_min(),
+            range_max_m=self._scan_range_max(),
+            source="front_sector",
+        )
+        front_details = decision.to_log_dict()
+        self.latest_front_clearance_details = front_details
+        if (
+            decision.nearest_valid_range_m is None
+            or decision.nearest_valid_bearing_rad is None
+        ):
+            return None, {
+                **front_details,
+                "reason": decision.stop_reason
+                or NO_VALID_FRONT_SECTOR_SCAN_RANGES,
+                "source": "stationary_blockage_confirmation",
+                "fail_closed": True,
+            }
+        execution_lookup = self._current_pose_lookup_with_stale_recovery()
+        if execution_lookup.pose is None:
+            return None, {
+                **dict(execution_lookup.details or {}),
+                "source": "stationary_blockage_confirmation",
+                "fail_closed": True,
+            }
+        odom_pose = self._latest_odom_pose()
+        if odom_pose is None:
+            return None, {
+                "reason": "odometry pose is invalid during blockage confirmation",
+                "source": "stationary_blockage_confirmation",
+                "fail_closed": True,
+            }
+        context = getattr(self, "odom_execution_context", None)
+        map_pose = (
+            execution_lookup.pose
+            if context is None
+            else context.odom_pose_to_map(execution_lookup.pose)
+        )
+        try:
+            sample = StationaryFrontSectorSample(
+                timestamp_sec=float(self.latest_scan_receipt),
+                front_range_m=decision.nearest_valid_range_m,
+                front_bearing_rad=decision.nearest_valid_bearing_rad,
+                map_pose=map_pose,
+                odom_pose=odom_pose,
+            )
+        except (TypeError, ValueError) as exc:
+            return None, {
+                "reason": f"stationary blockage sample is invalid: {exc}",
+                "source": "stationary_blockage_confirmation",
+                "fail_closed": True,
+            }
+        return sample, front_details
+
+    def _confirm_stationary_blockage(self) -> StationaryBlockageAdmission:
+        """Hold zero until a coherent obstacle or coherent clearance is proven."""
+
+        config = self.follower_config.persistent_obstacle_config
+        assert isinstance(config, PersistentObstacleConfig)
+        return collect_stationary_blockage_admission(
+            config=config,
+            timeout_sec=(
+                self.follower_config.blockage_confirmation_timeout_sec
+            ),
+            clearance_threshold_m=(
+                self.follower_config.front_obstacle_slow_distance_m
+            ),
+            initial_scan_receipt=getattr(self, "latest_scan_receipt", None),
+            runtime_ok=rclpy.ok,
+            publish_zero=self.publish_zero,
+            service_callbacks=self._service_or_wait_for_callbacks,
+            current_scan_receipt=lambda: getattr(
+                self,
+                "latest_scan_receipt",
+                None,
+            ),
+            capture_sample=self._stationary_front_sample,
+            monotonic=time.monotonic,
+        )
+
+    def _egress_trace_phase(self) -> str:
+        if getattr(self, "dynamic_join_pending", False):
+            return "dynamic_join"
+        if getattr(self, "start_egress_reverse", False):
+            return "straight_reverse"
+        if getattr(self, "start_egress_forward_alignment_index", None) is not None:
+            return "reverse_to_forward_alignment"
+        if getattr(self, "start_egress_lock_index", None) is not None:
+            return "start_egress"
+        return ""
+
+    def _append_controller_trace(
+        self,
+        *,
+        event: str,
+        pose: Pose2D | None = None,
+        step: ControllerStep | None = None,
+        route_check: ExecutionRouteCheck | None = None,
+        nominal_command: VelocityCommand | None = None,
+        effective_command: VelocityCommand | None = None,
+        reason: str = "",
+        fail_closed: bool = False,
+        front_cluster_summary: Mapping[str, object] | None = None,
+        diagnostics: Mapping[str, object] | None = None,
+    ) -> str:
+        """Append one evidence record or return a fail-closed write error."""
+
+        writer = getattr(self, "controller_trace_writer", None)
+        if writer is None:
+            return ""
+        try:
+            writer.append(
+                ControllerTraceRecord(
+                    timestamp_sec=time.monotonic(),
+                    event=event,
+                    reason=reason,
+                    fail_closed=fail_closed,
+                    route_revision=getattr(
+                        self,
+                        "controller_route_revision",
+                        0,
+                    ),
+                    route_kind=getattr(self, "current_route_kind", ""),
+                    target_index=(
+                        getattr(self, "target_index", None)
+                        if step is None
+                        else step.target_index
+                    ),
+                    pursuit_index=(None if step is None else step.pursuit_index),
+                    progress_mode=("" if step is None else step.progress_mode),
+                    egress_phase=self._egress_trace_phase(),
+                    map_pose=pose,
+                    odom_pose=self._latest_odom_pose(),
+                    active_segment_start_index=(
+                        None
+                        if route_check is None
+                        else route_check.active_segment_start_index
+                    ),
+                    active_segment_end_index=(
+                        None
+                        if route_check is None
+                        else route_check.active_segment_end_index
+                    ),
+                    distance_to_target_m=(
+                        None if step is None else step.distance_to_target_m
+                    ),
+                    pose_distance_to_segment_m=(
+                        None
+                        if route_check is None
+                        else route_check.pose_distance_to_segment_m
+                    ),
+                    maximum_chord_distance_to_segment_m=(
+                        None
+                        if route_check is None
+                        else route_check.maximum_chord_distance_to_segment_m
+                    ),
+                    tracking_tube_radius_m=(
+                        None
+                        if route_check is None
+                        else route_check.tracking_tube_radius_m
+                    ),
+                    nominal_command=nominal_command,
+                    effective_command=effective_command,
+                    front_clearance=getattr(
+                        self,
+                        "latest_front_clearance_details",
+                        None,
+                    ),
+                    front_cluster_summary=front_cluster_summary,
+                    diagnostics=diagnostics,
+                )
+            )
+        except Exception as exc:
+            failure = f"controller trace write failed: {exc}"
+            self.latest_stop_details = {
+                **dict(getattr(self, "latest_stop_details", None) or {}),
+                "reason": failure,
+                "fault_code": "controller_trace_write_failed",
+                "controller_trace_path": str(writer.path),
+                "fail_closed": True,
+            }
+            return failure
+        return ""
 
     def _drain_runtime_callbacks(
         self,
@@ -1569,6 +2037,26 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         self.certified_corner_latch = decision.latch
         return decision
 
+    def _execution_route_check(
+        self,
+        pose: Pose2D,
+        step: ControllerStep,
+    ) -> ExecutionRouteCheck:
+        """Check the live pose and pursuit chord against the active segment."""
+
+        return check_execution_route_tube(
+            pose,
+            self.waypoints,
+            target_index=step.target_index,
+            pursuit_index=step.pursuit_index,
+            tracking_tube_radius_m=(
+                self.follower_config.certified_route_tube_radius_m
+            ),
+            chord_sample_spacing_m=(
+                self.follower_config.certified_route_chord_sample_spacing_m
+            ),
+        )
+
     def _log_certified_corner_phase(
         self,
         step: ControllerStep | None,
@@ -1650,6 +2138,16 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                     if (
                         safety_failure == OBSTACLE_TOO_CLOSE
                         and self.blockage_recovery_provider is not None
+                        and isinstance(
+                            (self.latest_stop_details or {}).get(
+                                "front_clearance"
+                            ),
+                            Mapping,
+                        )
+                        and (self.latest_stop_details or {})[
+                            "front_clearance"
+                        ].get("source")
+                        == "front_sector"
                     ):
                         self.publish_repeated_zero()
                         recovery_pose = (
@@ -1662,6 +2160,12 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                                 self.latest_stop_details or {},
                             )
                             if recovery == "adopted":
+                                time.sleep(loop_sleep_sec)
+                                continue
+                            if recovery == "cleared":
+                                # A separately confirmed clear front sector may
+                                # resume only on the next full safety cycle.
+                                self.publish_zero()
                                 time.sleep(loop_sleep_sec)
                                 continue
                             if recovery == "stopped":
@@ -1680,6 +2184,23 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                         self.motion_published,
                         self.latest_stop_details,
                     )
+                localization_failure = (
+                    self._global_consistency_monitor_failure()
+                )
+                if localization_failure:
+                    # LiDAR and ordinary runtime safety have already run for
+                    # this cycle. Revoke the prior Twist before any monitor
+                    # evidence/logging and terminate this authorization; the
+                    # monitor is not permitted to steer or mutate the route.
+                    self.publish_repeated_zero()
+                    return FollowerResult(
+                        "stopped",
+                        localization_failure,
+                        time.monotonic() - started_at,
+                        self.distance_estimate_m,
+                        self.motion_published,
+                        self.latest_stop_details,
+                    )
                 # Endpoint graph discovery in _safety_failure can briefly
                 # delay TF listener callbacks.  Recover only that resulting
                 # stale-transform case, while holding an explicit zero command.
@@ -1693,13 +2214,28 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                             "map-to-base transform unavailable",
                         )
                     )
+                    stop_details = dict(pose_lookup.details or {})
+                    if not stop_details.get("pose_lookup_trace_recorded"):
+                        trace_failure = self._append_controller_trace(
+                            event="pose_lookup_stop",
+                            reason=stop_reason,
+                            fail_closed=True,
+                            diagnostics=stop_details,
+                        )
+                        if trace_failure:
+                            stop_details["controller_trace_error"] = (
+                                trace_failure
+                            )
+                            stop_details["controller_trace_fault_code"] = (
+                                "controller_trace_write_failed"
+                            )
                     return FollowerResult(
                         "stopped",
                         stop_reason,
                         time.monotonic() - started_at,
                         self.distance_estimate_m,
                         self.motion_published,
-                        pose_lookup.details,
+                        stop_details,
                     )
                 route_refresh = self._refresh_dynamic_route(pose)
                 if route_refresh == "stopped":
@@ -1940,6 +2476,10 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                             pose,
                             route_controller_config,
                         )
+                        if corner_decision.failure:
+                            # Revoke the preceding command before logging or
+                            # trace I/O can extend an in-progress rotation.
+                            self.publish_zero()
                         self._log_certified_corner_phase(corner_decision.step)
                         if corner_decision.failure:
                             failed_step = corner_decision.step
@@ -1976,6 +2516,39 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                                 ),
                                 "fail_closed": True,
                             }
+                            failure_route_check: ExecutionRouteCheck | None = None
+                            if self.current_route_kind in PHYSICAL_ROUTE_KINDS:
+                                try:
+                                    failure_route_check = self._execution_route_check(
+                                        pose,
+                                        failed_step,
+                                    )
+                                except (ValueError, OverflowError) as exc:
+                                    self.latest_stop_details = {
+                                        **self.latest_stop_details,
+                                        "route_check_error": str(exc),
+                                        "route_check_error_type": (
+                                            exc.__class__.__name__
+                                        ),
+                                    }
+                            trace_failure = self._append_controller_trace(
+                                event="certified_corner_stop",
+                                pose=pose,
+                                step=failed_step,
+                                route_check=failure_route_check,
+                                nominal_command=failed_step.command,
+                                effective_command=VelocityCommand(0.0, 0.0),
+                                reason=corner_decision.failure,
+                                fail_closed=True,
+                            )
+                            if trace_failure:
+                                self.latest_stop_details = {
+                                    **self.latest_stop_details,
+                                    "controller_trace_error": trace_failure,
+                                    "controller_trace_fault_code": (
+                                        "controller_trace_write_failed"
+                                    ),
+                                }
                             self.publish_repeated_zero()
                             return FollowerResult(
                                 "stopped",
@@ -2073,24 +2646,45 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                                 self.motion_published,
                                 self.latest_stop_details,
                             )
+                route_check: ExecutionRouteCheck | None = None
                 if (
                     self.current_route_kind in PHYSICAL_ROUTE_KINDS
-                    and not self.dynamic_join_pending
-                ):
-                    route_check = check_execution_route_tube(
-                        pose,
-                        self.waypoints,
-                        target_index=step.target_index,
-                        pursuit_index=step.pursuit_index,
-                        tracking_tube_radius_m=(
-                            self.follower_config.certified_route_tube_radius_m
-                        ),
-                        chord_sample_spacing_m=(
-                            self.follower_config.certified_route_chord_sample_spacing_m
-                        ),
+                    and (
+                        not self.dynamic_join_pending
+                        or (
+                            self.dynamic_join_limit_m is not None
+                            and self.dynamic_join_limit_m
+                            <= self.follower_config.certified_route_tube_radius_m
+                            + 1.0e-9
+                        )
                     )
+                ):
+                    route_check = self._execution_route_check(pose, step)
                     if not route_check.ok:
-                        self.latest_stop_details = route_check.to_log_dict()
+                        route_stop_details = route_check.to_log_dict()
+                        self.latest_stop_details = route_stop_details
+                        trace_failure = self._append_controller_trace(
+                            event="route_tube_stop",
+                            pose=pose,
+                            step=step,
+                            route_check=route_check,
+                            nominal_command=step.command,
+                            effective_command=VelocityCommand(0.0, 0.0),
+                            reason=route_check.reason,
+                            fail_closed=True,
+                        )
+                        if trace_failure:
+                            # Route departure remains the primary terminal
+                            # safety reason even if secondary evidence storage
+                            # also fails.
+                            self.latest_stop_details = {
+                                **route_stop_details,
+                                "controller_trace_error": trace_failure,
+                                "controller_trace_fault_code": (
+                                    "controller_trace_write_failed"
+                                ),
+                                "fail_closed": True,
+                            }
                         self.publish_repeated_zero()
                         return FollowerResult(
                             "stopped",
@@ -2200,6 +2794,113 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                     step.command.linear_x_mps
                 )
                 effective_linear_x_mps = step.command.linear_x_mps * front_clearance_scale
+                command_floor = classify_linear_command(
+                    step.command.linear_x_mps,
+                    effective_linear_x_mps,
+                    linear_motion_floor_mps=(
+                        self.follower_config.linear_motion_floor_mps
+                    ),
+                )
+                clearance_limited_below_floor = (
+                    self.current_route_kind in PHYSICAL_ROUTE_KINDS
+                    and front_clearance_scale < 1.0 - 1.0e-12
+                    and command_floor.zero_hold_required
+                )
+                if clearance_limited_below_floor:
+                    self.latest_stop_details = {
+                        "reason": CLEARANCE_LIMITED_MOTION_FLOOR,
+                        "source": "linear_motion_floor",
+                        **command_floor.to_log_dict(),
+                        "front_clearance_scale": front_clearance_scale,
+                        "front_clearance": dict(
+                            self.latest_front_clearance_details or {}
+                        ),
+                        "target_index": step.target_index,
+                        "pursuit_index": step.pursuit_index,
+                        "distance_to_target_m": step.distance_to_target_m,
+                        "progress_mode": step.progress_mode,
+                        "fail_closed": True,
+                    }
+                    self.publish_repeated_zero()
+                    trace_failure = self._append_controller_trace(
+                        event="motion_floor_zero_hold",
+                        pose=pose,
+                        step=step,
+                        route_check=route_check,
+                        nominal_command=step.command,
+                        effective_command=VelocityCommand(0.0, 0.0),
+                        reason=CLEARANCE_LIMITED_MOTION_FLOOR,
+                        fail_closed=False,
+                    )
+                    if trace_failure:
+                        return FollowerResult(
+                            "stopped",
+                            trace_failure,
+                            time.monotonic() - started_at,
+                            self.distance_estimate_m,
+                            self.motion_published,
+                            self.latest_stop_details,
+                        )
+                    front_evidence = self.latest_front_clearance_details or {}
+                    recovery = ""
+                    if (
+                        self.blockage_recovery_provider is not None
+                        and step.command.linear_x_mps > 0.0
+                        and front_evidence.get("source") == "front_sector"
+                    ):
+                        recovery = self._attempt_blockage_recovery(
+                            pose,
+                            CLEARANCE_LIMITED_MOTION_FLOOR,
+                            self.latest_stop_details,
+                        )
+                    if recovery in {"adopted", "cleared"}:
+                        self.publish_zero()
+                        time.sleep(loop_sleep_sec)
+                        continue
+                    stop_reason = (
+                        str(
+                            (self.latest_stop_details or {}).get(
+                                "reason",
+                                CLEARANCE_LIMITED_MOTION_FLOOR,
+                            )
+                        )
+                        if recovery == "stopped"
+                        else CLEARANCE_LIMITED_MOTION_FLOOR
+                    )
+                    return FollowerResult(
+                        "stopped",
+                        stop_reason,
+                        time.monotonic() - started_at,
+                        self.distance_estimate_m,
+                        self.motion_published,
+                        self.latest_stop_details,
+                    )
+                distance_progress_epsilon_m = (
+                    self.follower_config.stuck_progress_epsilon_m
+                )
+                if self.current_route_kind in PHYSICAL_ROUTE_KINDS:
+                    bounded_progress_epsilon_m = (
+                        reachable_distance_progress_epsilon(
+                            self.follower_config.stuck_progress_epsilon_m,
+                            remaining_distance_m=step.distance_to_target_m,
+                            waypoint_tolerance_m=(
+                                self.follower_config.physical_waypoint_tolerance_m
+                            ),
+                            expected_effective_travel_m=(
+                                abs(effective_linear_x_mps)
+                                * self.follower_config.stuck_timeout_sec
+                            ),
+                        )
+                    )
+                    if (
+                        bounded_progress_epsilon_m
+                        < self.follower_config.stuck_progress_epsilon_m
+                    ):
+                        # The comparison is strict. Half of the reachable
+                        # headroom remains attainable before vertex capture.
+                        distance_progress_epsilon_m = (
+                            0.5 * bounded_progress_epsilon_m
+                        )
                 progress_failure = self._progress_failure(
                     step.distance_to_target_m,
                     step.controlled_heading_error_rad,
@@ -2211,6 +2912,7 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                         or abs(step.command.angular_z_radps) > 0.0
                     ),
                     step.progress_mode,
+                    distance_progress_epsilon_m,
                 )
                 if progress_failure:
                     self.latest_stop_details = stuck_progress_details(
@@ -2219,7 +2921,7 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                         last_progress_distance_m=self.last_progress_distance_m,
                         elapsed_without_progress_sec=now_monotonic - self.last_progress_at,
                         max_without_progress_sec=self.follower_config.stuck_timeout_sec,
-                        progress_epsilon_m=self.follower_config.stuck_progress_epsilon_m,
+                        progress_epsilon_m=distance_progress_epsilon_m,
                         commanded_linear_x_mps=step.command.linear_x_mps,
                         commanded_angular_z_radps=step.command.angular_z_radps,
                         front_clearance_scale=front_clearance_scale,
@@ -2243,11 +2945,18 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                         ),
                     )
                     self.publish_repeated_zero()
-                    recovery = self._attempt_blockage_recovery(
-                        pose,
-                        progress_failure,
-                        self.latest_stop_details,
-                    )
+                    front_evidence = self.latest_front_clearance_details or {}
+                    recovery = ""
+                    if (
+                        self.blockage_recovery_provider is not None
+                        and step.command.linear_x_mps > 0.0
+                        and front_evidence.get("source") == "front_sector"
+                    ):
+                        recovery = self._attempt_blockage_recovery(
+                            pose,
+                            progress_failure,
+                            self.latest_stop_details,
+                        )
                     if recovery == "adopted":
                         time.sleep(loop_sleep_sec)
                         continue
@@ -2258,9 +2967,61 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                                 progress_failure,
                             )
                         )
+                    if recovery == "cleared":
+                        # A stuck watchdog is not discharged by clear LiDAR;
+                        # _attempt_blockage_recovery converts that case into a
+                        # fail-closed controller/localization diagnosis.
+                        progress_failure = str(
+                            (self.latest_stop_details or {}).get(
+                                "reason",
+                                progress_failure,
+                            )
+                        )
                     return FollowerResult(
                         "stopped",
                         progress_failure,
+                        time.monotonic() - started_at,
+                        self.distance_estimate_m,
+                        self.motion_published,
+                        self.latest_stop_details,
+                    )
+                if not _finite_velocity_command(
+                    effective_linear_x_mps,
+                    step.command.angular_z_radps,
+                ):
+                    self.publish_repeated_zero()
+                    self.latest_stop_details = {
+                        "reason": "controller produced a non-finite velocity command",
+                        "fault_code": "nonfinite_velocity_command",
+                        "linear_x_mps": effective_linear_x_mps,
+                        "angular_z_radps": step.command.angular_z_radps,
+                        "fail_closed": True,
+                    }
+                    return FollowerResult(
+                        "stopped",
+                        self.latest_stop_details["reason"],
+                        time.monotonic() - started_at,
+                        self.distance_estimate_m,
+                        self.motion_published,
+                        self.latest_stop_details,
+                    )
+                trace_failure = self._append_controller_trace(
+                    event="control_cycle",
+                    pose=pose,
+                    step=step,
+                    route_check=route_check,
+                    nominal_command=step.command,
+                    effective_command=VelocityCommand(
+                        effective_linear_x_mps,
+                        step.command.angular_z_radps,
+                    ),
+                    fail_closed=False,
+                )
+                if trace_failure:
+                    self.publish_repeated_zero()
+                    return FollowerResult(
+                        "stopped",
+                        trace_failure,
                         time.monotonic() - started_at,
                         self.distance_estimate_m,
                         self.motion_published,
@@ -2290,11 +3051,93 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         # sealing, or event logging begins. Sensor callbacks continue on the
         # background executor while the planner runs.
         self.publish_repeated_zero()
-        try:
-            update = provider(pose, stop_reason, dict(stop_details))
-        except Exception as exc:
+        ownership_failure = self._cmd_vel_ownership_failure()
+        if ownership_failure:
             self.latest_stop_details = {
                 **dict(stop_details),
+                "reason": ownership_failure,
+                "fault_code": "cmd_vel_ownership_ambiguous_before_replan",
+                "source": "blockage_recovery_admission",
+                "original_stop_reason": stop_reason,
+                "fail_closed": True,
+            }
+            return "stopped"
+        confirmation = self._confirm_stationary_blockage()
+        trace_failure = self._append_controller_trace(
+            event=f"blockage_{confirmation.status}",
+            # Controller traces are always in the execution frame. The
+            # independently named map pose remains in confirmation evidence.
+            pose=pose,
+            reason=stop_reason,
+            fail_closed=confirmation.status == "failed",
+            effective_command=VelocityCommand(0.0, 0.0),
+            front_cluster_summary=confirmation.evidence,
+        )
+        if trace_failure:
+            return "stopped"
+        if confirmation.status == "cleared":
+            if stop_reason == "stuck no progress":
+                self.latest_stop_details = {
+                    **dict(stop_details),
+                    **confirmation.evidence,
+                    "reason": (
+                        "stuck no progress without a confirmed persistent "
+                        "front obstacle"
+                    ),
+                    "fault_code": "stuck_without_persistent_front_obstacle",
+                    "original_stop_reason": stop_reason,
+                    "fail_closed": True,
+                }
+                return "stopped"
+            self.latest_stop_details = {
+                **dict(stop_details),
+                **confirmation.evidence,
+                "reason": "stationary front clearance confirmed",
+                "original_stop_reason": stop_reason,
+                "fail_closed": False,
+            }
+            self._reset_progress_watchdog(time.monotonic())
+            return "cleared"
+        if confirmation.status != "confirmed" or confirmation.pose is None:
+            self.latest_stop_details = {
+                **dict(stop_details),
+                **confirmation.evidence,
+                "reason": "stationary blockage confirmation failed",
+                "fault_code": "stationary_blockage_unconfirmed",
+                "original_stop_reason": stop_reason,
+                "fail_closed": True,
+            }
+            return "stopped"
+        confirmed_pose = confirmation.pose
+        context = getattr(self, "odom_execution_context", None)
+        runtime = getattr(self, "runtime_config", None)
+        planning_frame = getattr(runtime, "map_frame", "map")
+        execution_frame = (
+            planning_frame
+            if context is None
+            else context.odom_frame
+        )
+        confirmed_stop_details = {
+            **dict(stop_details),
+            **confirmation.evidence,
+            "front_clearance": dict(confirmation.front_clearance or {}),
+            "trigger_pose": {
+                "frame_id": execution_frame,
+                "x_m": pose.x_m,
+                "y_m": pose.y_m,
+                "yaw_rad": pose.yaw_rad,
+            },
+            "fail_closed": False,
+        }
+        try:
+            update = provider(
+                confirmed_pose,
+                stop_reason,
+                confirmed_stop_details,
+            )
+        except Exception as exc:
+            self.latest_stop_details = {
+                **confirmed_stop_details,
                 "reason": f"blockage recovery provider failed: {exc}",
                 "fault_code": "blockage_recovery_provider_exception",
                 "original_stop_reason": stop_reason,
@@ -2303,8 +3146,164 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
             return "stopped"
         if update is None:
             return ""
+        # Planning and artifact sealing are synchronous.  TF/AMCL and sensor
+        # callbacks continue on the background executors while that work runs,
+        # so the pose that triggered recovery is no longer authoritative for
+        # route admission.  Recheck every live input and bind adoption to a
+        # fresh post-plan execution pose instead of silently reusing ``pose``.
+        admission = self._post_replan_admission_pose()
+        if admission.pose is None:
+            self.latest_stop_details = {
+                **confirmed_stop_details,
+                **dict(admission.details or {}),
+                "reason": "post-replan runtime admission failed",
+                "fault_code": "post_replan_admission_failed",
+                "original_stop_reason": stop_reason,
+                "fail_closed": True,
+            }
+            return "stopped"
+        fresh_pose = admission.pose
+        fresh_planning_pose = (
+            fresh_pose
+            if context is None
+            else context.odom_pose_to_map(fresh_pose)
+        )
+        update = replace(
+            update,
+            event_fields={
+                **dict(update.event_fields),
+                "planning_stop_pose": {
+                    "frame_id": planning_frame,
+                    "x_m": confirmed_pose.x_m,
+                    "y_m": confirmed_pose.y_m,
+                    "yaw_rad": confirmed_pose.yaw_rad,
+                },
+                "post_plan_admission_pose": {
+                    "frame_id": planning_frame,
+                    "x_m": fresh_planning_pose.x_m,
+                    "y_m": fresh_planning_pose.y_m,
+                    "yaw_rad": fresh_planning_pose.yaw_rad,
+                },
+                "post_plan_execution_pose": {
+                    "frame_id": execution_frame,
+                    "x_m": fresh_pose.x_m,
+                    "y_m": fresh_pose.y_m,
+                    "yaw_rad": fresh_pose.yaw_rad,
+                },
+                "post_plan_pose_delta_m": math.hypot(
+                    fresh_planning_pose.x_m - confirmed_pose.x_m,
+                    fresh_planning_pose.y_m - confirmed_pose.y_m,
+                ),
+                "post_plan_runtime_revalidated": True,
+                "stationary_obstacle_confirmation": (
+                    confirmation.evidence.get(
+                        "stationary_obstacle_confirmation",
+                        {},
+                    )
+                ),
+            },
+        )
         self.queued_route_update = update
-        return self._refresh_dynamic_route(pose)
+        refresh = self._refresh_dynamic_route(fresh_pose)
+        if refresh == "adopted":
+            trace_failure = self._append_controller_trace(
+                event="replacement_route_adopted",
+                pose=fresh_pose,
+                reason=stop_reason,
+                fail_closed=False,
+                effective_command=VelocityCommand(0.0, 0.0),
+                front_cluster_summary=confirmation.evidence,
+            )
+            if trace_failure:
+                return "stopped"
+        return refresh
+
+    def _post_replan_admission_pose(self) -> PoseLookupResult:
+        """Return a fresh stopped pose after synchronous replacement planning.
+
+        Obstacle proximity is intentionally not re-evaluated here: the sealed
+        escape route exists precisely because the robot may still be close to
+        the confirmed blocker.  Scan/odom freshness, TF availability, and the
+        later exact-start join check remain mandatory before adoption.
+        """
+
+        self.publish_zero()
+        self._drain_runtime_callbacks()
+        ownership_failure = self._cmd_vel_ownership_failure()
+        if ownership_failure:
+            return PoseLookupResult(
+                None,
+                {
+                    "stop_reason": ownership_failure,
+                    "reason": ownership_failure,
+                    "fault_code": (
+                        "cmd_vel_ownership_ambiguous_after_replan"
+                    ),
+                    "source": "post_replan_admission",
+                    "fail_closed": True,
+                },
+            )
+        scan_failure = self._freshness_failure(
+            "scan",
+            self.latest_scan,
+            self.latest_scan_receipt,
+            self.follower_config.max_scan_age_sec,
+        )
+        if scan_failure:
+            return PoseLookupResult(
+                None,
+                {
+                    **dict(self.latest_stop_details or {}),
+                    "stop_reason": scan_failure,
+                    "source": "post_replan_admission",
+                    "fail_closed": True,
+                },
+            )
+        odom_failure = self._freshness_failure(
+            "odom",
+            self.latest_odom,
+            self.latest_odom_receipt,
+            self.follower_config.max_odom_age_sec,
+        )
+        if odom_failure:
+            return PoseLookupResult(
+                None,
+                {
+                    **dict(self.latest_stop_details or {}),
+                    "stop_reason": odom_failure,
+                    "source": "post_replan_admission",
+                    "fail_closed": True,
+                },
+            )
+        localization_failure = self._global_consistency_monitor_failure()
+        if localization_failure:
+            return PoseLookupResult(
+                None,
+                {
+                    **dict(self.latest_stop_details or {}),
+                    "stop_reason": localization_failure,
+                    "source": "post_replan_admission",
+                    "fail_closed": True,
+                },
+            )
+        pose_lookup = self._current_pose_lookup_with_stale_recovery()
+        if pose_lookup.pose is None:
+            return PoseLookupResult(
+                None,
+                {
+                    **dict(pose_lookup.details or {}),
+                    "stop_reason": str(
+                        (pose_lookup.details or {}).get(
+                            "stop_reason",
+                            "execution-frame transform unavailable",
+                        )
+                    ),
+                    "source": "post_replan_admission",
+                    "fail_closed": True,
+                },
+                pose_lookup.stamp_sec,
+            )
+        return pose_lookup
 
     def _refresh_dynamic_route(self, pose: Pose2D) -> str:
         queued_update = getattr(self, "queued_route_update", None)
@@ -2414,6 +3413,21 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                 "fail_closed": True,
             }
             return "stopped"
+        join_failure = dynamic_join_envelope_failure(
+            pose,
+            replacement[0],
+            join_limit,
+        )
+        if join_failure is not None:
+            self.publish_zero()
+            self.latest_stop_details = {
+                **join_failure,
+                "reason": "fresh pose is outside the replacement-route join envelope",
+                "certificate_reason": join_failure["reason"],
+                "source": "dynamic_route_admission",
+                "fail_closed": True,
+            }
+            return "stopped"
         next_route_kind = str(update.event_fields.get("route_kind", ""))
         phase_failure = dynamic_route_kind_transition_failure(
             self.current_route_kind, next_route_kind
@@ -2428,6 +3442,36 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                 "fail_closed": True,
             }
             return "stopped"
+        if (
+            next_route_kind in PHYSICAL_ROUTE_KINDS
+            and join_limit
+            <= self.follower_config.certified_route_tube_radius_m + 1.0e-9
+        ):
+            start_check = check_execution_route_tube(
+                pose,
+                replacement,
+                target_index=0,
+                pursuit_index=0,
+                tracking_tube_radius_m=(
+                    self.follower_config.certified_route_tube_radius_m
+                ),
+                chord_sample_spacing_m=(
+                    self.follower_config.certified_route_chord_sample_spacing_m
+                ),
+            )
+            if not start_check.ok:
+                self.publish_zero()
+                self.latest_stop_details = {
+                    **start_check.to_log_dict(),
+                    "reason": (
+                        "fresh pose failed the replacement-route start-tube "
+                        "certificate"
+                    ),
+                    "certificate_reason": start_check.reason,
+                    "source": "dynamic_route_admission",
+                    "fail_closed": True,
+                }
+                return "stopped"
         raw_egress_lock = update.event_fields.get(
             "start_egress_vertex_lock",
             False,
@@ -2516,6 +3560,17 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         )
         self.certified_corner_latch = None
         self._last_certified_corner_phase = None
+        raw_route_revision = update.route_revision
+        if (
+            isinstance(raw_route_revision, int)
+            and not isinstance(raw_route_revision, bool)
+            and raw_route_revision >= 0
+        ):
+            self.controller_route_revision = raw_route_revision
+        else:
+            self.controller_route_revision = (
+                getattr(self, "controller_route_revision", 0) + 1
+            )
         self.waypoints = replacement
         # Every route replacement owns a fresh lock decision. Ordinary routes
         # explicitly clear any lock retained from the previous revision.
@@ -2813,7 +3868,19 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         now_monotonic: float,
         motion_commanded: bool,
         progress_mode: str = "path_tracking",
+        distance_progress_epsilon_m: float | None = None,
     ) -> str:
+        if distance_progress_epsilon_m is None:
+            distance_progress_epsilon_m = (
+                self.follower_config.stuck_progress_epsilon_m
+            )
+        if (
+            not math.isfinite(distance_progress_epsilon_m)
+            or distance_progress_epsilon_m < 0.0
+        ):
+            raise ValueError(
+                "distance_progress_epsilon_m must be finite and non-negative"
+            )
         heading_error_abs = abs(controlled_heading_error_rad)
         target_changed = target_index != self.last_progress_target_index
         pursuit_advanced = (
@@ -2872,7 +3939,7 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
             )
         self.last_progress_heading_error_rad = mode_heading_baseline
         distance_improved = (
-            distance_to_target_m + self.follower_config.stuck_progress_epsilon_m
+            distance_to_target_m + distance_progress_epsilon_m
             < self.last_progress_distance_m
         )
         heading_improved = (
@@ -2907,10 +3974,212 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
             (),
         )
 
-    def _current_pose_lookup(self) -> PoseLookupResult:
+    def _ros_now_sec(self) -> float:
+        return self.get_clock().now().nanoseconds / 1_000_000_000.0
+
+    def _is_real_amcl_runtime(self) -> bool:
+        runtime = getattr(self, "runtime_config", None)
+        return (
+            getattr(self, "odom_execution_context", None) is None
+            and
+            getattr(runtime, "localization_source", "") == "amcl"
+            and getattr(runtime, "use_sim_time", True) is False
+        )
+
+    def _tf_edge_sample(self, parent_frame: str, child_frame: str) -> TfEdgeSample:
+        """Read one configured TF edge for diagnosis, never as a control pose."""
+
         try:
             transform = self.tf_buffer.lookup_transform(
-                self.runtime_config.map_frame,
+                parent_frame,
+                child_frame,
+                Time(),
+                timeout=Duration(seconds=0.1),
+            )
+            stamp_sec = (
+                Time.from_msg(transform.header.stamp).nanoseconds
+                / 1_000_000_000.0
+            )
+        except (TransformException, AttributeError, TypeError, ValueError):
+            stamp_sec = None
+        return TfEdgeSample(parent_frame, child_frame, stamp_sec)
+
+    def _composed_tf_sample(self, lookup: PoseLookupResult) -> TfEdgeSample:
+        return TfEdgeSample(
+            self.runtime_config.map_frame,
+            self.runtime_config.base_frame,
+            lookup.stamp_sec,
+        )
+
+    def _odom_stationarity_sample(self) -> OdomStationaritySample | None:
+        """Capture finite odom pose/twist evidence from one distinct callback."""
+
+        msg = getattr(self, "latest_odom", None)
+        pose = self._latest_odom_pose()
+        if msg is None or pose is None:
+            return None
+        try:
+            stamp_sec = _ros_stamp_sec(msg.header.stamp)
+            linear_x_mps = float(msg.twist.twist.linear.x)
+            angular_z_radps = float(msg.twist.twist.angular.z)
+            callback_count = int(
+                getattr(self, "latest_odom_callback_count", 0)
+            )
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return None
+        if stamp_sec is None or not all(
+            math.isfinite(value)
+            for value in (linear_x_mps, angular_z_radps)
+        ):
+            return None
+        try:
+            return OdomStationaritySample(
+                callback_count=callback_count,
+                stamp_sec=stamp_sec,
+                x_m=pose.x_m,
+                y_m=pose.y_m,
+                yaw_rad=pose.yaw_rad,
+                linear_x_mps=linear_x_mps,
+                angular_z_radps=angular_z_radps,
+            )
+        except ValueError:
+            return None
+
+    def _wait_for_stationary_odom_pair(
+        self,
+        *,
+        deadline_monotonic: float,
+    ) -> tuple[StationarityDecision | None, dict[str, object]]:
+        """Prove stationarity from two fresh advancing samples under zero hold."""
+
+        first = self._odom_stationarity_sample()
+        attempts: list[dict[str, object]] = []
+        if first is None:
+            return None, {
+                "accepted": False,
+                "reason": "initial_odom_stationarity_sample_unavailable",
+            }
+        while rclpy.ok() and time.monotonic() < deadline_monotonic:
+            self.publish_zero()
+            self._service_or_wait_for_callbacks(
+                min(
+                    AMCL_STALE_TF_RECOVERY_POLL_SEC,
+                    max(0.0, deadline_monotonic - time.monotonic()),
+                )
+            )
+            second = self._odom_stationarity_sample()
+            if second is None:
+                continue
+            if second.callback_count <= first.callback_count:
+                continue
+            decision = evaluate_stationarity(
+                first,
+                second,
+                now_sec=self._ros_now_sec(),
+            )
+            attempts.append(decision.to_log_dict())
+            # Retain only bounded recent evidence in a physical run artifact.
+            if len(attempts) > 4:
+                attempts.pop(0)
+            if decision.accepted:
+                return decision, {
+                    "accepted": True,
+                    "reason": decision.reason,
+                    "first_sample": first.to_log_dict(),
+                    "second_sample": second.to_log_dict(),
+                    "decision": decision.to_log_dict(),
+                    "attempts": attempts,
+                }
+            if decision.reasons == ("odom_sample_separation_too_short",):
+                # TurtleBot odometry commonly arrives around 20 Hz.  Keep the
+                # older sample until the pair spans the required 80 ms instead
+                # of sliding forever over adjacent 50 ms callbacks.
+                continue
+            first = second
+        return None, {
+            "accepted": False,
+            "reason": "stationarity_confirmation_timeout",
+            "last_sample": first.to_log_dict(),
+            "attempts": attempts,
+        }
+
+    def _global_consistency_monitor_failure(self) -> str:
+        """Stop/reseal on AMCL-map discontinuity without steering from it."""
+
+        context = getattr(self, "odom_execution_context", None)
+        if context is None:
+            return ""
+        transform = None
+        lookup_error = ""
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                context.map_frame,
+                context.odom_frame,
+                Time(),
+                timeout=Duration(seconds=0.1),
+            )
+            stamp = Time.from_msg(transform.header.stamp)
+            age_sec = (
+                self.get_clock().now() - stamp
+            ).nanoseconds / 1_000_000_000.0
+            if age_sec < -self.follower_config.amcl_edge_future_tolerance_sec:
+                lookup_error = "future_map_from_odom"
+            elif age_sec > self.follower_config.max_tf_age_sec:
+                lookup_error = "stale_map_from_odom"
+        except (TransformException, AttributeError, TypeError, ValueError) as exc:
+            lookup_error = f"map_from_odom_lookup_failed: {exc}"
+
+        live_transform = None
+        if transform is not None and not lookup_error:
+            try:
+                pose = _validated_planar_pose_from_tf(
+                    transform,
+                    expected_target_frame=context.map_frame,
+                    expected_source_frame=context.odom_frame,
+                )
+                live_transform = PlanarTransform2D(
+                    pose.x_m,
+                    pose.y_m,
+                    pose.yaw_rad,
+                )
+            except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+                lookup_error = f"map_from_odom_malformed: {exc}"
+
+        continuity = evaluate_map_odom_continuity(
+            context,
+            live_transform if not lookup_error else None,
+        )
+        monitor = evaluate_global_consistency_monitor(
+            reseal_required=not continuity.accepted,
+            diagnostic_warning=lookup_error,
+        )
+        if monitor.action != MONITOR_ACTION_FORCE_ZERO_RESEAL:
+            return ""
+        reason = "global localization consistency requires zero and reseal"
+        self.latest_stop_details = {
+            "reason": reason,
+            "fault_code": "localization_reseal_required",
+            "source": "global_consistency_monitor",
+            "execution_pose_owner": "odom",
+            "global_consistency_monitor": "amcl",
+            "monitor_action": monitor.action,
+            "monitor_reason": monitor.reason,
+            "monitor_warning": monitor.diagnostic_warning,
+            "continuity": continuity.to_evidence(),
+            "fail_closed": True,
+        }
+        return reason
+
+    def _current_pose_lookup(self) -> PoseLookupResult:
+        context = getattr(self, "odom_execution_context", None)
+        target_frame = (
+            self.runtime_config.map_frame
+            if context is None
+            else context.odom_frame
+        )
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                target_frame,
                 self.runtime_config.base_frame,
                 Time(),
                 timeout=Duration(seconds=0.1),
@@ -2920,13 +4189,25 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                 None,
                 tf_lookup_failure_details(
                     reason="lookup_exception",
-                    target_frame=self.runtime_config.map_frame,
+                    target_frame=target_frame,
                     source_frame=self.runtime_config.base_frame,
                     max_age_sec=self.follower_config.max_tf_age_sec,
                     exception=exc,
                 ),
             )
-        transform_stamp = Time.from_msg(transform.header.stamp)
+        try:
+            transform_stamp = Time.from_msg(transform.header.stamp)
+        except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+            return PoseLookupResult(
+                None,
+                tf_lookup_failure_details(
+                    reason="malformed_transform_stamp",
+                    target_frame=target_frame,
+                    source_frame=self.runtime_config.base_frame,
+                    max_age_sec=self.follower_config.max_tf_age_sec,
+                    exception=exc,
+                ),
+            )
         age = (
             self.get_clock().now() - transform_stamp
         ).nanoseconds / 1_000_000_000.0
@@ -2936,7 +4217,7 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                 None,
                 tf_lookup_failure_details(
                     reason="future_transform",
-                    target_frame=self.runtime_config.map_frame,
+                    target_frame=target_frame,
                     source_frame=self.runtime_config.base_frame,
                     max_age_sec=self.follower_config.max_tf_age_sec,
                     age_sec=age,
@@ -2948,19 +4229,33 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                 None,
                 tf_lookup_failure_details(
                     reason="stale_transform",
-                    target_frame=self.runtime_config.map_frame,
+                    target_frame=target_frame,
                     source_frame=self.runtime_config.base_frame,
                     max_age_sec=self.follower_config.max_tf_age_sec,
                     age_sec=age,
                 ),
                 stamp_sec,
             )
-        translation = transform.transform.translation
-        rotation = transform.transform.rotation
-        return PoseLookupResult(
-            Pose2D(translation.x, translation.y, _yaw_from_quaternion(rotation)),
-            stamp_sec=stamp_sec,
-        )
+        try:
+            pose = _validated_planar_pose_from_tf(
+                transform,
+                expected_target_frame=target_frame,
+                expected_source_frame=self.runtime_config.base_frame,
+            )
+        except (TypeError, ValueError) as exc:
+            return PoseLookupResult(
+                None,
+                tf_lookup_failure_details(
+                    reason="malformed_transform_pose",
+                    target_frame=target_frame,
+                    source_frame=self.runtime_config.base_frame,
+                    max_age_sec=self.follower_config.max_tf_age_sec,
+                    age_sec=age,
+                    exception=exc,
+                ),
+                stamp_sec,
+            )
+        return PoseLookupResult(pose, stamp_sec=stamp_sec)
 
     def _post_stale_tf_recovery_freshness_failure(self) -> str:
         scan_failure = self._freshness_failure(
@@ -3091,6 +4386,532 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                 "fail_closed": True,
             },
             stamp_sec,
+        )
+
+    def _real_amcl_recovery_failure(
+        self,
+        *,
+        reason: str,
+        evidence: Mapping[str, object],
+        stamp_sec: float | None,
+    ) -> PoseLookupResult:
+        """Persist one terminal AMCL recovery result without masking its cause."""
+
+        details: dict[str, object] = {
+            "stop_reason": "map-to-base transform unavailable",
+            "source": "real_amcl_stale_tf_recovery",
+            "reason": reason,
+            "fail_closed": True,
+            **dict(evidence),
+        }
+        event_name = "real_amcl_stale_tf_recovery_failed"
+        if not self._emit_route_update(
+            RouteUpdate(
+                kind=RouteUpdateKind.UNCHANGED,
+                event_name=event_name,
+                event_fields=details,
+            )
+        ):
+            details["semantic_event_failure"] = dict(
+                self.latest_stop_details or {}
+            )
+        trace_failure = self._append_controller_trace(
+            event="pose_lookup_stop",
+            reason=reason,
+            fail_closed=True,
+            diagnostics=details,
+        )
+        if trace_failure:
+            # The transform/recovery stop remains the primary safety reason.
+            details["controller_trace_error"] = trace_failure
+            details["controller_trace_fault_code"] = (
+                "controller_trace_write_failed"
+            )
+        else:
+            details["pose_lookup_trace_recorded"] = True
+        self.latest_stop_details = details
+        return PoseLookupResult(None, details, stamp_sec)
+
+    def _real_amcl_stale_tf_recovery(
+        self,
+        *,
+        first_lookup: PoseLookupResult,
+        retry_lookup: PoseLookupResult,
+        callback_drain: Mapping[str, object],
+        map_to_odom_before: TfEdgeSample,
+        map_to_odom_retry: TfEdgeSample,
+        odom_to_base_retry: TfEdgeSample,
+    ) -> PoseLookupResult:
+        """Perform one bounded, zero-held AMCL no-motion refresh episode."""
+
+        timeout_sec = float(
+            getattr(
+                self.follower_config,
+                "runtime_nomotion_update_timeout_sec",
+                2.0,
+            )
+        )
+        deadline = time.monotonic() + timeout_sec
+        now_sec = self._ros_now_sec()
+        composed_before = self._composed_tf_sample(first_lookup)
+        composed_retry = self._composed_tf_sample(retry_lookup)
+        eligibility = evaluate_recovery_eligibility(
+            localization_source=getattr(
+                self.runtime_config,
+                "localization_source",
+                "",
+            ),
+            use_sim_time=getattr(
+                self.runtime_config,
+                "use_sim_time",
+                True,
+            ),
+            composed_before=composed_before,
+            composed_retry=composed_retry,
+            map_to_odom_before=map_to_odom_before,
+            map_to_odom_retry=map_to_odom_retry,
+            odom_to_base_retry=odom_to_base_retry,
+            now_sec=now_sec,
+            max_tf_age_sec=self.follower_config.max_tf_age_sec,
+            composed_future_tolerance_sec=(
+                self.follower_config.max_future_timestamp_sec
+            ),
+            map_to_odom_future_tolerance_sec=(
+                self.follower_config.amcl_edge_future_tolerance_sec
+            ),
+        )
+        base_evidence: dict[str, object] = {
+            "service_name": getattr(
+                self,
+                "runtime_nomotion_update_service",
+                getattr(
+                    self.follower_config,
+                    "runtime_nomotion_update_service",
+                    "request_nomotion_update",
+                ),
+            ),
+            "timeout_sec": timeout_sec,
+            "service_requested": False,
+            "service_completed": False,
+            "zero_held": True,
+            "motion_authorized": False,
+            "requires_route_tube_readmission": True,
+            "callback_drain": dict(callback_drain),
+            "eligibility": eligibility.to_log_dict(),
+            "tf_edges": {
+                "composed_before": composed_before.to_log_dict(
+                    now_sec=now_sec
+                ),
+                "composed_retry": composed_retry.to_log_dict(
+                    now_sec=now_sec
+                ),
+                "map_to_odom_before": map_to_odom_before.to_log_dict(
+                    now_sec=now_sec
+                ),
+                "map_to_odom_retry": map_to_odom_retry.to_log_dict(
+                    now_sec=now_sec
+                ),
+                "odom_to_base_retry": odom_to_base_retry.to_log_dict(
+                    now_sec=now_sec
+                ),
+            },
+        }
+        if not eligibility.accepted:
+            return self._real_amcl_recovery_failure(
+                reason=eligibility.reason,
+                evidence=base_evidence,
+                stamp_sec=retry_lookup.stamp_sec,
+            )
+
+        sensor_failure = self._post_stale_tf_recovery_freshness_failure()
+        if sensor_failure:
+            return self._real_amcl_recovery_failure(
+                reason="pre_request_sensor_freshness_failure",
+                evidence={
+                    **base_evidence,
+                    "sensor_failure": dict(self.latest_stop_details or {}),
+                },
+                stamp_sec=retry_lookup.stamp_sec,
+            )
+        ownership_failure = self._cmd_vel_ownership_failure()
+        if ownership_failure:
+            return self._real_amcl_recovery_failure(
+                reason="pre_request_cmd_vel_ownership_failure",
+                evidence={
+                    **base_evidence,
+                    "ownership_failure": ownership_failure,
+                },
+                stamp_sec=retry_lookup.stamp_sec,
+            )
+
+        stationarity, stationarity_evidence = (
+            self._wait_for_stationary_odom_pair(
+                deadline_monotonic=deadline,
+            )
+        )
+        if stationarity is None:
+            return self._real_amcl_recovery_failure(
+                reason=str(stationarity_evidence["reason"]),
+                evidence={
+                    **base_evidence,
+                    "stationarity_before_request": stationarity_evidence,
+                },
+                stamp_sec=retry_lookup.stamp_sec,
+            )
+
+        started_evidence = {
+            **base_evidence,
+            "stationarity_before_request": stationarity_evidence,
+        }
+        if not self._emit_route_update(
+            RouteUpdate(
+                kind=RouteUpdateKind.UNCHANGED,
+                event_name="real_amcl_stale_tf_recovery_started",
+                event_fields=started_evidence,
+            )
+        ):
+            return self._real_amcl_recovery_failure(
+                reason="recovery_start_event_failed",
+                evidence={
+                    **started_evidence,
+                    "semantic_event_failure": dict(
+                        self.latest_stop_details or {}
+                    ),
+                },
+                stamp_sec=retry_lookup.stamp_sec,
+            )
+        trace_failure = self._append_controller_trace(
+            event="real_amcl_stale_tf_recovery_started",
+            reason="persistent_stale_localization_edge",
+            fail_closed=False,
+            diagnostics=started_evidence,
+        )
+        if trace_failure:
+            return self._real_amcl_recovery_failure(
+                reason="controller_trace_write_failed",
+                evidence={
+                    **started_evidence,
+                    "controller_trace_error": trace_failure,
+                },
+                stamp_sec=retry_lookup.stamp_sec,
+            )
+
+        client = getattr(self, "runtime_nomotion_update_client", None)
+        if client is None or not client.service_is_ready():
+            return self._real_amcl_recovery_failure(
+                reason="nomotion_update_service_unavailable",
+                evidence=started_evidence,
+                stamp_sec=retry_lookup.stamp_sec,
+            )
+        self.publish_zero()
+        try:
+            future = client.call_async(Empty.Request())
+        except Exception as exc:
+            return self._real_amcl_recovery_failure(
+                reason="nomotion_update_service_request_failed",
+                evidence={
+                    **started_evidence,
+                    "service_exception_type": exc.__class__.__name__,
+                    "service_exception": str(exc),
+                },
+                stamp_sec=retry_lookup.stamp_sec,
+            )
+
+        request_evidence = {
+            **started_evidence,
+            "service_requested": True,
+        }
+        candidate_lookup = retry_lookup
+        candidate_map_to_odom = map_to_odom_retry
+        candidate_odom_to_base = odom_to_base_retry
+        service_completed = False
+        service_error: BaseException | None = None
+        probe = None
+        while rclpy.ok() and time.monotonic() < deadline:
+            self.publish_zero()
+            self._service_or_wait_for_callbacks(
+                min(
+                    AMCL_STALE_TF_RECOVERY_POLL_SEC,
+                    max(0.0, deadline - time.monotonic()),
+                )
+            )
+            if future.done():
+                service_completed = True
+                try:
+                    service_error = future.exception()
+                except Exception as exc:
+                    service_error = exc
+                if service_error is not None:
+                    break
+                candidate_lookup = self._current_pose_lookup()
+                candidate_map_to_odom = self._tf_edge_sample(
+                    self.runtime_config.map_frame,
+                    self.runtime_config.odom_frame,
+                )
+                candidate_odom_to_base = self._tf_edge_sample(
+                    self.runtime_config.odom_frame,
+                    self.runtime_config.base_frame,
+                )
+                scan_evidence = self._fallback_message_freshness_evidence(
+                    "scan",
+                    self.latest_scan,
+                    self.latest_scan_receipt,
+                    self.follower_config.max_scan_age_sec,
+                )
+                odom_evidence = self._fallback_message_freshness_evidence(
+                    "odom",
+                    self.latest_odom,
+                    self.latest_odom_receipt,
+                    self.follower_config.max_odom_age_sec,
+                )
+                owner_ok = not self._cmd_vel_ownership_failure()
+                probe = evaluate_recovery_acceptance(
+                    eligibility=eligibility,
+                    composed_before=composed_before,
+                    composed_recovered=self._composed_tf_sample(
+                        candidate_lookup
+                    ),
+                    map_to_odom_before=map_to_odom_before,
+                    map_to_odom_recovered=candidate_map_to_odom,
+                    odom_to_base_recovered=candidate_odom_to_base,
+                    stationarity=stationarity,
+                    scan_fresh=bool(scan_evidence["fresh"]),
+                    odom_fresh=bool(odom_evidence["fresh"]),
+                    exclusive_cmd_vel_owner=owner_ok,
+                    now_sec=self._ros_now_sec(),
+                    max_tf_age_sec=self.follower_config.max_tf_age_sec,
+                    composed_future_tolerance_sec=(
+                        self.follower_config.max_future_timestamp_sec
+                    ),
+                    map_to_odom_future_tolerance_sec=(
+                        self.follower_config.amcl_edge_future_tolerance_sec
+                    ),
+                )
+                if probe.accepted:
+                    break
+                terminal_probe_reasons = tuple(
+                    reason
+                    for reason in probe.reasons
+                    if reason
+                    in {
+                        "scan_not_fresh",
+                        "odom_not_fresh",
+                        "cmd_vel_owner_not_exclusive",
+                    }
+                    or reason.startswith(
+                        "odom_to_base_recovered_not_fresh:"
+                    )
+                )
+                if terminal_probe_reasons:
+                    return self._real_amcl_recovery_failure(
+                        reason=terminal_probe_reasons[0],
+                        evidence={
+                            **request_evidence,
+                            "service_completed": True,
+                            "acceptance_probe": probe.to_log_dict(),
+                            "scan_freshness": scan_evidence,
+                            "odom_freshness": odom_evidence,
+                        },
+                        stamp_sec=candidate_lookup.stamp_sec,
+                    )
+
+        if service_error is not None:
+            return self._real_amcl_recovery_failure(
+                reason="nomotion_update_service_failed",
+                evidence={
+                    **request_evidence,
+                    "service_completed": True,
+                    "service_exception_type": (
+                        service_error.__class__.__name__
+                    ),
+                    "service_exception": str(service_error),
+                },
+                stamp_sec=candidate_lookup.stamp_sec,
+            )
+        if not service_completed:
+            return self._real_amcl_recovery_failure(
+                reason="nomotion_update_service_timeout",
+                evidence=request_evidence,
+                stamp_sec=candidate_lookup.stamp_sec,
+            )
+        if probe is None or not probe.accepted:
+            return self._real_amcl_recovery_failure(
+                reason="stale_tf_recovery_timeout",
+                evidence={
+                    **request_evidence,
+                    "service_completed": True,
+                    "acceptance_probe": (
+                        None if probe is None else probe.to_log_dict()
+                    ),
+                    "tf_edges_after_request": {
+                        "composed": self._composed_tf_sample(
+                            candidate_lookup
+                        ).to_log_dict(now_sec=self._ros_now_sec()),
+                        "map_to_odom": (
+                            candidate_map_to_odom.to_log_dict(
+                                now_sec=self._ros_now_sec()
+                            )
+                        ),
+                        "odom_to_base": (
+                            candidate_odom_to_base.to_log_dict(
+                                now_sec=self._ros_now_sec()
+                            )
+                        ),
+                    },
+                },
+                stamp_sec=candidate_lookup.stamp_sec,
+            )
+
+        # Complete a whole controller-period zero handoff before the final
+        # stationarity and admission samples.  If the bounded episode cannot
+        # fit that handoff, recovery remains terminal.
+        zero_cycle_sec = 1.0 / max(
+            self.follower_config.control_rate_hz,
+            1.0,
+        )
+        if deadline - time.monotonic() < zero_cycle_sec:
+            return self._real_amcl_recovery_failure(
+                reason="zero_cycle_handoff_timeout",
+                evidence={
+                    **request_evidence,
+                    "service_completed": True,
+                    "acceptance_probe": probe.to_log_dict(),
+                },
+                stamp_sec=candidate_lookup.stamp_sec,
+            )
+        self.publish_zero()
+        self._service_or_wait_for_callbacks(zero_cycle_sec)
+
+        final_stationarity, final_stationarity_evidence = (
+            self._wait_for_stationary_odom_pair(
+                deadline_monotonic=deadline,
+            )
+        )
+        if final_stationarity is None:
+            return self._real_amcl_recovery_failure(
+                reason=str(final_stationarity_evidence["reason"]),
+                evidence={
+                    **request_evidence,
+                    "service_completed": True,
+                    "stationarity_after_request": (
+                        final_stationarity_evidence
+                    ),
+                },
+                stamp_sec=candidate_lookup.stamp_sec,
+            )
+
+        final_lookup = self._current_pose_lookup()
+        final_map_to_odom = self._tf_edge_sample(
+            self.runtime_config.map_frame,
+            self.runtime_config.odom_frame,
+        )
+        final_odom_to_base = self._tf_edge_sample(
+            self.runtime_config.odom_frame,
+            self.runtime_config.base_frame,
+        )
+        scan_evidence = self._fallback_message_freshness_evidence(
+            "scan",
+            self.latest_scan,
+            self.latest_scan_receipt,
+            self.follower_config.max_scan_age_sec,
+        )
+        odom_evidence = self._fallback_message_freshness_evidence(
+            "odom",
+            self.latest_odom,
+            self.latest_odom_receipt,
+            self.follower_config.max_odom_age_sec,
+        )
+        ownership_failure = self._cmd_vel_ownership_failure()
+        final_now_sec = self._ros_now_sec()
+        acceptance = evaluate_recovery_acceptance(
+            eligibility=eligibility,
+            composed_before=composed_before,
+            composed_recovered=self._composed_tf_sample(final_lookup),
+            map_to_odom_before=map_to_odom_before,
+            map_to_odom_recovered=final_map_to_odom,
+            odom_to_base_recovered=final_odom_to_base,
+            stationarity=final_stationarity,
+            scan_fresh=bool(scan_evidence["fresh"]),
+            odom_fresh=bool(odom_evidence["fresh"]),
+            exclusive_cmd_vel_owner=not ownership_failure,
+            now_sec=final_now_sec,
+            max_tf_age_sec=self.follower_config.max_tf_age_sec,
+            composed_future_tolerance_sec=(
+                self.follower_config.max_future_timestamp_sec
+            ),
+            map_to_odom_future_tolerance_sec=(
+                self.follower_config.amcl_edge_future_tolerance_sec
+            ),
+        )
+        final_evidence = {
+            **request_evidence,
+            "service_completed": True,
+            "stationarity_after_request": final_stationarity_evidence,
+            "scan_freshness": scan_evidence,
+            "odom_freshness": odom_evidence,
+            "ownership_failure": ownership_failure,
+            "acceptance": acceptance.to_log_dict(),
+            "tf_edges_after_request": {
+                "composed": self._composed_tf_sample(
+                    final_lookup
+                ).to_log_dict(now_sec=final_now_sec),
+                "map_to_odom": final_map_to_odom.to_log_dict(
+                    now_sec=final_now_sec
+                ),
+                "odom_to_base": final_odom_to_base.to_log_dict(
+                    now_sec=final_now_sec
+                ),
+            },
+            "zero_cycle_handoff_completed": True,
+        }
+        if not acceptance.accepted or final_lookup.pose is None:
+            return self._real_amcl_recovery_failure(
+                reason=acceptance.reason,
+                evidence=final_evidence,
+                stamp_sec=final_lookup.stamp_sec,
+            )
+
+        if not self._emit_route_update(
+            RouteUpdate(
+                kind=RouteUpdateKind.UNCHANGED,
+                event_name="real_amcl_stale_tf_recovery_recovered",
+                event_fields=final_evidence,
+            )
+        ):
+            return self._real_amcl_recovery_failure(
+                reason="recovery_event_failed",
+                evidence={
+                    **final_evidence,
+                    "semantic_event_failure": dict(
+                        self.latest_stop_details or {}
+                    ),
+                },
+                stamp_sec=final_lookup.stamp_sec,
+            )
+        trace_failure = self._append_controller_trace(
+            event="real_amcl_stale_tf_recovery_recovered",
+            pose=final_lookup.pose,
+            reason=acceptance.reason,
+            fail_closed=False,
+            diagnostics=final_evidence,
+        )
+        if trace_failure:
+            return self._real_amcl_recovery_failure(
+                reason="controller_trace_write_failed",
+                evidence={
+                    **final_evidence,
+                    "controller_trace_error": trace_failure,
+                },
+                stamp_sec=final_lookup.stamp_sec,
+            )
+        return PoseLookupResult(
+            final_lookup.pose,
+            {
+                "source": "real_amcl_stale_tf_recovery",
+                "accepted": True,
+                **final_evidence,
+            },
+            final_lookup.stamp_sec,
         )
 
     def _primary_tf_result_with_restore_event(
@@ -3432,6 +5253,13 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
             0,
         )
         self.publish_zero()
+        real_amcl_runtime = self._is_real_amcl_runtime()
+        map_to_odom_before = None
+        if real_amcl_runtime:
+            map_to_odom_before = self._tf_edge_sample(
+                self.runtime_config.map_frame,
+                self.runtime_config.odom_frame,
+            )
         drain_details = self._drain_runtime_callbacks(
             max_callbacks=STALE_TF_RECOVERY_MAX_CALLBACKS,
             max_duration_sec=STALE_TF_RECOVERY_MAX_DURATION_SEC,
@@ -3450,6 +5278,22 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         retry_details = dict(retry_lookup.details or {})
         if retry_lookup.pose is None:
             if retry_details.get("reason") == "stale_transform":
+                if real_amcl_runtime:
+                    assert map_to_odom_before is not None
+                    return self._real_amcl_stale_tf_recovery(
+                        first_lookup=first_lookup,
+                        retry_lookup=retry_lookup,
+                        callback_drain=drain_details,
+                        map_to_odom_before=map_to_odom_before,
+                        map_to_odom_retry=self._tf_edge_sample(
+                            self.runtime_config.map_frame,
+                            self.runtime_config.odom_frame,
+                        ),
+                        odom_to_base_retry=self._tf_edge_sample(
+                            self.runtime_config.odom_frame,
+                            self.runtime_config.base_frame,
+                        ),
+                    )
                 return self._simulation_odom_fallback_after_stale_retry(
                     first_lookup=first_lookup,
                     retry_lookup=retry_lookup,
@@ -3539,6 +5383,8 @@ def run_simple_waypoint_follower(
         ]
         | None
     ) = None,
+    controller_trace_path: Path | None = None,
+    odom_execution_context: OdomExecutionContext | None = None,
 ) -> FollowerResult:
     _require_ros()
     rclpy.init(args=None)
@@ -3555,6 +5401,11 @@ def run_simple_waypoint_follower(
         listener_node, tf_buffer, tf_listener = _create_dedicated_tf_listener(
             runtime_config
         )
+        node_kwargs = {"tf_buffer": tf_buffer}
+        if controller_trace_path is not None:
+            node_kwargs["controller_trace_path"] = controller_trace_path
+        if odom_execution_context is not None:
+            node_kwargs["odom_execution_context"] = odom_execution_context
         node = SimpleWaypointFollowerNode(
             runtime_config,
             waypoints,
@@ -3562,7 +5413,7 @@ def run_simple_waypoint_follower(
             waypoint_provider,
             route_update_callback,
             blockage_recovery_provider,
-            tf_buffer=tf_buffer,
+            **node_kwargs,
         )
         follower_executor = MultiThreadedExecutor(
             num_threads=FOLLOWER_EXECUTOR_NUM_THREADS,

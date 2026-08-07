@@ -124,17 +124,92 @@ If a directly measured, content-hashed stand model is available, add
 `--stand-model-profile <measured_stand_model.json>`; provisional CAD dimensions
 are rejected for operational pose commitment.
 
+The finite yaw on a `stand_discovery_corridor` inspection waypoint is a stopped
+endpoint requirement, not a heading constraint for the entire incoming A*
+segment. The follower keeps exact-vertex pursuit and the certified route tube
+during translation, reaches the inspection position along the sealed segment,
+and only then performs the in-place terminal alignment. This matters at the end
+of the center corridor, where the only collision-free approach direction may be
+opposite the requested inspection yaw. Face-approach route kinds retain their
+heading-corridor behavior.
+
 The saved occupancy map is not assumed to contain movable stands. During a
-coverage leg the follower first stops on its normal LiDAR clearance or stuck
-watchdog. Only a stopped run with a near frontal obstacle may enter adaptive
-recovery. The script then records a stationary LiDAR epoch, requires that epoch
-to confirm and bind a stand candidate, adds every non-rejected candidate as a
-keepout in a new A* costmap, and plans back to the same inspection viewpoint.
-The exact stopped pose-to-A* connector must move away from the blocker and pass
-continuous hard-clearance checks. The replacement route is sealed by the same
-immutable route-certificate gate before it can move. Confirmation, clearance,
-sealing, or A* failure leaves the robot stopped. Recovery is bounded by
-`--max-blockage-replans-per-leg` (default `3`; set `0` to disable it).
+coverage leg the follower first holds a repeated zero command on its normal
+front-sector stop, stuck watchdog, or when clearance scaling would reduce a
+nonzero linear command below the configured physical motion floor (default
+`0.01 m/s`). Adaptive recovery then requires at least three fresh, distinct
+post-stop scans whose nearest front returns form one coherent map-frame cluster
+while both map and odom show that the robot stayed stationary and their relative
+offset stayed stable. One isolated return, including a single `0.234 m` ray, can
+never create a keepout. Coherent clear scans resume only on a new complete
+safety cycle; missing, inconsistent, moving, or localization-divergent evidence
+leaves the robot stopped.
+
+A confirmed blocker becomes a run-local navigation keepout only. It is not a
+semantic stand observation and cannot update the stand registry. A new inflated
+A* costmap plans back to the same inspection viewpoint. Its exact-start prefix
+is either a forward connector inside the controller's translation-heading
+envelope or one heading-aligned straight reverse prefix with a separately
+clearance-certified reverse-to-forward transition. Only the A* tail may be
+line-of-sight simplified. After synchronous planning and sealing, the latest
+scan and odom are revalidated and a fresh TF/map pose is looked up; route
+admission and the atomic zero-command handoff use that post-plan pose.
+Confirmation, geometry, sealing, freshness, join, or A* failure leaves the
+robot stopped. Recovery is bounded by `--max-blockage-replans-per-leg` (default
+`3`; set `0` to disable it).
+
+The stationary AMCL refresh before preflight and the bounded runtime refresh
+are deliberately separate controls. Preflight retains
+`--nomotion-update-service /request_nomotion_update` and its 15 s readiness
+budget. A runtime stale-`map -> base_footprint` event uses the namespace-relative
+`--runtime-nomotion-update-service request_nomotion_update` with at most the
+2.0 s configured by `--runtime-nomotion-update-timeout-sec`. This recovery does
+not widen `--max-tf-age-sec`: the follower must hold zero, obtain a strictly
+newer transform, and pass the normal freshness, command-owner, and certified
+route-tube gates before motion may resume. The semantic log records the
+configured and namespace-resolved runtime service, both refresh budgets, and
+the AMCL-edge future-stamp tolerance.
+
+Physical stand-exploration legs now use an uncertainty-aware split-frame
+contract. A* planning, static clearance, transient LiDAR keepouts, and route
+certificates remain in `map`. After a stopped AMCL preflight, the runner seals
+one direct `map <- odom` transform, projects that exact certified route into
+`odom`, and the follower uses only fresh `odom <- base_footprint` poses for
+control and route-tube checks. Later AMCL updates are a consistency monitor;
+they never steer the robot or rewrite the active route. A correction outside
+the covariance allowance already reserved by the route-clearance budget causes
+repeated zero and requires a new preflight/certificate.
+
+The budget samples uninflated static-map clearance and subtracts the robot
+radius, collision margin, 30 mm tracking tube, empirical odom drift, braking
+distance, the configured localization-sigma allowance, and segment-local yaw
+uncertainty. Exact exhaustion rejects. Low spread over five AMCL samples is
+evidence of convergence only, not absolute accuracy; physical execution also
+requires `--localization-branch-proof-id` naming a known start or asymmetric
+landmark. After arrival, LiDAR observation uses exact-time `odom <- base_scan`
+composed with the same frozen transform, so a later AMCL correction cannot move
+the recorded inspection geometry.
+
+An RViz warning such as `Message Filter dropping message: frame 'base_scan' ...
+because the queue is full` is a display-side symptom, not a velocity command or
+the direct controller stop cause. It normally means RViz could not transform a
+queued scan from `base_scan` into its Fixed Frame at the scan timestamp, or that
+the visualization process fell behind. If its timestamps overlap a follower TF
+failure, it corroborates a shared TF/publication or host-load problem. Before
+the next separately authorized physical run, verify the static LiDAR transform:
+
+```bash
+ros2 run tf2_ros tf2_echo base_footprint base_scan
+```
+
+Then disable nonessential RViz LaserScan, Path, and history-heavy displays for
+the trial. Preserve an external, continuous `/tf` and `/tf_static` capture that
+can distinguish `map -> odom` from `odom -> base_footprint`; pre/post snapshots
+alone cannot localize an intermittent edge outage. Keep the capture
+observe-only and outside the follower's `/cmd_vel` path. A no-motion dry run and
+offline tests validate admission and recovery logic only; they are not evidence
+that runtime TF recovery or obstacle replanning succeeded on the physical
+robot.
 
 Use a new `--session-id` for every command below; sessions are immutable. These
 are live-ROS checks, not simulation runs.
@@ -180,20 +255,26 @@ python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
   --max-blockage-replans-per-leg 3 \
   --max-startup-reseals-per-leg 3 \
   --coverage-leg-limit 1 \
+  --localization-branch-proof-id <known_start_or_asymmetric_landmark_id> \
   --session-id stand_explore_leg_001 \
   --execute
 ```
 
 Type `RUN` only after the separate no-motion run has passed and the live
 velocity owner is unambiguous. After that mission-level authorization, the
-script still requires the leg's own dry-run/preflight to pass before motion. A
+script still requires the leg's own dry-run/preflight to pass and the child
+runner's separate typed `RUN` before motion. A
 successful checkpoint writes
 `status=coverage_leg_checkpoint_complete`, the stopped LiDAR epoch, run events,
 preflight evidence, and the next viewpoint ID. If stand recovery occurred,
-also inspect `adaptive_replans.jsonl`, `coverage/replans/`, and the suffixed
+also inspect `controller_trace.jsonl`, `adaptive_replans.jsonl`,
+`coverage/replans/`, and the suffixed
 `execution/coverage_leg_<index>_replan_<index>/` certificate bundle. A stop
 reason such as route-tube departure, stale TF, or ambiguous velocity ownership
-is not classified as a stand and is never auto-replanned.
+is not classified as a stand and is never auto-replanned. In particular, a
+runtime route-tube departure is terminal for that authorization: there is no
+in-process recovery or retry. Any continuation requires a separately resealed
+route, another no-motion dry-run/preflight, and a new typed `RUN`.
 
 Immediately after ROS preflight, the runner also binds the fresh
 `map -> base_footprint` pose to the first certified route segment before it asks

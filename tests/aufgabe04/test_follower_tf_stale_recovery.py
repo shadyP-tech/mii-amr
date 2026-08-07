@@ -14,6 +14,11 @@ from scripts.aufgabe04.navigation.simple_waypoint_follower import (
     SimpleWaypointFollowerNode,
     tf_lookup_failure_details,
 )
+from scripts.aufgabe04.navigation.tf_stale_recovery_policy import (
+    OdomStationaritySample,
+    TfEdgeSample,
+    evaluate_stationarity,
+)
 
 
 def failed_lookup(
@@ -50,6 +55,8 @@ def odom_message(
     qy: float = 0.0,
     qz: float = 0.14943813247359922,
     qw: float = 0.9887710779360422,
+    linear_x_mps: float = 0.0,
+    angular_z_radps: float = 0.0,
 ):
     whole_sec = math.floor(stamp_sec)
     nanosec = round((stamp_sec - whole_sec) * 1_000_000_000)
@@ -68,6 +75,12 @@ def odom_message(
                     z=qz,
                     w=qw,
                 ),
+            )
+        ),
+        twist=SimpleNamespace(
+            twist=SimpleNamespace(
+                linear=SimpleNamespace(x=linear_x_mps),
+                angular=SimpleNamespace(z=angular_z_radps),
             )
         ),
     )
@@ -112,6 +125,83 @@ class FollowerTfStaleRecoveryTest(unittest.TestCase):
             }
         )
         node.route_update_callback = Mock()
+        return node
+
+    def real_amcl_node(self):
+        node = self.bare_node()
+        node.runtime_config = SimpleNamespace(
+            use_sim_time=False,
+            localization_source="amcl",
+            map_frame="map",
+            odom_frame="odom",
+            base_frame="base_footprint",
+            cmd_vel_topic="/cmd_vel",
+        )
+        node.follower_config = SimpleNamespace(
+            runtime_nomotion_update_service="request_nomotion_update",
+            runtime_nomotion_update_timeout_sec=2.0,
+            max_tf_age_sec=1.0,
+            max_future_timestamp_sec=0.25,
+            amcl_edge_future_tolerance_sec=1.1,
+            max_scan_age_sec=1.0,
+            max_odom_age_sec=1.0,
+            control_rate_hz=10.0,
+        )
+        node.runtime_nomotion_update_service = "/request_nomotion_update"
+        node.latest_scan = object()
+        node.latest_scan_receipt = 1.0
+        node.latest_odom = odom_message(stamp_sec=99.9)
+        node.latest_odom_receipt = 1.0
+        node.latest_odom_callback_count = 2
+        node.latest_stop_details = None
+        node._emit_route_update = Mock(return_value=True)
+        node._append_controller_trace = Mock(return_value="")
+        node._post_stale_tf_recovery_freshness_failure = Mock(
+            return_value=""
+        )
+        node._cmd_vel_ownership_failure = Mock(return_value="")
+        node._fallback_message_freshness_evidence = Mock(
+            side_effect=lambda name, _msg, _receipt, max_age: {
+                "sensor": name,
+                "fresh": True,
+                "failure": "",
+                "max_age_sec": max_age,
+            }
+        )
+        first = OdomStationaritySample(
+            1,
+            99.8,
+            1.0,
+            2.0,
+            0.1,
+            0.0,
+            0.0,
+        )
+        second = OdomStationaritySample(
+            2,
+            99.9,
+            1.0,
+            2.0,
+            0.1,
+            0.0,
+            0.0,
+        )
+        stationarity = evaluate_stationarity(
+            first,
+            second,
+            now_sec=100.0,
+        )
+        node._wait_for_stationary_odom_pair = Mock(
+            return_value=(
+                stationarity,
+                {
+                    "accepted": True,
+                    "decision": stationarity.to_log_dict(),
+                },
+            )
+        )
+        node._ros_now_sec = Mock(return_value=100.0)
+        node._service_or_wait_for_callbacks = Mock()
         return node
 
     def direct_fallback_result(
@@ -572,6 +662,264 @@ class FollowerTfStaleRecoveryTest(unittest.TestCase):
             "message_freshness",
         )
         self.assertTrue(result.details["fail_closed"])
+
+    def test_real_amcl_persistent_stale_routes_to_amcl_refresh_not_odom_fallback(self):
+        node = self.real_amcl_node()
+        first = failed_lookup("stale_transform", 1.2, 98.8)
+        retry = failed_lookup("stale_transform", 1.3, 98.8)
+        recovered = PoseLookupResult(Pose2D(1.0, 2.0, 0.1), stamp_sec=99.9)
+        node._current_pose_lookup = Mock(side_effect=(first, retry))
+        node._is_real_amcl_runtime = Mock(return_value=True)
+        node.publish_zero = Mock()
+        node._drain_runtime_callbacks = Mock(return_value={"elapsed_sec": 0.18})
+        node._tf_edge_sample = Mock(
+            side_effect=(
+                TfEdgeSample("map", "odom", 100.5),
+                TfEdgeSample("map", "odom", 100.5),
+                TfEdgeSample("odom", "base_footprint", 99.9),
+            )
+        )
+        node._real_amcl_stale_tf_recovery = Mock(return_value=recovered)
+        node._simulation_odom_fallback_after_stale_retry = Mock()
+
+        result = node._current_pose_lookup_with_stale_recovery()
+
+        self.assertIs(result, recovered)
+        node.publish_zero.assert_called_once_with()
+        node._real_amcl_stale_tf_recovery.assert_called_once()
+        node._simulation_odom_fallback_after_stale_retry.assert_not_called()
+
+    def test_real_amcl_refresh_calls_service_once_under_zero_and_requires_new_tf(self):
+        node = self.real_amcl_node()
+        events = []
+        future = SimpleNamespace(done=lambda: True, exception=lambda: None)
+        client = SimpleNamespace(
+            service_is_ready=lambda: True,
+            call_async=Mock(
+                side_effect=lambda _request: (
+                    events.append("service_request") or future
+                )
+            ),
+        )
+        node.runtime_nomotion_update_client = client
+        node.publish_zero = Mock(side_effect=lambda: events.append("zero"))
+        fresh_lookup = PoseLookupResult(
+            Pose2D(1.0, 2.0, 0.1),
+            stamp_sec=99.9,
+        )
+        node._current_pose_lookup = Mock(return_value=fresh_lookup)
+        node._tf_edge_sample = Mock(
+            side_effect=(
+                TfEdgeSample("map", "odom", 100.8),
+                TfEdgeSample("odom", "base_footprint", 99.95),
+                TfEdgeSample("map", "odom", 100.8),
+                TfEdgeSample("odom", "base_footprint", 99.95),
+            )
+        )
+
+        with patch(
+            "scripts.aufgabe04.navigation.simple_waypoint_follower.Empty",
+            SimpleNamespace(Request=lambda: object()),
+        ), patch(
+            "scripts.aufgabe04.navigation.simple_waypoint_follower.rclpy",
+            SimpleNamespace(ok=lambda: True),
+        ), patch(
+            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            return_value=0.0,
+        ):
+            result = node._real_amcl_stale_tf_recovery(
+                first_lookup=failed_lookup("stale_transform", 1.2, 98.8),
+                retry_lookup=failed_lookup("stale_transform", 1.3, 98.8),
+                callback_drain={"elapsed_sec": 0.18},
+                map_to_odom_before=TfEdgeSample("map", "odom", 100.5),
+                map_to_odom_retry=TfEdgeSample("map", "odom", 100.5),
+                odom_to_base_retry=TfEdgeSample(
+                    "odom",
+                    "base_footprint",
+                    99.9,
+                ),
+            )
+
+        self.assertEqual(result.pose, fresh_lookup.pose)
+        self.assertTrue(result.details["accepted"])
+        self.assertFalse(result.details["motion_authorized"])
+        self.assertTrue(result.details["requires_route_tube_readmission"])
+        self.assertTrue(result.details["zero_cycle_handoff_completed"])
+        self.assertEqual(client.call_async.call_count, 1)
+        self.assertLess(events.index("zero"), events.index("service_request"))
+        self.assertGreaterEqual(events.count("zero"), 3)
+        emitted_names = [
+            call.args[0].event_name
+            for call in node._emit_route_update.call_args_list
+        ]
+        self.assertEqual(
+            emitted_names,
+            [
+                "real_amcl_stale_tf_recovery_started",
+                "real_amcl_stale_tf_recovery_recovered",
+            ],
+        )
+
+    def test_real_amcl_refresh_service_unavailable_is_terminal(self):
+        node = self.real_amcl_node()
+        client = SimpleNamespace(
+            service_is_ready=lambda: False,
+            call_async=Mock(),
+        )
+        node.runtime_nomotion_update_client = client
+        node.publish_zero = Mock()
+
+        with patch(
+            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            return_value=0.0,
+        ):
+            result = node._real_amcl_stale_tf_recovery(
+                first_lookup=failed_lookup("stale_transform", 1.2, 98.8),
+                retry_lookup=failed_lookup("stale_transform", 1.3, 98.8),
+                callback_drain={"elapsed_sec": 0.18},
+                map_to_odom_before=TfEdgeSample("map", "odom", 100.5),
+                map_to_odom_retry=TfEdgeSample("map", "odom", 100.5),
+                odom_to_base_retry=TfEdgeSample(
+                    "odom",
+                    "base_footprint",
+                    99.9,
+                ),
+            )
+
+        self.assertIsNone(result.pose)
+        self.assertEqual(
+            result.details["reason"],
+            "nomotion_update_service_unavailable",
+        )
+        self.assertTrue(result.details["fail_closed"])
+        client.call_async.assert_not_called()
+
+    def test_stationarity_collector_spans_adjacent_twenty_hz_odom_samples(self):
+        node = self.real_amcl_node()
+        samples = (
+            OdomStationaritySample(1, 100.0, 1.0, 2.0, 0.1, 0.0, 0.0),
+            OdomStationaritySample(2, 100.05, 1.0, 2.0, 0.1, 0.0, 0.0),
+            OdomStationaritySample(3, 100.10, 1.0, 2.0, 0.1, 0.0, 0.0),
+        )
+        node._odom_stationarity_sample = Mock(side_effect=samples)
+        node._ros_now_sec = Mock(return_value=100.10)
+        node.publish_zero = Mock()
+
+        with patch(
+            "scripts.aufgabe04.navigation.simple_waypoint_follower.rclpy",
+            SimpleNamespace(ok=lambda: True),
+        ), patch(
+            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            return_value=0.0,
+        ):
+            decision, evidence = (
+                SimpleWaypointFollowerNode._wait_for_stationary_odom_pair(
+                    node,
+                    deadline_monotonic=1.0,
+                )
+            )
+
+        self.assertIsNotNone(decision)
+        self.assertTrue(decision.accepted)
+        self.assertAlmostEqual(decision.sample_separation_sec, 0.10)
+        self.assertEqual(len(evidence["attempts"]), 2)
+        self.assertEqual(node.publish_zero.call_count, 2)
+
+    def test_real_amcl_refresh_service_timeout_is_terminal_after_one_request(self):
+        node = self.real_amcl_node()
+        future = SimpleNamespace(done=lambda: False)
+        client = SimpleNamespace(
+            service_is_ready=lambda: True,
+            call_async=Mock(return_value=future),
+        )
+        node.runtime_nomotion_update_client = client
+        node.publish_zero = Mock()
+
+        with patch(
+            "scripts.aufgabe04.navigation.simple_waypoint_follower.Empty",
+            SimpleNamespace(Request=lambda: object()),
+        ), patch(
+            "scripts.aufgabe04.navigation.simple_waypoint_follower.rclpy",
+            SimpleNamespace(ok=lambda: True),
+        ), patch(
+            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            side_effect=(0.0, 0.0, 0.0, 2.1),
+        ):
+            result = node._real_amcl_stale_tf_recovery(
+                first_lookup=failed_lookup("stale_transform", 1.2, 98.8),
+                retry_lookup=failed_lookup("stale_transform", 1.3, 98.8),
+                callback_drain={"elapsed_sec": 0.18},
+                map_to_odom_before=TfEdgeSample("map", "odom", 100.5),
+                map_to_odom_retry=TfEdgeSample("map", "odom", 100.5),
+                odom_to_base_retry=TfEdgeSample(
+                    "odom",
+                    "base_footprint",
+                    99.9,
+                ),
+            )
+
+        self.assertIsNone(result.pose)
+        self.assertEqual(
+            result.details["reason"],
+            "nomotion_update_service_timeout",
+        )
+        self.assertEqual(client.call_async.call_count, 1)
+        self.assertGreaterEqual(node.publish_zero.call_count, 2)
+
+    def test_real_amcl_refresh_ownership_change_after_service_is_terminal(self):
+        node = self.real_amcl_node()
+        future = SimpleNamespace(done=lambda: True, exception=lambda: None)
+        client = SimpleNamespace(
+            service_is_ready=lambda: True,
+            call_async=Mock(return_value=future),
+        )
+        node.runtime_nomotion_update_client = client
+        node.publish_zero = Mock()
+        node._cmd_vel_ownership_failure = Mock(
+            side_effect=("", "competing cmd_vel publisher")
+        )
+        node._current_pose_lookup = Mock(
+            return_value=PoseLookupResult(
+                Pose2D(1.0, 2.0, 0.1),
+                stamp_sec=99.9,
+            )
+        )
+        node._tf_edge_sample = Mock(
+            side_effect=(
+                TfEdgeSample("map", "odom", 100.8),
+                TfEdgeSample("odom", "base_footprint", 99.95),
+            )
+        )
+
+        with patch(
+            "scripts.aufgabe04.navigation.simple_waypoint_follower.Empty",
+            SimpleNamespace(Request=lambda: object()),
+        ), patch(
+            "scripts.aufgabe04.navigation.simple_waypoint_follower.rclpy",
+            SimpleNamespace(ok=lambda: True),
+        ), patch(
+            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            return_value=0.0,
+        ):
+            result = node._real_amcl_stale_tf_recovery(
+                first_lookup=failed_lookup("stale_transform", 1.2, 98.8),
+                retry_lookup=failed_lookup("stale_transform", 1.3, 98.8),
+                callback_drain={"elapsed_sec": 0.18},
+                map_to_odom_before=TfEdgeSample("map", "odom", 100.5),
+                map_to_odom_retry=TfEdgeSample("map", "odom", 100.5),
+                odom_to_base_retry=TfEdgeSample(
+                    "odom",
+                    "base_footprint",
+                    99.9,
+                ),
+            )
+
+        self.assertIsNone(result.pose)
+        self.assertEqual(
+            result.details["reason"],
+            "cmd_vel_owner_not_exclusive",
+        )
+        self.assertEqual(client.call_async.call_count, 1)
 
     def test_future_and_lookup_exception_do_not_enter_recovery(self):
         for failure in (

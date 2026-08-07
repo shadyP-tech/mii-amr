@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import tempfile
 import time
@@ -809,6 +810,34 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
         )
         self.assertIn("motion_started", [event["event"] for event in events])
         self.assertEqual(rows[-1]["status"], "completed")
+
+    def test_bundled_real_run_passes_canonical_controller_trace_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            bundle = Path(tmp) / "bundle"
+            bundle.mkdir()
+            with patch.dict(
+                os.environ,
+                {"MII_AMR_RUN_BUNDLE_DIR": str(bundle)},
+            ), patch.object(
+                run_single_station_segment,
+                "run_ros_preflight",
+                return_value=passing_preflight(),
+            ), patch.object(
+                run_single_station_segment,
+                "run_simple_waypoint_follower",
+                return_value=FollowerResult("completed", "", 1.0, 0.2, True),
+            ) as follower, patch(
+                "builtins.input",
+                return_value="RUN",
+            ), redirect_stdout(StringIO()):
+                status = run_single_station_segment.main(self.base_args(paths))
+
+            self.assertEqual(status, 0)
+            self.assertEqual(
+                follower.call_args.kwargs["controller_trace_path"],
+                bundle / "controller_trace.jsonl",
+            )
 
     def test_route_diagnostics_failure_writes_result_row_and_one_terminal_event(self):
         with tempfile.TemporaryDirectory() as tmp:

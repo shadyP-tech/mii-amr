@@ -19,11 +19,15 @@ from scripts.aufgabe04.navigation.ros_runtime_config import (  # noqa: E402
     resolve_runtime_config,
 )
 from scripts.aufgabe04.navigation.run_single_station_segment import (  # noqa: E402
+    _covariance_bounded_continuity_limits,
     _execution_initial_distance_limit,
     _load_execution_route_leg,
     _simulation_odom_fallback_admission_failure,
     build_parser,
     main as run_segment_main,
+)
+from scripts.aufgabe04.navigation.route_uncertainty_budget import (  # noqa: E402
+    PlanarCovariance,
 )
 from scripts.aufgabe04.navigation.mission_execution_gate import (  # noqa: E402
     load_diagnostics_snapshot,
@@ -449,6 +453,180 @@ class SegmentRunnerCliGateTest(unittest.TestCase):
         args = build_parser().parse_args(["--leg-index", "0"])
 
         self.assertFalse(args.allow_simulation_odom_after_stale_tf)
+
+    def test_runtime_nomotion_refresh_has_separate_bounded_defaults(self):
+        args = build_parser().parse_args(["--leg-index", "0"])
+
+        self.assertEqual(args.nomotion_update_service, "/request_nomotion_update")
+        self.assertEqual(args.nomotion_update_timeout_sec, 15.0)
+        self.assertEqual(
+            args.runtime_nomotion_update_service,
+            "request_nomotion_update",
+        )
+        self.assertEqual(args.runtime_nomotion_update_timeout_sec, 2.0)
+        self.assertEqual(args.max_localization_tf_future_sec, 1.1)
+        self.assertEqual(args.max_stationary_amcl_position_std_m, 0.015)
+        self.assertEqual(args.max_stationary_amcl_yaw_std_rad, 0.03)
+        self.assertEqual(args.execution_pose_frame, "map")
+        self.assertEqual(args.uncertainty_sigma_multiplier, 1.0)
+        self.assertEqual(args.uncertainty_odom_drift_bound_m, 0.02)
+        self.assertEqual(args.max_map_odom_translation_drift_m, 0.15)
+
+        configured = build_parser().parse_args(
+            [
+                "--leg-index",
+                "0",
+                "--runtime-nomotion-update-service",
+                "amcl/request_nomotion_update",
+                "--runtime-nomotion-update-timeout-sec",
+                "1.25",
+                "--max-localization-tf-future-sec",
+                "0.75",
+            ]
+        )
+        self.assertEqual(
+            configured.runtime_nomotion_update_service,
+            "amcl/request_nomotion_update",
+        )
+        self.assertEqual(configured.runtime_nomotion_update_timeout_sec, 1.25)
+        self.assertEqual(configured.max_localization_tf_future_sec, 0.75)
+
+    def test_live_map_odom_limits_reuse_covariance_budget_with_hard_caps(self):
+        translation_m, yaw_rad = _covariance_bounded_continuity_limits(
+            PlanarCovariance(0.094**2, 0.0, 0.094**2),
+            heading_sigma_rad=0.03,
+            sigma_multiplier=1.0,
+            translation_hard_cap_m=0.15,
+            yaw_hard_cap_rad=0.10,
+        )
+        self.assertAlmostEqual(translation_m, 0.094)
+        self.assertAlmostEqual(yaw_rad, 0.03)
+
+        capped = _covariance_bounded_continuity_limits(
+            PlanarCovariance(0.094**2, 0.0, 0.094**2),
+            heading_sigma_rad=0.06,
+            sigma_multiplier=2.0,
+            translation_hard_cap_m=0.15,
+            yaw_hard_cap_rad=0.10,
+        )
+        self.assertEqual(capped, (0.15, 0.10))
+
+    def test_runtime_nomotion_refresh_timeout_must_be_in_bounded_interval(self):
+        for value in ("0", "2.01", "nan", "inf"):
+            with self.subTest(value=value), redirect_stderr(StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    run_segment_main(
+                        [
+                            "--leg-index",
+                            "0",
+                            "--runtime-nomotion-update-timeout-sec",
+                            value,
+                        ]
+                    )
+
+            self.assertEqual(raised.exception.code, 2)
+
+    def test_amcl_position_admission_bounds_cannot_exceed_half_route_tube(self):
+        for flag in (
+            "--max-stationary-amcl-position-spread-m",
+            "--max-stationary-amcl-position-std-m",
+        ):
+            with self.subTest(flag=flag), redirect_stderr(StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    run_segment_main(
+                        [
+                            "--leg-index",
+                            "0",
+                            flag,
+                            "0.0151",
+                            "--certified-route-tube-radius-m",
+                            "0.03",
+                        ]
+                    )
+
+            self.assertEqual(raised.exception.code, 2)
+
+    def test_odom_execution_requires_complete_uncertainty_artifacts(self):
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            run_segment_main(
+                [
+                    "--leg-index",
+                    "0",
+                    "--execution-pose-frame",
+                    "odom",
+                    "--dry-run",
+                ]
+            )
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("odom execution requires", stderr.getvalue())
+        self.assertIn(
+            "--localization-branch-proof-id", stderr.getvalue()
+        )
+
+    def test_odom_execution_disallows_simulation_stale_tf_fallback(self):
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            run_segment_main(
+                [
+                    "--leg-index",
+                    "0",
+                    "--execution-pose-frame",
+                    "odom",
+                    "--odom-execution-certificate-json",
+                    "odom_certificate.json",
+                    "--uncertainty-budget-json",
+                    "uncertainty.json",
+                    "--uncertainty-map-yaml",
+                    "map.yaml",
+                    "--localization-branch-proof-id",
+                    "known_start_marker_20260807",
+                    "--uncertainty-robot-radius-m",
+                    "0.105",
+                    "--allow-simulation-odom-after-stale-tf",
+                    "--dry-run",
+                ]
+            )
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn(
+            "may not enable the simulation stale-TF fallback",
+            stderr.getvalue(),
+        )
+
+    def test_odom_execution_delegates_large_covariance_to_route_budget(self):
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            run_segment_main(
+                [
+                    "--route-csv",
+                    "missing_route.csv",
+                    "--diagnostics-json",
+                    "missing_diagnostics.json",
+                    "--leg-index",
+                    "0",
+                    "--execution-pose-frame",
+                    "odom",
+                    "--odom-execution-certificate-json",
+                    "odom_certificate.json",
+                    "--uncertainty-budget-json",
+                    "uncertainty.json",
+                    "--uncertainty-map-yaml",
+                    "map.yaml",
+                    "--localization-branch-proof-id",
+                    "known_start_marker_20260807",
+                    "--uncertainty-robot-radius-m",
+                    "0.105",
+                    "--max-stationary-amcl-position-std-m",
+                    "0.30",
+                    "--dry-run",
+                ]
+            )
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertNotIn("half the certified route tube", stderr.getvalue())
+        self.assertIn("route validation failed", stderr.getvalue())
 
     def test_missing_route_kind_is_rejected_before_ros_preflight(self):
         with tempfile.TemporaryDirectory() as tmpdir:

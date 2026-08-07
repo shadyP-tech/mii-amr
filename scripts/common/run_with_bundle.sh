@@ -346,7 +346,7 @@ collect_ros_pre
 
 log_setup "running wrapped command"
 set +e
-"${COMMAND_ARGS[@]}" 2>&1 | tee "$TERMINAL_LOG"
+MII_AMR_RUN_BUNDLE_DIR="$BUNDLE_DIR" "${COMMAND_ARGS[@]}" 2>&1 | tee "$TERMINAL_LOG"
 COMMAND_STATUS=${PIPESTATUS[0]}
 set -e
 

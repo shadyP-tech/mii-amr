@@ -22,7 +22,12 @@ from scripts.aufgabe04.navigation.simple_waypoint_follower import (
     viewpoint_sampling_timeout_failure,
     viewpoint_sampling_target_timeout_failure,
 )
+from scripts.aufgabe04.navigation.transient_blockage_policy import (
+    CLEARANCE_LIMITED_MOTION_FLOOR,
+    classify_linear_command,
+)
 from scripts.aufgabe04.navigation.waypoint_controller import (
+    CertifiedCornerTransitionLatch,
     ControllerConfig,
     compute_join_anchor_command,
     compute_start_egress_vertex_command,
@@ -72,6 +77,70 @@ def bare_follower(update: RouteUpdate, callback):
 
 
 class DynamicFollowerHandoffTest(unittest.TestCase):
+    def test_certified_corner_stop_zeroes_before_diagnostics_and_traces_pose(self):
+        events = []
+        records = []
+        pose = Pose2D(0.09, 0.0, 0.0)
+        odom_pose = Pose2D(0.05, 0.0, 0.0)
+        node = bare_follower(RouteUpdate(kind=RouteUpdateKind.UNCHANGED), None)
+        node.waypoints = (
+            Pose2D(0.0, 0.0, math.nan),
+            Pose2D(0.05, 0.0, math.nan),
+            Pose2D(0.05, 0.05, math.nan),
+        )
+        node.current_route_kind = "stand_discovery_corridor"
+        node.target_index = 1
+        node.certified_corner_latch = CertifiedCornerTransitionLatch(1)
+        node.certified_static_start_pending = False
+        node.distance_estimate_m = 0.0
+        node.motion_published = True
+        node.last_pose = pose
+        node._wait_for_initial_runtime_inputs = lambda _started_at: ""
+        node._drain_runtime_callbacks = lambda: None
+        node._safety_failure = lambda: ""
+        node._current_pose_lookup_with_stale_recovery = lambda: SimpleNamespace(
+            pose=pose
+        )
+        node._refresh_dynamic_route = lambda _pose: ""
+        node._latest_odom_pose = lambda: odom_pose
+        node.publish_zero = lambda: events.append("zero")
+        node.publish_repeated_zero = lambda: events.append("repeated_zero")
+        node._log_certified_corner_phase = lambda _step: events.append("log")
+        route_check = node._execution_route_check
+
+        def checked_route(live_pose, step):
+            events.append("route_check")
+            return route_check(live_pose, step)
+
+        class CaptureWriter:
+            def append(self, record):
+                events.append("trace")
+                records.append(record)
+
+        node._execution_route_check = checked_route
+        node.controller_trace_writer = CaptureWriter()
+
+        with patch(
+            "scripts.aufgabe04.navigation.simple_waypoint_follower.rclpy",
+            SimpleNamespace(ok=lambda: True),
+        ):
+            result = node.run()
+
+        self.assertEqual(result.status, "stopped")
+        self.assertEqual(
+            result.stop_reason,
+            "certified corner hard tolerance exceeded",
+        )
+        zero_index = events.index("zero")
+        self.assertLess(zero_index, events.index("log"))
+        self.assertLess(zero_index, events.index("route_check"))
+        self.assertLess(zero_index, events.index("trace"))
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].event, "certified_corner_stop")
+        self.assertEqual(records[0].map_pose, pose)
+        self.assertEqual(records[0].odom_pose, odom_pose)
+        self.assertTrue(records[0].fail_closed)
+
     def test_discovery_replan_adopts_reverse_egress_without_phase_restart(self):
         update = RouteUpdate(
             kind=RouteUpdateKind.ADOPT,
@@ -195,7 +264,12 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         node = bare_follower(update, None)
         node.current_route_kind = "stand_discovery_corridor"
         node.publish_zero = lambda: None
-        self.assertEqual(node._refresh_dynamic_route(waypoints[0]), "adopted")
+        self.assertEqual(
+            node._refresh_dynamic_route(
+                Pose2D(waypoints[0].x_m, waypoints[0].y_m, math.pi)
+            ),
+            "adopted",
+        )
         node.dynamic_join_pending = False
 
         with patch(
@@ -587,6 +661,36 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         node.latest_scan.ranges = (0.19, 0.80, 0.50, 0.80, 0.19)
         self.assertEqual(node._motion_clearance_linear_scale(-0.05), 0.0)
 
+    def test_recorded_single_ray_low_speed_is_zero_hold_not_creep(self):
+        node = object.__new__(SimpleWaypointFollowerNode)
+        node.follower_config = FollowerConfig(controller=ControllerConfig())
+        node.latest_front_clearance_details = None
+        node.latest_scan = SimpleNamespace(
+            ranges=(0.23400000417232513,),
+            angle_min=0.0,
+            angle_increment=0.01,
+            range_min=0.12,
+            range_max=3.5,
+        )
+        nominal_linear_mps = 0.04303463189017459
+
+        scale = node._motion_clearance_linear_scale(nominal_linear_mps)
+        effective_linear_mps = nominal_linear_mps * scale
+        decision = classify_linear_command(
+            nominal_linear_mps,
+            effective_linear_mps,
+            linear_motion_floor_mps=node.follower_config.linear_motion_floor_mps,
+        )
+
+        self.assertAlmostEqual(effective_linear_mps, 0.00812876317446179)
+        self.assertEqual(
+            node.latest_front_clearance_details["valid_sample_count"],
+            1,
+        )
+        self.assertEqual(decision.reasons, (CLEARANCE_LIMITED_MOTION_FLOOR,))
+        self.assertTrue(decision.stationary_confirmation_required)
+        self.assertEqual(decision.output_linear_x_mps, 0.0)
+
     def test_heading_corridor_only_applies_to_physical_face_routes(self):
         configured = ControllerConfig(enforce_heading_corridor=True)
 
@@ -611,6 +715,16 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         self.assertEqual(sampling.goal_tolerance_m, 0.01)
         self.assertAlmostEqual(sampling.heading_tolerance_rad, math.radians(5.0))
         self.assertFalse(sampling.reverse_staging)
+        discovery = controller_config_for_route_kind(
+            configured,
+            "stand_discovery_corridor",
+            physical_waypoint_tolerance_m=0.02,
+            physical_goal_tolerance_m=0.03,
+        )
+        self.assertFalse(discovery.enforce_heading_corridor)
+        self.assertTrue(discovery.exact_vertex_pursuit)
+        self.assertEqual(discovery.goal_tolerance_m, 0.02)
+        self.assertEqual(discovery.terminal_goal_tolerance_m, 0.03)
         acquisition = controller_config_for_route_kind(
             configured,
             "axis_acquisition",
@@ -658,6 +772,101 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         self.assertTrue(catalog.enforce_heading_corridor)
         self.assertEqual(catalog.goal_tolerance_m, 0.02)
         self.assertEqual(catalog.terminal_goal_tolerance_m, 0.03)
+
+    def test_discovery_inspection_yaw_is_terminal_only_after_replan(self):
+        configured = controller_config_for_route_kind(
+            ControllerConfig(
+                goal_tolerance_m=0.02,
+                terminal_goal_tolerance_m=0.03,
+                heading_tolerance_rad=0.25,
+                stop_heading_error_rad=1.25,
+                enforce_heading_corridor=True,
+                exact_vertex_pursuit=True,
+            ),
+            "stand_discovery_corridor",
+            physical_waypoint_tolerance_m=0.02,
+            physical_goal_tolerance_m=0.03,
+        )
+        waypoints = (
+            Pose2D(-1.195, -0.065, math.nan),
+            Pose2D(-1.595, -0.015, 0.0),
+        )
+        path_heading = math.atan2(
+            waypoints[1].y_m - waypoints[0].y_m,
+            waypoints[1].x_m - waypoints[0].x_m,
+        )
+
+        align_to_path = compute_waypoint_command(
+            Pose2D(-1.205, -0.062, 0.24),
+            waypoints,
+            1,
+            configured,
+        )
+        moderate_path_error = compute_waypoint_command(
+            Pose2D(
+                waypoints[0].x_m,
+                waypoints[0].y_m,
+                path_heading - 0.50,
+            ),
+            waypoints,
+            1,
+            configured,
+        )
+        inside_path_alignment_tolerance = compute_waypoint_command(
+            Pose2D(
+                waypoints[0].x_m,
+                waypoints[0].y_m,
+                path_heading - 0.24,
+            ),
+            waypoints,
+            1,
+            configured,
+        )
+        translate = compute_waypoint_command(
+            Pose2D(waypoints[0].x_m, waypoints[0].y_m, path_heading),
+            waypoints,
+            1,
+            configured,
+        )
+        terminal_turn = compute_waypoint_command(
+            Pose2D(waypoints[1].x_m, waypoints[1].y_m, path_heading),
+            waypoints,
+            1,
+            configured,
+        )
+        completed = compute_waypoint_command(
+            Pose2D(waypoints[1].x_m, waypoints[1].y_m, 0.0),
+            waypoints,
+            1,
+            configured,
+        )
+
+        self.assertEqual(
+            align_to_path.progress_mode,
+            "exact_vertex_alignment",
+        )
+        self.assertEqual(align_to_path.command.linear_x_mps, 0.0)
+        self.assertGreater(align_to_path.command.angular_z_radps, 0.0)
+        self.assertEqual(
+            moderate_path_error.progress_mode,
+            "exact_vertex_alignment",
+        )
+        self.assertEqual(moderate_path_error.command.linear_x_mps, 0.0)
+        self.assertGreater(moderate_path_error.command.angular_z_radps, 0.0)
+        self.assertEqual(
+            inside_path_alignment_tolerance.progress_mode,
+            "path_tracking",
+        )
+        self.assertGreater(
+            inside_path_alignment_tolerance.command.linear_x_mps,
+            0.0,
+        )
+        self.assertEqual(translate.progress_mode, "path_tracking")
+        self.assertGreater(translate.command.linear_x_mps, 0.0)
+        self.assertEqual(terminal_turn.progress_mode, "terminal_heading")
+        self.assertEqual(terminal_turn.command.linear_x_mps, 0.0)
+        self.assertFalse(terminal_turn.reached_goal)
+        self.assertTrue(completed.reached_goal)
 
     def test_exact_vertex_alignment_has_its_own_progress_baseline(self):
         node = bare_follower(RouteUpdate(kind=RouteUpdateKind.UNCHANGED), None)
@@ -811,6 +1020,33 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
             self.assertEqual(node._refresh_dynamic_route(Pose2D(0.03, 0.0)), "")
 
         self.assertEqual(calls, [Pose2D(0.02, 0.0)])
+
+    def test_fresh_admission_pose_outside_replacement_join_is_rejected(self):
+        update = RouteUpdate(
+            kind=RouteUpdateKind.ADOPT,
+            waypoints=(Pose2D(0.0, 0.0), Pose2D(0.2, 0.0)),
+            target_index=0,
+            event_fields={
+                "effective_join_limit_m": 0.03,
+                "route_kind": "axis_acquisition",
+            },
+        )
+        node = bare_follower(update, None)
+        node.publish_zero = lambda: None
+        original_waypoints = node.waypoints
+
+        result = node._refresh_dynamic_route(Pose2D(0.03154134331426062, 0.0))
+
+        self.assertEqual(result, "stopped")
+        self.assertEqual(node.waypoints, original_waypoints)
+        self.assertEqual(
+            node.latest_stop_details["fault_code"],
+            "join_envelope_exceeded",
+        )
+        self.assertEqual(
+            node.latest_stop_details["source"],
+            "dynamic_route_admission",
+        )
 
     def test_survey_completion_stops_with_success(self):
         update = RouteUpdate(

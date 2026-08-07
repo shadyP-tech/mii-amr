@@ -95,7 +95,11 @@ At runtime the follower checks the live base pose and commanded pursuit chord
 against the active certified segment. Leaving the configured route tube, or
 attempting an uncertified lookahead shortcut, produces a fail-closed stop. This
 does not compensate for an incorrect map, localization estimate, footprint, or
-tube radius.
+tube radius. Route-tube departure is terminal for the current physical
+authorization and never enters transient-obstacle recovery. Continuing requires
+a separately resealed route, a new no-motion dry-run/preflight, and a new typed
+`RUN`; the stopped process does not auto-relaunch or reuse the previous motion
+authorization.
 
 The same tube is included during planning around the active target stand and
 around every frozen non-target stand. A catalog arrival is rejected when its

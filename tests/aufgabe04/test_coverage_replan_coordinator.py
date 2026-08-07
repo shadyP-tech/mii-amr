@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import redirect_stdout
 from io import StringIO
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -11,7 +12,7 @@ from unittest.mock import patch
 from scripts.aufgabe04.navigation.coverage_replan_coordinator import (
     CoverageReplanCoordinator,
     _front_evidence,
-    _reverse_egress_transition_indices,
+    _load_escape_metadata,
 )
 from scripts.aufgabe04.navigation.dynamic_route_handoff import RouteUpdateKind
 from scripts.aufgabe04.navigation.models import Pose2D
@@ -25,12 +26,18 @@ from scripts.aufgabe04.navigation.stand_discovery_route import (
 
 class CoverageReplanCoordinatorTest(unittest.TestCase):
     @staticmethod
-    def _front_details(range_m: float = 0.23):
+    def _front_details(range_m: float = 0.23, bearing_rad: float = 0.1):
         return {
+            "stationary_obstacle_confirmation": {
+                "confirmed": True,
+                "fail_closed": False,
+                "distinct_sample_count": 3,
+                "thresholds": {"min_distinct_samples": 3},
+            },
             "front_clearance": {
                 "source": "front_sector",
                 "nearest_valid_range_m": range_m,
-                "nearest_valid_bearing_rad": 0.1,
+                "nearest_valid_bearing_rad": bearing_rad,
             }
         }
 
@@ -41,6 +48,17 @@ class CoverageReplanCoordinatorTest(unittest.TestCase):
         self.assertIsNotNone(
             _front_evidence("obstacle too close", self._front_details(0.19))
         )
+        self.assertIsNotNone(
+            _front_evidence(
+                "clearance-limited motion floor",
+                self._front_details(0.234),
+            )
+        )
+        without_confirmation = self._front_details()
+        without_confirmation.pop("stationary_obstacle_confirmation")
+        self.assertIsNone(
+            _front_evidence("obstacle too close", without_confirmation)
+        )
         self.assertIsNone(
             _front_evidence(
                 "obstacle too close",
@@ -50,6 +68,77 @@ class CoverageReplanCoordinatorTest(unittest.TestCase):
                 },
             )
         )
+        self.assertIsNone(
+            _front_evidence(
+                "pose left certified route tube",
+                self._front_details(0.234),
+            )
+        )
+        only_two_scans = self._front_details(0.234)
+        only_two_scans["stationary_obstacle_confirmation"].update(
+            {
+                "distinct_sample_count": 2,
+                "thresholds": {"min_distinct_samples": 2},
+            }
+        )
+        self.assertIsNone(
+            _front_evidence(
+                "clearance-limited motion floor",
+                only_two_scans,
+            )
+        )
+
+    def test_forward_escape_metadata_accepts_its_outgoing_waypoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            diagnostics = Path(tmp) / "diagnostics.json"
+            waypoints = (
+                Pose2D(0.0, 0.0, 0.0),
+                Pose2D(0.1, 0.0, 0.0),
+                Pose2D(0.2, 0.0, 0.0),
+            )
+            diagnostics.write_text(
+                json.dumps(
+                    {
+                        "metadata": {
+                            "egress_mode": "forward",
+                            "egress_anchor": {"x_m": 0.1, "y_m": 0.0},
+                            "egress_transition_anchor": {
+                                "x_m": 0.1,
+                                "y_m": 0.0,
+                            },
+                            "egress_transition_waypoint_index": 1,
+                            "egress_forward_waypoint_index": 2,
+                            "forward_translation_heading_limit_rad": 1.25,
+                            "reverse_connector_alignment_tolerance_rad": 0.10,
+                            "tracking_tube_radius_m": 0.03,
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            metadata = _load_escape_metadata(
+                diagnostics,
+                waypoints,
+                tracking_tube_radius_m=0.03,
+                forward_translation_heading_limit_rad=1.25,
+                reverse_connector_alignment_tolerance_rad=0.10,
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "reverse-alignment tolerance differs",
+            ):
+                _load_escape_metadata(
+                    diagnostics,
+                    waypoints,
+                    tracking_tube_radius_m=0.03,
+                    forward_translation_heading_limit_rad=1.25,
+                    reverse_connector_alignment_tolerance_rad=0.08,
+                )
+
+        self.assertEqual(metadata["egress_mode"], "forward")
+        self.assertEqual(metadata["egress_forward_waypoint_index"], 2)
 
     def test_replans_twice_in_process_and_preserves_overlay(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -103,13 +192,40 @@ class CoverageReplanCoordinatorTest(unittest.TestCase):
             def transient_artifacts(**kwargs):
                 index = coordinator.replan_count
                 overlay = root / f"overlay_{index}.json"
+                diagnostics = root / f"source_diag_{index}.json"
+                route = route_1 if index == 1 else route_2
                 overlay.write_text(
                     '{"candidates":[{"x_m":-1.10,"y_m":-0.46,'
                     '"keepout_radius_m":0.30}]}\n'
                 )
+                diagnostics.write_text(
+                    json.dumps(
+                        {
+                            "metadata": {
+                                "egress_mode": "straight_reverse",
+                                "egress_anchor": {
+                                    "x_m": route[1].x_m,
+                                    "y_m": route[1].y_m,
+                                },
+                                "egress_transition_anchor": {
+                                    "x_m": route[2].x_m,
+                                    "y_m": route[2].y_m,
+                                },
+                                "egress_transition_waypoint_index": 2,
+                                "egress_forward_waypoint_index": 3,
+                                "forward_translation_heading_limit_rad": 1.25,
+                                "reverse_connector_alignment_tolerance_rad": 0.10,
+                                "reverse_connector_heading_error_rad": 0.0,
+                                "minimum_transition_keepout_tube_clearance_m": 0.01,
+                                "tracking_tube_radius_m": 0.03,
+                            }
+                        }
+                    )
+                    + "\n"
+                )
                 return {
                     "route_csv": str(root / f"source_route_{index}.csv"),
-                    "diagnostics_json": str(root / f"source_diag_{index}.json"),
+                    "diagnostics_json": str(diagnostics),
                     "summary_json": str(root / f"summary_{index}.json"),
                     "transient_obstacle_overlay_json": str(overlay),
                 }
@@ -173,6 +289,10 @@ class CoverageReplanCoordinatorTest(unittest.TestCase):
             self.assertEqual(second.kind, RouteUpdateKind.ADOPT)
             self.assertEqual(exhausted.kind, RouteUpdateKind.STOP)
             self.assertEqual(record.call_count, 2)
+            self.assertEqual(
+                record.call_args_list[0].kwargs["tracking_tube_radius_m"],
+                0.03,
+            )
             self.assertIn(
                 "leg_002_replan_001",
                 str(record.call_args_list[0].kwargs["output_dir"]),
@@ -241,13 +361,10 @@ class CoverageReplanCoordinatorTest(unittest.TestCase):
                     -3.1376510363781347,
                 ),
                 "stuck no progress",
-                {
-                    "front_clearance": {
-                        "source": "front_sector",
-                        "nearest_valid_range_m": 0.23000000417232513,
-                        "nearest_valid_bearing_rad": 0.20737460535019636,
-                    }
-                },
+                self._front_details(
+                    0.23000000417232513,
+                    0.20737460535019636,
+                ),
             )
 
             self.assertEqual(update.kind, RouteUpdateKind.ADOPT)
@@ -272,61 +389,6 @@ class CoverageReplanCoordinatorTest(unittest.TestCase):
                     ]
                 ).is_file()
             )
-
-    def test_recorded_physical_route_uses_second_vertex_as_transition_anchor(self):
-        waypoints = (
-            Pose2D(-0.8215194236642129, -0.515331012111416),
-            Pose2D(-0.7449999999999997, -0.565),
-            Pose2D(-0.6949999999999998, -0.565),
-            Pose2D(-0.6949999999999998, -0.5149999999999999),
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            overlay = Path(tmp) / "transient_obstacle_overlay.json"
-            overlay.write_text(
-                """{
-  "candidates": [
-    {
-      "x_m": -1.1305176773539973,
-      "y_m": -0.5163692626837199,
-      "keepout_radius_m": 0.33999999999999997
-    }
-  ]
-}\n"""
-            )
-
-            self.assertEqual(
-                _reverse_egress_transition_indices(
-                    waypoints,
-                    overlay,
-                    0.03,
-                ),
-                (2, 3),
-            )
-
-    def test_reverse_transition_fails_closed_without_tube_clearance(self):
-        waypoints = (
-            Pose2D(0.0, 0.0),
-            Pose2D(0.10, 0.0),
-            Pose2D(0.15, 0.0),
-            Pose2D(0.20, 0.0),
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            overlay = Path(tmp) / "transient_obstacle_overlay.json"
-            overlay.write_text(
-                '{"candidates":[{"x_m":0.15,"y_m":0.02,'
-                '"keepout_radius_m":0.10}]}\n'
-            )
-
-            with self.assertRaisesRegex(
-                ValueError,
-                "no clearance-certified reverse-to-forward transition anchor",
-            ):
-                _reverse_egress_transition_indices(
-                    waypoints,
-                    overlay,
-                    0.03,
-                )
-
 
 if __name__ == "__main__":
     unittest.main()

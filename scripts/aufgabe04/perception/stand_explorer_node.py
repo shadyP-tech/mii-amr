@@ -16,6 +16,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.aufgabe04.navigation.map_io import freeze_map_bundle
+from scripts.aufgabe04.navigation.odom_execution_certificate import (
+    OdomExecutionCertificate,
+    PlanarTransform2D,
+    load_odom_execution_certificate,
+    odom_execution_certificate_sha256,
+)
 from scripts.aufgabe04.navigation.ros_runtime_config import RuntimeConfig, resolve_runtime_config
 from scripts.aufgabe04.perception.lidar_stand_detector import detect_stand_candidates_from_scan
 from scripts.aufgabe04.perception.models import LidarStandDetectorConfig
@@ -64,6 +70,10 @@ except ImportError:  # pragma: no cover - keeps offline tests ROS-free.
 
 
 OBSERVER_VERSION = "aufgabe04-stand-explorer-observe-only-v5-scan-time-tf"
+FROZEN_ODOM_OBSERVER_VERSION = (
+    "aufgabe04-stand-explorer-observe-only-v6-frozen-odom-scan-time-tf"
+)
+FROZEN_FRAME_EVIDENCE_KEY = "frozen_odom_observation_geometry"
 DEFAULT_OUTPUT_JSONL = Path("results/aufgabe04/detected_stations/stand_observations.jsonl")
 
 
@@ -74,6 +84,191 @@ class _PendingScan:
     scan_stamp_sec: float
     query_time: object
     deadline_monotonic_sec: float
+
+
+@dataclass(frozen=True)
+class FrozenObserverFrame:
+    """Immutable evidence used to map odom-frame scan poses into ``map``.
+
+    The certificate's convention is ``p_map = R * p_odom + translation``.
+    Keeping this value outside the ROS node makes the observation geometry
+    independently testable and prevents live ``map`` corrections from steering
+    the stand-observation coordinates during an odom-certified leg.
+    """
+
+    certificate_path: Path
+    certificate: OdomExecutionCertificate
+    certificate_sha256: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.certificate, OdomExecutionCertificate):
+            raise ValueError("certificate must be an OdomExecutionCertificate")
+        expected_sha256 = odom_execution_certificate_sha256(self.certificate)
+        if self.certificate_sha256 != expected_sha256:
+            raise ValueError("odom execution certificate hash mismatch")
+        object.__setattr__(self, "certificate_path", Path(self.certificate_path))
+
+    def runtime_evidence(self) -> dict[str, object]:
+        certificate = self.certificate
+        return {
+            "schema_version": 1,
+            "mode": "frozen_map_from_odom",
+            "odom_execution_certificate_path": str(self.certificate_path),
+            "odom_execution_certificate_sha256": self.certificate_sha256,
+            "source_frames": {
+                "map_frame": certificate.map_frame,
+                "odom_frame": certificate.odom_frame,
+                "base_frame": certificate.base_frame,
+            },
+            "scan_tf_target_frame": certificate.odom_frame,
+            "map_from_odom": {
+                "x_m": certificate.map_from_odom.x_m,
+                "y_m": certificate.map_from_odom.y_m,
+                "yaw_rad": certificate.map_from_odom.yaw_rad,
+            },
+            "transform_stamp_sec": certificate.transform_stamp_sec,
+            "transform_capture_time_sec": (
+                certificate.transform_capture_time_sec
+            ),
+            "source_map_route_sha256": certificate.source_map_route_sha256,
+            "transformed_odom_route_sha256": (
+                certificate.transformed_odom_route_sha256
+            ),
+        }
+
+
+def load_frozen_observer_frame(
+    certificate_path: Path,
+    *,
+    map_frame: str,
+    odom_frame: str,
+    base_frame: str,
+) -> FrozenObserverFrame:
+    """Load one certificate and reject any configured-frame mismatch."""
+
+    path = Path(certificate_path)
+    try:
+        certificate = load_odom_execution_certificate(path)
+    except (OSError, ValueError) as exc:
+        raise ValueError(
+            f"invalid odom execution certificate {path}: {exc}"
+        ) from exc
+    expected_frames = {
+        "map_frame": map_frame,
+        "odom_frame": odom_frame,
+        "base_frame": base_frame,
+    }
+    for field, expected in expected_frames.items():
+        certified = getattr(certificate, field)
+        if certified != expected:
+            raise ValueError(
+                f"odom execution certificate {field} mismatch: "
+                f"certified={certified!r}, configured={expected!r}"
+            )
+    return FrozenObserverFrame(
+        certificate_path=path.resolve(),
+        certificate=certificate,
+        certificate_sha256=odom_execution_certificate_sha256(certificate),
+    )
+
+
+def compose_frozen_scan_pose_in_map(
+    *,
+    odom_from_scan: PlanarTransform,
+    map_from_odom: PlanarTransform2D,
+) -> PlanarTransform:
+    """Compose ``map<-odom`` with ``odom<-scan`` using planar SE(2)."""
+
+    # Reconstruct both inputs through the certificate value type so forged,
+    # non-finite, or non-normalized inputs cannot enter persisted geometry.
+    odom_from_scan_value = PlanarTransform2D(
+        odom_from_scan.x_m,
+        odom_from_scan.y_m,
+        odom_from_scan.yaw_rad,
+    )
+    map_from_odom_value = PlanarTransform2D(
+        map_from_odom.x_m,
+        map_from_odom.y_m,
+        map_from_odom.yaw_rad,
+    )
+    cosine = math.cos(map_from_odom_value.yaw_rad)
+    sine = math.sin(map_from_odom_value.yaw_rad)
+    map_from_scan = PlanarTransform2D(
+        x_m=(
+            map_from_odom_value.x_m
+            + cosine * odom_from_scan_value.x_m
+            - sine * odom_from_scan_value.y_m
+        ),
+        y_m=(
+            map_from_odom_value.y_m
+            + sine * odom_from_scan_value.x_m
+            + cosine * odom_from_scan_value.y_m
+        ),
+        yaw_rad=(
+            map_from_odom_value.yaw_rad + odom_from_scan_value.yaw_rad
+        ),
+    )
+    return PlanarTransform(
+        x_m=map_from_scan.x_m,
+        y_m=map_from_scan.y_m,
+        yaw_rad=map_from_scan.yaw_rad,
+    )
+
+
+def _observation_tf_target_frame(
+    runtime: RuntimeConfig,
+    frozen_frame: FrozenObserverFrame | None,
+) -> str:
+    return runtime.map_frame if frozen_frame is None else runtime.odom_frame
+
+
+def _observer_version(frozen_frame: FrozenObserverFrame | None) -> str:
+    return OBSERVER_VERSION if frozen_frame is None else FROZEN_ODOM_OBSERVER_VERSION
+
+
+def _validated_frozen_tf_frames(
+    transform,
+    *,
+    expected_parent_frame: str,
+    expected_child_frame: str,
+) -> None:
+    """Fail closed if tf2 returns a transform with unexpected frame labels."""
+
+    parent_frame = getattr(getattr(transform, "header", None), "frame_id", None)
+    child_frame = getattr(transform, "child_frame_id", None)
+    if parent_frame != expected_parent_frame:
+        raise ValueError(
+            "exact-time TF parent frame mismatch: "
+            f"expected={expected_parent_frame!r}, observed={parent_frame!r}"
+        )
+    if child_frame != expected_child_frame:
+        raise ValueError(
+            "exact-time TF child frame mismatch: "
+            f"expected={expected_child_frame!r}, observed={child_frame!r}"
+        )
+
+
+def _validated_planar_pose_from_tf(transform) -> PlanarTransform:
+    """Extract a finite planar pose from a normalized TF quaternion."""
+
+    try:
+        translation = transform.transform.translation
+        rotation = transform.transform.rotation
+        x_m = float(translation.x)
+        y_m = float(translation.y)
+        quaternion = tuple(
+            float(value)
+            for value in (rotation.x, rotation.y, rotation.z, rotation.w)
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("exact-time TF payload is malformed") from exc
+    if not all(math.isfinite(value) for value in (x_m, y_m, *quaternion)):
+        raise ValueError("exact-time TF payload is non-finite")
+    quaternion_norm_squared = sum(value * value for value in quaternion)
+    if abs(quaternion_norm_squared - 1.0) > 1e-3:
+        raise ValueError("exact-time TF quaternion is not normalized")
+    value = PlanarTransform2D(x_m, y_m, _yaw_from_quaternion(rotation))
+    return PlanarTransform(value.x_m, value.y_m, value.yaw_rad)
 
 
 def _require_ros() -> None:
@@ -117,6 +312,7 @@ def _validate_append_stream(
     *,
     required_observer_clock: str,
     timing_limits: ObservationTimingLimits,
+    frozen_frame: FrozenObserverFrame | None = None,
 ) -> None:
     """Fail before appending to a legacy or different-clock JSONL artifact."""
 
@@ -134,6 +330,16 @@ def _validate_append_stream(
         if existing_limits != timing_limits:
             raise ValueError(
                 "observation artifact uses incompatible producer timing limits"
+            )
+        existing_frozen_evidence = observation.provenance.runtime_config.get(
+            FROZEN_FRAME_EVIDENCE_KEY
+        )
+        expected_frozen_evidence = (
+            None if frozen_frame is None else frozen_frame.runtime_evidence()
+        )
+        if existing_frozen_evidence != expected_frozen_evidence:
+            raise ValueError(
+                "observation artifact uses incompatible observation geometry"
             )
 
 
@@ -165,6 +371,17 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
                 use_sim_time=args.allow_sim_time,
             )
         )
+        certificate_path = getattr(args, "odom_execution_certificate_json", None)
+        self.frozen_observer_frame = (
+            None
+            if certificate_path is None
+            else load_frozen_observer_frame(
+                certificate_path,
+                map_frame=self.runtime.map_frame,
+                odom_frame=self.runtime.odom_frame,
+                base_frame=self.runtime.base_frame,
+            )
+        )
         self.output_jsonl = args.output_jsonl
         self.output_jsonl.parent.mkdir(parents=True, exist_ok=True)
         _validate_append_stream(
@@ -173,6 +390,7 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
                 use_sim_time=self.runtime.use_sim_time
             ),
             timing_limits=self.timing_limits,
+            frozen_frame=self.frozen_observer_frame,
         )
         self.map_bundle = (
             None
@@ -224,7 +442,13 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
         )
         self.get_logger().info(
             "observe-only stand explorer listening on "
-            f"{self.runtime.scan_topic}; output={self.output_jsonl}"
+            f"{self.runtime.scan_topic}; output={self.output_jsonl}; "
+            "geometry="
+            + (
+                "live_map_from_scan"
+                if self.frozen_observer_frame is None
+                else "frozen_map_from_odom_plus_exact_odom_from_scan"
+            )
         )
 
     def set_observation_enabled(self, enabled: bool) -> None:
@@ -289,9 +513,13 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
         pending_count = len(self.pending_scans)
         for _index in range(pending_count):
             pending = self.pending_scans.popleft()
+            tf_target_frame = _observation_tf_target_frame(
+                self.runtime,
+                getattr(self, "frozen_observer_frame", None),
+            )
             if time.monotonic() > pending.deadline_monotonic_sec:
                 self.get_logger().warn(
-                    "dropping scan: exact-time map<-"
+                    f"dropping scan: exact-time {tf_target_frame}<-"
                     f"{pending.scan_frame} TF timed out for stamp "
                     f"{pending.scan_stamp_sec:.9f}"
                 )
@@ -300,14 +528,14 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
             zero_timeout = Duration(seconds=0.0)
             try:
                 available = self.tf_buffer.can_transform(
-                    self.runtime.map_frame,
+                    tf_target_frame,
                     pending.scan_frame,
                     pending.query_time,
                     timeout=zero_timeout,
                 )
             except TransformException as exc:
                 self.get_logger().warn(
-                    "exact-time map<-"
+                    f"exact-time {tf_target_frame}<-"
                     f"{pending.scan_frame} TF check failed: {exc}"
                 )
                 self.pending_scans.append(pending)
@@ -318,7 +546,7 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
 
             try:
                 transform = self.tf_buffer.lookup_transform(
-                    self.runtime.map_frame,
+                    tf_target_frame,
                     pending.scan_frame,
                     pending.query_time,
                     timeout=zero_timeout,
@@ -326,7 +554,7 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
             except TransformException as exc:
                 # The buffer can change between can_transform and lookup.
                 self.get_logger().warn(
-                    "exact-time map<-"
+                    f"exact-time {tf_target_frame}<-"
                     f"{pending.scan_frame} TF lookup raced: {exc}"
                 )
                 self.pending_scans.append(pending)
@@ -337,9 +565,23 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
         msg = pending.message
         scan_frame = pending.scan_frame
         scan_stamp_sec = pending.scan_stamp_sec
+        frozen_frame = getattr(self, "frozen_observer_frame", None)
 
         observer_clock_sec = _stamp_to_sec(self.get_clock().now().to_msg())
-        tf_stamp_sec = _stamp_to_sec(transform.header.stamp)
+        try:
+            tf_target_frame = _observation_tf_target_frame(
+                self.runtime,
+                frozen_frame,
+            )
+            _validated_frozen_tf_frames(
+                transform,
+                expected_parent_frame=tf_target_frame,
+                expected_child_frame=scan_frame,
+            )
+            tf_stamp_sec = _stamp_to_sec(transform.header.stamp)
+        except (AttributeError, TypeError, ValueError) as exc:
+            self.get_logger().warn(f"dropping scan: invalid exact-time TF: {exc}")
+            return
         try:
             timing = validated_observation_timing(
                 observer_clock_sec=observer_clock_sec,
@@ -358,14 +600,24 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
             self.get_logger().warn(f"dropping scan: {exc}")
             return
 
+        try:
+            exact_time_tf_pose = _validated_planar_pose_from_tf(transform)
+            if frozen_frame is None:
+                scan_pose_in_map = exact_time_tf_pose
+            else:
+                scan_pose_in_map = compose_frozen_scan_pose_in_map(
+                    odom_from_scan=exact_time_tf_pose,
+                    map_from_odom=frozen_frame.certificate.map_from_odom,
+                )
+        except ValueError as exc:
+            self.get_logger().warn(f"dropping scan: {exc}")
+            return
         self.processed_scan_count += 1
         self.last_processed_scan_stamp_sec = scan_stamp_sec
-        translation = transform.transform.translation
-        rotation = transform.transform.rotation
         self.last_scan_pose_map = {
-            "x_m": float(translation.x),
-            "y_m": float(translation.y),
-            "yaw_rad": _yaw_from_quaternion(rotation),
+            "x_m": scan_pose_in_map.x_m,
+            "y_m": scan_pose_in_map.y_m,
+            "yaw_rad": scan_pose_in_map.yaw_rad,
         }
         candidates = detect_stand_candidates_from_scan(
             msg.ranges,
@@ -379,9 +631,13 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
 
         runtime_config = dict(self.runtime.as_log_dict())
         runtime_config[RUNTIME_TIMING_LIMITS_KEY] = self.timing_limits.as_dict()
+        if frozen_frame is not None:
+            runtime_config[FROZEN_FRAME_EVIDENCE_KEY] = (
+                frozen_frame.runtime_evidence()
+            )
         provenance = ObservationProvenance(
             schema_version=OBSERVATION_SCHEMA_VERSION,
-            observer_version=OBSERVER_VERSION,
+            observer_version=_observer_version(frozen_frame),
             resolved_scan_topic=self.runtime.scan_topic,
             scan_frame=scan_frame,
             map_frame=self.runtime.map_frame,
@@ -412,11 +668,7 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
         )
         candidate_observations = observations_from_candidates(
             candidates,
-            transform_scan_to_map=PlanarTransform(
-                translation.x,
-                translation.y,
-                _yaw_from_quaternion(rotation),
-            ),
+            transform_scan_to_map=scan_pose_in_map,
             observed_at_sec=time.time(),
             provenance=provenance,
             start_index=self.observation_count + 1,
@@ -454,6 +706,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--odom-frame", default="odom")
     parser.add_argument("--base-frame", default="base_footprint")
     parser.add_argument("--localization-source", default="amcl", choices=["amcl", "tf"])
+    parser.add_argument(
+        "--odom-execution-certificate-json",
+        type=Path,
+        default=None,
+        help=(
+            "Optional immutable odom execution certificate. When supplied, "
+            "stand geometry uses exact-time odom<-scan TF composed with the "
+            "certificate's frozen map<-odom transform; live map TF is never "
+            "used for observation geometry."
+        ),
+    )
     parser.add_argument("--allow-sim-time", action="store_true")
     parser.add_argument("--output-jsonl", type=Path, default=DEFAULT_OUTPUT_JSONL)
     parser.add_argument(
@@ -478,8 +741,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.50,
         help=(
-            "Maximum monotonic wait in the bounded pending queue for map<-scan "
-            "TF at the exact LaserScan timestamp."
+            "Maximum monotonic wait in the bounded pending queue for the "
+            "selected observation TF at the exact LaserScan timestamp."
         ),
     )
     parser.add_argument(
@@ -527,9 +790,10 @@ def build_parser() -> argparse.ArgumentParser:
 def observer_summary_payload(node: StandExplorerNode) -> dict[str, object]:
     """Return evidence that a scan epoch ran, including negative observations."""
 
-    return {
+    frozen_frame = getattr(node, "frozen_observer_frame", None)
+    payload = {
         "schema_version": 1,
-        "observer_version": OBSERVER_VERSION,
+        "observer_version": _observer_version(frozen_frame),
         "motion_published": False,
         "started_unix_sec": node.started_unix_sec,
         "finished_unix_sec": time.time(),
@@ -547,6 +811,9 @@ def observer_summary_payload(node: StandExplorerNode) -> dict[str, object]:
         "runtime_config": node.runtime.as_log_dict(),
         "timing_limits": node.timing_limits.as_dict(),
     }
+    if frozen_frame is not None:
+        payload[FROZEN_FRAME_EVIDENCE_KEY] = frozen_frame.runtime_evidence()
+    return payload
 
 
 def write_observer_summary(path: Path, node: StandExplorerNode) -> None:

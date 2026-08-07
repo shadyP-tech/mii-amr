@@ -109,6 +109,33 @@ class RunWithBundleTest(unittest.TestCase):
             self.assertIn("command_exit_code=7", (bundle / "manifest.txt").read_text())
             self.assertTrue((bundle / "post_ros_topics.txt").exists())
 
+    def test_exposes_exact_bundle_directory_to_wrapped_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            result = self.run_bundle(
+                [
+                    "run_trace",
+                    "--",
+                    sys.executable,
+                    "-c",
+                    (
+                        "import os; from pathlib import Path; "
+                        "root=Path(os.environ['MII_AMR_RUN_BUNDLE_DIR']); "
+                        "(root/'controller_trace.jsonl').write_text('trace\\n'); "
+                        "print(root)"
+                    ),
+                ],
+                tmpdir=tmpdir,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            bundle = tmpdir / "bundles" / "run_trace"
+            self.assertEqual(
+                (bundle / "controller_trace.jsonl").read_text(),
+                "trace\n",
+            )
+            self.assertIn(str(bundle), (bundle / "terminal_run.log").read_text())
+
     def test_rejects_unsafe_run_ids_and_missing_command(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmpdir = Path(tmp)

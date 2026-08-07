@@ -14,7 +14,7 @@ gates.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import math
@@ -56,6 +56,8 @@ from scripts.aufgabe04.navigation.plan_stand_coverage_survey import (
 from scripts.aufgabe04.navigation.read_current_amcl_pose import (
     read_current_amcl_pose,
 )
+from scripts.aufgabe04.navigation.ros_preflight import run_ros_preflight
+from scripts.aufgabe04.navigation.ros_runtime_config import resolve_topic
 from scripts.aufgabe04.navigation.record_stand_candidate_decision import (
     main as record_stand_candidate_decision,
 )
@@ -130,6 +132,7 @@ class MotionLegOutcome:
     motion_published: bool
     returncode: int
     semantic_log_path: Path
+    odom_execution_certificate_path: Path | None = None
 
 
 def _file_sha256(path: Path) -> str:
@@ -147,6 +150,51 @@ def _default_session_id() -> str:
 def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def _admit_preplanning_localization(runtime, session_root: Path) -> Pose2D:
+    """Bind route planning to one strictly admitted stationary map pose."""
+
+    preflight = run_ros_preflight(
+        runtime,
+        max_localization_tf_future_sec=1.1,
+        request_nomotion_update=True,
+        nomotion_update_service=resolve_topic(
+            "request_nomotion_update",
+            runtime.namespace,
+        ),
+        nomotion_update_timeout_sec=STATIONARY_AMCL_TIMEOUT_SEC,
+        max_stationary_amcl_position_spread_m=(
+            0.5 * DEFAULT_TRACKING_TUBE_RADIUS_M
+        ),
+        max_stationary_amcl_yaw_spread_rad=0.03,
+        max_stationary_amcl_position_std_m=(
+            0.30
+        ),
+        max_stationary_amcl_yaw_std_rad=0.35,
+    )
+    evidence_path = session_root / "preflight/preplanning_localization.json"
+    _write_json(evidence_path, preflight.to_json_dict())
+    if not preflight.ok:
+        raise RuntimeError(
+            "preplanning localization admission failed: "
+            + "; ".join(preflight.failures)
+        )
+    route_pose = preflight.route_pose
+    if route_pose is None:
+        raise RuntimeError(
+            "preplanning localization admission returned no route pose"
+        )
+    try:
+        return Pose2D(
+            float(route_pose["x_m"]),
+            float(route_pose["y_m"]),
+            float(route_pose["yaw_rad"]),
+        )
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError(
+            f"preplanning localization route pose is invalid: {exc}"
+        ) from exc
 
 
 def _physical_clearance(profile, *, approach_offset_m: float) -> dict[str, float]:
@@ -420,7 +468,26 @@ def _runner_command(
     candidate_snapshot: Path | None = None,
     coverage_transient_replan: dict[str, object] | None = None,
     dry_run: bool,
+    uncertainty_map_yaml: Path | None = None,
+    localization_branch_proof_id: str = "",
+    odom_execution_certificate_json: Path | None = None,
+    uncertainty_budget_json: Path | None = None,
 ) -> list[str]:
+    run_phase = "dry" if dry_run else "execute"
+    odom_fields = (
+        uncertainty_map_yaml,
+        str(localization_branch_proof_id).strip(),
+        odom_execution_certificate_json,
+        uncertainty_budget_json,
+    )
+    odom_execution_requested = any(
+        value is not None and value != "" for value in odom_fields
+    )
+    preflight_name = (
+        f"{run_id}_{run_phase}.json"
+        if odom_execution_requested
+        else f"{run_id}.json"
+    )
     command = [
         sys.executable,
         "scripts/aufgabe04/navigation/run_single_station_segment.py",
@@ -467,10 +534,38 @@ def _runner_command(
         "--semantic-log",
         str(session_root / "run_events" / f"{run_id}.jsonl"),
         "--preflight-json",
-        str(session_root / "preflight" / f"{run_id}.json"),
+        str(session_root / "preflight" / preflight_name),
         "--operator-note",
         "UNLOADED autonomous stand exploration",
     ]
+    if odom_execution_requested:
+        if any(value is None or value == "" for value in odom_fields):
+            raise ValueError(
+                "uncertainty-aware odom execution arguments must be complete"
+            )
+        command.extend(
+            [
+                "--execution-pose-frame",
+                "odom",
+                "--odom-execution-certificate-json",
+                str(odom_execution_certificate_json),
+                "--uncertainty-budget-json",
+                str(uncertainty_budget_json),
+                "--uncertainty-map-yaml",
+                str(uncertainty_map_yaml),
+                "--localization-branch-proof-id",
+                str(localization_branch_proof_id).strip(),
+                "--uncertainty-robot-radius-m",
+                str(profile.robot_radius_m),
+                # Mean stability remains strict. Reported covariance is no
+                # longer forced inside half of the 30 mm tracking tube; it is
+                # charged against the route-specific clearance budget.
+                "--max-stationary-amcl-position-std-m",
+                "0.30",
+                "--max-stationary-amcl-yaw-std-rad",
+                "0.35",
+            ]
+        )
     if coverage_plan is not None:
         command.extend(["--coverage-plan", str(coverage_plan)])
     if candidate_snapshot is not None:
@@ -545,32 +640,51 @@ def _motion_outcome_from_log(
         ]
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"invalid motion semantic log for {run_id}: {exc}") from exc
-    motion_events = [
+    terminal_events = [
         event
         for event in events
         if event.get("run_id") == run_id
-        and event.get("event") in {"motion_completed", "safety_stop"}
+        and event.get("event")
+        in {"motion_completed", "safety_stop", "preflight_failed"}
     ]
-    if not motion_events:
+    if not terminal_events:
         raise RuntimeError(f"motion runner produced no terminal motion event for {run_id}")
-    event = motion_events[-1]
-    status = str(event.get("status", ""))
-    if status not in {"completed", "stopped"}:
+    event = terminal_events[-1]
+    if event.get("event") == "preflight_failed":
+        failures = event.get("failures", [])
+        if not isinstance(failures, list) or not all(
+            isinstance(failure, str) for failure in failures
+        ):
+            raise RuntimeError(f"preflight failures are invalid for {run_id}")
+        status = "preflight_failed"
+        stop_reason = "; ".join(failures) or "ROS preflight failed"
+        details = {
+            "failures": list(failures),
+            "observations": event.get("observations", []),
+            "runtime_config": event.get("runtime_config", {}),
+            "fail_closed": True,
+        }
+        motion_published = False
+    else:
+        status = str(event.get("status", ""))
+        stop_reason = str(event.get("stop_reason", ""))
+        details = event.get("stop_details", {})
+        motion_published = bool(event.get("motion_published", False))
+    if status not in {"completed", "stopped", "preflight_failed"}:
         raise RuntimeError(f"motion runner returned invalid status {status!r} for {run_id}")
     if (status == "completed") != (returncode == 0):
         raise RuntimeError(
             f"motion runner exit/status mismatch for {run_id}: "
             f"returncode={returncode} status={status}"
         )
-    details = event.get("stop_details", {})
     if not isinstance(details, dict):
         raise RuntimeError(f"motion runner stop details are invalid for {run_id}")
     return MotionLegOutcome(
         run_id=run_id,
         status=status,
-        stop_reason=str(event.get("stop_reason", "")),
+        stop_reason=stop_reason,
         stop_details=dict(details),
-        motion_published=bool(event.get("motion_published", False)),
+        motion_published=motion_published,
         returncode=returncode,
         semantic_log_path=Path(semantic_log_path),
     )
@@ -587,6 +701,8 @@ def _run_motion_leg(
     candidate_snapshot: Path | None = None,
     coverage_transient_replan: dict[str, object] | None = None,
     require_fresh_confirmation: bool = False,
+    uncertainty_map_yaml: Path | None = None,
+    localization_branch_proof_id: str = "",
 ) -> MotionLegOutcome:
     common = {
         "profile": profile,
@@ -598,8 +714,26 @@ def _run_motion_leg(
         "coverage_plan": coverage_plan,
         "candidate_snapshot": candidate_snapshot,
         "coverage_transient_replan": coverage_transient_replan,
+        "uncertainty_map_yaml": uncertainty_map_yaml,
+        "localization_branch_proof_id": localization_branch_proof_id,
     }
-    dry = _runner_command(**common, dry_run=True)
+    odom_root = session_root / "odom_execution"
+    dry_certificate = (
+        None
+        if uncertainty_map_yaml is None
+        else odom_root / f"{run_id}_dry_certificate.json"
+    )
+    dry_budget = (
+        None
+        if uncertainty_map_yaml is None
+        else odom_root / f"{run_id}_dry_uncertainty_budget.json"
+    )
+    dry = _runner_command(
+        **common,
+        dry_run=True,
+        odom_execution_certificate_json=dry_certificate,
+        uncertainty_budget_json=dry_budget,
+    )
     dry_result = subprocess.run(dry, check=False)
     if dry_result.returncode != 0:
         semantic_log = session_root / "run_events" / f"{run_id}.jsonl"
@@ -627,6 +761,7 @@ def _run_motion_leg(
             semantic_log_path=(
                 session_root / "run_events" / f"{run_id}.jsonl"
             ),
+            odom_execution_certificate_path=dry_certificate,
         )
     if require_fresh_confirmation:
         print(
@@ -642,18 +777,34 @@ def _run_motion_leg(
             raise RuntimeError(
                 f"operator did not authorize resealed route {run_id}"
             )
-    runner = _runner_command(**common, dry_run=False)
+    live_certificate = (
+        None
+        if uncertainty_map_yaml is None
+        else odom_root / f"{run_id}_execute_certificate.json"
+    )
+    live_budget = (
+        None
+        if uncertainty_map_yaml is None
+        else odom_root / f"{run_id}_execute_uncertainty_budget.json"
+    )
+    runner = _runner_command(
+        **common,
+        dry_run=False,
+        odom_execution_certificate_json=live_certificate,
+        uncertainty_budget_json=live_budget,
+    )
     wrapped = _bundle_command(profile, run_id, runner)
     result = subprocess.run(
         wrapped,
-        input="RUN\n",
-        text=True,
         check=False,
     )
-    return _motion_outcome_from_log(
-        session_root / "run_events" / f"{run_id}.jsonl",
-        run_id=run_id,
-        returncode=result.returncode,
+    return replace(
+        _motion_outcome_from_log(
+            session_root / "run_events" / f"{run_id}.jsonl",
+            run_id=run_id,
+            returncode=result.returncode,
+        ),
+        odom_execution_certificate_path=live_certificate,
     )
 
 
@@ -670,6 +821,7 @@ def _capture_lidar_epoch(
     args,
     survey_root: Path,
     viewpoint_id: str,
+    odom_execution_certificate_path: Path | None = None,
 ) -> Path:
     epoch_root = survey_root / "raw_epochs" / viewpoint_id
     epoch_root.mkdir(parents=True, exist_ok=False)
@@ -706,6 +858,19 @@ def _capture_lidar_epoch(
         "--summary-json",
         str(summary),
     ]
+    if odom_execution_certificate_path is not None:
+        certificate_path = Path(odom_execution_certificate_path)
+        if not certificate_path.is_file():
+            raise RuntimeError(
+                "completed odom execution leg has no readable certificate: "
+                f"{certificate_path}"
+            )
+        command.extend(
+            [
+                "--odom-execution-certificate-json",
+                str(certificate_path),
+            ]
+        )
     if subprocess.run(command, check=False).returncode != 0:
         raise RuntimeError(f"LiDAR epoch failed at {viewpoint_id}")
     payload = json.loads(summary.read_text())
@@ -876,9 +1041,12 @@ def _execute_coverage_leg_with_replans(
     target_viewpoint_id: str,
     source_route: Path,
     source_diagnostics: Path,
-) -> None:
+) -> MotionLegOutcome:
     """Run one coverage leg with in-process transient-overlay A* recovery."""
 
+    localization_branch_proof_id = str(
+        getattr(args, "localization_branch_proof_id", "")
+    ).strip()
     startup_reseal_index = 0
     adaptive_log = session_root / "adaptive_replans.jsonl"
     while True:
@@ -918,9 +1086,16 @@ def _execute_coverage_leg_with_replans(
                 "leg_index": leg_index,
             },
             require_fresh_confirmation=startup_reseal_index > 0,
+            # Production execution always carries this proof (validated by
+            # _validate_inputs). Keeping the empty-proof case map-native
+            # preserves compatibility for no-motion/unit callers.
+            uncertainty_map_yaml=(
+                args.map if localization_branch_proof_id else None
+            ),
+            localization_branch_proof_id=localization_branch_proof_id,
         )
         if outcome.status == "completed":
-            return
+            return outcome
         if _is_resealable_startup_mismatch(outcome):
             if startup_reseal_index >= args.max_startup_reseals_per_leg:
                 raise RuntimeError(
@@ -1246,6 +1421,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--axis-sample-count", type=int, default=7)
     parser.add_argument("--camera-timeout-sec", type=float, default=90.0)
     parser.add_argument(
+        "--localization-branch-proof-id",
+        default="",
+        help=(
+            "Operator evidence ID for a known physical start or an asymmetric "
+            "landmark that resolves the saved map's symmetric pose branch. "
+            "Required with --execute; covariance alone is insufficient."
+        ),
+    )
+    parser.add_argument(
         "--stand-model-profile",
         type=Path,
         default=None,
@@ -1304,6 +1488,14 @@ def _validate_inputs(parser, args, profile, calibration) -> None:
         parser.error("--max-blockage-replans-per-leg must be non-negative")
     if args.max_startup_reseals_per_leg < 0:
         parser.error("--max-startup-reseals-per-leg must be non-negative")
+    args.localization_branch_proof_id = str(
+        args.localization_branch_proof_id
+    ).strip()
+    if args.execute and not args.localization_branch_proof_id:
+        parser.error(
+            "--execute requires --localization-branch-proof-id for a known "
+            "physical start or asymmetric landmark"
+        )
     for name in (
         "inspection_stop_spacing_m",
         "lidar_epoch_sec",
@@ -1374,12 +1566,9 @@ def main(argv=None) -> int:
         )
         session_root.mkdir(parents=True, exist_ok=False)
         survey_root = session_root / "coverage"
-        start = read_current_amcl_pose(
-            namespace=profile.namespace,
-            amcl_topic=profile.amcl_topic,
-            map_frame=profile.map_frame,
-            timeout_sec=STATIONARY_AMCL_TIMEOUT_SEC,
-            max_age_sec=2.0,
+        start = _admit_preplanning_localization(
+            runtime,
+            session_root,
         )
         planning_status = plan_stand_coverage_survey(
             [
@@ -1432,6 +1621,11 @@ def main(argv=None) -> int:
                 session_root=session_root,
                 execute=False,
                 coverage_plan=plan_path,
+                uncertainty_map_yaml=args.map,
+                localization_branch_proof_id=(
+                    args.localization_branch_proof_id
+                    or "dry_run_no_motion"
+                ),
             )
             if first_dry_outcome.status != "dry_run_ok":
                 raise RuntimeError(
@@ -1490,7 +1684,7 @@ def main(argv=None) -> int:
             source_diagnostics = (
                 survey_root / "legs" / f"leg_{leg_index:03d}_diagnostics.json"
             )
-            _execute_coverage_leg_with_replans(
+            coverage_outcome = _execute_coverage_leg_with_replans(
                 profile=profile,
                 args=args,
                 session_root=session_root,
@@ -1506,6 +1700,9 @@ def main(argv=None) -> int:
                 args=args,
                 survey_root=survey_root,
                 viewpoint_id=str(viewpoint_id),
+                odom_execution_certificate_path=(
+                    coverage_outcome.odom_execution_certificate_path
+                ),
             )
             status = record_stand_coverage_stop(
                 [
@@ -1628,6 +1825,10 @@ def main(argv=None) -> int:
                 session_root=session_root,
                 execute=True,
                 candidate_snapshot=source_root / "candidate_snapshot.json",
+                uncertainty_map_yaml=args.map,
+                localization_branch_proof_id=(
+                    args.localization_branch_proof_id
+                ),
             )
             _require_completed_motion(candidate_outcome)
             recommendation_path, qr_id, axis_observation_path = (
@@ -1706,6 +1907,10 @@ def main(argv=None) -> int:
                     execute=True,
                     candidate_snapshot=(
                         opposite_source / "candidate_snapshot.json"
+                    ),
+                    uncertainty_map_yaml=args.map,
+                    localization_branch_proof_id=(
+                        args.localization_branch_proof_id
                     ),
                 )
                 _require_completed_motion(opposite_outcome)

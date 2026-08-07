@@ -107,6 +107,8 @@ def _maximum_position_std_m(sample: StationaryAmclPoseSample) -> float | None:
         for value in (covariance_xx, covariance_xy, covariance_yy)
     ):
         return None
+    if covariance_xx < 0.0 or covariance_yy < 0.0:
+        return None
     discriminant = max(
         0.0,
         (covariance_xx - covariance_yy) ** 2 + 4.0 * covariance_xy**2,
@@ -114,7 +116,18 @@ def _maximum_position_std_m(sample: StationaryAmclPoseSample) -> float | None:
     maximum_eigenvalue = 0.5 * (
         covariance_xx + covariance_yy + math.sqrt(discriminant)
     )
-    return math.sqrt(max(0.0, maximum_eigenvalue))
+    if maximum_eigenvalue < 0.0:
+        return None
+    return math.sqrt(maximum_eigenvalue)
+
+
+def _yaw_std_rad(sample: StationaryAmclPoseSample) -> float | None:
+    if len(sample.covariance) < 36:
+        return None
+    covariance_yaw = float(sample.covariance[35])
+    if not math.isfinite(covariance_yaw) or covariance_yaw < 0.0:
+        return None
+    return math.sqrt(covariance_yaw)
 
 
 def evaluate_stationary_amcl_stability(
@@ -123,8 +136,10 @@ def evaluate_stationary_amcl_stability(
     required_sample_count: int,
     max_position_spread_m: float,
     max_yaw_spread_rad: float,
+    max_position_std_m: float = 0.015,
+    max_yaw_std_rad: float = 0.03,
 ) -> RosObservation:
-    """Evaluate repeated no-motion AMCL means before physical authorization."""
+    """Evaluate no-motion AMCL means and uncertainty before authorization."""
 
     if (
         not isinstance(required_sample_count, int)
@@ -135,6 +150,8 @@ def evaluate_stationary_amcl_stability(
     for name, value in {
         "max_position_spread_m": max_position_spread_m,
         "max_yaw_spread_rad": max_yaw_spread_rad,
+        "max_position_std_m": max_position_std_m,
+        "max_yaw_std_rad": max_yaw_std_rad,
     }.items():
         if not math.isfinite(value) or value <= 0.0:
             raise ValueError(f"{name} must be finite and positive")
@@ -157,19 +174,50 @@ def evaluate_stationary_amcl_stability(
         if value is not None
     ]
     yaw_stds = [
-        math.sqrt(max(0.0, float(sample.covariance[35])))
-        for sample in samples
-        if len(sample.covariance) >= 36
-        and math.isfinite(float(sample.covariance[35]))
+        value
+        for value in (_yaw_std_rad(sample) for sample in samples)
+        if value is not None
     ]
     enough_samples = len(samples) >= required_sample_count
     position_ok = position_spread_m <= max_position_spread_m
     yaw_ok = yaw_spread_rad <= max_yaw_spread_rad
-    ok = enough_samples and position_ok and yaw_ok
+    position_covariance_complete = len(position_stds) == len(samples)
+    yaw_covariance_complete = len(yaw_stds) == len(samples)
+    maximum_position_std_m = max(position_stds) if position_stds else None
+    maximum_yaw_std_rad = max(yaw_stds) if yaw_stds else None
+    position_std_ok = (
+        position_covariance_complete
+        and maximum_position_std_m is not None
+        and maximum_position_std_m <= max_position_std_m
+    )
+    yaw_std_ok = (
+        yaw_covariance_complete
+        and maximum_yaw_std_rad is not None
+        and maximum_yaw_std_rad <= max_yaw_std_rad
+    )
+    ok = (
+        enough_samples
+        and position_ok
+        and yaw_ok
+        and position_std_ok
+        and yaw_std_ok
+    )
+    position_std_detail = (
+        "missing"
+        if maximum_position_std_m is None
+        else f"{maximum_position_std_m:.4f}m"
+    )
+    yaw_std_detail = (
+        "missing"
+        if maximum_yaw_std_rad is None
+        else f"{maximum_yaw_std_rad:.4f}rad"
+    )
     detail = (
         f"samples={len(samples)}/{required_sample_count} "
         f"position_spread={position_spread_m:.4f}m "
-        f"yaw_spread={yaw_spread_rad:.4f}rad"
+        f"yaw_spread={yaw_spread_rad:.4f}rad "
+        f"position_std={position_std_detail}/{max_position_std_m:.4f}m "
+        f"yaw_std={yaw_std_detail}/{max_yaw_std_rad:.4f}rad"
     )
     return RosObservation(
         "stationary AMCL stability",
@@ -182,12 +230,57 @@ def evaluate_stationary_amcl_stability(
             "maximum_yaw_spread_rad": yaw_spread_rad,
             "max_allowed_position_spread_m": max_position_spread_m,
             "max_allowed_yaw_spread_rad": max_yaw_spread_rad,
-            "maximum_reported_position_std_m": (
-                max(position_stds) if position_stds else None
-            ),
-            "maximum_reported_yaw_std_rad": (
-                max(yaw_stds) if yaw_stds else None
-            ),
+            "maximum_reported_position_std_m": maximum_position_std_m,
+            "maximum_reported_yaw_std_rad": maximum_yaw_std_rad,
+            "max_allowed_position_std_m": max_position_std_m,
+            "max_allowed_yaw_std_rad": max_yaw_std_rad,
+            "position_covariance_complete": position_covariance_complete,
+            "yaw_covariance_complete": yaw_covariance_complete,
+        },
+    )
+
+
+def evaluate_latest_stationary_amcl_window(
+    samples: Sequence[StationaryAmclPoseSample],
+    *,
+    required_sample_count: int,
+    max_position_spread_m: float,
+    max_yaw_spread_rad: float,
+    max_position_std_m: float = 0.015,
+    max_yaw_std_rad: float = 0.03,
+) -> RosObservation:
+    """Evaluate only the newest complete stationary convergence window.
+
+    AMCL starts with deliberately broad covariance after an ``/initialpose``
+    update.  Those settling samples must remain observable, but they must not
+    permanently poison a later consecutive window that satisfies the same
+    strict admission limits.  An incomplete window still fails closed.
+    """
+
+    if (
+        not isinstance(required_sample_count, int)
+        or isinstance(required_sample_count, bool)
+        or required_sample_count < 2
+    ):
+        raise ValueError("required_sample_count must be an integer >= 2")
+    window_start_index = max(0, len(samples) - required_sample_count)
+    window = samples[window_start_index:]
+    observation = evaluate_stationary_amcl_stability(
+        window,
+        required_sample_count=required_sample_count,
+        max_position_spread_m=max_position_spread_m,
+        max_yaw_spread_rad=max_yaw_spread_rad,
+        max_position_std_m=max_position_std_m,
+        max_yaw_std_rad=max_yaw_std_rad,
+    )
+    return RosObservation(
+        observation.name,
+        observation.ok,
+        observation.detail,
+        {
+            **observation.data,
+            "total_sample_count": len(samples),
+            "window_start_index": window_start_index,
         },
     )
 
@@ -199,6 +292,11 @@ class RosPreflightResult:
     observations: List[RosObservation]
     runtime_config: Dict[str, object]
     route_pose: Dict[str, object] | None = None
+    odom_pose: Dict[str, object] | None = None
+    map_from_odom: Dict[str, object] | None = None
+    stationary_amcl_samples: List[Dict[str, object]] = field(
+        default_factory=list
+    )
 
     def to_json_dict(self) -> Dict[str, object]:
         return {
@@ -207,6 +305,9 @@ class RosPreflightResult:
             "observations": [asdict(observation) for observation in self.observations],
             "runtime_config": self.runtime_config,
             "route_pose": self.route_pose,
+            "odom_pose": self.odom_pose,
+            "map_from_odom": self.map_from_odom,
+            "stationary_amcl_samples": self.stationary_amcl_samples,
         }
 
 
@@ -264,6 +365,11 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         stationary_amcl_sample_interval_sec: float,
         max_stationary_amcl_position_spread_m: float,
         max_stationary_amcl_yaw_spread_rad: float,
+        max_stationary_amcl_position_std_m: float,
+        max_stationary_amcl_yaw_std_rad: float,
+        execution_pose_owner: str,
+        global_consistency_monitor: str,
+        frozen_map_transform_certified: bool,
     ) -> None:
         super().__init__(
             "aufgabe04_ros_preflight",
@@ -291,6 +397,20 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         self.max_stationary_amcl_yaw_spread_rad = (
             max_stationary_amcl_yaw_spread_rad
         )
+        self.max_stationary_amcl_position_std_m = (
+            max_stationary_amcl_position_std_m
+        )
+        self.max_stationary_amcl_yaw_std_rad = (
+            max_stationary_amcl_yaw_std_rad
+        )
+        self.execution_pose_owner = str(execution_pose_owner).strip()
+        self.global_consistency_monitor = str(
+            global_consistency_monitor
+        ).strip()
+        self.frozen_map_transform_certified = bool(
+            frozen_map_transform_certified
+        )
+        self.stationary_amcl_samples: List[StationaryAmclPoseSample] = []
         self.latest_scan = None
         self.latest_scan_receipt = None
         self.latest_odom = None
@@ -440,6 +560,17 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             self.config.base_frame,
             self.max_tf_age_sec,
         )
+        map_to_odom_ok = False
+        map_to_odom_transform_data: Dict[str, object] = {}
+        if self.execution_pose_owner == "odom":
+            map_to_odom_ok, map_to_odom_transform_data = self._observe_tf(
+                observations,
+                failures,
+                self.config.map_frame,
+                self.config.odom_frame,
+                self.max_tf_age_sec,
+                max_future_sec=self.max_localization_tf_future_sec,
+            )
         self._observe_localization_ownership(
             observations,
             failures,
@@ -461,12 +592,37 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                 "y_m": map_to_base_data["y_m"],
                 "yaw_rad": map_to_base_data["yaw_rad"],
             }
+        odom_pose = None
+        if odom_to_base_ok and all(
+            key in odom_to_base_data for key in ("x_m", "y_m", "yaw_rad")
+        ):
+            odom_pose = {
+                "frame_id": self.config.odom_frame,
+                "child_frame_id": self.config.base_frame,
+                "x_m": odom_to_base_data["x_m"],
+                "y_m": odom_to_base_data["y_m"],
+                "yaw_rad": odom_to_base_data["yaw_rad"],
+            }
+        map_from_odom = (
+            dict(map_to_odom_transform_data) if map_to_odom_ok else None
+        )
         return RosPreflightResult(
             ok=not failures,
             failures=failures,
             observations=observations,
             runtime_config=self.config.as_log_dict(),
             route_pose=route_pose,
+            odom_pose=odom_pose,
+            map_from_odom=map_from_odom,
+            stationary_amcl_samples=[
+                {
+                    "x_m": sample.x_m,
+                    "y_m": sample.y_m,
+                    "yaw_rad": sample.yaw_rad,
+                    "covariance": list(sample.covariance),
+                }
+                for sample in self.stationary_amcl_samples
+            ],
         )
 
     def _refresh_stationary_amcl(self) -> RosObservation:
@@ -565,9 +721,19 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         samples: List[StationaryAmclPoseSample] = []
         service_failures: List[str] = []
         service_request_count = 0
+        observation = evaluate_latest_stationary_amcl_window(
+            samples,
+            required_sample_count=self.stationary_amcl_sample_count,
+            max_position_spread_m=(
+                self.max_stationary_amcl_position_spread_m
+            ),
+            max_yaw_spread_rad=self.max_stationary_amcl_yaw_spread_rad,
+            max_position_std_m=self.max_stationary_amcl_position_std_m,
+            max_yaw_std_rad=self.max_stationary_amcl_yaw_std_rad,
+        )
         while (
             rclpy.ok()
-            and len(samples) < self.stationary_amcl_sample_count
+            and not observation.ok
             and time.monotonic() < deadline
         ):
             while (
@@ -620,6 +786,22 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                 )
             else:
                 samples.append(sample)
+                observation = evaluate_latest_stationary_amcl_window(
+                    samples,
+                    required_sample_count=self.stationary_amcl_sample_count,
+                    max_position_spread_m=(
+                        self.max_stationary_amcl_position_spread_m
+                    ),
+                    max_yaw_spread_rad=(
+                        self.max_stationary_amcl_yaw_spread_rad
+                    ),
+                    max_position_std_m=(
+                        self.max_stationary_amcl_position_std_m
+                    ),
+                    max_yaw_std_rad=(
+                        self.max_stationary_amcl_yaw_std_rad
+                    ),
+                )
             interval_deadline = min(
                 deadline,
                 time.monotonic() + self.stationary_amcl_sample_interval_sec,
@@ -627,13 +809,8 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             while rclpy.ok() and time.monotonic() < interval_deadline:
                 rclpy.spin_once(self, timeout_sec=0.05)
 
-        observation = evaluate_stationary_amcl_stability(
-            samples,
-            required_sample_count=self.stationary_amcl_sample_count,
-            max_position_spread_m=(
-                self.max_stationary_amcl_position_spread_m
-            ),
-            max_yaw_spread_rad=self.max_stationary_amcl_yaw_spread_rad,
+        self.stationary_amcl_samples = list(
+            samples[-self.stationary_amcl_sample_count :]
         )
         return RosObservation(
             observation.name,
@@ -731,6 +908,8 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         target_frame: str,
         source_frame: str,
         max_age_sec: float,
+        *,
+        max_future_sec: float | None = None,
     ) -> Tuple[bool, Dict[str, object]]:
         name = f"tf {target_frame}->{source_frame}"
         try:
@@ -745,10 +924,35 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             observations.append(RosObservation(name, False, str(exc), data))
             failures.append(f"{name}: unavailable")
             return False, data
-        age = (self.get_clock().now() - Time.from_msg(transform.header.stamp)).nanoseconds / 1_000_000_000.0
-        ok = -self.max_future_timestamp_sec <= age <= max_age_sec
+        capture_time = self.get_clock().now()
+        transform_stamp = Time.from_msg(transform.header.stamp)
+        age = (capture_time - transform_stamp).nanoseconds / 1_000_000_000.0
+        accepted_future_sec = (
+            self.max_future_timestamp_sec
+            if max_future_sec is None
+            else max_future_sec
+        )
         translation = transform.transform.translation
         rotation = transform.transform.rotation
+        observed_target_frame = _frame_id(
+            str(getattr(transform.header, "frame_id", ""))
+        )
+        observed_source_frame = _frame_id(
+            str(getattr(transform, "child_frame_id", ""))
+        )
+        frame_identity_ok = (
+            observed_target_frame == _frame_id(target_frame)
+            and observed_source_frame == _frame_id(source_frame)
+        )
+        quaternion = tuple(
+            float(value)
+            for value in (rotation.x, rotation.y, rotation.z, rotation.w)
+        )
+        quaternion_norm = math.sqrt(sum(value * value for value in quaternion))
+        quaternion_ok = (
+            all(math.isfinite(value) for value in quaternion)
+            and abs(quaternion_norm - 1.0) <= 1.0e-3
+        )
         yaw_rad = math.atan2(
             2.0 * (rotation.w * rotation.z + rotation.x * rotation.y),
             1.0 - 2.0 * (rotation.y * rotation.y + rotation.z * rotation.z),
@@ -756,21 +960,51 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         data = {
             "available": True,
             "age_sec": age,
-            "max_future_sec": self.max_future_timestamp_sec,
+            "max_future_sec": accepted_future_sec,
+            "target_frame": target_frame,
+            "source_frame": source_frame,
+            "observed_target_frame": observed_target_frame,
+            "observed_source_frame": observed_source_frame,
+            "stamp_sec": transform_stamp.nanoseconds / 1_000_000_000.0,
+            "capture_time_sec": capture_time.nanoseconds / 1_000_000_000.0,
             "x_m": float(translation.x),
             "y_m": float(translation.y),
             "yaw_rad": yaw_rad,
+            "quaternion": {
+                "x": quaternion[0],
+                "y": quaternion[1],
+                "z": quaternion[2],
+                "w": quaternion[3],
+                "norm": quaternion_norm,
+            },
         }
+        pose_values_ok = all(
+            math.isfinite(value)
+            for value in (
+                data["x_m"],
+                data["y_m"],
+                data["yaw_rad"],
+            )
+        )
+        ok = (
+            -accepted_future_sec <= age <= max_age_sec
+            and frame_identity_ok
+            and quaternion_ok
+            and pose_values_ok
+        )
         observations.append(RosObservation(name, ok, f"age={age:.3f}s", data))
         if not ok:
-            failures.append(
-                f"{name}: "
-                + (
-                    "future-dated transform"
-                    if age < -self.max_future_timestamp_sec
-                    else "stale transform"
-                )
-            )
+            if not frame_identity_ok:
+                failure = "transform frame identity mismatch"
+            elif not quaternion_ok:
+                failure = "invalid transform quaternion"
+            elif not pose_values_ok:
+                failure = "non-finite transform"
+            elif age < -accepted_future_sec:
+                failure = "future-dated transform"
+            else:
+                failure = "stale transform"
+            failures.append(f"{name}: {failure}")
         return ok, data
 
     def _observe_localization_ownership(
@@ -796,8 +1030,13 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             map_to_odom_dynamic_fresh=map_to_odom_fresh,
             route_transform_fresh=route_transform_fresh,
             odom_to_base_fresh=odom_to_base_fresh,
-            route_uses_odom_frame=self.config.map_frame == self.config.odom_frame,
+            route_uses_odom_frame=self.execution_pose_owner == "odom",
             external_tf_owner_candidates=owner_candidates,
+            execution_pose_owner=self.execution_pose_owner,
+            global_consistency_monitor=self.global_consistency_monitor,
+            frozen_map_transform_certified=(
+                self.frozen_map_transform_certified
+            ),
         )
         decision = evaluate_localization_ownership(evidence)
         data = build_localization_ownership_observation_data(
@@ -934,6 +1173,11 @@ def run_ros_preflight(
     stationary_amcl_sample_interval_sec: float = 0.5,
     max_stationary_amcl_position_spread_m: float = 0.015,
     max_stationary_amcl_yaw_spread_rad: float = 0.03,
+    max_stationary_amcl_position_std_m: float = 0.015,
+    max_stationary_amcl_yaw_std_rad: float = 0.03,
+    execution_pose_owner: str = "",
+    global_consistency_monitor: str = "",
+    frozen_map_transform_certified: bool = False,
 ) -> RosPreflightResult:
     if (
         not math.isfinite(max_future_timestamp_sec)
@@ -973,6 +1217,12 @@ def run_ros_preflight(
         "max_stationary_amcl_yaw_spread_rad": (
             max_stationary_amcl_yaw_spread_rad
         ),
+        "max_stationary_amcl_position_std_m": (
+            max_stationary_amcl_position_std_m
+        ),
+        "max_stationary_amcl_yaw_std_rad": (
+            max_stationary_amcl_yaw_std_rad
+        ),
     }.items():
         if not math.isfinite(value) or value <= 0.0:
             raise ValueError(f"{name} must be finite and positive")
@@ -1003,6 +1253,13 @@ def run_ros_preflight(
         max_stationary_amcl_yaw_spread_rad=(
             max_stationary_amcl_yaw_spread_rad
         ),
+        max_stationary_amcl_position_std_m=(
+            max_stationary_amcl_position_std_m
+        ),
+        max_stationary_amcl_yaw_std_rad=max_stationary_amcl_yaw_std_rad,
+        execution_pose_owner=execution_pose_owner,
+        global_consistency_monitor=global_consistency_monitor,
+        frozen_map_transform_certified=frozen_map_transform_certified,
     )
     try:
         return node.collect()
