@@ -19,6 +19,9 @@ loaded logistics mission or a two-robot run; see
 | `perception/stand_axis/raw_support.py` | Four-side raw-edge support, common-side direction, and trapezoid refit | None |
 | `perception/stand_axis/geometry.py` | Quadrilateral geometry, square-head pose estimation, and debug rendering | None |
 | `perception/stand_axis/real_camera_profile.py` | Validate and resolve the offline-candidate real-camera edge recipe | None |
+| `navigation/runtime_localization_reseal.py` | Classify the exact global-consistency zero/reseal contract and enforce its retry budget | None |
+| `navigation/runtime_motion_authorization.py` | Bind the mission-level `RUN` to one exact, same-target runtime-localization recovery child and its fresh artifacts | None |
+| `navigation/runtime_motion_consumption.py` | Atomically consume that exact child permit once and reject replay before follower motion | None |
 | `real_robot/passive_viewpoint_node.py` | Synchronize image, scan, and exact-time TF; rectify the image; validate LiDAR/QR/silhouette evidence | None |
 | `real_robot/run_autonomous_stand_exploration.py` | Plan and execute the unloaded center-corridor discovery, candidate inspection, and QR-facing pose catalog | Dry-run by default; explicit physical gate |
 | `real_robot/prepare_passive_survey.py` | Produce immutable per-candidate observer and catalog-validation commands | None |
@@ -178,7 +181,12 @@ one direct `map <- odom` transform, projects that exact certified route into
 control and route-tube checks. Later AMCL updates are a consistency monitor;
 they never steer the robot or rewrite the active route. A correction outside
 the covariance allowance already reserved by the route-clearance budget causes
-repeated zero and requires a new preflight/certificate.
+repeated zero and invalidates the active odom certificate. For coverage legs,
+the autonomous wrapper may perform one bounded stopped-only recovery by
+default: it collects a new stationary AMCL/TF preflight, replans from that
+admitted pose to the same committed viewpoint, seals a new map route, runs the
+uncertainty admission again, and creates a new odom execution certificate. It
+does not widen the correction, route-tube, covariance, or obstacle gates.
 
 The budget samples uninflated static-map clearance and subtracts the robot
 radius, collision margin, 30 mm tracking tube, empirical odom drift, braking
@@ -254,6 +262,7 @@ python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
   --expected-stand-count 3 \
   --max-blockage-replans-per-leg 3 \
   --max-startup-reseals-per-leg 3 \
+  --max-runtime-localization-reseals-per-leg 1 \
   --coverage-leg-limit 1 \
   --localization-branch-proof-id <known_start_or_asymmetric_landmark_id> \
   --session-id stand_explore_leg_001 \
@@ -263,7 +272,8 @@ python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
 Type `RUN` only after the separate no-motion run has passed and the live
 velocity owner is unambiguous. After that mission-level authorization, the
 script still requires the leg's own dry-run/preflight to pass and the child
-runner's separate typed `RUN` before motion. A
+runner's separate typed `RUN` before motion, except for the exact bounded
+runtime-localization permit path described below. A
 successful checkpoint writes
 `status=coverage_leg_checkpoint_complete`, the stopped LiDAR epoch, run events,
 preflight evidence, and the next viewpoint ID. If stand recovery occurred,
@@ -275,6 +285,34 @@ is not classified as a stand and is never auto-replanned. In particular, a
 runtime route-tube departure is terminal for that authorization: there is no
 in-process recovery or retry. Any continuation requires a separately resealed
 route, another no-motion dry-run/preflight, and a new typed `RUN`.
+
+The one exception is an exact coverage-leg global-consistency stop whose
+persisted contract contains all of the following: `status=stopped`, prior
+motion, `fault_code=localization_reseal_required`,
+`source=global_consistency_monitor`, `monitor_action=FORCE_ZERO_RESEAL`,
+`fail_closed=true`, and a rejected continuity decision that explicitly
+requires both a zero cycle and reseal. The bounded retry count is controlled by
+`--max-runtime-localization-reseals-per-leg` (default `1`; set `0` to disable).
+The old certificate is never reused. The mission-level `RUN` explicitly covers
+only this bounded, same-leg, same-target recovery class. After the stationary
+preflight, replacement A* route, exact-start connector, dry-run, uncertainty
+budget, and certificate all pass, the wrapper publishes an immutable one-run
+motion permit and the child validates it instead of asking for another `RUN`.
+Missing, malformed, already-consumed, scope-mismatched, or artifact-mismatched
+permits fail closed before follower motion.
+
+Recovery evidence is written as an ordered sequence in
+`adaptive_replans.jsonl`: `runtime_localization_reseal_started`,
+`runtime_localization_admitted`, `runtime_localization_route_replanned`, and
+`runtime_localization_route_sealed`. The mission authorization and exact child
+permit and its atomic one-use receipt are stored under `motion_authorization/`,
+and the child semantic log records permit admission. A failed gate instead records
+`runtime_localization_reseal_failed` and authorizes no continuation. This
+recovery currently applies only to center-corridor coverage legs. Candidate
+pre-approach and opposite-face legs remain terminal on the same stop. A
+coverage child that already adopted a `transient_navigation_blockage_replanned`
+overlay also remains terminal because relaunching it would otherwise reset the
+overlay and the per-leg blockage budget.
 
 Immediately after ROS preflight, the runner also binds the fresh
 `map -> base_footprint` pose to the first certified route segment before it asks

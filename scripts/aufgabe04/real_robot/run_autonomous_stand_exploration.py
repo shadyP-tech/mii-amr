@@ -6,9 +6,11 @@ inspection poses, fuses LiDAR candidates across those poses, visits every
 stable candidate at a robot-facing pre-approach, and commits calibrated
 camera/LiDAR QR-face poses.  Physical execution requires ``--execute`` and a
 mission-level typed ``RUN``.  A route rebuilt after a pre-motion localization
-mismatch requires another typed ``RUN``.  Every motion leg still passes the
-existing route, ROS, obstacle, localization, and exclusive-velocity-owner
-gates.
+mismatch requires another typed ``RUN``.  The mission authorization may cover
+a bounded same-leg, same-target post-motion global-localization reseal, but
+only through an immutable child-run permit after every fresh gate passes.
+Every motion leg still passes the existing route, ROS, obstacle, localization,
+and exclusive-velocity-owner gates.
 """
 
 from __future__ import annotations
@@ -58,6 +60,22 @@ from scripts.aufgabe04.navigation.read_current_amcl_pose import (
 )
 from scripts.aufgabe04.navigation.ros_preflight import run_ros_preflight
 from scripts.aufgabe04.navigation.ros_runtime_config import resolve_topic
+from scripts.aufgabe04.navigation.runtime_localization_reseal import (
+    evaluate_runtime_localization_reseal,
+    evaluate_runtime_localization_reseal_budget,
+)
+from scripts.aufgabe04.navigation.runtime_motion_authorization import (
+    MISSION_MOTION_AUTHORIZATION_SCOPE,
+    MISSION_RUN_CONFIRMATION,
+    RUNTIME_LOCALIZATION_RESEAL_RECOVERY_KIND,
+    MissionMotionAuthorization,
+    RuntimeLocalizationMotionPermit,
+    file_sha256 as authorization_file_sha256,
+    load_mission_motion_authorization,
+    mission_motion_authorization_sha256,
+    write_mission_motion_authorization,
+    write_runtime_localization_motion_permit,
+)
 from scripts.aufgabe04.navigation.record_stand_candidate_decision import (
     main as record_stand_candidate_decision,
 )
@@ -121,6 +139,7 @@ DEFAULT_LIDAR_STOP_DISTANCE_M = 0.20
 DEFAULT_LIDAR_CLEARANCE_MARGIN_M = 0.02
 DEFAULT_MAX_BLOCKAGE_REPLANS_PER_LEG = 3
 DEFAULT_MAX_STARTUP_RESEALS_PER_LEG = 3
+DEFAULT_MAX_RUNTIME_LOCALIZATION_RESEALS_PER_LEG = 1
 
 
 @dataclass(frozen=True)
@@ -133,6 +152,24 @@ class MotionLegOutcome:
     returncode: int
     semantic_log_path: Path
     odom_execution_certificate_path: Path | None = None
+    motion_authorization_permit_path: Path | None = None
+    motion_authorization_permit_sha256: str = ""
+
+
+@dataclass(frozen=True)
+class RuntimeLocalizationPermitContext:
+    """Exact mission scope needed to authorize one recovery child run."""
+
+    mission_authorization_json: Path
+    session_id: str
+    leg_index: int
+    target_viewpoint_id: str
+    reseal_index: int
+    max_runtime_reseals_per_leg: int
+    rejected_run_id: str
+    runtime_reseal_decision_evidence: dict[str, object]
+    fresh_localization_evidence_path: Path
+    permit_json_path: Path
 
 
 def _file_sha256(path: Path) -> str:
@@ -152,7 +189,12 @@ def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
-def _admit_preplanning_localization(runtime, session_root: Path) -> Pose2D:
+def _admit_preplanning_localization(
+    runtime,
+    session_root: Path,
+    *,
+    evidence_path: Path | None = None,
+) -> Pose2D:
     """Bind route planning to one strictly admitted stationary map pose."""
 
     preflight = run_ros_preflight(
@@ -173,7 +215,11 @@ def _admit_preplanning_localization(runtime, session_root: Path) -> Pose2D:
         ),
         max_stationary_amcl_yaw_std_rad=0.35,
     )
-    evidence_path = session_root / "preflight/preplanning_localization.json"
+    evidence_path = (
+        session_root / "preflight/preplanning_localization.json"
+        if evidence_path is None
+        else Path(evidence_path)
+    )
     _write_json(evidence_path, preflight.to_json_dict())
     if not preflight.ok:
         raise RuntimeError(
@@ -472,6 +518,9 @@ def _runner_command(
     localization_branch_proof_id: str = "",
     odom_execution_certificate_json: Path | None = None,
     uncertainty_budget_json: Path | None = None,
+    mission_motion_authorization_json: Path | None = None,
+    runtime_localization_motion_permit_json: Path | None = None,
+    mission_session_id: str = "",
 ) -> list[str]:
     run_phase = "dry" if dry_run else "execute"
     odom_fields = (
@@ -596,6 +645,38 @@ def _runner_command(
                 ),
             ]
         )
+    authorization_fields = (
+        mission_motion_authorization_json,
+        runtime_localization_motion_permit_json,
+    )
+    if any(value is not None for value in authorization_fields):
+        if any(value is None for value in authorization_fields):
+            raise ValueError(
+                "mission motion authorization and runtime localization "
+                "permit must be supplied together"
+            )
+        if dry_run:
+            raise ValueError(
+                "runtime localization motion permits are live-run only"
+            )
+        if not str(mission_session_id).strip():
+            raise ValueError(
+                "runtime localization motion permit requires mission_session_id"
+            )
+        if coverage_transient_replan is None:
+            raise ValueError(
+                "runtime localization motion permit requires a coverage leg"
+            )
+        command.extend(
+            [
+                "--mission-motion-authorization-json",
+                str(mission_motion_authorization_json),
+                "--runtime-localization-motion-permit-json",
+                str(runtime_localization_motion_permit_json),
+                "--mission-session-id",
+                str(mission_session_id).strip(),
+            ]
+        )
     if dry_run:
         command.append("--dry-run")
     return command
@@ -669,7 +750,12 @@ def _motion_outcome_from_log(
         status = str(event.get("status", ""))
         stop_reason = str(event.get("stop_reason", ""))
         details = event.get("stop_details", {})
-        motion_published = bool(event.get("motion_published", False))
+        motion_published = event.get("motion_published")
+        if not isinstance(motion_published, bool):
+            raise RuntimeError(
+                f"motion runner returned non-boolean motion_published "
+                f"for {run_id}"
+            )
     if status not in {"completed", "stopped", "preflight_failed"}:
         raise RuntimeError(f"motion runner returned invalid status {status!r} for {run_id}")
     if (status == "completed") != (returncode == 0):
@@ -690,6 +776,87 @@ def _motion_outcome_from_log(
     )
 
 
+def _issue_runtime_localization_motion_permit(
+    *,
+    context: RuntimeLocalizationPermitContext,
+    run_id: str,
+    route_csv: Path,
+    diagnostics_json: Path,
+    map_route_certificate_json: Path,
+    dry_preflight_json: Path,
+    dry_odom_certificate_json: Path,
+    dry_uncertainty_budget_json: Path,
+) -> tuple[Path, str]:
+    """Seal one exact child-run permit after the replacement dry-run passes."""
+
+    if run_id == context.rejected_run_id:
+        raise ValueError("runtime localization permit run_id must be new")
+    if context.reseal_index <= 0:
+        raise ValueError("runtime localization permit reseal_index must be positive")
+    if context.reseal_index > context.max_runtime_reseals_per_leg:
+        raise ValueError("runtime localization permit reseal budget exhausted")
+    master_path = Path(context.mission_authorization_json).absolute()
+    master = load_mission_motion_authorization(master_path)
+    decision_evidence = dict(context.runtime_reseal_decision_evidence)
+
+    def sealed(path: Path) -> tuple[str, str]:
+        canonical = Path(path).absolute()
+        return str(canonical), authorization_file_sha256(canonical)
+
+    fresh_path, fresh_sha256 = sealed(
+        context.fresh_localization_evidence_path
+    )
+    route_path, route_sha256 = sealed(route_csv)
+    diagnostics_path, diagnostics_sha256 = sealed(diagnostics_json)
+    map_certificate_path, map_certificate_sha256 = sealed(
+        map_route_certificate_json
+    )
+    dry_preflight_path, dry_preflight_sha256 = sealed(dry_preflight_json)
+    dry_certificate_path, dry_certificate_sha256 = sealed(
+        dry_odom_certificate_json
+    )
+    dry_budget_path, dry_budget_sha256 = sealed(
+        dry_uncertainty_budget_json
+    )
+    permit = RuntimeLocalizationMotionPermit(
+        master_authorization_sha256=mission_motion_authorization_sha256(master),
+        master_authorization_path=str(master_path),
+        run_id=run_id,
+        leg_index=context.leg_index,
+        target_viewpoint_id=context.target_viewpoint_id,
+        reseal_index=context.reseal_index,
+        max_runtime_reseals_per_leg=(
+            context.max_runtime_reseals_per_leg
+        ),
+        rejected_run_id=context.rejected_run_id,
+        runtime_reseal_decision_evidence=decision_evidence,
+        runtime_reseal_decision_sha256=payload_sha256(decision_evidence),
+        fresh_localization_evidence_path=fresh_path,
+        fresh_localization_evidence_sha256=fresh_sha256,
+        route_csv_path=route_path,
+        route_csv_sha256=route_sha256,
+        diagnostics_path=diagnostics_path,
+        diagnostics_sha256=diagnostics_sha256,
+        map_route_certificate_path=map_certificate_path,
+        map_route_certificate_sha256=map_certificate_sha256,
+        dry_preflight_path=dry_preflight_path,
+        dry_preflight_sha256=dry_preflight_sha256,
+        dry_odom_certificate_path=dry_certificate_path,
+        dry_odom_certificate_sha256=dry_certificate_sha256,
+        dry_uncertainty_budget_path=dry_budget_path,
+        dry_uncertainty_budget_sha256=dry_budget_sha256,
+        same_target_verified=True,
+        dry_run_passed=True,
+        additional_typed_run_required=False,
+    )
+    permit_path = Path(context.permit_json_path).absolute()
+    permit_sha256 = write_runtime_localization_motion_permit(
+        permit_path,
+        permit,
+    )
+    return permit_path, permit_sha256
+
+
 def _run_motion_leg(
     *,
     profile,
@@ -701,9 +868,29 @@ def _run_motion_leg(
     candidate_snapshot: Path | None = None,
     coverage_transient_replan: dict[str, object] | None = None,
     require_fresh_confirmation: bool = False,
+    fresh_confirmation_reason: str = "startup",
+    fresh_localization_evidence_path: Path | None = None,
     uncertainty_map_yaml: Path | None = None,
     localization_branch_proof_id: str = "",
+    runtime_localization_permit_context: (
+        RuntimeLocalizationPermitContext | None
+    ) = None,
 ) -> MotionLegOutcome:
+    if require_fresh_confirmation and fresh_confirmation_reason not in {
+        "startup",
+        "runtime_localization",
+    }:
+        raise ValueError(
+            "fresh_confirmation_reason must be startup or "
+            "runtime_localization"
+        )
+    if runtime_localization_permit_context is not None and (
+        not require_fresh_confirmation
+        or fresh_confirmation_reason != "runtime_localization"
+    ):
+        raise ValueError(
+            "runtime localization permit requires runtime fresh-confirmation context"
+        )
     common = {
         "profile": profile,
         "route_csv": Path(sealed["route_csv"]),
@@ -763,15 +950,62 @@ def _run_motion_leg(
             ),
             odom_execution_certificate_path=dry_certificate,
         )
-    if require_fresh_confirmation:
-        print(
-            "The prior route was rejected before motion because AMCL moved "
-            "outside its certified startup segment. A new A* route, exact-start "
-            "connector, dry-run, and certificate now match the rejected live pose."
+    motion_permit_path = None
+    motion_permit_sha256 = ""
+    if runtime_localization_permit_context is not None:
+        if dry_certificate is None or dry_budget is None:
+            raise RuntimeError(
+                "runtime localization permit requires uncertainty-aware dry evidence"
+            )
+        motion_permit_path, motion_permit_sha256 = (
+            _issue_runtime_localization_motion_permit(
+                context=runtime_localization_permit_context,
+                run_id=run_id,
+                route_csv=common["route_csv"],
+                diagnostics_json=common["diagnostics_json"],
+                map_route_certificate_json=common["certificate_json"],
+                dry_preflight_json=(
+                    session_root / "preflight" / f"{run_id}_dry.json"
+                ),
+                dry_odom_certificate_json=dry_certificate,
+                dry_uncertainty_budget_json=dry_budget,
+            )
         )
+    if require_fresh_confirmation:
+        if fresh_confirmation_reason == "runtime_localization":
+            print(
+                "The prior route stopped after motion because the global "
+                "localization consistency monitor required zero and reseal. "
+                "A fresh stationary AMCL/TF admission, A* route, exact-start "
+                "connector, dry-run, uncertainty budget, and certificate now "
+                "match the newly admitted map pose."
+            )
+        else:
+            print(
+                "The prior route was rejected before motion because AMCL moved "
+                "outside its certified startup segment. A new A* route, exact-start "
+                "connector, dry-run, and certificate now match the rejected live pose."
+            )
         print(f"Resealed route: {common['route_csv']}")
-        print(f"Resealed certificate: {common['certificate_json']}")
-        if input(
+        print(f"Resealed map-route certificate: {common['certificate_json']}")
+        if fresh_localization_evidence_path is not None:
+            print(
+                "Fresh stationary localization evidence: "
+                f"{fresh_localization_evidence_path}"
+            )
+        if dry_certificate is not None:
+            print(f"Dry odom-execution certificate: {dry_certificate}")
+        if dry_budget is not None:
+            print(f"Dry route-uncertainty budget: {dry_budget}")
+        if runtime_localization_permit_context is not None:
+            print(
+                "No additional RUN is required: this exact same-target "
+                "runtime-localization recovery is covered by the initial "
+                "mission authorization."
+            )
+            print(f"Runtime localization motion permit: {motion_permit_path}")
+            print(f"Runtime localization motion permit SHA-256: {motion_permit_sha256}")
+        elif input(
             f"Type RUN to authorize the resealed route {run_id}: "
         ).strip() != "RUN":
             raise RuntimeError(
@@ -792,6 +1026,17 @@ def _run_motion_leg(
         dry_run=False,
         odom_execution_certificate_json=live_certificate,
         uncertainty_budget_json=live_budget,
+        mission_motion_authorization_json=(
+            None
+            if runtime_localization_permit_context is None
+            else runtime_localization_permit_context.mission_authorization_json
+        ),
+        runtime_localization_motion_permit_json=motion_permit_path,
+        mission_session_id=(
+            ""
+            if runtime_localization_permit_context is None
+            else runtime_localization_permit_context.session_id
+        ),
     )
     wrapped = _bundle_command(profile, run_id, runner)
     result = subprocess.run(
@@ -805,6 +1050,8 @@ def _run_motion_leg(
             returncode=result.returncode,
         ),
         odom_execution_certificate_path=live_certificate,
+        motion_authorization_permit_path=motion_permit_path,
+        motion_authorization_permit_sha256=motion_permit_sha256,
     )
 
 
@@ -897,6 +1144,54 @@ def _is_resealable_startup_mismatch(outcome: MotionLegOutcome) -> bool:
     )
 
 
+def _is_runtime_localization_reseal_required(outcome: MotionLegOutcome) -> bool:
+    return evaluate_runtime_localization_reseal(
+        status=outcome.status,
+        motion_published=outcome.motion_published,
+        stop_details=outcome.stop_details,
+    ).eligible
+
+
+def _adopted_blockage_replans_for_run(
+    adaptive_log: Path,
+    *,
+    run_id: str,
+) -> list[dict[str, object]]:
+    """Load adopted in-process blockage replans for one child run.
+
+    A localization reseal starts a new child process.  Until the last dynamic
+    overlay and its cumulative budget can be restored into that child, a run
+    that already adopted such an overlay is not safe to resume.  Malformed
+    evidence therefore fails closed instead of being treated as no overlay.
+    """
+
+    path = Path(adaptive_log)
+    if not path.exists():
+        return []
+    try:
+        payloads = [
+            json.loads(line)
+            for line in path.read_text().splitlines()
+            if line.strip()
+        ]
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"cannot validate prior blockage-replan state in {path}: {exc}"
+        ) from exc
+    if not all(isinstance(payload, dict) for payload in payloads):
+        raise RuntimeError(
+            f"cannot validate prior blockage-replan state in {path}: "
+            "JSONL entries must be objects"
+        )
+    return [
+        dict(payload)
+        for payload in payloads
+        if payload.get("event")
+        == "transient_navigation_blockage_replanned"
+        and payload.get("run_id") == run_id
+    ]
+
+
 def _startup_reseal_pose(outcome: MotionLegOutcome) -> Pose2D:
     if not _is_resealable_startup_mismatch(outcome):
         raise ValueError("outcome is not a resealable startup mismatch")
@@ -914,7 +1209,25 @@ def _startup_reseal_pose(outcome: MotionLegOutcome) -> Pose2D:
     return pose
 
 
-def _replan_startup_source(
+def _coverage_reseal_suffix(
+    *,
+    startup_reseal_index: int,
+    runtime_localization_reseal_index: int,
+) -> str:
+    if startup_reseal_index < 0 or runtime_localization_reseal_index < 0:
+        raise ValueError("reseal indices must be non-negative")
+    parts = []
+    if startup_reseal_index:
+        parts.append(f"startup_reseal_{startup_reseal_index:03d}")
+    if runtime_localization_reseal_index:
+        parts.append(
+            "runtime_localization_reseal_"
+            f"{runtime_localization_reseal_index:03d}"
+        )
+    return "" if not parts else "_" + "_".join(parts)
+
+
+def _replan_coverage_source_from_pose(
     *,
     map_yaml: Path,
     semantic_map_id: str,
@@ -925,11 +1238,13 @@ def _replan_startup_source(
     rejected_outcome: MotionLegOutcome,
     reseal_index: int,
     output_dir: Path,
+    reseal_kind: str,
+    status: str,
 ) -> dict[str, str]:
-    """Rebuild a complete motion-free A* leg from a rejected live pose."""
+    """Rebuild a complete motion-free A* coverage leg from a fresh map pose."""
 
     if reseal_index <= 0:
-        raise ValueError("startup reseal index must be positive")
+        raise ValueError(f"{reseal_kind} reseal index must be positive")
     plan = load_coverage_survey_plan(plan_path)
     progress = load_survey_progress(
         survey_root / "coverage_progress.json",
@@ -945,7 +1260,7 @@ def _replan_startup_source(
         planning_frame=plan.planning_frame,
     )
     if map_bundle.bundle_sha256 != plan.map_bundle_sha256:
-        raise ValueError("startup reseal map differs from coverage plan")
+        raise ValueError(f"{reseal_kind} reseal map differs from coverage plan")
     next_leg = plan_next_survey_leg(
         grid,
         plan=plan,
@@ -954,10 +1269,10 @@ def _replan_startup_source(
         current_pose=current_pose,
     )
     if next_leg is None:
-        raise ValueError("startup reseal found no remaining coverage leg")
+        raise ValueError(f"{reseal_kind} reseal found no remaining coverage leg")
     if next_leg.viewpoint.viewpoint_id != expected_target_viewpoint_id:
         raise ValueError(
-            "startup reseal changed the committed coverage target: "
+            f"{reseal_kind} reseal changed the committed coverage target: "
             f"expected={expected_target_viewpoint_id} "
             f"selected={next_leg.viewpoint.viewpoint_id}"
         )
@@ -965,7 +1280,7 @@ def _replan_startup_source(
     output_dir.mkdir(parents=True, exist_ok=False)
     route_path = output_dir / "route.csv"
     diagnostics_path = output_dir / "route_diagnostics.json"
-    summary_path = output_dir / "startup_reseal_summary.json"
+    summary_path = output_dir / f"{reseal_kind}_reseal_summary.json"
     write_route_csv(
         route_path,
         (next_leg.route_result,),
@@ -1001,17 +1316,19 @@ def _replan_startup_source(
             ),
             "arena_boundary_overlay": True,
             "arena_bounds": plan.arena_bounds.to_metadata(),
-            "startup_reseal": True,
-            "startup_reseal_index": reseal_index,
+            "reseal_kind": reseal_kind,
+            f"{reseal_kind}_reseal": True,
+            f"{reseal_kind}_reseal_index": reseal_index,
             "rejected_run_id": rejected_outcome.run_id,
             "rejected_stop_details": rejected_outcome.stop_details,
         },
     )
     summary = {
         "schema_version": 1,
-        "status": "startup_route_replanned",
+        "status": status,
         "motion_published": False,
-        "startup_reseal_index": reseal_index,
+        "reseal_kind": reseal_kind,
+        f"{reseal_kind}_reseal_index": reseal_index,
         "rejected_run_id": rejected_outcome.run_id,
         "target_viewpoint_id": next_leg.viewpoint.viewpoint_id,
         "fresh_start_pose": {
@@ -1030,6 +1347,64 @@ def _replan_startup_source(
     }
 
 
+def _replan_startup_source(
+    *,
+    map_yaml: Path,
+    semantic_map_id: str,
+    survey_root: Path,
+    plan_path: Path,
+    expected_target_viewpoint_id: str,
+    current_pose: Pose2D,
+    rejected_outcome: MotionLegOutcome,
+    reseal_index: int,
+    output_dir: Path,
+) -> dict[str, str]:
+    """Rebuild a complete motion-free A* leg from a rejected live pose."""
+
+    return _replan_coverage_source_from_pose(
+        map_yaml=map_yaml,
+        semantic_map_id=semantic_map_id,
+        survey_root=survey_root,
+        plan_path=plan_path,
+        expected_target_viewpoint_id=expected_target_viewpoint_id,
+        current_pose=current_pose,
+        rejected_outcome=rejected_outcome,
+        reseal_index=reseal_index,
+        output_dir=output_dir,
+        reseal_kind="startup",
+        status="startup_route_replanned",
+    )
+
+
+def _replan_runtime_localization_source(
+    *,
+    map_yaml: Path,
+    semantic_map_id: str,
+    survey_root: Path,
+    plan_path: Path,
+    expected_target_viewpoint_id: str,
+    current_pose: Pose2D,
+    rejected_outcome: MotionLegOutcome,
+    reseal_index: int,
+    output_dir: Path,
+) -> dict[str, str]:
+    """Rebuild a complete A* leg after post-motion localization reseal."""
+
+    return _replan_coverage_source_from_pose(
+        map_yaml=map_yaml,
+        semantic_map_id=semantic_map_id,
+        survey_root=survey_root,
+        plan_path=plan_path,
+        expected_target_viewpoint_id=expected_target_viewpoint_id,
+        current_pose=current_pose,
+        rejected_outcome=rejected_outcome,
+        reseal_index=reseal_index,
+        output_dir=output_dir,
+        reseal_kind="runtime_localization",
+        status="runtime_localization_route_replanned",
+    )
+
+
 def _execute_coverage_leg_with_replans(
     *,
     profile,
@@ -1041,6 +1416,7 @@ def _execute_coverage_leg_with_replans(
     target_viewpoint_id: str,
     source_route: Path,
     source_diagnostics: Path,
+    mission_motion_authorization_json: Path | None = None,
 ) -> MotionLegOutcome:
     """Run one coverage leg with in-process transient-overlay A* recovery."""
 
@@ -1048,26 +1424,87 @@ def _execute_coverage_leg_with_replans(
         getattr(args, "localization_branch_proof_id", "")
     ).strip()
     startup_reseal_index = 0
+    runtime_localization_reseal_index = 0
+    fresh_confirmation_reason: str | None = None
+    fresh_localization_evidence_path: Path | None = None
+    pending_runtime_route_seal: dict[str, object] | None = None
+    pending_runtime_permit_context: (
+        RuntimeLocalizationPermitContext | None
+    ) = None
     adaptive_log = session_root / "adaptive_replans.jsonl"
     while True:
-        startup_suffix = (
-            ""
-            if startup_reseal_index == 0
-            else f"_startup_reseal_{startup_reseal_index:03d}"
+        suffix = _coverage_reseal_suffix(
+            startup_reseal_index=startup_reseal_index,
+            runtime_localization_reseal_index=(
+                runtime_localization_reseal_index
+            ),
         )
-        suffix = startup_suffix
         run_id = f"{args.session_id}_coverage_{leg_index:03d}{suffix}"
         execution_root = (
             session_root
             / "execution"
             / f"coverage_leg_{leg_index:03d}{suffix}"
         )
-        sealed = seal_stand_discovery_route(
-            source_route_csv=source_route,
-            source_diagnostics_json=source_diagnostics,
-            coverage_plan_path=plan_path,
-            output_dir=execution_root,
-        )
+        try:
+            sealed = seal_stand_discovery_route(
+                source_route_csv=source_route,
+                source_diagnostics_json=source_diagnostics,
+                coverage_plan_path=plan_path,
+                output_dir=execution_root,
+            )
+        except Exception as exc:
+            if pending_runtime_route_seal is not None:
+                _append_jsonl(
+                    adaptive_log,
+                    {
+                        **pending_runtime_route_seal,
+                        "schema_version": 1,
+                        "event": "runtime_localization_reseal_failed",
+                        "timestamp": time.time(),
+                        "phase": "route_seal",
+                        "failure": str(exc),
+                        "motion_continues_authorized": False,
+                    },
+                )
+            raise
+        if pending_runtime_route_seal is not None:
+            covered_by_initial_run = mission_motion_authorization_json is not None
+            _append_jsonl(
+                adaptive_log,
+                {
+                    **pending_runtime_route_seal,
+                    "schema_version": 1,
+                    "event": "runtime_localization_route_sealed",
+                    "timestamp": time.time(),
+                    "replacement_run_id": run_id,
+                    "replacement_route_csv": sealed["route_csv"],
+                    "replacement_diagnostics_json": sealed[
+                        "diagnostics_json"
+                    ],
+                    "replacement_route_certificate_json": sealed[
+                        "route_certificate_json"
+                    ],
+                    "expected_dry_odom_execution_certificate_json": str(
+                        session_root
+                        / "odom_execution"
+                        / f"{run_id}_dry_certificate.json"
+                    ),
+                    "expected_dry_uncertainty_budget_json": str(
+                        session_root
+                        / "odom_execution"
+                        / f"{run_id}_dry_uncertainty_budget.json"
+                    ),
+                    "fresh_typed_run_required": not covered_by_initial_run,
+                    "covered_by_initial_mission_run": covered_by_initial_run,
+                    "expected_runtime_localization_motion_permit_json": (
+                        ""
+                        if pending_runtime_permit_context is None
+                        else str(pending_runtime_permit_context.permit_json_path)
+                    ),
+                    "motion_continues_authorized": False,
+                },
+            )
+            pending_runtime_route_seal = None
         outcome = _run_motion_leg(
             profile=profile,
             sealed=sealed,
@@ -1085,7 +1522,11 @@ def _execute_coverage_leg_with_replans(
                 "max_replans": args.max_blockage_replans_per_leg,
                 "leg_index": leg_index,
             },
-            require_fresh_confirmation=startup_reseal_index > 0,
+            require_fresh_confirmation=fresh_confirmation_reason is not None,
+            fresh_confirmation_reason=(
+                fresh_confirmation_reason or "startup"
+            ),
+            fresh_localization_evidence_path=fresh_localization_evidence_path,
             # Production execution always carries this proof (validated by
             # _validate_inputs). Keeping the empty-proof case map-native
             # preserves compatibility for no-motion/unit callers.
@@ -1093,7 +1534,30 @@ def _execute_coverage_leg_with_replans(
                 args.map if localization_branch_proof_id else None
             ),
             localization_branch_proof_id=localization_branch_proof_id,
+            runtime_localization_permit_context=(
+                pending_runtime_permit_context
+            ),
         )
+        if outcome.motion_authorization_permit_path is not None:
+            _append_jsonl(
+                adaptive_log,
+                {
+                    "schema_version": 1,
+                    "event": "runtime_localization_motion_permit_issued",
+                    "timestamp": time.time(),
+                    "leg_index": leg_index,
+                    "run_id": outcome.run_id,
+                    "runtime_localization_motion_permit_json": str(
+                        outcome.motion_authorization_permit_path
+                    ),
+                    "runtime_localization_motion_permit_sha256": (
+                        outcome.motion_authorization_permit_sha256
+                    ),
+                    "covered_by_initial_mission_run": True,
+                    "additional_typed_run_required": False,
+                },
+            )
+        pending_runtime_permit_context = None
         if outcome.status == "completed":
             return outcome
         if _is_resealable_startup_mismatch(outcome):
@@ -1144,6 +1608,259 @@ def _execute_coverage_leg_with_replans(
             )
             source_route = Path(replanned["route_csv"])
             source_diagnostics = Path(replanned["diagnostics_json"])
+            fresh_confirmation_reason = "startup"
+            fresh_localization_evidence_path = None
+            continue
+        runtime_localization_decision = evaluate_runtime_localization_reseal(
+            status=outcome.status,
+            motion_published=outcome.motion_published,
+            stop_details=outcome.stop_details,
+        )
+        if runtime_localization_decision.eligible:
+            adopted_blockage_replans = _adopted_blockage_replans_for_run(
+                adaptive_log,
+                run_id=outcome.run_id,
+            )
+            if adopted_blockage_replans:
+                _append_jsonl(
+                    adaptive_log,
+                    {
+                        "schema_version": 1,
+                        "event": "runtime_localization_reseal_rejected",
+                        "timestamp": time.time(),
+                        "leg_index": leg_index,
+                        "rejected_run_id": outcome.run_id,
+                        "reason": (
+                            "adopted_transient_blockage_replan_not_replayable"
+                        ),
+                        "adopted_blockage_replan_count": len(
+                            adopted_blockage_replans
+                        ),
+                        "runtime_localization_reseal_decision": (
+                            runtime_localization_decision.to_evidence()
+                        ),
+                        "motion_continues_authorized": False,
+                        "fail_closed": True,
+                    },
+                )
+                raise RuntimeError(
+                    "runtime localization reseal after an adopted transient "
+                    "blockage replan is not supported yet; refusing to relaunch "
+                    "a child runner with reset overlay state"
+                )
+            budget = evaluate_runtime_localization_reseal_budget(
+                completed_reseal_count=runtime_localization_reseal_index,
+                maximum_reseal_count=(
+                    args.max_runtime_localization_reseals_per_leg
+                ),
+            )
+            if not budget.allowed:
+                _append_jsonl(
+                    adaptive_log,
+                    {
+                        "schema_version": 1,
+                        "event": "runtime_localization_reseal_rejected",
+                        "timestamp": time.time(),
+                        "leg_index": leg_index,
+                        "rejected_run_id": outcome.run_id,
+                        "reason": budget.reason,
+                        "runtime_localization_reseal_decision": (
+                            runtime_localization_decision.to_evidence()
+                        ),
+                        "runtime_localization_reseal_budget": (
+                            budget.to_evidence()
+                        ),
+                        "motion_continues_authorized": False,
+                        "fail_closed": True,
+                    },
+                )
+                raise RuntimeError(
+                    "runtime localization reseal budget exhausted for "
+                    f"coverage leg {leg_index}: {outcome.stop_reason}"
+                )
+            assert budget.next_reseal_index is not None
+            runtime_localization_reseal_index = budget.next_reseal_index
+            runtime = (
+                profile.resolved_runtime()
+                if callable(getattr(profile, "resolved_runtime", None))
+                else profile
+            )
+            fresh_localization_evidence_path = (
+                session_root
+                / "preflight"
+                / "runtime_localization_reseals"
+                / (
+                    f"coverage_leg_{leg_index:03d}"
+                    f"_runtime_localization_reseal_"
+                    f"{runtime_localization_reseal_index:03d}.json"
+                )
+            )
+            recovery_event_base = {
+                "leg_index": leg_index,
+                "runtime_localization_reseal_index": (
+                    runtime_localization_reseal_index
+                ),
+                "rejected_run_id": outcome.run_id,
+                "rejected_stop_details": outcome.stop_details,
+                "fresh_localization_evidence_json": str(
+                    fresh_localization_evidence_path
+                ),
+                "runtime_localization_reseal_decision": (
+                    runtime_localization_decision.to_evidence()
+                ),
+                "runtime_localization_reseal_budget": budget.to_evidence(),
+                "fresh_confirmation_required": (
+                    mission_motion_authorization_json is None
+                ),
+                "covered_by_initial_mission_run": (
+                    mission_motion_authorization_json is not None
+                ),
+                "additional_typed_run_required": (
+                    mission_motion_authorization_json is None
+                ),
+                "motion_continues_authorized": False,
+            }
+            _append_jsonl(
+                adaptive_log,
+                {
+                    **recovery_event_base,
+                    "schema_version": 1,
+                    "event": "runtime_localization_reseal_started",
+                    "timestamp": time.time(),
+                    "source_stop_requires_zero_cycle": True,
+                },
+            )
+            try:
+                admitted_pose = _admit_preplanning_localization(
+                    runtime,
+                    session_root,
+                    evidence_path=fresh_localization_evidence_path,
+                )
+            except Exception as exc:
+                _append_jsonl(
+                    adaptive_log,
+                    {
+                        **recovery_event_base,
+                        "schema_version": 1,
+                        "event": "runtime_localization_reseal_failed",
+                        "timestamp": time.time(),
+                        "phase": "stationary_localization_admission",
+                        "failure": str(exc),
+                    },
+                )
+                raise
+            fresh_start_pose = {
+                "x_m": admitted_pose.x_m,
+                "y_m": admitted_pose.y_m,
+                "yaw_rad": admitted_pose.yaw_rad,
+            }
+            _append_jsonl(
+                adaptive_log,
+                {
+                    **recovery_event_base,
+                    "schema_version": 1,
+                    "event": "runtime_localization_admitted",
+                    "timestamp": time.time(),
+                    "fresh_start_pose": fresh_start_pose,
+                },
+            )
+            reseal_root = (
+                survey_root
+                / "runtime_localization_reseals"
+                / (
+                    f"leg_{leg_index:03d}"
+                    f"_runtime_localization_reseal_"
+                    f"{runtime_localization_reseal_index:03d}"
+                )
+            )
+            try:
+                replanned = _replan_runtime_localization_source(
+                    map_yaml=args.map,
+                    semantic_map_id=args.semantic_map_id,
+                    survey_root=survey_root,
+                    plan_path=plan_path,
+                    expected_target_viewpoint_id=target_viewpoint_id,
+                    current_pose=admitted_pose,
+                    rejected_outcome=outcome,
+                    reseal_index=runtime_localization_reseal_index,
+                    output_dir=reseal_root,
+                )
+            except Exception as exc:
+                _append_jsonl(
+                    adaptive_log,
+                    {
+                        **recovery_event_base,
+                        "schema_version": 1,
+                        "event": "runtime_localization_reseal_failed",
+                        "timestamp": time.time(),
+                        "phase": "same_target_route_replan",
+                        "failure": str(exc),
+                    },
+                )
+                raise
+            _append_jsonl(
+                adaptive_log,
+                {
+                    **recovery_event_base,
+                    "schema_version": 1,
+                    "event": "runtime_localization_route_replanned",
+                    "timestamp": time.time(),
+                    "fresh_start_pose": fresh_start_pose,
+                    "replacement_route_csv": replanned["route_csv"],
+                    "replacement_diagnostics_json": replanned[
+                        "diagnostics_json"
+                    ],
+                    "replacement_summary_json": replanned["summary_json"],
+                    "dynamic_overlay_preserved": False,
+                    "adopted_blockage_replan_count": 0,
+                    "committed_target_viewpoint_id": target_viewpoint_id,
+                },
+            )
+            pending_runtime_route_seal = {
+                **recovery_event_base,
+                "fresh_start_pose": fresh_start_pose,
+                "committed_target_viewpoint_id": target_viewpoint_id,
+                "replacement_source_route_csv": replanned["route_csv"],
+                "replacement_source_diagnostics_json": replanned[
+                    "diagnostics_json"
+                ],
+                "replacement_summary_json": replanned["summary_json"],
+            }
+            if mission_motion_authorization_json is not None:
+                pending_runtime_permit_context = (
+                    RuntimeLocalizationPermitContext(
+                        mission_authorization_json=Path(
+                            mission_motion_authorization_json
+                        ).absolute(),
+                        session_id=args.session_id,
+                        leg_index=leg_index,
+                        target_viewpoint_id=target_viewpoint_id,
+                        reseal_index=runtime_localization_reseal_index,
+                        max_runtime_reseals_per_leg=(
+                            args.max_runtime_localization_reseals_per_leg
+                        ),
+                        rejected_run_id=outcome.run_id,
+                        runtime_reseal_decision_evidence=(
+                            runtime_localization_decision.to_evidence()
+                        ),
+                        fresh_localization_evidence_path=(
+                            fresh_localization_evidence_path
+                        ),
+                        permit_json_path=(
+                            session_root
+                            / "motion_authorization"
+                            / (
+                                f"{args.session_id}_coverage_"
+                                f"{leg_index:03d}_runtime_localization_"
+                                f"reseal_{runtime_localization_reseal_index:03d}_"
+                                "permit.json"
+                            )
+                        ).absolute(),
+                    )
+                )
+            source_route = Path(replanned["route_csv"])
+            source_diagnostics = Path(replanned["diagnostics_json"])
+            fresh_confirmation_reason = "runtime_localization"
             continue
         _require_completed_motion(outcome)
 
@@ -1460,7 +2177,19 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Maximum fresh-pose A* reseals after a route is rejected before "
             "motion because AMCL left its certified startup segment. Every "
-            "successful reseal requires a new typed RUN."
+            "coverage-leg reseal requires a new typed RUN."
+        ),
+    )
+    parser.add_argument(
+        "--max-runtime-localization-reseals-per-leg",
+        type=int,
+        default=DEFAULT_MAX_RUNTIME_LOCALIZATION_RESEALS_PER_LEG,
+        help=(
+            "Maximum fresh stationary AMCL/TF admissions and A* reseals after "
+            "motion has stopped because the global localization consistency "
+            "monitor invalidated the odom execution certificate. The initial "
+            "mission RUN may cover these bounded same-leg, same-target retries "
+            "after a fresh immutable motion permit is admitted."
         ),
     )
     parser.add_argument(
@@ -1488,6 +2217,10 @@ def _validate_inputs(parser, args, profile, calibration) -> None:
         parser.error("--max-blockage-replans-per-leg must be non-negative")
     if args.max_startup_reseals_per_leg < 0:
         parser.error("--max-startup-reseals-per-leg must be non-negative")
+    if args.max_runtime_localization_reseals_per_leg < 0:
+        parser.error(
+            "--max-runtime-localization-reseals-per-leg must be non-negative"
+        )
     args.localization_branch_proof_id = str(
         args.localization_branch_proof_id
     ).strip()
@@ -1669,10 +2402,71 @@ def main(argv=None) -> int:
             "and its bounded scan-backed transient-obstacle A* replans "
             f"(maximum {args.max_blockage_replans_per_leg} per coverage leg). "
             "A pre-motion AMCL/start mismatch never inherits this RUN: the "
-            "route is rebuilt and a fresh typed RUN is required."
+            "route is rebuilt and a fresh typed RUN is required. On a coverage "
+            "leg, an exact post-motion global-localization reseal also stops "
+            "first, recollects stationary AMCL/TF evidence, rebuilds the route "
+            "to the same coverage target, reruns every dry/live gate, and may "
+            "reuse this RUN for at most "
+            f"{args.max_runtime_localization_reseals_per_leg} reseal(s) per leg "
+            "through an exact one-run permit. Route-tube, stale-TF, obstacle, "
+            "ownership, target-change, malformed-evidence, and budget failures "
+            "remain terminal."
         )
         if input("Type RUN to authorize the autonomous exploration mission: ").strip() != "RUN":
             raise RuntimeError("operator did not authorize the mission")
+
+        mission_motion_authorization_json = (
+            session_root
+            / "motion_authorization"
+            / "mission_motion_authorization.json"
+        ).absolute()
+        mission_motion_authorization = MissionMotionAuthorization(
+            session_id=args.session_id,
+            robot_id=profile.robot_id,
+            namespace=runtime.namespace,
+            cmd_vel_topic=runtime.cmd_vel_topic,
+            semantic_map_id=args.semantic_map_id,
+            localization_branch_proof_id=(
+                args.localization_branch_proof_id
+            ),
+            max_runtime_reseals_per_leg=(
+                args.max_runtime_localization_reseals_per_leg
+            ),
+            scope_text=MISSION_MOTION_AUTHORIZATION_SCOPE,
+            operator_confirmation=MISSION_RUN_CONFIRMATION,
+            allowed_recovery_kind=(
+                RUNTIME_LOCALIZATION_RESEAL_RECOVERY_KIND
+            ),
+        )
+        mission_motion_authorization_hash = (
+            write_mission_motion_authorization(
+                mission_motion_authorization_json,
+                mission_motion_authorization,
+            )
+        )
+        _append_jsonl(
+            session_root / "adaptive_replans.jsonl",
+            {
+                "schema_version": 1,
+                "event": "mission_motion_authorization_issued",
+                "timestamp": time.time(),
+                "session_id": args.session_id,
+                "authorization_scope": authorization_scope,
+                "mission_motion_authorization_json": str(
+                    mission_motion_authorization_json
+                ),
+                "mission_motion_authorization_sha256": (
+                    mission_motion_authorization_hash
+                ),
+                "max_runtime_localization_reseals_per_leg": (
+                    args.max_runtime_localization_reseals_per_leg
+                ),
+                "allowed_recovery_kind": (
+                    RUNTIME_LOCALIZATION_RESEAL_RECOVERY_KIND
+                ),
+                "additional_typed_run_required_for_eligible_recovery": False,
+            },
+        )
 
         leg_index = 0
         while True:
@@ -1694,6 +2488,9 @@ def main(argv=None) -> int:
                 target_viewpoint_id=str(viewpoint_id),
                 source_route=source_route,
                 source_diagnostics=source_diagnostics,
+                mission_motion_authorization_json=(
+                    mission_motion_authorization_json
+                ),
             )
             observer_summary = _capture_lidar_epoch(
                 profile=profile,

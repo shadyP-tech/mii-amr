@@ -91,6 +91,16 @@ from scripts.aufgabe04.navigation.route_uncertainty_admission import (
 from scripts.aufgabe04.navigation.route_uncertainty_budget import (
     PlanarCovariance,
 )
+from scripts.aufgabe04.navigation.runtime_motion_authorization import (
+    RuntimeLocalizationMotionPermit,
+    runtime_localization_motion_permit_sha256,
+    validate_runtime_localization_motion_permit_for_execution,
+)
+from scripts.aufgabe04.navigation.runtime_motion_consumption import (
+    consume_runtime_motion_permit,
+    default_runtime_motion_consumption_receipt_path,
+    runtime_motion_consumption_receipt_sha256,
+)
 from scripts.aufgabe04.navigation.mission_execution_gate import (
     DiagnosticsSnapshot,
     MissionExecutionBinding,
@@ -396,6 +406,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--uncertainty-budget-json", type=Path)
     parser.add_argument("--uncertainty-map-yaml", type=Path)
     parser.add_argument("--localization-branch-proof-id", default="")
+    parser.add_argument(
+        "--mission-motion-authorization-json",
+        type=Path,
+        help=(
+            "Internal autonomous-wrapper evidence for the mission-level RUN. "
+            "It never bypasses gates by itself."
+        ),
+    )
+    parser.add_argument(
+        "--runtime-localization-motion-permit-json",
+        type=Path,
+        help=(
+            "Internal one-run, same-target runtime-localization recovery permit."
+        ),
+    )
+    parser.add_argument(
+        "--mission-session-id",
+        default="",
+        help="Session identity bound by an internal motion permit.",
+    )
     parser.add_argument("--uncertainty-robot-radius-m", type=float)
     parser.add_argument(
         "--uncertainty-collision-margin-m", type=float, default=0.02
@@ -1513,6 +1543,135 @@ def _confirm_motion(args, resolved) -> bool:
     _physical_checklist(args, resolved)
     response = input("Type RUN to start station-segment following: ").strip()
     return response == "RUN"
+
+
+def _validated_runtime_localization_motion_permit(
+    args,
+    resolved,
+    *,
+    route_csv_path: Path,
+    diagnostics_path: Path,
+) -> RuntimeLocalizationMotionPermit | None:
+    """Return the exact recovery permit or preserve normal interactive motion."""
+
+    paths = (
+        args.mission_motion_authorization_json,
+        args.runtime_localization_motion_permit_json,
+    )
+    if all(path is None for path in paths):
+        return None
+    if any(path is None for path in paths):
+        raise ValueError(
+            "mission motion authorization and runtime localization permit "
+            "must be supplied together"
+        )
+    if args.dry_run:
+        raise ValueError("runtime localization motion permit is live-run only")
+    if args.allow_sim_time:
+        raise ValueError(
+            "runtime localization motion permit is physical-runtime only"
+        )
+    if args.execution_pose_frame != "odom":
+        raise ValueError(
+            "runtime localization motion permit requires odom execution"
+        )
+    if args.route_certificate_json is None:
+        raise ValueError(
+            "runtime localization motion permit requires a map route certificate"
+        )
+    if args.coverage_transient_replan_leg_index is None:
+        raise ValueError(
+            "runtime localization motion permit requires a coverage leg index"
+        )
+    target_viewpoint_id = str(
+        args.coverage_transient_replan_target_viewpoint_id
+    ).strip()
+    semantic_map_id = str(
+        args.coverage_transient_replan_semantic_map_id
+    ).strip()
+    session_id = str(args.mission_session_id).strip()
+    if not target_viewpoint_id or not semantic_map_id or not session_id:
+        raise ValueError(
+            "runtime localization motion permit requires session, semantic map, "
+            "and target identities"
+        )
+    return validate_runtime_localization_motion_permit_for_execution(
+        args.runtime_localization_motion_permit_json,
+        master_authorization_path=args.mission_motion_authorization_json,
+        session_id=session_id,
+        run_id=args.run_id,
+        robot_id=args.robot_id,
+        namespace=resolved.namespace,
+        cmd_vel_topic=resolved.cmd_vel_topic,
+        semantic_map_id=semantic_map_id,
+        target_viewpoint_id=target_viewpoint_id,
+        leg_index=args.coverage_transient_replan_leg_index,
+        localization_branch_proof_id=args.localization_branch_proof_id,
+        route_csv_path=route_csv_path,
+        diagnostics_path=diagnostics_path,
+        map_route_certificate_path=args.route_certificate_json,
+    )
+
+
+def _record_runtime_motion_authorization_rejection(
+    *,
+    args,
+    resolved,
+    leg,
+    event_logger,
+    failure: object,
+) -> int:
+    """Persist one no-motion authorization failure with terminal evidence."""
+
+    stop_reason = f"runtime localization motion permit rejected: {failure}"
+    stop_details = {
+        "reason": stop_reason,
+        "fault_code": "runtime_motion_authorization_rejected",
+        "source": "runtime_motion_authorization",
+        "motion_published": False,
+        "fail_closed": True,
+    }
+    result = FollowerResult(
+        "preflight_failed",
+        stop_reason,
+        0.0,
+        0.0,
+        False,
+        stop_details,
+    )
+    _append_result(args, resolved, leg, preflight_ok=False, result=result)
+    emit_event(
+        event_logger,
+        "motion_authorization_rejected",
+        run_id=args.run_id,
+        leg_index=leg.leg_index,
+        status=result.status,
+        stop_reason=stop_reason,
+        motion_published=False,
+        stop_details=stop_details,
+    )
+    emit_event(
+        event_logger,
+        "preflight_failed",
+        run_id=args.run_id,
+        leg_index=leg.leg_index,
+        status=result.status,
+        failures=[stop_reason],
+        observations=[],
+        runtime_config=resolved.as_log_dict(),
+        motion_published=False,
+    )
+    emit_event(
+        event_logger,
+        "run_finished",
+        run_id=args.run_id,
+        final_status=result.status,
+        stop_reason=stop_reason,
+        results_csv=str(args.results_csv),
+        semantic_log_path=str(args.semantic_log),
+        preflight_json_path=str(args.preflight_json or ""),
+    )
+    return 1
 
 
 def _prompt_for_initialpose(args, resolved) -> None:
@@ -2822,7 +2981,24 @@ def main(argv: list[str] | None = None) -> int:
             preflight_json_path=str(args.preflight_json or ""),
         )
         return 0
-    if not _confirm_motion(args, resolved):
+    runtime_motion_permit = None
+    try:
+        runtime_motion_permit = _validated_runtime_localization_motion_permit(
+            args,
+            resolved,
+            route_csv_path=route_csv_path,
+            diagnostics_path=diagnostics_json_path,
+        )
+    except ValueError as exc:
+        return _record_runtime_motion_authorization_rejection(
+            args=args,
+            resolved=resolved,
+            leg=leg,
+            event_logger=event_logger,
+            failure=exc,
+        )
+
+    if runtime_motion_permit is None and not _confirm_motion(args, resolved):
         result = FollowerResult("aborted", "operator did not type RUN", 0.0, 0.0, False)
         _append_result(args, resolved, leg, preflight_ok=True, result=result)
         emit_event(
@@ -3298,6 +3474,66 @@ def main(argv: list[str] | None = None) -> int:
 
         def waypoint_provider(pose):
             return route_source.poll(pose)
+    if runtime_motion_permit is not None:
+        try:
+            receipt_path = default_runtime_motion_consumption_receipt_path(
+                args.runtime_localization_motion_permit_json
+            )
+            runtime_motion_receipt = consume_runtime_motion_permit(
+                permit_path=args.runtime_localization_motion_permit_json,
+                permit=runtime_motion_permit,
+                session_id=args.mission_session_id,
+                run_id=args.run_id,
+                leg_index=runtime_motion_permit.leg_index,
+                target_viewpoint_id=(
+                    runtime_motion_permit.target_viewpoint_id
+                ),
+                reseal_index=runtime_motion_permit.reseal_index,
+            )
+        except ValueError as exc:
+            return _record_runtime_motion_authorization_rejection(
+                args=args,
+                resolved=resolved,
+                leg=leg,
+                event_logger=event_logger,
+                failure=exc,
+            )
+        print(
+            "Using the mission-level RUN for this exact bounded, same-target "
+            "runtime-localization recovery. All live gates passed and the "
+            "one-use receipt was claimed; no additional operator input is "
+            "requested."
+        )
+        emit_event(
+            event_logger,
+            "runtime_localization_motion_permit_consumed",
+            run_id=args.run_id,
+            leg_index=leg.leg_index,
+            target_viewpoint_id=(
+                runtime_motion_permit.target_viewpoint_id
+            ),
+            reseal_index=runtime_motion_permit.reseal_index,
+            rejected_run_id=runtime_motion_permit.rejected_run_id,
+            mission_motion_authorization_json=str(
+                args.mission_motion_authorization_json
+            ),
+            runtime_localization_motion_permit_json=str(
+                args.runtime_localization_motion_permit_json
+            ),
+            runtime_localization_motion_permit_sha256=(
+                runtime_localization_motion_permit_sha256(
+                    runtime_motion_permit
+                )
+            ),
+            runtime_motion_consumption_receipt_json=str(receipt_path),
+            runtime_motion_consumption_receipt_sha256=(
+                runtime_motion_consumption_receipt_sha256(
+                    runtime_motion_receipt
+                )
+            ),
+            covered_by_initial_mission_run=True,
+            additional_typed_run_required=False,
+        )
     emit_event(
         event_logger,
         "motion_started",

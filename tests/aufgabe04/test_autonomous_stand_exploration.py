@@ -14,6 +14,17 @@ from scripts.aufgabe04.navigation.plan_stand_coverage_survey import (
 )
 from scripts.aufgabe04.navigation.models import Pose2D
 from scripts.aufgabe04.navigation.ros_preflight import RosPreflightResult
+from scripts.aufgabe04.navigation.runtime_localization_reseal import (
+    evaluate_runtime_localization_reseal,
+)
+from scripts.aufgabe04.navigation.runtime_motion_authorization import (
+    MISSION_MOTION_AUTHORIZATION_SCOPE,
+    MISSION_RUN_CONFIRMATION,
+    RUNTIME_LOCALIZATION_RESEAL_RECOVERY_KIND,
+    MissionMotionAuthorization,
+    load_runtime_localization_motion_permit,
+    write_mission_motion_authorization,
+)
 from scripts.aufgabe04.navigation.run_single_station_segment import (
     main as run_segment,
 )
@@ -36,13 +47,17 @@ from scripts.aufgabe04.navigation.waypoint_csv import load_route_leg
 from scripts.aufgabe04.real_robot.passive_viewpoint_node import _resolved_qr_id
 from scripts.aufgabe04.real_robot.run_autonomous_stand_exploration import (
     MotionLegOutcome,
+    RuntimeLocalizationPermitContext,
     _admit_preplanning_localization,
     _bounded_approach_offsets,
     _capture_lidar_epoch,
+    _coverage_reseal_suffix,
     _execute_coverage_leg_with_replans,
     _is_resealable_startup_mismatch,
+    _is_runtime_localization_reseal_required,
     _motion_outcome_from_log,
     _opposite_face_normal,
+    _replan_runtime_localization_source,
     _replan_startup_source,
     _runner_command,
     _run_motion_leg,
@@ -56,6 +71,26 @@ from scripts.aufgabe04.stations.candidate_snapshot import (
 
 
 MAP = Path("maps/aufgabe03/arena_1p898x3p9_auto.yaml")
+
+
+def _runtime_localization_stop_details():
+    return {
+        "reason": "global localization consistency requires zero and reseal",
+        "fault_code": "localization_reseal_required",
+        "source": "global_consistency_monitor",
+        "execution_pose_owner": "odom",
+        "global_consistency_monitor": "amcl",
+        "monitor_action": "FORCE_ZERO_RESEAL",
+        "fail_closed": True,
+        "continuity": {
+            "accepted": False,
+            "requires_zero_cycle": True,
+            "requires_reseal": True,
+            "decision": "force_zero_reseal",
+            "reason": "map_from_odom_yaw_drift",
+            "fail_closed": True,
+        },
+    }
 
 
 class AutonomousStandExplorationTest(unittest.TestCase):
@@ -105,6 +140,78 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         self.assertIn("position_std=0.0940m", outcome.stop_reason)
         self.assertFalse(outcome.motion_published)
         self.assertTrue(outcome.stop_details["fail_closed"])
+
+    def test_motion_outcome_rejects_non_boolean_motion_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            semantic_log = Path(tmp) / "events.jsonl"
+            semantic_log.write_text(
+                json.dumps(
+                    {
+                        "event": "safety_stop",
+                        "run_id": "coverage_000",
+                        "status": "stopped",
+                        "stop_reason": "zero and reseal",
+                        "stop_details": _runtime_localization_stop_details(),
+                        "motion_published": "false",
+                    }
+                )
+                + "\n"
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "non-boolean motion_published",
+            ):
+                _motion_outcome_from_log(
+                    semantic_log,
+                    run_id="coverage_000",
+                    returncode=1,
+                )
+
+    def test_runtime_localization_wrapper_requires_complete_contract(self):
+        complete = MotionLegOutcome(
+            run_id="coverage_000",
+            status="stopped",
+            stop_reason="zero and reseal",
+            stop_details=_runtime_localization_stop_details(),
+            motion_published=True,
+            returncode=1,
+            semantic_log_path=Path("events.jsonl"),
+        )
+        self.assertTrue(_is_runtime_localization_reseal_required(complete))
+
+        for field in (
+            "monitor_action",
+            "continuity",
+        ):
+            with self.subTest(field=field):
+                details = _runtime_localization_stop_details()
+                details.pop(field)
+                incomplete = replace(complete, stop_details=details)
+                self.assertFalse(
+                    _is_runtime_localization_reseal_required(incomplete)
+                )
+        self.assertFalse(
+            _is_runtime_localization_reseal_required(
+                replace(complete, motion_published=False)
+            )
+        )
+
+    def test_coverage_reseal_suffix_keeps_retry_identities_distinct(self):
+        self.assertEqual(
+            _coverage_reseal_suffix(
+                startup_reseal_index=0,
+                runtime_localization_reseal_index=0,
+            ),
+            "",
+        )
+        self.assertEqual(
+            _coverage_reseal_suffix(
+                startup_reseal_index=2,
+                runtime_localization_reseal_index=1,
+            ),
+            "_startup_reseal_002_runtime_localization_reseal_001",
+        )
 
     def test_preplanning_localization_binds_start_to_admitted_pose(self):
         runtime = SimpleNamespace(namespace="")
@@ -498,6 +605,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         )
         self.assertEqual(args.coverage_leg_limit, 1)
         self.assertEqual(args.max_startup_reseals_per_leg, 3)
+        self.assertEqual(args.max_runtime_localization_reseals_per_leg, 1)
         self.assertTrue(args.stop_after_coverage)
         self.assertTrue(args.execute)
 
@@ -588,6 +696,49 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 dry_run=True,
                 uncertainty_map_yaml=MAP,
             )
+
+    def test_runner_command_requires_complete_live_recovery_authorization(self):
+        common = {
+            "profile": self._profile(),
+            "route_csv": Path("route.csv"),
+            "diagnostics_json": Path("diagnostics.json"),
+            "certificate_json": Path("map_certificate.json"),
+            "run_id": "mission_coverage_000_runtime_localization_reseal_001",
+            "session_root": Path("session"),
+            "coverage_transient_replan": {
+                "survey_root": Path("survey"),
+                "session_root": Path("session"),
+                "map_yaml": MAP,
+                "semantic_map_id": "arena_1p898x3p9_auto",
+                "target_viewpoint_id": "survey_vp_001",
+                "robot_radius_m": 0.105,
+                "max_replans": 3,
+                "leg_index": 0,
+            },
+            "dry_run": False,
+        }
+        with self.assertRaisesRegex(ValueError, "must be supplied together"):
+            _runner_command(
+                **common,
+                mission_motion_authorization_json=Path("mission.json"),
+            )
+
+        command = _runner_command(
+            **common,
+            mission_motion_authorization_json=Path("mission.json"),
+            runtime_localization_motion_permit_json=Path("permit.json"),
+            mission_session_id="mission",
+        )
+        self.assertEqual(
+            command[
+                command.index("--runtime-localization-motion-permit-json") + 1
+            ],
+            "permit.json",
+        )
+        self.assertEqual(
+            command[command.index("--mission-session-id") + 1],
+            "mission",
+        )
 
     def test_lidar_epoch_uses_completed_odom_execution_certificate(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -798,6 +949,407 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             )
             self.assertTrue(adaptive[-1]["fresh_confirmation_required"])
 
+    def test_runtime_localization_reseal_replans_from_fresh_admitted_pose(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_route = root / "route.csv"
+            source_diagnostics = root / "diagnostics.json"
+            source_route.write_text("source\n")
+            source_diagnostics.write_text("{}\n")
+            replacement_route = root / "runtime_replacement_route.csv"
+            replacement_diagnostics = root / "runtime_replacement_diagnostics.json"
+            replacement_route.write_text("replacement\n")
+            replacement_diagnostics.write_text("{}\n")
+            stopped = MotionLegOutcome(
+                run_id="mission_coverage_000",
+                status="stopped",
+                stop_reason="global localization consistency requires zero and reseal",
+                stop_details=_runtime_localization_stop_details(),
+                motion_published=True,
+                returncode=1,
+                semantic_log_path=root / "stopped.jsonl",
+            )
+            completed = MotionLegOutcome(
+                run_id=(
+                    "mission_coverage_000_"
+                    "runtime_localization_reseal_001"
+                ),
+                status="completed",
+                stop_reason="",
+                stop_details={},
+                motion_published=True,
+                returncode=0,
+                semantic_log_path=root / "completed.jsonl",
+            )
+            args = SimpleNamespace(
+                session_id="mission",
+                max_blockage_replans_per_leg=2,
+                max_startup_reseals_per_leg=2,
+                max_runtime_localization_reseals_per_leg=1,
+                map=MAP,
+                semantic_map_id="arena_1p898x3p9_auto",
+                localization_branch_proof_id="known_start_marker_20260807",
+            )
+            profile = SimpleNamespace(
+                robot_radius_m=0.105,
+                resolved_runtime=lambda: SimpleNamespace(namespace=""),
+            )
+            sealed = {
+                "route_csv": str(source_route),
+                "diagnostics_json": str(source_diagnostics),
+                "route_certificate_json": str(root / "certificate.json"),
+            }
+            admitted_pose = Pose2D(-0.31, -0.47, 0.12)
+            with patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "seal_stand_discovery_route",
+                return_value=sealed,
+            ) as seal, patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "_run_motion_leg",
+                side_effect=(stopped, completed),
+            ) as run, patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "_admit_preplanning_localization",
+                return_value=admitted_pose,
+            ) as admit, patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "_replan_runtime_localization_source",
+                return_value={
+                    "route_csv": str(replacement_route),
+                    "diagnostics_json": str(replacement_diagnostics),
+                    "summary_json": str(root / "runtime_reseal_summary.json"),
+                },
+            ) as replan:
+                outcome = _execute_coverage_leg_with_replans(
+                    profile=profile,
+                    args=args,
+                    session_root=root / "session",
+                    survey_root=root / "survey",
+                    plan_path=root / "coverage_plan.json",
+                    leg_index=0,
+                    target_viewpoint_id="survey_vp_001",
+                    source_route=source_route,
+                    source_diagnostics=source_diagnostics,
+                    mission_motion_authorization_json=(
+                        root / "mission_authorization.json"
+                    ),
+                )
+
+            self.assertEqual(outcome.status, "completed")
+            self.assertTrue(_is_runtime_localization_reseal_required(stopped))
+            self.assertEqual(run.call_count, 2)
+            self.assertTrue(
+                run.call_args_list[1].kwargs["require_fresh_confirmation"]
+            )
+            self.assertEqual(
+                run.call_args_list[1].kwargs["fresh_confirmation_reason"],
+                "runtime_localization",
+            )
+            permit_context = run.call_args_list[1].kwargs[
+                "runtime_localization_permit_context"
+            ]
+            self.assertIsInstance(
+                permit_context,
+                RuntimeLocalizationPermitContext,
+            )
+            self.assertEqual(
+                permit_context.target_viewpoint_id,
+                "survey_vp_001",
+            )
+            self.assertEqual(
+                run.call_args_list[1].kwargs[
+                    "fresh_localization_evidence_path"
+                ],
+                admit.call_args.kwargs["evidence_path"],
+            )
+            self.assertEqual(seal.call_count, 2)
+            self.assertEqual(
+                seal.call_args_list[1].kwargs["source_route_csv"],
+                replacement_route,
+            )
+            admit.assert_called_once()
+            self.assertIn(
+                "runtime_localization_reseals",
+                str(admit.call_args.kwargs["evidence_path"]),
+            )
+            replan.assert_called_once()
+            self.assertEqual(
+                replan.call_args.kwargs["current_pose"], admitted_pose
+            )
+            self.assertEqual(
+                replan.call_args.kwargs["expected_target_viewpoint_id"],
+                "survey_vp_001",
+            )
+            adaptive = [
+                json.loads(line)
+                for line in (root / "session/adaptive_replans.jsonl")
+                .read_text()
+                .splitlines()
+            ]
+            self.assertEqual(
+                [event["event"] for event in adaptive],
+                [
+                    "runtime_localization_reseal_started",
+                    "runtime_localization_admitted",
+                    "runtime_localization_route_replanned",
+                    "runtime_localization_route_sealed",
+                ],
+            )
+            self.assertFalse(adaptive[-1]["fresh_confirmation_required"])
+            self.assertFalse(adaptive[-1]["fresh_typed_run_required"])
+            self.assertTrue(adaptive[-1]["covered_by_initial_mission_run"])
+            self.assertFalse(adaptive[-1]["motion_continues_authorized"])
+            self.assertEqual(
+                adaptive[-1]["committed_target_viewpoint_id"],
+                "survey_vp_001",
+            )
+            self.assertIn(
+                "runtime_localization_reseal_001_dry_certificate.json",
+                adaptive[-1][
+                    "expected_dry_odom_execution_certificate_json"
+                ],
+            )
+
+    def test_runtime_localization_admission_failure_is_persisted_and_terminal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_route = root / "route.csv"
+            source_diagnostics = root / "diagnostics.json"
+            source_route.write_text("route\n")
+            source_diagnostics.write_text("{}\n")
+            stopped = MotionLegOutcome(
+                run_id="mission_coverage_000",
+                status="stopped",
+                stop_reason=(
+                    "global localization consistency requires zero and reseal"
+                ),
+                stop_details=_runtime_localization_stop_details(),
+                motion_published=True,
+                returncode=1,
+                semantic_log_path=root / "stopped.jsonl",
+            )
+            args = SimpleNamespace(
+                session_id="mission",
+                max_blockage_replans_per_leg=2,
+                max_startup_reseals_per_leg=2,
+                max_runtime_localization_reseals_per_leg=1,
+                map=MAP,
+                semantic_map_id="arena_1p898x3p9_auto",
+                localization_branch_proof_id="known_start_marker_20260807",
+            )
+            sealed = {
+                "route_csv": str(source_route),
+                "diagnostics_json": str(source_diagnostics),
+                "route_certificate_json": str(root / "certificate.json"),
+            }
+            with patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "seal_stand_discovery_route",
+                return_value=sealed,
+            ), patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "_run_motion_leg",
+                return_value=stopped,
+            ) as run, patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "_admit_preplanning_localization",
+                side_effect=RuntimeError("stationary AMCL did not converge"),
+            ), patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "_replan_runtime_localization_source",
+            ) as replan:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "stationary AMCL did not converge",
+                ):
+                    _execute_coverage_leg_with_replans(
+                        profile=SimpleNamespace(
+                            robot_radius_m=0.105,
+                            resolved_runtime=lambda: SimpleNamespace(
+                                namespace=""
+                            ),
+                        ),
+                        args=args,
+                        session_root=root / "session",
+                        survey_root=root / "survey",
+                        plan_path=root / "coverage_plan.json",
+                        leg_index=0,
+                        target_viewpoint_id="survey_vp_001",
+                        source_route=source_route,
+                        source_diagnostics=source_diagnostics,
+                    )
+
+            self.assertEqual(run.call_count, 1)
+            replan.assert_not_called()
+            adaptive = [
+                json.loads(line)
+                for line in (root / "session/adaptive_replans.jsonl")
+                .read_text()
+                .splitlines()
+            ]
+            self.assertEqual(
+                [event["event"] for event in adaptive],
+                [
+                    "runtime_localization_reseal_started",
+                    "runtime_localization_reseal_failed",
+                ],
+            )
+            self.assertEqual(
+                adaptive[-1]["phase"],
+                "stationary_localization_admission",
+            )
+            self.assertFalse(adaptive[-1]["motion_continues_authorized"])
+
+    def test_runtime_localization_reseal_budget_is_separate_and_bounded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_route = root / "route.csv"
+            source_diagnostics = root / "diagnostics.json"
+            source_route.write_text("route\n")
+            source_diagnostics.write_text("{}\n")
+            stopped = MotionLegOutcome(
+                run_id="mission_coverage_000",
+                status="stopped",
+                stop_reason="global localization consistency requires zero and reseal",
+                stop_details=_runtime_localization_stop_details(),
+                motion_published=True,
+                returncode=1,
+                semantic_log_path=root / "stopped.jsonl",
+            )
+            args = SimpleNamespace(
+                session_id="mission",
+                max_blockage_replans_per_leg=2,
+                max_startup_reseals_per_leg=2,
+                max_runtime_localization_reseals_per_leg=0,
+                map=MAP,
+                semantic_map_id="arena_1p898x3p9_auto",
+                localization_branch_proof_id="known_start_marker_20260807",
+            )
+            sealed = {
+                "route_csv": str(source_route),
+                "diagnostics_json": str(source_diagnostics),
+                "route_certificate_json": str(root / "certificate.json"),
+            }
+            with patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "seal_stand_discovery_route",
+                return_value=sealed,
+            ), patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "_run_motion_leg",
+                return_value=stopped,
+            ), patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "_admit_preplanning_localization",
+            ) as admit:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "runtime localization reseal budget exhausted",
+                ):
+                    _execute_coverage_leg_with_replans(
+                        profile=SimpleNamespace(robot_radius_m=0.105),
+                        args=args,
+                        session_root=root / "session",
+                        survey_root=root / "survey",
+                        plan_path=root / "coverage_plan.json",
+                        leg_index=0,
+                        target_viewpoint_id="survey_vp_001",
+                        source_route=source_route,
+                        source_diagnostics=source_diagnostics,
+                    )
+
+            admit.assert_not_called()
+
+    def test_runtime_localization_reseal_rejects_prior_adopted_blockage_overlay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_route = root / "route.csv"
+            source_diagnostics = root / "diagnostics.json"
+            source_route.write_text("route\n")
+            source_diagnostics.write_text("{}\n")
+            stopped = MotionLegOutcome(
+                run_id="mission_coverage_000",
+                status="stopped",
+                stop_reason=(
+                    "global localization consistency requires zero and reseal"
+                ),
+                stop_details=_runtime_localization_stop_details(),
+                motion_published=True,
+                returncode=1,
+                semantic_log_path=root / "stopped.jsonl",
+            )
+            args = SimpleNamespace(
+                session_id="mission",
+                max_blockage_replans_per_leg=2,
+                max_startup_reseals_per_leg=2,
+                max_runtime_localization_reseals_per_leg=1,
+                map=MAP,
+                semantic_map_id="arena_1p898x3p9_auto",
+                localization_branch_proof_id="known_start_marker_20260807",
+            )
+            sealed = {
+                "route_csv": str(source_route),
+                "diagnostics_json": str(source_diagnostics),
+                "route_certificate_json": str(root / "certificate.json"),
+            }
+            adaptive_log = root / "session/adaptive_replans.jsonl"
+            adaptive_log.parent.mkdir(parents=True)
+            adaptive_log.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "event": "transient_navigation_blockage_replanned",
+                        "run_id": "mission_coverage_000",
+                        "leg_index": 0,
+                        "route_revision": 1,
+                    }
+                )
+                + "\n"
+            )
+            with patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "seal_stand_discovery_route",
+                return_value=sealed,
+            ), patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "_run_motion_leg",
+                return_value=stopped,
+            ), patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "_admit_preplanning_localization",
+            ) as admit:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "adopted transient blockage replan",
+                ):
+                    _execute_coverage_leg_with_replans(
+                        profile=SimpleNamespace(robot_radius_m=0.105),
+                        args=args,
+                        session_root=root / "session",
+                        survey_root=root / "survey",
+                        plan_path=root / "coverage_plan.json",
+                        leg_index=0,
+                        target_viewpoint_id="survey_vp_001",
+                        source_route=source_route,
+                        source_diagnostics=source_diagnostics,
+                    )
+
+            admit.assert_not_called()
+            adaptive = [
+                json.loads(line)
+                for line in adaptive_log.read_text().splitlines()
+            ]
+            self.assertEqual(
+                adaptive[-1]["event"],
+                "runtime_localization_reseal_rejected",
+            )
+            self.assertEqual(
+                adaptive[-1]["reason"],
+                "adopted_transient_blockage_replan_not_replayable",
+            )
+            self.assertTrue(adaptive[-1]["fail_closed"])
+
     def test_runtime_blockage_failure_never_relaunches_the_runner(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -922,12 +1474,14 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 "diagnostics_json": str(root / "diagnostics.json"),
                 "route_certificate_json": str(root / "certificate.json"),
             }
+            output = StringIO()
+            localization_evidence = root / "runtime_localization.json"
             with patch(
                 "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
                 "subprocess.run",
                 return_value=SimpleNamespace(returncode=0),
             ) as run, patch("builtins.input", return_value="NO"), redirect_stdout(
-                StringIO()
+                output
             ):
                 with self.assertRaisesRegex(
                     RuntimeError,
@@ -941,9 +1495,21 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                         execute=True,
                         coverage_plan=root / "coverage_plan.json",
                         require_fresh_confirmation=True,
+                        fresh_confirmation_reason="runtime_localization",
+                        fresh_localization_evidence_path=(
+                            localization_evidence
+                        ),
+                        uncertainty_map_yaml=MAP,
+                        localization_branch_proof_id=(
+                            "known_start_marker_20260807"
+                        ),
                     )
 
             self.assertEqual(run.call_count, 1)
+            rendered = output.getvalue()
+            self.assertIn(str(localization_evidence), rendered)
+            self.assertIn("resealed_dry_certificate.json", rendered)
+            self.assertIn("resealed_dry_uncertainty_budget.json", rendered)
 
     def test_live_leg_keeps_child_runner_typed_run_interactive(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -993,6 +1559,150 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         self.assertEqual(outcome.status, "completed")
         self.assertEqual(run.call_count, 2)
         self.assertNotIn("input", run.call_args_list[1].kwargs)
+
+    def test_runtime_localization_recovery_uses_scoped_permit_without_parent_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_root = root / "session"
+            run_id = "mission_coverage_000_runtime_localization_reseal_001"
+            route = root / "route.csv"
+            diagnostics = root / "diagnostics.json"
+            map_certificate = root / "map_certificate.json"
+            fresh_localization = root / "fresh_localization.json"
+            for path, payload in (
+                (route, "route\n"),
+                (diagnostics, "{}\n"),
+                (map_certificate, "{}\n"),
+                (fresh_localization, "{}\n"),
+            ):
+                path.write_text(payload)
+            master_path = (
+                session_root
+                / "motion_authorization"
+                / "mission_motion_authorization.json"
+            )
+            write_mission_motion_authorization(
+                master_path,
+                MissionMotionAuthorization(
+                    session_id="mission",
+                    robot_id="turtlebot1",
+                    namespace="",
+                    cmd_vel_topic="/cmd_vel",
+                    semantic_map_id="arena_1p898x3p9_auto",
+                    localization_branch_proof_id="known_start_marker_20260807",
+                    max_runtime_reseals_per_leg=1,
+                    scope_text=MISSION_MOTION_AUTHORIZATION_SCOPE,
+                    operator_confirmation=MISSION_RUN_CONFIRMATION,
+                    allowed_recovery_kind=(
+                        RUNTIME_LOCALIZATION_RESEAL_RECOVERY_KIND
+                    ),
+                ),
+            )
+            decision = evaluate_runtime_localization_reseal(
+                status="stopped",
+                motion_published=True,
+                stop_details=_runtime_localization_stop_details(),
+            )
+            permit_path = (
+                session_root
+                / "motion_authorization"
+                / "runtime_reseal_001_permit.json"
+            )
+            context = RuntimeLocalizationPermitContext(
+                mission_authorization_json=master_path,
+                session_id="mission",
+                leg_index=0,
+                target_viewpoint_id="survey_vp_001",
+                reseal_index=1,
+                max_runtime_reseals_per_leg=1,
+                rejected_run_id="mission_coverage_000",
+                runtime_reseal_decision_evidence=decision.to_evidence(),
+                fresh_localization_evidence_path=fresh_localization,
+                permit_json_path=permit_path,
+            )
+            sealed = {
+                "route_csv": str(route),
+                "diagnostics_json": str(diagnostics),
+                "route_certificate_json": str(map_certificate),
+            }
+            commands = []
+
+            def run_process(command, **_kwargs):
+                commands.append(command)
+                if "--dry-run" in command:
+                    for flag in (
+                        "--preflight-json",
+                        "--odom-execution-certificate-json",
+                        "--uncertainty-budget-json",
+                    ):
+                        artifact = Path(command[command.index(flag) + 1])
+                        artifact.parent.mkdir(parents=True, exist_ok=True)
+                        artifact.write_text("{}\n")
+                else:
+                    event_path = session_root / "run_events" / f"{run_id}.jsonl"
+                    event_path.parent.mkdir(parents=True, exist_ok=True)
+                    event_path.write_text(
+                        json.dumps(
+                            {
+                                "event": "motion_completed",
+                                "run_id": run_id,
+                                "status": "completed",
+                                "stop_reason": "",
+                                "stop_details": {},
+                                "motion_published": True,
+                            }
+                        )
+                        + "\n"
+                    )
+                return SimpleNamespace(returncode=0)
+
+            with patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "subprocess.run",
+                side_effect=run_process,
+            ) as run, patch(
+                "builtins.input",
+                side_effect=AssertionError(
+                    "runtime localization permit must not prompt the parent"
+                ),
+            ):
+                outcome = _run_motion_leg(
+                    profile=self._profile(),
+                    sealed=sealed,
+                    run_id=run_id,
+                    session_root=session_root,
+                    execute=True,
+                    coverage_plan=root / "coverage_plan.json",
+                    coverage_transient_replan={
+                        "survey_root": root / "survey",
+                        "session_root": session_root,
+                        "map_yaml": MAP,
+                        "semantic_map_id": "arena_1p898x3p9_auto",
+                        "target_viewpoint_id": "survey_vp_001",
+                        "robot_radius_m": 0.105,
+                        "max_replans": 3,
+                        "leg_index": 0,
+                    },
+                    require_fresh_confirmation=True,
+                    fresh_confirmation_reason="runtime_localization",
+                    fresh_localization_evidence_path=fresh_localization,
+                    uncertainty_map_yaml=MAP,
+                    localization_branch_proof_id="known_start_marker_20260807",
+                    runtime_localization_permit_context=context,
+                )
+
+            self.assertEqual(outcome.status, "completed")
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual(outcome.motion_authorization_permit_path, permit_path)
+            self.assertTrue(outcome.motion_authorization_permit_sha256)
+            permit = load_runtime_localization_motion_permit(permit_path)
+            self.assertEqual(permit.run_id, run_id)
+            self.assertFalse(permit.additional_typed_run_required)
+            self.assertIn(
+                "--runtime-localization-motion-permit-json",
+                commands[1],
+            )
+            self.assertNotIn("input", run.call_args_list[1].kwargs)
 
     def test_startup_reseal_replans_full_a_star_leg_from_rejected_pose(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1051,6 +1761,62 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 output_dir=root / "sealed_reseal",
             )
             self.assertTrue(Path(sealed["route_certificate_json"]).is_file())
+
+    def test_runtime_localization_reseal_writes_same_target_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            survey_root = root / "survey"
+            self._planned_center_corridor(survey_root)
+            plan_path = survey_root / "coverage_plan.json"
+            summary = json.loads(
+                (survey_root / "survey_summary.json").read_text()
+            )
+            current = Pose2D(0.04, 0.02, 0.1)
+            rejected = MotionLegOutcome(
+                run_id="runtime_rejected",
+                status="stopped",
+                stop_reason=(
+                    "global localization consistency requires zero and reseal"
+                ),
+                stop_details={
+                    "fault_code": "localization_reseal_required",
+                    "source": "global_consistency_monitor",
+                    "fail_closed": True,
+                },
+                motion_published=True,
+                returncode=1,
+                semantic_log_path=root / "events.jsonl",
+            )
+            outputs = _replan_runtime_localization_source(
+                map_yaml=MAP,
+                semantic_map_id="arena_1p898x3p9_auto",
+                survey_root=survey_root,
+                plan_path=plan_path,
+                expected_target_viewpoint_id=summary["next_viewpoint_id"],
+                current_pose=current,
+                rejected_outcome=rejected,
+                reseal_index=1,
+                output_dir=root / "runtime_reseal_source",
+            )
+            diagnostics = json.loads(
+                Path(outputs["diagnostics_json"]).read_text()
+            )
+            metadata = diagnostics["metadata"]
+            self.assertEqual(metadata["reseal_kind"], "runtime_localization")
+            self.assertTrue(metadata["runtime_localization_reseal"])
+            self.assertEqual(metadata["runtime_localization_reseal_index"], 1)
+            self.assertEqual(
+                metadata["target_viewpoint_id"],
+                summary["next_viewpoint_id"],
+            )
+            summary_payload = json.loads(
+                Path(outputs["summary_json"]).read_text()
+            )
+            self.assertEqual(
+                summary_payload["status"],
+                "runtime_localization_route_replanned",
+            )
+            self.assertFalse(summary_payload["motion_published"])
 
     def test_opposite_inspection_offsets_never_cross_physical_minimum(self):
         offsets = _bounded_approach_offsets(0.70, 0.32)

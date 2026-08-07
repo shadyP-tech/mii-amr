@@ -197,6 +197,69 @@ class RunEventsTest(unittest.TestCase):
         self.assertTrue(confirmed)
         prompt.assert_not_called()
 
+    def test_runtime_recovery_permit_bypasses_only_through_exact_validator(self):
+        args = type(
+            "Args",
+            (),
+            {
+                "mission_motion_authorization_json": Path("mission.json"),
+                "runtime_localization_motion_permit_json": Path("permit.json"),
+                "dry_run": False,
+                "allow_sim_time": False,
+                "execution_pose_frame": "odom",
+                "route_certificate_json": Path("certificate.json"),
+                "coverage_transient_replan_leg_index": 0,
+                "coverage_transient_replan_target_viewpoint_id": "survey_vp_001",
+                "coverage_transient_replan_semantic_map_id": "arena_map",
+                "mission_session_id": "mission",
+                "run_id": "mission_coverage_000_runtime_localization_reseal_001",
+                "robot_id": "turtlebot1",
+                "localization_branch_proof_id": "known_start",
+            },
+        )()
+        resolved = type(
+            "Resolved",
+            (),
+            {"namespace": "", "cmd_vel_topic": "/cmd_vel"},
+        )()
+        sentinel = object()
+        with patch.object(
+            run_single_station_segment,
+            "validate_runtime_localization_motion_permit_for_execution",
+            return_value=sentinel,
+        ) as validate:
+            result = run_single_station_segment._validated_runtime_localization_motion_permit(
+                args,
+                resolved,
+                route_csv_path=Path("route.csv"),
+                diagnostics_path=Path("diagnostics.json"),
+            )
+
+        self.assertIs(result, sentinel)
+        self.assertEqual(validate.call_args.kwargs["session_id"], "mission")
+        self.assertEqual(
+            validate.call_args.kwargs["target_viewpoint_id"],
+            "survey_vp_001",
+        )
+        self.assertEqual(validate.call_args.kwargs["cmd_vel_topic"], "/cmd_vel")
+
+    def test_partial_runtime_recovery_permit_fails_closed(self):
+        args = type(
+            "Args",
+            (),
+            {
+                "mission_motion_authorization_json": Path("mission.json"),
+                "runtime_localization_motion_permit_json": None,
+            },
+        )()
+        with self.assertRaisesRegex(ValueError, "must be supplied together"):
+            run_single_station_segment._validated_runtime_localization_motion_permit(
+                args,
+                object(),
+                route_csv_path=Path("route.csv"),
+                diagnostics_path=Path("diagnostics.json"),
+            )
+
     def test_runner_rejects_nav2_direct_publisher_allowlist(self):
         with self.assertRaises(SystemExit) as raised, redirect_stdout(StringIO()):
             run_single_station_segment.main(
@@ -772,6 +835,127 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
         self.assertEqual(len(finish_events), 1)
         self.assertEqual(rows[-1]["status"], "aborted")
         self.assertFalse(abort_event["motion_published"])
+
+    def test_runtime_permit_claim_precedes_motion_and_skips_child_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            permit = type(
+                "Permit",
+                (),
+                {
+                    "target_viewpoint_id": "survey_vp_001",
+                    "leg_index": 7,
+                    "reseal_index": 1,
+                    "rejected_run_id": "run-0",
+                },
+            )()
+            receipt = object()
+            receipt_path = Path(tmp) / "consumption.json"
+            with patch.object(
+                run_single_station_segment,
+                "run_ros_preflight",
+                return_value=passing_preflight(),
+            ), patch.object(
+                run_single_station_segment,
+                "_validated_runtime_localization_motion_permit",
+                return_value=permit,
+            ), patch.object(
+                run_single_station_segment,
+                "default_runtime_motion_consumption_receipt_path",
+                return_value=receipt_path,
+            ), patch.object(
+                run_single_station_segment,
+                "consume_runtime_motion_permit",
+                return_value=receipt,
+            ) as consume, patch.object(
+                run_single_station_segment,
+                "runtime_localization_motion_permit_sha256",
+                return_value="a" * 64,
+            ), patch.object(
+                run_single_station_segment,
+                "runtime_motion_consumption_receipt_sha256",
+                return_value="b" * 64,
+            ), patch.object(
+                run_single_station_segment,
+                "_confirm_motion",
+                side_effect=AssertionError("permit path must not prompt"),
+            ), patch.object(
+                run_single_station_segment,
+                "run_simple_waypoint_follower",
+                return_value=FollowerResult("completed", "", 1.0, 0.2, True),
+            ) as follower, redirect_stdout(StringIO()):
+                status = run_single_station_segment.main(self.base_args(paths))
+
+            events = read_events(paths["events"])
+            names = [event["event"] for event in events]
+
+        self.assertEqual(status, 0)
+        self.assertTrue(consume.called)
+        self.assertEqual(consume.call_args.kwargs["leg_index"], 7)
+        self.assertTrue(follower.called)
+        self.assertLess(
+            names.index("runtime_localization_motion_permit_consumed"),
+            names.index("motion_started"),
+        )
+        consumed = next(
+            event
+            for event in events
+            if event["event"]
+            == "runtime_localization_motion_permit_consumed"
+        )
+        self.assertEqual(
+            consumed["runtime_motion_consumption_receipt_json"],
+            str(receipt_path),
+        )
+        self.assertFalse(consumed["additional_typed_run_required"])
+
+    def test_runtime_permit_replay_rejects_before_motion_started(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            permit = type(
+                "Permit",
+                (),
+                {
+                    "target_viewpoint_id": "survey_vp_001",
+                    "leg_index": 0,
+                    "reseal_index": 1,
+                    "rejected_run_id": "run-0",
+                },
+            )()
+            with patch.object(
+                run_single_station_segment,
+                "run_ros_preflight",
+                return_value=passing_preflight(),
+            ), patch.object(
+                run_single_station_segment,
+                "_validated_runtime_localization_motion_permit",
+                return_value=permit,
+            ), patch.object(
+                run_single_station_segment,
+                "default_runtime_motion_consumption_receipt_path",
+                return_value=Path(tmp) / "consumption.json",
+            ), patch.object(
+                run_single_station_segment,
+                "consume_runtime_motion_permit",
+                side_effect=ValueError("runtime motion permit already consumed"),
+            ), patch.object(
+                run_single_station_segment,
+                "_confirm_motion",
+                side_effect=AssertionError("replayed permit must not prompt"),
+            ), patch.object(
+                run_single_station_segment,
+                "run_simple_waypoint_follower",
+            ) as follower, redirect_stdout(StringIO()):
+                status = run_single_station_segment.main(self.base_args(paths))
+
+            events = read_events(paths["events"])
+            names = [event["event"] for event in events]
+
+        self.assertEqual(status, 1)
+        self.assertFalse(follower.called)
+        self.assertIn("motion_authorization_rejected", names)
+        self.assertNotIn("runtime_localization_motion_permit_consumed", names)
+        self.assertNotIn("motion_started", names)
 
     def test_real_run_passes_initial_sensor_wait_to_follower_config(self):
         with tempfile.TemporaryDirectory() as tmp:
