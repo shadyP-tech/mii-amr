@@ -1030,7 +1030,10 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             map_to_odom_dynamic_fresh=map_to_odom_fresh,
             route_transform_fresh=route_transform_fresh,
             odom_to_base_fresh=odom_to_base_fresh,
-            route_uses_odom_frame=self.execution_pose_owner == "odom",
+            route_uses_odom_frame=(
+                self.execution_pose_owner == "odom"
+                or self.config.map_frame == self.config.odom_frame
+            ),
             external_tf_owner_candidates=owner_candidates,
             execution_pose_owner=self.execution_pose_owner,
             global_consistency_monitor=self.global_consistency_monitor,
