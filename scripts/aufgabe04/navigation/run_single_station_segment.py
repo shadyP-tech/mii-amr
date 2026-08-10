@@ -69,6 +69,17 @@ from scripts.aufgabe04.navigation.execution_route_certificate import (
     validate_execution_route_identity,
 )
 from scripts.aufgabe04.navigation.map_io import load_occupancy_grid
+from scripts.aufgabe04.navigation.mission_leg_motion_consumption import (
+    consume_mission_leg_motion_permit,
+    default_mission_leg_motion_consumption_receipt_path,
+    mission_leg_motion_consumption_receipt_sha256,
+)
+from scripts.aufgabe04.navigation.mission_leg_motion_permit import (
+    MissionLegKind,
+    MissionLegMotionPermit,
+    mission_leg_motion_permit_sha256,
+    validate_mission_leg_motion_permit_for_execution,
+)
 from scripts.aufgabe04.navigation.odom_execution_certificate import (
     OdomExecutionCertificate,
     PlanarTransform2D,
@@ -420,6 +431,37 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Internal one-run, same-target runtime-localization recovery permit."
         ),
+    )
+    parser.add_argument(
+        "--mission-leg-motion-authorization-json",
+        type=Path,
+        help=(
+            "Internal autonomous-wrapper evidence for the one-time mission RUN "
+            "covering separately sealed routine child legs."
+        ),
+    )
+    parser.add_argument(
+        "--mission-leg-motion-permit-json",
+        type=Path,
+        help="Internal one-use permit for this exact routine child leg.",
+    )
+    parser.add_argument(
+        "--mission-leg-kind",
+        choices=[
+            MissionLegKind.COVERAGE.value,
+            MissionLegKind.CANDIDATE_PREAPPROACH.value,
+            MissionLegKind.OPPOSITE_FACE.value,
+        ],
+    )
+    parser.add_argument("--mission-leg-index", type=int)
+    parser.add_argument("--mission-leg-target-id", default="")
+    parser.add_argument("--mission-leg-semantic-map-id", default="")
+    parser.add_argument("--mission-leg-dry-preflight-json", type=Path)
+    parser.add_argument(
+        "--mission-leg-dry-odom-certificate-json", type=Path
+    )
+    parser.add_argument(
+        "--mission-leg-dry-uncertainty-budget-json", type=Path
     )
     parser.add_argument(
         "--mission-session-id",
@@ -1613,7 +1655,84 @@ def _validated_runtime_localization_motion_permit(
     )
 
 
-def _record_runtime_motion_authorization_rejection(
+def _validated_mission_leg_motion_permit(
+    args,
+    resolved,
+    *,
+    route_csv_path: Path,
+    diagnostics_path: Path,
+) -> MissionLegMotionPermit | None:
+    """Return one exact routine-leg permit or preserve interactive motion."""
+
+    fields = (
+        args.mission_leg_motion_authorization_json,
+        args.mission_leg_motion_permit_json,
+        args.mission_leg_kind,
+        args.mission_leg_index,
+        str(args.mission_leg_target_id).strip() or None,
+        str(args.mission_leg_semantic_map_id).strip() or None,
+        args.mission_leg_dry_preflight_json,
+        args.mission_leg_dry_odom_certificate_json,
+        args.mission_leg_dry_uncertainty_budget_json,
+    )
+    if all(value is None for value in fields):
+        return None
+    if any(value is None for value in fields):
+        raise ValueError(
+            "mission-leg motion authorization arguments must be supplied together"
+        )
+    if (
+        args.mission_motion_authorization_json is not None
+        or args.runtime_localization_motion_permit_json is not None
+    ):
+        raise ValueError(
+            "routine mission-leg and runtime-localization permits are "
+            "mutually exclusive"
+        )
+    if args.dry_run:
+        raise ValueError("mission-leg motion permit is live-run only")
+    if args.allow_sim_time:
+        raise ValueError("mission-leg motion permit is physical-runtime only")
+    if args.execution_pose_frame != "odom":
+        raise ValueError("mission-leg motion permit requires odom execution")
+    if args.route_certificate_json is None:
+        raise ValueError(
+            "mission-leg motion permit requires a map route certificate"
+        )
+    session_id = str(args.mission_session_id).strip()
+    if not session_id:
+        raise ValueError("mission-leg motion permit requires mission_session_id")
+    assert args.mission_leg_kind is not None
+    assert args.mission_leg_index is not None
+    return validate_mission_leg_motion_permit_for_execution(
+        args.mission_leg_motion_permit_json,
+        master_authorization_path=(
+            args.mission_leg_motion_authorization_json
+        ),
+        session_id=session_id,
+        robot_id=args.robot_id,
+        namespace=resolved.namespace,
+        cmd_vel_topic=resolved.cmd_vel_topic,
+        semantic_map_id=str(args.mission_leg_semantic_map_id).strip(),
+        localization_branch_proof_id=args.localization_branch_proof_id,
+        run_id=args.run_id,
+        mission_leg_kind=args.mission_leg_kind,
+        mission_leg_index=args.mission_leg_index,
+        target_id=str(args.mission_leg_target_id).strip(),
+        route_csv_path=route_csv_path,
+        diagnostics_path=diagnostics_path,
+        map_route_certificate_path=args.route_certificate_json,
+        dry_preflight_path=args.mission_leg_dry_preflight_json,
+        dry_odom_certificate_path=(
+            args.mission_leg_dry_odom_certificate_json
+        ),
+        dry_uncertainty_budget_path=(
+            args.mission_leg_dry_uncertainty_budget_json
+        ),
+    )
+
+
+def _record_motion_authorization_rejection(
     *,
     args,
     resolved,
@@ -1623,11 +1742,11 @@ def _record_runtime_motion_authorization_rejection(
 ) -> int:
     """Persist one no-motion authorization failure with terminal evidence."""
 
-    stop_reason = f"runtime localization motion permit rejected: {failure}"
+    stop_reason = f"motion authorization rejected: {failure}"
     stop_details = {
         "reason": stop_reason,
-        "fault_code": "runtime_motion_authorization_rejected",
-        "source": "runtime_motion_authorization",
+        "fault_code": "motion_authorization_rejected",
+        "source": "motion_authorization",
         "motion_published": False,
         "fail_closed": True,
     }
@@ -2982,6 +3101,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     runtime_motion_permit = None
+    mission_leg_motion_permit = None
     try:
         runtime_motion_permit = _validated_runtime_localization_motion_permit(
             args,
@@ -2989,8 +3109,14 @@ def main(argv: list[str] | None = None) -> int:
             route_csv_path=route_csv_path,
             diagnostics_path=diagnostics_json_path,
         )
+        mission_leg_motion_permit = _validated_mission_leg_motion_permit(
+            args,
+            resolved,
+            route_csv_path=route_csv_path,
+            diagnostics_path=diagnostics_json_path,
+        )
     except ValueError as exc:
-        return _record_runtime_motion_authorization_rejection(
+        return _record_motion_authorization_rejection(
             args=args,
             resolved=resolved,
             leg=leg,
@@ -2998,7 +3124,11 @@ def main(argv: list[str] | None = None) -> int:
             failure=exc,
         )
 
-    if runtime_motion_permit is None and not _confirm_motion(args, resolved):
+    if (
+        runtime_motion_permit is None
+        and mission_leg_motion_permit is None
+        and not _confirm_motion(args, resolved)
+    ):
         result = FollowerResult("aborted", "operator did not type RUN", 0.0, 0.0, False)
         _append_result(args, resolved, leg, preflight_ok=True, result=result)
         emit_event(
@@ -3474,6 +3604,73 @@ def main(argv: list[str] | None = None) -> int:
 
         def waypoint_provider(pose):
             return route_source.poll(pose)
+    if mission_leg_motion_permit is not None:
+        try:
+            mission_leg_receipt_path = (
+                default_mission_leg_motion_consumption_receipt_path(
+                    args.mission_leg_motion_permit_json
+                )
+            )
+            mission_leg_receipt = consume_mission_leg_motion_permit(
+                permit_path=args.mission_leg_motion_permit_json,
+                permit=mission_leg_motion_permit,
+                session_id=args.mission_session_id,
+                run_id=args.run_id,
+                mission_leg_kind=(
+                    mission_leg_motion_permit.mission_leg_kind
+                ),
+                mission_leg_index=(
+                    mission_leg_motion_permit.mission_leg_index
+                ),
+                target_id=mission_leg_motion_permit.target_id,
+            )
+        except ValueError as exc:
+            return _record_motion_authorization_rejection(
+                args=args,
+                resolved=resolved,
+                leg=leg,
+                event_logger=event_logger,
+                failure=exc,
+            )
+        print(
+            "Using the mission-level RUN for this exact routine child leg. "
+            "All live gates passed and its one-use receipt was claimed; no "
+            "additional operator input is requested."
+        )
+        emit_event(
+            event_logger,
+            "mission_leg_motion_permit_consumed",
+            run_id=args.run_id,
+            leg_index=leg.leg_index,
+            mission_leg_kind=(
+                mission_leg_motion_permit.mission_leg_kind.value
+            ),
+            mission_leg_index=(
+                mission_leg_motion_permit.mission_leg_index
+            ),
+            target_id=mission_leg_motion_permit.target_id,
+            mission_leg_motion_authorization_json=str(
+                args.mission_leg_motion_authorization_json
+            ),
+            mission_leg_motion_permit_json=str(
+                args.mission_leg_motion_permit_json
+            ),
+            mission_leg_motion_permit_sha256=(
+                mission_leg_motion_permit_sha256(
+                    mission_leg_motion_permit
+                )
+            ),
+            mission_leg_motion_consumption_receipt_json=str(
+                mission_leg_receipt_path
+            ),
+            mission_leg_motion_consumption_receipt_sha256=(
+                mission_leg_motion_consumption_receipt_sha256(
+                    mission_leg_receipt
+                )
+            ),
+            covered_by_initial_mission_run=True,
+            additional_typed_run_required=False,
+        )
     if runtime_motion_permit is not None:
         try:
             receipt_path = default_runtime_motion_consumption_receipt_path(
@@ -3491,7 +3688,7 @@ def main(argv: list[str] | None = None) -> int:
                 reseal_index=runtime_motion_permit.reseal_index,
             )
         except ValueError as exc:
-            return _record_runtime_motion_authorization_rejection(
+            return _record_motion_authorization_rejection(
                 args=args,
                 resolved=resolved,
                 leg=leg,

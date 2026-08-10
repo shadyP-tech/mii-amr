@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import math
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable, Mapping
@@ -21,6 +22,9 @@ VALID_OBSERVER_CLOCKS = frozenset(
 )
 TF_LOOKUP_MODE_SCAN_TIME_EXACT = "scan_time_exact"
 RUNTIME_TIMING_LIMITS_KEY = "observation_timing_limits"
+OBSERVATION_ID_SCOPE_RUNTIME_KEY = "observation_id_scope"
+
+_OBSERVATION_ID_SCOPE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 
 @dataclass(frozen=True)
@@ -272,6 +276,38 @@ def transform_point(x_m: float, y_m: float, transform: PlanarTransform) -> tuple
     )
 
 
+def validated_observation_id_scope(scope: object) -> str | None:
+    """Return a safe explicit identity scope, or ``None`` for legacy IDs."""
+
+    if scope is None:
+        return None
+    if not isinstance(scope, str) or _OBSERVATION_ID_SCOPE_RE.fullmatch(scope) is None:
+        raise ValueError(
+            "observation ID scope must be a 1-64 character safe identifier "
+            "starting with a letter or digit and containing only letters, "
+            "digits, '.', '_' or '-'"
+        )
+    return scope
+
+
+def observation_id_from_index(
+    observation_index: int,
+    *,
+    observation_id_scope: str | None = None,
+) -> str:
+    """Build a stable observation ID with an optional process/epoch scope."""
+
+    if isinstance(observation_index, bool) or not isinstance(observation_index, int):
+        raise ValueError("observation index must be an integer")
+    if observation_index <= 0:
+        raise ValueError("observation index must be positive")
+    scope = validated_observation_id_scope(observation_id_scope)
+    legacy_id = f"stand_observation_{observation_index:06d}"
+    if scope is None:
+        return legacy_id
+    return f"stand_observation_{scope}_{observation_index:06d}"
+
+
 def observation_from_candidate(
     candidate: StandCandidate,
     *,
@@ -279,6 +315,7 @@ def observation_from_candidate(
     observed_at_sec: float,
     provenance: ObservationProvenance,
     observation_index: int,
+    observation_id_scope: str | None = None,
 ) -> StandObservation:
     x_m, y_m = transform_point(
         candidate.center_x_m,
@@ -286,7 +323,10 @@ def observation_from_candidate(
         transform_scan_to_map,
     )
     return StandObservation(
-        observation_id=f"stand_observation_{observation_index:06d}",
+        observation_id=observation_id_from_index(
+            observation_index,
+            observation_id_scope=observation_id_scope,
+        ),
         candidate_id=candidate.candidate_id,
         x_m=x_m,
         y_m=y_m,
@@ -307,7 +347,9 @@ def observations_from_candidates(
     observed_at_sec: float,
     provenance: ObservationProvenance,
     start_index: int = 1,
+    observation_id_scope: str | None = None,
 ) -> tuple[StandObservation, ...]:
+    observation_id_scope = validated_observation_id_scope(observation_id_scope)
     return tuple(
         observation_from_candidate(
             candidate,
@@ -315,6 +357,7 @@ def observations_from_candidates(
             observed_at_sec=observed_at_sec,
             provenance=provenance,
             observation_index=start_index + index,
+            observation_id_scope=observation_id_scope,
         )
         for index, candidate in enumerate(candidates)
     )

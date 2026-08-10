@@ -53,6 +53,32 @@ conservative `1.35 m` visibility model, `0.25 m` static inflation, and a
 - `legs/leg_000_route.csv` plus diagnostics: motion-free A* planning evidence;
 - `survey_summary.json`: coverage and unresolved-candidate gates.
 
+For the measured small arena, an explicit minimal two-stop plan can be
+requested without weakening the visibility model:
+
+```bash
+python3 scripts/aufgabe04/navigation/plan_stand_coverage_survey.py \
+  --map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
+  --semantic-map-id arena_1p898x3p9_auto \
+  --planning-frame map \
+  --start-x CURRENT_MAP_X \
+  --start-y CURRENT_MAP_Y \
+  --start-yaw CURRENT_MAP_YAW \
+  --survey-id stand_coverage_two_stop_001 \
+  --output-dir results/aufgabe04/stand_coverage_two_stop_001 \
+  --lane-count 1 \
+  --stop-spacing-m 0.70 \
+  --exact-inspection-point-count 2 \
+  --expected-stand-count 5
+```
+
+The exact-two selector chooses two distinct centerline cells from the normal
+dense plan by maximum union coverage and shared visibility. It still rejects
+the plan unless the unchanged `95%` map-coverage gate passes. After both
+epochs, candidate motion remains blocked unless the registry contains exactly
+the expected `pending_camera` candidates, no provisional extras, and valid
+confidence, hit, and evidence from both planned viewpoints.
+
 The generated leg is deliberately marked `motion_authorized: false`. Do not
 feed it directly to the real-robot segment runner. Real survey execution still
 needs a separately reviewed route certificate/admission wrapper, dry-run,
@@ -79,6 +105,7 @@ python3 scripts/aufgabe04/perception/stand_explorer_node.py \
   --map-yaml maps/aufgabe03/arena_1p898x3p9_auto.yaml \
   --semantic-map-id arena_1p898x3p9_auto \
   --duration-sec 8 \
+  --observation-id-scope "$VIEWPOINT_ID" \
   --output-jsonl "$SURVEY_ROOT/raw_epochs/$VIEWPOINT_ID/observations.jsonl" \
   --summary-json "$SURVEY_ROOT/raw_epochs/$VIEWPOINT_ID/observer_summary.json"
 ```
@@ -86,7 +113,9 @@ python3 scripts/aufgabe04/perception/stand_explorer_node.py \
 `observer_summary.json` is written even when no candidate was found. A
 viewpoint counts as covered only when that receipt reports at least one
 processed scan and its exact map bundle, planning frame, and observed scan
-pose match the plan.
+pose match the plan. The explicit viewpoint scope makes observation IDs unique
+across the separate observer processes; never omit it when epochs will be
+fused into one registry.
 
 ### 3. Fuse candidates and replan
 

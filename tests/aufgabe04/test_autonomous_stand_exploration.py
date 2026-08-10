@@ -9,10 +9,22 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from scripts.aufgabe04.real_robot import (
+    run_autonomous_stand_exploration as autonomous_wrapper,
+)
 from scripts.aufgabe04.navigation.plan_stand_coverage_survey import (
     main as plan_coverage,
 )
 from scripts.aufgabe04.navigation.models import Pose2D
+from scripts.aufgabe04.navigation.mission_leg_motion_permit import (
+    MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+    MISSION_LEG_RUN_CONFIRMATION,
+    ROUTINE_MISSION_LEG_KINDS,
+    MissionLegKind,
+    MissionLegMotionAuthorization,
+    load_mission_leg_motion_permit,
+    write_mission_leg_motion_authorization,
+)
 from scripts.aufgabe04.navigation.ros_preflight import RosPreflightResult
 from scripts.aufgabe04.navigation.runtime_localization_reseal import (
     evaluate_runtime_localization_reseal,
@@ -47,6 +59,7 @@ from scripts.aufgabe04.navigation.waypoint_csv import load_route_leg
 from scripts.aufgabe04.real_robot.passive_viewpoint_node import _resolved_qr_id
 from scripts.aufgabe04.real_robot.run_autonomous_stand_exploration import (
     MotionLegOutcome,
+    MissionLegPermitContext,
     RuntimeLocalizationPermitContext,
     _admit_preplanning_localization,
     _bounded_approach_offsets,
@@ -599,15 +612,216 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 "site.json",
                 "--coverage-leg-limit",
                 "1",
+                "--exact-inspection-point-count",
+                "2",
                 "--stop-after-coverage",
                 "--execute",
             ]
         )
         self.assertEqual(args.coverage_leg_limit, 1)
+        self.assertEqual(args.exact_inspection_point_count, 2)
         self.assertEqual(args.max_startup_reseals_per_leg, 3)
         self.assertEqual(args.max_runtime_localization_reseals_per_leg, 1)
         self.assertTrue(args.stop_after_coverage)
         self.assertTrue(args.execute)
+
+    def _run_one_leg_wrapper_to_failure(
+        self,
+        root: Path,
+        *,
+        record_error=None,
+        admission_error=None,
+    ):
+        session_id = "one_leg_final_checkpoint"
+        output_root = root / "runs"
+        session_root = output_root / session_id
+        plan = SimpleNamespace(viewpoints=(SimpleNamespace(),))
+        registry = SimpleNamespace()
+        progress = SimpleNamespace()
+        profile = SimpleNamespace(
+            robot_id="turtlebot1",
+            map_frame="map",
+            scan_origin_to_base_offset_m=0.05,
+            resolved_runtime=lambda: SimpleNamespace(
+                namespace="",
+                cmd_vel_topic="/cmd_vel",
+            ),
+        )
+
+        def plan_one_leg(command):
+            survey_root = Path(
+                command[command.index("--output-dir") + 1]
+            )
+            survey_root.mkdir(parents=True, exist_ok=True)
+            (survey_root / "survey_summary.json").write_text(
+                json.dumps({"next_viewpoint_id": "survey_vp_001"}) + "\n"
+            )
+            return 0
+
+        def record_final_stop(**kwargs):
+            if record_error is not None:
+                raise record_error
+            survey_root = Path(kwargs["survey_root"])
+            (survey_root / "survey_summary.json").write_text(
+                json.dumps({"next_viewpoint_id": None}) + "\n"
+            )
+            return {"next_viewpoint_id": None}
+
+        completed = MotionLegOutcome(
+            run_id=f"{session_id}_coverage_000",
+            status="completed",
+            stop_reason="",
+            stop_details={},
+            motion_published=True,
+            returncode=0,
+            semantic_log_path=root / "events.jsonl",
+            odom_execution_certificate_path=root / "odom_certificate.json",
+        )
+        with (
+            patch.object(
+                autonomous_wrapper,
+                "load_real_robot_profile",
+                return_value=profile,
+            ),
+            patch.object(
+                autonomous_wrapper,
+                "load_camera_calibration",
+                return_value=SimpleNamespace(),
+            ),
+            patch.object(autonomous_wrapper, "_validate_inputs"),
+            patch.object(
+                autonomous_wrapper,
+                "_physical_clearance",
+                return_value={
+                    "minimum_active_standoff_m": 0.20,
+                    "minimum_static_inflation_m": 0.25,
+                    "minimum_candidate_transit_radius_m": 0.31,
+                },
+            ),
+            patch.object(
+                autonomous_wrapper,
+                "_admit_preplanning_localization",
+                return_value=Pose2D(0.0, 0.0, 0.0),
+            ),
+            patch.object(
+                autonomous_wrapper,
+                "plan_stand_coverage_survey",
+                side_effect=plan_one_leg,
+            ),
+            patch.object(
+                autonomous_wrapper,
+                "load_coverage_survey_plan",
+                return_value=plan,
+            ),
+            patch.object(
+                autonomous_wrapper,
+                "write_mission_leg_motion_authorization",
+                return_value="mission-leg-authorization-sha256",
+            ),
+            patch.object(
+                autonomous_wrapper,
+                "write_mission_motion_authorization",
+                return_value="mission-authorization-sha256",
+            ),
+            patch.object(
+                autonomous_wrapper,
+                "_execute_coverage_leg_with_replans",
+                return_value=completed,
+            ),
+            patch.object(
+                autonomous_wrapper,
+                "_capture_lidar_epoch",
+                return_value=root / "observer_summary.json",
+            ),
+            patch.object(
+                autonomous_wrapper,
+                "record_stand_coverage_stop",
+                side_effect=record_final_stop,
+            ) as record_stop,
+            patch.object(
+                autonomous_wrapper,
+                "load_stand_survey_registry",
+                return_value=registry,
+            ),
+            patch.object(
+                autonomous_wrapper,
+                "load_survey_progress",
+                return_value=progress,
+            ),
+            patch.object(
+                autonomous_wrapper,
+                "evaluate_coverage_candidate_admission",
+                side_effect=admission_error,
+            ) as evaluate_admission,
+            patch("builtins.input", return_value="RUN"),
+            patch("sys.stderr", new=StringIO()),
+            redirect_stdout(StringIO()),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            autonomous_wrapper.main(
+                [
+                    "--robot-profile",
+                    str(root / "robot.json"),
+                    "--camera-calibration",
+                    str(root / "camera.json"),
+                    "--physical-site",
+                    str(root / "site.json"),
+                    "--session-id",
+                    session_id,
+                    "--output-root",
+                    str(output_root),
+                    "--expected-stand-count",
+                    "1",
+                    "--coverage-leg-limit",
+                    "1",
+                    "--stop-after-coverage",
+                    "--localization-branch-proof-id",
+                    "known_start_marker_20260807",
+                    "--execute",
+                ]
+            )
+        return session_root, raised.exception.code, record_stop, evaluate_admission
+
+    def test_final_coverage_leg_limit_reaches_candidate_admission_gate(self):
+        reason = "post-coverage candidate admission sentinel"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_root, exit_code, record_stop, evaluate_admission = (
+                self._run_one_leg_wrapper_to_failure(
+                    root,
+                    admission_error=RuntimeError(reason),
+                )
+            )
+            failure = json.loads(
+                (session_root / "mission_failure.json").read_text()
+            )
+
+            self.assertEqual(exit_code, 2)
+            record_stop.assert_called_once()
+            evaluate_admission.assert_called_once()
+            self.assertEqual(failure["reason"], reason)
+            self.assertFalse(failure["motion_continues_authorized"])
+            self.assertFalse((session_root / "mission_summary.json").exists())
+
+    def test_coverage_stop_exception_crosses_mission_failure_boundary(self):
+        reason = "coverage stop fusion sentinel"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_root, exit_code, record_stop, evaluate_admission = (
+                self._run_one_leg_wrapper_to_failure(
+                    root,
+                    record_error=ValueError(reason),
+                )
+            )
+            failure = json.loads(
+                (session_root / "mission_failure.json").read_text()
+            )
+
+            self.assertEqual(exit_code, 2)
+            record_stop.assert_called_once()
+            evaluate_admission.assert_not_called()
+            self.assertEqual(failure["reason"], reason)
+            self.assertFalse(failure["motion_continues_authorized"])
 
     def test_coverage_runner_receives_persistent_replan_contract(self):
         profile = self._profile()
@@ -777,6 +991,10 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 command.index("--odom-execution-certificate-json") + 1
             ],
             str(certificate),
+        )
+        self.assertEqual(
+            command[command.index("--observation-id-scope") + 1],
+            "survey_vp_001",
         )
         self.assertEqual(summary.name, "observer_summary.json")
 
@@ -1559,6 +1777,129 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         self.assertEqual(outcome.status, "completed")
         self.assertEqual(run.call_count, 2)
         self.assertNotIn("input", run.call_args_list[1].kwargs)
+
+    def test_routine_leg_uses_one_time_mission_permit_without_parent_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_root = root / "session"
+            run_id = "mission_coverage_001"
+            route = root / "route.csv"
+            diagnostics = root / "diagnostics.json"
+            map_certificate = root / "map_certificate.json"
+            for path, payload in (
+                (route, "route\n"),
+                (diagnostics, "{}\n"),
+                (map_certificate, "{}\n"),
+            ):
+                path.write_text(payload)
+            master_path = (
+                session_root
+                / "motion_authorization"
+                / "mission_leg_motion_authorization.json"
+            ).absolute()
+            write_mission_leg_motion_authorization(
+                master_path,
+                MissionLegMotionAuthorization(
+                    session_id="mission",
+                    robot_id="turtlebot1",
+                    namespace="",
+                    cmd_vel_topic="/cmd_vel",
+                    semantic_map_id="arena_1p898x3p9_auto",
+                    localization_branch_proof_id=(
+                        "known_start_marker_20260807"
+                    ),
+                    allowed_leg_kinds=ROUTINE_MISSION_LEG_KINDS,
+                    scope_text=MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+                    operator_confirmation=MISSION_LEG_RUN_CONFIRMATION,
+                ),
+            )
+            permit_path = (
+                session_root
+                / "motion_authorization"
+                / "mission_legs"
+                / f"{run_id}_permit.json"
+            ).absolute()
+            context = MissionLegPermitContext(
+                mission_authorization_json=master_path,
+                session_id="mission",
+                semantic_map_id="arena_1p898x3p9_auto",
+                mission_leg_kind=MissionLegKind.COVERAGE,
+                mission_leg_index=1,
+                target_id="survey_vp_002",
+                permit_json_path=permit_path,
+            )
+            sealed = {
+                "route_csv": str(route),
+                "diagnostics_json": str(diagnostics),
+                "route_certificate_json": str(map_certificate),
+            }
+            commands = []
+
+            def run_process(command, **_kwargs):
+                commands.append(command)
+                if "--dry-run" in command:
+                    for flag in (
+                        "--preflight-json",
+                        "--odom-execution-certificate-json",
+                        "--uncertainty-budget-json",
+                    ):
+                        artifact = Path(command[command.index(flag) + 1])
+                        artifact.parent.mkdir(parents=True, exist_ok=True)
+                        artifact.write_text("{}\n")
+                else:
+                    event_path = (
+                        session_root / "run_events" / f"{run_id}.jsonl"
+                    )
+                    event_path.parent.mkdir(parents=True, exist_ok=True)
+                    event_path.write_text(
+                        json.dumps(
+                            {
+                                "event": "motion_completed",
+                                "run_id": run_id,
+                                "status": "completed",
+                                "stop_reason": "",
+                                "stop_details": {},
+                                "motion_published": True,
+                            }
+                        )
+                        + "\n"
+                    )
+                return SimpleNamespace(returncode=0)
+
+            with patch(
+                "scripts.aufgabe04.real_robot."
+                "run_autonomous_stand_exploration.subprocess.run",
+                side_effect=run_process,
+            ) as run, patch(
+                "builtins.input",
+                side_effect=AssertionError(
+                    "routine leg permit must not prompt the parent"
+                ),
+            ):
+                outcome = _run_motion_leg(
+                    profile=self._profile(),
+                    sealed=sealed,
+                    run_id=run_id,
+                    session_root=session_root,
+                    execute=True,
+                    coverage_plan=root / "coverage_plan.json",
+                    uncertainty_map_yaml=MAP,
+                    localization_branch_proof_id=(
+                        "known_start_marker_20260807"
+                    ),
+                    mission_leg_permit_context=context,
+                )
+            permit = load_mission_leg_motion_permit(permit_path)
+
+        self.assertEqual(outcome.status, "completed")
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(outcome.mission_leg_motion_permit_path, permit_path)
+        self.assertTrue(outcome.mission_leg_motion_permit_sha256)
+        self.assertEqual(permit.run_id, run_id)
+        self.assertEqual(permit.mission_leg_kind, MissionLegKind.COVERAGE)
+        self.assertFalse(permit.additional_typed_run_required)
+        self.assertIn("--mission-leg-motion-permit-json", commands[1])
+        self.assertNotIn("--runtime-localization-motion-permit-json", commands[1])
 
     def test_runtime_localization_recovery_uses_scoped_permit_without_parent_input(self):
         with tempfile.TemporaryDirectory() as tmp:

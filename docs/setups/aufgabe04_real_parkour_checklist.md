@@ -99,9 +99,15 @@ velocity topic under a namespace.
    staged gate and physical precautions pass. It does not clear real logistics
    mission execution.
 
-Every physical validation requires typing `RUN` before motion. There is no
-`--yes` bypass for `run_single_station_segment.py`; repeated runs still require
-the same dry-run/preflight sequence and an operator beside the robot.
+Every physical mission requires an operator to type `RUN` before its first
+motion. A standalone `run_single_station_segment.py` invocation still has no
+`--yes` bypass and remains interactive. The autonomous exploration wrapper may
+skip repeated child prompts only for the exact routine legs covered by its
+immutable, one-use `mission_leg_motion_permit`; each child still repeats the
+dry-run/live gates, validates the sealed artifacts, and consumes its receipt
+immediately before motion. Startup-route reseals remain outside that mission
+authorization and require a fresh confirmation. Keep an operator beside the
+robot throughout the mission.
 
 For the next operator-authorized trial, disable nonessential RViz LaserScan,
 Path, and long-history displays. Start an observe-only external capture of

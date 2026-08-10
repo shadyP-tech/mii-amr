@@ -176,199 +176,221 @@ def _epoch_stands(observations, plan):
     return accumulator.add_observations(observations)
 
 
+def record_stand_coverage_stop(
+    *,
+    survey_root: Path,
+    map_yaml: Path,
+    viewpoint_id: str,
+    observer_summary_json: Path,
+    semantic_map_id: str = "",
+    observations_jsonl: Path | None = None,
+    arrival_tolerance_m: float = 0.18,
+    scan_to_base_position_offset_m: float = 0.05,
+) -> dict[str, object]:
+    """Fuse one stopped observation epoch and return its persisted status.
+
+    Unlike :func:`main`, this importable API never converts failures to
+    ``SystemExit``.  Callers that own a wider mission boundary can therefore
+    record the original ``ValueError``/``OSError`` as mission-failure evidence.
+    """
+
+    survey_root = Path(survey_root)
+    map_yaml = Path(map_yaml)
+    observer_summary_json = Path(observer_summary_json)
+    if observations_jsonl is not None:
+        observations_jsonl = Path(observations_jsonl)
+
+    if not math.isfinite(arrival_tolerance_m) or arrival_tolerance_m <= 0.0:
+        raise ValueError("arrival tolerance must be finite and positive")
+    if (
+        not math.isfinite(scan_to_base_position_offset_m)
+        or scan_to_base_position_offset_m < 0.0
+    ):
+        raise ValueError(
+            "scan-to-base position offset must be finite and non-negative"
+        )
+    plan_path = survey_root / "coverage_plan.json"
+    progress_path = survey_root / "coverage_progress.json"
+    registry_path = survey_root / "stand_registry.json"
+    plan = load_coverage_survey_plan(plan_path)
+    progress = load_survey_progress(progress_path, plan)
+    registry = load_stand_survey_registry(registry_path, plan)
+    if viewpoint_id in progress.visited_viewpoint_ids:
+        raise ValueError(f"viewpoint {viewpoint_id!r} is already visited")
+    viewpoint = plan.viewpoint_for(viewpoint_id)
+    if viewpoint is None:
+        raise ValueError(f"unknown viewpoint {viewpoint_id!r}")
+
+    resolved_semantic_map_id = semantic_map_id or map_yaml.stem
+    grid, map_bundle = load_occupancy_grid_with_bundle(
+        map_yaml,
+        semantic_map_id=resolved_semantic_map_id,
+        planning_frame=plan.planning_frame,
+    )
+    if map_bundle.bundle_sha256 != plan.map_bundle_sha256:
+        raise ValueError("runtime map bundle differs from coverage plan")
+    observer_summary = _load_summary(observer_summary_json)
+    if observer_summary.get("map_bundle_sha256") != plan.map_bundle_sha256:
+        raise ValueError("observer summary map bundle differs from coverage plan")
+    if observer_summary.get("planning_frame") != plan.planning_frame:
+        raise ValueError("observer summary planning frame differs from plan")
+    scan_pose = _summary_scan_pose(observer_summary)
+    viewpoint_error_m = math.hypot(
+        scan_pose.x_m - viewpoint.pose.x_m,
+        scan_pose.y_m - viewpoint.pose.y_m,
+    )
+    allowed_error_m = arrival_tolerance_m + scan_to_base_position_offset_m
+    if viewpoint_error_m > allowed_error_m + 1.0e-12:
+        raise ValueError(
+            "observation was not captured at the planned viewpoint: "
+            f"error={viewpoint_error_m:.3f} m > {allowed_error_m:.3f} m"
+        )
+
+    summary_output = Path(str(observer_summary.get("output_jsonl", "")))
+    observations_path = observations_jsonl or summary_output
+    if not str(observations_path):
+        raise ValueError("observer summary has no observations JSONL path")
+    if observations_path.resolve() != summary_output.resolve():
+        raise ValueError("observations path differs from the observer summary output")
+    observations = _observations_from_epoch(
+        summary=observer_summary,
+        observations_path=observations_path,
+        map_yaml=map_yaml,
+        map_bundle=map_bundle,
+        plan=plan,
+    )
+    stands = _epoch_stands(observations, plan)
+    registry = fuse_confirmed_stands(
+        registry,
+        stands,
+        viewpoint_id=viewpoint.viewpoint_id,
+        config=plan.config,
+    )
+    progress = mark_viewpoint_visited(plan, progress, viewpoint.viewpoint_id)
+
+    # Prove that the enlarged keepout registry still admits a next leg before
+    # committing the mutable epoch/progress artifacts.
+    next_leg = plan_next_survey_leg(
+        grid,
+        plan=plan,
+        progress=progress,
+        registry=registry,
+        current_pose=scan_pose,
+    )
+    next_viewpoint_id = None
+    next_route_path = None
+    next_diagnostics_path = None
+    if next_leg is not None:
+        leg_index = len(progress.visited_viewpoint_ids)
+        legs_dir = survey_root / "legs"
+        next_route_path = legs_dir / f"leg_{leg_index:03d}_route.csv"
+        next_diagnostics_path = legs_dir / f"leg_{leg_index:03d}_diagnostics.json"
+        if next_route_path.exists() or next_diagnostics_path.exists():
+            raise ValueError("refusing to overwrite next-leg artifacts")
+
+    epoch_path = survey_root / "epochs" / f"{viewpoint.viewpoint_id}.json"
+    if epoch_path.exists():
+        raise ValueError(f"refusing to overwrite survey epoch: {epoch_path}")
+    epoch_path.parent.mkdir(parents=True, exist_ok=True)
+    epoch = {
+        "schema_version": 1,
+        "survey_id": plan.survey_id,
+        "viewpoint_id": viewpoint.viewpoint_id,
+        "planned_pose": {
+            "x_m": viewpoint.pose.x_m,
+            "y_m": viewpoint.pose.y_m,
+            "yaw_rad": viewpoint.pose.yaw_rad,
+        },
+        "observed_scan_pose": {
+            "x_m": scan_pose.x_m,
+            "y_m": scan_pose.y_m,
+            "yaw_rad": scan_pose.yaw_rad,
+        },
+        "viewpoint_error_m": viewpoint_error_m,
+        "observer_summary_json": str(observer_summary_json),
+        "observations_jsonl": str(observations_path),
+        "processed_scan_count": observer_summary["processed_scan_count"],
+        "accepted_observation_count": len(observations),
+        "confirmed_epoch_candidate_count": len(stands),
+    }
+    epoch_path.write_text(json.dumps(epoch, indent=2, sort_keys=True) + "\n")
+    write_survey_progress(progress_path, progress, plan)
+    write_stand_survey_registry(registry_path, registry, plan)
+
+    if next_leg is not None:
+        write_route_csv(
+            next_route_path,
+            (next_leg.route_result,),
+            final_yaw_by_leg={0: next_leg.viewpoint.pose.yaw_rad},
+        )
+        write_diagnostics_json(
+            next_diagnostics_path,
+            (next_leg.route_result,),
+            metadata={
+                "schema_version": 1,
+                "route_kind": "stand_coverage_survey",
+                "motion_authorized": False,
+                "survey_id": plan.survey_id,
+                "plan_sha256": coverage_survey_plan_sha256(plan),
+                "map_bundle_sha256": plan.map_bundle_sha256,
+                "target_viewpoint_id": next_leg.viewpoint.viewpoint_id,
+                "target_pose": {
+                    "x_m": next_leg.viewpoint.pose.x_m,
+                    "y_m": next_leg.viewpoint.pose.y_m,
+                    "yaw_rad": next_leg.viewpoint.pose.yaw_rad,
+                },
+                "candidate_keepout_count": sum(
+                    1
+                    for candidate in registry.candidates
+                    if candidate.status != "rejected"
+                ),
+                "unreachable_viewpoint_ids_before_target": list(
+                    next_leg.unreachable_viewpoint_ids
+                ),
+                "inflation_radius_m": plan.config.inflation_radius_m,
+                "exact_start_connector": (
+                    next_leg.exact_start_connector.to_metadata()
+                ),
+                "arena_boundary_overlay": True,
+                "arena_bounds": plan.arena_bounds.to_metadata(),
+            },
+        )
+        next_viewpoint_id = next_leg.viewpoint.viewpoint_id
+
+    status = {
+        "schema_version": 1,
+        "status": "coverage_stop_recorded",
+        "motion_published": False,
+        **survey_status(plan, progress, registry),
+        "recorded_viewpoint_id": viewpoint.viewpoint_id,
+        "epoch_json": str(epoch_path),
+        "next_viewpoint_id": next_viewpoint_id,
+        "next_route_csv": None if next_route_path is None else str(next_route_path),
+        "next_diagnostics_json": (
+            None if next_diagnostics_path is None else str(next_diagnostics_path)
+        ),
+    }
+    (survey_root / "survey_summary.json").write_text(
+        json.dumps(status, indent=2, sort_keys=True) + "\n"
+    )
+    return status
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        if (
-            not math.isfinite(args.arrival_tolerance_m)
-            or args.arrival_tolerance_m <= 0.0
-        ):
-            raise ValueError("arrival tolerance must be finite and positive")
-        if (
-            not math.isfinite(args.scan_to_base_position_offset_m)
-            or args.scan_to_base_position_offset_m < 0.0
-        ):
-            raise ValueError(
-                "scan-to-base position offset must be finite and non-negative"
-            )
-        plan_path = args.survey_root / "coverage_plan.json"
-        progress_path = args.survey_root / "coverage_progress.json"
-        registry_path = args.survey_root / "stand_registry.json"
-        plan = load_coverage_survey_plan(plan_path)
-        progress = load_survey_progress(progress_path, plan)
-        registry = load_stand_survey_registry(registry_path, plan)
-        if args.viewpoint_id in progress.visited_viewpoint_ids:
-            raise ValueError(f"viewpoint {args.viewpoint_id!r} is already visited")
-        viewpoint = plan.viewpoint_for(args.viewpoint_id)
-        if viewpoint is None:
-            raise ValueError(f"unknown viewpoint {args.viewpoint_id!r}")
-
-        semantic_map_id = args.semantic_map_id or args.map.stem
-        grid, map_bundle = load_occupancy_grid_with_bundle(
-            args.map,
-            semantic_map_id=semantic_map_id,
-            planning_frame=plan.planning_frame,
-        )
-        if map_bundle.bundle_sha256 != plan.map_bundle_sha256:
-            raise ValueError("runtime map bundle differs from coverage plan")
-        observer_summary = _load_summary(args.observer_summary_json)
-        if observer_summary.get("map_bundle_sha256") != plan.map_bundle_sha256:
-            raise ValueError("observer summary map bundle differs from coverage plan")
-        if observer_summary.get("planning_frame") != plan.planning_frame:
-            raise ValueError("observer summary planning frame differs from plan")
-        scan_pose = _summary_scan_pose(observer_summary)
-        viewpoint_error_m = math.hypot(
-            scan_pose.x_m - viewpoint.pose.x_m,
-            scan_pose.y_m - viewpoint.pose.y_m,
-        )
-        allowed_error_m = (
-            args.arrival_tolerance_m + args.scan_to_base_position_offset_m
-        )
-        if viewpoint_error_m > allowed_error_m + 1.0e-12:
-            raise ValueError(
-                "observation was not captured at the planned viewpoint: "
-                f"error={viewpoint_error_m:.3f} m > {allowed_error_m:.3f} m"
-            )
-
-        summary_output = Path(str(observer_summary.get("output_jsonl", "")))
-        observations_path = args.observations_jsonl or summary_output
-        if not str(observations_path):
-            raise ValueError("observer summary has no observations JSONL path")
-        if observations_path.resolve() != summary_output.resolve():
-            raise ValueError(
-                "observations path differs from the observer summary output"
-            )
-        observations = _observations_from_epoch(
-            summary=observer_summary,
-            observations_path=observations_path,
+        status = record_stand_coverage_stop(
+            survey_root=args.survey_root,
             map_yaml=args.map,
-            map_bundle=map_bundle,
-            plan=plan,
-        )
-        stands = _epoch_stands(observations, plan)
-        registry = fuse_confirmed_stands(
-            registry,
-            stands,
-            viewpoint_id=viewpoint.viewpoint_id,
-            config=plan.config,
-        )
-        progress = mark_viewpoint_visited(plan, progress, viewpoint.viewpoint_id)
-
-        # Prove that the enlarged keepout registry still admits a next leg
-        # before committing the mutable epoch/progress artifacts.
-        next_leg = plan_next_survey_leg(
-            grid,
-            plan=plan,
-            progress=progress,
-            registry=registry,
-            current_pose=scan_pose,
-        )
-        next_viewpoint_id = None
-        next_route_path = None
-        next_diagnostics_path = None
-        if next_leg is not None:
-            leg_index = len(progress.visited_viewpoint_ids)
-            legs_dir = args.survey_root / "legs"
-            next_route_path = legs_dir / f"leg_{leg_index:03d}_route.csv"
-            next_diagnostics_path = (
-                legs_dir / f"leg_{leg_index:03d}_diagnostics.json"
-            )
-            if next_route_path.exists() or next_diagnostics_path.exists():
-                raise ValueError("refusing to overwrite next-leg artifacts")
-
-        epoch_path = (
-            args.survey_root
-            / "epochs"
-            / f"{viewpoint.viewpoint_id}.json"
-        )
-        if epoch_path.exists():
-            raise ValueError(f"refusing to overwrite survey epoch: {epoch_path}")
-        epoch_path.parent.mkdir(parents=True, exist_ok=True)
-        epoch = {
-            "schema_version": 1,
-            "survey_id": plan.survey_id,
-            "viewpoint_id": viewpoint.viewpoint_id,
-            "planned_pose": {
-                "x_m": viewpoint.pose.x_m,
-                "y_m": viewpoint.pose.y_m,
-                "yaw_rad": viewpoint.pose.yaw_rad,
-            },
-            "observed_scan_pose": {
-                "x_m": scan_pose.x_m,
-                "y_m": scan_pose.y_m,
-                "yaw_rad": scan_pose.yaw_rad,
-            },
-            "viewpoint_error_m": viewpoint_error_m,
-            "observer_summary_json": str(args.observer_summary_json),
-            "observations_jsonl": str(observations_path),
-            "processed_scan_count": observer_summary["processed_scan_count"],
-            "accepted_observation_count": len(observations),
-            "confirmed_epoch_candidate_count": len(stands),
-        }
-        epoch_path.write_text(json.dumps(epoch, indent=2, sort_keys=True) + "\n")
-        write_survey_progress(progress_path, progress, plan)
-        write_stand_survey_registry(registry_path, registry, plan)
-
-        if next_leg is not None:
-            write_route_csv(
-                next_route_path,
-                (next_leg.route_result,),
-                final_yaw_by_leg={0: next_leg.viewpoint.pose.yaw_rad},
-            )
-            write_diagnostics_json(
-                next_diagnostics_path,
-                (next_leg.route_result,),
-                metadata={
-                    "schema_version": 1,
-                    "route_kind": "stand_coverage_survey",
-                    "motion_authorized": False,
-                    "survey_id": plan.survey_id,
-                    "plan_sha256": coverage_survey_plan_sha256(plan),
-                    "map_bundle_sha256": plan.map_bundle_sha256,
-                    "target_viewpoint_id": next_leg.viewpoint.viewpoint_id,
-                    "target_pose": {
-                        "x_m": next_leg.viewpoint.pose.x_m,
-                        "y_m": next_leg.viewpoint.pose.y_m,
-                        "yaw_rad": next_leg.viewpoint.pose.yaw_rad,
-                    },
-                    "candidate_keepout_count": sum(
-                        1
-                        for candidate in registry.candidates
-                        if candidate.status != "rejected"
-                    ),
-                    "unreachable_viewpoint_ids_before_target": list(
-                        next_leg.unreachable_viewpoint_ids
-                    ),
-                    "inflation_radius_m": plan.config.inflation_radius_m,
-                    "exact_start_connector": (
-                        next_leg.exact_start_connector.to_metadata()
-                    ),
-                    "arena_boundary_overlay": True,
-                    "arena_bounds": plan.arena_bounds.to_metadata(),
-                },
-            )
-            next_viewpoint_id = next_leg.viewpoint.viewpoint_id
-
-        status = {
-            "schema_version": 1,
-            "status": "coverage_stop_recorded",
-            "motion_published": False,
-            **survey_status(plan, progress, registry),
-            "recorded_viewpoint_id": viewpoint.viewpoint_id,
-            "epoch_json": str(epoch_path),
-            "next_viewpoint_id": next_viewpoint_id,
-            "next_route_csv": (
-                None if next_route_path is None else str(next_route_path)
+            semantic_map_id=args.semantic_map_id,
+            viewpoint_id=args.viewpoint_id,
+            observer_summary_json=args.observer_summary_json,
+            observations_jsonl=args.observations_jsonl,
+            arrival_tolerance_m=args.arrival_tolerance_m,
+            scan_to_base_position_offset_m=(
+                args.scan_to_base_position_offset_m
             ),
-            "next_diagnostics_json": (
-                None
-                if next_diagnostics_path is None
-                else str(next_diagnostics_path)
-            ),
-        }
-        (args.survey_root / "survey_summary.json").write_text(
-            json.dumps(status, indent=2, sort_keys=True) + "\n"
         )
     except (KeyError, OSError, TypeError, ValueError) as exc:
         parser.exit(2, f"error: {exc}\n")

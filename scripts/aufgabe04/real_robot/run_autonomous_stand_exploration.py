@@ -7,10 +7,11 @@ stable candidate at a robot-facing pre-approach, and commits calibrated
 camera/LiDAR QR-face poses.  Physical execution requires ``--execute`` and a
 mission-level typed ``RUN``.  A route rebuilt after a pre-motion localization
 mismatch requires another typed ``RUN``.  The mission authorization may cover
-a bounded same-leg, same-target post-motion global-localization reseal, but
-only through an immutable child-run permit after every fresh gate passes.
-Every motion leg still passes the existing route, ROS, obstacle, localization,
-and exclusive-velocity-owner gates.
+routine coverage and inspection children through exact one-use leg permits,
+and a bounded same-leg, same-target post-motion global-localization reseal
+through its narrower recovery permit.  Both paths require every fresh gate to
+pass.  Every motion leg still passes the existing route, ROS, obstacle,
+localization, and exclusive-velocity-owner gates.
 """
 
 from __future__ import annotations
@@ -40,6 +41,10 @@ from scripts.aufgabe04.navigation.artifacts import (
     write_route_csv,
 )
 from scripts.aufgabe04.navigation.costmap import Costmap
+from scripts.aufgabe04.navigation.coverage_candidate_admission import (
+    coverage_candidate_admission_evidence,
+    evaluate_coverage_candidate_admission,
+)
 from scripts.aufgabe04.navigation.detected_stand_preapproach import (
     CAMERA_AXIS_FACE_BEARING_MODE,
     ROBOT_TO_STAND_BEARING_MODE,
@@ -51,6 +56,18 @@ from scripts.aufgabe04.navigation.dynamic_approach_planner import (
 )
 from scripts.aufgabe04.navigation.global_planner import plan_route
 from scripts.aufgabe04.navigation.map_io import load_occupancy_grid_with_bundle
+from scripts.aufgabe04.navigation.mission_leg_motion_permit import (
+    MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+    MISSION_LEG_RUN_CONFIRMATION,
+    ROUTINE_MISSION_LEG_KINDS,
+    MissionLegKind,
+    MissionLegMotionAuthorization,
+    MissionLegMotionPermit,
+    load_mission_leg_motion_authorization,
+    mission_leg_motion_authorization_sha256,
+    write_mission_leg_motion_authorization,
+    write_mission_leg_motion_permit,
+)
 from scripts.aufgabe04.navigation.models import Pose2D
 from scripts.aufgabe04.navigation.plan_stand_coverage_survey import (
     main as plan_stand_coverage_survey,
@@ -80,7 +97,7 @@ from scripts.aufgabe04.navigation.record_stand_candidate_decision import (
     main as record_stand_candidate_decision,
 )
 from scripts.aufgabe04.navigation.record_stand_coverage_stop import (
-    main as record_stand_coverage_stop,
+    record_stand_coverage_stop,
 )
 from scripts.aufgabe04.navigation.route_context import build_station_route_dry_run
 from scripts.aufgabe04.navigation.stand_coverage_survey import (
@@ -154,6 +171,8 @@ class MotionLegOutcome:
     odom_execution_certificate_path: Path | None = None
     motion_authorization_permit_path: Path | None = None
     motion_authorization_permit_sha256: str = ""
+    mission_leg_motion_permit_path: Path | None = None
+    mission_leg_motion_permit_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -169,6 +188,19 @@ class RuntimeLocalizationPermitContext:
     rejected_run_id: str
     runtime_reseal_decision_evidence: dict[str, object]
     fresh_localization_evidence_path: Path
+    permit_json_path: Path
+
+
+@dataclass(frozen=True)
+class MissionLegPermitContext:
+    """Exact routine-leg identity authorized by the mission-level RUN."""
+
+    mission_authorization_json: Path
+    session_id: str
+    semantic_map_id: str
+    mission_leg_kind: MissionLegKind
+    mission_leg_index: int
+    target_id: str
     permit_json_path: Path
 
 
@@ -520,6 +552,15 @@ def _runner_command(
     uncertainty_budget_json: Path | None = None,
     mission_motion_authorization_json: Path | None = None,
     runtime_localization_motion_permit_json: Path | None = None,
+    mission_leg_motion_authorization_json: Path | None = None,
+    mission_leg_motion_permit_json: Path | None = None,
+    mission_leg_kind: MissionLegKind | str | None = None,
+    mission_leg_index: int | None = None,
+    mission_leg_target_id: str = "",
+    mission_leg_semantic_map_id: str = "",
+    mission_leg_dry_preflight_json: Path | None = None,
+    mission_leg_dry_odom_certificate_json: Path | None = None,
+    mission_leg_dry_uncertainty_budget_json: Path | None = None,
     mission_session_id: str = "",
 ) -> list[str]:
     run_phase = "dry" if dry_run else "execute"
@@ -673,6 +714,61 @@ def _runner_command(
                 str(mission_motion_authorization_json),
                 "--runtime-localization-motion-permit-json",
                 str(runtime_localization_motion_permit_json),
+                "--mission-session-id",
+                str(mission_session_id).strip(),
+            ]
+        )
+    mission_leg_fields = (
+        mission_leg_motion_authorization_json,
+        mission_leg_motion_permit_json,
+        mission_leg_kind,
+        mission_leg_index,
+        mission_leg_target_id or None,
+        mission_leg_semantic_map_id or None,
+        mission_leg_dry_preflight_json,
+        mission_leg_dry_odom_certificate_json,
+        mission_leg_dry_uncertainty_budget_json,
+    )
+    if any(value is not None for value in mission_leg_fields):
+        if any(value is None for value in mission_leg_fields):
+            raise ValueError(
+                "mission-leg authorization arguments must be supplied together"
+            )
+        if any(value is not None for value in authorization_fields):
+            raise ValueError(
+                "routine mission-leg and runtime-localization permits are "
+                "mutually exclusive"
+            )
+        if dry_run:
+            raise ValueError("mission-leg motion permits are live-run only")
+        if not str(mission_session_id).strip():
+            raise ValueError(
+                "mission-leg motion permit requires mission_session_id"
+            )
+        kind = MissionLegKind(mission_leg_kind)
+        if kind not in ROUTINE_MISSION_LEG_KINDS:
+            raise ValueError("mission-leg permit requires a routine leg kind")
+        assert mission_leg_index is not None
+        command.extend(
+            [
+                "--mission-leg-motion-authorization-json",
+                str(mission_leg_motion_authorization_json),
+                "--mission-leg-motion-permit-json",
+                str(mission_leg_motion_permit_json),
+                "--mission-leg-kind",
+                kind.value,
+                "--mission-leg-index",
+                str(mission_leg_index),
+                "--mission-leg-target-id",
+                str(mission_leg_target_id).strip(),
+                "--mission-leg-semantic-map-id",
+                str(mission_leg_semantic_map_id).strip(),
+                "--mission-leg-dry-preflight-json",
+                str(mission_leg_dry_preflight_json),
+                "--mission-leg-dry-odom-certificate-json",
+                str(mission_leg_dry_odom_certificate_json),
+                "--mission-leg-dry-uncertainty-budget-json",
+                str(mission_leg_dry_uncertainty_budget_json),
                 "--mission-session-id",
                 str(mission_session_id).strip(),
             ]
@@ -857,6 +953,75 @@ def _issue_runtime_localization_motion_permit(
     return permit_path, permit_sha256
 
 
+def _issue_mission_leg_motion_permit(
+    *,
+    context: MissionLegPermitContext,
+    run_id: str,
+    route_csv: Path,
+    diagnostics_json: Path,
+    map_route_certificate_json: Path,
+    dry_preflight_json: Path,
+    dry_odom_certificate_json: Path,
+    dry_uncertainty_budget_json: Path,
+) -> tuple[Path, str]:
+    """Seal one exact routine child after its no-motion dry-run passes."""
+
+    master_path = Path(context.mission_authorization_json).absolute()
+    master = load_mission_leg_motion_authorization(master_path)
+
+    def sealed(path: Path) -> tuple[str, str]:
+        canonical = Path(path).absolute()
+        return str(canonical), authorization_file_sha256(canonical)
+
+    route_path, route_sha256 = sealed(route_csv)
+    diagnostics_path, diagnostics_sha256 = sealed(diagnostics_json)
+    map_certificate_path, map_certificate_sha256 = sealed(
+        map_route_certificate_json
+    )
+    dry_preflight_path, dry_preflight_sha256 = sealed(dry_preflight_json)
+    dry_certificate_path, dry_certificate_sha256 = sealed(
+        dry_odom_certificate_json
+    )
+    dry_budget_path, dry_budget_sha256 = sealed(
+        dry_uncertainty_budget_json
+    )
+    permit = MissionLegMotionPermit(
+        master_authorization_sha256=(
+            mission_leg_motion_authorization_sha256(master)
+        ),
+        master_authorization_path=str(master_path),
+        session_id=context.session_id,
+        robot_id=master.robot_id,
+        namespace=master.namespace,
+        cmd_vel_topic=master.cmd_vel_topic,
+        semantic_map_id=context.semantic_map_id,
+        localization_branch_proof_id=(
+            master.localization_branch_proof_id
+        ),
+        run_id=run_id,
+        mission_leg_kind=context.mission_leg_kind,
+        mission_leg_index=context.mission_leg_index,
+        target_id=context.target_id,
+        route_csv_path=route_path,
+        route_csv_sha256=route_sha256,
+        diagnostics_path=diagnostics_path,
+        diagnostics_sha256=diagnostics_sha256,
+        map_route_certificate_path=map_certificate_path,
+        map_route_certificate_sha256=map_certificate_sha256,
+        dry_preflight_path=dry_preflight_path,
+        dry_preflight_sha256=dry_preflight_sha256,
+        dry_odom_certificate_path=dry_certificate_path,
+        dry_odom_certificate_sha256=dry_certificate_sha256,
+        dry_uncertainty_budget_path=dry_budget_path,
+        dry_uncertainty_budget_sha256=dry_budget_sha256,
+        dry_run_passed=True,
+        additional_typed_run_required=False,
+    )
+    permit_path = Path(context.permit_json_path).absolute()
+    permit_sha256 = write_mission_leg_motion_permit(permit_path, permit)
+    return permit_path, permit_sha256
+
+
 def _run_motion_leg(
     *,
     profile,
@@ -875,6 +1040,7 @@ def _run_motion_leg(
     runtime_localization_permit_context: (
         RuntimeLocalizationPermitContext | None
     ) = None,
+    mission_leg_permit_context: MissionLegPermitContext | None = None,
 ) -> MotionLegOutcome:
     if require_fresh_confirmation and fresh_confirmation_reason not in {
         "startup",
@@ -890,6 +1056,18 @@ def _run_motion_leg(
     ):
         raise ValueError(
             "runtime localization permit requires runtime fresh-confirmation context"
+        )
+    if (
+        mission_leg_permit_context is not None
+        and runtime_localization_permit_context is not None
+    ):
+        raise ValueError(
+            "routine mission-leg and runtime-localization permits are "
+            "mutually exclusive"
+        )
+    if mission_leg_permit_context is not None and require_fresh_confirmation:
+        raise ValueError(
+            "routine mission-leg authorization cannot cover a resealed route"
         )
     common = {
         "profile": profile,
@@ -952,6 +1130,8 @@ def _run_motion_leg(
         )
     motion_permit_path = None
     motion_permit_sha256 = ""
+    mission_leg_permit_path = None
+    mission_leg_permit_sha256 = ""
     if runtime_localization_permit_context is not None:
         if dry_certificate is None or dry_budget is None:
             raise RuntimeError(
@@ -970,6 +1150,49 @@ def _run_motion_leg(
                 dry_odom_certificate_json=dry_certificate,
                 dry_uncertainty_budget_json=dry_budget,
             )
+        )
+    if mission_leg_permit_context is not None:
+        if dry_certificate is None or dry_budget is None:
+            raise RuntimeError(
+                "mission-leg permit requires uncertainty-aware dry evidence"
+            )
+        mission_leg_permit_path, mission_leg_permit_sha256 = (
+            _issue_mission_leg_motion_permit(
+                context=mission_leg_permit_context,
+                run_id=run_id,
+                route_csv=common["route_csv"],
+                diagnostics_json=common["diagnostics_json"],
+                map_route_certificate_json=common["certificate_json"],
+                dry_preflight_json=(
+                    session_root / "preflight" / f"{run_id}_dry.json"
+                ),
+                dry_odom_certificate_json=dry_certificate,
+                dry_uncertainty_budget_json=dry_budget,
+            )
+        )
+        _append_jsonl(
+            session_root / "adaptive_replans.jsonl",
+            {
+                "schema_version": 1,
+                "event": "mission_leg_motion_permit_issued",
+                "timestamp": time.time(),
+                "run_id": run_id,
+                "mission_leg_kind": (
+                    mission_leg_permit_context.mission_leg_kind.value
+                ),
+                "mission_leg_index": (
+                    mission_leg_permit_context.mission_leg_index
+                ),
+                "target_id": mission_leg_permit_context.target_id,
+                "mission_leg_motion_permit_json": str(
+                    mission_leg_permit_path
+                ),
+                "mission_leg_motion_permit_sha256": (
+                    mission_leg_permit_sha256
+                ),
+                "covered_by_initial_mission_run": True,
+                "additional_typed_run_required": False,
+            },
         )
     if require_fresh_confirmation:
         if fresh_confirmation_reason == "runtime_localization":
@@ -1032,10 +1255,51 @@ def _run_motion_leg(
             else runtime_localization_permit_context.mission_authorization_json
         ),
         runtime_localization_motion_permit_json=motion_permit_path,
-        mission_session_id=(
+        mission_leg_motion_authorization_json=(
+            None
+            if mission_leg_permit_context is None
+            else mission_leg_permit_context.mission_authorization_json
+        ),
+        mission_leg_motion_permit_json=mission_leg_permit_path,
+        mission_leg_kind=(
+            None
+            if mission_leg_permit_context is None
+            else mission_leg_permit_context.mission_leg_kind
+        ),
+        mission_leg_index=(
+            None
+            if mission_leg_permit_context is None
+            else mission_leg_permit_context.mission_leg_index
+        ),
+        mission_leg_target_id=(
             ""
-            if runtime_localization_permit_context is None
-            else runtime_localization_permit_context.session_id
+            if mission_leg_permit_context is None
+            else mission_leg_permit_context.target_id
+        ),
+        mission_leg_semantic_map_id=(
+            ""
+            if mission_leg_permit_context is None
+            else mission_leg_permit_context.semantic_map_id
+        ),
+        mission_leg_dry_preflight_json=(
+            None
+            if mission_leg_permit_context is None
+            else session_root / "preflight" / f"{run_id}_dry.json"
+        ),
+        mission_leg_dry_odom_certificate_json=(
+            None if mission_leg_permit_context is None else dry_certificate
+        ),
+        mission_leg_dry_uncertainty_budget_json=(
+            None if mission_leg_permit_context is None else dry_budget
+        ),
+        mission_session_id=(
+            runtime_localization_permit_context.session_id
+            if runtime_localization_permit_context is not None
+            else (
+                ""
+                if mission_leg_permit_context is None
+                else mission_leg_permit_context.session_id
+            )
         ),
     )
     wrapped = _bundle_command(profile, run_id, runner)
@@ -1052,6 +1316,8 @@ def _run_motion_leg(
         odom_execution_certificate_path=live_certificate,
         motion_authorization_permit_path=motion_permit_path,
         motion_authorization_permit_sha256=motion_permit_sha256,
+        mission_leg_motion_permit_path=mission_leg_permit_path,
+        mission_leg_motion_permit_sha256=mission_leg_permit_sha256,
     )
 
 
@@ -1104,6 +1370,8 @@ def _capture_lidar_epoch(
         str(epoch_root / "observations.jsonl"),
         "--summary-json",
         str(summary),
+        "--observation-id-scope",
+        str(viewpoint_id),
     ]
     if odom_execution_certificate_path is not None:
         certificate_path = Path(odom_execution_certificate_path)
@@ -1417,6 +1685,7 @@ def _execute_coverage_leg_with_replans(
     source_route: Path,
     source_diagnostics: Path,
     mission_motion_authorization_json: Path | None = None,
+    mission_leg_motion_authorization_json: Path | None = None,
 ) -> MotionLegOutcome:
     """Run one coverage leg with in-process transient-overlay A* recovery."""
 
@@ -1536,6 +1805,30 @@ def _execute_coverage_leg_with_replans(
             localization_branch_proof_id=localization_branch_proof_id,
             runtime_localization_permit_context=(
                 pending_runtime_permit_context
+            ),
+            mission_leg_permit_context=(
+                None
+                if (
+                    mission_leg_motion_authorization_json is None
+                    or fresh_confirmation_reason is not None
+                    or pending_runtime_permit_context is not None
+                )
+                else MissionLegPermitContext(
+                    mission_authorization_json=Path(
+                        mission_leg_motion_authorization_json
+                    ).absolute(),
+                    session_id=args.session_id,
+                    semantic_map_id=args.semantic_map_id,
+                    mission_leg_kind=MissionLegKind.COVERAGE,
+                    mission_leg_index=leg_index,
+                    target_id=target_viewpoint_id,
+                    permit_json_path=(
+                        session_root
+                        / "motion_authorization"
+                        / "mission_legs"
+                        / f"{run_id}_permit.json"
+                    ).absolute(),
+                )
             ),
         )
         if outcome.motion_authorization_permit_path is not None:
@@ -2132,6 +2425,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--expected-stand-count", type=int, default=3)
     parser.add_argument("--inspection-stop-spacing-m", type=float, default=0.70)
+    parser.add_argument(
+        "--exact-inspection-point-count",
+        type=int,
+        choices=(2,),
+        default=None,
+        help=(
+            "Select exactly two complementary centerline LiDAR inspection "
+            "points while retaining the map-coverage and two-view candidate "
+            "admission gates."
+        ),
+    )
     parser.add_argument("--lidar-epoch-sec", type=float, default=8.0)
     parser.add_argument("--candidate-approach-offset-m", type=float, default=0.70)
     parser.add_argument("--final-facing-offset-m", type=float, default=0.35)
@@ -2303,40 +2607,54 @@ def main(argv=None) -> int:
             runtime,
             session_root,
         )
-        planning_status = plan_stand_coverage_survey(
-            [
-                "--map",
-                str(args.map),
-                "--semantic-map-id",
-                args.semantic_map_id,
-                "--planning-frame",
-                profile.map_frame,
-                "--start-x",
-                str(start.x_m),
-                "--start-y",
-                str(start.y_m),
-                "--start-yaw",
-                str(start.yaw_rad),
-                "--survey-id",
-                args.session_id,
-                "--output-dir",
-                str(survey_root),
-                "--lane-count",
-                "1",
-                "--stop-spacing-m",
-                str(args.inspection_stop_spacing_m),
-                "--inflation-radius-m",
-                str(inflation_radius_m),
-                "--candidate-keepout-radius-m",
-                str(candidate_keepout_radius_m),
-                "--expected-stand-count",
-                str(args.expected_stand_count),
-            ]
-        )
+        planning_command = [
+            "--map",
+            str(args.map),
+            "--semantic-map-id",
+            args.semantic_map_id,
+            "--planning-frame",
+            profile.map_frame,
+            "--start-x",
+            str(start.x_m),
+            "--start-y",
+            str(start.y_m),
+            "--start-yaw",
+            str(start.yaw_rad),
+            "--survey-id",
+            args.session_id,
+            "--output-dir",
+            str(survey_root),
+            "--lane-count",
+            "1",
+            "--stop-spacing-m",
+            str(args.inspection_stop_spacing_m),
+            "--inflation-radius-m",
+            str(inflation_radius_m),
+            "--candidate-keepout-radius-m",
+            str(candidate_keepout_radius_m),
+            "--expected-stand-count",
+            str(args.expected_stand_count),
+        ]
+        if args.exact_inspection_point_count is not None:
+            planning_command.extend(
+                [
+                    "--exact-inspection-point-count",
+                    str(args.exact_inspection_point_count),
+                ]
+            )
+        planning_status = plan_stand_coverage_survey(planning_command)
         if planning_status != 0:
             return planning_status
         plan_path = survey_root / "coverage_plan.json"
         plan = load_coverage_survey_plan(plan_path)
+        if (
+            args.exact_inspection_point_count is not None
+            and len(plan.viewpoints) != args.exact_inspection_point_count
+        ):
+            raise RuntimeError(
+                "coverage planner did not preserve the exact inspection-point "
+                "count before motion authorization"
+            )
 
         if not args.execute:
             first_sealed = seal_stand_discovery_route(
@@ -2399,8 +2717,13 @@ def main(argv=None) -> int:
             "Physical safety requirements: clear arena; unloaded robot; operator "
             "beside the robot; Ctrl+C and physical stop ready; separate exact-topic "
             f"zero Twist terminal ready. This RUN authorizes {authorization_scope} "
-            "and its bounded scan-backed transient-obstacle A* replans "
+            "and its separately sealed routine coverage, candidate, and "
+            "opposite-face child legs, plus bounded scan-backed transient-"
+            "obstacle A* replans "
             f"(maximum {args.max_blockage_replans_per_leg} per coverage leg). "
+            "Each routine child must pass a fresh dry-run and all live gates, "
+            "then atomically consume its exact one-leg permit; it will not ask "
+            "for another RUN. "
             "A pre-motion AMCL/start mismatch never inherits this RUN: the "
             "route is rebuilt and a fresh typed RUN is required. On a coverage "
             "leg, an exact post-motion global-localization reseal also stops "
@@ -2414,6 +2737,31 @@ def main(argv=None) -> int:
         )
         if input("Type RUN to authorize the autonomous exploration mission: ").strip() != "RUN":
             raise RuntimeError("operator did not authorize the mission")
+
+        mission_leg_motion_authorization_json = (
+            session_root
+            / "motion_authorization"
+            / "mission_leg_motion_authorization.json"
+        ).absolute()
+        mission_leg_motion_authorization = MissionLegMotionAuthorization(
+            session_id=args.session_id,
+            robot_id=profile.robot_id,
+            namespace=runtime.namespace,
+            cmd_vel_topic=runtime.cmd_vel_topic,
+            semantic_map_id=args.semantic_map_id,
+            localization_branch_proof_id=(
+                args.localization_branch_proof_id
+            ),
+            allowed_leg_kinds=ROUTINE_MISSION_LEG_KINDS,
+            scope_text=MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+            operator_confirmation=MISSION_LEG_RUN_CONFIRMATION,
+        )
+        mission_leg_motion_authorization_hash = (
+            write_mission_leg_motion_authorization(
+                mission_leg_motion_authorization_json,
+                mission_leg_motion_authorization,
+            )
+        )
 
         mission_motion_authorization_json = (
             session_root
@@ -2458,6 +2806,17 @@ def main(argv=None) -> int:
                 "mission_motion_authorization_sha256": (
                     mission_motion_authorization_hash
                 ),
+                "mission_leg_motion_authorization_json": str(
+                    mission_leg_motion_authorization_json
+                ),
+                "mission_leg_motion_authorization_sha256": (
+                    mission_leg_motion_authorization_hash
+                ),
+                "routine_leg_kinds": [
+                    kind.value for kind in ROUTINE_MISSION_LEG_KINDS
+                ],
+                "routine_child_prompts_required": False,
+                "startup_reseal_fresh_typed_run_required": True,
                 "max_runtime_localization_reseals_per_leg": (
                     args.max_runtime_localization_reseals_per_leg
                 ),
@@ -2491,6 +2850,9 @@ def main(argv=None) -> int:
                 mission_motion_authorization_json=(
                     mission_motion_authorization_json
                 ),
+                mission_leg_motion_authorization_json=(
+                    mission_leg_motion_authorization_json
+                ),
             )
             observer_summary = _capture_lidar_epoch(
                 profile=profile,
@@ -2501,24 +2863,16 @@ def main(argv=None) -> int:
                     coverage_outcome.odom_execution_certificate_path
                 ),
             )
-            status = record_stand_coverage_stop(
-                [
-                    "--survey-root",
-                    str(survey_root),
-                    "--map",
-                    str(args.map),
-                    "--semantic-map-id",
-                    args.semantic_map_id,
-                    "--viewpoint-id",
-                    str(viewpoint_id),
-                    "--observer-summary-json",
-                    str(observer_summary),
-                    "--scan-to-base-position-offset-m",
-                    str(profile.scan_origin_to_base_offset_m),
-                ]
+            record_stand_coverage_stop(
+                survey_root=survey_root,
+                map_yaml=args.map,
+                semantic_map_id=args.semantic_map_id,
+                viewpoint_id=str(viewpoint_id),
+                observer_summary_json=observer_summary,
+                scan_to_base_position_offset_m=(
+                    profile.scan_origin_to_base_offset_m
+                ),
             )
-            if status != 0:
-                raise RuntimeError(f"failed to fuse coverage stop {viewpoint_id}")
             leg_index += 1
             if (
                 args.coverage_leg_limit > 0
@@ -2527,6 +2881,12 @@ def main(argv=None) -> int:
                 checkpoint_summary = json.loads(
                     (survey_root / "survey_summary.json").read_text()
                 )
+                # A checkpoint must never bypass the terminal coverage-to-
+                # candidate admission gate.  When this was the final planned
+                # viewpoint, leave the loop normally and validate the fused
+                # registry before reporting success or starting approaches.
+                if checkpoint_summary.get("next_viewpoint_id") is None:
+                    continue
                 result = {
                     "schema_version": 1,
                     "status": "coverage_leg_checkpoint_complete",
@@ -2543,6 +2903,31 @@ def main(argv=None) -> int:
 
         registry_path = survey_root / "stand_registry.json"
         registry = load_stand_survey_registry(registry_path, plan)
+        coverage_candidate_admission = (
+            evaluate_coverage_candidate_admission(
+                plan,
+                load_survey_progress(
+                    survey_root / "coverage_progress.json",
+                    plan,
+                ),
+                registry,
+            )
+        )
+        coverage_candidate_admission_path = (
+            session_root / "coverage_candidate_admission.json"
+        )
+        coverage_candidate_admission_sha256 = write_content_hashed_json(
+            coverage_candidate_admission_path,
+            coverage_candidate_admission_evidence(
+                coverage_candidate_admission
+            ),
+            hash_field="coverage_candidate_admission_sha256",
+        )
+        if not coverage_candidate_admission.ready:
+            raise RuntimeError(
+                "coverage candidate admission rejected: "
+                + ", ".join(coverage_candidate_admission.reasons)
+            )
         pending = tuple(
             candidate
             for candidate in registry.candidates
@@ -2574,6 +2959,12 @@ def main(argv=None) -> int:
                     snapshot
                 ),
                 "survey_root": str(survey_root),
+                "coverage_candidate_admission": str(
+                    coverage_candidate_admission_path
+                ),
+                "coverage_candidate_admission_sha256": (
+                    coverage_candidate_admission_sha256
+                ),
             }
             _write_json(session_root / "mission_summary.json", result)
             print(json.dumps(result, indent=2, sort_keys=True))
@@ -2613,18 +3004,37 @@ def main(argv=None) -> int:
                 candidate_transit_radius_m=candidate_keepout_radius_m,
                 physical_clearance=clearance,
             )
+            candidate_run_id = (
+                f"{args.session_id}_candidate_{candidate_index:03d}"
+            )
             candidate_outcome = _run_motion_leg(
                 profile=profile,
                 sealed=sealed,
-                run_id=(
-                    f"{args.session_id}_candidate_{candidate_index:03d}"
-                ),
+                run_id=candidate_run_id,
                 session_root=session_root,
                 execute=True,
                 candidate_snapshot=source_root / "candidate_snapshot.json",
                 uncertainty_map_yaml=args.map,
                 localization_branch_proof_id=(
                     args.localization_branch_proof_id
+                ),
+                mission_leg_permit_context=MissionLegPermitContext(
+                    mission_authorization_json=(
+                        mission_leg_motion_authorization_json
+                    ),
+                    session_id=args.session_id,
+                    semantic_map_id=args.semantic_map_id,
+                    mission_leg_kind=(
+                        MissionLegKind.CANDIDATE_PREAPPROACH
+                    ),
+                    mission_leg_index=candidate_index,
+                    target_id=candidate.candidate_uid,
+                    permit_json_path=(
+                        session_root
+                        / "motion_authorization"
+                        / "mission_legs"
+                        / f"{candidate_run_id}_permit.json"
+                    ).absolute(),
                 ),
             )
             _require_completed_motion(candidate_outcome)
@@ -2693,13 +3103,14 @@ def main(argv=None) -> int:
                         "no physically allowed opposite-face approach was "
                         "A*-reachable: " + "; ".join(feasibility_failures)
                     )
+                opposite_run_id = (
+                    f"{args.session_id}_candidate_"
+                    f"{candidate_index:03d}_opposite"
+                )
                 opposite_outcome = _run_motion_leg(
                     profile=profile,
                     sealed=opposite_sealed,
-                    run_id=(
-                        f"{args.session_id}_candidate_"
-                        f"{candidate_index:03d}_opposite"
-                    ),
+                    run_id=opposite_run_id,
                     session_root=session_root,
                     execute=True,
                     candidate_snapshot=(
@@ -2708,6 +3119,22 @@ def main(argv=None) -> int:
                     uncertainty_map_yaml=args.map,
                     localization_branch_proof_id=(
                         args.localization_branch_proof_id
+                    ),
+                    mission_leg_permit_context=MissionLegPermitContext(
+                        mission_authorization_json=(
+                            mission_leg_motion_authorization_json
+                        ),
+                        session_id=args.session_id,
+                        semantic_map_id=args.semantic_map_id,
+                        mission_leg_kind=MissionLegKind.OPPOSITE_FACE,
+                        mission_leg_index=candidate_index,
+                        target_id=candidate.candidate_uid,
+                        permit_json_path=(
+                            session_root
+                            / "motion_authorization"
+                            / "mission_legs"
+                            / f"{opposite_run_id}_permit.json"
+                        ).absolute(),
                     ),
                 )
                 _require_completed_motion(opposite_outcome)
@@ -2825,6 +3252,12 @@ def main(argv=None) -> int:
             "candidate_snapshot": str(snapshot_path),
             "station_identity_registry": str(identity_path),
             "survey_root": str(survey_root),
+            "coverage_candidate_admission": str(
+                coverage_candidate_admission_path
+            ),
+            "coverage_candidate_admission_sha256": (
+                coverage_candidate_admission_sha256
+            ),
         }
         _write_json(session_root / "mission_summary.json", final_summary)
         print(json.dumps(final_summary, indent=2, sort_keys=True))

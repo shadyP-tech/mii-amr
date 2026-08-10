@@ -65,6 +65,7 @@ class CoverageSurveyConfig:
     candidate_uncertainty_m: float = 0.02
     candidate_keepout_radius_m: float = 0.31
     expected_stand_count: int | None = None
+    exact_inspection_point_count: int | None = None
 
     def validated(self) -> "CoverageSurveyConfig":
         positive = {
@@ -89,6 +90,19 @@ class CoverageSurveyConfig:
                 raise ValueError(f"{name} must be finite and non-negative")
         if type(self.lane_count) is not int or self.lane_count < 1:
             raise ValueError("lane_count must be a positive integer")
+        if self.exact_inspection_point_count is not None:
+            if (
+                type(self.exact_inspection_point_count) is not int
+                or self.exact_inspection_point_count != 2
+            ):
+                raise ValueError(
+                    "exact_inspection_point_count must be exactly 2 when set"
+                )
+            if self.lane_count != 1:
+                raise ValueError(
+                    "exact_inspection_point_count requires lane_count=1 "
+                    "for centerline inspection"
+                )
         if (
             type(self.minimum_distinct_viewpoints) is not int
             or self.minimum_distinct_viewpoints < 1
@@ -281,6 +295,8 @@ def build_coverage_survey_plan(
         )
         for cell in cells
     }
+    if selected_config.exact_inspection_point_count == 2:
+        cells = _select_exact_two_inspection_cells(cells, visible_by_cell)
     viewpoints = []
     for index, cell in enumerate(cells):
         if index + 1 < len(cells):
@@ -601,6 +617,16 @@ def validate_coverage_survey_plan(plan: CoverageSurveyPlan) -> None:
         abs_tol=1.0e-12,
     ):
         raise ValueError("planned coverage ratio does not match covered cells")
+    if (
+        plan.config.exact_inspection_point_count == 2
+        and plan.planned_coverage_ratio + 1.0e-12
+        < plan.config.coverage_threshold
+    ):
+        raise ValueError(
+            "exact-two survey does not meet coverage threshold: "
+            f"{plan.planned_coverage_ratio:.3f} < "
+            f"{plan.config.coverage_threshold:.3f}"
+        )
     for viewpoint in plan.viewpoints:
         _validate_nonempty_id(viewpoint.viewpoint_id, "viewpoint_id")
         _validate_pose(viewpoint.pose, "viewpoint.pose")
@@ -608,6 +634,22 @@ def validate_coverage_survey_plan(plan: CoverageSurveyPlan) -> None:
             raise ValueError("viewpoint visible cells must be sorted and unique")
         if not set(viewpoint.visible_cells).issubset(surveyable):
             raise ValueError("viewpoint visibility contains a non-surveyable cell")
+    if plan.config.exact_inspection_point_count == 2:
+        if len(plan.viewpoints) != 2:
+            raise ValueError(
+                "exact-two survey plan must contain exactly two viewpoints"
+            )
+        if plan.viewpoints[0].cell == plan.viewpoints[1].cell:
+            raise ValueError(
+                "exact-two survey viewpoints must use distinct snapped cells"
+            )
+        shared_visibility = set(plan.viewpoints[0].visible_cells).intersection(
+            plan.viewpoints[1].visible_cells
+        )
+        if not shared_visibility:
+            raise ValueError(
+                "exact-two survey viewpoints must have shared visibility"
+            )
 
 
 def validate_survey_progress(
@@ -900,6 +942,47 @@ def _nearest_traversable_cell(
     return min(options)[1] if options else None
 
 
+def _select_exact_two_inspection_cells(
+    dense_cells: tuple[GridCell, ...],
+    visible_by_cell: Mapping[GridCell, tuple[GridCell, ...]],
+) -> tuple[GridCell, GridCell]:
+    """Choose an ordered dense-sequence pair with complementary visibility.
+
+    A valid pair uses two distinct snapped centerline cells and retains at
+    least one commonly visible surveyable cell.  Among valid pairs, planned
+    union coverage is maximized first, then shared visibility.  Dense-sequence
+    indices provide a stable final tie-break and preserve travel order.
+    """
+
+    best: tuple[tuple[int, int, int, int], tuple[GridCell, GridCell]] | None = None
+    visibility_sets = {
+        cell: frozenset(visible_by_cell[cell]) for cell in dense_cells
+    }
+    for first_index, first in enumerate(dense_cells):
+        for second_index in range(first_index + 1, len(dense_cells)):
+            second = dense_cells[second_index]
+            if first == second:
+                continue
+            shared_count = len(
+                visibility_sets[first].intersection(visibility_sets[second])
+            )
+            if shared_count == 0:
+                continue
+            union_count = len(
+                visibility_sets[first].union(visibility_sets[second])
+            )
+            score = (-union_count, -shared_count, first_index, second_index)
+            candidate = (score, (first, second))
+            if best is None or candidate[0] < best[0]:
+                best = candidate
+    if best is None:
+        raise ValueError(
+            "no valid exact-two inspection-point pair with distinct snapped "
+            "cells and shared visibility"
+        )
+    return best[1]
+
+
 def _cell_distance_m(costmap: Costmap, pose: Pose2D, cell: GridCell) -> float:
     world = costmap.grid_to_world(cell)
     return math.hypot(pose.x_m - world.x_m, pose.y_m - world.y_m)
@@ -1118,7 +1201,7 @@ def _validate_sha256(value: str, name: str) -> None:
 
 
 def _config_payload(config: CoverageSurveyConfig) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "lane_count": config.lane_count,
         "stop_spacing_m": config.stop_spacing_m,
         "visibility_radius_m": config.visibility_radius_m,
@@ -1136,6 +1219,11 @@ def _config_payload(config: CoverageSurveyConfig) -> dict[str, object]:
         "candidate_keepout_radius_m": config.candidate_keepout_radius_m,
         "expected_stand_count": config.expected_stand_count,
     }
+    if config.exact_inspection_point_count is not None:
+        payload["exact_inspection_point_count"] = (
+            config.exact_inspection_point_count
+        )
+    return payload
 
 
 def _config_from_payload(payload: object) -> CoverageSurveyConfig:
@@ -1143,6 +1231,7 @@ def _config_from_payload(payload: object) -> CoverageSurveyConfig:
     return CoverageSurveyConfig(
         lane_count=int(item["lane_count"]),
         stop_spacing_m=float(item["stop_spacing_m"]),
+        exact_inspection_point_count=item.get("exact_inspection_point_count"),
         visibility_radius_m=float(item["visibility_radius_m"]),
         inflation_radius_m=float(item["inflation_radius_m"]),
         snap_radius_m=float(item["snap_radius_m"]),

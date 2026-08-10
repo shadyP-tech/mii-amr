@@ -22,6 +22,9 @@ loaded logistics mission or a two-robot run; see
 | `navigation/runtime_localization_reseal.py` | Classify the exact global-consistency zero/reseal contract and enforce its retry budget | None |
 | `navigation/runtime_motion_authorization.py` | Bind the mission-level `RUN` to one exact, same-target runtime-localization recovery child and its fresh artifacts | None |
 | `navigation/runtime_motion_consumption.py` | Atomically consume that exact child permit once and reject replay before follower motion | None |
+| `navigation/mission_leg_motion_permit.py` | Bind one mission-level `RUN` to separately sealed routine coverage, candidate, and opposite-face child legs | None |
+| `navigation/mission_leg_motion_consumption.py` | Atomically consume each exact routine-leg permit once immediately before motion | None |
+| `navigation/coverage_candidate_admission.py` | Fail closed between LiDAR coverage and candidate approaches unless coverage and multi-view candidate evidence are complete | None |
 | `real_robot/passive_viewpoint_node.py` | Synchronize image, scan, and exact-time TF; rectify the image; validate LiDAR/QR/silhouette evidence | None |
 | `real_robot/run_autonomous_stand_exploration.py` | Plan and execute the unloaded center-corridor discovery, candidate inspection, and QR-facing pose catalog | Dry-run by default; explicit physical gate |
 | `real_robot/prepare_passive_survey.py` | Produce immutable per-candidate observer and catalog-validation commands | None |
@@ -237,6 +240,7 @@ python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
   --map maps/aufgabe03/<real_map>.yaml \
   --semantic-map-id <real_map_id> \
   --expected-stand-count 3 \
+  --exact-inspection-point-count 2 \
   --session-id stand_explore_dry_001
 ```
 
@@ -270,10 +274,14 @@ python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
 ```
 
 Type `RUN` only after the separate no-motion run has passed and the live
-velocity owner is unambiguous. After that mission-level authorization, the
-script still requires the leg's own dry-run/preflight to pass and the child
-runner's separate typed `RUN` before motion, except for the exact bounded
-runtime-localization permit path described below. A
+velocity owner is unambiguous. That one mission-level confirmation covers
+routine coverage, candidate pre-approach, and opposite-face child legs only
+through separate immutable one-use permits. Every child still has to pass its
+own dry-run, preflight, route/certificate binding, uncertainty budget, and live
+revalidation before atomically claiming its permit immediately before motion;
+it does not ask for another `RUN`. A direct standalone child without this
+parent-issued contract remains interactive. Startup route reseals remain
+outside this scope and require fresh operator confirmation. A
 successful checkpoint writes
 `status=coverage_leg_checkpoint_complete`, the stopped LiDAR epoch, run events,
 preflight evidence, and the next viewpoint ID. If stand recovery occurred,
@@ -293,11 +301,12 @@ motion, `fault_code=localization_reseal_required`,
 `fail_closed=true`, and a rejected continuity decision that explicitly
 requires both a zero cycle and reseal. The bounded retry count is controlled by
 `--max-runtime-localization-reseals-per-leg` (default `1`; set `0` to disable).
-The old certificate is never reused. The mission-level `RUN` explicitly covers
-only this bounded, same-leg, same-target recovery class. After the stationary
-preflight, replacement A* route, exact-start connector, dry-run, uncertainty
-budget, and certificate all pass, the wrapper publishes an immutable one-run
-motion permit and the child validates it instead of asking for another `RUN`.
+The old certificate is never reused. The separate runtime-reseal authorization
+derived from the mission-level `RUN` covers only this bounded, same-leg,
+same-target recovery class. After the stationary preflight, replacement A*
+route, exact-start connector, dry-run, uncertainty budget, and certificate all
+pass, the wrapper publishes an immutable one-run motion permit and the child
+validates it instead of asking for another `RUN`.
 Missing, malformed, already-consumed, scope-mismatched, or artifact-mismatched
 permits fail closed before follower motion.
 
@@ -344,14 +353,16 @@ python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
   --map maps/aufgabe03/<real_map>.yaml \
   --semantic-map-id <real_map_id> \
   --expected-stand-count 3 \
+  --exact-inspection-point-count 2 \
   --stop-after-coverage \
   --session-id stand_explore_coverage_001 \
   --execute
 ```
 
-Require `status=coverage_complete`, the exact expected stand count, and a
-content-hashed `candidate_snapshot.json`. Review the fused candidates in the
-map frame before running the complete mission with a fresh session ID:
+Require `status=coverage_complete`, the exact expected stand count, a
+content-hashed `coverage_candidate_admission.json`, and a content-hashed
+`candidate_snapshot.json`. Review the fused candidates in the map frame before
+running the complete mission with a fresh session ID:
 
 ```bash
 python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
@@ -361,6 +372,7 @@ python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
   --map maps/aufgabe03/<real_map>.yaml \
   --semantic-map-id <real_map_id> \
   --expected-stand-count 3 \
+  --exact-inspection-point-count 2 \
   --session-id stand_explore_full_001 \
   --execute
 ```

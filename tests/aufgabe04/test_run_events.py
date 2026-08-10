@@ -24,6 +24,9 @@ from scripts.aufgabe04.navigation.dynamic_route_handoff import (  # noqa: E402
 )
 from scripts.aufgabe04.navigation.follower_models import FollowerResult  # noqa: E402
 from scripts.aufgabe04.navigation.models import Pose2D  # noqa: E402
+from scripts.aufgabe04.navigation.mission_leg_motion_permit import (  # noqa: E402
+    MissionLegKind,
+)
 from scripts.aufgabe04.navigation.ros_preflight import (  # noqa: E402
     RosObservation,
     RosPreflightResult,
@@ -905,6 +908,84 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
         )
         self.assertEqual(
             consumed["runtime_motion_consumption_receipt_json"],
+            str(receipt_path),
+        )
+        self.assertFalse(consumed["additional_typed_run_required"])
+
+    def test_routine_leg_permit_claim_precedes_motion_and_skips_child_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            permit = type(
+                "Permit",
+                (),
+                {
+                    "mission_leg_kind": MissionLegKind.COVERAGE,
+                    "mission_leg_index": 1,
+                    "target_id": "survey_vp_002",
+                },
+            )()
+            receipt = object()
+            receipt_path = Path(tmp) / "mission_leg_consumption.json"
+            with patch.object(
+                run_single_station_segment,
+                "run_ros_preflight",
+                return_value=passing_preflight(),
+            ), patch.object(
+                run_single_station_segment,
+                "_validated_runtime_localization_motion_permit",
+                return_value=None,
+            ), patch.object(
+                run_single_station_segment,
+                "_validated_mission_leg_motion_permit",
+                return_value=permit,
+            ), patch.object(
+                run_single_station_segment,
+                "default_mission_leg_motion_consumption_receipt_path",
+                return_value=receipt_path,
+            ), patch.object(
+                run_single_station_segment,
+                "consume_mission_leg_motion_permit",
+                return_value=receipt,
+            ) as consume, patch.object(
+                run_single_station_segment,
+                "mission_leg_motion_permit_sha256",
+                return_value="c" * 64,
+            ), patch.object(
+                run_single_station_segment,
+                "mission_leg_motion_consumption_receipt_sha256",
+                return_value="d" * 64,
+            ), patch.object(
+                run_single_station_segment,
+                "_confirm_motion",
+                side_effect=AssertionError("mission leg permit must not prompt"),
+            ), patch.object(
+                run_single_station_segment,
+                "run_simple_waypoint_follower",
+                return_value=FollowerResult("completed", "", 1.0, 0.2, True),
+            ) as follower, redirect_stdout(StringIO()):
+                status = run_single_station_segment.main(self.base_args(paths))
+
+            events = read_events(paths["events"])
+            names = [event["event"] for event in events]
+
+        self.assertEqual(status, 0)
+        self.assertTrue(consume.called)
+        self.assertEqual(
+            consume.call_args.kwargs["mission_leg_kind"],
+            MissionLegKind.COVERAGE,
+        )
+        self.assertTrue(follower.called)
+        self.assertLess(
+            names.index("mission_leg_motion_permit_consumed"),
+            names.index("motion_started"),
+        )
+        consumed = next(
+            event
+            for event in events
+            if event["event"] == "mission_leg_motion_permit_consumed"
+        )
+        self.assertEqual(
+            consumed["mission_leg_motion_consumption_receipt_json"],
             str(receipt_path),
         )
         self.assertFalse(consumed["additional_typed_run_required"])

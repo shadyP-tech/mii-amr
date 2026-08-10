@@ -32,6 +32,7 @@ from scripts.aufgabe04.perception.stand_confirmation import (
 from scripts.aufgabe04.perception.stand_observation import (
     DEFAULT_OBSERVATION_TIMING_LIMITS,
     OBSERVATION_SCHEMA_VERSION,
+    OBSERVATION_ID_SCOPE_RUNTIME_KEY,
     RUNTIME_TIMING_LIMITS_KEY,
     TF_LOOKUP_MODE_SCAN_TIME_EXACT,
     ObservationProvenance,
@@ -43,6 +44,7 @@ from scripts.aufgabe04.perception.stand_observation import (
     observations_from_candidates,
     validated_observation_timing,
     validated_observation_stream_clock,
+    validated_observation_id_scope,
     validated_scan_age_sec,
     write_observation_jsonl,
 )
@@ -356,6 +358,9 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
             parameter_overrides=_node_parameter_overrides(args.allow_sim_time),
         )
         self.args = args
+        self.observation_id_scope = validated_observation_id_scope(
+            getattr(args, "observation_id_scope", None)
+        )
         self.timing_limits = _timing_limits_from_args(args)
         self.runtime = resolve_runtime_config(
             RuntimeConfig(
@@ -631,6 +636,10 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
 
         runtime_config = dict(self.runtime.as_log_dict())
         runtime_config[RUNTIME_TIMING_LIMITS_KEY] = self.timing_limits.as_dict()
+        if self.observation_id_scope is not None:
+            runtime_config[OBSERVATION_ID_SCOPE_RUNTIME_KEY] = (
+                self.observation_id_scope
+            )
         if frozen_frame is not None:
             runtime_config[FROZEN_FRAME_EVIDENCE_KEY] = (
                 frozen_frame.runtime_evidence()
@@ -672,6 +681,7 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
             observed_at_sec=time.time(),
             provenance=provenance,
             start_index=self.observation_count + 1,
+            observation_id_scope=self.observation_id_scope,
         )
         self.observation_count += len(candidate_observations)
         observations = tuple(
@@ -719,6 +729,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--allow-sim-time", action="store_true")
     parser.add_argument("--output-jsonl", type=Path, default=DEFAULT_OUTPUT_JSONL)
+    parser.add_argument(
+        "--observation-id-scope",
+        "--observation-id-prefix",
+        dest="observation_id_scope",
+        type=validated_observation_id_scope,
+        default=None,
+        help=(
+            "Optional unique process/epoch scope embedded in every observation "
+            "ID. Omit it to preserve legacy stand_observation_000001 IDs."
+        ),
+    )
     parser.add_argument(
         "--summary-json",
         type=Path,
@@ -813,6 +834,9 @@ def observer_summary_payload(node: StandExplorerNode) -> dict[str, object]:
     }
     if frozen_frame is not None:
         payload[FROZEN_FRAME_EVIDENCE_KEY] = frozen_frame.runtime_evidence()
+    observation_id_scope = getattr(node, "observation_id_scope", None)
+    if observation_id_scope is not None:
+        payload[OBSERVATION_ID_SCOPE_RUNTIME_KEY] = observation_id_scope
     return payload
 
 

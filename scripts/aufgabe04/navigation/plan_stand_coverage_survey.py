@@ -53,6 +53,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--lane-count", type=int, default=2)
     parser.add_argument("--stop-spacing-m", type=float, default=0.90)
+    parser.add_argument(
+        "--exact-inspection-point-count",
+        type=int,
+        help=(
+            "select exactly two complementary centerline inspection points; "
+            "requires --lane-count 1"
+        ),
+    )
     parser.add_argument("--visibility-radius-m", type=float, default=1.35)
     parser.add_argument("--inflation-radius-m", type=float, default=0.25)
     parser.add_argument("--snap-radius-m", type=float, default=0.30)
@@ -132,6 +140,7 @@ def main(argv: list[str] | None = None) -> int:
         config = CoverageSurveyConfig(
             lane_count=args.lane_count,
             stop_spacing_m=args.stop_spacing_m,
+            exact_inspection_point_count=args.exact_inspection_point_count,
             visibility_radius_m=args.visibility_radius_m,
             inflation_radius_m=args.inflation_radius_m,
             snap_radius_m=args.snap_radius_m,
