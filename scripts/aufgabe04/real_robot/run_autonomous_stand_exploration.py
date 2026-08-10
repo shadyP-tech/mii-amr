@@ -168,6 +168,11 @@ DEFAULT_LIDAR_CLEARANCE_MARGIN_M = 0.02
 DEFAULT_MAX_BLOCKAGE_REPLANS_PER_LEG = 3
 DEFAULT_MAX_STARTUP_RESEALS_PER_LEG = 3
 DEFAULT_MAX_RUNTIME_LOCALIZATION_RESEALS_PER_LEG = 1
+# Charge a two-sigma AMCL envelope to static-route clearance.  The child still
+# clamps continuity at its hard translation/yaw caps, and route admission
+# fails closed whenever the map does not have enough clearance for this
+# larger, explicitly persisted allowance.
+DEFAULT_UNCERTAINTY_SIGMA_MULTIPLIER = 2.0
 
 
 @dataclass(frozen=True)
@@ -559,6 +564,9 @@ def _runner_command(
     coverage_transient_replan: dict[str, object] | None = None,
     dry_run: bool,
     uncertainty_map_yaml: Path | None = None,
+    uncertainty_sigma_multiplier: float = (
+        DEFAULT_UNCERTAINTY_SIGMA_MULTIPLIER
+    ),
     localization_branch_proof_id: str = "",
     odom_execution_certificate_json: Path | None = None,
     uncertainty_budget_json: Path | None = None,
@@ -659,6 +667,8 @@ def _runner_command(
                 str(localization_branch_proof_id).strip(),
                 "--uncertainty-robot-radius-m",
                 str(profile.robot_radius_m),
+                "--uncertainty-sigma-multiplier",
+                str(uncertainty_sigma_multiplier),
                 # Mean stability remains strict. Reported covariance is no
                 # longer forced inside half of the 30 mm tracking tube; it is
                 # charged against the route-specific clearance budget.
@@ -1076,6 +1086,9 @@ def _run_motion_leg(
     fresh_confirmation_reason: str = "startup",
     fresh_localization_evidence_path: Path | None = None,
     uncertainty_map_yaml: Path | None = None,
+    uncertainty_sigma_multiplier: float = (
+        DEFAULT_UNCERTAINTY_SIGMA_MULTIPLIER
+    ),
     localization_branch_proof_id: str = "",
     runtime_localization_permit_context: (
         RuntimeLocalizationPermitContext | None
@@ -1126,6 +1139,7 @@ def _run_motion_leg(
         "candidate_snapshot": candidate_snapshot,
         "coverage_transient_replan": coverage_transient_replan,
         "uncertainty_map_yaml": uncertainty_map_yaml,
+        "uncertainty_sigma_multiplier": uncertainty_sigma_multiplier,
         "localization_branch_proof_id": localization_branch_proof_id,
     }
     odom_root = session_root / "odom_execution"
@@ -2006,6 +2020,13 @@ def _execute_coverage_leg_with_replans(
             uncertainty_map_yaml=(
                 args.map if localization_branch_proof_id else None
             ),
+            uncertainty_sigma_multiplier=(
+                getattr(
+                    args,
+                    "uncertainty_sigma_multiplier",
+                    DEFAULT_UNCERTAINTY_SIGMA_MULTIPLIER,
+                )
+            ),
             localization_branch_proof_id=localization_branch_proof_id,
             runtime_localization_permit_context=(
                 pending_runtime_permit_context
@@ -2817,6 +2838,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--uncertainty-sigma-multiplier",
+        type=float,
+        default=DEFAULT_UNCERTAINTY_SIGMA_MULTIPLIER,
+        help=(
+            "AMCL covariance multiplier charged to every route-clearance "
+            "admission and reused as the live map<-odom continuity envelope. "
+            "The route is rejected when this larger allowance exhausts "
+            "clearance; hard transform-drift caps remain unchanged."
+        ),
+    )
+    parser.add_argument(
         "--stop-after-coverage",
         action="store_true",
         help=(
@@ -2844,6 +2876,13 @@ def _validate_inputs(parser, args, profile, calibration) -> None:
     if args.max_runtime_localization_reseals_per_leg < 0:
         parser.error(
             "--max-runtime-localization-reseals-per-leg must be non-negative"
+        )
+    if (
+        not math.isfinite(args.uncertainty_sigma_multiplier)
+        or args.uncertainty_sigma_multiplier <= 0.0
+    ):
+        parser.error(
+            "--uncertainty-sigma-multiplier must be finite and positive"
         )
     args.localization_branch_proof_id = str(
         args.localization_branch_proof_id
@@ -2993,6 +3032,9 @@ def main(argv=None) -> int:
                 execute=False,
                 coverage_plan=plan_path,
                 uncertainty_map_yaml=args.map,
+                uncertainty_sigma_multiplier=(
+                    args.uncertainty_sigma_multiplier
+                ),
                 localization_branch_proof_id=(
                     args.localization_branch_proof_id
                     or "dry_run_no_motion"
@@ -3011,6 +3053,9 @@ def main(argv=None) -> int:
                     "execute": False,
                     "motion_published": False,
                     "survey_root": str(survey_root),
+                    "uncertainty_sigma_multiplier": (
+                        args.uncertainty_sigma_multiplier
+                    ),
                 },
             )
             print(
@@ -3053,7 +3098,9 @@ def main(argv=None) -> int:
             f"{args.max_runtime_localization_reseals_per_leg} reseal(s) per leg "
             "through an exact one-run permit. Route-tube, stale-TF, obstacle, "
             "ownership, target-change, malformed-evidence, and budget failures "
-            "remain terminal."
+            "remain terminal. The AMCL envelope multiplier is "
+            f"{args.uncertainty_sigma_multiplier:g}; it is charged to route "
+            "clearance before motion and reused by the live map<-odom monitor."
         )
         if input("Type RUN to authorize the autonomous exploration mission: ").strip() != "RUN":
             raise RuntimeError("operator did not authorize the mission")
@@ -3139,6 +3186,9 @@ def main(argv=None) -> int:
                 "startup_reseal_fresh_typed_run_required": True,
                 "max_runtime_localization_reseals_per_leg": (
                     args.max_runtime_localization_reseals_per_leg
+                ),
+                "uncertainty_sigma_multiplier": (
+                    args.uncertainty_sigma_multiplier
                 ),
                 "allowed_recovery_kind": (
                     RUNTIME_LOCALIZATION_RESEAL_RECOVERY_KIND
@@ -3335,6 +3385,9 @@ def main(argv=None) -> int:
                 execute=True,
                 candidate_snapshot=source_root / "candidate_snapshot.json",
                 uncertainty_map_yaml=args.map,
+                uncertainty_sigma_multiplier=(
+                    args.uncertainty_sigma_multiplier
+                ),
                 localization_branch_proof_id=(
                     args.localization_branch_proof_id
                 ),
@@ -3437,6 +3490,9 @@ def main(argv=None) -> int:
                         opposite_source / "candidate_snapshot.json"
                     ),
                     uncertainty_map_yaml=args.map,
+                    uncertainty_sigma_multiplier=(
+                        args.uncertainty_sigma_multiplier
+                    ),
                     localization_branch_proof_id=(
                         args.localization_branch_proof_id
                     ),

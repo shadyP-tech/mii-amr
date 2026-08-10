@@ -1,5 +1,5 @@
 import json
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from io import StringIO
 import math
@@ -690,8 +690,35 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         self.assertEqual(args.exact_inspection_point_count, 2)
         self.assertEqual(args.max_startup_reseals_per_leg, 3)
         self.assertEqual(args.max_runtime_localization_reseals_per_leg, 1)
+        self.assertEqual(args.uncertainty_sigma_multiplier, 2.0)
         self.assertTrue(args.stop_after_coverage)
         self.assertTrue(args.execute)
+
+    def test_uncertainty_sigma_multiplier_must_be_finite_and_positive(self):
+        for invalid in ("0", "-1", "nan", "inf"):
+            with self.subTest(invalid=invalid):
+                parser = build_parser()
+                args = parser.parse_args(
+                    [
+                        "--robot-profile",
+                        "robot.json",
+                        "--camera-calibration",
+                        "camera.json",
+                        "--physical-site",
+                        "site.json",
+                        "--uncertainty-sigma-multiplier",
+                        invalid,
+                    ]
+                )
+                with redirect_stderr(StringIO()), self.assertRaises(
+                    SystemExit
+                ):
+                    autonomous_wrapper._validate_inputs(
+                        parser,
+                        args,
+                        None,
+                        None,
+                    )
 
     def _run_one_leg_wrapper_to_failure(
         self,
@@ -956,6 +983,10 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         self.assertEqual(
             command[command.index("--uncertainty-robot-radius-m") + 1],
             "0.105",
+        )
+        self.assertEqual(
+            command[command.index("--uncertainty-sigma-multiplier") + 1],
+            "2.0",
         )
         self.assertEqual(
             command[command.index("--max-stationary-amcl-position-std-m") + 1],
@@ -2202,6 +2233,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                     fresh_confirmation_reason="runtime_localization",
                     fresh_localization_evidence_path=fresh_localization,
                     uncertainty_map_yaml=MAP,
+                    uncertainty_sigma_multiplier=2.25,
                     localization_branch_proof_id="known_start_marker_20260807",
                     runtime_localization_permit_context=context,
                 )
@@ -2217,6 +2249,13 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 "--runtime-localization-motion-permit-json",
                 commands[1],
             )
+            for command in commands:
+                self.assertEqual(
+                    command[
+                        command.index("--uncertainty-sigma-multiplier") + 1
+                    ],
+                    "2.25",
+                )
             self.assertNotIn("input", run.call_args_list[1].kwargs)
 
     def test_startup_reseal_replans_full_a_star_leg_from_rejected_pose(self):

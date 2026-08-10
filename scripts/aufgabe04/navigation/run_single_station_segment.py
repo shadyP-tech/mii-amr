@@ -97,6 +97,7 @@ from scripts.aufgabe04.navigation.odom_execution_certificate import (
 from scripts.aufgabe04.navigation.odom_route_adapter import (
     OdomExecutionContext,
     adapt_map_route_update_to_odom,
+    evaluate_map_odom_stationary_stability,
 )
 from scripts.aufgabe04.navigation.route_uncertainty_admission import (
     RouteUncertaintyAdmissionConfig,
@@ -1062,6 +1063,135 @@ def _preflight_map_from_odom(
     return transform, stamp_sec, capture_time_sec
 
 
+def _preflight_stationary_map_from_odom_window(
+    preflight: RosPreflightResult,
+    *,
+    map_frame: str,
+    odom_frame: str,
+) -> tuple[tuple[PlanarTransform2D, ...], tuple[dict[str, object], ...]]:
+    """Validate ordered direct-TF samples paired with stationary AMCL."""
+
+    raw_samples = preflight.stationary_map_from_odom_samples
+    if not isinstance(raw_samples, list) or len(raw_samples) < 2:
+        raise ValueError(
+            "preflight did not provide at least two stationary direct "
+            "map->odom transform samples"
+        )
+    transforms: list[PlanarTransform2D] = []
+    provenance: list[dict[str, object]] = []
+    previous_receipt_nanoseconds: int | None = None
+    previous_stamp_nanoseconds: int | None = None
+    for index, raw in enumerate(raw_samples):
+        if not isinstance(raw, Mapping):
+            raise ValueError(
+                f"preflight stationary map->odom sample {index} is malformed"
+            )
+        if (
+            raw.get("source") != "direct_dynamic_tf"
+            or raw.get("target_frame") != map_frame
+            or raw.get("source_frame") != odom_frame
+            or raw.get("observed_target_frame") != map_frame
+            or raw.get("observed_source_frame") != odom_frame
+            or raw.get("amcl_sample_index") != index
+        ):
+            raise ValueError(
+                "preflight stationary map->odom sample provenance or frame "
+                f"identity mismatch at index {index}"
+            )
+        try:
+            transform = PlanarTransform2D(
+                float(raw["x_m"]),
+                float(raw["y_m"]),
+                float(raw["yaw_rad"]),
+            )
+            stamp_sec = float(raw["stamp_sec"])
+            receipt_time_sec = float(raw["receipt_time_sec"])
+            capture_time_sec = float(raw["capture_time_sec"])
+            stamp_nanoseconds = raw["stamp_nanoseconds"]
+            receipt_time_nanoseconds = raw["receipt_time_nanoseconds"]
+            capture_time_nanoseconds = raw["capture_time_nanoseconds"]
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                f"preflight stationary map->odom sample {index} is malformed: "
+                f"{exc}"
+            ) from exc
+        if not all(
+            math.isfinite(value) and value >= 0.0
+            for value in (stamp_sec, receipt_time_sec, capture_time_sec)
+        ):
+            raise ValueError(
+                f"preflight stationary map->odom sample {index} has invalid "
+                "timestamps"
+            )
+        if not all(
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 0
+            for value in (
+                stamp_nanoseconds,
+                receipt_time_nanoseconds,
+                capture_time_nanoseconds,
+            )
+        ):
+            raise ValueError(
+                f"preflight stationary map->odom sample {index} has invalid "
+                "nanosecond timestamps"
+            )
+        for seconds, nanoseconds, name in (
+            (stamp_sec, stamp_nanoseconds, "stamp"),
+            (receipt_time_sec, receipt_time_nanoseconds, "receipt"),
+            (capture_time_sec, capture_time_nanoseconds, "capture"),
+        ):
+            if not math.isclose(
+                seconds,
+                nanoseconds / 1_000_000_000.0,
+                rel_tol=0.0,
+                abs_tol=1.0e-9,
+            ):
+                raise ValueError(
+                    f"preflight stationary map->odom sample {index} {name} "
+                    "second/nanosecond timestamps disagree"
+                )
+        if capture_time_nanoseconds < receipt_time_nanoseconds:
+            raise ValueError(
+                f"preflight stationary map->odom sample {index} was captured "
+                "before receipt"
+            )
+        if (
+            previous_receipt_nanoseconds is not None
+            and receipt_time_nanoseconds <= previous_receipt_nanoseconds
+        ):
+            raise ValueError(
+                "preflight stationary map->odom samples do not have strictly "
+                "newer direct-TF receipts"
+            )
+        if (
+            previous_stamp_nanoseconds is not None
+            and stamp_nanoseconds <= previous_stamp_nanoseconds
+        ):
+            raise ValueError(
+                "preflight stationary map->odom samples do not have strictly "
+                "newer direct-TF stamps"
+            )
+        transforms.append(transform)
+        provenance.append(
+            {
+                "sample_index": index,
+                "amcl_sample_index": index,
+                "source": "direct_dynamic_tf",
+                "stamp_sec": stamp_sec,
+                "stamp_nanoseconds": stamp_nanoseconds,
+                "receipt_time_sec": receipt_time_sec,
+                "receipt_time_nanoseconds": receipt_time_nanoseconds,
+                "capture_time_sec": capture_time_sec,
+                "capture_time_nanoseconds": capture_time_nanoseconds,
+            }
+        )
+        previous_receipt_nanoseconds = receipt_time_nanoseconds
+        previous_stamp_nanoseconds = stamp_nanoseconds
+    return tuple(transforms), tuple(provenance)
+
+
 def _conservative_preflight_covariance(
     preflight: RosPreflightResult,
 ) -> tuple[PlanarCovariance, float, dict[str, object]]:
@@ -1179,6 +1309,66 @@ def _covariance_bounded_continuity_limits(
     )
 
 
+def _admit_stationary_map_from_odom_window(
+    preflight: RosPreflightResult,
+    *,
+    map_frame: str,
+    odom_frame: str,
+    final_map_from_odom: PlanarTransform2D,
+    final_stamp_sec: float,
+    final_capture_time_sec: float,
+    max_translation_drift_m: float,
+    max_yaw_drift_rad: float,
+) -> tuple[PlanarTransform2D, dict[str, object]]:
+    """Bind the final certificate transform to a stable direct-TF window."""
+
+    samples, provenance = _preflight_stationary_map_from_odom_window(
+        preflight,
+        map_frame=map_frame,
+        odom_frame=odom_frame,
+    )
+    final_provenance = provenance[-1]
+    if (
+        final_capture_time_sec
+        < float(final_provenance["capture_time_sec"])
+        or final_stamp_sec < float(final_provenance["stamp_sec"])
+    ):
+        raise ValueError(
+            "preflight final map->odom transform predates its stationary "
+            "sample window"
+        )
+    stability = evaluate_map_odom_stationary_stability(
+        (*samples, final_map_from_odom),
+        max_translation_drift_m=max_translation_drift_m,
+        max_yaw_drift_rad=max_yaw_drift_rad,
+    )
+    if not stability.accepted:
+        raise ValueError(
+            "preflight stationary map->odom transform window rejected: "
+            f"{stability.reason}"
+        )
+    admitted = stability.frozen_map_from_odom
+    if admitted is None:
+        raise ValueError(
+            "preflight stationary map->odom admission did not freeze a transform"
+        )
+    if admitted != final_map_from_odom:
+        raise ValueError(
+            "preflight stationary map->odom admission changed the final transform"
+        )
+    evidence = stability.to_evidence()
+    evidence["sample_provenance"] = [
+        *provenance,
+        {
+            "sample_index": len(samples),
+            "source": "final_preflight_tf_lookup",
+            "stamp_sec": final_stamp_sec,
+            "capture_time_sec": final_capture_time_sec,
+        },
+    ]
+    return admitted, evidence
+
+
 def _build_odom_execution_admission(
     *,
     args,
@@ -1272,6 +1462,18 @@ def _build_odom_execution_admission(
         translation_hard_cap_m=args.max_map_odom_translation_drift_m,
         yaw_hard_cap_rad=args.max_map_odom_yaw_drift_rad,
     )
+    map_from_odom, stationary_stability_evidence = (
+        _admit_stationary_map_from_odom_window(
+            preflight,
+            map_frame=resolved.map_frame,
+            odom_frame=resolved.odom_frame,
+            final_map_from_odom=map_from_odom,
+            final_stamp_sec=transform_stamp_sec,
+            final_capture_time_sec=transform_capture_time_sec,
+            max_translation_drift_m=continuity_translation_limit_m,
+            max_yaw_drift_rad=continuity_yaw_limit_rad,
+        )
+    )
     arena_bounds = validate_arena_boundary_evidence(
         diagnostics_snapshot.metadata
     )
@@ -1359,6 +1561,9 @@ def _build_odom_execution_admission(
                 "allowance already reserved in route clearance"
             ),
         },
+        "stationary_map_from_odom_stability": (
+            stationary_stability_evidence
+        ),
         "localization_branch_evidence": branch_evidence,
         "preflight_composition": {
             "position_error_m": composition_position_error_m,

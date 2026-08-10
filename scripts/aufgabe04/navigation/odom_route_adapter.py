@@ -20,6 +20,7 @@ mutate a route source.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -41,6 +42,11 @@ from scripts.aufgabe04.navigation.odom_execution_certificate import (
 CONTINUITY_EVIDENCE_SCHEMA_VERSION = 1
 CONTINUITY_ACCEPTED = "continue_odom_execution"
 CONTINUITY_RESEAL = "force_zero_reseal"
+
+STATIONARY_STABILITY_EVIDENCE_SCHEMA_VERSION = 1
+STATIONARY_STABILITY_MINIMUM_SAMPLE_COUNT = 2
+STATIONARY_STABILITY_ACCEPTED = "admit_frozen_map_from_odom"
+STATIONARY_STABILITY_REJECTED = "reject_frozen_map_from_odom"
 
 
 @dataclass(frozen=True)
@@ -170,6 +176,257 @@ class MapOdomContinuityResult:
         }
 
 
+@dataclass(frozen=True)
+class MapOdomStationarySampleComparison:
+    """Drift of one stationary sample from the final reference sample."""
+
+    sample_index: int
+    map_from_odom: PlanarTransform2D
+    is_final_sample: bool
+    relative_translation_x_m: float
+    relative_translation_y_m: float
+    translation_drift_m: float
+    relative_yaw_rad: float
+    absolute_yaw_drift_rad: float
+    translation_within_limit: bool
+    yaw_within_limit: bool
+
+    @property
+    def accepted(self) -> bool:
+        return self.translation_within_limit and self.yaw_within_limit
+
+    def to_evidence(self) -> dict[str, Any]:
+        return {
+            "sample_index": self.sample_index,
+            "map_from_odom": _transform_evidence(self.map_from_odom),
+            "is_final_sample": self.is_final_sample,
+            "relative_translation_x_m": self.relative_translation_x_m,
+            "relative_translation_y_m": self.relative_translation_y_m,
+            "translation_drift_m": self.translation_drift_m,
+            "relative_yaw_rad": self.relative_yaw_rad,
+            "absolute_yaw_drift_rad": self.absolute_yaw_drift_rad,
+            "translation_within_limit": self.translation_within_limit,
+            "yaw_within_limit": self.yaw_within_limit,
+            "accepted": self.accepted,
+        }
+
+
+@dataclass(frozen=True)
+class MapOdomStationaryStabilityResult:
+    """Fail-closed admission for a stopped ``map_from_odom`` sample window."""
+
+    accepted: bool
+    reason: str
+    decision: str
+    sample_count: int
+    final_sample_index: int | None
+    final_map_from_odom: PlanarTransform2D | None
+    sample_comparisons: tuple[MapOdomStationarySampleComparison, ...]
+    unstable_sample_indices: tuple[int, ...]
+    max_observed_translation_drift_m: float | None
+    max_observed_absolute_yaw_drift_rad: float | None
+    max_translation_drift_m: float
+    max_yaw_drift_rad: float
+    validation_error: str | None = None
+
+    @property
+    def frozen_map_from_odom(self) -> PlanarTransform2D | None:
+        """Return the final sample only when the whole window was admitted."""
+
+        return self.final_map_from_odom if self.accepted else None
+
+    def to_evidence(self) -> dict[str, Any]:
+        """Return deterministic, JSON-ready stationary-admission evidence."""
+
+        return {
+            "schema_version": STATIONARY_STABILITY_EVIDENCE_SCHEMA_VERSION,
+            "accepted": self.accepted,
+            "decision": self.decision,
+            "reason": self.reason,
+            "fail_closed": not self.accepted,
+            "threshold_semantics": (
+                "accept_if_every_sample_is_less_than_or_equal_to_limit_"
+                "from_final_sample"
+            ),
+            "sample_order": "oldest_to_newest_final_sample_is_reference",
+            "sample_count": self.sample_count,
+            "minimum_sample_count": (
+                STATIONARY_STABILITY_MINIMUM_SAMPLE_COUNT
+            ),
+            "final_sample_index": self.final_sample_index,
+            "final_map_from_odom": (
+                None
+                if self.final_map_from_odom is None
+                else _transform_evidence(self.final_map_from_odom)
+            ),
+            "frozen_map_from_odom": (
+                None
+                if self.frozen_map_from_odom is None
+                else _transform_evidence(self.frozen_map_from_odom)
+            ),
+            "sample_comparisons": [
+                comparison.to_evidence()
+                for comparison in self.sample_comparisons
+            ],
+            "unstable_sample_indices": list(self.unstable_sample_indices),
+            "max_observed_translation_drift_m": (
+                self.max_observed_translation_drift_m
+            ),
+            "max_observed_absolute_yaw_drift_rad": (
+                self.max_observed_absolute_yaw_drift_rad
+            ),
+            "max_translation_drift_m": self.max_translation_drift_m,
+            "max_yaw_drift_rad": self.max_yaw_drift_rad,
+            "validation_error": self.validation_error,
+        }
+
+
+@dataclass(frozen=True)
+class _MapOdomDrift:
+    relative_translation_x_m: float
+    relative_translation_y_m: float
+    translation_drift_m: float
+    relative_yaw_rad: float
+    absolute_yaw_drift_rad: float
+
+
+def evaluate_map_odom_stationary_stability(
+    samples: object | None,
+    *,
+    max_translation_drift_m: float,
+    max_yaw_drift_rad: float,
+) -> MapOdomStationaryStabilityResult:
+    """Admit a final transform only after a stable stopped sample window.
+
+    ``samples`` must be an ordered sequence of at least two finite
+    :class:`PlanarTransform2D` values, oldest to newest.  Every sample is
+    compared with the final sample using the same translation and normalized
+    yaw semantics as :func:`evaluate_map_odom_continuity`.  Equality at either
+    configured limit is accepted.
+
+    Missing, structurally malformed, non-finite, or insufficient sample
+    evidence returns a rejected result rather than raising.  Invalid threshold
+    configuration remains a caller error and raises :class:`ValueError`,
+    matching :class:`OdomExecutionContext` validation.
+    """
+
+    translation_limit = _finite_nonnegative(
+        max_translation_drift_m,
+        "max_translation_drift_m",
+    )
+    yaw_limit = _finite_nonnegative(max_yaw_drift_rad, "max_yaw_drift_rad")
+    if yaw_limit > math.pi:
+        raise ValueError("max_yaw_drift_rad must be <= pi")
+
+    if samples is None:
+        return _unavailable_stationary_stability_result(
+            reason="stationary_map_from_odom_samples_missing",
+            validation_error="samples are missing",
+            sample_count=0,
+            max_translation_drift_m=translation_limit,
+            max_yaw_drift_rad=yaw_limit,
+        )
+    if isinstance(samples, (str, bytes, bytearray, Mapping)) or not isinstance(
+        samples,
+        Sequence,
+    ):
+        return _unavailable_stationary_stability_result(
+            reason="stationary_map_from_odom_samples_malformed",
+            validation_error=(
+                "samples must be an ordered sequence of PlanarTransform2D"
+            ),
+            sample_count=0,
+            max_translation_drift_m=translation_limit,
+            max_yaw_drift_rad=yaw_limit,
+        )
+
+    sample_values = tuple(samples)
+    if len(sample_values) < STATIONARY_STABILITY_MINIMUM_SAMPLE_COUNT:
+        return _unavailable_stationary_stability_result(
+            reason="stationary_map_from_odom_samples_insufficient",
+            validation_error=(
+                "samples must contain at least "
+                f"{STATIONARY_STABILITY_MINIMUM_SAMPLE_COUNT} transforms"
+            ),
+            sample_count=len(sample_values),
+            max_translation_drift_m=translation_limit,
+            max_yaw_drift_rad=yaw_limit,
+        )
+
+    validated_samples: list[PlanarTransform2D] = []
+    for sample_index, sample in enumerate(sample_values):
+        try:
+            validated_samples.append(_validated_transform(sample))
+        except (TypeError, ValueError):
+            return _unavailable_stationary_stability_result(
+                reason="stationary_map_from_odom_samples_malformed",
+                validation_error=(
+                    f"samples[{sample_index}] must be a finite "
+                    "PlanarTransform2D"
+                ),
+                sample_count=len(sample_values),
+                max_translation_drift_m=translation_limit,
+                max_yaw_drift_rad=yaw_limit,
+            )
+
+    final_sample_index = len(validated_samples) - 1
+    final_map_from_odom = validated_samples[final_sample_index]
+    comparisons: list[MapOdomStationarySampleComparison] = []
+    unstable_sample_indices: list[int] = []
+    for sample_index, sample in enumerate(validated_samples):
+        drift = _map_odom_drift(
+            observed_map_from_odom=sample,
+            reference_map_from_odom=final_map_from_odom,
+        )
+        translation_within_limit = (
+            drift.translation_drift_m <= translation_limit
+        )
+        yaw_within_limit = drift.absolute_yaw_drift_rad <= yaw_limit
+        comparison = MapOdomStationarySampleComparison(
+            sample_index=sample_index,
+            map_from_odom=sample,
+            is_final_sample=sample_index == final_sample_index,
+            relative_translation_x_m=drift.relative_translation_x_m,
+            relative_translation_y_m=drift.relative_translation_y_m,
+            translation_drift_m=drift.translation_drift_m,
+            relative_yaw_rad=drift.relative_yaw_rad,
+            absolute_yaw_drift_rad=drift.absolute_yaw_drift_rad,
+            translation_within_limit=translation_within_limit,
+            yaw_within_limit=yaw_within_limit,
+        )
+        comparisons.append(comparison)
+        if not comparison.accepted:
+            unstable_sample_indices.append(sample_index)
+
+    accepted = not unstable_sample_indices
+    return MapOdomStationaryStabilityResult(
+        accepted=accepted,
+        reason=(
+            "stationary_map_from_odom_stable"
+            if accepted
+            else "stationary_map_from_odom_unstable"
+        ),
+        decision=(
+            STATIONARY_STABILITY_ACCEPTED
+            if accepted
+            else STATIONARY_STABILITY_REJECTED
+        ),
+        sample_count=len(validated_samples),
+        final_sample_index=final_sample_index,
+        final_map_from_odom=final_map_from_odom,
+        sample_comparisons=tuple(comparisons),
+        unstable_sample_indices=tuple(unstable_sample_indices),
+        max_observed_translation_drift_m=max(
+            comparison.translation_drift_m for comparison in comparisons
+        ),
+        max_observed_absolute_yaw_drift_rad=max(
+            comparison.absolute_yaw_drift_rad for comparison in comparisons
+        ),
+        max_translation_drift_m=translation_limit,
+        max_yaw_drift_rad=yaw_limit,
+    )
+
+
 def evaluate_map_odom_continuity(
     context: OdomExecutionContext,
     live_map_from_odom: object | None,
@@ -200,23 +457,18 @@ def evaluate_map_odom_continuity(
         )
 
     frozen = context.frozen_map_from_odom
-    map_delta_x = live.x_m - frozen.x_m
-    map_delta_y = live.y_m - frozen.y_m
-    cosine = math.cos(frozen.yaw_rad)
-    sine = math.sin(frozen.yaw_rad)
-    # Express the relative translation in the frozen odom basis.  Its norm is
-    # rotation-invariant, while the components make transform direction clear
-    # in persisted evidence.
-    relative_x = _canonical_zero(cosine * map_delta_x + sine * map_delta_y)
-    relative_y = _canonical_zero(-sine * map_delta_x + cosine * map_delta_y)
-    translation_drift = math.hypot(relative_x, relative_y)
-    relative_yaw = normalize_yaw(live.yaw_rad - frozen.yaw_rad)
-    absolute_yaw_drift = abs(relative_yaw)
+    drift = _map_odom_drift(
+        observed_map_from_odom=live,
+        reference_map_from_odom=frozen,
+    )
     translation_ok = (
-        translation_drift
+        drift.translation_drift_m
         <= context.max_map_from_odom_translation_drift_m
     )
-    yaw_ok = absolute_yaw_drift <= context.max_map_from_odom_yaw_drift_rad
+    yaw_ok = (
+        drift.absolute_yaw_drift_rad
+        <= context.max_map_from_odom_yaw_drift_rad
+    )
 
     if translation_ok and yaw_ok:
         accepted = True
@@ -242,11 +494,11 @@ def evaluate_map_odom_continuity(
         base_frame=context.base_frame,
         frozen_map_from_odom=frozen,
         live_map_from_odom=live,
-        relative_translation_x_m=relative_x,
-        relative_translation_y_m=relative_y,
-        translation_drift_m=translation_drift,
-        relative_yaw_rad=relative_yaw,
-        absolute_yaw_drift_rad=absolute_yaw_drift,
+        relative_translation_x_m=drift.relative_translation_x_m,
+        relative_translation_y_m=drift.relative_translation_y_m,
+        translation_drift_m=drift.translation_drift_m,
+        relative_yaw_rad=drift.relative_yaw_rad,
+        absolute_yaw_drift_rad=drift.absolute_yaw_drift_rad,
         max_translation_drift_m=(
             context.max_map_from_odom_translation_drift_m
         ),
@@ -342,6 +594,60 @@ def _unavailable_continuity_result(
         ),
         max_yaw_drift_rad=context.max_map_from_odom_yaw_drift_rad,
         validation_error=validation_error,
+    )
+
+
+def _unavailable_stationary_stability_result(
+    *,
+    reason: str,
+    validation_error: str,
+    sample_count: int,
+    max_translation_drift_m: float,
+    max_yaw_drift_rad: float,
+) -> MapOdomStationaryStabilityResult:
+    return MapOdomStationaryStabilityResult(
+        accepted=False,
+        reason=reason,
+        decision=STATIONARY_STABILITY_REJECTED,
+        sample_count=sample_count,
+        final_sample_index=None,
+        final_map_from_odom=None,
+        sample_comparisons=(),
+        unstable_sample_indices=(),
+        max_observed_translation_drift_m=None,
+        max_observed_absolute_yaw_drift_rad=None,
+        max_translation_drift_m=max_translation_drift_m,
+        max_yaw_drift_rad=max_yaw_drift_rad,
+        validation_error=validation_error,
+    )
+
+
+def _map_odom_drift(
+    *,
+    observed_map_from_odom: PlanarTransform2D,
+    reference_map_from_odom: PlanarTransform2D,
+) -> _MapOdomDrift:
+    """Compute drift using the frozen-reference continuity convention."""
+
+    map_delta_x = observed_map_from_odom.x_m - reference_map_from_odom.x_m
+    map_delta_y = observed_map_from_odom.y_m - reference_map_from_odom.y_m
+    cosine = math.cos(reference_map_from_odom.yaw_rad)
+    sine = math.sin(reference_map_from_odom.yaw_rad)
+    # Express relative translation in the reference odom basis.  Its norm is
+    # rotation-invariant, while components preserve transform direction in
+    # persisted evidence.
+    relative_x = _canonical_zero(cosine * map_delta_x + sine * map_delta_y)
+    relative_y = _canonical_zero(-sine * map_delta_x + cosine * map_delta_y)
+    translation_drift = math.hypot(relative_x, relative_y)
+    relative_yaw = normalize_yaw(
+        observed_map_from_odom.yaw_rad - reference_map_from_odom.yaw_rad
+    )
+    return _MapOdomDrift(
+        relative_translation_x_m=relative_x,
+        relative_translation_y_m=relative_y,
+        translation_drift_m=translation_drift,
+        relative_yaw_rad=relative_yaw,
+        absolute_yaw_drift_rad=abs(relative_yaw),
     )
 
 

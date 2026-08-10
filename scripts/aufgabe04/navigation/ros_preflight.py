@@ -22,6 +22,9 @@ from scripts.aufgabe04.navigation.localization_preflight_evidence import (
     build_localization_ownership_observation_data,
     find_external_tf_owner_candidates,
 )
+from scripts.aufgabe04.navigation.odom_route_adapter import (
+    STATIONARY_STABILITY_MINIMUM_SAMPLE_COUNT,
+)
 from scripts.aufgabe04.navigation.ros_runtime_config import (
     ResolvedRuntimeConfig,
     RuntimeConfig,
@@ -297,6 +300,9 @@ class RosPreflightResult:
     stationary_amcl_samples: List[Dict[str, object]] = field(
         default_factory=list
     )
+    stationary_map_from_odom_samples: List[Dict[str, object]] = field(
+        default_factory=list
+    )
 
     def to_json_dict(self) -> Dict[str, object]:
         return {
@@ -308,6 +314,9 @@ class RosPreflightResult:
             "odom_pose": self.odom_pose,
             "map_from_odom": self.map_from_odom,
             "stationary_amcl_samples": self.stationary_amcl_samples,
+            "stationary_map_from_odom_samples": (
+                self.stationary_map_from_odom_samples
+            ),
         }
 
 
@@ -328,6 +337,28 @@ def _stamp_to_seconds(stamp) -> float:
     return float(stamp.sec) + float(stamp.nanosec) / 1_000_000_000.0
 
 
+def _stamp_to_nanoseconds(stamp) -> int:
+    seconds = stamp.sec
+    nanoseconds = stamp.nanosec
+    if (
+        not isinstance(seconds, int)
+        or isinstance(seconds, bool)
+        or seconds < 0
+    ):
+        raise ValueError("transform stamp sec must be a non-negative integer")
+    if not isinstance(nanoseconds, int) or isinstance(nanoseconds, bool):
+        raise ValueError("transform stamp nanosec must be an integer")
+    if nanoseconds < 0 or nanoseconds >= 1_000_000_000:
+        raise ValueError("transform stamp nanosec must be in [0, 1e9)")
+    return seconds * 1_000_000_000 + nanoseconds
+
+
+def _nonnegative_nanoseconds(value: object, *, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+    return value
+
+
 def _topic_type_names(node: Node, topic: str) -> List[str]:
     return [item[0] for item in node.get_topic_names_and_types() if item[0] == topic for _ in item[1]]
 
@@ -341,6 +372,248 @@ def _topic_types(node: Node, topic: str) -> List[str]:
 
 def _frame_id(frame_id: str) -> str:
     return frame_id.strip("/")
+
+
+def build_stationary_map_from_odom_sample(
+    transform,
+    *,
+    expected_map_frame: str,
+    expected_odom_frame: str,
+    receipt_time_nanoseconds: int,
+    capture_time_nanoseconds: int,
+    max_age_sec: float,
+    max_future_sec: float,
+    amcl_sample_index: int,
+) -> Tuple[Dict[str, object] | None, str]:
+    """Normalize one direct dynamic map<-odom sample or explain rejection."""
+
+    if (
+        not isinstance(amcl_sample_index, int)
+        or isinstance(amcl_sample_index, bool)
+        or amcl_sample_index < 0
+    ):
+        raise ValueError("amcl_sample_index must be a non-negative integer")
+    for name, value in {
+        "max_age_sec": max_age_sec,
+        "max_future_sec": max_future_sec,
+    }.items():
+        if not math.isfinite(value) or value < 0.0:
+            raise ValueError(f"{name} must be finite and non-negative")
+    try:
+        observed_map_frame = _frame_id(str(transform.header.frame_id))
+        observed_odom_frame = _frame_id(str(transform.child_frame_id))
+        stamp_nanoseconds = _stamp_to_nanoseconds(transform.header.stamp)
+        receipt_time_nanoseconds = _nonnegative_nanoseconds(
+            receipt_time_nanoseconds,
+            name="receipt_time_nanoseconds",
+        )
+        capture_time_nanoseconds = _nonnegative_nanoseconds(
+            capture_time_nanoseconds,
+            name="capture_time_nanoseconds",
+        )
+        translation = transform.transform.translation
+        rotation = transform.transform.rotation
+        x_m = float(translation.x)
+        y_m = float(translation.y)
+        quaternion = tuple(
+            float(value)
+            for value in (rotation.x, rotation.y, rotation.z, rotation.w)
+        )
+    except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+        return None, f"malformed direct map<-odom transform: {exc}"
+
+    if (
+        observed_map_frame != _frame_id(expected_map_frame)
+        or observed_odom_frame != _frame_id(expected_odom_frame)
+    ):
+        return None, "direct map<-odom transform frame identity mismatch"
+    pose_values = (x_m, y_m)
+    if not all(math.isfinite(value) for value in pose_values):
+        return None, "direct map<-odom transform contains non-finite values"
+    quaternion_norm = math.sqrt(sum(value * value for value in quaternion))
+    if (
+        not all(math.isfinite(value) for value in quaternion)
+        or not math.isfinite(quaternion_norm)
+        or abs(quaternion_norm - 1.0) > 1.0e-3
+    ):
+        return None, "direct map<-odom transform has invalid quaternion"
+    yaw_rad = math.atan2(
+        2.0 * (quaternion[3] * quaternion[2] + quaternion[0] * quaternion[1]),
+        1.0 - 2.0 * (quaternion[1] ** 2 + quaternion[2] ** 2),
+    )
+    if not math.isfinite(yaw_rad):
+        return None, "direct map<-odom transform has non-finite yaw"
+    stamp_sec = stamp_nanoseconds / 1_000_000_000.0
+    receipt_time_sec = receipt_time_nanoseconds / 1_000_000_000.0
+    capture_time_sec = capture_time_nanoseconds / 1_000_000_000.0
+    header_age_sec = (
+        capture_time_nanoseconds - stamp_nanoseconds
+    ) / 1_000_000_000.0
+    receipt_age_sec = (
+        capture_time_nanoseconds - receipt_time_nanoseconds
+    ) / 1_000_000_000.0
+    if (
+        header_age_sec < -max_future_sec
+        or receipt_age_sec < -max_future_sec
+    ):
+        return None, "direct map<-odom transform is future-dated"
+    if header_age_sec > max_age_sec or receipt_age_sec > max_age_sec:
+        return None, "direct map<-odom transform is stale"
+
+    return (
+        {
+            "amcl_sample_index": amcl_sample_index,
+            "source": "direct_dynamic_tf",
+            "target_frame": expected_map_frame,
+            "source_frame": expected_odom_frame,
+            "observed_target_frame": observed_map_frame,
+            "observed_source_frame": observed_odom_frame,
+            "stamp_nanoseconds": stamp_nanoseconds,
+            "receipt_time_nanoseconds": receipt_time_nanoseconds,
+            "capture_time_nanoseconds": capture_time_nanoseconds,
+            "stamp_sec": stamp_sec,
+            "receipt_time_sec": receipt_time_sec,
+            "capture_time_sec": capture_time_sec,
+            "header_age_sec": header_age_sec,
+            "receipt_age_sec": receipt_age_sec,
+            "max_age_sec": max_age_sec,
+            "max_future_sec": max_future_sec,
+            "x_m": x_m,
+            "y_m": y_m,
+            "yaw_rad": yaw_rad,
+            "quaternion": {
+                "x": quaternion[0],
+                "y": quaternion[1],
+                "z": quaternion[2],
+                "w": quaternion[3],
+                "norm": quaternion_norm,
+            },
+        },
+        "",
+    )
+
+
+def _latest_stationary_map_from_odom_capture_window(
+    samples_by_amcl: Sequence[Dict[str, object] | None],
+    failures_by_amcl: Sequence[str | None],
+    *,
+    amcl_window_size: int,
+) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
+    """Keep direct-TF captures paired with the newest AMCL sample window."""
+
+    if (
+        not isinstance(amcl_window_size, int)
+        or isinstance(amcl_window_size, bool)
+        or amcl_window_size < 2
+    ):
+        raise ValueError("amcl_window_size must be an integer >= 2")
+    if len(samples_by_amcl) != len(failures_by_amcl):
+        raise ValueError("stationary map<-odom capture records must align")
+    window_start = max(0, len(samples_by_amcl) - amcl_window_size)
+    selected_samples: List[Dict[str, object]] = []
+    selected_failures: List[Dict[str, object]] = []
+    for window_index, (sample, failure) in enumerate(
+        zip(
+            samples_by_amcl[window_start:],
+            failures_by_amcl[window_start:],
+        )
+    ):
+        if sample is not None:
+            selected_samples.append(
+                {**sample, "amcl_sample_index": window_index}
+            )
+        if failure:
+            selected_failures.append(
+                {
+                    "amcl_sample_index": window_index,
+                    "reason": str(failure),
+                }
+            )
+    return selected_samples, selected_failures
+
+
+def _stationary_map_from_odom_pairing_failure(
+    sample: Dict[str, object],
+    *,
+    baseline_identity: Tuple[int, int] | None,
+    previous_sample: Dict[str, object] | None,
+    paired_amcl_receipt_nanoseconds: int | None = None,
+) -> str:
+    """Require a new, strictly ordered direct TF for each AMCL pair."""
+
+    try:
+        stamp_nanoseconds = _nonnegative_nanoseconds(
+            sample["stamp_nanoseconds"],
+            name="stamp_nanoseconds",
+        )
+        receipt_nanoseconds = _nonnegative_nanoseconds(
+            sample["receipt_time_nanoseconds"],
+            name="receipt_time_nanoseconds",
+        )
+        capture_nanoseconds = _nonnegative_nanoseconds(
+            sample["capture_time_nanoseconds"],
+            name="capture_time_nanoseconds",
+        )
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        return f"map<-odom pairing metadata is malformed: {exc}"
+    if paired_amcl_receipt_nanoseconds is not None:
+        try:
+            paired_amcl_receipt_nanoseconds = _nonnegative_nanoseconds(
+                paired_amcl_receipt_nanoseconds,
+                name="paired_amcl_receipt_nanoseconds",
+            )
+        except ValueError as exc:
+            return f"paired AMCL receipt metadata is malformed: {exc}"
+        if receipt_nanoseconds <= paired_amcl_receipt_nanoseconds:
+            return (
+                "direct map<-odom receipt did not follow paired AMCL "
+                "publication"
+            )
+    if baseline_identity is not None:
+        try:
+            baseline_stamp = _nonnegative_nanoseconds(
+                baseline_identity[0],
+                name="baseline stamp_nanoseconds",
+            )
+            baseline_receipt = _nonnegative_nanoseconds(
+                baseline_identity[1],
+                name="baseline receipt_time_nanoseconds",
+            )
+        except (IndexError, TypeError, ValueError) as exc:
+            return f"baseline map<-odom pairing metadata is malformed: {exc}"
+        if stamp_nanoseconds <= baseline_stamp:
+            return (
+                "direct map<-odom stamp did not advance after no-motion "
+                "request"
+            )
+        if receipt_nanoseconds <= baseline_receipt:
+            return (
+                "direct map<-odom receipt did not advance after no-motion "
+                "request"
+            )
+    if previous_sample is not None:
+        try:
+            previous_stamp = _nonnegative_nanoseconds(
+                previous_sample["stamp_nanoseconds"],
+                name="prior stamp_nanoseconds",
+            )
+            previous_receipt = _nonnegative_nanoseconds(
+                previous_sample["receipt_time_nanoseconds"],
+                name="prior receipt_time_nanoseconds",
+            )
+            previous_capture = _nonnegative_nanoseconds(
+                previous_sample["capture_time_nanoseconds"],
+                name="prior capture_time_nanoseconds",
+            )
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            return f"prior map<-odom pairing metadata is malformed: {exc}"
+        if stamp_nanoseconds <= previous_stamp:
+            return "direct map<-odom stamps are not strictly increasing"
+        if receipt_nanoseconds <= previous_receipt:
+            return "direct map<-odom receipts are not strictly increasing"
+        if capture_nanoseconds <= previous_capture:
+            return "direct map<-odom capture times are not strictly increasing"
+    return ""
 
 
 class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
@@ -411,6 +684,10 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             frozen_map_transform_certified
         )
         self.stationary_amcl_samples: List[StationaryAmclPoseSample] = []
+        self.stationary_map_from_odom_samples: List[Dict[str, object]] = []
+        self.stationary_map_from_odom_capture_failures: List[
+            Dict[str, object]
+        ] = []
         self.latest_scan = None
         self.latest_scan_receipt = None
         self.latest_odom = None
@@ -420,6 +697,10 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         self.latest_nav2_status = None
         self.latest_dynamic_map_to_odom = None
         self.latest_dynamic_map_to_odom_receipt = None
+        self.dynamic_map_to_odom_message_count = 0
+        self.stationary_map_from_odom_capture_failure_history: List[
+            Dict[str, object]
+        ] = []
         self.nomotion_client = (
             self.create_client(Empty, nomotion_update_service)
             if request_nomotion_update and config.localization_source == "amcl"
@@ -468,6 +749,7 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             if self._is_configured_map_to_odom(transform):
                 self.latest_dynamic_map_to_odom = transform
                 self.latest_dynamic_map_to_odom_receipt = self.get_clock().now()
+                self.dynamic_map_to_odom_message_count += 1
 
     def _is_configured_map_to_odom(self, transform) -> bool:
         return (
@@ -505,6 +787,16 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             if not stability.ok:
                 failures.append(
                     f"stationary AMCL stability: {stability.detail}"
+                )
+        if self.execution_pose_owner == "odom":
+            transform_window = (
+                self._observe_stationary_map_from_odom_samples()
+            )
+            observations.append(transform_window)
+            if not transform_window.ok:
+                failures.append(
+                    "stationary map<-odom transform samples: "
+                    f"{transform_window.detail}"
                 )
 
         self._observe_topic(
@@ -623,6 +915,10 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                 }
                 for sample in self.stationary_amcl_samples
             ],
+            stationary_map_from_odom_samples=[
+                dict(sample)
+                for sample in self.stationary_map_from_odom_samples
+            ],
         )
 
     def _refresh_stationary_amcl(self) -> RosObservation:
@@ -716,9 +1012,145 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             covariance=tuple(float(value) for value in msg.pose.covariance),
         )
 
+    def _stationary_map_from_odom_sample(
+        self,
+        *,
+        amcl_sample_index: int,
+    ) -> Tuple[Dict[str, object] | None, str]:
+        transform = self.latest_dynamic_map_to_odom
+        receipt = self.latest_dynamic_map_to_odom_receipt
+        if transform is None or receipt is None:
+            return None, "no direct dynamic map<-odom transform received"
+        capture_time = self.get_clock().now()
+        try:
+            receipt_time_nanoseconds = _nonnegative_nanoseconds(
+                receipt.nanoseconds,
+                name="receipt_time_nanoseconds",
+            )
+            capture_time_nanoseconds = _nonnegative_nanoseconds(
+                capture_time.nanoseconds,
+                name="capture_time_nanoseconds",
+            )
+        except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+            return None, f"malformed direct map<-odom receipt time: {exc}"
+        return build_stationary_map_from_odom_sample(
+            transform,
+            expected_map_frame=self.config.map_frame,
+            expected_odom_frame=self.config.odom_frame,
+            receipt_time_nanoseconds=receipt_time_nanoseconds,
+            capture_time_nanoseconds=capture_time_nanoseconds,
+            max_age_sec=self.max_tf_age_sec,
+            max_future_sec=self.max_localization_tf_future_sec,
+            amcl_sample_index=amcl_sample_index,
+        )
+
+    def _latest_dynamic_map_from_odom_identity(
+        self,
+    ) -> Tuple[Tuple[int, int] | None, str]:
+        transform = self.latest_dynamic_map_to_odom
+        receipt = self.latest_dynamic_map_to_odom_receipt
+        if transform is None and receipt is None:
+            return None, ""
+        if transform is None or receipt is None:
+            return None, "cached direct map<-odom transform is incomplete"
+        try:
+            stamp_nanoseconds = _stamp_to_nanoseconds(
+                transform.header.stamp
+            )
+            receipt_nanoseconds = _nonnegative_nanoseconds(
+                receipt.nanoseconds,
+                name="cached receipt_time_nanoseconds",
+            )
+        except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+            return None, f"cached direct map<-odom identity is malformed: {exc}"
+        return (stamp_nanoseconds, receipt_nanoseconds), ""
+
+    def _observe_stationary_map_from_odom_samples(self) -> RosObservation:
+        sample_count = len(self.stationary_map_from_odom_samples)
+        required_pair_count = self.stationary_amcl_sample_count
+        paired_amcl_sample_count = len(self.stationary_amcl_samples)
+        ordering_failure = ""
+        previous_sample = None
+        for expected_index, sample in enumerate(
+            self.stationary_map_from_odom_samples
+        ):
+            if not isinstance(sample, dict):
+                ordering_failure = (
+                    "stationary map<-odom sample is not a JSON object"
+                )
+                break
+            if sample.get("amcl_sample_index") != expected_index:
+                ordering_failure = (
+                    "stationary map<-odom sample indices are not contiguous"
+                )
+                break
+            ordering_failure = _stationary_map_from_odom_pairing_failure(
+                sample,
+                baseline_identity=None,
+                previous_sample=previous_sample,
+            )
+            if ordering_failure:
+                break
+            previous_sample = sample
+        complete_amcl_window = (
+            paired_amcl_sample_count == required_pair_count
+        )
+        complete_transform_window = sample_count == required_pair_count
+        ok = (
+            required_pair_count
+            >= STATIONARY_STABILITY_MINIMUM_SAMPLE_COUNT
+            and complete_amcl_window
+            and complete_transform_window
+            and not self.stationary_map_from_odom_capture_failures
+            and not ordering_failure
+        )
+        detail = (
+            f"paired_samples={sample_count}/{required_pair_count} "
+            f"amcl_samples={paired_amcl_sample_count}/{required_pair_count} "
+            "capture_failures="
+            f"{len(self.stationary_map_from_odom_capture_failures)}"
+        )
+        if ordering_failure:
+            detail += f" ordering_failure={ordering_failure}"
+        return RosObservation(
+            "stationary map<-odom transform samples",
+            ok,
+            detail,
+            {
+                "sample_count": sample_count,
+                "minimum_sample_count": (
+                    STATIONARY_STABILITY_MINIMUM_SAMPLE_COUNT
+                ),
+                "required_pair_count": required_pair_count,
+                "paired_amcl_sample_count": paired_amcl_sample_count,
+                "complete_amcl_window": complete_amcl_window,
+                "complete_transform_window": complete_transform_window,
+                "sample_order": "oldest_to_newest",
+                "direct_dynamic_tf_required": True,
+                "new_direct_tf_after_each_nomotion_amcl_required": True,
+                "strictly_increasing_stamp_receipt_required": True,
+                "ordering_failure": ordering_failure,
+                "capture_failures": list(
+                    self.stationary_map_from_odom_capture_failures
+                ),
+                "capture_failure_history": list(
+                    getattr(
+                        self,
+                        "stationary_map_from_odom_capture_failure_history",
+                        [],
+                    )
+                ),
+            },
+        )
+
     def _observe_stationary_amcl_stability(self) -> RosObservation:
         deadline = time.monotonic() + self.nomotion_update_timeout_sec
         samples: List[StationaryAmclPoseSample] = []
+        map_from_odom_samples_by_amcl: List[
+            Dict[str, object] | None
+        ] = []
+        map_from_odom_failures_by_amcl: List[str | None] = []
+        map_from_odom_candidate_rejections: List[Dict[str, object]] = []
         service_failures: List[str] = []
         service_request_count = 0
         observation = evaluate_latest_stationary_amcl_window(
@@ -731,9 +1163,33 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             max_position_std_m=self.max_stationary_amcl_position_std_m,
             max_yaw_std_rad=self.max_stationary_amcl_yaw_std_rad,
         )
+
+        def latest_map_from_odom_window_complete() -> bool:
+            window_start = max(
+                0,
+                len(map_from_odom_samples_by_amcl)
+                - self.stationary_amcl_sample_count,
+            )
+            sample_window = map_from_odom_samples_by_amcl[window_start:]
+            failure_window = map_from_odom_failures_by_amcl[window_start:]
+            return (
+                len(sample_window) == self.stationary_amcl_sample_count
+                and len(failure_window) == self.stationary_amcl_sample_count
+                and all(sample is not None for sample in sample_window)
+                and all(failure is None for failure in failure_window)
+            )
+
+        def collection_complete() -> bool:
+            if not observation.ok:
+                return False
+            return (
+                self.execution_pose_owner != "odom"
+                or latest_map_from_odom_window_complete()
+            )
+
         while (
             rclpy.ok()
-            and not observation.ok
+            and not collection_complete()
             and time.monotonic() < deadline
         ):
             while (
@@ -749,9 +1205,22 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                 if self.latest_amcl_receipt is None
                 else self.latest_amcl_receipt.nanoseconds
             )
+            baseline_map_from_odom_message_count = (
+                self.dynamic_map_to_odom_message_count
+            )
+            (
+                baseline_map_from_odom_identity,
+                baseline_map_from_odom_failure,
+            ) = self._latest_dynamic_map_from_odom_identity()
             future = self.nomotion_client.call_async(Empty.Request())
             service_request_count += 1
             sample = None
+            sample_receipt_nanoseconds = None
+            map_from_odom_sample = None
+            map_from_odom_failure = ""
+            evaluated_map_from_odom_message_count = (
+                baseline_map_from_odom_message_count
+            )
             sample_deadline = min(
                 deadline,
                 time.monotonic()
@@ -778,7 +1247,78 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                     and fresh
                     and self._route_transform_available()
                 ):
-                    sample = self._stationary_amcl_sample()
+                    if sample is None:
+                        sample = self._stationary_amcl_sample()
+                        try:
+                            sample_receipt_nanoseconds = (
+                                _nonnegative_nanoseconds(
+                                    receipt_ns,
+                                    name="paired_amcl_receipt_nanoseconds",
+                                )
+                            )
+                        except ValueError as exc:
+                            map_from_odom_failure = str(exc)
+                            break
+                    if self.execution_pose_owner != "odom":
+                        break
+                    if baseline_map_from_odom_failure:
+                        map_from_odom_failure = (
+                            baseline_map_from_odom_failure
+                        )
+                        break
+                    if (
+                        self.dynamic_map_to_odom_message_count
+                        <= evaluated_map_from_odom_message_count
+                    ):
+                        continue
+                    evaluated_map_from_odom_message_count = (
+                        self.dynamic_map_to_odom_message_count
+                    )
+                    candidate, candidate_failure = (
+                        self._stationary_map_from_odom_sample(
+                            amcl_sample_index=len(samples),
+                        )
+                    )
+                    if candidate is not None:
+                        previous_sample = next(
+                            (
+                                prior
+                                for prior in reversed(
+                                    map_from_odom_samples_by_amcl
+                                )
+                                if prior is not None
+                            ),
+                            None,
+                        )
+                        candidate_failure = (
+                            _stationary_map_from_odom_pairing_failure(
+                                candidate,
+                                baseline_identity=(
+                                    baseline_map_from_odom_identity
+                                ),
+                                previous_sample=previous_sample,
+                                paired_amcl_receipt_nanoseconds=(
+                                    sample_receipt_nanoseconds
+                                ),
+                            )
+                        )
+                    if candidate_failure:
+                        map_from_odom_failure = candidate_failure
+                        map_from_odom_candidate_rejections.append(
+                            {
+                                "service_request_index": (
+                                    service_request_count - 1
+                                ),
+                                "amcl_sample_index": len(samples),
+                                "direct_tf_message_count": (
+                                    evaluated_map_from_odom_message_count
+                                ),
+                                "reason": candidate_failure,
+                            }
+                        )
+                        continue
+                    map_from_odom_sample = candidate
+                    map_from_odom_failure = ""
                     break
             if sample is None:
                 service_failures.append(
@@ -786,6 +1326,31 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                 )
             else:
                 samples.append(sample)
+                if self.execution_pose_owner == "odom":
+                    if map_from_odom_sample is None:
+                        if not map_from_odom_failure:
+                            map_from_odom_failure = (
+                                "no new direct map<-odom transform followed "
+                                "paired no-motion AMCL publication"
+                            )
+                        map_from_odom_candidate_rejections.append(
+                            {
+                                "service_request_index": (
+                                    service_request_count - 1
+                                ),
+                                "amcl_sample_index": len(samples) - 1,
+                                "direct_tf_message_count": (
+                                    self.dynamic_map_to_odom_message_count
+                                ),
+                                "reason": map_from_odom_failure,
+                            }
+                        )
+                    map_from_odom_samples_by_amcl.append(
+                        map_from_odom_sample
+                    )
+                    map_from_odom_failures_by_amcl.append(
+                        map_from_odom_failure or None
+                    )
                 observation = evaluate_latest_stationary_amcl_window(
                     samples,
                     required_sample_count=self.stationary_amcl_sample_count,
@@ -812,6 +1377,24 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         self.stationary_amcl_samples = list(
             samples[-self.stationary_amcl_sample_count :]
         )
+        (
+            self.stationary_map_from_odom_samples,
+            self.stationary_map_from_odom_capture_failures,
+        ) = _latest_stationary_map_from_odom_capture_window(
+            map_from_odom_samples_by_amcl,
+            map_from_odom_failures_by_amcl,
+            amcl_window_size=self.stationary_amcl_sample_count,
+        )
+        self.stationary_map_from_odom_capture_failure_history = [
+            {
+                "amcl_sample_index": index,
+                "reason": failure,
+            }
+            for index, failure in enumerate(
+                map_from_odom_failures_by_amcl
+            )
+            if failure
+        ]
         return RosObservation(
             observation.name,
             observation.ok,
@@ -823,6 +1406,15 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                 "timeout_sec": self.nomotion_update_timeout_sec,
                 "sample_interval_sec": (
                     self.stationary_amcl_sample_interval_sec
+                ),
+                "map_from_odom_pairing_required": (
+                    self.execution_pose_owner == "odom"
+                ),
+                "map_from_odom_pairing_failure_history": list(
+                    self.stationary_map_from_odom_capture_failure_history
+                ),
+                "map_from_odom_candidate_rejections": (
+                    map_from_odom_candidate_rejections
                 ),
             },
         )
