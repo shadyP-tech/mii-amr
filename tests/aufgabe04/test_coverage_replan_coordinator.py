@@ -302,9 +302,221 @@ class CoverageReplanCoordinatorTest(unittest.TestCase):
                 record.call_args_list[1].kwargs["existing_overlay_path"],
                 root / "overlay_1.json",
             )
+            self.assertFalse((session / "adaptive_replans.jsonl").exists())
+
+    def test_resumed_replans_preserve_overlay_revision_and_cumulative_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            survey = root / "survey"
+            session = root / "session"
+            survey.mkdir()
+            (survey / "coverage_plan.json").write_text("{}\n")
+            initial_overlay = root / "overlay_1.json"
+            initial_overlay.write_text(
+                '{"candidates":[{"x_m":-1.10,"y_m":-0.46,'
+                '"keepout_radius_m":0.30}]}\n'
+            )
+            coordinator = CoverageReplanCoordinator(
+                survey_root=survey,
+                session_root=session,
+                map_yaml=Path("map.yaml"),
+                semantic_map_id="arena",
+                target_viewpoint_id="survey_vp_001",
+                run_id="mission_coverage_000_runtime_localization_reseal_001",
+                coverage_leg_index=2,
+                robot_radius_m=0.105,
+                max_replans=3,
+                tracking_tube_radius_m=0.03,
+                replan_count=1,
+                overlay_path=initial_overlay,
+                adopted_route_hashes={"route_hash_1"},
+            )
+            pose = Pose2D(-0.86, -0.46, 3.141592653589793)
+            routes = {
+                2: (
+                    Pose2D(pose.x_m, pose.y_m),
+                    Pose2D(-0.74, -0.46),
+                    Pose2D(-0.69, -0.46),
+                    Pose2D(-0.69, -0.41, 0.0),
+                ),
+                3: (
+                    Pose2D(-0.74, -0.46),
+                    Pose2D(-0.64, -0.46),
+                    Pose2D(-0.59, -0.46),
+                    Pose2D(-0.59, -0.41, 0.0),
+                ),
+            }
+
+            def transient_artifacts(**_kwargs):
+                index = coordinator.replan_count
+                overlay = root / f"overlay_{index}.json"
+                diagnostics = root / f"source_diag_{index}.json"
+                route = routes[index]
+                overlay.write_text(
+                    '{"candidates":[{"x_m":-1.10,"y_m":-0.46,'
+                    '"keepout_radius_m":0.30}]}\n'
+                )
+                diagnostics.write_text(
+                    json.dumps(
+                        {
+                            "metadata": {
+                                "egress_mode": "straight_reverse",
+                                "egress_anchor": {
+                                    "x_m": route[1].x_m,
+                                    "y_m": route[1].y_m,
+                                },
+                                "egress_transition_anchor": {
+                                    "x_m": route[2].x_m,
+                                    "y_m": route[2].y_m,
+                                },
+                                "egress_transition_waypoint_index": 2,
+                                "egress_forward_waypoint_index": 3,
+                                "forward_translation_heading_limit_rad": 1.25,
+                                "reverse_connector_alignment_tolerance_rad": 0.10,
+                                "reverse_connector_heading_error_rad": 0.0,
+                                "minimum_transition_keepout_tube_clearance_m": 0.01,
+                                "tracking_tube_radius_m": 0.03,
+                            }
+                        }
+                    )
+                    + "\n"
+                )
+                return {
+                    "route_csv": str(root / f"source_route_{index}.csv"),
+                    "diagnostics_json": str(diagnostics),
+                    "summary_json": str(root / f"summary_{index}.json"),
+                    "transient_obstacle_overlay_json": str(overlay),
+                }
+
+            def sealed_artifacts(**_kwargs):
+                index = coordinator.replan_count
+                return {
+                    "route_csv": str(root / f"sealed_route_{index}.csv"),
+                    "diagnostics_json": str(root / f"sealed_diag_{index}.json"),
+                    "route_certificate_json": str(root / f"cert_{index}.json"),
+                }
+
+            def loaded_leg(*_args, **_kwargs):
+                index = coordinator.replan_count
+                return SimpleNamespace(
+                    executable_waypoints=tuple(
+                        SimpleNamespace(pose=item) for item in routes[index]
+                    ),
+                    route_kind=STAND_DISCOVERY_ROUTE_KIND,
+                    source_sha256=f"route_hash_{index}",
+                )
+
+            with patch(
+                "scripts.aufgabe04.navigation.coverage_replan_coordinator."
+                "record_transient_blockage_replan",
+                side_effect=transient_artifacts,
+            ) as record, patch(
+                "scripts.aufgabe04.navigation.coverage_replan_coordinator."
+                "seal_stand_discovery_route",
+                side_effect=sealed_artifacts,
+            ) as seal, patch(
+                "scripts.aufgabe04.navigation.coverage_replan_coordinator."
+                "load_route_leg",
+                side_effect=loaded_leg,
+            ):
+                second = coordinator(
+                    pose,
+                    "stuck no progress",
+                    self._front_details(),
+                )
+                third = coordinator(
+                    routes[2][1],
+                    "obstacle too close",
+                    self._front_details(0.19),
+                )
+                exhausted = coordinator(
+                    routes[3][1],
+                    "stuck no progress",
+                    self._front_details(),
+                )
+
+            self.assertEqual(second.kind, RouteUpdateKind.ADOPT)
+            self.assertEqual(second.route_revision, 2)
+            self.assertEqual(second.event_fields["replan_index"], 2)
+            self.assertEqual(third.kind, RouteUpdateKind.ADOPT)
+            self.assertEqual(third.route_revision, 3)
+            self.assertEqual(third.event_fields["replan_index"], 3)
+            self.assertEqual(exhausted.kind, RouteUpdateKind.STOP)
+            self.assertEqual(coordinator.replan_count, 3)
+            self.assertEqual(record.call_count, 2)
             self.assertEqual(
-                len((session / "adaptive_replans.jsonl").read_text().splitlines()),
-                2,
+                record.call_args_list[0].kwargs["existing_overlay_path"],
+                initial_overlay,
+            )
+            self.assertEqual(
+                record.call_args_list[1].kwargs["existing_overlay_path"],
+                root / "overlay_2.json",
+            )
+            self.assertIn(
+                "leg_002_replan_002",
+                str(record.call_args_list[0].kwargs["output_dir"]),
+            )
+            self.assertIn(
+                "leg_002_replan_003",
+                str(record.call_args_list[1].kwargs["output_dir"]),
+            )
+            self.assertIn(
+                "coverage_leg_002_replan_002",
+                str(seal.call_args_list[0].kwargs["output_dir"]),
+            )
+            self.assertIn(
+                "coverage_leg_002_replan_003",
+                str(seal.call_args_list[1].kwargs["output_dir"]),
+            )
+            self.assertNotIn(
+                "replan_001",
+                "\n".join(
+                    [
+                        *(
+                            str(call.kwargs["output_dir"])
+                            for call in record.call_args_list
+                        ),
+                        *(
+                            str(call.kwargs["output_dir"])
+                            for call in seal.call_args_list
+                        ),
+                    ]
+                ),
+            )
+            self.assertFalse(
+                (survey / "replans" / "leg_002_replan_001").exists()
+            )
+            self.assertEqual(
+                coordinator.adopted_route_hashes,
+                {"route_hash_1", "route_hash_2", "route_hash_3"},
+            )
+
+    def test_resume_count_and_overlay_must_be_supplied_together(self):
+        common = {
+            "survey_root": Path("survey"),
+            "session_root": Path("session"),
+            "map_yaml": Path("map.yaml"),
+            "semantic_map_id": "arena",
+            "target_viewpoint_id": "survey_vp_001",
+            "run_id": "mission_coverage_000",
+            "coverage_leg_index": 2,
+            "robot_radius_m": 0.105,
+            "max_replans": 3,
+            "tracking_tube_radius_m": 0.03,
+        }
+        with self.assertRaisesRegex(ValueError, "requires an obstacle overlay"):
+            CoverageReplanCoordinator(**common, replan_count=1)
+        with self.assertRaisesRegex(ValueError, "requires a positive replan_count"):
+            CoverageReplanCoordinator(
+                **common,
+                replan_count=0,
+                overlay_path=Path("overlay.json"),
+            )
+        with self.assertRaisesRegex(ValueError, "inside the cumulative budget"):
+            CoverageReplanCoordinator(
+                **common,
+                replan_count=4,
+                overlay_path=Path("overlay.json"),
             )
 
     def test_latest_physical_blockage_geometry_plans_a_sealed_reverse_escape(self):

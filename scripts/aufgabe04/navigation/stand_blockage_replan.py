@@ -1091,6 +1091,7 @@ def _write_transient_replan_artifacts(
             "transient_obstacle_overlay": True,
             "semantic_stand_observation": False,
             "survey_id": plan.survey_id,
+            "planning_frame": plan.planning_frame,
             "plan_sha256": coverage_survey_plan_sha256(plan),
             "map_bundle_sha256": plan.map_bundle_sha256,
             "target_viewpoint_id": route_plan.target_viewpoint_id,
@@ -1273,6 +1274,7 @@ def replan_transient_blockage_from_overlay(
     robot_radius_m: float,
     rejected_run_id: str,
     rejected_stop_details: dict[str, object],
+    recovery_kind: str = "startup",
     tracking_tube_radius_m: float = DEFAULT_TRACKING_TUBE_RADIUS_M,
     forward_translation_heading_limit_rad: float = (
         DEFAULT_FORWARD_TRANSLATION_HEADING_LIMIT_RAD
@@ -1283,6 +1285,10 @@ def replan_transient_blockage_from_overlay(
 ) -> dict[str, str]:
     """Rebuild from fresh AMCL while preserving the dynamic obstacle overlay."""
 
+    if recovery_kind not in {"startup", "runtime_localization"}:
+        raise ValueError(
+            "overlay recovery_kind must be startup or runtime_localization"
+        )
     survey_root = Path(survey_root)
     plan = load_coverage_survey_plan(survey_root / "coverage_plan.json")
     persistent = load_stand_survey_registry(
@@ -1325,7 +1331,7 @@ def replan_transient_blockage_from_overlay(
         overlay=overlay,
         output_dir=output_dir,
         source={
-            "event": "transient_overlay_startup_replan",
+            "event": f"transient_overlay_{recovery_kind}_replan",
             "rejected_run_id": rejected_run_id,
             "rejected_stop_details": rejected_stop_details,
             "fresh_start_pose": {
@@ -1335,5 +1341,5 @@ def replan_transient_blockage_from_overlay(
             },
             "previous_overlay_json": str(overlay_path),
         },
-        status="transient_overlay_startup_replan_ready",
+        status=f"transient_overlay_{recovery_kind}_replan_ready",
     )

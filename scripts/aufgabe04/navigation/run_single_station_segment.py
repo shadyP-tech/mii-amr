@@ -7,6 +7,7 @@ import json
 import math
 import os
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,6 +60,9 @@ from scripts.aufgabe04.navigation.detected_stand_preapproach import (
 from scripts.aufgabe04.navigation.stand_discovery_route import (
     STAND_DISCOVERY_ROUTE_KIND,
     validate_stand_discovery_route_binding,
+)
+from scripts.aufgabe04.navigation.stand_coverage_survey import (
+    load_coverage_survey_plan,
 )
 from scripts.aufgabe04.navigation.segment_run_logger import append_segment_run
 from scripts.aufgabe04.navigation.follower_models import FollowerResult
@@ -138,6 +142,11 @@ from scripts.aufgabe04.navigation.transient_blockage_policy import (
     DEFAULT_LINEAR_MOTION_FLOOR_MPS,
     PersistentObstacleConfig,
 )
+from scripts.aufgabe04.navigation.transient_overlay_resume_state import (
+    TransientOverlayResumeState,
+    transient_overlay_resume_state_sha256,
+    validate_transient_overlay_resume_state_diagnostics_binding,
+)
 from scripts.aufgabe04.navigation.waypoint_controller import ControllerConfig
 from scripts.aufgabe04.navigation.waypoint_csv import (
     SelectedRouteLeg,
@@ -148,6 +157,20 @@ from scripts.aufgabe04.navigation.waypoint_csv import (
 
 DEFAULT_ROUTE_CSV = Path("results/aufgabe04/routes/station_route.csv")
 DEFAULT_DIAGNOSTICS_JSON = Path("results/aufgabe04/routes/station_route_diagnostics.json")
+
+
+def _append_jsonl(path: Path, payload: Mapping[str, object]) -> None:
+    """Append one post-adoption mission event or fail the zero-held handoff."""
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(dict(payload), sort_keys=True, separators=(",", ":"))
+            + "\n"
+        )
+
+
 DEFAULT_RUN_LOG = Path("results/aufgabe04/station_segment_runs.csv")
 DEFAULT_EVENT_LOG_DIR = Path("results/aufgabe04/run_events")
 _CATALOG_ROUTE_INITIAL_DISTANCE_LIMIT_M = 0.15
@@ -387,6 +410,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--coverage-transient-replan-robot-radius-m", type=float)
     parser.add_argument("--coverage-transient-replan-max-count", type=int, default=0)
     parser.add_argument("--coverage-transient-replan-leg-index", type=int)
+    parser.add_argument(
+        "--coverage-transient-replan-resume-state-json",
+        type=Path,
+        help=(
+            "Internal immutable state for resuming a cumulative transient "
+            "overlay after a stopped localization reseal."
+        ),
+    )
     parser.add_argument("--station-identity-registry", type=Path, default=None)
     parser.add_argument("--arrival-pose-catalog", type=Path, default=None)
     parser.add_argument("--task-snapshot", type=Path, default=None)
@@ -1655,6 +1686,57 @@ def _validated_runtime_localization_motion_permit(
     )
 
 
+def _validated_coverage_replan_resume_state(
+    args,
+    *,
+    diagnostics_path: Path,
+) -> TransientOverlayResumeState | None:
+    """Integrity-load one inherited overlay without authorizing motion."""
+
+    state_path = args.coverage_transient_replan_resume_state_json
+    if state_path is None:
+        return None
+    if not args.coverage_transient_replan_enabled:
+        raise ValueError(
+            "transient overlay resume state requires coverage replanning"
+        )
+    if args.coverage_plan is None:
+        raise ValueError(
+            "transient overlay resume state requires the coverage plan"
+        )
+    survey_plan_path = (
+        Path(args.coverage_transient_replan_survey_root)
+        / "coverage_plan.json"
+    )
+    try:
+        supplied_plan_path = Path(args.coverage_plan).resolve(strict=True)
+        expected_plan_path = survey_plan_path.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("coverage resume plan is unavailable") from exc
+    if supplied_plan_path != expected_plan_path:
+        raise ValueError(
+            "coverage resume state and replanner use different plans"
+        )
+    plan = load_coverage_survey_plan(supplied_plan_path)
+    state = validate_transient_overlay_resume_state_diagnostics_binding(
+        diagnostics_path,
+        resume_state_path=state_path,
+        plan=plan,
+        expected_coverage_leg_index=(
+            args.coverage_transient_replan_leg_index
+        ),
+        expected_target_viewpoint_id=(
+            args.coverage_transient_replan_target_viewpoint_id
+        ),
+        expected_max_replans=args.coverage_transient_replan_max_count,
+    )
+    if args.run_id in state.source_run_ids:
+        raise ValueError(
+            "coverage resume state cannot be replayed by a source child run"
+        )
+    return state
+
+
 def _validated_mission_leg_motion_permit(
     args,
     resolved,
@@ -1958,6 +2040,7 @@ def main(argv: list[str] | None = None) -> int:
         args.coverage_transient_replan_semantic_map_id
         or args.coverage_transient_replan_target_viewpoint_id
         or args.coverage_transient_replan_max_count
+        or args.coverage_transient_replan_resume_state_json is not None
     )
     if args.coverage_transient_replan_enabled and (
         any(value is None for value in recovery_fields)
@@ -2548,6 +2631,51 @@ def main(argv: list[str] | None = None) -> int:
         parser.exit(
             2,
             "error: physical transient replanning is not a simulation route mode\n",
+        )
+    try:
+        coverage_replan_resume_state = (
+            _validated_coverage_replan_resume_state(
+                args,
+                diagnostics_path=diagnostics_json_path,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        emit_event(
+            event_logger,
+            "transient_overlay_resume_state_rejected",
+            run_id=args.run_id,
+            leg_index=args.leg_index,
+            status="failed_closed",
+            stop_reason=str(exc),
+            motion_published=False,
+        )
+        parser.exit(
+            2,
+            f"error: transient overlay resume state rejected: {exc}\n",
+        )
+    if coverage_replan_resume_state is not None:
+        emit_event(
+            event_logger,
+            "transient_overlay_resume_state_validated",
+            run_id=args.run_id,
+            leg_index=args.leg_index,
+            resume_state_json=str(
+                args.coverage_transient_replan_resume_state_json
+            ),
+            resume_state_sha256=(
+                transient_overlay_resume_state_sha256(
+                    coverage_replan_resume_state
+                )
+            ),
+            completed_replan_count=(
+                coverage_replan_resume_state.completed_replan_count
+            ),
+            max_replans=coverage_replan_resume_state.max_replans,
+            remaining_replans=(
+                coverage_replan_resume_state.remaining_replans
+            ),
+            motion_continues_authorized=False,
+            automatic_motion_authorized=False,
         )
     if leg.route_kind in DYNAMIC_VIEWPOINT_ROUTE_KINDS and committed_route is None:
         parser.exit(2, "error: dynamic viewpoint route requires its authoritative manifest\n")
@@ -3413,6 +3541,19 @@ def main(argv: list[str] | None = None) -> int:
         coverage_transient_replan_max_count=(
             args.coverage_transient_replan_max_count
         ),
+        coverage_transient_replan_resume_state_json=str(
+            args.coverage_transient_replan_resume_state_json or ""
+        ),
+        coverage_transient_replan_initial_count=(
+            0
+            if coverage_replan_resume_state is None
+            else coverage_replan_resume_state.completed_replan_count
+        ),
+        coverage_transient_replan_remaining_count=(
+            args.coverage_transient_replan_max_count
+            if coverage_replan_resume_state is None
+            else coverage_replan_resume_state.remaining_replans
+        ),
         linear_motion_floor_mps=follower_config.linear_motion_floor_mps,
         blockage_confirmation_timeout_sec=(
             follower_config.blockage_confirmation_timeout_sec
@@ -3551,8 +3692,49 @@ def main(argv: list[str] | None = None) -> int:
             leg_index=args.leg_index,
             **dict(update.event_fields),
         )
+        if (
+            event_name == "transient_navigation_blockage_replanned"
+            and args.coverage_transient_replan_enabled
+        ):
+            # The coordinator prepares artifacts while zero is held, but this
+            # callback runs only after the follower has atomically installed
+            # the replacement.  Persist "replanned" here so the parent never
+            # mistakes a merely prepared route for an adopted one.
+            _append_jsonl(
+                Path(args.coverage_transient_replan_session_root)
+                / "adaptive_replans.jsonl",
+                {
+                    "schema_version": 1,
+                    "event": event_name,
+                    "timestamp": time.time(),
+                    "run_id": args.run_id,
+                    "leg_index": args.coverage_transient_replan_leg_index,
+                    **dict(update.event_fields),
+                },
+            )
 
     if args.coverage_transient_replan_enabled:
+        if coverage_replan_resume_state is not None:
+            try:
+                live_resume_state = _validated_coverage_replan_resume_state(
+                    args,
+                    diagnostics_path=diagnostics_json_path,
+                )
+                if live_resume_state != coverage_replan_resume_state:
+                    raise ValueError(
+                        "transient overlay resume state changed before motion"
+                    )
+            except (OSError, ValueError) as exc:
+                return _record_motion_authorization_rejection(
+                    args=args,
+                    resolved=resolved,
+                    leg=leg,
+                    event_logger=event_logger,
+                    failure=(
+                        "transient overlay resume-state revalidation failed: "
+                        f"{exc}"
+                    ),
+                )
         blockage_recovery_provider = CoverageReplanCoordinator(
             survey_root=args.coverage_transient_replan_survey_root,
             session_root=args.coverage_transient_replan_session_root,
@@ -3567,6 +3749,26 @@ def main(argv: list[str] | None = None) -> int:
             command_owner=_runtime_command_owner(resolved.namespace),
             robot_radius_m=args.coverage_transient_replan_robot_radius_m,
             max_replans=args.coverage_transient_replan_max_count,
+            replan_count=(
+                0
+                if coverage_replan_resume_state is None
+                else coverage_replan_resume_state.completed_replan_count
+            ),
+            overlay_path=(
+                None
+                if coverage_replan_resume_state is None
+                else Path(
+                    coverage_replan_resume_state.transient_obstacle_overlay_path
+                )
+            ),
+            adopted_route_hashes=(
+                set()
+                if coverage_replan_resume_state is None
+                else set(
+                    coverage_replan_resume_state.adopted_route_sha256s
+                )
+                | {leg.source_sha256}
+            ),
             tracking_tube_radius_m=args.certified_route_tube_radius_m,
             forward_translation_heading_limit_rad=(
                 follower_config.controller.stop_heading_error_rad

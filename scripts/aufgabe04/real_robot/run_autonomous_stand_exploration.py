@@ -113,6 +113,17 @@ from scripts.aufgabe04.navigation.stand_coverage_survey import (
 from scripts.aufgabe04.navigation.stand_discovery_route import (
     seal_stand_discovery_route,
 )
+from scripts.aufgabe04.navigation.stand_blockage_replan import (
+    replan_transient_blockage_from_overlay,
+)
+from scripts.aufgabe04.navigation.transient_overlay_resume_state import (
+    TransientOverlayResumeState,
+    bind_transient_overlay_resume_state_to_diagnostics,
+    load_jsonl_event_objects,
+    refresh_transient_overlay_resume_state,
+    update_transient_overlay_resume_state_from_events,
+    write_transient_overlay_resume_state,
+)
 from scripts.aufgabe04.navigation.viewpoint_recommendation import (
     load_recommendation,
     normalize_angle,
@@ -168,6 +179,7 @@ class MotionLegOutcome:
     motion_published: bool
     returncode: int
     semantic_log_path: Path
+    semantic_log_start_offset: int = 0
     odom_execution_certificate_path: Path | None = None
     motion_authorization_permit_path: Path | None = None
     motion_authorization_permit_sha256: str = ""
@@ -686,6 +698,16 @@ def _runner_command(
                 ),
             ]
         )
+        resume_state_json = coverage_transient_replan.get(
+            "resume_state_json"
+        )
+        if resume_state_json is not None:
+            command.extend(
+                [
+                    "--coverage-transient-replan-resume-state-json",
+                    str(resume_state_json),
+                ]
+            )
     authorization_fields = (
         mission_motion_authorization_json,
         runtime_localization_motion_permit_json,
@@ -808,14 +830,14 @@ def _motion_outcome_from_log(
     *,
     run_id: str,
     returncode: int,
+    start_offset: int = 0,
 ) -> MotionLegOutcome:
     try:
-        events = [
-            json.loads(line)
-            for line in Path(semantic_log_path).read_text().splitlines()
-            if line.strip()
-        ]
-    except (OSError, json.JSONDecodeError) as exc:
+        events = load_jsonl_event_objects(
+            Path(semantic_log_path),
+            start_offset=start_offset,
+        )
+    except ValueError as exc:
         raise RuntimeError(f"invalid motion semantic log for {run_id}: {exc}") from exc
     terminal_events = [
         event
@@ -826,7 +848,11 @@ def _motion_outcome_from_log(
     ]
     if not terminal_events:
         raise RuntimeError(f"motion runner produced no terminal motion event for {run_id}")
-    event = terminal_events[-1]
+    if len(terminal_events) != 1:
+        raise RuntimeError(
+            f"motion runner produced ambiguous terminal events for {run_id}"
+        )
+    event = terminal_events[0]
     if event.get("event") == "preflight_failed":
         failures = event.get("failures", [])
         if not isinstance(failures, list) or not all(
@@ -869,7 +895,21 @@ def _motion_outcome_from_log(
         motion_published=motion_published,
         returncode=returncode,
         semantic_log_path=Path(semantic_log_path),
+        semantic_log_start_offset=start_offset,
     )
+
+
+def _semantic_log_size(path: Path) -> int:
+    """Return a trusted append boundary for one child invocation."""
+
+    source = Path(path)
+    if source.is_symlink():
+        raise RuntimeError(f"motion semantic log must not be a symlink: {source}")
+    if not source.exists():
+        return 0
+    if not source.is_file():
+        raise RuntimeError(f"motion semantic log is not a normal file: {source}")
+    return source.stat().st_size
 
 
 def _issue_runtime_localization_motion_permit(
@@ -1069,6 +1109,12 @@ def _run_motion_leg(
         raise ValueError(
             "routine mission-leg authorization cannot cover a resealed route"
         )
+    semantic_log = session_root / "run_events" / f"{run_id}.jsonl"
+    if semantic_log.exists() or semantic_log.is_symlink():
+        raise RuntimeError(
+            "refusing to reuse an existing motion semantic log: "
+            f"{semantic_log}"
+        )
     common = {
         "profile": profile,
         "route_csv": Path(sealed["route_csv"]),
@@ -1101,12 +1147,12 @@ def _run_motion_leg(
     )
     dry_result = subprocess.run(dry, check=False)
     if dry_result.returncode != 0:
-        semantic_log = session_root / "run_events" / f"{run_id}.jsonl"
         try:
             outcome = _motion_outcome_from_log(
                 semantic_log,
                 run_id=run_id,
                 returncode=dry_result.returncode,
+                start_offset=0,
             )
         except RuntimeError as exc:
             raise RuntimeError(f"dry-run failed for {run_id}: {exc}") from exc
@@ -1124,7 +1170,7 @@ def _run_motion_leg(
             motion_published=False,
             returncode=0,
             semantic_log_path=(
-                session_root / "run_events" / f"{run_id}.jsonl"
+                semantic_log
             ),
             odom_execution_certificate_path=dry_certificate,
         )
@@ -1302,6 +1348,7 @@ def _run_motion_leg(
             )
         ),
     )
+    live_log_start_offset = _semantic_log_size(semantic_log)
     wrapped = _bundle_command(profile, run_id, runner)
     result = subprocess.run(
         wrapped,
@@ -1309,9 +1356,10 @@ def _run_motion_leg(
     )
     return replace(
         _motion_outcome_from_log(
-            session_root / "run_events" / f"{run_id}.jsonl",
+            semantic_log,
             run_id=run_id,
             returncode=result.returncode,
+            start_offset=live_log_start_offset,
         ),
         odom_execution_certificate_path=live_certificate,
         motion_authorization_permit_path=motion_permit_path,
@@ -1421,43 +1469,107 @@ def _is_runtime_localization_reseal_required(outcome: MotionLegOutcome) -> bool:
 
 
 def _adopted_blockage_replans_for_run(
-    adaptive_log: Path,
+    semantic_log: Path,
     *,
     run_id: str,
+    start_offset: int = 0,
 ) -> list[dict[str, object]]:
-    """Load adopted in-process blockage replans for one child run.
+    """Load post-admission blockage adoptions from one child semantic log."""
 
-    A localization reseal starts a new child process.  Until the last dynamic
-    overlay and its cumulative budget can be restored into that child, a run
-    that already adopted such an overlay is not safe to resume.  Malformed
-    evidence therefore fails closed instead of being treated as no overlay.
-    """
-
-    path = Path(adaptive_log)
+    path = Path(semantic_log)
     if not path.exists():
-        return []
+        raise RuntimeError(f"child semantic log is unavailable: {path}")
     try:
-        payloads = [
-            json.loads(line)
-            for line in path.read_text().splitlines()
-            if line.strip()
-        ]
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(
-            f"cannot validate prior blockage-replan state in {path}: {exc}"
-        ) from exc
-    if not all(isinstance(payload, dict) for payload in payloads):
-        raise RuntimeError(
-            f"cannot validate prior blockage-replan state in {path}: "
-            "JSONL entries must be objects"
+        payloads = load_jsonl_event_objects(
+            path,
+            start_offset=start_offset,
         )
-    return [
+    except ValueError as exc:
+        raise RuntimeError(
+            f"cannot validate adopted blockage-replan state in {path}: {exc}"
+        ) from exc
+    adopted = [
         dict(payload)
         for payload in payloads
         if payload.get("event")
         == "transient_navigation_blockage_replanned"
-        and payload.get("run_id") == run_id
     ]
+    for payload in adopted:
+        if payload.get("run_id") != run_id:
+            raise RuntimeError(
+                "adopted blockage-replan event belongs to another child run"
+            )
+        if payload.get("post_plan_runtime_revalidated") is not True:
+            raise RuntimeError(
+                "blockage replan lacks post-plan runtime adoption evidence"
+            )
+        if payload.get("semantic_survey_evidence") is not False:
+            raise RuntimeError(
+                "blockage replan was incorrectly marked as survey evidence"
+            )
+    return adopted
+
+
+def _advance_transient_overlay_resume_state(
+    *,
+    outcome: MotionLegOutcome,
+    previous_state: TransientOverlayResumeState | None,
+    plan_path: Path,
+    leg_index: int,
+    target_viewpoint_id: str,
+    max_replans: int,
+    require_uncertainty_admission: bool,
+    artifact_root: Path,
+    survey_root: Path,
+) -> TransientOverlayResumeState | None:
+    """Fold only post-adoption child events into cumulative overlay state."""
+
+    adopted = _adopted_blockage_replans_for_run(
+        outcome.semantic_log_path,
+        run_id=outcome.run_id,
+        start_offset=outcome.semantic_log_start_offset,
+    )
+    if not adopted:
+        return previous_state
+    plan = load_coverage_survey_plan(plan_path)
+    if require_uncertainty_admission:
+        for event in adopted:
+            if event.get("replacement_route_uncertainty_accepted") is not True:
+                raise RuntimeError(
+                    "adopted blockage replan lacks accepted uncertainty evidence"
+                )
+    # Child events normally use repository-relative paths, while a caller may
+    # place its mission output under an absolute custom --output-root.  Make
+    # the resolution base explicit, then let the state validator prove that
+    # every referenced artifact remains inside this exact mission session.
+    absolute_events = []
+    for event in adopted:
+        absolute_event = dict(event)
+        for field in (
+            "replacement_route_csv",
+            "transient_obstacle_overlay_json",
+        ):
+            value = absolute_event.get(field)
+            if isinstance(value, str) and not Path(value).is_absolute():
+                absolute_event[field] = str(ROOT / value)
+        absolute_events.append(absolute_event)
+    try:
+        return update_transient_overlay_resume_state_from_events(
+            absolute_events,
+            plan=plan,
+            coverage_leg_index=leg_index,
+            target_viewpoint_id=target_viewpoint_id,
+            max_replans=max_replans,
+            artifact_root=artifact_root,
+            expected_survey_root=survey_root,
+            expected_session_root=artifact_root,
+            previous_state=previous_state,
+            source_run_id=outcome.run_id,
+        )
+    except ValueError as exc:
+        raise RuntimeError(
+            f"adopted transient blockage resume state is invalid: {exc}"
+        ) from exc
 
 
 def _startup_reseal_pose(outcome: MotionLegOutcome) -> Pose2D:
@@ -1673,6 +1785,72 @@ def _replan_runtime_localization_source(
     )
 
 
+def _replan_source_preserving_transient_overlay(
+    *,
+    state: TransientOverlayResumeState,
+    plan: CoverageSurveyPlan,
+    map_yaml: Path,
+    semantic_map_id: str,
+    survey_root: Path,
+    target_viewpoint_id: str,
+    current_pose: Pose2D,
+    rejected_outcome: MotionLegOutcome,
+    output_dir: Path,
+    robot_radius_m: float,
+    recovery_kind: str,
+    artifact_root: Path,
+) -> tuple[
+    dict[str, str],
+    TransientOverlayResumeState,
+    Path,
+    str,
+]:
+    """Replan from a fresh pose and bind the inherited overlay to diagnostics."""
+
+    replanned = replan_transient_blockage_from_overlay(
+        survey_root=survey_root,
+        map_yaml=map_yaml,
+        semantic_map_id=semantic_map_id,
+        target_viewpoint_id=target_viewpoint_id,
+        current_pose=current_pose,
+        overlay_path=Path(state.transient_obstacle_overlay_path),
+        output_dir=output_dir,
+        robot_radius_m=robot_radius_m,
+        rejected_run_id=rejected_outcome.run_id,
+        rejected_stop_details=rejected_outcome.stop_details,
+        recovery_kind=recovery_kind,
+        tracking_tube_radius_m=DEFAULT_TRACKING_TUBE_RADIUS_M,
+    )
+    refreshed_state = refresh_transient_overlay_resume_state(
+        state,
+        overlay_path=Path(replanned["transient_obstacle_overlay_json"]),
+        plan=plan,
+        artifact_root=artifact_root,
+    )
+    state_path = output_dir / "transient_overlay_resume_state.json"
+    state_sha256 = write_transient_overlay_resume_state(
+        state_path,
+        refreshed_state,
+        plan=plan,
+    )
+    bound_diagnostics = output_dir / "route_diagnostics_resume_bound.json"
+    bind_transient_overlay_resume_state_to_diagnostics(
+        Path(replanned["diagnostics_json"]),
+        bound_diagnostics,
+        resume_state_path=state_path,
+        plan=plan,
+    )
+    return (
+        {
+            **replanned,
+            "diagnostics_json": str(bound_diagnostics),
+        },
+        refreshed_state,
+        state_path,
+        state_sha256,
+    )
+
+
 def _execute_coverage_leg_with_replans(
     *,
     profile,
@@ -1692,8 +1870,12 @@ def _execute_coverage_leg_with_replans(
     localization_branch_proof_id = str(
         getattr(args, "localization_branch_proof_id", "")
     ).strip()
+    coverage_plan: CoverageSurveyPlan | None = None
     startup_reseal_index = 0
     runtime_localization_reseal_index = 0
+    transient_overlay_resume_state: TransientOverlayResumeState | None = None
+    transient_overlay_resume_state_path: Path | None = None
+    transient_overlay_resume_state_digest = ""
     fresh_confirmation_reason: str | None = None
     fresh_localization_evidence_path: Path | None = None
     pending_runtime_route_seal: dict[str, object] | None = None
@@ -1770,6 +1952,27 @@ def _execute_coverage_leg_with_replans(
                         if pending_runtime_permit_context is None
                         else str(pending_runtime_permit_context.permit_json_path)
                     ),
+                    "transient_overlay_resume_state_json": (
+                        ""
+                        if transient_overlay_resume_state_path is None
+                        else str(transient_overlay_resume_state_path)
+                    ),
+                    "transient_overlay_resume_state_sha256": (
+                        transient_overlay_resume_state_digest
+                    ),
+                    "dynamic_overlay_preserved": (
+                        transient_overlay_resume_state is not None
+                    ),
+                    "adopted_blockage_replan_count": (
+                        0
+                        if transient_overlay_resume_state is None
+                        else transient_overlay_resume_state.completed_replan_count
+                    ),
+                    "remaining_blockage_replan_count": (
+                        args.max_blockage_replans_per_leg
+                        if transient_overlay_resume_state is None
+                        else transient_overlay_resume_state.remaining_replans
+                    ),
                     "motion_continues_authorized": False,
                 },
             )
@@ -1790,6 +1993,7 @@ def _execute_coverage_leg_with_replans(
                 "robot_radius_m": profile.robot_radius_m,
                 "max_replans": args.max_blockage_replans_per_leg,
                 "leg_index": leg_index,
+                "resume_state_json": transient_overlay_resume_state_path,
             },
             require_fresh_confirmation=fresh_confirmation_reason is not None,
             fresh_confirmation_reason=(
@@ -1869,17 +2073,42 @@ def _execute_coverage_leg_with_replans(
                     f"_startup_reseal_{startup_reseal_index:03d}"
                 )
             )
-            replanned = _replan_startup_source(
-                map_yaml=args.map,
-                semantic_map_id=args.semantic_map_id,
-                survey_root=survey_root,
-                plan_path=plan_path,
-                expected_target_viewpoint_id=target_viewpoint_id,
-                current_pose=rejected_pose,
-                rejected_outcome=outcome,
-                reseal_index=startup_reseal_index,
-                output_dir=reseal_root,
-            )
+            if transient_overlay_resume_state is None:
+                replanned = _replan_startup_source(
+                    map_yaml=args.map,
+                    semantic_map_id=args.semantic_map_id,
+                    survey_root=survey_root,
+                    plan_path=plan_path,
+                    expected_target_viewpoint_id=target_viewpoint_id,
+                    current_pose=rejected_pose,
+                    rejected_outcome=outcome,
+                    reseal_index=startup_reseal_index,
+                    output_dir=reseal_root,
+                )
+                transient_overlay_resume_state_path = None
+                transient_overlay_resume_state_digest = ""
+            else:
+                if coverage_plan is None:
+                    coverage_plan = load_coverage_survey_plan(plan_path)
+                (
+                    replanned,
+                    transient_overlay_resume_state,
+                    transient_overlay_resume_state_path,
+                    transient_overlay_resume_state_digest,
+                ) = _replan_source_preserving_transient_overlay(
+                    state=transient_overlay_resume_state,
+                    plan=coverage_plan,
+                    map_yaml=args.map,
+                    semantic_map_id=args.semantic_map_id,
+                    survey_root=survey_root,
+                    target_viewpoint_id=target_viewpoint_id,
+                    current_pose=rejected_pose,
+                    rejected_outcome=outcome,
+                    output_dir=reseal_root,
+                    robot_radius_m=profile.robot_radius_m,
+                    recovery_kind="startup",
+                    artifact_root=session_root,
+                )
             _append_jsonl(
                 adaptive_log,
                 {
@@ -1895,7 +2124,27 @@ def _execute_coverage_leg_with_replans(
                         "diagnostics_json"
                     ],
                     "replacement_summary_json": replanned["summary_json"],
-                    "dynamic_overlay_preserved": False,
+                    "dynamic_overlay_preserved": (
+                        transient_overlay_resume_state is not None
+                    ),
+                    "adopted_blockage_replan_count": (
+                        0
+                        if transient_overlay_resume_state is None
+                        else transient_overlay_resume_state.completed_replan_count
+                    ),
+                    "remaining_blockage_replan_count": (
+                        args.max_blockage_replans_per_leg
+                        if transient_overlay_resume_state is None
+                        else transient_overlay_resume_state.remaining_replans
+                    ),
+                    "transient_overlay_resume_state_json": (
+                        ""
+                        if transient_overlay_resume_state_path is None
+                        else str(transient_overlay_resume_state_path)
+                    ),
+                    "transient_overlay_resume_state_sha256": (
+                        transient_overlay_resume_state_digest
+                    ),
                     "fresh_confirmation_required": True,
                 },
             )
@@ -1910,37 +2159,6 @@ def _execute_coverage_leg_with_replans(
             stop_details=outcome.stop_details,
         )
         if runtime_localization_decision.eligible:
-            adopted_blockage_replans = _adopted_blockage_replans_for_run(
-                adaptive_log,
-                run_id=outcome.run_id,
-            )
-            if adopted_blockage_replans:
-                _append_jsonl(
-                    adaptive_log,
-                    {
-                        "schema_version": 1,
-                        "event": "runtime_localization_reseal_rejected",
-                        "timestamp": time.time(),
-                        "leg_index": leg_index,
-                        "rejected_run_id": outcome.run_id,
-                        "reason": (
-                            "adopted_transient_blockage_replan_not_replayable"
-                        ),
-                        "adopted_blockage_replan_count": len(
-                            adopted_blockage_replans
-                        ),
-                        "runtime_localization_reseal_decision": (
-                            runtime_localization_decision.to_evidence()
-                        ),
-                        "motion_continues_authorized": False,
-                        "fail_closed": True,
-                    },
-                )
-                raise RuntimeError(
-                    "runtime localization reseal after an adopted transient "
-                    "blockage replan is not supported yet; refusing to relaunch "
-                    "a child runner with reset overlay state"
-                )
             budget = evaluate_runtime_localization_reseal_budget(
                 completed_reseal_count=runtime_localization_reseal_index,
                 maximum_reseal_count=(
@@ -1971,6 +2189,51 @@ def _execute_coverage_leg_with_replans(
                     "runtime localization reseal budget exhausted for "
                     f"coverage leg {leg_index}: {outcome.stop_reason}"
                 )
+            try:
+                transient_overlay_resume_state = (
+                    _advance_transient_overlay_resume_state(
+                        outcome=outcome,
+                        previous_state=transient_overlay_resume_state,
+                        plan_path=plan_path,
+                        leg_index=leg_index,
+                        target_viewpoint_id=target_viewpoint_id,
+                        max_replans=args.max_blockage_replans_per_leg,
+                        require_uncertainty_admission=bool(
+                            localization_branch_proof_id
+                        ),
+                        artifact_root=session_root,
+                        survey_root=survey_root,
+                    )
+                )
+                if (
+                    transient_overlay_resume_state is not None
+                    and coverage_plan is None
+                ):
+                    coverage_plan = load_coverage_survey_plan(plan_path)
+            except Exception as exc:
+                _append_jsonl(
+                    adaptive_log,
+                    {
+                        "schema_version": 1,
+                        "event": "runtime_localization_reseal_rejected",
+                        "timestamp": time.time(),
+                        "leg_index": leg_index,
+                        "rejected_run_id": outcome.run_id,
+                        "reason": (
+                            "adopted_transient_blockage_resume_state_invalid"
+                        ),
+                        "failure": str(exc),
+                        "runtime_localization_reseal_decision": (
+                            runtime_localization_decision.to_evidence()
+                        ),
+                        "motion_continues_authorized": False,
+                        "fail_closed": True,
+                    },
+                )
+                raise RuntimeError(
+                    "cannot resume runtime localization with adopted transient "
+                    f"blockage state: {exc}"
+                ) from exc
             assert budget.next_reseal_index is not None
             runtime_localization_reseal_index = budget.next_reseal_index
             runtime = (
@@ -2010,6 +2273,19 @@ def _execute_coverage_leg_with_replans(
                 ),
                 "additional_typed_run_required": (
                     mission_motion_authorization_json is None
+                ),
+                "dynamic_overlay_preserved": (
+                    transient_overlay_resume_state is not None
+                ),
+                "adopted_blockage_replan_count": (
+                    0
+                    if transient_overlay_resume_state is None
+                    else transient_overlay_resume_state.completed_replan_count
+                ),
+                "remaining_blockage_replan_count": (
+                    args.max_blockage_replans_per_leg
+                    if transient_overlay_resume_state is None
+                    else transient_overlay_resume_state.remaining_replans
                 ),
                 "motion_continues_authorized": False,
             }
@@ -2067,17 +2343,42 @@ def _execute_coverage_leg_with_replans(
                 )
             )
             try:
-                replanned = _replan_runtime_localization_source(
-                    map_yaml=args.map,
-                    semantic_map_id=args.semantic_map_id,
-                    survey_root=survey_root,
-                    plan_path=plan_path,
-                    expected_target_viewpoint_id=target_viewpoint_id,
-                    current_pose=admitted_pose,
-                    rejected_outcome=outcome,
-                    reseal_index=runtime_localization_reseal_index,
-                    output_dir=reseal_root,
-                )
+                if transient_overlay_resume_state is None:
+                    replanned = _replan_runtime_localization_source(
+                        map_yaml=args.map,
+                        semantic_map_id=args.semantic_map_id,
+                        survey_root=survey_root,
+                        plan_path=plan_path,
+                        expected_target_viewpoint_id=target_viewpoint_id,
+                        current_pose=admitted_pose,
+                        rejected_outcome=outcome,
+                        reseal_index=runtime_localization_reseal_index,
+                        output_dir=reseal_root,
+                    )
+                    transient_overlay_resume_state_path = None
+                    transient_overlay_resume_state_digest = ""
+                else:
+                    if coverage_plan is None:
+                        coverage_plan = load_coverage_survey_plan(plan_path)
+                    (
+                        replanned,
+                        transient_overlay_resume_state,
+                        transient_overlay_resume_state_path,
+                        transient_overlay_resume_state_digest,
+                    ) = _replan_source_preserving_transient_overlay(
+                        state=transient_overlay_resume_state,
+                        plan=coverage_plan,
+                        map_yaml=args.map,
+                        semantic_map_id=args.semantic_map_id,
+                        survey_root=survey_root,
+                        target_viewpoint_id=target_viewpoint_id,
+                        current_pose=admitted_pose,
+                        rejected_outcome=outcome,
+                        output_dir=reseal_root,
+                        robot_radius_m=profile.robot_radius_m,
+                        recovery_kind="runtime_localization",
+                        artifact_root=session_root,
+                    )
             except Exception as exc:
                 _append_jsonl(
                     adaptive_log,
@@ -2104,8 +2405,27 @@ def _execute_coverage_leg_with_replans(
                         "diagnostics_json"
                     ],
                     "replacement_summary_json": replanned["summary_json"],
-                    "dynamic_overlay_preserved": False,
-                    "adopted_blockage_replan_count": 0,
+                    "dynamic_overlay_preserved": (
+                        transient_overlay_resume_state is not None
+                    ),
+                    "adopted_blockage_replan_count": (
+                        0
+                        if transient_overlay_resume_state is None
+                        else transient_overlay_resume_state.completed_replan_count
+                    ),
+                    "remaining_blockage_replan_count": (
+                        args.max_blockage_replans_per_leg
+                        if transient_overlay_resume_state is None
+                        else transient_overlay_resume_state.remaining_replans
+                    ),
+                    "transient_overlay_resume_state_json": (
+                        ""
+                        if transient_overlay_resume_state_path is None
+                        else str(transient_overlay_resume_state_path)
+                    ),
+                    "transient_overlay_resume_state_sha256": (
+                        transient_overlay_resume_state_digest
+                    ),
                     "committed_target_viewpoint_id": target_viewpoint_id,
                 },
             )

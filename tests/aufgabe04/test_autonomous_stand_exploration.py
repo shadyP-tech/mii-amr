@@ -55,6 +55,9 @@ from scripts.aufgabe04.navigation.stand_discovery_route import (
     seal_stand_discovery_route,
     validate_stand_discovery_route_binding,
 )
+from scripts.aufgabe04.navigation.transient_overlay_resume_state import (
+    TransientOverlayResumeState,
+)
 from scripts.aufgabe04.navigation.waypoint_csv import load_route_leg
 from scripts.aufgabe04.real_robot.passive_viewpoint_node import _resolved_qr_id
 from scripts.aufgabe04.real_robot.run_autonomous_stand_exploration import (
@@ -180,6 +183,71 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                     run_id="coverage_000",
                     returncode=1,
                 )
+
+    def test_motion_outcome_uses_only_the_current_invocation_log_slice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            semantic_log = Path(tmp) / "events.jsonl"
+            stale = {
+                "event": "safety_stop",
+                "run_id": "coverage_000",
+                "status": "stopped",
+                "stop_reason": "stale stop",
+                "stop_details": {"fail_closed": True},
+                "motion_published": True,
+            }
+            current = {
+                "event": "motion_completed",
+                "run_id": "coverage_000",
+                "status": "completed",
+                "stop_reason": "",
+                "stop_details": {},
+                "motion_published": True,
+            }
+            stale_line = json.dumps(stale) + "\n"
+            semantic_log.write_text(
+                stale_line + json.dumps(current) + "\n",
+                encoding="utf-8",
+            )
+            offset = len(stale_line.encode("utf-8"))
+
+            outcome = _motion_outcome_from_log(
+                semantic_log,
+                run_id="coverage_000",
+                returncode=0,
+                start_offset=offset,
+            )
+
+        self.assertEqual(outcome.status, "completed")
+        self.assertEqual(outcome.semantic_log_start_offset, offset)
+
+    def test_motion_leg_refuses_a_preexisting_semantic_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "reused_child"
+            semantic_log = root / "run_events" / f"{run_id}.jsonl"
+            semantic_log.parent.mkdir(parents=True)
+            semantic_log.write_text("{}\n", encoding="utf-8")
+            sealed = {
+                "route_csv": str(root / "route.csv"),
+                "diagnostics_json": str(root / "diagnostics.json"),
+                "route_certificate_json": str(root / "certificate.json"),
+            }
+            with patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "subprocess.run"
+            ) as run, self.assertRaisesRegex(
+                RuntimeError,
+                "refusing to reuse an existing motion semantic log",
+            ):
+                _run_motion_leg(
+                    profile=self._profile(),
+                    sealed=sealed,
+                    run_id=run_id,
+                    session_root=root,
+                    execute=True,
+                )
+
+            run.assert_not_called()
 
     def test_runtime_localization_wrapper_requires_complete_contract(self):
         complete = MotionLegOutcome(
@@ -1187,6 +1255,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 returncode=1,
                 semantic_log_path=root / "stopped.jsonl",
             )
+            stopped.semantic_log_path.write_text("{}\n")
             completed = MotionLegOutcome(
                 run_id=(
                     "mission_coverage_000_"
@@ -1347,6 +1416,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 returncode=1,
                 semantic_log_path=root / "stopped.jsonl",
             )
+            stopped.semantic_log_path.write_text("{}\n")
             args = SimpleNamespace(
                 session_id="mission",
                 max_blockage_replans_per_leg=2,
@@ -1479,13 +1549,19 @@ class AutonomousStandExplorationTest(unittest.TestCase):
 
             admit.assert_not_called()
 
-    def test_runtime_localization_reseal_rejects_prior_adopted_blockage_overlay(self):
+    def test_runtime_localization_reseal_preserves_adopted_blockage_overlay(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source_route = root / "route.csv"
             source_diagnostics = root / "diagnostics.json"
             source_route.write_text("route\n")
             source_diagnostics.write_text("{}\n")
+            replacement_route = root / "overlay_runtime_route.csv"
+            replacement_diagnostics = root / "overlay_runtime_diagnostics.json"
+            replacement_summary = root / "overlay_runtime_summary.json"
+            replacement_route.write_text("replacement\n")
+            replacement_diagnostics.write_text("{}\n")
+            replacement_summary.write_text("{}\n")
             stopped = MotionLegOutcome(
                 run_id="mission_coverage_000",
                 status="stopped",
@@ -1496,6 +1572,18 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 motion_published=True,
                 returncode=1,
                 semantic_log_path=root / "stopped.jsonl",
+            )
+            completed = MotionLegOutcome(
+                run_id=(
+                    "mission_coverage_000_"
+                    "runtime_localization_reseal_001"
+                ),
+                status="completed",
+                stop_reason="",
+                stop_details={},
+                motion_published=True,
+                returncode=0,
+                semantic_log_path=root / "completed.jsonl",
             )
             args = SimpleNamespace(
                 session_id="mission",
@@ -1511,62 +1599,145 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 "diagnostics_json": str(source_diagnostics),
                 "route_certificate_json": str(root / "certificate.json"),
             }
-            adaptive_log = root / "session/adaptive_replans.jsonl"
-            adaptive_log.parent.mkdir(parents=True)
-            adaptive_log.write_text(
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "event": "transient_navigation_blockage_replanned",
-                        "run_id": "mission_coverage_000",
-                        "leg_index": 0,
-                        "route_revision": 1,
-                    }
-                )
-                + "\n"
+            resume_state_path = root / "transient_overlay_resume_state.json"
+            resume_state_path.write_text("{}\n")
+            resume_state = TransientOverlayResumeState(
+                schema_version=1,
+                coverage_plan_sha256="a" * 64,
+                survey_id="mission",
+                planning_frame="map",
+                map_bundle_sha256="b" * 64,
+                coverage_leg_index=0,
+                target_viewpoint_id="survey_vp_001",
+                completed_replan_count=1,
+                max_replans=2,
+                remaining_replans=1,
+                transient_obstacle_overlay_path=str(root / "overlay.json"),
+                transient_obstacle_overlay_sha256="c" * 64,
+                overlay_candidate_ids=("transient_obstacle_0001",),
+                adopted_route_paths=(str(root / "prior_route.csv"),),
+                adopted_route_sha256s=("d" * 64,),
+                source_run_ids=("mission_coverage_000",),
             )
+            admitted_pose = Pose2D(-0.31, -0.47, 0.12)
+            replanned = {
+                "route_csv": str(replacement_route),
+                "diagnostics_json": str(replacement_diagnostics),
+                "summary_json": str(replacement_summary),
+            }
             with patch(
                 "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
                 "seal_stand_discovery_route",
                 return_value=sealed,
-            ), patch(
+            ) as seal, patch(
                 "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
                 "_run_motion_leg",
-                return_value=stopped,
-            ), patch(
+                side_effect=(stopped, completed),
+            ) as run, patch(
                 "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
                 "_admit_preplanning_localization",
-            ) as admit:
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    "adopted transient blockage replan",
-                ):
-                    _execute_coverage_leg_with_replans(
-                        profile=SimpleNamespace(robot_radius_m=0.105),
-                        args=args,
-                        session_root=root / "session",
-                        survey_root=root / "survey",
-                        plan_path=root / "coverage_plan.json",
-                        leg_index=0,
-                        target_viewpoint_id="survey_vp_001",
-                        source_route=source_route,
-                        source_diagnostics=source_diagnostics,
-                    )
+                return_value=admitted_pose,
+            ) as admit, patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "_advance_transient_overlay_resume_state",
+                return_value=resume_state,
+            ) as advance, patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "load_coverage_survey_plan",
+                return_value=SimpleNamespace(),
+            ), patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "_replan_source_preserving_transient_overlay",
+                return_value=(
+                    replanned,
+                    resume_state,
+                    resume_state_path,
+                    "e" * 64,
+                ),
+            ) as replan:
+                outcome = _execute_coverage_leg_with_replans(
+                    profile=SimpleNamespace(
+                        robot_radius_m=0.105,
+                        resolved_runtime=lambda: SimpleNamespace(namespace=""),
+                    ),
+                    args=args,
+                    session_root=root / "session",
+                    survey_root=root / "survey",
+                    plan_path=root / "coverage_plan.json",
+                    leg_index=0,
+                    target_viewpoint_id="survey_vp_001",
+                    source_route=source_route,
+                    source_diagnostics=source_diagnostics,
+                    mission_motion_authorization_json=(
+                        root / "mission_authorization.json"
+                    ),
+                )
 
-            admit.assert_not_called()
+            self.assertEqual(outcome.status, "completed")
+            self.assertEqual(run.call_count, 2)
+            advance.assert_called_once()
+            self.assertEqual(
+                advance.call_args.kwargs["outcome"],
+                stopped,
+            )
+            self.assertEqual(
+                advance.call_args.kwargs["artifact_root"],
+                root / "session",
+            )
+            admit.assert_called_once()
+            replan.assert_called_once()
+            self.assertEqual(replan.call_args.kwargs["state"], resume_state)
+            self.assertEqual(
+                replan.call_args.kwargs["recovery_kind"],
+                "runtime_localization",
+            )
+            self.assertEqual(
+                replan.call_args.kwargs["artifact_root"],
+                root / "session",
+            )
+            self.assertEqual(
+                replan.call_args.kwargs["target_viewpoint_id"],
+                "survey_vp_001",
+            )
+            self.assertEqual(seal.call_count, 2)
+            self.assertEqual(
+                seal.call_args_list[1].kwargs["source_route_csv"],
+                replacement_route,
+            )
+            resumed_contract = run.call_args_list[1].kwargs[
+                "coverage_transient_replan"
+            ]
+            self.assertEqual(
+                resumed_contract["resume_state_json"],
+                resume_state_path,
+            )
+            self.assertEqual(resumed_contract["max_replans"], 2)
+            adaptive_log = root / "session/adaptive_replans.jsonl"
             adaptive = [
                 json.loads(line)
                 for line in adaptive_log.read_text().splitlines()
             ]
             self.assertEqual(
-                adaptive[-1]["event"],
-                "runtime_localization_reseal_rejected",
+                [event["event"] for event in adaptive],
+                [
+                    "runtime_localization_reseal_started",
+                    "runtime_localization_admitted",
+                    "runtime_localization_route_replanned",
+                    "runtime_localization_route_sealed",
+                ],
+            )
+            for event in adaptive:
+                self.assertTrue(event["dynamic_overlay_preserved"])
+                self.assertEqual(event["adopted_blockage_replan_count"], 1)
+                self.assertEqual(event["remaining_blockage_replan_count"], 1)
+            self.assertEqual(
+                adaptive[-1]["transient_overlay_resume_state_json"],
+                str(resume_state_path),
             )
             self.assertEqual(
-                adaptive[-1]["reason"],
-                "adopted_transient_blockage_replan_not_replayable",
+                adaptive[-1]["transient_overlay_resume_state_sha256"],
+                "e" * 64,
             )
-            self.assertTrue(adaptive[-1]["fail_closed"])
 
     def test_runtime_blockage_failure_never_relaunches_the_runner(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1638,39 +1809,42 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             root = Path(tmp)
             run_id = "startup_rejected"
             event_path = root / "run_events" / f"{run_id}.jsonl"
-            event_path.parent.mkdir(parents=True)
-            event_path.write_text(
-                json.dumps(
-                    {
-                        "event": "safety_stop",
-                        "run_id": run_id,
-                        "status": "stopped",
-                        "stop_reason": "pose outside certified startup segment",
-                        "stop_details": {
-                            "source": "execution_route_certificate",
-                            "phase": "before_motion_confirmation",
-                            "route_pose": {
-                                "frame_id": "map",
-                                "child_frame_id": "base_footprint",
-                                "x_m": -0.5044625,
-                                "y_m": -0.6255536,
-                                "yaw_rad": 1.7007652,
-                            },
+            event_payload = json.dumps(
+                {
+                    "event": "safety_stop",
+                    "run_id": run_id,
+                    "status": "stopped",
+                    "stop_reason": "pose outside certified startup segment",
+                    "stop_details": {
+                        "source": "execution_route_certificate",
+                        "phase": "before_motion_confirmation",
+                        "route_pose": {
+                            "frame_id": "map",
+                            "child_frame_id": "base_footprint",
+                            "x_m": -0.5044625,
+                            "y_m": -0.6255536,
+                            "yaw_rad": 1.7007652,
                         },
-                        "motion_published": False,
-                    }
-                )
-                + "\n"
+                    },
+                    "motion_published": False,
+                }
             )
             sealed = {
                 "route_csv": str(root / "route.csv"),
                 "diagnostics_json": str(root / "diagnostics.json"),
                 "route_certificate_json": str(root / "certificate.json"),
             }
+
+            def reject_dry(_command, **_kwargs):
+                event_path.parent.mkdir(parents=True, exist_ok=True)
+                with event_path.open("a", encoding="utf-8") as handle:
+                    handle.write(event_payload + "\n")
+                return SimpleNamespace(returncode=1)
+
             with patch(
                 "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
                 "subprocess.run",
-                return_value=SimpleNamespace(returncode=1),
+                side_effect=reject_dry,
             ) as run:
                 outcome = _run_motion_leg(
                     profile=self._profile(),

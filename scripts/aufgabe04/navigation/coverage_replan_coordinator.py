@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 import json
 import math
 from pathlib import Path
-import time
 from typing import Mapping
 
 from scripts.aufgabe04.navigation.coverage_escape_geometry import (
@@ -50,12 +49,6 @@ RECOVERABLE_STOP_REASONS = frozenset(
         CLEARANCE_LIMITED_MOTION_FLOOR,
     }
 )
-
-
-def _append_jsonl(path: Path, payload: Mapping[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(dict(payload), sort_keys=True) + "\n")
 
 
 def _front_evidence(
@@ -262,6 +255,26 @@ class CoverageReplanCoordinator:
             raise ValueError("command_owner must be a namespace-qualified node")
         if self.max_replans < 0:
             raise ValueError("max_replans must be non-negative")
+        if (
+            not isinstance(self.replan_count, int)
+            or isinstance(self.replan_count, bool)
+            or self.replan_count < 0
+            or self.replan_count > self.max_replans
+        ):
+            raise ValueError(
+                "replan_count must be an integer inside the cumulative budget"
+            )
+        if self.replan_count > 0 and self.overlay_path is None:
+            raise ValueError("resumed replan_count requires an obstacle overlay")
+        if self.replan_count == 0 and self.overlay_path is not None:
+            raise ValueError("an obstacle overlay requires a positive replan_count")
+        if self.overlay_path is not None:
+            self.overlay_path = Path(self.overlay_path)
+        if not isinstance(self.adopted_route_hashes, set) or any(
+            not isinstance(route_hash, str) or not route_hash
+            for route_hash in self.adopted_route_hashes
+        ):
+            raise ValueError("adopted_route_hashes must be a set of non-empty strings")
         if not math.isfinite(self.robot_radius_m) or self.robot_radius_m <= 0.0:
             raise ValueError("robot_radius_m must be finite and positive")
         if (
@@ -290,10 +303,6 @@ class CoverageReplanCoordinator:
                 "reverse_connector_alignment_tolerance_rad must be in "
                 "(0, pi/2]"
             )
-
-    @property
-    def adaptive_log_path(self) -> Path:
-        return self.session_root / "adaptive_replans.jsonl"
 
     def __call__(
         self,
@@ -414,6 +423,7 @@ class CoverageReplanCoordinator:
             "start_egress_continuous_clearance_validated": True,
             "start_egress_motion": "reverse" if reverse_egress else "forward",
             "replacement_route_csv": sealed["route_csv"],
+            "source_map_route_sha256": leg.source_sha256,
             "replacement_diagnostics_json": sealed["diagnostics_json"],
             "replacement_route_certificate_json": sealed[
                 "route_certificate_json"
@@ -464,17 +474,6 @@ class CoverageReplanCoordinator:
                     ),
                 }
             )
-        _append_jsonl(
-            self.adaptive_log_path,
-            {
-                "schema_version": 1,
-                "event": "transient_navigation_blockage_replanned",
-                "timestamp": time.time(),
-                "run_id": self.run_id,
-                "leg_index": self.coverage_leg_index,
-                **event_fields,
-            },
-        )
         return RouteUpdate(
             kind=RouteUpdateKind.ADOPT,
             waypoints=waypoints,

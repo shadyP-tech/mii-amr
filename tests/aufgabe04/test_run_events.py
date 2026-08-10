@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import sys
@@ -27,6 +28,9 @@ from scripts.aufgabe04.navigation.models import Pose2D  # noqa: E402
 from scripts.aufgabe04.navigation.mission_leg_motion_permit import (  # noqa: E402
     MissionLegKind,
 )
+from scripts.aufgabe04.navigation.plan_stand_coverage_survey import (  # noqa: E402
+    main as plan_coverage,
+)
 from scripts.aufgabe04.navigation.ros_preflight import (  # noqa: E402
     RosObservation,
     RosPreflightResult,
@@ -40,6 +44,27 @@ from scripts.aufgabe04.navigation.run_events import (  # noqa: E402
 from scripts.aufgabe04.navigation.route_revision_store import (  # noqa: E402
     RouteRevisionStore,
     read_committed_revision,
+)
+from scripts.aufgabe04.navigation.stand_blockage_replan import (  # noqa: E402
+    TRANSIENT_OBSTACLE_OVERLAY_SCHEMA_VERSION,
+    TransientObstacleOverlay,
+    write_transient_obstacle_overlay,
+)
+from scripts.aufgabe04.navigation.stand_coverage_survey import (  # noqa: E402
+    STATUS_PROVISIONAL,
+    SurveyCandidate,
+    load_coverage_survey_plan,
+)
+from scripts.aufgabe04.navigation.stand_discovery_route import (  # noqa: E402
+    seal_stand_discovery_route,
+)
+from scripts.aufgabe04.navigation.transient_overlay_resume_state import (  # noqa: E402
+    bind_transient_overlay_resume_state_to_diagnostics,
+    update_transient_overlay_resume_state_from_events,
+    write_transient_overlay_resume_state,
+)
+from scripts.aufgabe04.navigation.waypoint_csv import (  # noqa: E402
+    load_route_leg,
 )
 
 
@@ -189,6 +214,184 @@ def failing_preflight() -> RosPreflightResult:
         ],
         runtime_config={"cmd_vel_topic": "/cmd_vel", "scan_topic": "/scan"},
     )
+
+
+def write_resumed_coverage_fixture(root: Path) -> dict[str, object]:
+    """Create real sealed coverage artifacts bound to one inherited overlay."""
+
+    root = Path(root).resolve()
+    survey = root / "survey"
+    map_yaml = ROOT / "maps/aufgabe03/arena_1p898x3p9_auto.yaml"
+    with redirect_stdout(StringIO()):
+        status = plan_coverage(
+            [
+                "--map",
+                str(map_yaml),
+                "--semantic-map-id",
+                "arena_1p898x3p9_auto",
+                "--planning-frame",
+                "map",
+                "--start-x",
+                "-0.5025319639494574",
+                "--start-y",
+                "-0.605412965510235",
+                "--start-yaw",
+                "-3.1376510363781347",
+                "--survey-id",
+                "resume_runner_test",
+                "--output-dir",
+                str(survey),
+                "--lane-count",
+                "1",
+                "--stop-spacing-m",
+                "0.70",
+                "--expected-stand-count",
+                "1",
+            ]
+        )
+    if status != 0:
+        raise AssertionError(f"coverage fixture planning failed: {status}")
+    plan_path = survey / "coverage_plan.json"
+    plan = load_coverage_survey_plan(plan_path)
+    target_viewpoint_id = plan.viewpoints[0].viewpoint_id
+
+    overlay_path = root / "overlay_replan_001.json"
+    candidate = SurveyCandidate(
+        candidate_uid="transient_obstacle_0001",
+        x_m=1.40,
+        y_m=0.60,
+        radius_m=plan.config.candidate_radius_m,
+        uncertainty_m=plan.config.candidate_uncertainty_m,
+        keepout_radius_m=plan.config.candidate_keepout_radius_m,
+        confidence=1.0,
+        hit_count=1,
+        first_seen_sec=0.0,
+        last_seen_sec=0.0,
+        source_observation_ids=("prior_blockage",),
+        viewpoint_ids=(),
+        status=STATUS_PROVISIONAL,
+    )
+    write_transient_obstacle_overlay(
+        overlay_path,
+        TransientObstacleOverlay(
+            schema_version=TRANSIENT_OBSTACLE_OVERLAY_SCHEMA_VERSION,
+            survey_id=plan.survey_id,
+            planning_frame=plan.planning_frame,
+            map_bundle_sha256=plan.map_bundle_sha256,
+            candidates=(candidate,),
+        ),
+        source={"kind": "runner_resume_test"},
+    )
+    prior_route = root / "prior_adopted_route_001.csv"
+    prior_route.write_text("prior adopted route\n", encoding="utf-8")
+    state = update_transient_overlay_resume_state_from_events(
+        [
+            {
+                "event": "transient_navigation_blockage_replanned",
+                "run_id": "prior-child",
+                "leg_index": 0,
+                "replan_index": 1,
+                "target_viewpoint_id": target_viewpoint_id,
+                "semantic_survey_evidence": False,
+                "transient_obstacle_overlay_json": str(overlay_path),
+                "replacement_route_csv": str(prior_route),
+                "source_map_route_sha256": hashlib.sha256(
+                    prior_route.read_bytes()
+                ).hexdigest(),
+            }
+        ],
+        plan=plan,
+        coverage_leg_index=0,
+        target_viewpoint_id=target_viewpoint_id,
+        max_replans=3,
+        artifact_root=root,
+    )
+    if state is None:
+        raise AssertionError("resume fixture did not create state")
+    state_path = root / "resume_state.json"
+    write_transient_overlay_resume_state(state_path, state, plan=plan)
+
+    source_diagnostics = survey / "legs/leg_000_diagnostics.json"
+    diagnostics_payload = json.loads(source_diagnostics.read_text())
+    diagnostics_payload["metadata"]["planning_frame"] = plan.planning_frame
+    source_diagnostics.write_text(
+        json.dumps(diagnostics_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    bound_diagnostics = root / "bound_resume_diagnostics.json"
+    bind_transient_overlay_resume_state_to_diagnostics(
+        source_diagnostics,
+        bound_diagnostics,
+        resume_state_path=state_path,
+        plan=plan,
+    )
+    sealed = seal_stand_discovery_route(
+        source_route_csv=survey / "legs/leg_000_route.csv",
+        source_diagnostics_json=bound_diagnostics,
+        coverage_plan_path=plan_path,
+        output_dir=root / "sealed",
+    )
+    leg = load_route_leg(Path(sealed["route_csv"]), 0)
+    return {
+        "map_yaml": map_yaml,
+        "survey": survey,
+        "plan_path": plan_path,
+        "target_viewpoint_id": target_viewpoint_id,
+        "overlay_path": overlay_path,
+        "state": state,
+        "state_path": state_path,
+        "sealed": sealed,
+        "leg": leg,
+    }
+
+
+def resumed_coverage_runner_args(
+    fixture: dict[str, object],
+    *,
+    root: Path,
+    session: Path,
+    semantic_log: Path,
+) -> list[str]:
+    sealed = fixture["sealed"]
+    assert isinstance(sealed, dict)
+    return [
+        "--route-csv",
+        str(sealed["route_csv"]),
+        "--diagnostics-json",
+        str(sealed["diagnostics_json"]),
+        "--route-certificate-json",
+        str(sealed["route_certificate_json"]),
+        "--coverage-plan",
+        str(fixture["plan_path"]),
+        "--leg-index",
+        "0",
+        "--semantic-log",
+        str(semantic_log),
+        "--results-csv",
+        str(root / "results.csv"),
+        "--preflight-json",
+        str(root / "preflight.json"),
+        "--run-id",
+        "resumed-child",
+        "--coverage-transient-replan-survey-root",
+        str(fixture["survey"]),
+        "--coverage-transient-replan-session-root",
+        str(session),
+        "--coverage-transient-replan-map",
+        str(fixture["map_yaml"]),
+        "--coverage-transient-replan-semantic-map-id",
+        "arena_1p898x3p9_auto",
+        "--coverage-transient-replan-target-viewpoint-id",
+        str(fixture["target_viewpoint_id"]),
+        "--coverage-transient-replan-robot-radius-m",
+        "0.105",
+        "--coverage-transient-replan-max-count",
+        "3",
+        "--coverage-transient-replan-leg-index",
+        "0",
+        "--coverage-transient-replan-resume-state-json",
+        str(fixture["state_path"]),
+    ]
 
 
 class RunEventsTest(unittest.TestCase):
@@ -514,6 +717,365 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
         self.assertEqual(resolved["previous_route_length_m"], 0.0)
         self.assertEqual(resolved["new_route_length_m"], 0.2)
         self.assertEqual(len(resolved["route_sha256"]), 64)
+
+    def test_adopted_blockage_replan_is_appended_to_mission_adaptive_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            survey = root / "survey"
+            with redirect_stdout(StringIO()):
+                plan_status = plan_coverage(
+                    [
+                        "--map",
+                        str(
+                            ROOT
+                            / "maps/aufgabe03/arena_1p898x3p9_auto.yaml"
+                        ),
+                        "--semantic-map-id",
+                        "arena_1p898x3p9_auto",
+                        "--planning-frame",
+                        "map",
+                        "--start-x",
+                        "0",
+                        "--start-y",
+                        "0",
+                        "--start-yaw",
+                        "0",
+                        "--survey-id",
+                        "adoption_event_test",
+                        "--output-dir",
+                        str(survey),
+                        "--lane-count",
+                        "1",
+                        "--stop-spacing-m",
+                        "0.70",
+                        "--expected-stand-count",
+                        "1",
+                    ]
+                )
+            self.assertEqual(plan_status, 0)
+            sealed = seal_stand_discovery_route(
+                source_route_csv=survey / "legs/leg_000_route.csv",
+                source_diagnostics_json=(
+                    survey / "legs/leg_000_diagnostics.json"
+                ),
+                coverage_plan_path=survey / "coverage_plan.json",
+                output_dir=root / "sealed",
+            )
+            leg = load_route_leg(Path(sealed["route_csv"]), 0)
+            first_pose = leg.raw_waypoints[0].pose
+            session = root / "mission_session"
+            semantic_log = root / "events.jsonl"
+            args = [
+                "--route-csv",
+                sealed["route_csv"],
+                "--diagnostics-json",
+                sealed["diagnostics_json"],
+                "--route-certificate-json",
+                sealed["route_certificate_json"],
+                "--coverage-plan",
+                str(survey / "coverage_plan.json"),
+                "--leg-index",
+                "0",
+                "--semantic-log",
+                str(semantic_log),
+                "--results-csv",
+                str(root / "results.csv"),
+                "--preflight-json",
+                str(root / "preflight.json"),
+                "--run-id",
+                "run-adoption",
+                "--coverage-transient-replan-survey-root",
+                str(survey),
+                "--coverage-transient-replan-session-root",
+                str(session),
+                "--coverage-transient-replan-map",
+                str(
+                    ROOT / "maps/aufgabe03/arena_1p898x3p9_auto.yaml"
+                ),
+                "--coverage-transient-replan-semantic-map-id",
+                "arena_1p898x3p9_auto",
+                "--coverage-transient-replan-target-viewpoint-id",
+                "survey_vp_001",
+                "--coverage-transient-replan-robot-radius-m",
+                "0.105",
+                "--coverage-transient-replan-max-count",
+                "3",
+                "--coverage-transient-replan-leg-index",
+                "7",
+            ]
+
+            def fake_follower(
+                _resolved,
+                _waypoints,
+                _config,
+                _provider,
+                callback,
+                **kwargs,
+            ):
+                self.assertIn("blockage_recovery_provider", kwargs)
+                callback(
+                    RouteUpdate(
+                        kind=RouteUpdateKind.ADOPT,
+                        event_name=(
+                            "transient_navigation_blockage_replanned"
+                        ),
+                        route_revision=2,
+                        route_hash="route_hash_2",
+                        event_fields={
+                            "replan_index": 2,
+                            "post_plan_runtime_revalidated": True,
+                            "semantic_survey_evidence": False,
+                            "target_viewpoint_id": "survey_vp_001",
+                            "replacement_route_csv": "replacement.csv",
+                            "transient_obstacle_overlay_json": "overlay.json",
+                        },
+                    )
+                )
+                return FollowerResult("completed", "", 1.0, 0.2, True)
+
+            preflight = RosPreflightResult(
+                ok=True,
+                failures=[],
+                observations=[],
+                runtime_config={},
+                route_pose={
+                    "frame_id": "map",
+                    "child_frame_id": "base_footprint",
+                    "x_m": first_pose.x_m,
+                    "y_m": first_pose.y_m,
+                    "yaw_rad": 0.0,
+                },
+            )
+            output = StringIO()
+            with patch.object(
+                run_single_station_segment,
+                "run_ros_preflight",
+                return_value=preflight,
+            ), patch.object(
+                run_single_station_segment,
+                "_confirm_motion",
+                return_value=True,
+            ), patch.object(
+                run_single_station_segment,
+                "run_simple_waypoint_follower",
+                side_effect=fake_follower,
+            ), redirect_stdout(output):
+                status = run_single_station_segment.main(args)
+
+            self.assertEqual(status, 0, output.getvalue())
+            adaptive_events = read_events(
+                session / "adaptive_replans.jsonl"
+            )
+
+        self.assertEqual(len(adaptive_events), 1)
+        self.assertEqual(
+            adaptive_events[0]["event"],
+            "transient_navigation_blockage_replanned",
+        )
+        self.assertEqual(adaptive_events[0]["run_id"], "run-adoption")
+        self.assertEqual(adaptive_events[0]["leg_index"], 7)
+        self.assertEqual(adaptive_events[0]["replan_index"], 2)
+        self.assertTrue(
+            adaptive_events[0]["post_plan_runtime_revalidated"]
+        )
+        self.assertFalse(adaptive_events[0]["semantic_survey_evidence"])
+        self.assertEqual(
+            adaptive_events[0]["target_viewpoint_id"],
+            "survey_vp_001",
+        )
+
+    def test_bound_resume_state_seeds_next_cumulative_blockage_replan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            fixture = write_resumed_coverage_fixture(root)
+            session = root / "mission_session"
+            semantic_log = root / "events.jsonl"
+            source_001 = (
+                Path(fixture["survey"])
+                / "replans/leg_000_replan_001"
+            )
+            execution_001 = (
+                session / "execution/coverage_leg_000_replan_001"
+            )
+            source_001.mkdir(parents=True)
+            execution_001.mkdir(parents=True)
+            source_marker = source_001 / "existing.txt"
+            execution_marker = execution_001 / "existing.txt"
+            source_marker.write_text("prior source\n", encoding="utf-8")
+            execution_marker.write_text("prior execution\n", encoding="utf-8")
+            leg = fixture["leg"]
+            state = fixture["state"]
+            first_pose = leg.raw_waypoints[0].pose
+            observed: dict[str, object] = {}
+
+            def fake_follower(
+                _resolved,
+                _waypoints,
+                _config,
+                _provider,
+                _callback,
+                **kwargs,
+            ):
+                provider = kwargs["blockage_recovery_provider"]
+                observed["initial_count"] = provider.replan_count
+                observed["initial_overlay"] = provider.overlay_path
+                observed["initial_hashes"] = set(
+                    provider.adopted_route_hashes
+                )
+                update = provider(
+                    Pose2D(
+                        -0.858887873410987,
+                        -0.46164086690318107,
+                        -3.1376510363781347,
+                    ),
+                    "stuck no progress",
+                    {
+                        "stationary_obstacle_confirmation": {
+                            "confirmed": True,
+                            "fail_closed": False,
+                            "distinct_sample_count": 3,
+                            "thresholds": {"min_distinct_samples": 3},
+                        },
+                        "front_clearance": {
+                            "source": "front_sector",
+                            "nearest_valid_range_m": 0.23000000417232513,
+                            "nearest_valid_bearing_rad": 0.20737460535019636,
+                        },
+                    },
+                )
+                observed["update"] = update
+                observed["final_count"] = provider.replan_count
+                return FollowerResult("completed", "", 1.0, 0.2, True)
+
+            preflight = RosPreflightResult(
+                ok=True,
+                failures=[],
+                observations=[],
+                runtime_config={},
+                route_pose={
+                    "frame_id": "map",
+                    "child_frame_id": "base_footprint",
+                    "x_m": first_pose.x_m,
+                    "y_m": first_pose.y_m,
+                    "yaw_rad": 0.0,
+                },
+            )
+            args = resumed_coverage_runner_args(
+                fixture,
+                root=root,
+                session=session,
+                semantic_log=semantic_log,
+            )
+            output = StringIO()
+            with patch.object(
+                run_single_station_segment,
+                "run_ros_preflight",
+                return_value=preflight,
+            ), patch(
+                "builtins.input",
+                return_value="RUN",
+            ), patch.object(
+                run_single_station_segment,
+                "run_simple_waypoint_follower",
+                side_effect=fake_follower,
+            ), redirect_stdout(output):
+                status = run_single_station_segment.main(args)
+
+            update = observed["update"]
+            observed["source_marker"] = source_marker.read_text()
+            observed["execution_marker"] = execution_marker.read_text()
+            observed["events"] = read_events(semantic_log)
+
+        self.assertEqual(status, 0, output.getvalue())
+        self.assertEqual(observed["initial_count"], 1)
+        self.assertEqual(
+            Path(observed["initial_overlay"]),
+            Path(fixture["overlay_path"]),
+        )
+        self.assertTrue(
+            set(state.adopted_route_sha256s).issubset(
+                observed["initial_hashes"]
+            )
+        )
+        self.assertIn(leg.source_sha256, observed["initial_hashes"])
+        self.assertEqual(observed["final_count"], 2)
+        self.assertEqual(update.kind, RouteUpdateKind.ADOPT)
+        self.assertEqual(update.route_revision, 2)
+        self.assertEqual(update.event_fields["replan_index"], 2)
+        self.assertIn(
+            "leg_000_replan_002",
+            update.event_fields["transient_obstacle_overlay_json"],
+        )
+        self.assertIn(
+            "coverage_leg_000_replan_002",
+            update.event_fields["replacement_route_csv"],
+        )
+        self.assertNotIn(
+            "replan_001",
+            "\n".join(
+                [
+                    update.event_fields[
+                        "transient_obstacle_overlay_json"
+                    ],
+                    update.event_fields["replacement_route_csv"],
+                    update.event_fields[
+                        "replacement_route_certificate_json"
+                    ],
+                ]
+            ),
+        )
+        self.assertEqual(observed["source_marker"], "prior source\n")
+        self.assertEqual(observed["execution_marker"], "prior execution\n")
+        event_names = [item["event"] for item in observed["events"]]
+        self.assertLess(
+            event_names.index("transient_overlay_resume_state_validated"),
+            event_names.index("motion_started"),
+        )
+
+    def test_tampered_bound_resume_state_is_rejected_before_motion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            fixture = write_resumed_coverage_fixture(root)
+            session = root / "mission_session"
+            semantic_log = root / "events.jsonl"
+            state_path = Path(fixture["state_path"])
+            tampered = json.loads(state_path.read_text(encoding="utf-8"))
+            tampered["remaining_replans"] = 0
+            state_path.write_text(
+                json.dumps(tampered, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            args = resumed_coverage_runner_args(
+                fixture,
+                root=root,
+                session=session,
+                semantic_log=semantic_log,
+            )
+            with patch.object(
+                run_single_station_segment,
+                "run_ros_preflight",
+            ) as preflight, patch.object(
+                run_single_station_segment,
+                "run_simple_waypoint_follower",
+            ) as follower, redirect_stdout(StringIO()), redirect_stderr(
+                StringIO()
+            ):
+                with self.assertRaises(SystemExit) as raised:
+                    run_single_station_segment.main(args)
+            events = read_events(semantic_log)
+
+        self.assertEqual(raised.exception.code, 2)
+        preflight.assert_not_called()
+        follower.assert_not_called()
+        rejected = next(
+            event
+            for event in events
+            if event["event"]
+            == "transient_overlay_resume_state_rejected"
+        )
+        self.assertFalse(rejected["motion_published"])
+        self.assertIn("hash mismatch", rejected["stop_reason"])
+        self.assertNotIn("motion_started", [item["event"] for item in events])
 
     def test_stale_one_shot_authoritative_route_is_rejected_before_preflight(self):
         with tempfile.TemporaryDirectory() as tmp:
