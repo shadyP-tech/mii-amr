@@ -78,11 +78,12 @@ class TestRouteRevisionStore(unittest.TestCase):
             self.assertEqual(loaded.status, "active")
             self.assertEqual(loaded.route_revision, 1)
             self.assertEqual(
-                loaded.route_path, store.revision_dir / "route_000001.csv"
+                loaded.route_path,
+                (store.revision_dir / "route_000001.csv").resolve(),
             )
             self.assertEqual(
                 loaded.diagnostics_path,
-                store.revision_dir / "diagnostics_000001.json",
+                (store.revision_dir / "diagnostics_000001.json").resolve(),
             )
             self.assertEqual(loaded.route_hash, loaded.manifest["route"]["sha256"])
             self.assertIs(loaded.manifest["simulation_only"], True)

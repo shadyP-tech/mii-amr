@@ -185,7 +185,9 @@ it is not a safety gate.
   descriptor and frame.
 - Durable sequential dispatch/progress state with post-arrival QR confirmation;
   the generic multi-leg simulation wrapper is not a logistics executor.
-- Automatic execution-evidence manifest creation covering every attempt.
+- Automatic execution-evidence manifests for every non-checkpoint motion
+  attempt. Autonomous coverage checkpoints now have immutable manifests, but
+  that narrower evidence chain does not close the general execution gap.
 - Deployed ROS command guard/mux and watchdog.
 - Measured carrier, retention/load sensing, loaded dynamics, and custody runtime.
 - Persistent/networked fleet coordinator and namespaced two-robot integration.

@@ -14,7 +14,7 @@ from scripts.aufgabe04.perception.debug.stand_axis_viewer import (
     _draw_dashed_polygon,
     _roi_label_origin,
 )
-from scripts.aufgabe04.perception.debug.text_overlay import OverlayTextCursor
+from scripts.aufgabe04.perception.text_overlay import OverlayTextCursor
 from scripts.aufgabe04.perception.stand_axis_handoff.models import (
     AxisHandoffDecision,
     CameraAxisEstimate,

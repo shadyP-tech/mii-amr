@@ -1,0 +1,868 @@
+"""Motion-edge-free candidate approach orchestration for autonomous exploration.
+
+The parent runner owns ROS sampling, passive camera process lifecycle, operator
+authorization, and the only child motion edge.  This module owns deterministic
+candidate ordering, offline route planning/validation, the bounded opposite-face
+fallback, and final identity/facing artifacts behind injected effects.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import hashlib
+import json
+import math
+from pathlib import Path
+import shutil
+import time
+from typing import Callable, Mapping
+
+from scripts.aufgabe04.artifacts.content_store import write_content_hashed_json
+from scripts.aufgabe04.navigation.artifacts import (
+    write_diagnostics_json,
+    write_route_csv,
+)
+from scripts.aufgabe04.navigation.costmap import Costmap
+from scripts.aufgabe04.navigation.detected_stand_preapproach import (
+    CAMERA_AXIS_FACE_BEARING_MODE,
+    ROBOT_TO_STAND_BEARING_MODE,
+    seal_detected_stand_preapproach,
+)
+from scripts.aufgabe04.navigation.global_planner import plan_route
+from scripts.aufgabe04.navigation.map_io import load_occupancy_grid_with_bundle
+from scripts.aufgabe04.navigation.mission_leg_motion_permit import MissionLegKind
+from scripts.aufgabe04.navigation.models import Pose2D
+from scripts.aufgabe04.navigation.record_stand_candidate_decision import (
+    main as record_stand_candidate_decision,
+)
+from scripts.aufgabe04.navigation.route_context import build_station_route_dry_run
+from scripts.aufgabe04.navigation.stand_coverage_survey import (
+    CoverageSurveyPlan,
+    coverage_survey_plan_sha256,
+)
+from scripts.aufgabe04.navigation.viewpoint_recommendation import (
+    load_recommendation,
+    normalize_angle,
+)
+from scripts.aufgabe04.real_robot.autonomous_child_runner import MotionLegOutcome
+from scripts.aufgabe04.real_robot.recommendation_builder import (
+    REAL_VIEWPOINT_SOURCE,
+)
+from scripts.aufgabe04.stations.candidate_snapshot import (
+    CandidateSnapshot,
+    FrozenCandidate,
+    candidate_snapshot_sha256,
+)
+from scripts.aufgabe04.stations.create_station_identity_registry import (
+    create_registry,
+)
+from scripts.aufgabe04.stations.models import Station, StationPose
+from scripts.aufgabe04.stations.station_identity_registry import (
+    StationIdentity,
+    write_station_identity_registry,
+)
+
+
+SealedRoute = Mapping[str, str]
+
+
+@dataclass(frozen=True)
+class CandidateApproachConfig:
+    session_root: Path
+    survey_root: Path
+    session_id: str
+    semantic_map_id: str
+    planning_frame: str
+    map_yaml: Path
+    plan: CoverageSurveyPlan
+    snapshot: CandidateSnapshot
+    snapshot_path: Path
+    approach_offset_m: float
+    inflation_radius_m: float
+    candidate_transit_radius_m: float
+    physical_clearance: Mapping[str, float]
+    uncertainty_sigma_multiplier: float
+    localization_branch_proof_id: str
+    mission_leg_motion_authorization_json: Path
+
+
+@dataclass(frozen=True)
+class CandidatePreapproachRequest:
+    map_yaml: Path
+    semantic_map_id: str
+    plan: CoverageSurveyPlan
+    snapshot: CandidateSnapshot
+    snapshot_path: Path
+    candidate_uid: str
+    start: Pose2D
+    output_dir: Path
+    approach_offset_m: float
+    inflation_radius_m: float
+    candidate_transit_radius_m: float
+    physical_clearance: Mapping[str, float]
+    approach_normal_rad: float | None = None
+    axis_observation_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class CandidateMotionLegRequest:
+    sealed: SealedRoute
+    run_id: str
+    session_root: Path
+    candidate_snapshot_path: Path
+    uncertainty_map_yaml: Path
+    uncertainty_sigma_multiplier: float
+    localization_branch_proof_id: str
+    mission_authorization_json: Path
+    session_id: str
+    semantic_map_id: str
+    mission_leg_kind: MissionLegKind
+    mission_leg_index: int
+    target_id: str
+    permit_json_path: Path
+
+
+@dataclass(frozen=True)
+class CandidateObservationRequest:
+    candidate: FrozenCandidate
+    output_dir: Path
+    attempt_index: int
+
+
+@dataclass(frozen=True)
+class CandidateObservation:
+    recommendation_path: Path | None
+    qr_id: str | None
+    axis_observation_path: Path | None
+
+
+@dataclass(frozen=True)
+class FacingValidationRequest:
+    config: CandidateApproachConfig
+    candidate: FrozenCandidate
+    recommendation_path: Path
+    current_pose: Pose2D
+    output_dir: Path
+
+
+@dataclass(frozen=True)
+class CandidateDecisionRequest:
+    survey_root: Path
+    receipt_path: Path
+
+
+@dataclass(frozen=True)
+class CandidateApproachComplete:
+    stand_count: int
+    visit_order: tuple[str, ...]
+    identity_registry_path: Path
+    identity_registry_sha256: str
+    stand_facing_catalog_path: Path
+    stand_facing_catalog_sha256: str
+    facing_records: tuple[Mapping[str, object], ...]
+    motion_authorized: bool = False
+
+    def to_mission_summary_fields(self) -> dict[str, object]:
+        return {
+            "stand_count": self.stand_count,
+            "stand_facing_catalog": str(self.stand_facing_catalog_path),
+            "stand_facing_catalog_sha256": self.stand_facing_catalog_sha256,
+            "station_identity_registry": str(self.identity_registry_path),
+            "station_identity_registry_sha256": (
+                self.identity_registry_sha256
+            ),
+            "motion_authorized": self.motion_authorized,
+        }
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _write_json(path: Path, payload: Mapping[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def nearest_candidate(
+    snapshot: CandidateSnapshot,
+    current_pose: Pose2D,
+    unresolved: set[str],
+) -> FrozenCandidate | None:
+    options = [
+        candidate
+        for candidate in snapshot.candidates
+        if candidate.candidate_uid in unresolved
+    ]
+    if not options:
+        return None
+    return min(
+        options,
+        key=lambda candidate: (
+            math.hypot(
+                current_pose.x_m - candidate.geometry.x_m,
+                current_pose.y_m - candidate.geometry.y_m,
+            ),
+            candidate.candidate_uid,
+        ),
+    )
+
+
+def plan_candidate_preapproach(
+    *,
+    map_yaml: Path,
+    semantic_map_id: str,
+    plan: CoverageSurveyPlan,
+    snapshot: CandidateSnapshot,
+    snapshot_path: Path,
+    candidate_uid: str,
+    start: Pose2D,
+    output_dir: Path,
+    approach_offset_m: float,
+    inflation_radius_m: float,
+    candidate_transit_radius_m: float,
+    physical_clearance: Mapping[str, float],
+    approach_normal_rad: float | None = None,
+    axis_observation_path: Path | None = None,
+) -> dict[str, str]:
+    """Write and seal a robot-side or axis-selected inspection route."""
+
+    candidate = snapshot.candidate_for(candidate_uid)
+    if candidate is None:
+        raise ValueError(f"unknown candidate {candidate_uid!r}")
+    if (approach_normal_rad is None) != (axis_observation_path is None):
+        raise ValueError(
+            "axis-selected approach requires both normal and observation"
+        )
+    if approach_normal_rad is None:
+        bearing = math.atan2(
+            candidate.geometry.y_m - start.y_m,
+            candidate.geometry.x_m - start.x_m,
+        )
+        bearing_mode = ROBOT_TO_STAND_BEARING_MODE
+    else:
+        if not math.isfinite(approach_normal_rad):
+            raise ValueError("approach face normal must be finite")
+        bearing = normalize_angle(approach_normal_rad + math.pi)
+        bearing_mode = CAMERA_AXIS_FACE_BEARING_MODE
+
+    target_station_id = "D00"
+    stations = {}
+    for index, item in enumerate(snapshot.candidates, start=1):
+        yaw = bearing if item.candidate_uid == candidate_uid else 0.0
+        station_id = (
+            target_station_id
+            if item.candidate_uid == candidate_uid
+            else f"K{index:02d}"
+        )
+        stations[station_id] = Station(
+            station_id,
+            StationPose(item.geometry.x_m, item.geometry.y_m, yaw),
+            approach_offset_m,
+            candidate_transit_radius_m,
+        )
+
+    grid, map_bundle = load_occupancy_grid_with_bundle(
+        map_yaml,
+        semantic_map_id=semantic_map_id,
+        planning_frame=plan.planning_frame,
+    )
+    if map_bundle.bundle_sha256 != snapshot.map_bundle_sha256:
+        raise ValueError("candidate snapshot map differs from runtime map")
+    dry_run = build_station_route_dry_run(
+        map_yaml,
+        [target_station_id],
+        station_map=stations,
+        start=start,
+        inflation_radius_m=inflation_radius_m,
+        snap_radius_m=plan.config.snap_radius_m,
+        transit_keepout_radius_m=candidate_transit_radius_m,
+        arena_bounds=plan.arena_bounds,
+        occupancy_grid=grid,
+        map_bundle=map_bundle,
+    )
+    result = dry_run.results[0]
+    if result.route is None or result.failure is not None:
+        reason = result.failure.reason if result.failure is not None else "no route"
+        raise ValueError(f"candidate pre-approach A* failed: {reason}")
+    endpoint = result.route.points[-1].pose
+    terminal_yaw = math.atan2(
+        candidate.geometry.y_m - endpoint.y_m,
+        candidate.geometry.x_m - endpoint.x_m,
+    )
+
+    output_dir.mkdir(parents=True, exist_ok=False)
+    route_csv = output_dir / "route.csv"
+    diagnostics_json = output_dir / "route_diagnostics.json"
+    pipeline_summary = output_dir / "pipeline_summary.json"
+    local_snapshot = output_dir / "candidate_snapshot.json"
+    shutil.copyfile(snapshot_path, local_snapshot)
+    local_axis_observation = None
+    if axis_observation_path is not None:
+        local_axis_observation = output_dir / "axis_observation.json"
+        shutil.copyfile(axis_observation_path, local_axis_observation)
+    write_route_csv(route_csv, dry_run.results, final_yaw_by_leg={0: terminal_yaw})
+    metadata = dict(dry_run.metadata)
+    metadata.update(
+        {
+            "source": "lidar_detected_stand_exploration",
+            "order": "nearest",
+            "plan_mode": "next-candidate",
+            "stand_count": 1,
+            "candidate_transit_radius_m": candidate_transit_radius_m,
+            "inflation_radius_m": inflation_radius_m,
+            "approach_offset_m": approach_offset_m,
+            "approach_bearing_mode": bearing_mode,
+            "physical_clearance_enforced": True,
+            "physical_clearance": dict(physical_clearance),
+            "candidate_snapshot_json": str(local_snapshot),
+            "candidate_snapshot_sha256": candidate_snapshot_sha256(snapshot),
+            "map_bundle_sha256": map_bundle.bundle_sha256,
+            "planning_frame": plan.planning_frame,
+            "selected_candidate_stand_id": candidate_uid,
+            "selected_approach_pose": {
+                "x_m": endpoint.x_m,
+                "y_m": endpoint.y_m,
+                "yaw_rad": terminal_yaw,
+            },
+        }
+    )
+    if local_axis_observation is not None:
+        metadata.update(
+            {
+                "axis_observation_json": str(
+                    local_axis_observation.resolve()
+                ),
+                "axis_observation_sha256": _file_sha256(
+                    local_axis_observation
+                ),
+                "selected_face_normal_rad": normalize_angle(
+                    float(approach_normal_rad)
+                ),
+            }
+        )
+    write_diagnostics_json(diagnostics_json, dry_run.results, metadata=metadata)
+    _write_json(
+        pipeline_summary,
+        {
+            "schema_version": 1,
+            "status": "observe_and_plan_complete",
+            "motion_published": False,
+            "selected_candidate_uid": candidate_uid,
+            "selected_approach_pose": metadata["selected_approach_pose"],
+            "physical_clearance": dict(physical_clearance),
+        },
+    )
+    return seal_detected_stand_preapproach(pipeline_root=output_dir)
+
+
+def opposite_face_normal(axis_observation_path: Path) -> float:
+    """Select the axis-perpendicular face opposite the first camera view."""
+
+    payload = json.loads(axis_observation_path.read_text())
+    if payload.get("observation_kind") != "real_stand_axis_without_qr":
+        raise ValueError("unexpected axis observation kind")
+    axis_rad = float(payload["stand_axis_rad"])
+    stand = payload["stand_center"]
+    robot = payload["robot_pose"]
+    robot_side = math.atan2(
+        float(robot["y_m"]) - float(stand["y_m"]),
+        float(robot["x_m"]) - float(stand["x_m"]),
+    )
+    normals = (
+        normalize_angle(axis_rad + math.pi / 2.0),
+        normalize_angle(axis_rad - math.pi / 2.0),
+    )
+    selected = min(normals, key=lambda normal: math.cos(normal - robot_side))
+    if math.cos(selected - robot_side) > -0.5:
+        raise ValueError(
+            "stand axis does not resolve a sufficiently opposite inspection face"
+        )
+    return selected
+
+
+def bounded_approach_offsets(
+    requested_m: float,
+    minimum_m: float,
+    *,
+    step_m: float = 0.05,
+) -> tuple[float, ...]:
+    """Return descending standoffs without crossing the physical minimum."""
+
+    if not all(
+        math.isfinite(value) and value > 0.0
+        for value in (requested_m, minimum_m, step_m)
+    ):
+        raise ValueError("approach offsets and step must be finite and positive")
+    if requested_m + 1.0e-9 < minimum_m:
+        raise ValueError("requested approach offset is below physical minimum")
+    values = []
+    current = requested_m
+    while current > minimum_m + 1.0e-9:
+        values.append(round(current, 6))
+        current -= step_m
+    if not values or abs(values[-1] - minimum_m) > 1.0e-9:
+        values.append(round(minimum_m, 6))
+    return tuple(values)
+
+
+def is_approach_feasibility_failure(exc: ValueError) -> bool:
+    message = str(exc)
+    return (
+        "candidate pre-approach A* failed" in message
+        or "target is blocked" in message
+    )
+
+
+def validate_facing_pose(request: FacingValidationRequest) -> dict[str, object]:
+    config = request.config
+    candidate = request.candidate
+    recommendation = load_recommendation(
+        request.recommendation_path,
+        expected_frame=config.planning_frame,
+        expected_source=REAL_VIEWPOINT_SOURCE,
+        expected_simulation_only=False,
+    )
+    target = recommendation.material_target.pose
+    grid, map_bundle = load_occupancy_grid_with_bundle(
+        config.map_yaml,
+        semantic_map_id=config.semantic_map_id,
+        planning_frame=config.planning_frame,
+    )
+    if map_bundle.bundle_sha256 != config.plan.map_bundle_sha256:
+        raise ValueError("facing-pose validation map differs from survey")
+    costmap = (
+        Costmap.from_occupancy_grid(grid)
+        .with_arena_bounds(config.plan.arena_bounds)
+        .with_inflation(config.inflation_radius_m)
+    )
+    other_keepouts = tuple(
+        Station(
+            item.candidate_uid,
+            StationPose(item.geometry.x_m, item.geometry.y_m, 0.0),
+            0.0,
+            item.geometry.keepout_radius_m,
+        )
+        for item in config.snapshot.candidates
+        if item.candidate_uid != candidate.candidate_uid
+    )
+    if other_keepouts:
+        costmap = costmap.with_station_keepouts(other_keepouts)
+    route = plan_route(
+        costmap,
+        request.current_pose,
+        target,
+        snap_radius_m=config.plan.config.snap_radius_m,
+    )
+    if route.route is None or route.failure is not None:
+        reason = route.failure.reason if route.failure is not None else "no route"
+        raise ValueError(f"computed QR-facing pose is not A*-reachable: {reason}")
+    request.output_dir.mkdir(parents=True, exist_ok=True)
+    route_path = request.output_dir / "facing_pose_validation_route.csv"
+    diagnostics_path = (
+        request.output_dir / "facing_pose_validation_diagnostics.json"
+    )
+    write_route_csv(route_path, (route,), final_yaw_by_leg={0: target.yaw_rad})
+    write_diagnostics_json(
+        diagnostics_path,
+        (route,),
+        metadata={
+            "route_kind": "facing_pose_validation_only",
+            "motion_authorized": False,
+            "map_bundle_sha256": map_bundle.bundle_sha256,
+            "candidate_uid": candidate.candidate_uid,
+            "arena_boundary_overlay": True,
+            "arena_bounds": config.plan.arena_bounds.to_metadata(),
+            "inflation_radius_m": config.inflation_radius_m,
+        },
+    )
+    qr_face = next(
+        (
+            face
+            for face in recommendation.face_candidates
+            if face.face_id == recommendation.material_target.face_id
+        ),
+        None,
+    )
+    if qr_face is None:
+        raise ValueError("recommendation target face is absent from candidates")
+    stand_axis = (qr_face.outward_normal_rad - math.pi / 2.0) % math.pi
+    return {
+        "candidate_uid": candidate.candidate_uid,
+        "stand_center": {
+            "x_m": candidate.geometry.x_m,
+            "y_m": candidate.geometry.y_m,
+        },
+        "stand_axis_rad_axial": stand_axis,
+        "qr_outward_normal_rad": normalize_angle(qr_face.outward_normal_rad),
+        "facing_pose": {
+            "x_m": target.x_m,
+            "y_m": target.y_m,
+            "yaw_rad": target.yaw_rad,
+        },
+        "axis_confidence": recommendation.axis_confidence,
+        "axis_sample_count": recommendation.axis_sample_count,
+        "recommendation_json": str(request.recommendation_path),
+        "validation_route_csv": str(route_path),
+        "motion_to_facing_pose_authorized": False,
+    }
+
+
+def commit_candidate_decision(request: CandidateDecisionRequest) -> None:
+    try:
+        returncode = record_stand_candidate_decision(
+            [
+                "--survey-root",
+                str(request.survey_root),
+                "--decision-receipt-json",
+                str(request.receipt_path),
+            ]
+        )
+    except SystemExit as exc:
+        raise RuntimeError("failed to commit camera candidate decision") from exc
+    if returncode != 0:
+        raise RuntimeError("failed to commit camera candidate decision")
+
+
+def _plan_preapproach_from_request(
+    request: CandidatePreapproachRequest,
+) -> dict[str, str]:
+    return plan_candidate_preapproach(
+        map_yaml=request.map_yaml,
+        semantic_map_id=request.semantic_map_id,
+        plan=request.plan,
+        snapshot=request.snapshot,
+        snapshot_path=request.snapshot_path,
+        candidate_uid=request.candidate_uid,
+        start=request.start,
+        output_dir=request.output_dir,
+        approach_offset_m=request.approach_offset_m,
+        inflation_radius_m=request.inflation_radius_m,
+        candidate_transit_radius_m=request.candidate_transit_radius_m,
+        physical_clearance=request.physical_clearance,
+        approach_normal_rad=request.approach_normal_rad,
+        axis_observation_path=request.axis_observation_path,
+    )
+
+
+@dataclass(frozen=True)
+class CandidateApproachEffects:
+    read_current_pose: Callable[[], Pose2D]
+    run_motion_leg: Callable[[CandidateMotionLegRequest], MotionLegOutcome]
+    capture_observation: Callable[
+        [CandidateObservationRequest], CandidateObservation
+    ]
+    plan_preapproach: Callable[
+        [CandidatePreapproachRequest], SealedRoute
+    ] = _plan_preapproach_from_request
+    validate_facing: Callable[
+        [FacingValidationRequest], Mapping[str, object]
+    ] = validate_facing_pose
+    commit_decision: Callable[
+        [CandidateDecisionRequest], None
+    ] = commit_candidate_decision
+    clock: Callable[[], float] = time.time
+
+
+def _require_completed_motion(
+    request: CandidateMotionLegRequest,
+    outcome: MotionLegOutcome,
+) -> None:
+    if outcome.run_id != request.run_id:
+        raise RuntimeError(
+            "candidate motion outcome identity mismatch: "
+            f"expected {request.run_id}, got {outcome.run_id}"
+        )
+    if outcome.status != "completed":
+        raise RuntimeError(
+            f"physical route failed for {outcome.run_id}: {outcome.stop_reason}"
+        )
+
+
+def _motion_request(
+    *,
+    config: CandidateApproachConfig,
+    sealed: SealedRoute,
+    run_id: str,
+    candidate_snapshot_path: Path,
+    leg_kind: MissionLegKind,
+    candidate_index: int,
+    target_id: str,
+) -> CandidateMotionLegRequest:
+    return CandidateMotionLegRequest(
+        sealed=sealed,
+        run_id=run_id,
+        session_root=config.session_root,
+        candidate_snapshot_path=candidate_snapshot_path,
+        uncertainty_map_yaml=config.map_yaml,
+        uncertainty_sigma_multiplier=config.uncertainty_sigma_multiplier,
+        localization_branch_proof_id=config.localization_branch_proof_id,
+        mission_authorization_json=(
+            config.mission_leg_motion_authorization_json
+        ),
+        session_id=config.session_id,
+        semantic_map_id=config.semantic_map_id,
+        mission_leg_kind=leg_kind,
+        mission_leg_index=candidate_index,
+        target_id=target_id,
+        permit_json_path=(
+            config.session_root
+            / "motion_authorization"
+            / "mission_legs"
+            / f"{run_id}_permit.json"
+        ).absolute(),
+    )
+
+
+def execute_candidate_approach_phase(
+    config: CandidateApproachConfig,
+    effects: CandidateApproachEffects,
+) -> CandidateApproachComplete:
+    """Execute the post-coverage candidate state machine behind live effects."""
+
+    unresolved = set(config.snapshot.candidate_uids)
+    facing_records: list[Mapping[str, object]] = []
+    identities: list[StationIdentity] = []
+    visit_order: list[str] = []
+    candidate_index = 0
+
+    while unresolved:
+        current = effects.read_current_pose()
+        candidate = nearest_candidate(config.snapshot, current, unresolved)
+        if candidate is None:
+            raise RuntimeError("candidate snapshot has no unresolved candidate")
+        candidate_root = (
+            config.session_root
+            / "candidates"
+            / f"{candidate_index:03d}_{candidate.candidate_uid}"
+        )
+        source_root = candidate_root / "preapproach_source"
+        sealed = effects.plan_preapproach(
+            CandidatePreapproachRequest(
+                map_yaml=config.map_yaml,
+                semantic_map_id=config.semantic_map_id,
+                plan=config.plan,
+                snapshot=config.snapshot,
+                snapshot_path=config.snapshot_path,
+                candidate_uid=candidate.candidate_uid,
+                start=current,
+                output_dir=source_root,
+                approach_offset_m=config.approach_offset_m,
+                inflation_radius_m=config.inflation_radius_m,
+                candidate_transit_radius_m=(
+                    config.candidate_transit_radius_m
+                ),
+                physical_clearance=config.physical_clearance,
+            )
+        )
+        candidate_run_id = (
+            f"{config.session_id}_candidate_{candidate_index:03d}"
+        )
+        motion_request = _motion_request(
+            config=config,
+            sealed=sealed,
+            run_id=candidate_run_id,
+            candidate_snapshot_path=source_root / "candidate_snapshot.json",
+            leg_kind=MissionLegKind.CANDIDATE_PREAPPROACH,
+            candidate_index=candidate_index,
+            target_id=candidate.candidate_uid,
+        )
+        outcome = effects.run_motion_leg(motion_request)
+        _require_completed_motion(motion_request, outcome)
+        observation = effects.capture_observation(
+            CandidateObservationRequest(
+                candidate=candidate,
+                output_dir=candidate_root / "camera_lidar_attempt_00",
+                attempt_index=0,
+            )
+        )
+
+        if observation.recommendation_path is None:
+            if observation.axis_observation_path is None:
+                raise RuntimeError(
+                    "observer returned neither QR recommendation nor axis"
+                )
+            opposite_normal = opposite_face_normal(
+                observation.axis_observation_path
+            )
+            opposite_start = effects.read_current_pose()
+            opposite_source = candidate_root / "opposite_face_source"
+            opposite_sealed = None
+            feasibility_failures = []
+            for inspection_offset_m in bounded_approach_offsets(
+                config.approach_offset_m,
+                float(config.physical_clearance["minimum_active_standoff_m"]),
+            ):
+                try:
+                    opposite_sealed = effects.plan_preapproach(
+                        CandidatePreapproachRequest(
+                            map_yaml=config.map_yaml,
+                            semantic_map_id=config.semantic_map_id,
+                            plan=config.plan,
+                            snapshot=config.snapshot,
+                            snapshot_path=config.snapshot_path,
+                            candidate_uid=candidate.candidate_uid,
+                            start=opposite_start,
+                            output_dir=opposite_source,
+                            approach_offset_m=inspection_offset_m,
+                            inflation_radius_m=config.inflation_radius_m,
+                            candidate_transit_radius_m=(
+                                config.candidate_transit_radius_m
+                            ),
+                            physical_clearance=config.physical_clearance,
+                            approach_normal_rad=opposite_normal,
+                            axis_observation_path=(
+                                observation.axis_observation_path
+                            ),
+                        )
+                    )
+                    break
+                except ValueError as exc:
+                    if not is_approach_feasibility_failure(exc):
+                        raise
+                    feasibility_failures.append(
+                        f"{inspection_offset_m:.3f} m: {exc}"
+                    )
+            if opposite_sealed is None:
+                raise RuntimeError(
+                    "no physically allowed opposite-face approach was "
+                    "A*-reachable: " + "; ".join(feasibility_failures)
+                )
+            opposite_run_id = f"{candidate_run_id}_opposite"
+            opposite_request = _motion_request(
+                config=config,
+                sealed=opposite_sealed,
+                run_id=opposite_run_id,
+                candidate_snapshot_path=(
+                    opposite_source / "candidate_snapshot.json"
+                ),
+                leg_kind=MissionLegKind.OPPOSITE_FACE,
+                candidate_index=candidate_index,
+                target_id=candidate.candidate_uid,
+            )
+            opposite_outcome = effects.run_motion_leg(opposite_request)
+            _require_completed_motion(opposite_request, opposite_outcome)
+            observation = effects.capture_observation(
+                CandidateObservationRequest(
+                    candidate=candidate,
+                    output_dir=candidate_root / "camera_lidar_attempt_01",
+                    attempt_index=1,
+                )
+            )
+            if observation.recommendation_path is None:
+                raise RuntimeError(
+                    "QR side remained unresolved after opposite-face "
+                    f"inspection for {candidate.candidate_uid}"
+                )
+
+        if observation.qr_id is None:
+            raise RuntimeError("camera recommendation has no QR identity")
+        stopped_pose = effects.read_current_pose()
+        facing = dict(
+            effects.validate_facing(
+                FacingValidationRequest(
+                    config=config,
+                    candidate=candidate,
+                    recommendation_path=observation.recommendation_path,
+                    current_pose=stopped_pose,
+                    output_dir=candidate_root,
+                )
+            )
+        )
+        facing["qr_id"] = observation.qr_id
+        receipt = candidate_root / "candidate_decision.json"
+        _write_json(
+            receipt,
+            {
+                "schema_version": 1,
+                "survey_id": config.plan.survey_id,
+                "candidate_uid": candidate.candidate_uid,
+                "decision": "confirmed",
+                "decision_source": "camera_evidence",
+                "camera_evidence_path": str(observation.recommendation_path),
+            },
+        )
+        effects.commit_decision(
+            CandidateDecisionRequest(
+                survey_root=config.survey_root,
+                receipt_path=receipt,
+            )
+        )
+        facing_records.append(facing)
+        identities.append(
+            StationIdentity(
+                candidate.candidate_uid,
+                observation.qr_id,
+                f"station_{observation.qr_id}",
+            )
+        )
+        visit_order.append(candidate.candidate_uid)
+        unresolved.remove(candidate.candidate_uid)
+        candidate_index += 1
+
+    identity_registry, _source_sha = create_registry(
+        candidate_snapshot=config.snapshot,
+        mappings=identities,
+        registry_id=f"{config.session_id}_identities",
+        created_unix_sec=effects.clock(),
+    )
+    identity_path = config.session_root / "station_identity_registry.json"
+    identity_sha256 = write_station_identity_registry(
+        identity_path,
+        identity_registry,
+    )
+    catalog = {
+        "schema_version": 1,
+        "catalog_kind": "real_autonomous_stand_facing_poses",
+        "session_id": config.session_id,
+        "planning_frame": config.planning_frame,
+        "map_bundle_sha256": config.plan.map_bundle_sha256,
+        "coverage_plan_sha256": coverage_survey_plan_sha256(config.plan),
+        "candidate_snapshot_sha256": candidate_snapshot_sha256(
+            config.snapshot
+        ),
+        "station_identity_registry_sha256": identity_sha256,
+        "stand_count": len(facing_records),
+        "records": sorted(
+            facing_records,
+            key=lambda item: str(item["candidate_uid"]),
+        ),
+    }
+    catalog_path = config.session_root / "stand_facing_catalog.json"
+    catalog_sha256 = write_content_hashed_json(
+        catalog_path,
+        catalog,
+        hash_field="stand_facing_catalog_sha256",
+    )
+    return CandidateApproachComplete(
+        stand_count=len(facing_records),
+        visit_order=tuple(visit_order),
+        identity_registry_path=identity_path,
+        identity_registry_sha256=identity_sha256,
+        stand_facing_catalog_path=catalog_path,
+        stand_facing_catalog_sha256=catalog_sha256,
+        facing_records=tuple(facing_records),
+    )
+
+
+__all__ = [
+    "CandidateApproachComplete",
+    "CandidateApproachConfig",
+    "CandidateApproachEffects",
+    "CandidateDecisionRequest",
+    "CandidateMotionLegRequest",
+    "CandidateObservation",
+    "CandidateObservationRequest",
+    "CandidatePreapproachRequest",
+    "FacingValidationRequest",
+    "bounded_approach_offsets",
+    "execute_candidate_approach_phase",
+    "nearest_candidate",
+    "opposite_face_normal",
+    "plan_candidate_preapproach",
+    "validate_facing_pose",
+]

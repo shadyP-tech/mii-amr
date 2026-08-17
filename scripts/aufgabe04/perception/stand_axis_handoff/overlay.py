@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 
-from scripts.aufgabe04.perception.debug.text_overlay import OverlayTextCursor
+from scripts.aufgabe04.perception.text_overlay import OverlayTextCursor
 from scripts.aufgabe04.perception.stand_axis_handoff.models import (
     AxisHandoffDecision,
 )

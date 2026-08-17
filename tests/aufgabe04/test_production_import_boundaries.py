@@ -432,6 +432,130 @@ class ProductionImportBoundaryTest(unittest.TestCase):
 
         self.assertEqual(offenders, [])
 
+    def test_autonomous_parent_does_not_import_private_coverage_helpers(self):
+        parent_path = (
+            ROOT
+            / "scripts"
+            / "aufgabe04"
+            / "real_robot"
+            / "run_autonomous_stand_exploration.py"
+        )
+        tree = ast.parse(parent_path.read_text(), filename=str(parent_path))
+        extracted_modules = {
+            "scripts.aufgabe04.real_robot.autonomous_coverage_execution",
+            "scripts.aufgabe04.real_robot.autonomous_coverage_replanning",
+            "scripts.aufgabe04.real_robot.autonomous_candidate_approach",
+        }
+        offenders = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if (node.module or "") not in extracted_modules:
+                continue
+            offenders.extend(
+                (node.module, alias.name)
+                for alias in node.names
+                if alias.name.startswith("_")
+            )
+
+        self.assertEqual(offenders, [])
+
+    def test_autonomous_parent_only_imports_declared_phase_apis(self):
+        real_robot_root = ROOT / "scripts" / "aufgabe04" / "real_robot"
+        module_paths = {
+            "scripts.aufgabe04.real_robot.autonomous_coverage_execution": (
+                real_robot_root / "autonomous_coverage_execution.py"
+            ),
+            "scripts.aufgabe04.real_robot.autonomous_coverage_replanning": (
+                real_robot_root / "autonomous_coverage_replanning.py"
+            ),
+            "scripts.aufgabe04.real_robot.autonomous_candidate_approach": (
+                real_robot_root / "autonomous_candidate_approach.py"
+            ),
+        }
+        declared_exports = {}
+        for module_name, module_path in module_paths.items():
+            tree = ast.parse(module_path.read_text(), filename=str(module_path))
+            export_assignment = next(
+                (
+                    node
+                    for node in tree.body
+                    if isinstance(node, ast.Assign)
+                    and any(
+                        isinstance(target, ast.Name) and target.id == "__all__"
+                        for target in node.targets
+                    )
+                ),
+                None,
+            )
+            self.assertIsNotNone(export_assignment, module_name)
+            declared_exports[module_name] = set(
+                ast.literal_eval(export_assignment.value)
+            )
+
+        parent_path = real_robot_root / "run_autonomous_stand_exploration.py"
+        parent_tree = ast.parse(
+            parent_path.read_text(),
+            filename=str(parent_path),
+        )
+        offenders = []
+        for node in ast.walk(parent_tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            module_name = node.module or ""
+            if module_name not in declared_exports:
+                continue
+            offenders.extend(
+                (module_name, alias.name)
+                for alias in node.names
+                if alias.name not in declared_exports[module_name]
+            )
+
+        self.assertEqual(offenders, [])
+
+    def test_extracted_autonomous_phases_do_not_own_live_edges(self):
+        module_names = (
+            "autonomous_coverage_replanning.py",
+            "autonomous_candidate_approach.py",
+        )
+        forbidden_imports = (
+            "rclpy",
+            "sensor_msgs",
+            "geometry_msgs",
+            "nav_msgs",
+            "nav2_msgs",
+            "subprocess",
+            "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration",
+        )
+        forbidden_source = (
+            "create_publisher",
+            "/cmd_vel",
+            "input(",
+        )
+        offenders = []
+        for module_name in module_names:
+            module_path = (
+                ROOT / "scripts" / "aufgabe04" / "real_robot" / module_name
+            )
+            self.assertTrue(module_path.is_file(), module_path)
+            source = module_path.read_text()
+            tree = ast.parse(source, filename=str(module_path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported_modules = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    imported_modules = [node.module or ""]
+                else:
+                    continue
+                for imported_module in imported_modules:
+                    if imported_module.startswith(forbidden_imports):
+                        offenders.append((module_name, imported_module))
+            for snippet in forbidden_source:
+                if snippet in source:
+                    offenders.append((module_name, snippet))
+
+        self.assertEqual(offenders, [])
+
 
 if __name__ == "__main__":
     unittest.main()

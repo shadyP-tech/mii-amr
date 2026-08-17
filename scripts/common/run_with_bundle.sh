@@ -194,18 +194,37 @@ collect_git() {
 }
 
 collect_ros_pre() {
-  run_capture "$BUNDLE_DIR/ros_topics.txt" ros2 topic list
-  run_capture "$BUNDLE_DIR/ros_nodes.txt" ros2 node list
-  run_capture "$BUNDLE_DIR/ros_actions.txt" ros2 action list
-  run_capture "$BUNDLE_DIR/cmd_vel_info.txt" ros2 topic info "$RESOLVED_CMD_VEL_TOPIC" --verbose
-  run_capture_timeout "$BUNDLE_DIR/scan_once.txt" 4 ros2 topic echo --once "$RESOLVED_SCAN_TOPIC"
-  run_capture_timeout "$BUNDLE_DIR/odom_once.txt" 4 ros2 topic echo --once "$RESOLVED_ODOM_TOPIC"
-  run_capture_timeout "$BUNDLE_DIR/amcl_pose_once.txt" 4 ros2 topic echo --once "$RESOLVED_AMCL_TOPIC"
-  run_capture_timeout "$BUNDLE_DIR/navigate_to_pose_status_once.txt" 4 ros2 topic echo --once "$NAV2_STATUS_TOPIC"
+  local capture_pids=()
+  local capture_pid
+
+  # These are independent, read-only evidence captures with disjoint outputs.
+  # Start them together, but join every job before the wrapped command may run.
+  run_capture "$BUNDLE_DIR/ros_topics.txt" ros2 topic list &
+  capture_pids+=("$!")
+  run_capture "$BUNDLE_DIR/ros_nodes.txt" ros2 node list &
+  capture_pids+=("$!")
+  run_capture "$BUNDLE_DIR/ros_actions.txt" ros2 action list &
+  capture_pids+=("$!")
+  run_capture "$BUNDLE_DIR/cmd_vel_info.txt" ros2 topic info "$RESOLVED_CMD_VEL_TOPIC" --verbose &
+  capture_pids+=("$!")
+  run_capture_timeout "$BUNDLE_DIR/scan_once.txt" 4 ros2 topic echo --once "$RESOLVED_SCAN_TOPIC" &
+  capture_pids+=("$!")
+  run_capture_timeout "$BUNDLE_DIR/odom_once.txt" 4 ros2 topic echo --once "$RESOLVED_ODOM_TOPIC" &
+  capture_pids+=("$!")
+  run_capture_timeout "$BUNDLE_DIR/amcl_pose_once.txt" 4 ros2 topic echo --once "$RESOLVED_AMCL_TOPIC" &
+  capture_pids+=("$!")
+  run_capture_timeout "$BUNDLE_DIR/navigate_to_pose_status_once.txt" 4 ros2 topic echo --once "$NAV2_STATUS_TOPIC" &
+  capture_pids+=("$!")
   if [[ "$NAV2_STATUS_TOPIC" != "$NAMESPACED_NAV2_STATUS_TOPIC" ]]; then
-    run_capture_timeout "$BUNDLE_DIR/namespaced_navigate_to_pose_status_once.txt" 4 ros2 topic echo --once "$NAMESPACED_NAV2_STATUS_TOPIC"
+    run_capture_timeout "$BUNDLE_DIR/namespaced_navigate_to_pose_status_once.txt" 4 ros2 topic echo --once "$NAMESPACED_NAV2_STATUS_TOPIC" &
+    capture_pids+=("$!")
   fi
-  collect_tf
+  collect_tf &
+  capture_pids+=("$!")
+
+  for capture_pid in "${capture_pids[@]}"; do
+    wait "$capture_pid" || true
+  done
 }
 
 collect_ros_post() {
@@ -216,6 +235,9 @@ collect_ros_post() {
 }
 
 collect_tf() {
+  local fallback_pids=()
+  local fallback_pid
+
   (
     cd "$BUNDLE_DIR" || exit 0
     if ros2 run tf2_tools view_frames >tf_frames.txt 2>&1; then
@@ -230,8 +252,14 @@ collect_tf() {
   if ! grep -q "fallback" "$BUNDLE_DIR/tf_frames.txt" 2>/dev/null; then
     return 0
   fi
-  run_capture_timeout "$BUNDLE_DIR/tf_map_base_once.txt" 4 ros2 run tf2_ros tf2_echo "$MAP_FRAME" "$BASE_FRAME"
-  run_capture_timeout "$BUNDLE_DIR/tf_odom_base_once.txt" 4 ros2 run tf2_ros tf2_echo "$ODOM_FRAME" "$BASE_FRAME"
+  run_capture_timeout "$BUNDLE_DIR/tf_map_base_once.txt" 4 ros2 run tf2_ros tf2_echo "$MAP_FRAME" "$BASE_FRAME" &
+  fallback_pids+=("$!")
+  run_capture_timeout "$BUNDLE_DIR/tf_odom_base_once.txt" 4 ros2 run tf2_ros tf2_echo "$ODOM_FRAME" "$BASE_FRAME" &
+  fallback_pids+=("$!")
+
+  for fallback_pid in "${fallback_pids[@]}"; do
+    wait "$fallback_pid" || true
+  done
 }
 
 CONFIG_NAMESPACE=""
@@ -341,7 +369,7 @@ write_manifest_start
 collect_env
 collect_git
 
-log_setup "collecting pre-run ROS diagnostics"
+log_setup "collecting pre-run ROS diagnostics concurrently; waiting for all captures"
 collect_ros_pre
 
 log_setup "running wrapped command"

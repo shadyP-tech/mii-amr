@@ -60,25 +60,31 @@ from scripts.aufgabe04.navigation.transient_overlay_resume_state import (
 )
 from scripts.aufgabe04.navigation.waypoint_csv import load_route_leg
 from scripts.aufgabe04.real_robot.passive_viewpoint_node import _resolved_qr_id
+from scripts.aufgabe04.real_robot import autonomous_coverage_replanning
+from scripts.aufgabe04.real_robot.autonomous_coverage_replanning import (
+    coverage_reseal_suffix,
+    is_resealable_startup_mismatch,
+    is_runtime_localization_reseal_required,
+    replan_runtime_localization_source,
+    replan_startup_source,
+)
 from scripts.aufgabe04.real_robot.run_autonomous_stand_exploration import (
     MotionLegOutcome,
     MissionLegPermitContext,
     RuntimeLocalizationPermitContext,
     _admit_preplanning_localization,
-    _bounded_approach_offsets,
     _capture_lidar_epoch,
-    _coverage_reseal_suffix,
     _execute_coverage_leg_with_replans,
-    _is_resealable_startup_mismatch,
-    _is_runtime_localization_reseal_required,
     _motion_outcome_from_log,
-    _opposite_face_normal,
-    _replan_runtime_localization_source,
-    _replan_startup_source,
     _runner_command,
     _run_motion_leg,
     build_parser,
     candidate_snapshot_from_registry,
+)
+from scripts.aufgabe04.real_robot.autonomous_candidate_approach import (
+    CandidateMotionLegRequest,
+    bounded_approach_offsets,
+    opposite_face_normal,
     plan_candidate_preapproach,
 )
 from scripts.aufgabe04.stations.candidate_snapshot import (
@@ -127,6 +133,57 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             max_angular_speed_radps=0.18,
             robot_radius_m=0.105,
         )
+
+    def test_candidate_motion_adapter_preserves_exact_permit_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            request = CandidateMotionLegRequest(
+                sealed={"route_csv": str(root / "route.csv")},
+                run_id="mission_candidate_003_opposite",
+                session_root=root,
+                candidate_snapshot_path=root / "candidate_snapshot.json",
+                uncertainty_map_yaml=MAP,
+                uncertainty_sigma_multiplier=2.0,
+                localization_branch_proof_id="known_start",
+                mission_authorization_json=root / "mission_authorization.json",
+                session_id="mission",
+                semantic_map_id="arena_1p898x3p9_auto",
+                mission_leg_kind=MissionLegKind.OPPOSITE_FACE,
+                mission_leg_index=3,
+                target_id="candidate_7",
+                permit_json_path=(root / "permit.json").absolute(),
+            )
+            expected = object()
+            with patch.object(
+                autonomous_wrapper,
+                "_run_motion_leg",
+                return_value=expected,
+            ) as run:
+                actual = autonomous_wrapper._run_candidate_motion_leg(
+                    profile=self._profile(),
+                    request=request,
+                )
+
+            self.assertIs(actual, expected)
+            kwargs = run.call_args.kwargs
+            self.assertTrue(kwargs["execute"])
+            self.assertEqual(kwargs["run_id"], request.run_id)
+            self.assertEqual(
+                kwargs["candidate_snapshot"],
+                request.candidate_snapshot_path,
+            )
+            permit_context = kwargs["mission_leg_permit_context"]
+            self.assertIsInstance(permit_context, MissionLegPermitContext)
+            self.assertEqual(
+                permit_context.mission_leg_kind,
+                MissionLegKind.OPPOSITE_FACE,
+            )
+            self.assertEqual(permit_context.mission_leg_index, 3)
+            self.assertEqual(permit_context.target_id, "candidate_7")
+            self.assertEqual(
+                permit_context.permit_json_path,
+                request.permit_json_path,
+            )
 
     def test_motion_outcome_preserves_preflight_failure_reason(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -177,6 +234,34 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             with self.assertRaisesRegex(
                 RuntimeError,
                 "non-boolean motion_published",
+            ):
+                _motion_outcome_from_log(
+                    semantic_log,
+                    run_id="coverage_000",
+                    returncode=1,
+                )
+
+    def test_motion_outcome_rejects_preflight_claiming_motion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            semantic_log = Path(tmp) / "events.jsonl"
+            semantic_log.write_text(
+                json.dumps(
+                    {
+                        "event": "preflight_failed",
+                        "run_id": "coverage_000",
+                        "failures": ["route uncertainty budget exhausted"],
+                        "observations": [],
+                        "runtime_config": {},
+                        "motion_published": True,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "preflight_failed event must carry false motion_published",
             ):
                 _motion_outcome_from_log(
                     semantic_log,
@@ -259,7 +344,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             returncode=1,
             semantic_log_path=Path("events.jsonl"),
         )
-        self.assertTrue(_is_runtime_localization_reseal_required(complete))
+        self.assertTrue(is_runtime_localization_reseal_required(complete))
 
         for field in (
             "monitor_action",
@@ -270,24 +355,24 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 details.pop(field)
                 incomplete = replace(complete, stop_details=details)
                 self.assertFalse(
-                    _is_runtime_localization_reseal_required(incomplete)
+                    is_runtime_localization_reseal_required(incomplete)
                 )
         self.assertFalse(
-            _is_runtime_localization_reseal_required(
+            is_runtime_localization_reseal_required(
                 replace(complete, motion_published=False)
             )
         )
 
     def test_coverage_reseal_suffix_keeps_retry_identities_distinct(self):
         self.assertEqual(
-            _coverage_reseal_suffix(
+            coverage_reseal_suffix(
                 startup_reseal_index=0,
                 runtime_localization_reseal_index=0,
             ),
             "",
         )
         self.assertEqual(
-            _coverage_reseal_suffix(
+            coverage_reseal_suffix(
                 startup_reseal_index=2,
                 runtime_localization_reseal_index=1,
             ),
@@ -662,7 +747,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                     }
                 )
             )
-            selected = _opposite_face_normal(axis_path)
+            selected = opposite_face_normal(axis_path)
             error = math.atan2(
                 math.sin(selected + math.pi / 2.0),
                 math.cos(selected + math.pi / 2.0),
@@ -682,17 +767,25 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 "1",
                 "--exact-inspection-point-count",
                 "2",
-                "--stop-after-coverage",
-                "--execute",
+                "--run-mode",
+                "execute-coverage-checkpoint",
             ]
         )
-        self.assertEqual(args.coverage_leg_limit, 1)
+        resolved = autonomous_wrapper.resolve_autonomous_run_mode(
+            run_mode=args.run_mode,
+            execute=args.execute,
+            coverage_leg_limit=args.coverage_leg_limit,
+            stop_after_coverage=args.stop_after_coverage,
+        )
+
+        self.assertEqual(resolved.coverage_leg_limit, 1)
         self.assertEqual(args.exact_inspection_point_count, 2)
         self.assertEqual(args.max_startup_reseals_per_leg, 3)
         self.assertEqual(args.max_runtime_localization_reseals_per_leg, 1)
+        self.assertEqual(args.max_localization_readiness_retries_per_leg, 2)
         self.assertEqual(args.uncertainty_sigma_multiplier, 2.0)
-        self.assertTrue(args.stop_after_coverage)
-        self.assertTrue(args.execute)
+        self.assertFalse(resolved.stop_after_coverage)
+        self.assertTrue(resolved.execute)
 
     def test_uncertainty_sigma_multiplier_must_be_finite_and_positive(self):
         for invalid in ("0", "-1", "nan", "inf"):
@@ -730,9 +823,14 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         session_id = "one_leg_final_checkpoint"
         output_root = root / "runs"
         session_root = output_root / session_id
-        plan = SimpleNamespace(viewpoints=(SimpleNamespace(),))
+        plan = SimpleNamespace(
+            viewpoints=(SimpleNamespace(),),
+            map_bundle_sha256="a" * 64,
+        )
         registry = SimpleNamespace()
         progress = SimpleNamespace()
+        for fixture_name in ("robot.json", "camera.json", "site.json"):
+            (root / fixture_name).write_text("{}\n")
         profile = SimpleNamespace(
             robot_id="turtlebot1",
             map_frame="map",
@@ -869,7 +967,6 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                     "1",
                     "--coverage-leg-limit",
                     "1",
-                    "--stop-after-coverage",
                     "--localization-branch-proof-id",
                     "known_start_marker_20260807",
                     "--execute",
@@ -1216,9 +1313,9 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
                 "_run_motion_leg",
                 side_effect=(rejected, completed),
-            ) as run, patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
-                "_replan_startup_source",
+            ) as run, patch.object(
+                autonomous_coverage_replanning,
+                "replan_startup_source",
                 return_value={
                     "route_csv": str(replacement_route),
                     "diagnostics_json": str(replacement_diagnostics),
@@ -1240,7 +1337,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                     source_diagnostics=source_diagnostics,
                 )
 
-            self.assertTrue(_is_resealable_startup_mismatch(rejected))
+            self.assertTrue(is_resealable_startup_mismatch(rejected))
             self.assertEqual(run.call_count, 2)
             self.assertFalse(
                 run.call_args_list[0].kwargs["require_fresh_confirmation"]
@@ -1330,9 +1427,9 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
                 "_admit_preplanning_localization",
                 return_value=admitted_pose,
-            ) as admit, patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
-                "_replan_runtime_localization_source",
+            ) as admit, patch.object(
+                autonomous_coverage_replanning,
+                "replan_runtime_localization_source",
                 return_value={
                     "route_csv": str(replacement_route),
                     "diagnostics_json": str(replacement_diagnostics),
@@ -1355,7 +1452,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 )
 
             self.assertEqual(outcome.status, "completed")
-            self.assertTrue(_is_runtime_localization_reseal_required(stopped))
+            self.assertTrue(is_runtime_localization_reseal_required(stopped))
             self.assertEqual(run.call_count, 2)
             self.assertTrue(
                 run.call_args_list[1].kwargs["require_fresh_confirmation"]
@@ -1474,9 +1571,9 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
                 "_admit_preplanning_localization",
                 side_effect=RuntimeError("stationary AMCL did not converge"),
-            ), patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
-                "_replan_runtime_localization_source",
+            ), patch.object(
+                autonomous_coverage_replanning,
+                "replan_runtime_localization_source",
             ) as replan:
                 with self.assertRaisesRegex(
                     RuntimeError,
@@ -1668,17 +1765,17 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
                 "_admit_preplanning_localization",
                 return_value=admitted_pose,
-            ) as admit, patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
-                "_advance_transient_overlay_resume_state",
+            ) as admit, patch.object(
+                autonomous_coverage_replanning,
+                "advance_transient_overlay_resume_state",
                 return_value=resume_state,
-            ) as advance, patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
-                "load_coverage_survey_plan",
+            ) as advance, patch.object(
+                autonomous_coverage_replanning,
+                "load_coverage_plan",
                 return_value=SimpleNamespace(),
-            ), patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
-                "_replan_source_preserving_transient_overlay",
+            ), patch.object(
+                autonomous_coverage_replanning,
+                "replan_source_preserving_transient_overlay",
                 return_value=(
                     replanned,
                     resume_state,
@@ -1886,7 +1983,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                     coverage_plan=root / "coverage_plan.json",
                 )
 
-            self.assertTrue(_is_resealable_startup_mismatch(outcome))
+            self.assertTrue(is_resealable_startup_mismatch(outcome))
             self.assertEqual(run.call_count, 1)
 
     def test_resealed_route_refusal_never_launches_execution(self):
@@ -2287,7 +2384,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 returncode=1,
                 semantic_log_path=root / "events.jsonl",
             )
-            outputs = _replan_startup_source(
+            outputs = replan_startup_source(
                 map_yaml=MAP,
                 semantic_map_id="arena_1p898x3p9_auto",
                 survey_root=survey_root,
@@ -2341,7 +2438,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 returncode=1,
                 semantic_log_path=root / "events.jsonl",
             )
-            outputs = _replan_runtime_localization_source(
+            outputs = replan_runtime_localization_source(
                 map_yaml=MAP,
                 semantic_map_id="arena_1p898x3p9_auto",
                 survey_root=survey_root,
@@ -2373,7 +2470,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             self.assertFalse(summary_payload["motion_published"])
 
     def test_opposite_inspection_offsets_never_cross_physical_minimum(self):
-        offsets = _bounded_approach_offsets(0.70, 0.32)
+        offsets = bounded_approach_offsets(0.70, 0.32)
         self.assertEqual(offsets[0], 0.70)
         self.assertEqual(offsets[-1], 0.32)
         self.assertTrue(all(value >= 0.32 for value in offsets))

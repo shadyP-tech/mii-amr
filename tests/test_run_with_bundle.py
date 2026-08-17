@@ -3,6 +3,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -39,6 +40,11 @@ class RunWithBundleTest(unittest.TestCase):
             fake_bin / "ros2",
             f"""\
             #!/usr/bin/env bash
+            if [[ "${{ROS2_FAKE_DELAY_SEC:-}}" != "" && "$1 $2" == "topic echo" ]]; then
+              echo "start $*" >>"${{ROS2_FAKE_EVENT_LOG}}"
+              sleep "${{ROS2_FAKE_DELAY_SEC}}"
+              echo "end $*" >>"${{ROS2_FAKE_EVENT_LOG}}"
+            fi
             echo "ros2 $*"
             if [[ "${{ROS2_FAKE_LOG:-}}" != "" ]]; then
               echo "$*" >>"${{ROS2_FAKE_LOG}}"
@@ -48,11 +54,21 @@ class RunWithBundleTest(unittest.TestCase):
         )
         return str(fake_bin) + os.pathsep + os.environ.get("PATH", "")
 
-    def run_bundle(self, args, *, tmpdir: Path, ros2_exit: int = 0):
+    def run_bundle(
+        self,
+        args,
+        *,
+        tmpdir: Path,
+        ros2_exit: int = 0,
+        ros2_delay_sec: float | None = None,
+    ):
         env = os.environ.copy()
         env["PATH"] = self.make_fake_path(tmpdir, ros2_exit=ros2_exit)
         env["RUN_BUNDLE_ROOT"] = str(tmpdir / "bundles")
         env["ROS2_FAKE_LOG"] = str(tmpdir / "ros2_calls.txt")
+        if ros2_delay_sec is not None:
+            env["ROS2_FAKE_DELAY_SEC"] = str(ros2_delay_sec)
+            env["ROS2_FAKE_EVENT_LOG"] = str(tmpdir / "ros2_events.txt")
         return subprocess.run(
             ["bash", str(SCRIPT), *args],
             cwd=ROOT,
@@ -91,6 +107,19 @@ class RunWithBundleTest(unittest.TestCase):
             self.assertIn("resolved_cmd_vel_topic=/robot1/cmd_vel", manifest)
             self.assertIn("resolved_odom_topic=/odom", manifest)
             self.assertIn("command_exit_code=0", manifest)
+            for artifact_name in (
+                "ros_topics.txt",
+                "ros_nodes.txt",
+                "ros_actions.txt",
+                "cmd_vel_info.txt",
+                "scan_once.txt",
+                "odom_once.txt",
+                "amcl_pose_once.txt",
+                "navigate_to_pose_status_once.txt",
+                "namespaced_navigate_to_pose_status_once.txt",
+                "tf_frames.txt",
+            ):
+                self.assertTrue((bundle / artifact_name).exists(), artifact_name)
             ros2_calls = (tmpdir / "ros2_calls.txt").read_text()
             self.assertIn("topic info /robot1/cmd_vel --verbose", ros2_calls)
             self.assertIn("topic echo --once /robot1/scan", ros2_calls)
@@ -159,6 +188,45 @@ class RunWithBundleTest(unittest.TestCase):
             bundle = tmpdir / "bundles" / "run_no_ros"
             self.assertIn("still runs", (bundle / "terminal_run.log").read_text())
             self.assertIn("command failed with exit code 42", (bundle / "ros_topics.txt").read_text())
+
+    def test_pre_run_topic_echo_captures_overlap_and_finish_before_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            started = time.monotonic()
+            result = self.run_bundle(
+                [
+                    "--namespace",
+                    "robot1",
+                    "run_parallel",
+                    "--",
+                    sys.executable,
+                    "-c",
+                    (
+                        "import os; from pathlib import Path; "
+                        "events=Path(os.environ['ROS2_FAKE_EVENT_LOG']).read_text(); "
+                        "assert events.count('end topic echo') == 5, events; "
+                        "print('all pre-run captures complete')"
+                    ),
+                ],
+                tmpdir=tmpdir,
+                ros2_delay_sec=1.0,
+            )
+            elapsed = time.monotonic() - started
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            events = (tmpdir / "ros2_events.txt").read_text().splitlines()
+            first_end = next(index for index, event in enumerate(events) if event.startswith("end "))
+            self.assertGreaterEqual(
+                sum(event.startswith("start ") for event in events[:first_end]),
+                2,
+                events,
+            )
+            # Five sequential one-second echoes would take at least five
+            # seconds. The wider bound leaves ample scheduling headroom while
+            # still catching a return to sequential collection.
+            self.assertLess(elapsed, 3.5, (elapsed, events))
+            terminal_log = tmpdir / "bundles" / "run_parallel" / "terminal_run.log"
+            self.assertIn("all pre-run captures complete", terminal_log.read_text())
 
 
 if __name__ == "__main__":

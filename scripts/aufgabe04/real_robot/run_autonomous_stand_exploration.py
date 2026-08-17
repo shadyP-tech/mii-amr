@@ -4,8 +4,9 @@
 The mission plans a single center rail, drives certified A* legs to stopped
 inspection poses, fuses LiDAR candidates across those poses, visits every
 stable candidate at a robot-facing pre-approach, and commits calibrated
-camera/LiDAR QR-face poses.  Physical execution requires ``--execute`` and a
-mission-level typed ``RUN``.  A route rebuilt after a pre-motion localization
+camera/LiDAR QR-face poses.  Physical execution requires an explicit
+``execute-*`` or ``resume-*`` run mode and a mission-level typed ``RUN``.  A
+route rebuilt after a pre-motion localization
 mismatch requires another typed ``RUN``.  The mission authorization may cover
 routine coverage and inspection children through exact one-use leg permits,
 and a bounded same-leg, same-target post-motion global-localization reseal
@@ -17,12 +18,11 @@ localization, and exclusive-velocity-owner gates.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, replace
+from dataclasses import replace
 import hashlib
 import json
 import math
 from pathlib import Path
-import shutil
 import signal
 import subprocess
 import sys
@@ -36,25 +36,14 @@ from scripts.aufgabe04.artifacts.content_store import (
     payload_sha256,
     write_content_hashed_json,
 )
-from scripts.aufgabe04.navigation.artifacts import (
-    write_diagnostics_json,
-    write_route_csv,
-)
-from scripts.aufgabe04.navigation.costmap import Costmap
 from scripts.aufgabe04.navigation.coverage_candidate_admission import (
     coverage_candidate_admission_evidence,
     evaluate_coverage_candidate_admission,
-)
-from scripts.aufgabe04.navigation.detected_stand_preapproach import (
-    CAMERA_AXIS_FACE_BEARING_MODE,
-    ROBOT_TO_STAND_BEARING_MODE,
-    seal_detected_stand_preapproach,
 )
 from scripts.aufgabe04.navigation.dynamic_approach_planner import (
     DynamicApproachConfig,
     minimum_static_obstacle_inflation_m,
 )
-from scripts.aufgabe04.navigation.global_planner import plan_route
 from scripts.aufgabe04.navigation.map_io import load_occupancy_grid_with_bundle
 from scripts.aufgabe04.navigation.mission_leg_motion_permit import (
     MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
@@ -77,10 +66,6 @@ from scripts.aufgabe04.navigation.read_current_amcl_pose import (
 )
 from scripts.aufgabe04.navigation.ros_preflight import run_ros_preflight
 from scripts.aufgabe04.navigation.ros_runtime_config import resolve_topic
-from scripts.aufgabe04.navigation.runtime_localization_reseal import (
-    evaluate_runtime_localization_reseal,
-    evaluate_runtime_localization_reseal_budget,
-)
 from scripts.aufgabe04.navigation.runtime_motion_authorization import (
     MISSION_MOTION_AUTHORIZATION_SCOPE,
     MISSION_RUN_CONFIRMATION,
@@ -93,13 +78,9 @@ from scripts.aufgabe04.navigation.runtime_motion_authorization import (
     write_mission_motion_authorization,
     write_runtime_localization_motion_permit,
 )
-from scripts.aufgabe04.navigation.record_stand_candidate_decision import (
-    main as record_stand_candidate_decision,
-)
 from scripts.aufgabe04.navigation.record_stand_coverage_stop import (
     record_stand_coverage_stop,
 )
-from scripts.aufgabe04.navigation.route_context import build_station_route_dry_run
 from scripts.aufgabe04.navigation.stand_coverage_survey import (
     STATUS_PENDING_CAMERA,
     CoverageSurveyPlan,
@@ -108,25 +89,9 @@ from scripts.aufgabe04.navigation.stand_coverage_survey import (
     load_coverage_survey_plan,
     load_survey_progress,
     load_stand_survey_registry,
-    plan_next_survey_leg,
 )
 from scripts.aufgabe04.navigation.stand_discovery_route import (
     seal_stand_discovery_route,
-)
-from scripts.aufgabe04.navigation.stand_blockage_replan import (
-    replan_transient_blockage_from_overlay,
-)
-from scripts.aufgabe04.navigation.transient_overlay_resume_state import (
-    TransientOverlayResumeState,
-    bind_transient_overlay_resume_state_to_diagnostics,
-    load_jsonl_event_objects,
-    refresh_transient_overlay_resume_state,
-    update_transient_overlay_resume_state_from_events,
-    write_transient_overlay_resume_state,
-)
-from scripts.aufgabe04.navigation.viewpoint_recommendation import (
-    load_recommendation,
-    normalize_angle,
 )
 from scripts.aufgabe04.perception.stand_axis.model_profile import (
     load_stand_model,
@@ -136,8 +101,60 @@ from scripts.aufgabe04.real_robot.hardware_profile import (
     load_camera_calibration,
     load_real_robot_profile,
 )
-from scripts.aufgabe04.real_robot.recommendation_builder import (
-    REAL_VIEWPOINT_SOURCE,
+from scripts.aufgabe04.real_robot.autonomous_child_runner import (
+    DEFAULT_COLLISION_MARGIN_M,
+    DEFAULT_LIDAR_STOP_DISTANCE_M,
+    DEFAULT_TRACKING_TUBE_RADIUS_M,
+    DEFAULT_UNCERTAINTY_SIGMA_MULTIPLIER,
+    MotionLegOutcome,
+    build_bundle_command as _bundle_command,
+    build_child_runner_command as _runner_command,
+    parse_motion_leg_outcome as _motion_outcome_from_log,
+    semantic_log_size as _semantic_log_size,
+)
+from scripts.aufgabe04.real_robot.autonomous_coverage_execution import (
+    CoverageLegConfig,
+    CoverageLegEffects,
+    MissionLegPermitContext,
+    RuntimeLocalizationPermitContext,
+    execute_coverage_leg_with_replans as execute_coverage_leg_state_machine,
+)
+from scripts.aufgabe04.real_robot.autonomous_coverage_replanning import (
+    is_resealable_startup_mismatch,
+)
+from scripts.aufgabe04.real_robot.autonomous_coverage_mission import (
+    CompletedCoverageLeg,
+    CoverageCheckpointComplete,
+    CoverageCheckpointIdentity,
+    CoverageComplete,
+    CoverageMissionConfig,
+    CoverageMissionEffects,
+    PublishedCoverageCheckpoint,
+    execute_coverage_mission,
+)
+from scripts.aufgabe04.real_robot.autonomous_localization_readiness import (
+    evaluate_localization_readiness_retry,
+    localization_readiness_suffix,
+)
+from scripts.aufgabe04.real_robot.autonomous_candidate_approach import (
+    CandidateApproachConfig,
+    CandidateApproachEffects,
+    CandidateMotionLegRequest,
+    CandidateObservation,
+    CandidateObservationRequest,
+    execute_candidate_approach_phase,
+)
+from scripts.aufgabe04.real_robot.autonomous_checkpoint_resume import (
+    admit_coverage_resume,
+    restore_and_replan_coverage_resume,
+)
+from scripts.aufgabe04.real_robot.autonomous_modes import (
+    AutonomousRunMode,
+    resolve_autonomous_run_mode,
+    validate_session_id_mode_label,
+)
+from scripts.aufgabe04.real_robot.autonomous_session_manifest import (
+    publish_coverage_checkpoint,
 )
 from scripts.aufgabe04.stations.candidate_snapshot import (
     CandidateGeometry,
@@ -147,78 +164,16 @@ from scripts.aufgabe04.stations.candidate_snapshot import (
     new_candidate_snapshot,
     write_candidate_snapshot,
 )
-from scripts.aufgabe04.stations.create_station_identity_registry import (
-    create_registry,
-)
-from scripts.aufgabe04.stations.models import Station, StationPose
-from scripts.aufgabe04.stations.station_identity_registry import (
-    StationIdentity,
-    station_identity_registry_sha256,
-    write_station_identity_registry,
-)
 
 
 DEFAULT_MAP = Path("maps/aufgabe03/arena_1p898x3p9_auto.yaml")
 DEFAULT_OUTPUT_ROOT = Path("results/aufgabe04/real/autonomous_exploration")
 STATIONARY_AMCL_TIMEOUT_SEC = 15.0
-DEFAULT_TRACKING_TUBE_RADIUS_M = 0.03
-DEFAULT_COLLISION_MARGIN_M = 0.02
-DEFAULT_LIDAR_STOP_DISTANCE_M = 0.20
 DEFAULT_LIDAR_CLEARANCE_MARGIN_M = 0.02
 DEFAULT_MAX_BLOCKAGE_REPLANS_PER_LEG = 3
 DEFAULT_MAX_STARTUP_RESEALS_PER_LEG = 3
 DEFAULT_MAX_RUNTIME_LOCALIZATION_RESEALS_PER_LEG = 1
-# Charge a two-sigma AMCL envelope to static-route clearance.  The child still
-# clamps continuity at its hard translation/yaw caps, and route admission
-# fails closed whenever the map does not have enough clearance for this
-# larger, explicitly persisted allowance.
-DEFAULT_UNCERTAINTY_SIGMA_MULTIPLIER = 2.0
-
-
-@dataclass(frozen=True)
-class MotionLegOutcome:
-    run_id: str
-    status: str
-    stop_reason: str
-    stop_details: dict[str, object]
-    motion_published: bool
-    returncode: int
-    semantic_log_path: Path
-    semantic_log_start_offset: int = 0
-    odom_execution_certificate_path: Path | None = None
-    motion_authorization_permit_path: Path | None = None
-    motion_authorization_permit_sha256: str = ""
-    mission_leg_motion_permit_path: Path | None = None
-    mission_leg_motion_permit_sha256: str = ""
-
-
-@dataclass(frozen=True)
-class RuntimeLocalizationPermitContext:
-    """Exact mission scope needed to authorize one recovery child run."""
-
-    mission_authorization_json: Path
-    session_id: str
-    leg_index: int
-    target_viewpoint_id: str
-    reseal_index: int
-    max_runtime_reseals_per_leg: int
-    rejected_run_id: str
-    runtime_reseal_decision_evidence: dict[str, object]
-    fresh_localization_evidence_path: Path
-    permit_json_path: Path
-
-
-@dataclass(frozen=True)
-class MissionLegPermitContext:
-    """Exact routine-leg identity authorized by the mission-level RUN."""
-
-    mission_authorization_json: Path
-    session_id: str
-    semantic_map_id: str
-    mission_leg_kind: MissionLegKind
-    mission_leg_index: int
-    target_id: str
-    permit_json_path: Path
+DEFAULT_MAX_LOCALIZATION_READINESS_RETRIES_PER_LEG = 2
 
 
 def _file_sha256(path: Path) -> str:
@@ -229,8 +184,56 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _default_session_id() -> str:
-    return "stand_explore_" + time.strftime("%Y%m%d_%H%M%S", time.gmtime())
+def _checkpoint_config_sha256(args) -> str:
+    """Bind checkpoint continuation to all behavior-relevant run settings."""
+
+    stand_model_sha256 = (
+        None
+        if args.stand_model_profile is None
+        else _file_sha256(args.stand_model_profile)
+    )
+    return payload_sha256(
+        {
+            "schema_version": 1,
+            "semantic_map_id": args.semantic_map_id,
+            "expected_stand_count": args.expected_stand_count,
+            "inspection_stop_spacing_m": args.inspection_stop_spacing_m,
+            "exact_inspection_point_count": (
+                args.exact_inspection_point_count
+            ),
+            "lidar_epoch_sec": args.lidar_epoch_sec,
+            "candidate_approach_offset_m": args.candidate_approach_offset_m,
+            "final_facing_offset_m": args.final_facing_offset_m,
+            "axis_sample_count": args.axis_sample_count,
+            "camera_timeout_sec": args.camera_timeout_sec,
+            "stand_model_profile_sha256": stand_model_sha256,
+            "max_blockage_replans_per_leg": (
+                args.max_blockage_replans_per_leg
+            ),
+            "max_startup_reseals_per_leg": args.max_startup_reseals_per_leg,
+            "max_runtime_localization_reseals_per_leg": (
+                args.max_runtime_localization_reseals_per_leg
+            ),
+            "max_localization_readiness_retries_per_leg": (
+                args.max_localization_readiness_retries_per_leg
+            ),
+            "uncertainty_sigma_multiplier": (
+                args.uncertainty_sigma_multiplier
+            ),
+            "certified_route_tube_radius_m": (
+                DEFAULT_TRACKING_TUBE_RADIUS_M
+            ),
+            "collision_margin_m": DEFAULT_COLLISION_MARGIN_M,
+            "lidar_stop_distance_m": DEFAULT_LIDAR_STOP_DISTANCE_M,
+            "lidar_clearance_margin_m": DEFAULT_LIDAR_CLEARANCE_MARGIN_M,
+        }
+    )
+
+
+def _default_session_id(run_mode: AutonomousRunMode) -> str:
+    mode_token = run_mode.value.replace("-", "_")
+    timestamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
+    return f"stand_explore_{mode_token}_{timestamp}"
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
@@ -383,543 +386,6 @@ def candidate_snapshot_from_registry(
             for candidate in pending
         ),
     )
-
-
-def _nearest_candidate(snapshot, current_pose: Pose2D, unresolved: set[str]):
-    options = [
-        candidate
-        for candidate in snapshot.candidates
-        if candidate.candidate_uid in unresolved
-    ]
-    if not options:
-        return None
-    return min(
-        options,
-        key=lambda candidate: (
-            math.hypot(
-                current_pose.x_m - candidate.geometry.x_m,
-                current_pose.y_m - candidate.geometry.y_m,
-            ),
-            candidate.candidate_uid,
-        ),
-    )
-
-
-def plan_candidate_preapproach(
-    *,
-    map_yaml: Path,
-    semantic_map_id: str,
-    plan: CoverageSurveyPlan,
-    snapshot,
-    snapshot_path: Path,
-    candidate_uid: str,
-    start: Pose2D,
-    output_dir: Path,
-    approach_offset_m: float,
-    inflation_radius_m: float,
-    candidate_transit_radius_m: float,
-    physical_clearance: dict[str, float],
-    approach_normal_rad: float | None = None,
-    axis_observation_path: Path | None = None,
-) -> dict[str, str]:
-    """Write and seal a robot-side or axis-selected stand inspection route."""
-
-    candidate = snapshot.candidate_for(candidate_uid)
-    if candidate is None:
-        raise ValueError(f"unknown candidate {candidate_uid!r}")
-    if (approach_normal_rad is None) != (axis_observation_path is None):
-        raise ValueError(
-            "axis-selected approach requires both normal and observation"
-        )
-    if approach_normal_rad is None:
-        bearing = math.atan2(
-            candidate.geometry.y_m - start.y_m,
-            candidate.geometry.x_m - start.x_m,
-        )
-        bearing_mode = ROBOT_TO_STAND_BEARING_MODE
-    else:
-        if not math.isfinite(approach_normal_rad):
-            raise ValueError("approach face normal must be finite")
-        bearing = normalize_angle(approach_normal_rad + math.pi)
-        bearing_mode = CAMERA_AXIS_FACE_BEARING_MODE
-    stations = {}
-    target_station_id = "D00"
-    for index, item in enumerate(snapshot.candidates, start=1):
-        yaw = bearing if item.candidate_uid == candidate_uid else 0.0
-        station_id = (
-            target_station_id
-            if item.candidate_uid == candidate_uid
-            else f"K{index:02d}"
-        )
-        stations[station_id] = Station(
-            station_id,
-            StationPose(item.geometry.x_m, item.geometry.y_m, yaw),
-            approach_offset_m,
-            candidate_transit_radius_m,
-        )
-    grid, map_bundle = load_occupancy_grid_with_bundle(
-        map_yaml,
-        semantic_map_id=semantic_map_id,
-        planning_frame=plan.planning_frame,
-    )
-    if map_bundle.bundle_sha256 != snapshot.map_bundle_sha256:
-        raise ValueError("candidate snapshot map differs from runtime map")
-    dry_run = build_station_route_dry_run(
-        map_yaml,
-        [target_station_id],
-        station_map=stations,
-        start=start,
-        inflation_radius_m=inflation_radius_m,
-        snap_radius_m=plan.config.snap_radius_m,
-        transit_keepout_radius_m=candidate_transit_radius_m,
-        arena_bounds=plan.arena_bounds,
-        occupancy_grid=grid,
-        map_bundle=map_bundle,
-    )
-    result = dry_run.results[0]
-    if result.route is None or result.failure is not None:
-        reason = result.failure.reason if result.failure is not None else "no route"
-        raise ValueError(f"candidate pre-approach A* failed: {reason}")
-    endpoint = result.route.points[-1].pose
-    terminal_yaw = math.atan2(
-        candidate.geometry.y_m - endpoint.y_m,
-        candidate.geometry.x_m - endpoint.x_m,
-    )
-
-    output_dir.mkdir(parents=True, exist_ok=False)
-    route_csv = output_dir / "route.csv"
-    diagnostics_json = output_dir / "route_diagnostics.json"
-    pipeline_summary = output_dir / "pipeline_summary.json"
-    local_snapshot = output_dir / "candidate_snapshot.json"
-    shutil.copyfile(snapshot_path, local_snapshot)
-    local_axis_observation = None
-    if axis_observation_path is not None:
-        local_axis_observation = output_dir / "axis_observation.json"
-        shutil.copyfile(axis_observation_path, local_axis_observation)
-    write_route_csv(route_csv, dry_run.results, final_yaw_by_leg={0: terminal_yaw})
-    metadata = dict(dry_run.metadata)
-    metadata.update(
-        {
-            "source": "lidar_detected_stand_exploration",
-            "order": "nearest",
-            "plan_mode": "next-candidate",
-            "stand_count": 1,
-            "candidate_transit_radius_m": candidate_transit_radius_m,
-            "inflation_radius_m": inflation_radius_m,
-            "approach_offset_m": approach_offset_m,
-            "approach_bearing_mode": bearing_mode,
-            "physical_clearance_enforced": True,
-            "physical_clearance": physical_clearance,
-            "candidate_snapshot_json": str(local_snapshot),
-            "candidate_snapshot_sha256": candidate_snapshot_sha256(snapshot),
-            "map_bundle_sha256": map_bundle.bundle_sha256,
-            "planning_frame": plan.planning_frame,
-            "selected_candidate_stand_id": candidate_uid,
-            "selected_approach_pose": {
-                "x_m": endpoint.x_m,
-                "y_m": endpoint.y_m,
-                "yaw_rad": terminal_yaw,
-            },
-        }
-    )
-    if local_axis_observation is not None:
-        metadata.update(
-            {
-                "axis_observation_json": str(
-                    local_axis_observation.resolve()
-                ),
-                "axis_observation_sha256": _file_sha256(
-                    local_axis_observation
-                ),
-                "selected_face_normal_rad": normalize_angle(
-                    float(approach_normal_rad)
-                ),
-            }
-        )
-    write_diagnostics_json(diagnostics_json, dry_run.results, metadata=metadata)
-    _write_json(
-        pipeline_summary,
-        {
-            "schema_version": 1,
-            "status": "observe_and_plan_complete",
-            "motion_published": False,
-            "selected_candidate_uid": candidate_uid,
-            "selected_approach_pose": metadata["selected_approach_pose"],
-            "physical_clearance": physical_clearance,
-        },
-    )
-    return seal_detected_stand_preapproach(pipeline_root=output_dir)
-
-
-def _runner_command(
-    *,
-    profile,
-    route_csv: Path,
-    diagnostics_json: Path,
-    certificate_json: Path,
-    run_id: str,
-    session_root: Path,
-    coverage_plan: Path | None = None,
-    candidate_snapshot: Path | None = None,
-    coverage_transient_replan: dict[str, object] | None = None,
-    dry_run: bool,
-    uncertainty_map_yaml: Path | None = None,
-    uncertainty_sigma_multiplier: float = (
-        DEFAULT_UNCERTAINTY_SIGMA_MULTIPLIER
-    ),
-    localization_branch_proof_id: str = "",
-    odom_execution_certificate_json: Path | None = None,
-    uncertainty_budget_json: Path | None = None,
-    mission_motion_authorization_json: Path | None = None,
-    runtime_localization_motion_permit_json: Path | None = None,
-    mission_leg_motion_authorization_json: Path | None = None,
-    mission_leg_motion_permit_json: Path | None = None,
-    mission_leg_kind: MissionLegKind | str | None = None,
-    mission_leg_index: int | None = None,
-    mission_leg_target_id: str = "",
-    mission_leg_semantic_map_id: str = "",
-    mission_leg_dry_preflight_json: Path | None = None,
-    mission_leg_dry_odom_certificate_json: Path | None = None,
-    mission_leg_dry_uncertainty_budget_json: Path | None = None,
-    mission_session_id: str = "",
-) -> list[str]:
-    run_phase = "dry" if dry_run else "execute"
-    odom_fields = (
-        uncertainty_map_yaml,
-        str(localization_branch_proof_id).strip(),
-        odom_execution_certificate_json,
-        uncertainty_budget_json,
-    )
-    odom_execution_requested = any(
-        value is not None and value != "" for value in odom_fields
-    )
-    preflight_name = (
-        f"{run_id}_{run_phase}.json"
-        if odom_execution_requested
-        else f"{run_id}.json"
-    )
-    command = [
-        sys.executable,
-        "scripts/aufgabe04/navigation/run_single_station_segment.py",
-        "--route-csv",
-        str(route_csv),
-        "--diagnostics-json",
-        str(diagnostics_json),
-        "--route-certificate-json",
-        str(certificate_json),
-        "--leg-index",
-        "0",
-        "--run-id",
-        run_id,
-        "--robot-id",
-        profile.robot_id,
-        "--namespace",
-        profile.namespace,
-        "--scan-topic",
-        profile.scan_topic,
-        "--odom-topic",
-        profile.odom_topic,
-        "--cmd-vel-topic",
-        profile.cmd_vel_topic,
-        "--amcl-topic",
-        profile.amcl_topic,
-        "--map-frame",
-        profile.map_frame,
-        "--odom-frame",
-        profile.odom_frame,
-        "--base-frame",
-        profile.base_frame,
-        "--localization-source",
-        profile.localization_source,
-        "--max-linear-mps",
-        str(profile.max_linear_speed_mps),
-        "--max-angular-radps",
-        str(profile.max_angular_speed_radps),
-        "--min-obstacle-distance-m",
-        str(DEFAULT_LIDAR_STOP_DISTANCE_M),
-        "--certified-route-tube-radius-m",
-        str(DEFAULT_TRACKING_TUBE_RADIUS_M),
-        "--results-csv",
-        str(session_root / "station_segment_runs.csv"),
-        "--semantic-log",
-        str(session_root / "run_events" / f"{run_id}.jsonl"),
-        "--preflight-json",
-        str(session_root / "preflight" / preflight_name),
-        "--operator-note",
-        "UNLOADED autonomous stand exploration",
-    ]
-    if odom_execution_requested:
-        if any(value is None or value == "" for value in odom_fields):
-            raise ValueError(
-                "uncertainty-aware odom execution arguments must be complete"
-            )
-        command.extend(
-            [
-                "--execution-pose-frame",
-                "odom",
-                "--odom-execution-certificate-json",
-                str(odom_execution_certificate_json),
-                "--uncertainty-budget-json",
-                str(uncertainty_budget_json),
-                "--uncertainty-map-yaml",
-                str(uncertainty_map_yaml),
-                "--localization-branch-proof-id",
-                str(localization_branch_proof_id).strip(),
-                "--uncertainty-robot-radius-m",
-                str(profile.robot_radius_m),
-                "--uncertainty-sigma-multiplier",
-                str(uncertainty_sigma_multiplier),
-                # Mean stability remains strict. Reported covariance is no
-                # longer forced inside half of the 30 mm tracking tube; it is
-                # charged against the route-specific clearance budget.
-                "--max-stationary-amcl-position-std-m",
-                "0.30",
-                "--max-stationary-amcl-yaw-std-rad",
-                "0.35",
-            ]
-        )
-    if coverage_plan is not None:
-        command.extend(["--coverage-plan", str(coverage_plan)])
-    if candidate_snapshot is not None:
-        command.extend(["--candidate-snapshot", str(candidate_snapshot)])
-    if coverage_transient_replan is not None:
-        command.extend(
-            [
-                "--coverage-transient-replan-survey-root",
-                str(coverage_transient_replan["survey_root"]),
-                "--coverage-transient-replan-session-root",
-                str(coverage_transient_replan["session_root"]),
-                "--coverage-transient-replan-map",
-                str(coverage_transient_replan["map_yaml"]),
-                "--coverage-transient-replan-semantic-map-id",
-                str(coverage_transient_replan["semantic_map_id"]),
-                "--coverage-transient-replan-target-viewpoint-id",
-                str(coverage_transient_replan["target_viewpoint_id"]),
-                "--coverage-transient-replan-robot-radius-m",
-                str(coverage_transient_replan["robot_radius_m"]),
-                "--coverage-transient-replan-max-count",
-                str(coverage_transient_replan["max_replans"]),
-                "--coverage-transient-replan-leg-index",
-                str(coverage_transient_replan["leg_index"]),
-                "--omnidirectional-hard-stop-distance-m",
-                str(
-                    float(coverage_transient_replan["robot_radius_m"])
-                    + DEFAULT_COLLISION_MARGIN_M
-                ),
-            ]
-        )
-        resume_state_json = coverage_transient_replan.get(
-            "resume_state_json"
-        )
-        if resume_state_json is not None:
-            command.extend(
-                [
-                    "--coverage-transient-replan-resume-state-json",
-                    str(resume_state_json),
-                ]
-            )
-    authorization_fields = (
-        mission_motion_authorization_json,
-        runtime_localization_motion_permit_json,
-    )
-    if any(value is not None for value in authorization_fields):
-        if any(value is None for value in authorization_fields):
-            raise ValueError(
-                "mission motion authorization and runtime localization "
-                "permit must be supplied together"
-            )
-        if dry_run:
-            raise ValueError(
-                "runtime localization motion permits are live-run only"
-            )
-        if not str(mission_session_id).strip():
-            raise ValueError(
-                "runtime localization motion permit requires mission_session_id"
-            )
-        if coverage_transient_replan is None:
-            raise ValueError(
-                "runtime localization motion permit requires a coverage leg"
-            )
-        command.extend(
-            [
-                "--mission-motion-authorization-json",
-                str(mission_motion_authorization_json),
-                "--runtime-localization-motion-permit-json",
-                str(runtime_localization_motion_permit_json),
-                "--mission-session-id",
-                str(mission_session_id).strip(),
-            ]
-        )
-    mission_leg_fields = (
-        mission_leg_motion_authorization_json,
-        mission_leg_motion_permit_json,
-        mission_leg_kind,
-        mission_leg_index,
-        mission_leg_target_id or None,
-        mission_leg_semantic_map_id or None,
-        mission_leg_dry_preflight_json,
-        mission_leg_dry_odom_certificate_json,
-        mission_leg_dry_uncertainty_budget_json,
-    )
-    if any(value is not None for value in mission_leg_fields):
-        if any(value is None for value in mission_leg_fields):
-            raise ValueError(
-                "mission-leg authorization arguments must be supplied together"
-            )
-        if any(value is not None for value in authorization_fields):
-            raise ValueError(
-                "routine mission-leg and runtime-localization permits are "
-                "mutually exclusive"
-            )
-        if dry_run:
-            raise ValueError("mission-leg motion permits are live-run only")
-        if not str(mission_session_id).strip():
-            raise ValueError(
-                "mission-leg motion permit requires mission_session_id"
-            )
-        kind = MissionLegKind(mission_leg_kind)
-        if kind not in ROUTINE_MISSION_LEG_KINDS:
-            raise ValueError("mission-leg permit requires a routine leg kind")
-        assert mission_leg_index is not None
-        command.extend(
-            [
-                "--mission-leg-motion-authorization-json",
-                str(mission_leg_motion_authorization_json),
-                "--mission-leg-motion-permit-json",
-                str(mission_leg_motion_permit_json),
-                "--mission-leg-kind",
-                kind.value,
-                "--mission-leg-index",
-                str(mission_leg_index),
-                "--mission-leg-target-id",
-                str(mission_leg_target_id).strip(),
-                "--mission-leg-semantic-map-id",
-                str(mission_leg_semantic_map_id).strip(),
-                "--mission-leg-dry-preflight-json",
-                str(mission_leg_dry_preflight_json),
-                "--mission-leg-dry-odom-certificate-json",
-                str(mission_leg_dry_odom_certificate_json),
-                "--mission-leg-dry-uncertainty-budget-json",
-                str(mission_leg_dry_uncertainty_budget_json),
-                "--mission-session-id",
-                str(mission_session_id).strip(),
-            ]
-        )
-    if dry_run:
-        command.append("--dry-run")
-    return command
-
-
-def _bundle_command(profile, run_id: str, runner: list[str]) -> list[str]:
-    return [
-        "scripts/common/run_with_bundle.sh",
-        "--namespace",
-        profile.namespace,
-        "--cmd-vel-topic",
-        profile.cmd_vel_topic,
-        "--scan-topic",
-        profile.scan_topic,
-        "--odom-topic",
-        profile.odom_topic,
-        "--amcl-topic",
-        profile.amcl_topic,
-        "--map-frame",
-        profile.map_frame,
-        "--odom-frame",
-        profile.odom_frame,
-        "--base-frame",
-        profile.base_frame,
-        run_id,
-        "--",
-        *runner,
-    ]
-
-
-def _motion_outcome_from_log(
-    semantic_log_path: Path,
-    *,
-    run_id: str,
-    returncode: int,
-    start_offset: int = 0,
-) -> MotionLegOutcome:
-    try:
-        events = load_jsonl_event_objects(
-            Path(semantic_log_path),
-            start_offset=start_offset,
-        )
-    except ValueError as exc:
-        raise RuntimeError(f"invalid motion semantic log for {run_id}: {exc}") from exc
-    terminal_events = [
-        event
-        for event in events
-        if event.get("run_id") == run_id
-        and event.get("event")
-        in {"motion_completed", "safety_stop", "preflight_failed"}
-    ]
-    if not terminal_events:
-        raise RuntimeError(f"motion runner produced no terminal motion event for {run_id}")
-    if len(terminal_events) != 1:
-        raise RuntimeError(
-            f"motion runner produced ambiguous terminal events for {run_id}"
-        )
-    event = terminal_events[0]
-    if event.get("event") == "preflight_failed":
-        failures = event.get("failures", [])
-        if not isinstance(failures, list) or not all(
-            isinstance(failure, str) for failure in failures
-        ):
-            raise RuntimeError(f"preflight failures are invalid for {run_id}")
-        status = "preflight_failed"
-        stop_reason = "; ".join(failures) or "ROS preflight failed"
-        details = {
-            "failures": list(failures),
-            "observations": event.get("observations", []),
-            "runtime_config": event.get("runtime_config", {}),
-            "fail_closed": True,
-        }
-        motion_published = False
-    else:
-        status = str(event.get("status", ""))
-        stop_reason = str(event.get("stop_reason", ""))
-        details = event.get("stop_details", {})
-        motion_published = event.get("motion_published")
-        if not isinstance(motion_published, bool):
-            raise RuntimeError(
-                f"motion runner returned non-boolean motion_published "
-                f"for {run_id}"
-            )
-    if status not in {"completed", "stopped", "preflight_failed"}:
-        raise RuntimeError(f"motion runner returned invalid status {status!r} for {run_id}")
-    if (status == "completed") != (returncode == 0):
-        raise RuntimeError(
-            f"motion runner exit/status mismatch for {run_id}: "
-            f"returncode={returncode} status={status}"
-        )
-    if not isinstance(details, dict):
-        raise RuntimeError(f"motion runner stop details are invalid for {run_id}")
-    return MotionLegOutcome(
-        run_id=run_id,
-        status=status,
-        stop_reason=stop_reason,
-        stop_details=dict(details),
-        motion_published=motion_published,
-        returncode=returncode,
-        semantic_log_path=Path(semantic_log_path),
-        semantic_log_start_offset=start_offset,
-    )
-
-
-def _semantic_log_size(path: Path) -> int:
-    """Return a trusted append boundary for one child invocation."""
-
-    source = Path(path)
-    if source.is_symlink():
-        raise RuntimeError(f"motion semantic log must not be a symlink: {source}")
-    if not source.exists():
-        return 0
-    if not source.is_file():
-        raise RuntimeError(f"motion semantic log is not a normal file: {source}")
-    return source.stat().st_size
 
 
 def _issue_runtime_localization_motion_permit(
@@ -1170,7 +636,14 @@ def _run_motion_leg(
             )
         except RuntimeError as exc:
             raise RuntimeError(f"dry-run failed for {run_id}: {exc}") from exc
-        if _is_resealable_startup_mismatch(outcome):
+        if is_resealable_startup_mismatch(outcome):
+            return outcome
+        if evaluate_localization_readiness_retry(
+            status=outcome.status,
+            stop_reason=outcome.stop_reason,
+            stop_details=outcome.stop_details,
+            motion_published=outcome.motion_published,
+        ).retryable:
             return outcome
         raise RuntimeError(
             f"dry-run failed for {run_id}: {outcome.stop_reason}"
@@ -1462,409 +935,6 @@ def _append_jsonl(path: Path, payload: dict[str, object]) -> None:
         handle.write(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
 
 
-def _is_resealable_startup_mismatch(outcome: MotionLegOutcome) -> bool:
-    details = outcome.stop_details
-    return (
-        outcome.status == "stopped"
-        and not outcome.motion_published
-        and outcome.stop_reason == "pose outside certified startup segment"
-        and details.get("source") == "execution_route_certificate"
-        and details.get("phase") == "before_motion_confirmation"
-        and isinstance(details.get("route_pose"), dict)
-    )
-
-
-def _is_runtime_localization_reseal_required(outcome: MotionLegOutcome) -> bool:
-    return evaluate_runtime_localization_reseal(
-        status=outcome.status,
-        motion_published=outcome.motion_published,
-        stop_details=outcome.stop_details,
-    ).eligible
-
-
-def _adopted_blockage_replans_for_run(
-    semantic_log: Path,
-    *,
-    run_id: str,
-    start_offset: int = 0,
-) -> list[dict[str, object]]:
-    """Load post-admission blockage adoptions from one child semantic log."""
-
-    path = Path(semantic_log)
-    if not path.exists():
-        raise RuntimeError(f"child semantic log is unavailable: {path}")
-    try:
-        payloads = load_jsonl_event_objects(
-            path,
-            start_offset=start_offset,
-        )
-    except ValueError as exc:
-        raise RuntimeError(
-            f"cannot validate adopted blockage-replan state in {path}: {exc}"
-        ) from exc
-    adopted = [
-        dict(payload)
-        for payload in payloads
-        if payload.get("event")
-        == "transient_navigation_blockage_replanned"
-    ]
-    for payload in adopted:
-        if payload.get("run_id") != run_id:
-            raise RuntimeError(
-                "adopted blockage-replan event belongs to another child run"
-            )
-        if payload.get("post_plan_runtime_revalidated") is not True:
-            raise RuntimeError(
-                "blockage replan lacks post-plan runtime adoption evidence"
-            )
-        if payload.get("semantic_survey_evidence") is not False:
-            raise RuntimeError(
-                "blockage replan was incorrectly marked as survey evidence"
-            )
-    return adopted
-
-
-def _advance_transient_overlay_resume_state(
-    *,
-    outcome: MotionLegOutcome,
-    previous_state: TransientOverlayResumeState | None,
-    plan_path: Path,
-    leg_index: int,
-    target_viewpoint_id: str,
-    max_replans: int,
-    require_uncertainty_admission: bool,
-    artifact_root: Path,
-    survey_root: Path,
-) -> TransientOverlayResumeState | None:
-    """Fold only post-adoption child events into cumulative overlay state."""
-
-    adopted = _adopted_blockage_replans_for_run(
-        outcome.semantic_log_path,
-        run_id=outcome.run_id,
-        start_offset=outcome.semantic_log_start_offset,
-    )
-    if not adopted:
-        return previous_state
-    plan = load_coverage_survey_plan(plan_path)
-    if require_uncertainty_admission:
-        for event in adopted:
-            if event.get("replacement_route_uncertainty_accepted") is not True:
-                raise RuntimeError(
-                    "adopted blockage replan lacks accepted uncertainty evidence"
-                )
-    # Child events normally use repository-relative paths, while a caller may
-    # place its mission output under an absolute custom --output-root.  Make
-    # the resolution base explicit, then let the state validator prove that
-    # every referenced artifact remains inside this exact mission session.
-    absolute_events = []
-    for event in adopted:
-        absolute_event = dict(event)
-        for field in (
-            "replacement_route_csv",
-            "transient_obstacle_overlay_json",
-        ):
-            value = absolute_event.get(field)
-            if isinstance(value, str) and not Path(value).is_absolute():
-                absolute_event[field] = str(ROOT / value)
-        absolute_events.append(absolute_event)
-    try:
-        return update_transient_overlay_resume_state_from_events(
-            absolute_events,
-            plan=plan,
-            coverage_leg_index=leg_index,
-            target_viewpoint_id=target_viewpoint_id,
-            max_replans=max_replans,
-            artifact_root=artifact_root,
-            expected_survey_root=survey_root,
-            expected_session_root=artifact_root,
-            previous_state=previous_state,
-            source_run_id=outcome.run_id,
-        )
-    except ValueError as exc:
-        raise RuntimeError(
-            f"adopted transient blockage resume state is invalid: {exc}"
-        ) from exc
-
-
-def _startup_reseal_pose(outcome: MotionLegOutcome) -> Pose2D:
-    if not _is_resealable_startup_mismatch(outcome):
-        raise ValueError("outcome is not a resealable startup mismatch")
-    raw = outcome.stop_details["route_pose"]
-    assert isinstance(raw, dict)
-    pose = Pose2D(
-        float(raw["x_m"]),
-        float(raw["y_m"]),
-        float(raw["yaw_rad"]),
-    )
-    if not all(
-        math.isfinite(value) for value in (pose.x_m, pose.y_m, pose.yaw_rad)
-    ):
-        raise ValueError("startup mismatch pose must be finite")
-    return pose
-
-
-def _coverage_reseal_suffix(
-    *,
-    startup_reseal_index: int,
-    runtime_localization_reseal_index: int,
-) -> str:
-    if startup_reseal_index < 0 or runtime_localization_reseal_index < 0:
-        raise ValueError("reseal indices must be non-negative")
-    parts = []
-    if startup_reseal_index:
-        parts.append(f"startup_reseal_{startup_reseal_index:03d}")
-    if runtime_localization_reseal_index:
-        parts.append(
-            "runtime_localization_reseal_"
-            f"{runtime_localization_reseal_index:03d}"
-        )
-    return "" if not parts else "_" + "_".join(parts)
-
-
-def _replan_coverage_source_from_pose(
-    *,
-    map_yaml: Path,
-    semantic_map_id: str,
-    survey_root: Path,
-    plan_path: Path,
-    expected_target_viewpoint_id: str,
-    current_pose: Pose2D,
-    rejected_outcome: MotionLegOutcome,
-    reseal_index: int,
-    output_dir: Path,
-    reseal_kind: str,
-    status: str,
-) -> dict[str, str]:
-    """Rebuild a complete motion-free A* coverage leg from a fresh map pose."""
-
-    if reseal_index <= 0:
-        raise ValueError(f"{reseal_kind} reseal index must be positive")
-    plan = load_coverage_survey_plan(plan_path)
-    progress = load_survey_progress(
-        survey_root / "coverage_progress.json",
-        plan,
-    )
-    registry = load_stand_survey_registry(
-        survey_root / "stand_registry.json",
-        plan,
-    )
-    grid, map_bundle = load_occupancy_grid_with_bundle(
-        map_yaml,
-        semantic_map_id=semantic_map_id,
-        planning_frame=plan.planning_frame,
-    )
-    if map_bundle.bundle_sha256 != plan.map_bundle_sha256:
-        raise ValueError(f"{reseal_kind} reseal map differs from coverage plan")
-    next_leg = plan_next_survey_leg(
-        grid,
-        plan=plan,
-        progress=progress,
-        registry=registry,
-        current_pose=current_pose,
-    )
-    if next_leg is None:
-        raise ValueError(f"{reseal_kind} reseal found no remaining coverage leg")
-    if next_leg.viewpoint.viewpoint_id != expected_target_viewpoint_id:
-        raise ValueError(
-            f"{reseal_kind} reseal changed the committed coverage target: "
-            f"expected={expected_target_viewpoint_id} "
-            f"selected={next_leg.viewpoint.viewpoint_id}"
-        )
-
-    output_dir.mkdir(parents=True, exist_ok=False)
-    route_path = output_dir / "route.csv"
-    diagnostics_path = output_dir / "route_diagnostics.json"
-    summary_path = output_dir / f"{reseal_kind}_reseal_summary.json"
-    write_route_csv(
-        route_path,
-        (next_leg.route_result,),
-        final_yaw_by_leg={0: next_leg.viewpoint.pose.yaw_rad},
-    )
-    write_diagnostics_json(
-        diagnostics_path,
-        (next_leg.route_result,),
-        metadata={
-            "schema_version": 1,
-            "route_kind": "stand_coverage_survey",
-            "motion_authorized": False,
-            "survey_id": plan.survey_id,
-            "plan_sha256": coverage_survey_plan_sha256(plan),
-            "map_bundle_sha256": plan.map_bundle_sha256,
-            "target_viewpoint_id": next_leg.viewpoint.viewpoint_id,
-            "target_pose": {
-                "x_m": next_leg.viewpoint.pose.x_m,
-                "y_m": next_leg.viewpoint.pose.y_m,
-                "yaw_rad": next_leg.viewpoint.pose.yaw_rad,
-            },
-            "candidate_keepout_count": sum(
-                1
-                for candidate in registry.candidates
-                if candidate.status != "rejected"
-            ),
-            "unreachable_viewpoint_ids_before_target": list(
-                next_leg.unreachable_viewpoint_ids
-            ),
-            "inflation_radius_m": plan.config.inflation_radius_m,
-            "exact_start_connector": (
-                next_leg.exact_start_connector.to_metadata()
-            ),
-            "arena_boundary_overlay": True,
-            "arena_bounds": plan.arena_bounds.to_metadata(),
-            "reseal_kind": reseal_kind,
-            f"{reseal_kind}_reseal": True,
-            f"{reseal_kind}_reseal_index": reseal_index,
-            "rejected_run_id": rejected_outcome.run_id,
-            "rejected_stop_details": rejected_outcome.stop_details,
-        },
-    )
-    summary = {
-        "schema_version": 1,
-        "status": status,
-        "motion_published": False,
-        "reseal_kind": reseal_kind,
-        f"{reseal_kind}_reseal_index": reseal_index,
-        "rejected_run_id": rejected_outcome.run_id,
-        "target_viewpoint_id": next_leg.viewpoint.viewpoint_id,
-        "fresh_start_pose": {
-            "x_m": current_pose.x_m,
-            "y_m": current_pose.y_m,
-            "yaw_rad": current_pose.yaw_rad,
-        },
-        "route_csv": str(route_path),
-        "diagnostics_json": str(diagnostics_path),
-    }
-    _write_json(summary_path, summary)
-    return {
-        "route_csv": str(route_path),
-        "diagnostics_json": str(diagnostics_path),
-        "summary_json": str(summary_path),
-    }
-
-
-def _replan_startup_source(
-    *,
-    map_yaml: Path,
-    semantic_map_id: str,
-    survey_root: Path,
-    plan_path: Path,
-    expected_target_viewpoint_id: str,
-    current_pose: Pose2D,
-    rejected_outcome: MotionLegOutcome,
-    reseal_index: int,
-    output_dir: Path,
-) -> dict[str, str]:
-    """Rebuild a complete motion-free A* leg from a rejected live pose."""
-
-    return _replan_coverage_source_from_pose(
-        map_yaml=map_yaml,
-        semantic_map_id=semantic_map_id,
-        survey_root=survey_root,
-        plan_path=plan_path,
-        expected_target_viewpoint_id=expected_target_viewpoint_id,
-        current_pose=current_pose,
-        rejected_outcome=rejected_outcome,
-        reseal_index=reseal_index,
-        output_dir=output_dir,
-        reseal_kind="startup",
-        status="startup_route_replanned",
-    )
-
-
-def _replan_runtime_localization_source(
-    *,
-    map_yaml: Path,
-    semantic_map_id: str,
-    survey_root: Path,
-    plan_path: Path,
-    expected_target_viewpoint_id: str,
-    current_pose: Pose2D,
-    rejected_outcome: MotionLegOutcome,
-    reseal_index: int,
-    output_dir: Path,
-) -> dict[str, str]:
-    """Rebuild a complete A* leg after post-motion localization reseal."""
-
-    return _replan_coverage_source_from_pose(
-        map_yaml=map_yaml,
-        semantic_map_id=semantic_map_id,
-        survey_root=survey_root,
-        plan_path=plan_path,
-        expected_target_viewpoint_id=expected_target_viewpoint_id,
-        current_pose=current_pose,
-        rejected_outcome=rejected_outcome,
-        reseal_index=reseal_index,
-        output_dir=output_dir,
-        reseal_kind="runtime_localization",
-        status="runtime_localization_route_replanned",
-    )
-
-
-def _replan_source_preserving_transient_overlay(
-    *,
-    state: TransientOverlayResumeState,
-    plan: CoverageSurveyPlan,
-    map_yaml: Path,
-    semantic_map_id: str,
-    survey_root: Path,
-    target_viewpoint_id: str,
-    current_pose: Pose2D,
-    rejected_outcome: MotionLegOutcome,
-    output_dir: Path,
-    robot_radius_m: float,
-    recovery_kind: str,
-    artifact_root: Path,
-) -> tuple[
-    dict[str, str],
-    TransientOverlayResumeState,
-    Path,
-    str,
-]:
-    """Replan from a fresh pose and bind the inherited overlay to diagnostics."""
-
-    replanned = replan_transient_blockage_from_overlay(
-        survey_root=survey_root,
-        map_yaml=map_yaml,
-        semantic_map_id=semantic_map_id,
-        target_viewpoint_id=target_viewpoint_id,
-        current_pose=current_pose,
-        overlay_path=Path(state.transient_obstacle_overlay_path),
-        output_dir=output_dir,
-        robot_radius_m=robot_radius_m,
-        rejected_run_id=rejected_outcome.run_id,
-        rejected_stop_details=rejected_outcome.stop_details,
-        recovery_kind=recovery_kind,
-        tracking_tube_radius_m=DEFAULT_TRACKING_TUBE_RADIUS_M,
-    )
-    refreshed_state = refresh_transient_overlay_resume_state(
-        state,
-        overlay_path=Path(replanned["transient_obstacle_overlay_json"]),
-        plan=plan,
-        artifact_root=artifact_root,
-    )
-    state_path = output_dir / "transient_overlay_resume_state.json"
-    state_sha256 = write_transient_overlay_resume_state(
-        state_path,
-        refreshed_state,
-        plan=plan,
-    )
-    bound_diagnostics = output_dir / "route_diagnostics_resume_bound.json"
-    bind_transient_overlay_resume_state_to_diagnostics(
-        Path(replanned["diagnostics_json"]),
-        bound_diagnostics,
-        resume_state_path=state_path,
-        plan=plan,
-    )
-    return (
-        {
-            **replanned,
-            "diagnostics_json": str(bound_diagnostics),
-        },
-        refreshed_state,
-        state_path,
-        state_sha256,
-    )
-
-
 def _execute_coverage_leg_with_replans(
     *,
     profile,
@@ -1879,624 +949,77 @@ def _execute_coverage_leg_with_replans(
     mission_motion_authorization_json: Path | None = None,
     mission_leg_motion_authorization_json: Path | None = None,
 ) -> MotionLegOutcome:
-    """Run one coverage leg with in-process transient-overlay A* recovery."""
+    """Adapt parent runtime/effects to the extracted coverage state machine."""
 
-    localization_branch_proof_id = str(
-        getattr(args, "localization_branch_proof_id", "")
-    ).strip()
-    coverage_plan: CoverageSurveyPlan | None = None
-    startup_reseal_index = 0
-    runtime_localization_reseal_index = 0
-    transient_overlay_resume_state: TransientOverlayResumeState | None = None
-    transient_overlay_resume_state_path: Path | None = None
-    transient_overlay_resume_state_digest = ""
-    fresh_confirmation_reason: str | None = None
-    fresh_localization_evidence_path: Path | None = None
-    pending_runtime_route_seal: dict[str, object] | None = None
-    pending_runtime_permit_context: (
-        RuntimeLocalizationPermitContext | None
-    ) = None
-    adaptive_log = session_root / "adaptive_replans.jsonl"
-    while True:
-        suffix = _coverage_reseal_suffix(
-            startup_reseal_index=startup_reseal_index,
-            runtime_localization_reseal_index=(
-                runtime_localization_reseal_index
-            ),
-        )
-        run_id = f"{args.session_id}_coverage_{leg_index:03d}{suffix}"
-        execution_root = (
-            session_root
-            / "execution"
-            / f"coverage_leg_{leg_index:03d}{suffix}"
-        )
-        try:
-            sealed = seal_stand_discovery_route(
-                source_route_csv=source_route,
-                source_diagnostics_json=source_diagnostics,
-                coverage_plan_path=plan_path,
-                output_dir=execution_root,
+    runtime = (
+        profile.resolved_runtime()
+        if callable(getattr(profile, "resolved_runtime", None))
+        else profile
+    )
+    config = CoverageLegConfig(
+        session_id=args.session_id,
+        map_yaml=args.map,
+        semantic_map_id=args.semantic_map_id,
+        runtime=runtime,
+        robot_radius_m=profile.robot_radius_m,
+        max_blockage_replans_per_leg=args.max_blockage_replans_per_leg,
+        max_startup_reseals_per_leg=int(
+            getattr(
+                args,
+                "max_startup_reseals_per_leg",
+                DEFAULT_MAX_STARTUP_RESEALS_PER_LEG,
             )
-        except Exception as exc:
-            if pending_runtime_route_seal is not None:
-                _append_jsonl(
-                    adaptive_log,
-                    {
-                        **pending_runtime_route_seal,
-                        "schema_version": 1,
-                        "event": "runtime_localization_reseal_failed",
-                        "timestamp": time.time(),
-                        "phase": "route_seal",
-                        "failure": str(exc),
-                        "motion_continues_authorized": False,
-                    },
-                )
-            raise
-        if pending_runtime_route_seal is not None:
-            covered_by_initial_run = mission_motion_authorization_json is not None
-            _append_jsonl(
-                adaptive_log,
-                {
-                    **pending_runtime_route_seal,
-                    "schema_version": 1,
-                    "event": "runtime_localization_route_sealed",
-                    "timestamp": time.time(),
-                    "replacement_run_id": run_id,
-                    "replacement_route_csv": sealed["route_csv"],
-                    "replacement_diagnostics_json": sealed[
-                        "diagnostics_json"
-                    ],
-                    "replacement_route_certificate_json": sealed[
-                        "route_certificate_json"
-                    ],
-                    "expected_dry_odom_execution_certificate_json": str(
-                        session_root
-                        / "odom_execution"
-                        / f"{run_id}_dry_certificate.json"
-                    ),
-                    "expected_dry_uncertainty_budget_json": str(
-                        session_root
-                        / "odom_execution"
-                        / f"{run_id}_dry_uncertainty_budget.json"
-                    ),
-                    "fresh_typed_run_required": not covered_by_initial_run,
-                    "covered_by_initial_mission_run": covered_by_initial_run,
-                    "expected_runtime_localization_motion_permit_json": (
-                        ""
-                        if pending_runtime_permit_context is None
-                        else str(pending_runtime_permit_context.permit_json_path)
-                    ),
-                    "transient_overlay_resume_state_json": (
-                        ""
-                        if transient_overlay_resume_state_path is None
-                        else str(transient_overlay_resume_state_path)
-                    ),
-                    "transient_overlay_resume_state_sha256": (
-                        transient_overlay_resume_state_digest
-                    ),
-                    "dynamic_overlay_preserved": (
-                        transient_overlay_resume_state is not None
-                    ),
-                    "adopted_blockage_replan_count": (
-                        0
-                        if transient_overlay_resume_state is None
-                        else transient_overlay_resume_state.completed_replan_count
-                    ),
-                    "remaining_blockage_replan_count": (
-                        args.max_blockage_replans_per_leg
-                        if transient_overlay_resume_state is None
-                        else transient_overlay_resume_state.remaining_replans
-                    ),
-                    "motion_continues_authorized": False,
-                },
+        ),
+        max_runtime_localization_reseals_per_leg=int(
+            getattr(
+                args,
+                "max_runtime_localization_reseals_per_leg",
+                DEFAULT_MAX_RUNTIME_LOCALIZATION_RESEALS_PER_LEG,
             )
-            pending_runtime_route_seal = None
-        outcome = _run_motion_leg(
-            profile=profile,
-            sealed=sealed,
-            run_id=run_id,
-            session_root=session_root,
-            execute=True,
-            coverage_plan=plan_path,
-            coverage_transient_replan={
-                "survey_root": survey_root,
-                "session_root": session_root,
-                "map_yaml": args.map,
-                "semantic_map_id": args.semantic_map_id,
-                "target_viewpoint_id": target_viewpoint_id,
-                "robot_radius_m": profile.robot_radius_m,
-                "max_replans": args.max_blockage_replans_per_leg,
-                "leg_index": leg_index,
-                "resume_state_json": transient_overlay_resume_state_path,
-            },
-            require_fresh_confirmation=fresh_confirmation_reason is not None,
-            fresh_confirmation_reason=(
-                fresh_confirmation_reason or "startup"
-            ),
-            fresh_localization_evidence_path=fresh_localization_evidence_path,
-            # Production execution always carries this proof (validated by
-            # _validate_inputs). Keeping the empty-proof case map-native
-            # preserves compatibility for no-motion/unit callers.
-            uncertainty_map_yaml=(
-                args.map if localization_branch_proof_id else None
-            ),
-            uncertainty_sigma_multiplier=(
-                getattr(
-                    args,
-                    "uncertainty_sigma_multiplier",
-                    DEFAULT_UNCERTAINTY_SIGMA_MULTIPLIER,
-                )
-            ),
-            localization_branch_proof_id=localization_branch_proof_id,
-            runtime_localization_permit_context=(
-                pending_runtime_permit_context
-            ),
-            mission_leg_permit_context=(
-                None
-                if (
-                    mission_leg_motion_authorization_json is None
-                    or fresh_confirmation_reason is not None
-                    or pending_runtime_permit_context is not None
-                )
-                else MissionLegPermitContext(
-                    mission_authorization_json=Path(
-                        mission_leg_motion_authorization_json
-                    ).absolute(),
-                    session_id=args.session_id,
-                    semantic_map_id=args.semantic_map_id,
-                    mission_leg_kind=MissionLegKind.COVERAGE,
-                    mission_leg_index=leg_index,
-                    target_id=target_viewpoint_id,
-                    permit_json_path=(
-                        session_root
-                        / "motion_authorization"
-                        / "mission_legs"
-                        / f"{run_id}_permit.json"
-                    ).absolute(),
-                )
-            ),
-        )
-        if outcome.motion_authorization_permit_path is not None:
-            _append_jsonl(
-                adaptive_log,
-                {
-                    "schema_version": 1,
-                    "event": "runtime_localization_motion_permit_issued",
-                    "timestamp": time.time(),
-                    "leg_index": leg_index,
-                    "run_id": outcome.run_id,
-                    "runtime_localization_motion_permit_json": str(
-                        outcome.motion_authorization_permit_path
-                    ),
-                    "runtime_localization_motion_permit_sha256": (
-                        outcome.motion_authorization_permit_sha256
-                    ),
-                    "covered_by_initial_mission_run": True,
-                    "additional_typed_run_required": False,
-                },
+        ),
+        max_localization_readiness_retries_per_leg=int(
+            getattr(
+                args,
+                "max_localization_readiness_retries_per_leg",
+                DEFAULT_MAX_LOCALIZATION_READINESS_RETRIES_PER_LEG,
             )
-        pending_runtime_permit_context = None
-        if outcome.status == "completed":
-            return outcome
-        if _is_resealable_startup_mismatch(outcome):
-            if startup_reseal_index >= args.max_startup_reseals_per_leg:
-                raise RuntimeError(
-                    "startup reseal budget exhausted for coverage leg "
-                    f"{leg_index}: {outcome.stop_reason}"
-                )
-            startup_reseal_index += 1
-            rejected_pose = _startup_reseal_pose(outcome)
-            reseal_root = (
-                survey_root
-                / "startup_reseals"
-                / (
-                    f"leg_{leg_index:03d}"
-                    f"_startup_reseal_{startup_reseal_index:03d}"
-                )
+        ),
+        localization_branch_proof_id=str(
+            getattr(args, "localization_branch_proof_id", "")
+        ).strip(),
+        uncertainty_sigma_multiplier=float(
+            getattr(
+                args,
+                "uncertainty_sigma_multiplier",
+                DEFAULT_UNCERTAINTY_SIGMA_MULTIPLIER,
             )
-            if transient_overlay_resume_state is None:
-                replanned = _replan_startup_source(
-                    map_yaml=args.map,
-                    semantic_map_id=args.semantic_map_id,
-                    survey_root=survey_root,
-                    plan_path=plan_path,
-                    expected_target_viewpoint_id=target_viewpoint_id,
-                    current_pose=rejected_pose,
-                    rejected_outcome=outcome,
-                    reseal_index=startup_reseal_index,
-                    output_dir=reseal_root,
-                )
-                transient_overlay_resume_state_path = None
-                transient_overlay_resume_state_digest = ""
-            else:
-                if coverage_plan is None:
-                    coverage_plan = load_coverage_survey_plan(plan_path)
-                (
-                    replanned,
-                    transient_overlay_resume_state,
-                    transient_overlay_resume_state_path,
-                    transient_overlay_resume_state_digest,
-                ) = _replan_source_preserving_transient_overlay(
-                    state=transient_overlay_resume_state,
-                    plan=coverage_plan,
-                    map_yaml=args.map,
-                    semantic_map_id=args.semantic_map_id,
-                    survey_root=survey_root,
-                    target_viewpoint_id=target_viewpoint_id,
-                    current_pose=rejected_pose,
-                    rejected_outcome=outcome,
-                    output_dir=reseal_root,
-                    robot_radius_m=profile.robot_radius_m,
-                    recovery_kind="startup",
-                    artifact_root=session_root,
-                )
-            _append_jsonl(
-                adaptive_log,
-                {
-                    "schema_version": 1,
-                    "event": "startup_pose_route_resealed",
-                    "timestamp": time.time(),
-                    "leg_index": leg_index,
-                    "startup_reseal_index": startup_reseal_index,
-                    "rejected_run_id": outcome.run_id,
-                    "rejected_stop_details": outcome.stop_details,
-                    "replacement_route_csv": replanned["route_csv"],
-                    "replacement_diagnostics_json": replanned[
-                        "diagnostics_json"
-                    ],
-                    "replacement_summary_json": replanned["summary_json"],
-                    "dynamic_overlay_preserved": (
-                        transient_overlay_resume_state is not None
-                    ),
-                    "adopted_blockage_replan_count": (
-                        0
-                        if transient_overlay_resume_state is None
-                        else transient_overlay_resume_state.completed_replan_count
-                    ),
-                    "remaining_blockage_replan_count": (
-                        args.max_blockage_replans_per_leg
-                        if transient_overlay_resume_state is None
-                        else transient_overlay_resume_state.remaining_replans
-                    ),
-                    "transient_overlay_resume_state_json": (
-                        ""
-                        if transient_overlay_resume_state_path is None
-                        else str(transient_overlay_resume_state_path)
-                    ),
-                    "transient_overlay_resume_state_sha256": (
-                        transient_overlay_resume_state_digest
-                    ),
-                    "fresh_confirmation_required": True,
-                },
-            )
-            source_route = Path(replanned["route_csv"])
-            source_diagnostics = Path(replanned["diagnostics_json"])
-            fresh_confirmation_reason = "startup"
-            fresh_localization_evidence_path = None
-            continue
-        runtime_localization_decision = evaluate_runtime_localization_reseal(
-            status=outcome.status,
-            motion_published=outcome.motion_published,
-            stop_details=outcome.stop_details,
-        )
-        if runtime_localization_decision.eligible:
-            budget = evaluate_runtime_localization_reseal_budget(
-                completed_reseal_count=runtime_localization_reseal_index,
-                maximum_reseal_count=(
-                    args.max_runtime_localization_reseals_per_leg
-                ),
-            )
-            if not budget.allowed:
-                _append_jsonl(
-                    adaptive_log,
-                    {
-                        "schema_version": 1,
-                        "event": "runtime_localization_reseal_rejected",
-                        "timestamp": time.time(),
-                        "leg_index": leg_index,
-                        "rejected_run_id": outcome.run_id,
-                        "reason": budget.reason,
-                        "runtime_localization_reseal_decision": (
-                            runtime_localization_decision.to_evidence()
-                        ),
-                        "runtime_localization_reseal_budget": (
-                            budget.to_evidence()
-                        ),
-                        "motion_continues_authorized": False,
-                        "fail_closed": True,
-                    },
-                )
-                raise RuntimeError(
-                    "runtime localization reseal budget exhausted for "
-                    f"coverage leg {leg_index}: {outcome.stop_reason}"
-                )
-            try:
-                transient_overlay_resume_state = (
-                    _advance_transient_overlay_resume_state(
-                        outcome=outcome,
-                        previous_state=transient_overlay_resume_state,
-                        plan_path=plan_path,
-                        leg_index=leg_index,
-                        target_viewpoint_id=target_viewpoint_id,
-                        max_replans=args.max_blockage_replans_per_leg,
-                        require_uncertainty_admission=bool(
-                            localization_branch_proof_id
-                        ),
-                        artifact_root=session_root,
-                        survey_root=survey_root,
-                    )
-                )
-                if (
-                    transient_overlay_resume_state is not None
-                    and coverage_plan is None
-                ):
-                    coverage_plan = load_coverage_survey_plan(plan_path)
-            except Exception as exc:
-                _append_jsonl(
-                    adaptive_log,
-                    {
-                        "schema_version": 1,
-                        "event": "runtime_localization_reseal_rejected",
-                        "timestamp": time.time(),
-                        "leg_index": leg_index,
-                        "rejected_run_id": outcome.run_id,
-                        "reason": (
-                            "adopted_transient_blockage_resume_state_invalid"
-                        ),
-                        "failure": str(exc),
-                        "runtime_localization_reseal_decision": (
-                            runtime_localization_decision.to_evidence()
-                        ),
-                        "motion_continues_authorized": False,
-                        "fail_closed": True,
-                    },
-                )
-                raise RuntimeError(
-                    "cannot resume runtime localization with adopted transient "
-                    f"blockage state: {exc}"
-                ) from exc
-            assert budget.next_reseal_index is not None
-            runtime_localization_reseal_index = budget.next_reseal_index
-            runtime = (
-                profile.resolved_runtime()
-                if callable(getattr(profile, "resolved_runtime", None))
-                else profile
-            )
-            fresh_localization_evidence_path = (
-                session_root
-                / "preflight"
-                / "runtime_localization_reseals"
-                / (
-                    f"coverage_leg_{leg_index:03d}"
-                    f"_runtime_localization_reseal_"
-                    f"{runtime_localization_reseal_index:03d}.json"
-                )
-            )
-            recovery_event_base = {
-                "leg_index": leg_index,
-                "runtime_localization_reseal_index": (
-                    runtime_localization_reseal_index
-                ),
-                "rejected_run_id": outcome.run_id,
-                "rejected_stop_details": outcome.stop_details,
-                "fresh_localization_evidence_json": str(
-                    fresh_localization_evidence_path
-                ),
-                "runtime_localization_reseal_decision": (
-                    runtime_localization_decision.to_evidence()
-                ),
-                "runtime_localization_reseal_budget": budget.to_evidence(),
-                "fresh_confirmation_required": (
-                    mission_motion_authorization_json is None
-                ),
-                "covered_by_initial_mission_run": (
-                    mission_motion_authorization_json is not None
-                ),
-                "additional_typed_run_required": (
-                    mission_motion_authorization_json is None
-                ),
-                "dynamic_overlay_preserved": (
-                    transient_overlay_resume_state is not None
-                ),
-                "adopted_blockage_replan_count": (
-                    0
-                    if transient_overlay_resume_state is None
-                    else transient_overlay_resume_state.completed_replan_count
-                ),
-                "remaining_blockage_replan_count": (
-                    args.max_blockage_replans_per_leg
-                    if transient_overlay_resume_state is None
-                    else transient_overlay_resume_state.remaining_replans
-                ),
-                "motion_continues_authorized": False,
-            }
-            _append_jsonl(
-                adaptive_log,
-                {
-                    **recovery_event_base,
-                    "schema_version": 1,
-                    "event": "runtime_localization_reseal_started",
-                    "timestamp": time.time(),
-                    "source_stop_requires_zero_cycle": True,
-                },
-            )
-            try:
-                admitted_pose = _admit_preplanning_localization(
-                    runtime,
-                    session_root,
-                    evidence_path=fresh_localization_evidence_path,
-                )
-            except Exception as exc:
-                _append_jsonl(
-                    adaptive_log,
-                    {
-                        **recovery_event_base,
-                        "schema_version": 1,
-                        "event": "runtime_localization_reseal_failed",
-                        "timestamp": time.time(),
-                        "phase": "stationary_localization_admission",
-                        "failure": str(exc),
-                    },
-                )
-                raise
-            fresh_start_pose = {
-                "x_m": admitted_pose.x_m,
-                "y_m": admitted_pose.y_m,
-                "yaw_rad": admitted_pose.yaw_rad,
-            }
-            _append_jsonl(
-                adaptive_log,
-                {
-                    **recovery_event_base,
-                    "schema_version": 1,
-                    "event": "runtime_localization_admitted",
-                    "timestamp": time.time(),
-                    "fresh_start_pose": fresh_start_pose,
-                },
-            )
-            reseal_root = (
-                survey_root
-                / "runtime_localization_reseals"
-                / (
-                    f"leg_{leg_index:03d}"
-                    f"_runtime_localization_reseal_"
-                    f"{runtime_localization_reseal_index:03d}"
-                )
-            )
-            try:
-                if transient_overlay_resume_state is None:
-                    replanned = _replan_runtime_localization_source(
-                        map_yaml=args.map,
-                        semantic_map_id=args.semantic_map_id,
-                        survey_root=survey_root,
-                        plan_path=plan_path,
-                        expected_target_viewpoint_id=target_viewpoint_id,
-                        current_pose=admitted_pose,
-                        rejected_outcome=outcome,
-                        reseal_index=runtime_localization_reseal_index,
-                        output_dir=reseal_root,
-                    )
-                    transient_overlay_resume_state_path = None
-                    transient_overlay_resume_state_digest = ""
-                else:
-                    if coverage_plan is None:
-                        coverage_plan = load_coverage_survey_plan(plan_path)
-                    (
-                        replanned,
-                        transient_overlay_resume_state,
-                        transient_overlay_resume_state_path,
-                        transient_overlay_resume_state_digest,
-                    ) = _replan_source_preserving_transient_overlay(
-                        state=transient_overlay_resume_state,
-                        plan=coverage_plan,
-                        map_yaml=args.map,
-                        semantic_map_id=args.semantic_map_id,
-                        survey_root=survey_root,
-                        target_viewpoint_id=target_viewpoint_id,
-                        current_pose=admitted_pose,
-                        rejected_outcome=outcome,
-                        output_dir=reseal_root,
-                        robot_radius_m=profile.robot_radius_m,
-                        recovery_kind="runtime_localization",
-                        artifact_root=session_root,
-                    )
-            except Exception as exc:
-                _append_jsonl(
-                    adaptive_log,
-                    {
-                        **recovery_event_base,
-                        "schema_version": 1,
-                        "event": "runtime_localization_reseal_failed",
-                        "timestamp": time.time(),
-                        "phase": "same_target_route_replan",
-                        "failure": str(exc),
-                    },
-                )
-                raise
-            _append_jsonl(
-                adaptive_log,
-                {
-                    **recovery_event_base,
-                    "schema_version": 1,
-                    "event": "runtime_localization_route_replanned",
-                    "timestamp": time.time(),
-                    "fresh_start_pose": fresh_start_pose,
-                    "replacement_route_csv": replanned["route_csv"],
-                    "replacement_diagnostics_json": replanned[
-                        "diagnostics_json"
-                    ],
-                    "replacement_summary_json": replanned["summary_json"],
-                    "dynamic_overlay_preserved": (
-                        transient_overlay_resume_state is not None
-                    ),
-                    "adopted_blockage_replan_count": (
-                        0
-                        if transient_overlay_resume_state is None
-                        else transient_overlay_resume_state.completed_replan_count
-                    ),
-                    "remaining_blockage_replan_count": (
-                        args.max_blockage_replans_per_leg
-                        if transient_overlay_resume_state is None
-                        else transient_overlay_resume_state.remaining_replans
-                    ),
-                    "transient_overlay_resume_state_json": (
-                        ""
-                        if transient_overlay_resume_state_path is None
-                        else str(transient_overlay_resume_state_path)
-                    ),
-                    "transient_overlay_resume_state_sha256": (
-                        transient_overlay_resume_state_digest
-                    ),
-                    "committed_target_viewpoint_id": target_viewpoint_id,
-                },
-            )
-            pending_runtime_route_seal = {
-                **recovery_event_base,
-                "fresh_start_pose": fresh_start_pose,
-                "committed_target_viewpoint_id": target_viewpoint_id,
-                "replacement_source_route_csv": replanned["route_csv"],
-                "replacement_source_diagnostics_json": replanned[
-                    "diagnostics_json"
-                ],
-                "replacement_summary_json": replanned["summary_json"],
-            }
-            if mission_motion_authorization_json is not None:
-                pending_runtime_permit_context = (
-                    RuntimeLocalizationPermitContext(
-                        mission_authorization_json=Path(
-                            mission_motion_authorization_json
-                        ).absolute(),
-                        session_id=args.session_id,
-                        leg_index=leg_index,
-                        target_viewpoint_id=target_viewpoint_id,
-                        reseal_index=runtime_localization_reseal_index,
-                        max_runtime_reseals_per_leg=(
-                            args.max_runtime_localization_reseals_per_leg
-                        ),
-                        rejected_run_id=outcome.run_id,
-                        runtime_reseal_decision_evidence=(
-                            runtime_localization_decision.to_evidence()
-                        ),
-                        fresh_localization_evidence_path=(
-                            fresh_localization_evidence_path
-                        ),
-                        permit_json_path=(
-                            session_root
-                            / "motion_authorization"
-                            / (
-                                f"{args.session_id}_coverage_"
-                                f"{leg_index:03d}_runtime_localization_"
-                                f"reseal_{runtime_localization_reseal_index:03d}_"
-                                "permit.json"
-                            )
-                        ).absolute(),
-                    )
-                )
-            source_route = Path(replanned["route_csv"])
-            source_diagnostics = Path(replanned["diagnostics_json"])
-            fresh_confirmation_reason = "runtime_localization"
-            continue
-        _require_completed_motion(outcome)
+        ),
+    )
+    effects = CoverageLegEffects(
+        run_motion_leg=_run_motion_leg,
+        admit_preplanning_localization=_admit_preplanning_localization,
+        seal_route=seal_stand_discovery_route,
+        event_sink=_append_jsonl,
+        clock=time.time,
+    )
+    return execute_coverage_leg_state_machine(
+        profile=profile,
+        config=config,
+        effects=effects,
+        session_root=session_root,
+        survey_root=survey_root,
+        plan_path=plan_path,
+        leg_index=leg_index,
+        target_viewpoint_id=target_viewpoint_id,
+        source_route=source_route,
+        source_diagnostics=source_diagnostics,
+        mission_motion_authorization_json=(
+            mission_motion_authorization_json
+        ),
+        mission_leg_motion_authorization_json=(
+            mission_leg_motion_authorization_json
+        ),
+    )
 
 
 def _capture_camera_recommendation(
@@ -2593,166 +1116,56 @@ def _capture_camera_recommendation(
     )
 
 
-def _opposite_face_normal(axis_observation_path: Path) -> float:
-    """Select the axis-perpendicular face opposite the first camera view."""
-
-    payload = json.loads(axis_observation_path.read_text())
-    if payload.get("observation_kind") != "real_stand_axis_without_qr":
-        raise ValueError("unexpected axis observation kind")
-    axis_rad = float(payload["stand_axis_rad"])
-    stand = payload["stand_center"]
-    robot = payload["robot_pose"]
-    robot_side = math.atan2(
-        float(robot["y_m"]) - float(stand["y_m"]),
-        float(robot["x_m"]) - float(stand["x_m"]),
-    )
-    normals = (
-        normalize_angle(axis_rad + math.pi / 2.0),
-        normalize_angle(axis_rad - math.pi / 2.0),
-    )
-    selected = min(
-        normals,
-        key=lambda normal: math.cos(normal - robot_side),
-    )
-    if math.cos(selected - robot_side) > -0.5:
-        raise ValueError(
-            "stand axis does not resolve a sufficiently opposite inspection face"
-        )
-    return selected
-
-
-def _bounded_approach_offsets(
-    requested_m: float,
-    minimum_m: float,
+def _run_candidate_motion_leg(
     *,
-    step_m: float = 0.05,
-) -> tuple[float, ...]:
-    """Return descending standoffs without crossing the physical minimum."""
-
-    if not all(
-        math.isfinite(value) and value > 0.0
-        for value in (requested_m, minimum_m, step_m)
-    ):
-        raise ValueError("approach offsets and step must be finite and positive")
-    if requested_m + 1.0e-9 < minimum_m:
-        raise ValueError("requested approach offset is below physical minimum")
-    values = []
-    current = requested_m
-    while current > minimum_m + 1.0e-9:
-        values.append(round(current, 6))
-        current -= step_m
-    if not values or abs(values[-1] - minimum_m) > 1.0e-9:
-        values.append(round(minimum_m, 6))
-    return tuple(values)
-
-
-def _is_approach_feasibility_failure(exc: ValueError) -> bool:
-    message = str(exc)
-    return (
-        "candidate pre-approach A* failed" in message
-        or "target is blocked" in message
-    )
-
-
-def _validate_facing_pose(
-    *,
-    args,
     profile,
-    plan,
-    snapshot,
-    candidate,
-    recommendation_path: Path,
-    current_pose: Pose2D,
-    output_dir: Path,
-    inflation_radius_m: float,
-) -> dict[str, object]:
-    recommendation = load_recommendation(
-        recommendation_path,
-        expected_frame=profile.map_frame,
-        expected_source=REAL_VIEWPOINT_SOURCE,
-        expected_simulation_only=False,
-    )
-    target = recommendation.material_target.pose
-    grid, map_bundle = load_occupancy_grid_with_bundle(
-        args.map,
-        semantic_map_id=args.semantic_map_id,
-        planning_frame=profile.map_frame,
-    )
-    if map_bundle.bundle_sha256 != plan.map_bundle_sha256:
-        raise ValueError("facing-pose validation map differs from survey")
-    costmap = (
-        Costmap.from_occupancy_grid(grid)
-        .with_arena_bounds(plan.arena_bounds)
-        .with_inflation(inflation_radius_m)
-    )
-    other_keepouts = tuple(
-        Station(
-            item.candidate_uid,
-            StationPose(item.geometry.x_m, item.geometry.y_m, 0.0),
-            0.0,
-            item.geometry.keepout_radius_m,
-        )
-        for item in snapshot.candidates
-        if item.candidate_uid != candidate.candidate_uid
-    )
-    if other_keepouts:
-        costmap = costmap.with_station_keepouts(other_keepouts)
-    route = plan_route(
-        costmap,
-        current_pose,
-        target,
-        snap_radius_m=plan.config.snap_radius_m,
-    )
-    if route.route is None or route.failure is not None:
-        reason = route.failure.reason if route.failure is not None else "no route"
-        raise ValueError(f"computed QR-facing pose is not A*-reachable: {reason}")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    write_route_csv(
-        output_dir / "facing_pose_validation_route.csv",
-        (route,),
-        final_yaw_by_leg={0: target.yaw_rad},
-    )
-    write_diagnostics_json(
-        output_dir / "facing_pose_validation_diagnostics.json",
-        (route,),
-        metadata={
-            "route_kind": "facing_pose_validation_only",
-            "motion_authorized": False,
-            "map_bundle_sha256": map_bundle.bundle_sha256,
-            "candidate_uid": candidate.candidate_uid,
-            "arena_boundary_overlay": True,
-            "arena_bounds": plan.arena_bounds.to_metadata(),
-            "inflation_radius_m": inflation_radius_m,
-        },
-    )
-    qr_face = next(
-        face
-        for face in recommendation.face_candidates
-        if face.face_id == recommendation.material_target.face_id
-    )
-    # The stand axis is axial. Canonicalize it to [0, pi).
-    stand_axis = (qr_face.outward_normal_rad - math.pi / 2.0) % math.pi
-    return {
-        "candidate_uid": candidate.candidate_uid,
-        "stand_center": {
-            "x_m": candidate.geometry.x_m,
-            "y_m": candidate.geometry.y_m,
-        },
-        "stand_axis_rad_axial": stand_axis,
-        "qr_outward_normal_rad": normalize_angle(qr_face.outward_normal_rad),
-        "facing_pose": {
-            "x_m": target.x_m,
-            "y_m": target.y_m,
-            "yaw_rad": target.yaw_rad,
-        },
-        "axis_confidence": recommendation.axis_confidence,
-        "axis_sample_count": recommendation.axis_sample_count,
-        "recommendation_json": str(recommendation_path),
-        "validation_route_csv": str(
-            output_dir / "facing_pose_validation_route.csv"
+    request: CandidateMotionLegRequest,
+) -> MotionLegOutcome:
+    """Adapt one typed candidate request to the sole child motion edge."""
+
+    return _run_motion_leg(
+        profile=profile,
+        sealed=request.sealed,
+        run_id=request.run_id,
+        session_root=request.session_root,
+        execute=True,
+        candidate_snapshot=request.candidate_snapshot_path,
+        uncertainty_map_yaml=request.uncertainty_map_yaml,
+        uncertainty_sigma_multiplier=request.uncertainty_sigma_multiplier,
+        localization_branch_proof_id=request.localization_branch_proof_id,
+        mission_leg_permit_context=MissionLegPermitContext(
+            mission_authorization_json=request.mission_authorization_json,
+            session_id=request.session_id,
+            semantic_map_id=request.semantic_map_id,
+            mission_leg_kind=request.mission_leg_kind,
+            mission_leg_index=request.mission_leg_index,
+            target_id=request.target_id,
+            permit_json_path=request.permit_json_path,
         ),
-        "motion_to_facing_pose_authorized": False,
-    }
+    )
+
+
+def _capture_candidate_observation(
+    *,
+    profile,
+    args,
+    request: CandidateObservationRequest,
+) -> CandidateObservation:
+    """Adapt the passive observer process to the typed candidate boundary."""
+
+    recommendation_path, qr_id, axis_observation_path = (
+        _capture_camera_recommendation(
+            profile=profile,
+            args=args,
+            candidate=request.candidate,
+            output_dir=request.output_dir,
+        )
+    )
+    return CandidateObservation(
+        recommendation_path=recommendation_path,
+        qr_id=qr_id,
+        axis_observation_path=axis_observation_path,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2763,6 +1176,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--map", type=Path, default=DEFAULT_MAP)
     parser.add_argument("--semantic-map-id", default="arena_1p898x3p9_auto")
     parser.add_argument("--session-id", default="")
+    parser.add_argument(
+        "--run-mode",
+        choices=tuple(mode.value for mode in AutonomousRunMode),
+        default=None,
+        help=(
+            "Explicit mutually exclusive workflow mode. Legacy --execute, "
+            "--coverage-leg-limit, and --stop-after-coverage remain accepted "
+            "only when they resolve to the same mode."
+        ),
+    )
+    parser.add_argument(
+        "--resume-checkpoint",
+        type=Path,
+        default=None,
+        help=(
+            "Immutable autonomous coverage checkpoint to continue. Required "
+            "only with --run-mode resume-next-coverage-leg. The continuation "
+            "uses a new session, fresh AMCL/TF, fresh A*, fresh dry-run, and "
+            "fresh typed RUN."
+        ),
+    )
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--expected-stand-count", type=int, default=3)
     parser.add_argument("--inspection-stop-spacing-m", type=float, default=0.70)
@@ -2788,7 +1222,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Operator evidence ID for a known physical start or an asymmetric "
             "landmark that resolves the saved map's symmetric pose branch. "
-            "Required with --execute; covariance alone is insufficient."
+            "Required for every physical execution mode; covariance alone "
+            "is insufficient."
         ),
     )
     parser.add_argument(
@@ -2802,8 +1237,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help=(
-            "Real-test checkpoint: stop successfully after this many coverage "
-            "legs; zero means run the complete mission."
+            "Coverage checkpoint leg count. A positive value is required by "
+            "--run-mode execute-coverage-checkpoint; use zero for other modes."
         ),
     )
     parser.add_argument(
@@ -2838,6 +1273,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--max-localization-readiness-retries-per-leg",
+        type=int,
+        default=DEFAULT_MAX_LOCALIZATION_READINESS_RETRIES_PER_LEG,
+        help=(
+            "Maximum fresh no-motion AMCL dry admissions when the certified "
+            "route uncertainty budget is exhausted before any motion. Safety "
+            "limits remain unchanged; zero disables this bounded retry."
+        ),
+    )
+    parser.add_argument(
         "--uncertainty-sigma-multiplier",
         type=float,
         default=DEFAULT_UNCERTAINTY_SIGMA_MULTIPLIER,
@@ -2852,14 +1297,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--stop-after-coverage",
         action="store_true",
         help=(
-            "Real-test checkpoint: finish the center-corridor LiDAR survey and "
-            "candidate snapshot, then stop before candidate approaches."
+            "Legacy alias: finish the center-corridor LiDAR survey and "
+            "candidate snapshot, then stop before candidate approaches. "
+            "Prefer --run-mode execute-coverage-only."
         ),
     )
     parser.add_argument(
         "--execute",
         action="store_true",
-        help="After every dry-run passes, permit physical motion.",
+        help=(
+            "Legacy execution selector. Prefer an explicit --run-mode; typed "
+            "RUN and exact one-use permits remain mandatory."
+        ),
     )
     return parser
 
@@ -2877,6 +1326,10 @@ def _validate_inputs(parser, args, profile, calibration) -> None:
         parser.error(
             "--max-runtime-localization-reseals-per-leg must be non-negative"
         )
+    if args.max_localization_readiness_retries_per_leg < 0:
+        parser.error(
+            "--max-localization-readiness-retries-per-leg must be non-negative"
+        )
     if (
         not math.isfinite(args.uncertainty_sigma_multiplier)
         or args.uncertainty_sigma_multiplier <= 0.0
@@ -2889,8 +1342,8 @@ def _validate_inputs(parser, args, profile, calibration) -> None:
     ).strip()
     if args.execute and not args.localization_branch_proof_id:
         parser.error(
-            "--execute requires --localization-branch-proof-id for a known "
-            "physical start or asymmetric landmark"
+            "physical execution modes require --localization-branch-proof-id "
+            "for a known physical start or asymmetric landmark"
         )
     for name in (
         "inspection_stop_spacing_m",
@@ -2929,7 +1382,38 @@ def _validate_inputs(parser, args, profile, calibration) -> None:
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    args.session_id = args.session_id or _default_session_id()
+    try:
+        resolved_run_mode = resolve_autonomous_run_mode(
+            run_mode=args.run_mode,
+            execute=args.execute,
+            coverage_leg_limit=args.coverage_leg_limit,
+            stop_after_coverage=args.stop_after_coverage,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    args.run_mode = resolved_run_mode.mode.value
+    args.execute = resolved_run_mode.execute
+    args.coverage_leg_limit = resolved_run_mode.coverage_leg_limit
+    args.stop_after_coverage = resolved_run_mode.stop_after_coverage
+    resume_mode = (
+        resolved_run_mode.mode
+        is AutonomousRunMode.RESUME_NEXT_COVERAGE_LEG
+    )
+    if resume_mode and args.resume_checkpoint is None:
+        parser.error(
+            "--run-mode resume-next-coverage-leg requires --resume-checkpoint"
+        )
+    if not resume_mode and args.resume_checkpoint is not None:
+        parser.error(
+            "--resume-checkpoint requires --run-mode resume-next-coverage-leg"
+        )
+    if args.session_id:
+        try:
+            validate_session_id_mode_label(args.session_id, resolved_run_mode)
+        except ValueError as exc:
+            parser.error(str(exc))
+    else:
+        args.session_id = _default_session_id(resolved_run_mode.mode)
     session_root = args.output_root / args.session_id
     if session_root.exists():
         parser.error(f"refusing to reuse existing session: {session_root}")
@@ -2960,52 +1444,89 @@ def main(argv=None) -> int:
             0.31,
             clearance["minimum_candidate_transit_radius_m"],
         )
+        admitted_resume = None
+        if resume_mode:
+            _grid, current_map_bundle = load_occupancy_grid_with_bundle(
+                args.map,
+                semantic_map_id=args.semantic_map_id,
+                planning_frame=profile.map_frame,
+            )
+            admitted_resume = admit_coverage_resume(
+                args.resume_checkpoint,
+                new_session_id=args.session_id,
+                robot_id=profile.robot_id,
+                robot_profile_sha256=_file_sha256(args.robot_profile),
+                calibration_profile_sha256=_file_sha256(
+                    args.camera_calibration
+                ),
+                physical_site_sha256=_file_sha256(args.physical_site),
+                map_bundle_sha256=current_map_bundle.bundle_sha256,
+                config_sha256=_checkpoint_config_sha256(args),
+            )
         session_root.mkdir(parents=True, exist_ok=False)
         survey_root = session_root / "coverage"
         start = _admit_preplanning_localization(
             runtime,
             session_root,
         )
-        planning_command = [
-            "--map",
-            str(args.map),
-            "--semantic-map-id",
-            args.semantic_map_id,
-            "--planning-frame",
-            profile.map_frame,
-            "--start-x",
-            str(start.x_m),
-            "--start-y",
-            str(start.y_m),
-            "--start-yaw",
-            str(start.yaw_rad),
-            "--survey-id",
-            args.session_id,
-            "--output-dir",
-            str(survey_root),
-            "--lane-count",
-            "1",
-            "--stop-spacing-m",
-            str(args.inspection_stop_spacing_m),
-            "--inflation-radius-m",
-            str(inflation_radius_m),
-            "--candidate-keepout-radius-m",
-            str(candidate_keepout_radius_m),
-            "--expected-stand-count",
-            str(args.expected_stand_count),
-        ]
-        if args.exact_inspection_point_count is not None:
-            planning_command.extend(
-                [
-                    "--exact-inspection-point-count",
-                    str(args.exact_inspection_point_count),
-                ]
+        resume_parent_checkpoint_path: Path | None = None
+        if resume_mode:
+            assert admitted_resume is not None
+            restored_resume = restore_and_replan_coverage_resume(
+                admitted_resume,
+                survey_root=survey_root,
+                map_yaml=args.map,
+                semantic_map_id=args.semantic_map_id,
+                current_pose=start,
             )
-        planning_status = plan_stand_coverage_survey(planning_command)
-        if planning_status != 0:
-            return planning_status
-        plan_path = survey_root / "coverage_plan.json"
-        plan = load_coverage_survey_plan(plan_path)
+            plan_path = restored_resume.plan_path
+            plan = restored_resume.plan
+            initial_leg_index = restored_resume.leg_index
+            resume_parent_checkpoint_path = (
+                restored_resume.parent_checkpoint_path
+            )
+        else:
+            planning_command = [
+                "--map",
+                str(args.map),
+                "--semantic-map-id",
+                args.semantic_map_id,
+                "--planning-frame",
+                profile.map_frame,
+                "--start-x",
+                str(start.x_m),
+                "--start-y",
+                str(start.y_m),
+                "--start-yaw",
+                str(start.yaw_rad),
+                "--survey-id",
+                args.session_id,
+                "--output-dir",
+                str(survey_root),
+                "--lane-count",
+                "1",
+                "--stop-spacing-m",
+                str(args.inspection_stop_spacing_m),
+                "--inflation-radius-m",
+                str(inflation_radius_m),
+                "--candidate-keepout-radius-m",
+                str(candidate_keepout_radius_m),
+                "--expected-stand-count",
+                str(args.expected_stand_count),
+            ]
+            if args.exact_inspection_point_count is not None:
+                planning_command.extend(
+                    [
+                        "--exact-inspection-point-count",
+                        str(args.exact_inspection_point_count),
+                    ]
+                )
+            planning_status = plan_stand_coverage_survey(planning_command)
+            if planning_status != 0:
+                return planning_status
+            plan_path = survey_root / "coverage_plan.json"
+            plan = load_coverage_survey_plan(plan_path)
+            initial_leg_index = 0
         if (
             args.exact_inspection_point_count is not None
             and len(plan.viewpoints) != args.exact_inspection_point_count
@@ -3024,66 +1545,128 @@ def main(argv=None) -> int:
                 coverage_plan_path=plan_path,
                 output_dir=session_root / "execution/coverage_leg_000",
             )
-            first_dry_outcome = _run_motion_leg(
-                profile=profile,
-                sealed=first_sealed,
-                run_id=f"{args.session_id}_coverage_000_dry",
-                session_root=session_root,
-                execute=False,
-                coverage_plan=plan_path,
-                uncertainty_map_yaml=args.map,
-                uncertainty_sigma_multiplier=(
-                    args.uncertainty_sigma_multiplier
-                ),
-                localization_branch_proof_id=(
-                    args.localization_branch_proof_id
-                    or "dry_run_no_motion"
-                ),
-            )
-            if first_dry_outcome.status != "dry_run_ok":
-                raise RuntimeError(
-                    "first center-corridor dry-run rejected the sealed route: "
-                    f"{first_dry_outcome.stop_reason}"
+            dry_readiness_retry_index = 0
+            while True:
+                first_dry_outcome = _run_motion_leg(
+                    profile=profile,
+                    sealed=first_sealed,
+                    run_id=(
+                        f"{args.session_id}_coverage_000_dry"
+                        + localization_readiness_suffix(
+                            dry_readiness_retry_index
+                        )
+                    ),
+                    session_root=session_root,
+                    execute=False,
+                    coverage_plan=plan_path,
+                    uncertainty_map_yaml=args.map,
+                    uncertainty_sigma_multiplier=(
+                        args.uncertainty_sigma_multiplier
+                    ),
+                    localization_branch_proof_id=(
+                        args.localization_branch_proof_id
+                        or "dry_run_no_motion"
+                    ),
+                )
+                if first_dry_outcome.status == "dry_run_ok":
+                    break
+                readiness = evaluate_localization_readiness_retry(
+                    status=first_dry_outcome.status,
+                    stop_reason=first_dry_outcome.stop_reason,
+                    stop_details=first_dry_outcome.stop_details,
+                    motion_published=first_dry_outcome.motion_published,
+                )
+                if (
+                    not readiness.retryable
+                    or dry_readiness_retry_index
+                    >= args.max_localization_readiness_retries_per_leg
+                ):
+                    raise RuntimeError(
+                        "first center-corridor dry-run rejected the sealed "
+                        f"route: {first_dry_outcome.stop_reason}"
+                    )
+                dry_readiness_retry_index += 1
+                _append_jsonl(
+                    session_root / "adaptive_replans.jsonl",
+                    {
+                        "schema_version": 1,
+                        "event": "dry_localization_readiness_retry_scheduled",
+                        "timestamp": time.time(),
+                        "rejected_run_id": first_dry_outcome.run_id,
+                        "next_retry_index": dry_readiness_retry_index,
+                        "maximum_retry_count": (
+                            args.max_localization_readiness_retries_per_leg
+                        ),
+                        "motion_published": False,
+                        "motion_authorized": False,
+                        "fresh_nomotion_amcl_preflight_required": True,
+                        "route_limits_unchanged": True,
+                    },
                 )
             _write_json(
                 session_root / "mission_summary.json",
                 {
                     "schema_version": 1,
                     "status": "first_leg_dry_run_ok",
+                    "run_mode": args.run_mode,
                     "execute": False,
                     "motion_published": False,
                     "survey_root": str(survey_root),
                     "uncertainty_sigma_multiplier": (
                         args.uncertainty_sigma_multiplier
                     ),
+                    "localization_readiness_retry_count": (
+                        dry_readiness_retry_index
+                    ),
                 },
             )
             print(
                 "First center-corridor leg passed the runner dry-run. "
-                "Re-run with --execute for the physical mission."
+                "Use a new session with an explicit execute-* run mode for "
+                "any separately authorized physical mission."
             )
             return 0
 
-        if args.coverage_leg_limit > 0:
-            authorization_scope = (
-                f"at most {args.coverage_leg_limit} center-corridor "
-                "coverage leg(s)"
-            )
-        elif args.stop_after_coverage:
-            authorization_scope = (
-                "the complete center-corridor coverage pass, with no "
-                "candidate-approach legs"
-            )
-        else:
-            authorization_scope = (
-                "the complete multi-leg stand exploration mission"
-            )
+        # Freeze every checkpoint identity before asking the operator to RUN.
+        # The immutable inputs are hashed once and reused across all coverage
+        # legs; unreadable or inconsistent artifacts therefore fail before
+        # any mission-level motion authorization is issued.
+        checkpoint_identity = CoverageCheckpointIdentity(
+            session_root=session_root,
+            session_id=args.session_id,
+            run_mode=args.run_mode,
+            robot_id=profile.robot_id,
+            robot_profile_sha256=_file_sha256(args.robot_profile),
+            calibration_profile_sha256=_file_sha256(
+                args.camera_calibration
+            ),
+            physical_site_sha256=_file_sha256(args.physical_site),
+            map_bundle_sha256=plan.map_bundle_sha256,
+            config_sha256=_checkpoint_config_sha256(args),
+        )
+
+        authorization_scope = resolved_run_mode.authorization_scope_text
+        coverage_scoped_mode = resolved_run_mode.mode in {
+            AutonomousRunMode.EXECUTE_COVERAGE_CHECKPOINT,
+            AutonomousRunMode.EXECUTE_COVERAGE_ONLY,
+            AutonomousRunMode.RESUME_NEXT_COVERAGE_LEG,
+        }
+        authorized_leg_kinds = (
+            (MissionLegKind.COVERAGE,)
+            if coverage_scoped_mode
+            else ROUTINE_MISSION_LEG_KINDS
+        )
+        authorized_leg_description = (
+            "coverage child legs"
+            if coverage_scoped_mode
+            else "coverage, candidate, and opposite-face child legs"
+        )
         print(
             "Physical safety requirements: clear arena; unloaded robot; operator "
             "beside the robot; Ctrl+C and physical stop ready; separate exact-topic "
             f"zero Twist terminal ready. This RUN authorizes {authorization_scope} "
-            "and its separately sealed routine coverage, candidate, and "
-            "opposite-face child legs, plus bounded scan-backed transient-"
+            f"and its separately sealed routine {authorized_leg_description}, "
+            "plus bounded scan-backed transient-"
             "obstacle A* replans "
             f"(maximum {args.max_blockage_replans_per_leg} per coverage leg). "
             "Each routine child must pass a fresh dry-run and all live gates, "
@@ -3101,6 +1684,11 @@ def main(argv=None) -> int:
             "remain terminal. The AMCL envelope multiplier is "
             f"{args.uncertainty_sigma_multiplier:g}; it is charged to route "
             "clearance before motion and reused by the live map<-odom monitor."
+            " A route-specific uncertainty-budget rejection before motion may "
+            "trigger at most "
+            f"{args.max_localization_readiness_retries_per_leg} fresh no-motion "
+            "AMCL dry admission(s); no limit is relaxed and no permit is issued "
+            "until one passes."
         )
         if input("Type RUN to authorize the autonomous exploration mission: ").strip() != "RUN":
             raise RuntimeError("operator did not authorize the mission")
@@ -3119,7 +1707,7 @@ def main(argv=None) -> int:
             localization_branch_proof_id=(
                 args.localization_branch_proof_id
             ),
-            allowed_leg_kinds=ROUTINE_MISSION_LEG_KINDS,
+            allowed_leg_kinds=authorized_leg_kinds,
             scope_text=MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
             operator_confirmation=MISSION_LEG_RUN_CONFIRMATION,
         )
@@ -3166,7 +1754,13 @@ def main(argv=None) -> int:
                 "event": "mission_motion_authorization_issued",
                 "timestamp": time.time(),
                 "session_id": args.session_id,
+                "run_mode": args.run_mode,
                 "authorization_scope": authorization_scope,
+                "resume_parent_checkpoint": (
+                    None
+                    if resume_parent_checkpoint_path is None
+                    else str(resume_parent_checkpoint_path)
+                ),
                 "mission_motion_authorization_json": str(
                     mission_motion_authorization_json
                 ),
@@ -3180,12 +1774,15 @@ def main(argv=None) -> int:
                     mission_leg_motion_authorization_hash
                 ),
                 "routine_leg_kinds": [
-                    kind.value for kind in ROUTINE_MISSION_LEG_KINDS
+                    kind.value for kind in authorized_leg_kinds
                 ],
                 "routine_child_prompts_required": False,
                 "startup_reseal_fresh_typed_run_required": True,
                 "max_runtime_localization_reseals_per_leg": (
                     args.max_runtime_localization_reseals_per_leg
+                ),
+                "max_localization_readiness_retries_per_leg": (
+                    args.max_localization_readiness_retries_per_leg
                 ),
                 "uncertainty_sigma_multiplier": (
                     args.uncertainty_sigma_multiplier
@@ -3197,26 +1794,17 @@ def main(argv=None) -> int:
             },
         )
 
-        leg_index = 0
-        while True:
-            summary = json.loads((survey_root / "survey_summary.json").read_text())
-            viewpoint_id = summary.get("next_viewpoint_id")
-            if viewpoint_id is None:
-                break
-            source_route = survey_root / "legs" / f"leg_{leg_index:03d}_route.csv"
-            source_diagnostics = (
-                survey_root / "legs" / f"leg_{leg_index:03d}_diagnostics.json"
-            )
-            coverage_outcome = _execute_coverage_leg_with_replans(
+        def execute_completed_coverage_leg(request):
+            outcome = _execute_coverage_leg_with_replans(
                 profile=profile,
                 args=args,
                 session_root=session_root,
                 survey_root=survey_root,
                 plan_path=plan_path,
-                leg_index=leg_index,
-                target_viewpoint_id=str(viewpoint_id),
-                source_route=source_route,
-                source_diagnostics=source_diagnostics,
+                leg_index=request.leg_index,
+                target_viewpoint_id=request.target_viewpoint_id,
+                source_route=request.source_route,
+                source_diagnostics=request.source_diagnostics,
                 mission_motion_authorization_json=(
                     mission_motion_authorization_json
                 ),
@@ -3224,409 +1812,201 @@ def main(argv=None) -> int:
                     mission_leg_motion_authorization_json
                 ),
             )
-            observer_summary = _capture_lidar_epoch(
+            if outcome.odom_execution_certificate_path is None:
+                raise RuntimeError(
+                    "completed coverage leg has no odom execution certificate"
+                )
+            return CompletedCoverageLeg(
+                outcome.odom_execution_certificate_path
+            )
+
+        def capture_coverage_lidar_epoch(
+            viewpoint_id,
+            odom_execution_certificate_path,
+        ):
+            return _capture_lidar_epoch(
                 profile=profile,
                 args=args,
                 survey_root=survey_root,
-                viewpoint_id=str(viewpoint_id),
+                viewpoint_id=viewpoint_id,
                 odom_execution_certificate_path=(
-                    coverage_outcome.odom_execution_certificate_path
+                    odom_execution_certificate_path
                 ),
             )
-            record_stand_coverage_stop(
+
+        def fuse_coverage_stop(viewpoint_id, observer_summary_path):
+            return record_stand_coverage_stop(
                 survey_root=survey_root,
                 map_yaml=args.map,
                 semantic_map_id=args.semantic_map_id,
-                viewpoint_id=str(viewpoint_id),
-                observer_summary_json=observer_summary,
+                viewpoint_id=viewpoint_id,
+                observer_summary_json=observer_summary_path,
                 scan_to_base_position_offset_m=(
                     profile.scan_origin_to_base_offset_m
                 ),
             )
-            leg_index += 1
-            if (
-                args.coverage_leg_limit > 0
-                and leg_index >= args.coverage_leg_limit
-            ):
-                checkpoint_summary = json.loads(
-                    (survey_root / "survey_summary.json").read_text()
-                )
-                # A checkpoint must never bypass the terminal coverage-to-
-                # candidate admission gate.  When this was the final planned
-                # viewpoint, leave the loop normally and validate the fused
-                # registry before reporting success or starting approaches.
-                if checkpoint_summary.get("next_viewpoint_id") is None:
-                    continue
-                result = {
-                    "schema_version": 1,
-                    "status": "coverage_leg_checkpoint_complete",
-                    "motion_published": True,
-                    "completed_coverage_legs": leg_index,
-                    "next_viewpoint_id": checkpoint_summary.get(
-                        "next_viewpoint_id"
-                    ),
-                    "survey_root": str(survey_root),
-                }
-                _write_json(session_root / "mission_summary.json", result)
-                print(json.dumps(result, indent=2, sort_keys=True))
-                return 0
 
-        registry_path = survey_root / "stand_registry.json"
-        registry = load_stand_survey_registry(registry_path, plan)
-        coverage_candidate_admission = (
-            evaluate_coverage_candidate_admission(
-                plan,
-                load_survey_progress(
-                    survey_root / "coverage_progress.json",
-                    plan,
+        def publish_coverage_checkpoint_effect(request):
+            identity = request.identity
+            published = publish_coverage_checkpoint(
+                session_root=identity.session_root,
+                session_id=identity.session_id,
+                run_mode=identity.run_mode,
+                robot_id=identity.robot_id,
+                robot_profile_sha256=identity.robot_profile_sha256,
+                calibration_profile_sha256=(
+                    identity.calibration_profile_sha256
                 ),
-                registry,
+                physical_site_sha256=identity.physical_site_sha256,
+                map_bundle_sha256=identity.map_bundle_sha256,
+                config_sha256=identity.config_sha256,
+                completed_coverage_legs=request.completed_coverage_legs,
+                next_viewpoint_id=request.next_viewpoint_id,
+                coverage_plan_path=request.coverage_plan_path,
+                coverage_progress_path=request.coverage_progress_path,
+                survey_summary_path=request.survey_summary_path,
+                stand_registry_path=request.stand_registry_path,
+                lidar_observer_summary_path=(
+                    request.lidar_observer_summary_path
+                ),
+                parent_checkpoint_path=request.parent_checkpoint_path,
             )
-        )
-        coverage_candidate_admission_path = (
-            session_root / "coverage_candidate_admission.json"
-        )
-        coverage_candidate_admission_sha256 = write_content_hashed_json(
-            coverage_candidate_admission_path,
-            coverage_candidate_admission_evidence(
-                coverage_candidate_admission
-            ),
-            hash_field="coverage_candidate_admission_sha256",
-        )
-        if not coverage_candidate_admission.ready:
-            raise RuntimeError(
-                "coverage candidate admission rejected: "
-                + ", ".join(coverage_candidate_admission.reasons)
+            return PublishedCoverageCheckpoint(
+                published.manifest_path,
+                published.manifest_sha256,
             )
-        pending = tuple(
-            candidate
-            for candidate in registry.candidates
-            if candidate.status == STATUS_PENDING_CAMERA
-        )
-        if len(pending) != args.expected_stand_count:
-            raise RuntimeError(
-                "center-corridor survey did not resolve the expected stand count: "
-                f"pending_camera={len(pending)} "
-                f"expected={args.expected_stand_count}"
-            )
-        snapshot = candidate_snapshot_from_registry(
+
+        def build_coverage_candidate_snapshot(
             registry,
-            plan,
-            registry_path=registry_path,
-            snapshot_id=f"{args.session_id}_candidates",
-        )
-        snapshot_path = session_root / "candidate_snapshot.json"
-        write_candidate_snapshot(snapshot_path, snapshot)
+            coverage_plan,
+            registry_path,
+            snapshot_id,
+        ):
+            return candidate_snapshot_from_registry(
+                registry,
+                coverage_plan,
+                registry_path=registry_path,
+                snapshot_id=snapshot_id,
+            )
 
-        if args.stop_after_coverage:
-            result = {
-                "schema_version": 1,
-                "status": "coverage_complete",
-                "motion_published": True,
-                "stand_count": len(snapshot.candidates),
-                "candidate_snapshot": str(snapshot_path),
-                "candidate_snapshot_sha256": candidate_snapshot_sha256(
-                    snapshot
+        coverage_phase = execute_coverage_mission(
+            CoverageMissionConfig(
+                survey_root=survey_root,
+                plan=plan,
+                coverage_plan_path=plan_path,
+                checkpoint_identity=checkpoint_identity,
+                expected_stand_count=args.expected_stand_count,
+                initial_leg_index=initial_leg_index,
+                coverage_leg_limit=args.coverage_leg_limit,
+                parent_checkpoint_path=resume_parent_checkpoint_path,
+            ),
+            CoverageMissionEffects(
+                execute_completed_leg=execute_completed_coverage_leg,
+                capture_lidar_epoch=capture_coverage_lidar_epoch,
+                fuse_coverage_stop=fuse_coverage_stop,
+                build_snapshot=build_coverage_candidate_snapshot,
+                publish_checkpoint=publish_coverage_checkpoint_effect,
+                load_progress=load_survey_progress,
+                load_registry=load_stand_survey_registry,
+                evaluate_admission=evaluate_coverage_candidate_admission,
+                write_admission=lambda path, decision: (
+                    write_content_hashed_json(
+                        path,
+                        coverage_candidate_admission_evidence(decision),
+                        hash_field=(
+                            "coverage_candidate_admission_sha256"
+                        ),
+                    )
                 ),
-                "survey_root": str(survey_root),
-                "coverage_candidate_admission": str(
-                    coverage_candidate_admission_path
-                ),
-                "coverage_candidate_admission_sha256": (
-                    coverage_candidate_admission_sha256
-                ),
-            }
+                write_snapshot=write_candidate_snapshot,
+                snapshot_sha256=candidate_snapshot_sha256,
+            ),
+        )
+
+        if isinstance(coverage_phase, CoverageCheckpointComplete):
+            result = coverage_phase.to_mission_summary()
+            _write_json(session_root / "mission_summary.json", result)
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0
+        if not isinstance(coverage_phase, CoverageComplete):
+            raise RuntimeError("coverage transaction returned an unknown outcome")
+
+        snapshot = coverage_phase.candidate_snapshot
+        snapshot_path = coverage_phase.candidate_snapshot_path
+        coverage_candidate_admission_path = (
+            coverage_phase.coverage_candidate_admission_path
+        )
+        coverage_candidate_admission_sha256 = (
+            coverage_phase.coverage_candidate_admission_sha256
+        )
+
+        if resolved_run_mode.mode in {
+            AutonomousRunMode.EXECUTE_COVERAGE_CHECKPOINT,
+            AutonomousRunMode.EXECUTE_COVERAGE_ONLY,
+            AutonomousRunMode.RESUME_NEXT_COVERAGE_LEG,
+        }:
+            result = coverage_phase.to_mission_summary()
             _write_json(session_root / "mission_summary.json", result)
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0
 
-        unresolved = set(snapshot.candidate_uids)
-        facing_records = []
-        identities = []
-        candidate_index = 0
-        while unresolved:
-            current = read_current_amcl_pose(
-                namespace=profile.namespace,
-                amcl_topic=profile.amcl_topic,
-                map_frame=profile.map_frame,
-                timeout_sec=STATIONARY_AMCL_TIMEOUT_SEC,
-                max_age_sec=2.0,
+        if mission_leg_motion_authorization_json is None:
+            raise RuntimeError(
+                "candidate phase requires mission-leg authorization evidence"
             )
-            candidate = _nearest_candidate(snapshot, current, unresolved)
-            assert candidate is not None
-            candidate_root = (
-                session_root
-                / "candidates"
-                / f"{candidate_index:03d}_{candidate.candidate_uid}"
-            )
-            source_root = candidate_root / "preapproach_source"
-            sealed = plan_candidate_preapproach(
-                map_yaml=args.map,
+        candidate_phase = execute_candidate_approach_phase(
+            CandidateApproachConfig(
+                session_root=session_root,
+                survey_root=survey_root,
+                session_id=args.session_id,
                 semantic_map_id=args.semantic_map_id,
+                planning_frame=profile.map_frame,
+                map_yaml=args.map,
                 plan=plan,
                 snapshot=snapshot,
                 snapshot_path=snapshot_path,
-                candidate_uid=candidate.candidate_uid,
-                start=Pose2D(current.x_m, current.y_m, current.yaw_rad),
-                output_dir=source_root,
                 approach_offset_m=args.candidate_approach_offset_m,
                 inflation_radius_m=inflation_radius_m,
                 candidate_transit_radius_m=candidate_keepout_radius_m,
                 physical_clearance=clearance,
-            )
-            candidate_run_id = (
-                f"{args.session_id}_candidate_{candidate_index:03d}"
-            )
-            candidate_outcome = _run_motion_leg(
-                profile=profile,
-                sealed=sealed,
-                run_id=candidate_run_id,
-                session_root=session_root,
-                execute=True,
-                candidate_snapshot=source_root / "candidate_snapshot.json",
-                uncertainty_map_yaml=args.map,
                 uncertainty_sigma_multiplier=(
                     args.uncertainty_sigma_multiplier
                 ),
                 localization_branch_proof_id=(
                     args.localization_branch_proof_id
                 ),
-                mission_leg_permit_context=MissionLegPermitContext(
-                    mission_authorization_json=(
-                        mission_leg_motion_authorization_json
-                    ),
-                    session_id=args.session_id,
-                    semantic_map_id=args.semantic_map_id,
-                    mission_leg_kind=(
-                        MissionLegKind.CANDIDATE_PREAPPROACH
-                    ),
-                    mission_leg_index=candidate_index,
-                    target_id=candidate.candidate_uid,
-                    permit_json_path=(
-                        session_root
-                        / "motion_authorization"
-                        / "mission_legs"
-                        / f"{candidate_run_id}_permit.json"
-                    ).absolute(),
+                mission_leg_motion_authorization_json=(
+                    mission_leg_motion_authorization_json
                 ),
-            )
-            _require_completed_motion(candidate_outcome)
-            recommendation_path, qr_id, axis_observation_path = (
-                _capture_camera_recommendation(
-                    profile=profile,
-                    args=args,
-                    candidate=candidate,
-                    output_dir=candidate_root / "camera_lidar_attempt_00",
-                )
-            )
-            if recommendation_path is None:
-                if axis_observation_path is None:
-                    raise RuntimeError(
-                        "observer returned neither QR recommendation nor axis"
-                    )
-                opposite_normal = _opposite_face_normal(
-                    axis_observation_path
-                )
-                opposite_start = read_current_amcl_pose(
+            ),
+            CandidateApproachEffects(
+                read_current_pose=lambda: read_current_amcl_pose(
                     namespace=profile.namespace,
                     amcl_topic=profile.amcl_topic,
                     map_frame=profile.map_frame,
                     timeout_sec=STATIONARY_AMCL_TIMEOUT_SEC,
                     max_age_sec=2.0,
-                )
-                opposite_source = candidate_root / "opposite_face_source"
-                opposite_sealed = None
-                feasibility_failures = []
-                for inspection_offset_m in _bounded_approach_offsets(
-                    args.candidate_approach_offset_m,
-                    clearance["minimum_active_standoff_m"],
-                ):
-                    try:
-                        opposite_sealed = plan_candidate_preapproach(
-                            map_yaml=args.map,
-                            semantic_map_id=args.semantic_map_id,
-                            plan=plan,
-                            snapshot=snapshot,
-                            snapshot_path=snapshot_path,
-                            candidate_uid=candidate.candidate_uid,
-                            start=Pose2D(
-                                opposite_start.x_m,
-                                opposite_start.y_m,
-                                opposite_start.yaw_rad,
-                            ),
-                            output_dir=opposite_source,
-                            approach_offset_m=inspection_offset_m,
-                            inflation_radius_m=inflation_radius_m,
-                            candidate_transit_radius_m=(
-                                candidate_keepout_radius_m
-                            ),
-                            physical_clearance=clearance,
-                            approach_normal_rad=opposite_normal,
-                            axis_observation_path=axis_observation_path,
-                        )
-                        break
-                    except ValueError as exc:
-                        if not _is_approach_feasibility_failure(exc):
-                            raise
-                        feasibility_failures.append(
-                            f"{inspection_offset_m:.3f} m: {exc}"
-                        )
-                if opposite_sealed is None:
-                    raise RuntimeError(
-                        "no physically allowed opposite-face approach was "
-                        "A*-reachable: " + "; ".join(feasibility_failures)
-                    )
-                opposite_run_id = (
-                    f"{args.session_id}_candidate_"
-                    f"{candidate_index:03d}_opposite"
-                )
-                opposite_outcome = _run_motion_leg(
+                ),
+                run_motion_leg=lambda request: _run_candidate_motion_leg(
                     profile=profile,
-                    sealed=opposite_sealed,
-                    run_id=opposite_run_id,
-                    session_root=session_root,
-                    execute=True,
-                    candidate_snapshot=(
-                        opposite_source / "candidate_snapshot.json"
-                    ),
-                    uncertainty_map_yaml=args.map,
-                    uncertainty_sigma_multiplier=(
-                        args.uncertainty_sigma_multiplier
-                    ),
-                    localization_branch_proof_id=(
-                        args.localization_branch_proof_id
-                    ),
-                    mission_leg_permit_context=MissionLegPermitContext(
-                        mission_authorization_json=(
-                            mission_leg_motion_authorization_json
-                        ),
-                        session_id=args.session_id,
-                        semantic_map_id=args.semantic_map_id,
-                        mission_leg_kind=MissionLegKind.OPPOSITE_FACE,
-                        mission_leg_index=candidate_index,
-                        target_id=candidate.candidate_uid,
-                        permit_json_path=(
-                            session_root
-                            / "motion_authorization"
-                            / "mission_legs"
-                            / f"{opposite_run_id}_permit.json"
-                        ).absolute(),
-                    ),
-                )
-                _require_completed_motion(opposite_outcome)
-                recommendation_path, qr_id, _ = (
-                    _capture_camera_recommendation(
+                    request=request,
+                ),
+                capture_observation=(
+                    lambda request: _capture_candidate_observation(
                         profile=profile,
                         args=args,
-                        candidate=candidate,
-                        output_dir=(
-                            candidate_root / "camera_lidar_attempt_01"
-                        ),
+                        request=request,
                     )
-                )
-                if recommendation_path is None:
-                    raise RuntimeError(
-                        f"QR side remained unresolved after opposite-face "
-                        f"inspection for {candidate.candidate_uid}"
-                    )
-            if qr_id is None:
-                raise RuntimeError("camera recommendation has no QR identity")
-            stopped_pose = read_current_amcl_pose(
-                namespace=profile.namespace,
-                amcl_topic=profile.amcl_topic,
-                map_frame=profile.map_frame,
-                timeout_sec=STATIONARY_AMCL_TIMEOUT_SEC,
-                max_age_sec=2.0,
-            )
-            facing = _validate_facing_pose(
-                args=args,
-                profile=profile,
-                plan=plan,
-                snapshot=snapshot,
-                candidate=candidate,
-                recommendation_path=recommendation_path,
-                current_pose=Pose2D(
-                    stopped_pose.x_m,
-                    stopped_pose.y_m,
-                    stopped_pose.yaw_rad,
                 ),
-                output_dir=candidate_root,
-                inflation_radius_m=inflation_radius_m,
-            )
-            facing["qr_id"] = qr_id
-            facing_records.append(facing)
-            identities.append(
-                StationIdentity(
-                    candidate.candidate_uid,
-                    qr_id,
-                    f"station_{qr_id}",
-                )
-            )
-            receipt = candidate_root / "candidate_decision.json"
-            _write_json(
-                receipt,
-                {
-                    "schema_version": 1,
-                    "survey_id": plan.survey_id,
-                    "candidate_uid": candidate.candidate_uid,
-                    "decision": "confirmed",
-                    "decision_source": "camera_evidence",
-                    "camera_evidence_path": str(recommendation_path),
-                },
-            )
-            if record_stand_candidate_decision(
-                [
-                    "--survey-root",
-                    str(survey_root),
-                    "--decision-receipt-json",
-                    str(receipt),
-                ]
-            ) != 0:
-                raise RuntimeError("failed to commit camera candidate decision")
-            unresolved.remove(candidate.candidate_uid)
-            candidate_index += 1
-
-        identity_registry, _source_sha = create_registry(
-            candidate_snapshot=snapshot,
-            mappings=identities,
-            registry_id=f"{args.session_id}_identities",
-            created_unix_sec=time.time(),
-        )
-        identity_path = session_root / "station_identity_registry.json"
-        write_station_identity_registry(identity_path, identity_registry)
-        catalog = {
-            "schema_version": 1,
-            "catalog_kind": "real_autonomous_stand_facing_poses",
-            "session_id": args.session_id,
-            "planning_frame": profile.map_frame,
-            "map_bundle_sha256": plan.map_bundle_sha256,
-            "coverage_plan_sha256": coverage_survey_plan_sha256(plan),
-            "candidate_snapshot_sha256": candidate_snapshot_sha256(snapshot),
-            "station_identity_registry_sha256": (
-                station_identity_registry_sha256(identity_registry)
             ),
-            "stand_count": len(facing_records),
-            "records": sorted(
-                facing_records,
-                key=lambda item: str(item["candidate_uid"]),
-            ),
-        }
-        catalog_path = session_root / "stand_facing_catalog.json"
-        catalog_sha256 = write_content_hashed_json(
-            catalog_path,
-            catalog,
-            hash_field="stand_facing_catalog_sha256",
         )
-        final_summary = {
+        result = {
             "schema_version": 1,
             "status": "complete",
+            "run_mode": args.run_mode,
             "motion_published": True,
             "session_id": args.session_id,
-            "stand_count": len(facing_records),
-            "stand_facing_catalog": str(catalog_path),
-            "stand_facing_catalog_sha256": catalog_sha256,
             "candidate_snapshot": str(snapshot_path),
-            "station_identity_registry": str(identity_path),
             "survey_root": str(survey_root),
             "coverage_candidate_admission": str(
                 coverage_candidate_admission_path
@@ -3635,9 +2015,11 @@ def main(argv=None) -> int:
                 coverage_candidate_admission_sha256
             ),
         }
-        _write_json(session_root / "mission_summary.json", final_summary)
-        print(json.dumps(final_summary, indent=2, sort_keys=True))
+        result.update(candidate_phase.to_mission_summary_fields())
+        _write_json(session_root / "mission_summary.json", result)
+        print(json.dumps(result, indent=2, sort_keys=True))
         return 0
+
     except (
         AssertionError,
         KeyError,
@@ -3652,6 +2034,7 @@ def main(argv=None) -> int:
                 {
                     "schema_version": 1,
                     "status": "failed_closed",
+                    "run_mode": args.run_mode,
                     "reason": str(exc),
                     "motion_continues_authorized": False,
                 },

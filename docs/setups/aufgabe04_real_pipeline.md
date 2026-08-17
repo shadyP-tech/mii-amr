@@ -25,8 +25,17 @@ loaded logistics mission or a two-robot run; see
 | `navigation/mission_leg_motion_permit.py` | Bind one mission-level `RUN` to separately sealed routine coverage, candidate, and opposite-face child legs | None |
 | `navigation/mission_leg_motion_consumption.py` | Atomically consume each exact routine-leg permit once immediately before motion | None |
 | `navigation/coverage_candidate_admission.py` | Fail closed between LiDAR coverage and candidate approaches unless coverage and multi-view candidate evidence are complete | None |
+| `real_robot/autonomous_modes.py` | Resolve one explicit workflow mode and authorization scope; reject contradictory legacy flags, unsafe session IDs, and misleading session labels | None |
+| `real_robot/autonomous_child_runner.py` | Build child-runner and bundle argv, and parse one unambiguous append-only terminal outcome | None |
+| `real_robot/autonomous_localization_readiness.py` | Classify the one bounded no-motion retryable uncertainty-admission failure without changing any limit | None |
+| `real_robot/autonomous_session_manifest.py` | Snapshot and content-hash resumable coverage checkpoints; manifests explicitly authorize no motion | None |
+| `real_robot/autonomous_checkpoint_resume.py` | Re-hash, restore, and freshly replan one next coverage leg in a new session | None |
+| `real_robot/autonomous_coverage_replanning.py` | Rebuild a coverage leg from admitted startup/runtime-localization evidence while preserving bounded transient-overlay continuity | None; offline route/artifact reconstruction only |
+| `real_robot/autonomous_coverage_execution.py` | Run the bounded per-leg coverage retry/reseal state machine behind injected ROS and child-process effects | None; delegates any authorized motion to the existing child runner |
+| `real_robot/autonomous_coverage_mission.py` | Commit each completed coverage leg as one ordered observe/fuse/checkpoint transaction and gate candidate materialization | None; cannot execute a leg itself |
+| `real_robot/autonomous_candidate_approach.py` | Order frozen candidates, orchestrate sealed pre-approach/opposite-face inspection, and publish validated identity/facing artifacts behind injected live effects | None; cannot sample ROS, prompt, launch a process, or publish motion itself |
 | `real_robot/passive_viewpoint_node.py` | Synchronize image, scan, and exact-time TF; rectify the image; validate LiDAR/QR/silhouette evidence | None |
-| `real_robot/run_autonomous_stand_exploration.py` | Plan and execute the unloaded center-corridor discovery, candidate inspection, and QR-facing pose catalog | Dry-run by default; explicit physical gate |
+| `real_robot/run_autonomous_stand_exploration.py` | Wire CLI/profile/operator authorization to the focused coverage, child-runner, and inspection modules | Dry-run by default; explicit physical gate |
 | `real_robot/prepare_passive_survey.py` | Produce immutable per-candidate observer and catalog-validation commands | None |
 | `real_robot/finalize_passive_survey.py` | Freeze a complete real arrival catalog and write a real `SurveyManifest` | None |
 | `real_robot/run_unloaded_segment.py` | Bind one certified route leg to the sealed hardware/site profile and existing preflight runner | Dry-run by default; explicit physical gate |
@@ -49,6 +58,26 @@ ssh turtle 'ros2 run tf2_ros tf2_echo base_footprint camera_optical_frame'
 
 Substitute the robot's actual namespace, camera topics, and optical frame in
 all later commands. Do not infer them from Gazebo names.
+
+Keep the orchestration split explicit. Run planning, checkpointing, diagnostic
+bundles, camera processing, and all session artifact writes on the workstation
+inside its ROS 2 Humble Apptainer environment. The TurtleBot host should run
+only the required sensor/actuator bringup nodes. Before every session, verify
+the robot's free filesystem space and do not copy capture-heavy session roots
+or bags to it:
+
+```bash
+ssh turtle 'hostname; df -h /; free -h; printenv ROS_DOMAIN_ID TURTLEBOT3_MODEL LDS_MODEL'
+```
+
+The workstation login shell is not itself proof of a usable ROS graph. Enter
+the same Apptainer image used for the run, source ROS Humble and the workspace,
+then verify the resolved profile topics and frames before the typed `RUN` is
+shown. In particular require fresh `/scan`, `/odom`, `/tf`, `/amcl_pose`, and
+camera data plus unambiguous ownership of the exact resolved `/cmd_vel` topic.
+An empty graph, missing bringup, a mismatched DDS domain/model, or insufficient
+robot storage is a stop condition, not a reason to weaken a route or
+localization limit.
 
 ## 2. Seal Calibration and Hardware Inputs
 
@@ -130,6 +159,15 @@ If a directly measured, content-hashed stand model is available, add
 `--stand-model-profile <measured_stand_model.json>`; provisional CAD dimensions
 are rejected for operational pose commitment.
 
+The entrypoint is only the live-edge adapter. Coverage route reconstruction is
+isolated in `autonomous_coverage_replanning.py`; the bounded per-leg state
+machine remains in `autonomous_coverage_execution.py`; and candidate ordering,
+opposite-face fallback, facing validation, and identity/catalog publication are
+owned by `autonomous_candidate_approach.py`. The extracted modules cannot read
+ROS, prompt, launch subprocesses, or publish velocity. Fresh AMCL reads, passive
+camera capture, exact one-use mission-leg permits, and child motion remain
+explicit injected effects supplied by the entrypoint.
+
 The finite yaw on a `stand_discovery_corridor` inspection waypoint is a stopped
 endpoint requirement, not a heading constraint for the entire incoming A*
 segment. The follower keeps exact-vertex pursuit and the certified route tube
@@ -201,6 +239,14 @@ landmark. After arrival, LiDAR observation uses exact-time `odom <- base_scan`
 composed with the same frozen transform, so a later AMCL correction cannot move
 the recorded inspection geometry.
 
+If a dry child fails only because this unchanged route-specific uncertainty
+budget is exhausted, the wrapper may request a fresh no-motion AMCL update and
+repeat the complete dry admission with a new child ID. This is bounded by
+`--max-localization-readiness-retries-per-leg` (default `2`; set `0` to
+disable). It does not mint a permit, lower the sigma multiplier, shrink the
+collision allowance, or widen the `0.03 m` route tube. Any other preflight
+failure remains terminal.
+
 An RViz warning such as `Message Filter dropping message: frame 'base_scan' ...
 because the queue is full` is a display-side symptom, not a velocity command or
 the direct controller stop cause. It normally means RViz could not transform a
@@ -225,6 +271,12 @@ robot.
 Use a new `--session-id` for every command below; sessions are immutable. These
 are live-ROS checks, not simulation runs.
 
+When these commands are wrapped by `scripts/common/run_with_bundle.sh`, its
+independent topic, node, action, sensor, status, and TF captures start in
+parallel and are all joined before the child command starts. No diagnostic or
+timeout is skipped; the latency reduction is evidence-preserving and does not
+replace the child's safety preflight.
+
 First verify the exact runtime graph without authorizing motion:
 
 ```bash
@@ -241,10 +293,11 @@ python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
   --semantic-map-id <real_map_id> \
   --expected-stand-count 3 \
   --exact-inspection-point-count 2 \
+  --run-mode dry-first-leg \
   --session-id stand_explore_dry_001
 ```
 
-Without `--execute`, the script reads live AMCL, creates the center-corridor
+In `dry-first-leg` mode, the script reads live AMCL, creates the center-corridor
 coverage plan, seals the first physical route, and runs the full route/ROS
 preflight without publishing velocity. Require
 `status=first_leg_dry_run_ok` and `motion_published=false` in
@@ -267,16 +320,18 @@ python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
   --max-blockage-replans-per-leg 3 \
   --max-startup-reseals-per-leg 3 \
   --max-runtime-localization-reseals-per-leg 1 \
+  --max-localization-readiness-retries-per-leg 2 \
+  --run-mode execute-coverage-checkpoint \
   --coverage-leg-limit 1 \
   --localization-branch-proof-id <known_start_or_asymmetric_landmark_id> \
-  --session-id stand_explore_leg_001 \
-  --execute
+  --session-id stand_explore_checkpoint_001
 ```
 
 Type `RUN` only after the separate no-motion run has passed and the live
-velocity owner is unambiguous. That one mission-level confirmation covers
-routine coverage, candidate pre-approach, and opposite-face child legs only
-through separate immutable one-use permits. Every child still has to pass its
+velocity owner is unambiguous. In this checkpoint mode that one mission-level
+confirmation covers coverage child legs only, through separate immutable
+one-use permits. Candidate and opposite-face leg kinds are absent from the
+master authorization. Every child still has to pass its
 own dry-run, preflight, route/certificate binding, uncertainty budget, and live
 revalidation before atomically claiming its permit immediately before motion;
 it does not ask for another `RUN`. A direct standalone child without this
@@ -284,7 +339,14 @@ parent-issued contract remains interactive. Startup route reseals remain
 outside this scope and require fresh operator confirmation. A
 successful checkpoint writes
 `status=coverage_leg_checkpoint_complete`, the stopped LiDAR epoch, run events,
-preflight evidence, and the next viewpoint ID. If stand recovery occurred,
+preflight evidence, the next viewpoint ID, and an immutable content-hashed
+`checkpoints/coverage_leg_<count>/manifest.json`. The manifest snapshots the
+plan, progress, survey summary, registry, and latest LiDAR observer summary;
+it explicitly records `motion_authorized=false`. The mission summary keeps
+`motion_published=true` as historical evidence that the completed leg moved,
+and repeats that fact as `prior_leg_motion_published=true`; neither field is a
+permit for continuation. Require `next_required_action=resume-next-coverage-leg`
+and use a new session with fresh localization. If stand recovery occurred,
 also inspect `controller_trace.jsonl`, `adaptive_replans.jsonl`,
 `coverage/replans/`, and the suffixed
 `execution/coverage_leg_<index>_replan_<index>/` certificate bundle. A stop
@@ -320,8 +382,10 @@ and the child semantic log records permit admission. A failed gate instead recor
 recovery currently applies only to center-corridor coverage legs. Candidate
 pre-approach and opposite-face legs remain terminal on the same stop. A
 coverage child that already adopted a `transient_navigation_blockage_replanned`
-overlay also remains terminal because relaunching it would otherwise reset the
-overlay and the per-leg blockage budget.
+overlay carries a content-hashed resume-state binding through the same-target
+localization reseal; the adopted overlay, source run IDs, route hashes, and
+remaining blockage budget must all verify before a new permit can be minted.
+Missing or mismatched overlay evidence remains terminal.
 
 Immediately after ROS preflight, the runner also binds the fresh
 `map -> base_footprint` pose to the first certified route segment before it asks
@@ -332,8 +396,33 @@ pose to run a complete new A* plan, validate a new exact-start connector, seal
 a new certificate, and repeat the dry-run. The previous mission-level `RUN`
 does not authorize this replacement: type a fresh `RUN` only after inspecting
 the resealed artifact paths printed by the script. The bounded retry count is
-controlled by `--max-startup-reseals-per-leg`; dynamic stand-blockage overlays
-remain fail-closed rather than being discarded by this generic reseal.
+controlled by `--max-startup-reseals-per-leg`; any adopted dynamic blockage
+overlay must be preserved and rebound rather than discarded by this reseal.
+
+To continue exactly one remaining coverage leg from a successful checkpoint,
+use a new session ID and repeat every behavior-relevant option from the parent
+run:
+
+```bash
+python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
+  --robot-profile results/aufgabe04/real/profiles/<robot_profile>.json \
+  --camera-calibration results/aufgabe04/real/profiles/<camera_calibration>.json \
+  --physical-site docs/setups/<physical_site>.json \
+  --map maps/aufgabe03/<real_map>.yaml \
+  --semantic-map-id <real_map_id> \
+  --expected-stand-count 3 \
+  --exact-inspection-point-count 2 \
+  --run-mode resume-next-coverage-leg \
+  --resume-checkpoint results/aufgabe04/real/autonomous_exploration/<parent_session>/checkpoints/coverage_leg_001/manifest.json \
+  --localization-branch-proof-id <fresh_known_start_or_landmark_id> \
+  --session-id stand_explore_resume_002
+```
+
+The checkpoint and every referenced snapshot are re-hashed before ROS
+preflight. The new session then obtains fresh stationary AMCL/TF evidence and
+plans a new exact-start A* route to the committed next viewpoint. Old routes,
+semantic logs, authorizations, and permits are never reused. The new typed
+`RUN` authorizes that one coverage leg only.
 
 Certified discovery routes also treat every material A* bend as an explicit
 control handoff. The follower approaches that vertex to within `0.01 m`, keeps
@@ -354,9 +443,9 @@ python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
   --semantic-map-id <real_map_id> \
   --expected-stand-count 3 \
   --exact-inspection-point-count 2 \
-  --stop-after-coverage \
-  --session-id stand_explore_coverage_001 \
-  --execute
+  --run-mode execute-coverage-only \
+  --localization-branch-proof-id <known_start_or_asymmetric_landmark_id> \
+  --session-id stand_explore_coverage_001
 ```
 
 Require `status=coverage_complete`, the exact expected stand count, a
@@ -373,8 +462,9 @@ python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
   --semantic-map-id <real_map_id> \
   --expected-stand-count 3 \
   --exact-inspection-point-count 2 \
-  --session-id stand_explore_full_001 \
-  --execute
+  --run-mode execute-full \
+  --localization-branch-proof-id <known_start_or_asymmetric_landmark_id> \
+  --session-id stand_explore_full_001
 ```
 
 The complete run writes `stand_facing_catalog.json`,
