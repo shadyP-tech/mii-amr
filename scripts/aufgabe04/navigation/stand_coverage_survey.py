@@ -23,6 +23,7 @@ from scripts.aufgabe04.navigation.exact_start_connector import (
 from scripts.aufgabe04.navigation.global_planner import PlanRouteResult, plan_route
 from scripts.aufgabe04.navigation.map_io import OccupancyGrid
 from scripts.aufgabe04.navigation.models import GridCell, Pose2D
+from scripts.aufgabe04.navigation.spatial_assignment import assign_spatial_points
 from scripts.aufgabe04.perception.stand_confirmation import ConfirmedStand
 from scripts.aufgabe04.stations.models import Station, StationPose
 
@@ -409,15 +410,21 @@ def fuse_confirmed_stands(
     validate_stand_survey_registry(registry)
     _validate_nonempty_id(viewpoint_id, "viewpoint_id")
     candidates = list(registry.candidates)
-    matched_indices: set[int] = set()
-    for stand in sorted(stands, key=lambda item: (item.x_m, item.y_m, item.stand_id)):
+    ordered_stands = tuple(
+        sorted(stands, key=lambda item: (item.x_m, item.y_m, item.stand_id))
+    )
+    for stand in ordered_stands:
         _validate_confirmed_stand(stand)
-        match_index = _matching_candidate_index(
-            candidates,
-            stand,
-            selected_config.candidate_merge_distance_m,
-            excluded_indices=matched_indices,
-        )
+
+    matches, replayed_stand_indices = _candidate_matches_for_epoch(
+        candidates,
+        ordered_stands,
+        selected_config.candidate_merge_distance_m,
+    )
+    for stand_index, stand in enumerate(ordered_stands):
+        if stand_index in replayed_stand_indices:
+            continue
+        match_index = matches.get(stand_index)
         if match_index is None:
             candidate = SurveyCandidate(
                 candidate_uid=_next_candidate_uid(candidates),
@@ -436,9 +443,9 @@ def fuse_confirmed_stands(
                 viewpoint_ids=(viewpoint_id,),
                 status=STATUS_PROVISIONAL,
             )
-            candidate = _advance_candidate_status(candidate, selected_config)
-            candidates.append(candidate)
-            matched_indices.add(len(candidates) - 1)
+            candidates.append(
+                _advance_candidate_status(candidate, selected_config)
+            )
             continue
         candidates[match_index] = _merge_candidate(
             candidates[match_index],
@@ -446,7 +453,6 @@ def fuse_confirmed_stands(
             viewpoint_id=viewpoint_id,
             config=selected_config,
         )
-        matched_indices.add(match_index)
     updated = replace(
         registry,
         candidates=tuple(sorted(candidates, key=lambda item: item.candidate_uid)),
@@ -1031,33 +1037,78 @@ def _bresenham_cells(start: GridCell, end: GridCell) -> tuple[GridCell, ...]:
     return tuple(cells)
 
 
-def _matching_candidate_index(
+def _candidate_matches_for_epoch(
     candidates: list[SurveyCandidate],
-    stand: ConfirmedStand,
+    stands: tuple[ConfirmedStand, ...],
     match_radius_m: float,
-    *,
-    excluded_indices: set[int],
-) -> int | None:
-    incoming_observations = set(stand.source_observation_ids)
-    overlapping = [
-        index
-        for index, candidate in enumerate(candidates)
-        if index not in excluded_indices
-        and incoming_observations.intersection(candidate.source_observation_ids)
-    ]
-    if overlapping:
-        return min(overlapping)
-    options = [
-        (
-            math.hypot(candidate.x_m - stand.x_m, candidate.y_m - stand.y_m),
-            candidate.candidate_uid,
-            index,
+) -> tuple[dict[int, int], frozenset[int]]:
+    """Match a stopped epoch without order-dependent nearest-neighbor claims.
+
+    Previously consumed observation IDs retain their candidate identity even
+    if the candidate centroid has since moved. A complete replay is a no-op
+    and does not consume a slot in the new epoch's one-to-one assignment.
+    """
+
+    observation_owners = {
+        observation_id: candidate_index
+        for candidate_index, candidate in enumerate(candidates)
+        for observation_id in candidate.source_observation_ids
+    }
+    matches: dict[int, int] = {}
+    replayed_stand_indices: set[int] = set()
+    identity_claimed_candidates: set[int] = set()
+    for stand_index, stand in enumerate(stands):
+        owners = {
+            observation_owners[observation_id]
+            for observation_id in stand.source_observation_ids
+            if observation_id in observation_owners
+        }
+        if not owners:
+            continue
+        if len(owners) != 1:
+            raise ValueError(
+                "confirmed stand observations belong to multiple survey candidates"
+            )
+        owner = next(iter(owners))
+        new_observation_ids = set(stand.source_observation_ids).difference(
+            observation_owners
         )
-        for index, candidate in enumerate(candidates)
-        if index not in excluded_indices
-    ]
-    options = [item for item in options if item[0] <= match_radius_m]
-    return min(options)[2] if options else None
+        if not new_observation_ids:
+            replayed_stand_indices.add(stand_index)
+            continue
+        if owner in identity_claimed_candidates:
+            raise ValueError(
+                "multiple incoming stands claim the same survey candidate identity"
+            )
+        matches[stand_index] = owner
+        identity_claimed_candidates.add(owner)
+
+    available_candidate_indices = tuple(
+        index
+        for index in range(len(candidates))
+        if index not in identity_claimed_candidates
+    )
+    available_stand_indices = tuple(
+        index
+        for index in range(len(stands))
+        if index not in matches and index not in replayed_stand_indices
+    )
+    spatial_matches = assign_spatial_points(
+        tuple(
+            (candidates[index].x_m, candidates[index].y_m)
+            for index in available_candidate_indices
+        ),
+        tuple(
+            (stands[index].x_m, stands[index].y_m)
+            for index in available_stand_indices
+        ),
+        maximum_distance_m=match_radius_m,
+    )
+    for assignment in spatial_matches:
+        matches[available_stand_indices[assignment.right_index]] = (
+            available_candidate_indices[assignment.left_index]
+        )
+    return matches, frozenset(replayed_stand_indices)
 
 
 def _merge_candidate(

@@ -186,6 +186,8 @@ def record_stand_coverage_stop(
     observations_jsonl: Path | None = None,
     arrival_tolerance_m: float = 0.18,
     scan_to_base_position_offset_m: float = 0.05,
+    next_leg_start_pose: Pose2D | None = None,
+    next_leg_localization_evidence_json: Path | None = None,
 ) -> dict[str, object]:
     """Fuse one stopped observation epoch and return its persisted status.
 
@@ -199,6 +201,10 @@ def record_stand_coverage_stop(
     observer_summary_json = Path(observer_summary_json)
     if observations_jsonl is not None:
         observations_jsonl = Path(observations_jsonl)
+    if next_leg_localization_evidence_json is not None:
+        next_leg_localization_evidence_json = Path(
+            next_leg_localization_evidence_json
+        )
 
     if not math.isfinite(arrival_tolerance_m) or arrival_tolerance_m <= 0.0:
         raise ValueError("arrival tolerance must be finite and positive")
@@ -208,6 +214,29 @@ def record_stand_coverage_stop(
     ):
         raise ValueError(
             "scan-to-base position offset must be finite and non-negative"
+        )
+    if next_leg_start_pose is not None and not all(
+        math.isfinite(value)
+        for value in (
+            next_leg_start_pose.x_m,
+            next_leg_start_pose.y_m,
+            next_leg_start_pose.yaw_rad,
+        )
+    ):
+        raise ValueError("next-leg start pose must be finite")
+    if (
+        next_leg_localization_evidence_json is not None
+        and next_leg_start_pose is None
+    ):
+        raise ValueError(
+            "next-leg localization evidence requires a fresh start pose"
+        )
+    if next_leg_localization_evidence_json is not None and (
+        next_leg_localization_evidence_json.is_symlink()
+        or not next_leg_localization_evidence_json.is_file()
+    ):
+        raise ValueError(
+            "next-leg localization evidence must be a normal file"
         )
     plan_path = survey_root / "coverage_plan.json"
     progress_path = survey_root / "coverage_progress.json"
@@ -275,7 +304,7 @@ def record_stand_coverage_stop(
         plan=plan,
         progress=progress,
         registry=registry,
-        current_pose=scan_pose,
+        current_pose=next_leg_start_pose or scan_pose,
     )
     next_viewpoint_id = None
     next_route_path = None
@@ -306,6 +335,21 @@ def record_stand_coverage_stop(
             "y_m": scan_pose.y_m,
             "yaw_rad": scan_pose.yaw_rad,
         },
+        "next_leg_start_pose": {
+            "x_m": (next_leg_start_pose or scan_pose).x_m,
+            "y_m": (next_leg_start_pose or scan_pose).y_m,
+            "yaw_rad": (next_leg_start_pose or scan_pose).yaw_rad,
+        },
+        "next_leg_start_pose_source": (
+            "fresh_stationary_localization_admission"
+            if next_leg_start_pose is not None
+            else "observer_frozen_scan_pose"
+        ),
+        "next_leg_localization_evidence_json": (
+            None
+            if next_leg_localization_evidence_json is None
+            else str(next_leg_localization_evidence_json)
+        ),
         "viewpoint_error_m": viewpoint_error_m,
         "observer_summary_json": str(observer_summary_json),
         "observations_jsonl": str(observations_path),
@@ -361,6 +405,7 @@ def record_stand_coverage_stop(
         "schema_version": 1,
         "status": "coverage_stop_recorded",
         "motion_published": False,
+        "motion_scope": "stopped_observation_epoch",
         **survey_status(plan, progress, registry),
         "recorded_viewpoint_id": viewpoint.viewpoint_id,
         "epoch_json": str(epoch_path),

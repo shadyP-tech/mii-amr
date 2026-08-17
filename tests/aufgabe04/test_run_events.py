@@ -1552,6 +1552,88 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
         )
         self.assertFalse(consumed["additional_typed_run_required"])
 
+    def test_startup_reseal_permit_claim_precedes_motion_and_skips_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            permit = type(
+                "Permit",
+                (),
+                {
+                    "target_viewpoint_id": "survey_vp_001",
+                    "leg_index": 0,
+                    "reseal_index": 1,
+                    "rejected_run_id": "run-0",
+                },
+            )()
+            receipt = object()
+            receipt_path = Path(tmp) / "startup_consumption.json"
+            with patch.object(
+                run_single_station_segment,
+                "run_ros_preflight",
+                return_value=passing_preflight(),
+            ), patch.object(
+                run_single_station_segment,
+                "_validated_runtime_localization_motion_permit",
+                return_value=None,
+            ), patch.object(
+                run_single_station_segment,
+                "_validated_mission_leg_motion_permit",
+                return_value=None,
+            ), patch.object(
+                run_single_station_segment,
+                "_validated_startup_reseal_motion_permit",
+                return_value=permit,
+            ), patch.object(
+                run_single_station_segment,
+                "default_startup_reseal_motion_consumption_receipt_path",
+                return_value=receipt_path,
+            ), patch.object(
+                run_single_station_segment,
+                "consume_startup_reseal_motion_permit",
+                return_value=receipt,
+            ) as consume, patch.object(
+                run_single_station_segment,
+                "startup_reseal_motion_permit_sha256",
+                return_value="e" * 64,
+            ), patch.object(
+                run_single_station_segment,
+                "startup_reseal_motion_consumption_receipt_sha256",
+                return_value="f" * 64,
+            ), patch.object(
+                run_single_station_segment,
+                "_confirm_motion",
+                side_effect=AssertionError("startup permit must not prompt"),
+            ), patch.object(
+                run_single_station_segment,
+                "run_simple_waypoint_follower",
+                return_value=FollowerResult("completed", "", 1.0, 0.2, True),
+            ) as follower, redirect_stdout(StringIO()):
+                status = run_single_station_segment.main(self.base_args(paths))
+
+            events = read_events(paths["events"])
+            names = [event["event"] for event in events]
+
+        self.assertEqual(status, 0)
+        self.assertTrue(consume.called)
+        self.assertEqual(consume.call_args.kwargs["reseal_index"], 1)
+        self.assertTrue(follower.called)
+        self.assertLess(
+            names.index("startup_reseal_motion_permit_consumed"),
+            names.index("motion_started"),
+        )
+        consumed = next(
+            event
+            for event in events
+            if event["event"] == "startup_reseal_motion_permit_consumed"
+        )
+        self.assertEqual(
+            consumed[
+                "startup_reseal_motion_consumption_receipt_json"
+            ],
+            str(receipt_path),
+        )
+        self.assertFalse(consumed["additional_typed_run_required"])
+
     def test_runtime_permit_replay_rejects_before_motion_started(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = self.make_paths(Path(tmp))
@@ -1598,6 +1680,64 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
         self.assertFalse(follower.called)
         self.assertIn("motion_authorization_rejected", names)
         self.assertNotIn("runtime_localization_motion_permit_consumed", names)
+        self.assertNotIn("motion_started", names)
+
+    def test_startup_permit_replay_rejects_before_motion_started(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            permit = type(
+                "Permit",
+                (),
+                {
+                    "target_viewpoint_id": "survey_vp_001",
+                    "leg_index": 0,
+                    "reseal_index": 1,
+                    "rejected_run_id": "run-0",
+                },
+            )()
+            with patch.object(
+                run_single_station_segment,
+                "run_ros_preflight",
+                return_value=passing_preflight(),
+            ), patch.object(
+                run_single_station_segment,
+                "_validated_runtime_localization_motion_permit",
+                return_value=None,
+            ), patch.object(
+                run_single_station_segment,
+                "_validated_mission_leg_motion_permit",
+                return_value=None,
+            ), patch.object(
+                run_single_station_segment,
+                "_validated_startup_reseal_motion_permit",
+                return_value=permit,
+            ), patch.object(
+                run_single_station_segment,
+                "default_startup_reseal_motion_consumption_receipt_path",
+                return_value=Path(tmp) / "startup_consumption.json",
+            ), patch.object(
+                run_single_station_segment,
+                "consume_startup_reseal_motion_permit",
+                side_effect=ValueError(
+                    "startup reseal motion permit already consumed"
+                ),
+            ), patch.object(
+                run_single_station_segment,
+                "_confirm_motion",
+                side_effect=AssertionError("replayed permit must not prompt"),
+            ), patch.object(
+                run_single_station_segment,
+                "run_simple_waypoint_follower",
+            ) as follower, redirect_stdout(StringIO()):
+                status = run_single_station_segment.main(self.base_args(paths))
+
+            events = read_events(paths["events"])
+            names = [event["event"] for event in events]
+
+        self.assertEqual(status, 1)
+        self.assertFalse(follower.called)
+        self.assertIn("motion_authorization_rejected", names)
+        self.assertNotIn("startup_reseal_motion_permit_consumed", names)
         self.assertNotIn("motion_started", names)
 
     def test_real_run_passes_initial_sensor_wait_to_follower_config(self):

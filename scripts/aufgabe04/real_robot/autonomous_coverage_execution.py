@@ -39,6 +39,10 @@ from scripts.aufgabe04.real_robot.autonomous_localization_readiness import (
     evaluate_localization_readiness_retry,
     localization_readiness_suffix,
 )
+from scripts.aufgabe04.real_robot.autonomous_startup_reseal import (
+    StartupResealPermitContext,
+    write_startup_reseal_permit_summary,
+)
 
 
 DEFAULT_MAX_LOCALIZATION_READINESS_RETRIES_PER_LEG = 2
@@ -188,6 +192,7 @@ def execute_coverage_leg_with_replans(
     source_diagnostics: Path,
     mission_motion_authorization_json: Path | None = None,
     mission_leg_motion_authorization_json: Path | None = None,
+    startup_reseal_motion_authorization_json: Path | None = None,
 ) -> MotionLegOutcome:
     """Run one coverage leg with bounded, fail-closed recovery branches."""
 
@@ -205,6 +210,8 @@ def execute_coverage_leg_with_replans(
     fresh_localization_evidence_path: Path | None = None
     pending_runtime_route_seal: dict[str, object] | None = None
     pending_runtime_permit_context: RuntimeLocalizationPermitContext | None = None
+    pending_startup_recovery: dict[str, object] | None = None
+    pending_startup_permit_context: StartupResealPermitContext | None = None
     adaptive_log = session_root / "adaptive_replans.jsonl"
 
     def emit(payload: dict[str, object]) -> None:
@@ -235,6 +242,22 @@ def execute_coverage_leg_with_replans(
                         "event": "runtime_localization_reseal_failed",
                         "timestamp": effects.clock(),
                         "phase": "route_seal",
+                        "failure": str(exc),
+                        "motion_continues_authorized": False,
+                    }
+                )
+            if pending_startup_recovery is not None:
+                emit(
+                    {
+                        "schema_version": 1,
+                        "event": "startup_reseal_failed",
+                        "timestamp": effects.clock(),
+                        "phase": "route_seal",
+                        "leg_index": leg_index,
+                        "startup_reseal_index": startup_reseal_index,
+                        "rejected_run_id": pending_startup_recovery[
+                            "rejected_run_id"
+                        ],
                         "failure": str(exc),
                         "motion_continues_authorized": False,
                     }
@@ -299,6 +322,108 @@ def execute_coverage_leg_with_replans(
             )
             pending_runtime_route_seal = None
 
+        if pending_startup_recovery is not None:
+            fresh_pose = pending_startup_recovery["fresh_start_pose"]
+            assert isinstance(fresh_pose, dict)
+            try:
+                summary_path = write_startup_reseal_permit_summary(
+                    session_root
+                    / "motion_authorization"
+                    / "startup_reseals"
+                    / f"{run_id}_sealed_summary.json",
+                    leg_index=leg_index,
+                    target_viewpoint_id=target_viewpoint_id,
+                    reseal_index=startup_reseal_index,
+                    rejected_run_id=str(
+                        pending_startup_recovery["rejected_run_id"]
+                    ),
+                    fresh_start_x_m=float(fresh_pose["x_m"]),
+                    fresh_start_y_m=float(fresh_pose["y_m"]),
+                    fresh_start_yaw_rad=float(fresh_pose["yaw_rad"]),
+                    route_csv=Path(sealed["route_csv"]),
+                    diagnostics_json=Path(sealed["diagnostics_json"]),
+                    additional_typed_run_required=(
+                        startup_reseal_motion_authorization_json is None
+                    ),
+                )
+            except Exception as exc:
+                emit(
+                    {
+                        "schema_version": 1,
+                        "event": "startup_reseal_failed",
+                        "timestamp": effects.clock(),
+                        "phase": "authorization_summary",
+                        "leg_index": leg_index,
+                        "startup_reseal_index": startup_reseal_index,
+                        "rejected_run_id": pending_startup_recovery[
+                            "rejected_run_id"
+                        ],
+                        "failure": str(exc),
+                        "motion_continues_authorized": False,
+                    }
+                )
+                raise
+            if startup_reseal_motion_authorization_json is not None:
+                pending_startup_permit_context = StartupResealPermitContext(
+                    mission_authorization_json=Path(
+                        startup_reseal_motion_authorization_json
+                    ).absolute(),
+                    session_id=config.session_id,
+                    semantic_map_id=config.semantic_map_id,
+                    leg_index=leg_index,
+                    target_viewpoint_id=target_viewpoint_id,
+                    reseal_index=startup_reseal_index,
+                    max_startup_reseals_per_leg=(
+                        config.max_startup_reseals_per_leg
+                    ),
+                    rejected_run_id=str(
+                        pending_startup_recovery["rejected_run_id"]
+                    ),
+                    rejected_semantic_log_path=Path(
+                        pending_startup_recovery["rejected_semantic_log_path"]
+                    ).absolute(),
+                    startup_reseal_summary_path=summary_path,
+                    fresh_localization_evidence_path=Path(
+                        pending_startup_recovery[
+                            "fresh_localization_evidence_path"
+                        ]
+                    ).absolute(),
+                    permit_json_path=(
+                        session_root
+                        / "motion_authorization"
+                        / "startup_reseals"
+                        / f"{run_id}_permit.json"
+                    ).absolute(),
+                )
+            emit(
+                {
+                    "schema_version": 1,
+                    "event": "startup_reseal_route_sealed",
+                    "timestamp": effects.clock(),
+                    "leg_index": leg_index,
+                    "startup_reseal_index": startup_reseal_index,
+                    "replacement_run_id": run_id,
+                    "rejected_run_id": pending_startup_recovery[
+                        "rejected_run_id"
+                    ],
+                    "replacement_route_csv": sealed["route_csv"],
+                    "replacement_diagnostics_json": sealed[
+                        "diagnostics_json"
+                    ],
+                    "replacement_route_certificate_json": sealed[
+                        "route_certificate_json"
+                    ],
+                    "startup_reseal_permit_summary_json": str(summary_path),
+                    "covered_by_initial_mission_run": (
+                        pending_startup_permit_context is not None
+                    ),
+                    "additional_typed_run_required": (
+                        pending_startup_permit_context is None
+                    ),
+                    "motion_continues_authorized": False,
+                }
+            )
+
         outcome = effects.run_motion_leg(
             profile=profile,
             sealed=sealed,
@@ -326,6 +451,7 @@ def execute_coverage_leg_with_replans(
             uncertainty_sigma_multiplier=config.uncertainty_sigma_multiplier,
             localization_branch_proof_id=localization_branch_proof_id,
             runtime_localization_permit_context=pending_runtime_permit_context,
+            startup_reseal_permit_context=pending_startup_permit_context,
             mission_leg_permit_context=(
                 None
                 if (
@@ -364,6 +490,25 @@ def execute_coverage_leg_with_replans(
                     ),
                     "runtime_localization_motion_permit_sha256": (
                         outcome.motion_authorization_permit_sha256
+                    ),
+                    "covered_by_initial_mission_run": True,
+                    "additional_typed_run_required": False,
+                }
+            )
+        if outcome.startup_reseal_motion_permit_path is not None:
+            emit(
+                {
+                    "schema_version": 1,
+                    "event": "startup_reseal_motion_permit_issued",
+                    "timestamp": effects.clock(),
+                    "leg_index": leg_index,
+                    "run_id": outcome.run_id,
+                    "startup_reseal_index": startup_reseal_index,
+                    "startup_reseal_motion_permit_json": str(
+                        outcome.startup_reseal_motion_permit_path
+                    ),
+                    "startup_reseal_motion_permit_sha256": (
+                        outcome.startup_reseal_motion_permit_sha256
                     ),
                     "covered_by_initial_mission_run": True,
                     "additional_typed_run_required": False,
@@ -425,6 +570,8 @@ def execute_coverage_leg_with_replans(
             continue
 
         pending_runtime_permit_context = None
+        pending_startup_permit_context = None
+        pending_startup_recovery = None
         if replanning.is_resealable_startup_mismatch(outcome):
             if startup_reseal_index >= config.max_startup_reseals_per_leg:
                 raise RuntimeError(
@@ -434,6 +581,78 @@ def execute_coverage_leg_with_replans(
             startup_reseal_index += 1
             localization_readiness_retry_index = 0
             rejected_pose = replanning.startup_reseal_pose(outcome)
+            fresh_localization_evidence_path = (
+                session_root
+                / "preflight"
+                / "startup_reseals"
+                / (
+                    f"coverage_leg_{leg_index:03d}_startup_reseal_"
+                    f"{startup_reseal_index:03d}.json"
+                )
+            )
+            startup_event_base = {
+                "leg_index": leg_index,
+                "startup_reseal_index": startup_reseal_index,
+                "target_viewpoint_id": target_viewpoint_id,
+                "rejected_run_id": outcome.run_id,
+                "rejected_stop_details": outcome.stop_details,
+                "rejected_route_pose": {
+                    "x_m": rejected_pose.x_m,
+                    "y_m": rejected_pose.y_m,
+                    "yaw_rad": rejected_pose.yaw_rad,
+                },
+                "fresh_localization_evidence_json": str(
+                    fresh_localization_evidence_path
+                ),
+                "covered_by_initial_mission_run": (
+                    startup_reseal_motion_authorization_json is not None
+                ),
+                "additional_typed_run_required": (
+                    startup_reseal_motion_authorization_json is None
+                ),
+                "motion_continues_authorized": False,
+            }
+            emit(
+                {
+                    **startup_event_base,
+                    "schema_version": 1,
+                    "event": "startup_reseal_started",
+                    "timestamp": effects.clock(),
+                    "source_rejection_published_motion": False,
+                }
+            )
+            try:
+                admitted_pose = effects.admit_preplanning_localization(
+                    config.runtime,
+                    session_root,
+                    evidence_path=fresh_localization_evidence_path,
+                )
+            except Exception as exc:
+                emit(
+                    {
+                        **startup_event_base,
+                        "schema_version": 1,
+                        "event": "startup_reseal_failed",
+                        "timestamp": effects.clock(),
+                        "phase": "stationary_localization_admission",
+                        "failure": str(exc),
+                    }
+                )
+                raise
+            fresh_start_pose = {
+                "x_m": admitted_pose.x_m,
+                "y_m": admitted_pose.y_m,
+                "yaw_rad": admitted_pose.yaw_rad,
+            }
+            emit(
+                {
+                    **startup_event_base,
+                    "schema_version": 1,
+                    "event": "startup_localization_admitted",
+                    "timestamp": effects.clock(),
+                    "fresh_start_pose": fresh_start_pose,
+                }
+            )
             reseal_root = (
                 survey_root
                 / "startup_reseals"
@@ -449,7 +668,7 @@ def execute_coverage_leg_with_replans(
                     survey_root=survey_root,
                     plan_path=plan_path,
                     expected_target_viewpoint_id=target_viewpoint_id,
-                    current_pose=rejected_pose,
+                    current_pose=admitted_pose,
                     rejected_outcome=outcome,
                     reseal_index=startup_reseal_index,
                     output_dir=reseal_root,
@@ -471,7 +690,7 @@ def execute_coverage_leg_with_replans(
                     semantic_map_id=config.semantic_map_id,
                     survey_root=survey_root,
                     target_viewpoint_id=target_viewpoint_id,
-                    current_pose=rejected_pose,
+                    current_pose=admitted_pose,
                     rejected_outcome=outcome,
                     output_dir=reseal_root,
                     robot_radius_m=config.robot_radius_m,
@@ -513,9 +732,25 @@ def execute_coverage_leg_with_replans(
                     "transient_overlay_resume_state_sha256": (
                         transient_overlay_resume_state_digest
                     ),
-                    "fresh_confirmation_required": True,
+                    "fresh_confirmation_required": (
+                        startup_reseal_motion_authorization_json is None
+                    ),
+                    "covered_by_initial_mission_run": (
+                        startup_reseal_motion_authorization_json is not None
+                    ),
+                    "additional_typed_run_required": (
+                        startup_reseal_motion_authorization_json is None
+                    ),
                 }
             )
+            pending_startup_recovery = {
+                "rejected_run_id": outcome.run_id,
+                "rejected_semantic_log_path": outcome.semantic_log_path,
+                "fresh_start_pose": fresh_start_pose,
+                "fresh_localization_evidence_path": (
+                    fresh_localization_evidence_path
+                ),
+            }
             source_route = Path(replanned["route_csv"])
             source_diagnostics = Path(replanned["diagnostics_json"])
             fresh_confirmation_reason = "startup"

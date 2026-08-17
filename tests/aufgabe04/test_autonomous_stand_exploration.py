@@ -55,6 +55,14 @@ from scripts.aufgabe04.navigation.stand_discovery_route import (
     seal_stand_discovery_route,
     validate_stand_discovery_route_binding,
 )
+from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
+    STARTUP_RESEAL_MOTION_AUTHORIZATION_SCOPE,
+    STARTUP_RESEAL_RECOVERY_KIND,
+    STARTUP_RESEAL_RUN_CONFIRMATION,
+    StartupResealMotionAuthorization,
+    load_startup_reseal_motion_permit,
+    write_startup_reseal_motion_authorization,
+)
 from scripts.aufgabe04.navigation.transient_overlay_resume_state import (
     TransientOverlayResumeState,
 )
@@ -72,6 +80,7 @@ from scripts.aufgabe04.real_robot.run_autonomous_stand_exploration import (
     MotionLegOutcome,
     MissionLegPermitContext,
     RuntimeLocalizationPermitContext,
+    StartupResealPermitContext,
     _admit_preplanning_localization,
     _capture_lidar_epoch,
     _execute_coverage_leg_with_replans,
@@ -80,6 +89,9 @@ from scripts.aufgabe04.real_robot.run_autonomous_stand_exploration import (
     _run_motion_leg,
     build_parser,
     candidate_snapshot_from_registry,
+)
+from scripts.aufgabe04.real_robot.autonomous_startup_reseal import (
+    write_startup_reseal_permit_summary,
 )
 from scripts.aufgabe04.real_robot.autonomous_candidate_approach import (
     CandidateMotionLegRequest,
@@ -112,6 +124,48 @@ def _runtime_localization_stop_details():
             "reason": "map_from_odom_yaw_drift",
             "fail_closed": True,
         },
+    }
+
+
+def _stationary_localization_payload(
+    x_m: float,
+    y_m: float,
+    yaw_rad: float,
+) -> dict[str, object]:
+    pose = {"x_m": x_m, "y_m": y_m, "yaw_rad": yaw_rad}
+    return {
+        "ok": True,
+        "failures": [],
+        "observations": [
+            {
+                "name": "stationary AMCL stability",
+                "ok": True,
+                "detail": "samples=2/2",
+                "data": {
+                    "sample_count": 2,
+                    "required_sample_count": 2,
+                    "service_request_count": 2,
+                    "position_covariance_complete": True,
+                    "yaw_covariance_complete": True,
+                },
+            }
+        ],
+        "runtime_config": {
+            "localization_source": "amcl",
+            "use_sim_time": False,
+        },
+        "route_pose": {
+            "frame_id": "map",
+            "child_frame_id": "base_footprint",
+            **pose,
+        },
+        "odom_pose": None,
+        "map_from_odom": None,
+        "stationary_amcl_samples": [
+            {**pose, "covariance": [0.0] * 36},
+            {**pose, "covariance": [0.0] * 36},
+        ],
+        "stationary_map_from_odom_samples": [],
     }
 
 
@@ -780,12 +834,64 @@ class AutonomousStandExplorationTest(unittest.TestCase):
 
         self.assertEqual(resolved.coverage_leg_limit, 1)
         self.assertEqual(args.exact_inspection_point_count, 2)
+        self.assertIsNone(args.expected_stand_count)
         self.assertEqual(args.max_startup_reseals_per_leg, 3)
         self.assertEqual(args.max_runtime_localization_reseals_per_leg, 1)
         self.assertEqual(args.max_localization_readiness_retries_per_leg, 2)
         self.assertEqual(args.uncertainty_sigma_multiplier, 2.0)
         self.assertFalse(resolved.stop_after_coverage)
         self.assertTrue(resolved.execute)
+
+    def test_site_count_mismatch_fails_before_session_and_run_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_root = root / "runs"
+            with (
+                patch.object(
+                    autonomous_wrapper,
+                    "load_real_robot_profile",
+                    return_value=SimpleNamespace(),
+                ),
+                patch.object(
+                    autonomous_wrapper,
+                    "load_camera_calibration",
+                    return_value=SimpleNamespace(),
+                ),
+                patch.object(
+                    autonomous_wrapper,
+                    "validate_physical_site_contract",
+                    side_effect=ValueError(
+                        "requested expected stand count differs from the "
+                        "physical-site contract: requested=3 canonical=5"
+                    ),
+                ),
+                patch("builtins.input") as run_prompt,
+                redirect_stderr(StringIO()),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                autonomous_wrapper.main(
+                    [
+                        "--robot-profile",
+                        str(root / "robot.json"),
+                        "--camera-calibration",
+                        str(root / "camera.json"),
+                        "--physical-site",
+                        str(root / "site.json"),
+                        "--output-root",
+                        str(output_root),
+                        "--session-id",
+                        "site_count_contract_execute_full",
+                        "--expected-stand-count",
+                        "3",
+                        "--localization-branch-proof-id",
+                        "known_start_marker_20260817",
+                        "--execute",
+                    ]
+                )
+
+            self.assertEqual(raised.exception.code, 2)
+            run_prompt.assert_not_called()
+            self.assertFalse(output_root.exists())
 
     def test_uncertainty_sigma_multiplier_must_be_finite_and_positive(self):
         for invalid in ("0", "-1", "nan", "inf"):
@@ -824,11 +930,11 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         output_root = root / "runs"
         session_root = output_root / session_id
         plan = SimpleNamespace(
-            viewpoints=(SimpleNamespace(),),
+            viewpoints=(SimpleNamespace(viewpoint_id="survey_vp_001"),),
             map_bundle_sha256="a" * 64,
         )
         registry = SimpleNamespace()
-        progress = SimpleNamespace()
+        progress = SimpleNamespace(visited_viewpoint_ids=())
         for fixture_name in ("robot.json", "camera.json", "site.json"):
             (root / fixture_name).write_text("{}\n")
         profile = SimpleNamespace(
@@ -880,6 +986,16 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 autonomous_wrapper,
                 "load_camera_calibration",
                 return_value=SimpleNamespace(),
+            ),
+            patch.object(
+                autonomous_wrapper,
+                "validate_physical_site_contract",
+                return_value=SimpleNamespace(
+                    expected_stand_count=1,
+                    physical_site_path=(root / "site.json"),
+                    map_yaml_path=(root / "map.yaml"),
+                    map_bundle=SimpleNamespace(bundle_sha256="a" * 64),
+                ),
             ),
             patch.object(autonomous_wrapper, "_validate_inputs"),
             patch.object(
@@ -946,7 +1062,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 "evaluate_coverage_candidate_admission",
                 side_effect=admission_error,
             ) as evaluate_admission,
-            patch("builtins.input", return_value="RUN"),
+            patch("builtins.input", return_value="RUN") as run_prompt,
             patch("sys.stderr", new=StringIO()),
             redirect_stdout(StringIO()),
             self.assertRaises(SystemExit) as raised,
@@ -972,6 +1088,9 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                     "--execute",
                 ]
             )
+        run_prompt.assert_called_once_with(
+            "Type RUN to authorize the autonomous exploration mission: "
+        )
         return session_root, raised.exception.code, record_stop, evaluate_admission
 
     def test_final_coverage_leg_limit_reaches_candidate_admission_gate(self):
@@ -990,6 +1109,11 @@ class AutonomousStandExplorationTest(unittest.TestCase):
 
             self.assertEqual(exit_code, 2)
             record_stop.assert_called_once()
+            fusion_call = record_stop.call_args.kwargs
+            self.assertIsNone(fusion_call["next_leg_start_pose"])
+            self.assertIsNone(
+                fusion_call["next_leg_localization_evidence_json"]
+            )
             evaluate_admission.assert_called_once()
             self.assertEqual(failure["reason"], reason)
             self.assertFalse(failure["motion_continues_authorized"])
@@ -1041,6 +1165,10 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         self.assertIn("--coverage-transient-replan-leg-index", command)
         self.assertEqual(
             command[command.index("--coverage-transient-replan-leg-index") + 1],
+            "2",
+        )
+        self.assertEqual(
+            command[command.index("--leg-index") + 1],
             "2",
         )
         self.assertEqual(
@@ -1300,6 +1428,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 map=MAP,
                 semantic_map_id="arena_1p898x3p9_auto",
             )
+            admitted_pose = Pose2D(-0.49, -0.61, 1.69)
             sealed = {
                 "route_csv": str(source_route),
                 "diagnostics_json": str(source_diagnostics),
@@ -1322,6 +1451,10 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                     "summary_json": str(root / "reseal_summary.json"),
                 },
             ) as replan, patch(
+                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "_admit_preplanning_localization",
+                return_value=admitted_pose,
+            ) as admit, patch(
                 "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
                 "_capture_lidar_epoch"
             ) as observe:
@@ -1351,6 +1484,10 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 replacement_route,
             )
             replan.assert_called_once()
+            self.assertEqual(
+                replan.call_args.kwargs["current_pose"], admitted_pose
+            )
+            admit.assert_called_once()
             observe.assert_not_called()
             adaptive = [
                 json.loads(line)
@@ -1359,9 +1496,15 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 .splitlines()
             ]
             self.assertEqual(
-                adaptive[-1]["event"], "startup_pose_route_resealed"
+                [event["event"] for event in adaptive],
+                [
+                    "startup_reseal_started",
+                    "startup_localization_admitted",
+                    "startup_pose_route_resealed",
+                    "startup_reseal_route_sealed",
+                ],
             )
-            self.assertTrue(adaptive[-1]["fresh_confirmation_required"])
+            self.assertTrue(adaptive[2]["fresh_confirmation_required"])
 
     def test_runtime_localization_reseal_replans_from_fresh_admitted_pose(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1986,7 +2129,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             self.assertTrue(is_resealable_startup_mismatch(outcome))
             self.assertEqual(run.call_count, 1)
 
-    def test_resealed_route_refusal_never_launches_execution(self):
+    def test_resealed_route_without_permit_stops_without_reprompting(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             sealed = {
@@ -2000,12 +2143,15 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
                 "subprocess.run",
                 return_value=SimpleNamespace(returncode=0),
-            ) as run, patch("builtins.input", return_value="NO"), redirect_stdout(
-                output
-            ):
+            ) as run, patch(
+                "builtins.input",
+                side_effect=AssertionError(
+                    "autonomous reseal must not request another RUN"
+                ),
+            ), redirect_stdout(output):
                 with self.assertRaisesRegex(
                     RuntimeError,
-                    "operator did not authorize resealed route",
+                    "lacks an exact runtime_localization recovery permit",
                 ):
                     _run_motion_leg(
                         profile=self._profile(),
@@ -2216,9 +2362,14 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 (route, "route\n"),
                 (diagnostics, "{}\n"),
                 (map_certificate, "{}\n"),
-                (fresh_localization, "{}\n"),
             ):
                 path.write_text(payload)
+            fresh_localization.write_text(
+                json.dumps(
+                    _stationary_localization_payload(-0.48, -0.60, 1.69)
+                )
+                + "\n"
+            )
             master_path = (
                 session_root
                 / "motion_authorization"
@@ -2354,6 +2505,203 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                     "2.25",
                 )
             self.assertNotIn("input", run.call_args_list[1].kwargs)
+
+    def test_startup_reseal_uses_dedicated_permit_without_parent_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_root = root / "session"
+            rejected_run_id = "mission_coverage_000"
+            run_id = f"{rejected_run_id}_startup_reseal_001"
+            route = root / "route.csv"
+            diagnostics = root / "diagnostics.json"
+            map_certificate = root / "map_certificate.json"
+            fresh_localization = root / "fresh_localization.json"
+            for path, payload in (
+                (route, "route\n"),
+                (diagnostics, "{}\n"),
+                (map_certificate, "{}\n"),
+            ):
+                path.write_text(payload)
+            fresh_localization.write_text(
+                json.dumps(
+                    _stationary_localization_payload(-0.48, -0.60, 1.69)
+                )
+                + "\n"
+            )
+            rejected_log = root / "rejected.jsonl"
+            rejected_log.write_text(
+                json.dumps(
+                    {
+                        "event": "startup_route_rejected",
+                        "run_id": rejected_run_id,
+                        "leg_index": 0,
+                        "status": "stopped",
+                        "stop_reason": (
+                            "pose outside certified startup segment"
+                        ),
+                        "motion_published": False,
+                        "stop_details": {
+                            "reason": (
+                                "pose outside certified startup segment"
+                            ),
+                            "source": "execution_route_certificate",
+                            "phase": "before_motion_confirmation",
+                            "fail_closed": True,
+                        },
+                    }
+                )
+                + "\n"
+            )
+            master_path = (
+                session_root
+                / "motion_authorization"
+                / "startup_reseal_motion_authorization.json"
+            ).absolute()
+            write_startup_reseal_motion_authorization(
+                master_path,
+                StartupResealMotionAuthorization(
+                    session_id="mission",
+                    robot_id="turtlebot1",
+                    namespace="",
+                    cmd_vel_topic="/cmd_vel",
+                    semantic_map_id="arena_1p898x3p9_auto",
+                    localization_branch_proof_id=(
+                        "known_start_marker_20260807"
+                    ),
+                    max_startup_reseals_per_leg=2,
+                    scope_text=STARTUP_RESEAL_MOTION_AUTHORIZATION_SCOPE,
+                    operator_confirmation=STARTUP_RESEAL_RUN_CONFIRMATION,
+                    allowed_recovery_kind=STARTUP_RESEAL_RECOVERY_KIND,
+                ),
+            )
+            summary_path = write_startup_reseal_permit_summary(
+                root / "startup_summary.json",
+                leg_index=0,
+                target_viewpoint_id="survey_vp_001",
+                reseal_index=1,
+                rejected_run_id=rejected_run_id,
+                fresh_start_x_m=-0.48,
+                fresh_start_y_m=-0.60,
+                fresh_start_yaw_rad=1.69,
+                route_csv=route,
+                diagnostics_json=diagnostics,
+            )
+            permit_path = (
+                session_root
+                / "motion_authorization"
+                / "startup_reseals"
+                / f"{run_id}_permit.json"
+            ).absolute()
+            context = StartupResealPermitContext(
+                mission_authorization_json=master_path,
+                session_id="mission",
+                semantic_map_id="arena_1p898x3p9_auto",
+                leg_index=0,
+                target_viewpoint_id="survey_vp_001",
+                reseal_index=1,
+                max_startup_reseals_per_leg=2,
+                rejected_run_id=rejected_run_id,
+                rejected_semantic_log_path=rejected_log,
+                startup_reseal_summary_path=summary_path,
+                fresh_localization_evidence_path=fresh_localization,
+                permit_json_path=permit_path,
+            )
+            sealed = {
+                "route_csv": str(route),
+                "diagnostics_json": str(diagnostics),
+                "route_certificate_json": str(map_certificate),
+            }
+            commands = []
+
+            def run_process(command, **_kwargs):
+                commands.append(command)
+                if "--dry-run" in command:
+                    for flag in (
+                        "--preflight-json",
+                        "--odom-execution-certificate-json",
+                        "--uncertainty-budget-json",
+                    ):
+                        artifact = Path(command[command.index(flag) + 1])
+                        artifact.parent.mkdir(parents=True, exist_ok=True)
+                        artifact.write_text("{}\n")
+                else:
+                    event_path = (
+                        session_root / "run_events" / f"{run_id}.jsonl"
+                    )
+                    event_path.parent.mkdir(parents=True, exist_ok=True)
+                    event_path.write_text(
+                        json.dumps(
+                            {
+                                "event": "motion_completed",
+                                "run_id": run_id,
+                                "status": "completed",
+                                "stop_reason": "",
+                                "stop_details": {},
+                                "motion_published": True,
+                            }
+                        )
+                        + "\n"
+                    )
+                return SimpleNamespace(returncode=0)
+
+            with patch(
+                "scripts.aufgabe04.real_robot."
+                "run_autonomous_stand_exploration.subprocess.run",
+                side_effect=run_process,
+            ) as run, patch(
+                "builtins.input",
+                side_effect=AssertionError(
+                    "startup reseal permit must not prompt the parent"
+                ),
+            ):
+                outcome = _run_motion_leg(
+                    profile=self._profile(),
+                    sealed=sealed,
+                    run_id=run_id,
+                    session_root=session_root,
+                    execute=True,
+                    coverage_plan=root / "coverage_plan.json",
+                    coverage_transient_replan={
+                        "survey_root": root / "survey",
+                        "session_root": session_root,
+                        "map_yaml": MAP,
+                        "semantic_map_id": "arena_1p898x3p9_auto",
+                        "target_viewpoint_id": "survey_vp_001",
+                        "robot_radius_m": 0.105,
+                        "max_replans": 3,
+                        "leg_index": 0,
+                    },
+                    require_fresh_confirmation=True,
+                    fresh_confirmation_reason="startup",
+                    fresh_localization_evidence_path=fresh_localization,
+                    uncertainty_map_yaml=MAP,
+                    uncertainty_sigma_multiplier=2.0,
+                    localization_branch_proof_id=(
+                        "known_start_marker_20260807"
+                    ),
+                    startup_reseal_permit_context=context,
+                )
+
+            permit = load_startup_reseal_motion_permit(permit_path)
+            self.assertEqual(outcome.status, "completed")
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual(
+                outcome.startup_reseal_motion_permit_path,
+                permit_path,
+            )
+            self.assertTrue(outcome.startup_reseal_motion_permit_sha256)
+            self.assertEqual(permit.run_id, run_id)
+            self.assertEqual(permit.rejected_run_id, rejected_run_id)
+            self.assertFalse(permit.additional_typed_run_required)
+            self.assertIn(
+                "--startup-reseal-motion-permit-json",
+                commands[1],
+            )
+            self.assertNotIn("--mission-leg-motion-permit-json", commands[1])
+            self.assertNotIn(
+                "--runtime-localization-motion-permit-json",
+                commands[1],
+            )
 
     def test_startup_reseal_replans_full_a_star_leg_from_rejected_pose(self):
         with tempfile.TemporaryDirectory() as tmp:

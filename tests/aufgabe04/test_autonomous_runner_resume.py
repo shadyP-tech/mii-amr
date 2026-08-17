@@ -103,8 +103,13 @@ class AutonomousRunnerResumeTest(unittest.TestCase):
                 ) as admit_localization,
                 patch.object(
                     runner,
-                    "load_occupancy_grid_with_bundle",
-                    return_value=(object(), SimpleNamespace(bundle_sha256="d" * 64)),
+                    "validate_physical_site_contract",
+                    return_value=SimpleNamespace(
+                        expected_stand_count=5,
+                        physical_site_path=(root / "site.json").resolve(),
+                        map_yaml_path=(root / "map.yaml").resolve(),
+                        map_bundle=SimpleNamespace(bundle_sha256="d" * 64),
+                    ),
                 ),
                 patch.object(
                     runner,

@@ -435,6 +435,81 @@ class StandSurveyRegistryTest(unittest.TestCase):
         self.assertEqual(replayed, registry)
         self.assertEqual(replayed.candidates[0].status, STATUS_PROVISIONAL)
 
+    def test_epoch_uses_global_assignment_when_greedy_would_lose_match(self):
+        survey = plan()
+        registry = fuse_confirmed_stands(
+            new_stand_survey_registry(survey),
+            (
+                stand(
+                    stand_id="first_a",
+                    x_m=0.0,
+                    y_m=0.0,
+                    observation_prefix="first_a",
+                    timestamp=10.0,
+                ),
+                stand(
+                    stand_id="first_b",
+                    x_m=0.20,
+                    y_m=0.0,
+                    observation_prefix="first_b",
+                    timestamp=10.0,
+                ),
+            ),
+            viewpoint_id="survey_vp_001",
+            config=survey.config,
+        )
+        original_uids = tuple(
+            candidate.candidate_uid for candidate in registry.candidates
+        )
+        contested = stand(
+            stand_id="contested",
+            x_m=0.08,
+            y_m=0.0,
+            observation_prefix="contested",
+            timestamp=20.0,
+        )
+        first_only = stand(
+            stand_id="first_only",
+            x_m=0.09,
+            y_m=-0.15,
+            observation_prefix="first_only",
+            timestamp=20.0,
+        )
+
+        updated = fuse_confirmed_stands(
+            registry,
+            (contested, first_only),
+            viewpoint_id="survey_vp_002",
+            config=survey.config,
+        )
+        reversed_input = fuse_confirmed_stands(
+            registry,
+            (first_only, contested),
+            viewpoint_id="survey_vp_002",
+            config=survey.config,
+        )
+
+        self.assertEqual(updated, reversed_input)
+        self.assertEqual(len(updated.candidates), 2)
+        self.assertEqual(
+            tuple(candidate.candidate_uid for candidate in updated.candidates),
+            original_uids,
+        )
+        self.assertIn(
+            "first_only_0",
+            updated.candidates[0].source_observation_ids,
+        )
+        self.assertIn(
+            "contested_0",
+            updated.candidates[1].source_observation_ids,
+        )
+        self.assertTrue(
+            all(
+                candidate.status == STATUS_PENDING_CAMERA
+                for candidate in updated.candidates
+            )
+        )
+
     def test_camera_decisions_drive_exploration_completion(self):
         survey = plan(
             CoverageSurveyConfig(

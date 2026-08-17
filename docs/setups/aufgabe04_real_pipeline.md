@@ -24,6 +24,9 @@ loaded logistics mission or a two-robot run; see
 | `navigation/runtime_motion_consumption.py` | Atomically consume that exact child permit once and reject replay before follower motion | None |
 | `navigation/mission_leg_motion_permit.py` | Bind one mission-level `RUN` to separately sealed routine coverage, candidate, and opposite-face child legs | None |
 | `navigation/mission_leg_motion_consumption.py` | Atomically consume each exact routine-leg permit once immediately before motion | None |
+| `navigation/startup_reseal_motion_authorization.py` | Bind the mission-level `RUN` to an exact bounded same-target pre-motion recovery and its fresh artifacts | None |
+| `navigation/startup_reseal_motion_consumption.py` | Atomically consume each startup-reseal permit once immediately before motion | None |
+| `navigation/spatial_assignment.py` | Globally associate stopped-epoch detections with existing candidates by cardinality and total distance | None |
 | `navigation/coverage_candidate_admission.py` | Fail closed between LiDAR coverage and candidate approaches unless coverage and multi-view candidate evidence are complete | None |
 | `real_robot/autonomous_modes.py` | Resolve one explicit workflow mode and authorization scope; reject contradictory legacy flags, unsafe session IDs, and misleading session labels | None |
 | `real_robot/autonomous_child_runner.py` | Build child-runner and bundle argv, and parse one unambiguous append-only terminal outcome | None |
@@ -31,6 +34,8 @@ loaded logistics mission or a two-robot run; see
 | `real_robot/autonomous_session_manifest.py` | Snapshot and content-hash resumable coverage checkpoints; manifests explicitly authorize no motion | None |
 | `real_robot/autonomous_checkpoint_resume.py` | Re-hash, restore, and freshly replan one next coverage leg in a new session | None |
 | `real_robot/autonomous_coverage_replanning.py` | Rebuild a coverage leg from admitted startup/runtime-localization evidence while preserving bounded transient-overlay continuity | None; offline route/artifact reconstruction only |
+| `real_robot/autonomous_startup_reseal.py` | Adapt the startup-reseal safety contract to autonomous coverage execution | None; ROS-free permit construction only |
+| `real_robot/physical_site_contract.py` | Bind site, map bytes, robot profile, and canonical stand count before planning | None |
 | `real_robot/autonomous_coverage_execution.py` | Run the bounded per-leg coverage retry/reseal state machine behind injected ROS and child-process effects | None; delegates any authorized motion to the existing child runner |
 | `real_robot/autonomous_coverage_mission.py` | Commit each completed coverage leg as one ordered observe/fuse/checkpoint transaction and gate candidate materialization | None; cannot execute a leg itself |
 | `real_robot/autonomous_candidate_approach.py` | Order frozen candidates, orchestrate sealed pre-approach/opposite-face inspection, and publish validated identity/facing artifacts behind injected live effects | None; cannot sample ROS, prompt, launch a process, or publish motion itself |
@@ -286,13 +291,12 @@ ros2 topic echo --once /robot1/camera/camera_info
 ros2 topic info /robot1/cmd_vel -v
 
 python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
-  --robot-profile results/aufgabe04/real/profiles/<robot_profile>.json \
+  --robot-profile configs/aufgabe04/real_robot_profiles/turtlebot1_unloaded_20260817.json \
   --camera-calibration results/aufgabe04/real/profiles/<camera_calibration>.json \
-  --physical-site docs/setups/<physical_site>.json \
-  --map maps/aufgabe03/<real_map>.yaml \
-  --semantic-map-id <real_map_id> \
-  --expected-stand-count 3 \
-  --exact-inspection-point-count 2 \
+  --physical-site docs/setups/aufgabe04_lab_20260817.json \
+  --map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
+  --semantic-map-id arena_1p898x3p9_auto \
+  --expected-stand-count 5 \
   --run-mode dry-first-leg \
   --session-id stand_explore_dry_001
 ```
@@ -311,12 +315,12 @@ authorize only one center-corridor leg:
 
 ```bash
 python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
-  --robot-profile results/aufgabe04/real/profiles/<robot_profile>.json \
+  --robot-profile configs/aufgabe04/real_robot_profiles/turtlebot1_unloaded_20260817.json \
   --camera-calibration results/aufgabe04/real/profiles/<camera_calibration>.json \
-  --physical-site docs/setups/<physical_site>.json \
-  --map maps/aufgabe03/<real_map>.yaml \
-  --semantic-map-id <real_map_id> \
-  --expected-stand-count 3 \
+  --physical-site docs/setups/aufgabe04_lab_20260817.json \
+  --map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
+  --semantic-map-id arena_1p898x3p9_auto \
+  --expected-stand-count 5 \
   --max-blockage-replans-per-leg 3 \
   --max-startup-reseals-per-leg 3 \
   --max-runtime-localization-reseals-per-leg 1 \
@@ -327,6 +331,13 @@ python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
   --session-id stand_explore_checkpoint_001
 ```
 
+The physical-site descriptor is the canonical source of the five-stand count.
+`--expected-stand-count 5` is an optional assertion: omitting it derives five,
+while any other value fails before planning, session creation, or a `RUN`
+prompt. The robust workflow lets stop spacing determine the full centerline
+viewpoint set. `--exact-inspection-point-count 2` is diagnostic-only and must
+not be copied into the five-stand full-exploration command.
+
 Type `RUN` only after the separate no-motion run has passed and the live
 velocity owner is unambiguous. In this checkpoint mode that one mission-level
 confirmation covers coverage child legs only, through separate immutable
@@ -335,9 +346,12 @@ master authorization. Every child still has to pass its
 own dry-run, preflight, route/certificate binding, uncertainty budget, and live
 revalidation before atomically claiming its permit immediately before motion;
 it does not ask for another `RUN`. A direct standalone child without this
-parent-issued contract remains interactive. Startup route reseals remain
-outside this scope and require fresh operator confirmation. A
-successful checkpoint writes
+parent-issued contract remains interactive. An eligible startup mismatch also
+does not ask again: it first admits fresh stationary AMCL/TF, reconstructs the
+same target, repeats the dry/live gates, and then uses a separate bounded
+startup-reseal authorization and exact one-use recovery permit. Missing,
+tampered, stale, target-changed, over-budget, or replayed evidence stops instead
+of prompting or moving. A successful checkpoint writes
 `status=coverage_leg_checkpoint_complete`, the stopped LiDAR epoch, run events,
 preflight evidence, the next viewpoint ID, and an immutable content-hashed
 `checkpoints/coverage_leg_<count>/manifest.json`. The manifest snapshots the
@@ -391,11 +405,14 @@ Immediately after ROS preflight, the runner also binds the fresh
 `map -> base_footprint` pose to the first certified route segment before it asks
 for motion confirmation. If AMCL has moved outside the unchanged `0.03 m`
 startup tube, no velocity is published and the stale certificate is rejected.
-For an ordinary coverage leg, the autonomous wrapper may use that rejected
-pose to run a complete new A* plan, validate a new exact-start connector, seal
-a new certificate, and repeat the dry-run. The previous mission-level `RUN`
-does not authorize this replacement: type a fresh `RUN` only after inspecting
-the resealed artifact paths printed by the script. The bounded retry count is
+For an ordinary coverage leg, the autonomous wrapper samples a fresh
+stationary pose, runs a complete same-target A* plan, validates a new
+exact-start connector, seals a new certificate, and repeats the dry-run. The
+original mission-level `RUN` covers the replacement only through the dedicated
+startup master plus an exact permit binding the rejected no-motion log, fresh
+localization, replacement route/certificate, and dry artifacts. The child
+claims that permit once after every live gate and immediately before
+`motion_started`; no second prompt occurs. The bounded retry count is
 controlled by `--max-startup-reseals-per-leg`; any adopted dynamic blockage
 overlay must be preserved and rebound rather than discarded by this reseal.
 
@@ -405,13 +422,12 @@ run:
 
 ```bash
 python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
-  --robot-profile results/aufgabe04/real/profiles/<robot_profile>.json \
+  --robot-profile configs/aufgabe04/real_robot_profiles/turtlebot1_unloaded_20260817.json \
   --camera-calibration results/aufgabe04/real/profiles/<camera_calibration>.json \
-  --physical-site docs/setups/<physical_site>.json \
-  --map maps/aufgabe03/<real_map>.yaml \
-  --semantic-map-id <real_map_id> \
-  --expected-stand-count 3 \
-  --exact-inspection-point-count 2 \
+  --physical-site docs/setups/aufgabe04_lab_20260817.json \
+  --map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
+  --semantic-map-id arena_1p898x3p9_auto \
+  --expected-stand-count 5 \
   --run-mode resume-next-coverage-leg \
   --resume-checkpoint results/aufgabe04/real/autonomous_exploration/<parent_session>/checkpoints/coverage_leg_001/manifest.json \
   --localization-branch-proof-id <fresh_known_start_or_landmark_id> \
@@ -436,17 +452,23 @@ candidate:
 
 ```bash
 python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
-  --robot-profile results/aufgabe04/real/profiles/<robot_profile>.json \
+  --robot-profile configs/aufgabe04/real_robot_profiles/turtlebot1_unloaded_20260817.json \
   --camera-calibration results/aufgabe04/real/profiles/<camera_calibration>.json \
-  --physical-site docs/setups/<physical_site>.json \
-  --map maps/aufgabe03/<real_map>.yaml \
-  --semantic-map-id <real_map_id> \
-  --expected-stand-count 3 \
-  --exact-inspection-point-count 2 \
+  --physical-site docs/setups/aufgabe04_lab_20260817.json \
+  --map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
+  --semantic-map-id arena_1p898x3p9_auto \
+  --expected-stand-count 5 \
   --run-mode execute-coverage-only \
   --localization-branch-proof-id <known_start_or_asymmetric_landmark_id> \
   --session-id stand_explore_coverage_001
 ```
+
+After every stopped LiDAR epoch, the wrapper samples fresh stationary
+localization and seals the next leg from that pose instead of reusing the pose
+from before the observation wait. Candidate fusion performs one global
+maximum-cardinality, minimum-total-distance assignment per epoch, so input
+order cannot greedily create avoidable provisional duplicates. Neither change
+widens the existing candidate merge-distance gate.
 
 Require `status=coverage_complete`, the exact expected stand count, a
 content-hashed `coverage_candidate_admission.json`, and a content-hashed
@@ -455,13 +477,12 @@ running the complete mission with a fresh session ID:
 
 ```bash
 python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
-  --robot-profile results/aufgabe04/real/profiles/<robot_profile>.json \
+  --robot-profile configs/aufgabe04/real_robot_profiles/turtlebot1_unloaded_20260817.json \
   --camera-calibration results/aufgabe04/real/profiles/<camera_calibration>.json \
-  --physical-site docs/setups/<physical_site>.json \
-  --map maps/aufgabe03/<real_map>.yaml \
-  --semantic-map-id <real_map_id> \
-  --expected-stand-count 3 \
-  --exact-inspection-point-count 2 \
+  --physical-site docs/setups/aufgabe04_lab_20260817.json \
+  --map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
+  --semantic-map-id arena_1p898x3p9_auto \
+  --expected-stand-count 5 \
   --run-mode execute-full \
   --localization-branch-proof-id <known_start_or_asymmetric_landmark_id> \
   --session-id stand_explore_full_001

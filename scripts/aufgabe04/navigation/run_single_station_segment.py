@@ -117,6 +117,16 @@ from scripts.aufgabe04.navigation.runtime_motion_consumption import (
     default_runtime_motion_consumption_receipt_path,
     runtime_motion_consumption_receipt_sha256,
 )
+from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
+    StartupResealMotionPermit,
+    startup_reseal_motion_permit_sha256,
+    validate_startup_reseal_motion_permit_for_execution,
+)
+from scripts.aufgabe04.navigation.startup_reseal_motion_consumption import (
+    consume_startup_reseal_motion_permit,
+    default_startup_reseal_motion_consumption_receipt_path,
+    startup_reseal_motion_consumption_receipt_sha256,
+)
 from scripts.aufgabe04.navigation.mission_execution_gate import (
     DiagnosticsSnapshot,
     MissionExecutionBinding,
@@ -464,6 +474,21 @@ def build_parser() -> argparse.ArgumentParser:
             "Internal one-run, same-target runtime-localization recovery permit."
         ),
     )
+    parser.add_argument(
+        "--startup-reseal-motion-authorization-json",
+        type=Path,
+        help=(
+            "Internal autonomous-wrapper evidence that the mission RUN covers "
+            "bounded same-target pre-motion startup recovery."
+        ),
+    )
+    parser.add_argument(
+        "--startup-reseal-motion-permit-json",
+        type=Path,
+        help="Internal one-use permit for this exact startup-reseal child.",
+    )
+    parser.add_argument("--startup-reseal-target-viewpoint-id", default="")
+    parser.add_argument("--startup-reseal-semantic-map-id", default="")
     parser.add_argument(
         "--mission-leg-motion-authorization-json",
         type=Path,
@@ -1883,6 +1908,79 @@ def _validated_runtime_localization_motion_permit(
         cmd_vel_topic=resolved.cmd_vel_topic,
         semantic_map_id=semantic_map_id,
         target_viewpoint_id=target_viewpoint_id,
+        leg_index=args.coverage_transient_replan_leg_index,
+        localization_branch_proof_id=args.localization_branch_proof_id,
+        route_csv_path=route_csv_path,
+        diagnostics_path=diagnostics_path,
+        map_route_certificate_path=args.route_certificate_json,
+    )
+
+
+def _validated_startup_reseal_motion_permit(
+    args,
+    resolved,
+    *,
+    route_csv_path: Path,
+    diagnostics_path: Path,
+) -> StartupResealMotionPermit | None:
+    """Return one exact startup-reseal permit or preserve normal prompting."""
+
+    fields = (
+        args.startup_reseal_motion_authorization_json,
+        args.startup_reseal_motion_permit_json,
+        str(args.startup_reseal_target_viewpoint_id).strip() or None,
+        str(args.startup_reseal_semantic_map_id).strip() or None,
+    )
+    if all(value is None for value in fields):
+        return None
+    if any(value is None for value in fields):
+        raise ValueError(
+            "startup-reseal motion authorization arguments must be supplied together"
+        )
+    if any(
+        value is not None
+        for value in (
+            args.mission_motion_authorization_json,
+            args.runtime_localization_motion_permit_json,
+            args.mission_leg_motion_authorization_json,
+            args.mission_leg_motion_permit_json,
+        )
+    ):
+        raise ValueError(
+            "startup-reseal, routine-leg, and runtime-localization permits "
+            "are mutually exclusive"
+        )
+    if args.dry_run:
+        raise ValueError("startup-reseal motion permit is live-run only")
+    if args.allow_sim_time:
+        raise ValueError("startup-reseal motion permit is physical-runtime only")
+    if args.execution_pose_frame != "odom":
+        raise ValueError("startup-reseal motion permit requires odom execution")
+    if args.route_certificate_json is None:
+        raise ValueError(
+            "startup-reseal motion permit requires a map route certificate"
+        )
+    if args.coverage_transient_replan_leg_index is None:
+        raise ValueError(
+            "startup-reseal motion permit requires a coverage leg index"
+        )
+    session_id = str(args.mission_session_id).strip()
+    if not session_id:
+        raise ValueError("startup-reseal motion permit requires mission_session_id")
+    return validate_startup_reseal_motion_permit_for_execution(
+        args.startup_reseal_motion_permit_json,
+        master_authorization_path=(
+            args.startup_reseal_motion_authorization_json
+        ),
+        run_id=args.run_id,
+        session_id=session_id,
+        robot_id=args.robot_id,
+        namespace=resolved.namespace,
+        cmd_vel_topic=resolved.cmd_vel_topic,
+        semantic_map_id=str(args.startup_reseal_semantic_map_id).strip(),
+        target_viewpoint_id=str(
+            args.startup_reseal_target_viewpoint_id
+        ).strip(),
         leg_index=args.coverage_transient_replan_leg_index,
         localization_branch_proof_id=args.localization_branch_proof_id,
         route_csv_path=route_csv_path,
@@ -3435,6 +3533,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     runtime_motion_permit = None
     mission_leg_motion_permit = None
+    startup_reseal_motion_permit = None
     try:
         runtime_motion_permit = _validated_runtime_localization_motion_permit(
             args,
@@ -3448,6 +3547,14 @@ def main(argv: list[str] | None = None) -> int:
             route_csv_path=route_csv_path,
             diagnostics_path=diagnostics_json_path,
         )
+        startup_reseal_motion_permit = (
+            _validated_startup_reseal_motion_permit(
+                args,
+                resolved,
+                route_csv_path=route_csv_path,
+                diagnostics_path=diagnostics_json_path,
+            )
+        )
     except ValueError as exc:
         return _record_motion_authorization_rejection(
             args=args,
@@ -3460,6 +3567,7 @@ def main(argv: list[str] | None = None) -> int:
     if (
         runtime_motion_permit is None
         and mission_leg_motion_permit is None
+        and startup_reseal_motion_permit is None
         and not _confirm_motion(args, resolved)
     ):
         result = FollowerResult("aborted", "operator did not type RUN", 0.0, 0.0, False)
@@ -4073,6 +4181,69 @@ def main(argv: list[str] | None = None) -> int:
             mission_leg_motion_consumption_receipt_sha256=(
                 mission_leg_motion_consumption_receipt_sha256(
                     mission_leg_receipt
+                )
+            ),
+            covered_by_initial_mission_run=True,
+            additional_typed_run_required=False,
+        )
+    if startup_reseal_motion_permit is not None:
+        try:
+            startup_receipt_path = (
+                default_startup_reseal_motion_consumption_receipt_path(
+                    args.startup_reseal_motion_permit_json
+                )
+            )
+            startup_receipt = consume_startup_reseal_motion_permit(
+                permit_path=args.startup_reseal_motion_permit_json,
+                permit=startup_reseal_motion_permit,
+                session_id=args.mission_session_id,
+                run_id=args.run_id,
+                leg_index=startup_reseal_motion_permit.leg_index,
+                target_viewpoint_id=(
+                    startup_reseal_motion_permit.target_viewpoint_id
+                ),
+                reseal_index=startup_reseal_motion_permit.reseal_index,
+            )
+        except ValueError as exc:
+            return _record_motion_authorization_rejection(
+                args=args,
+                resolved=resolved,
+                leg=leg,
+                event_logger=event_logger,
+                failure=exc,
+            )
+        print(
+            "Using the mission-level RUN for this exact bounded, same-target "
+            "startup recovery. All live gates passed and the one-use receipt "
+            "was claimed; no additional operator input is requested."
+        )
+        emit_event(
+            event_logger,
+            "startup_reseal_motion_permit_consumed",
+            run_id=args.run_id,
+            leg_index=leg.leg_index,
+            target_viewpoint_id=(
+                startup_reseal_motion_permit.target_viewpoint_id
+            ),
+            reseal_index=startup_reseal_motion_permit.reseal_index,
+            rejected_run_id=startup_reseal_motion_permit.rejected_run_id,
+            startup_reseal_motion_authorization_json=str(
+                args.startup_reseal_motion_authorization_json
+            ),
+            startup_reseal_motion_permit_json=str(
+                args.startup_reseal_motion_permit_json
+            ),
+            startup_reseal_motion_permit_sha256=(
+                startup_reseal_motion_permit_sha256(
+                    startup_reseal_motion_permit
+                )
+            ),
+            startup_reseal_motion_consumption_receipt_json=str(
+                startup_receipt_path
+            ),
+            startup_reseal_motion_consumption_receipt_sha256=(
+                startup_reseal_motion_consumption_receipt_sha256(
+                    startup_receipt
                 )
             ),
             covered_by_initial_mission_run=True,

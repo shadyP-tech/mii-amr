@@ -5,14 +5,13 @@ The mission plans a single center rail, drives certified A* legs to stopped
 inspection poses, fuses LiDAR candidates across those poses, visits every
 stable candidate at a robot-facing pre-approach, and commits calibrated
 camera/LiDAR QR-face poses.  Physical execution requires an explicit
-``execute-*`` or ``resume-*`` run mode and a mission-level typed ``RUN``.  A
-route rebuilt after a pre-motion localization
-mismatch requires another typed ``RUN``.  The mission authorization may cover
-routine coverage and inspection children through exact one-use leg permits,
-and a bounded same-leg, same-target post-motion global-localization reseal
-through its narrower recovery permit.  Both paths require every fresh gate to
-pass.  Every motion leg still passes the existing route, ROS, obstacle,
-localization, and exclusive-velocity-owner gates.
+``execute-*`` or ``resume-*`` run mode and a mission-level typed ``RUN``.  The
+mission authorization may cover routine coverage and inspection children
+through exact one-use leg permits. Bounded startup and post-motion
+localization recovery use separate, evidence-bound recovery permits. Every
+path requires all fresh gates to pass. Every motion leg still passes the
+existing route, ROS, obstacle, localization, and exclusive-velocity-owner
+gates.
 """
 
 from __future__ import annotations
@@ -44,7 +43,6 @@ from scripts.aufgabe04.navigation.dynamic_approach_planner import (
     DynamicApproachConfig,
     minimum_static_obstacle_inflation_m,
 )
-from scripts.aufgabe04.navigation.map_io import load_occupancy_grid_with_bundle
 from scripts.aufgabe04.navigation.mission_leg_motion_permit import (
     MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     MISSION_LEG_RUN_CONFIRMATION,
@@ -93,6 +91,13 @@ from scripts.aufgabe04.navigation.stand_coverage_survey import (
 from scripts.aufgabe04.navigation.stand_discovery_route import (
     seal_stand_discovery_route,
 )
+from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
+    STARTUP_RESEAL_MOTION_AUTHORIZATION_SCOPE,
+    STARTUP_RESEAL_RECOVERY_KIND,
+    STARTUP_RESEAL_RUN_CONFIRMATION,
+    StartupResealMotionAuthorization,
+    write_startup_reseal_motion_authorization,
+)
 from scripts.aufgabe04.perception.stand_axis.model_profile import (
     load_stand_model,
 )
@@ -100,6 +105,9 @@ from scripts.aufgabe04.real_robot.hardware_profile import (
     camera_calibration_sha256,
     load_camera_calibration,
     load_real_robot_profile,
+)
+from scripts.aufgabe04.real_robot.physical_site_contract import (
+    validate_physical_site_contract,
 )
 from scripts.aufgabe04.real_robot.autonomous_child_runner import (
     DEFAULT_COLLISION_MARGIN_M,
@@ -155,6 +163,10 @@ from scripts.aufgabe04.real_robot.autonomous_modes import (
 )
 from scripts.aufgabe04.real_robot.autonomous_session_manifest import (
     publish_coverage_checkpoint,
+)
+from scripts.aufgabe04.real_robot.autonomous_startup_reseal import (
+    StartupResealPermitContext,
+    issue_startup_reseal_motion_permit,
 )
 from scripts.aufgabe04.stations.candidate_snapshot import (
     CandidateGeometry,
@@ -559,6 +571,7 @@ def _run_motion_leg(
     runtime_localization_permit_context: (
         RuntimeLocalizationPermitContext | None
     ) = None,
+    startup_reseal_permit_context: StartupResealPermitContext | None = None,
     mission_leg_permit_context: MissionLegPermitContext | None = None,
 ) -> MotionLegOutcome:
     if require_fresh_confirmation and fresh_confirmation_reason not in {
@@ -576,13 +589,25 @@ def _run_motion_leg(
         raise ValueError(
             "runtime localization permit requires runtime fresh-confirmation context"
         )
-    if (
-        mission_leg_permit_context is not None
-        and runtime_localization_permit_context is not None
+    if startup_reseal_permit_context is not None and (
+        not require_fresh_confirmation
+        or fresh_confirmation_reason != "startup"
     ):
         raise ValueError(
-            "routine mission-leg and runtime-localization permits are "
-            "mutually exclusive"
+            "startup reseal permit requires startup fresh-confirmation context"
+        )
+    permit_context_count = sum(
+        context is not None
+        for context in (
+            runtime_localization_permit_context,
+            startup_reseal_permit_context,
+            mission_leg_permit_context,
+        )
+    )
+    if permit_context_count > 1:
+        raise ValueError(
+            "routine-leg, startup-reseal, and runtime-localization permit "
+            "contexts are mutually exclusive"
         )
     if mission_leg_permit_context is not None and require_fresh_confirmation:
         raise ValueError(
@@ -665,6 +690,8 @@ def _run_motion_leg(
     motion_permit_sha256 = ""
     mission_leg_permit_path = None
     mission_leg_permit_sha256 = ""
+    startup_reseal_permit_path = None
+    startup_reseal_permit_sha256 = ""
     if runtime_localization_permit_context is not None:
         if dry_certificate is None or dry_budget is None:
             raise RuntimeError(
@@ -673,6 +700,25 @@ def _run_motion_leg(
         motion_permit_path, motion_permit_sha256 = (
             _issue_runtime_localization_motion_permit(
                 context=runtime_localization_permit_context,
+                run_id=run_id,
+                route_csv=common["route_csv"],
+                diagnostics_json=common["diagnostics_json"],
+                map_route_certificate_json=common["certificate_json"],
+                dry_preflight_json=(
+                    session_root / "preflight" / f"{run_id}_dry.json"
+                ),
+                dry_odom_certificate_json=dry_certificate,
+                dry_uncertainty_budget_json=dry_budget,
+            )
+        )
+    if startup_reseal_permit_context is not None:
+        if dry_certificate is None or dry_budget is None:
+            raise RuntimeError(
+                "startup reseal permit requires uncertainty-aware dry evidence"
+            )
+        startup_reseal_permit_path, startup_reseal_permit_sha256 = (
+            issue_startup_reseal_motion_permit(
+                context=startup_reseal_permit_context,
                 run_id=run_id,
                 route_csv=common["route_csv"],
                 diagnostics_json=common["diagnostics_json"],
@@ -761,11 +807,22 @@ def _run_motion_leg(
             )
             print(f"Runtime localization motion permit: {motion_permit_path}")
             print(f"Runtime localization motion permit SHA-256: {motion_permit_sha256}")
-        elif input(
-            f"Type RUN to authorize the resealed route {run_id}: "
-        ).strip() != "RUN":
+        elif startup_reseal_permit_context is not None:
+            print(
+                "No additional RUN is required: this exact same-target "
+                "pre-motion startup recovery is covered by the initial "
+                "mission authorization."
+            )
+            print(f"Startup reseal motion permit: {startup_reseal_permit_path}")
+            print(
+                "Startup reseal motion permit SHA-256: "
+                f"{startup_reseal_permit_sha256}"
+            )
+        else:
             raise RuntimeError(
-                f"operator did not authorize resealed route {run_id}"
+                f"resealed route {run_id} lacks an exact "
+                f"{fresh_confirmation_reason} recovery permit; refusing "
+                "to reprompt or launch motion"
             )
     live_certificate = (
         None
@@ -788,6 +845,22 @@ def _run_motion_leg(
             else runtime_localization_permit_context.mission_authorization_json
         ),
         runtime_localization_motion_permit_json=motion_permit_path,
+        startup_reseal_motion_authorization_json=(
+            None
+            if startup_reseal_permit_context is None
+            else startup_reseal_permit_context.mission_authorization_json
+        ),
+        startup_reseal_motion_permit_json=startup_reseal_permit_path,
+        startup_reseal_target_viewpoint_id=(
+            ""
+            if startup_reseal_permit_context is None
+            else startup_reseal_permit_context.target_viewpoint_id
+        ),
+        startup_reseal_semantic_map_id=(
+            ""
+            if startup_reseal_permit_context is None
+            else startup_reseal_permit_context.semantic_map_id
+        ),
         mission_leg_motion_authorization_json=(
             None
             if mission_leg_permit_context is None
@@ -829,9 +902,13 @@ def _run_motion_leg(
             runtime_localization_permit_context.session_id
             if runtime_localization_permit_context is not None
             else (
-                ""
-                if mission_leg_permit_context is None
-                else mission_leg_permit_context.session_id
+                startup_reseal_permit_context.session_id
+                if startup_reseal_permit_context is not None
+                else (
+                    ""
+                    if mission_leg_permit_context is None
+                    else mission_leg_permit_context.session_id
+                )
             )
         ),
     )
@@ -853,6 +930,8 @@ def _run_motion_leg(
         motion_authorization_permit_sha256=motion_permit_sha256,
         mission_leg_motion_permit_path=mission_leg_permit_path,
         mission_leg_motion_permit_sha256=mission_leg_permit_sha256,
+        startup_reseal_motion_permit_path=startup_reseal_permit_path,
+        startup_reseal_motion_permit_sha256=startup_reseal_permit_sha256,
     )
 
 
@@ -948,6 +1027,7 @@ def _execute_coverage_leg_with_replans(
     source_diagnostics: Path,
     mission_motion_authorization_json: Path | None = None,
     mission_leg_motion_authorization_json: Path | None = None,
+    startup_reseal_motion_authorization_json: Path | None = None,
 ) -> MotionLegOutcome:
     """Adapt parent runtime/effects to the extracted coverage state machine."""
 
@@ -1018,6 +1098,9 @@ def _execute_coverage_leg_with_replans(
         ),
         mission_leg_motion_authorization_json=(
             mission_leg_motion_authorization_json
+        ),
+        startup_reseal_motion_authorization_json=(
+            startup_reseal_motion_authorization_json
         ),
     )
 
@@ -1198,7 +1281,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
-    parser.add_argument("--expected-stand-count", type=int, default=3)
+    parser.add_argument(
+        "--expected-stand-count",
+        type=int,
+        default=None,
+        help=(
+            "Optional assertion of the arena stand count. The canonical "
+            "value is loaded from --physical-site; a mismatch fails before "
+            "planning or motion authorization."
+        ),
+    )
     parser.add_argument("--inspection-stop-spacing-m", type=float, default=0.70)
     parser.add_argument(
         "--exact-inspection-point-count",
@@ -1206,9 +1298,10 @@ def build_parser() -> argparse.ArgumentParser:
         choices=(2,),
         default=None,
         help=(
-            "Select exactly two complementary centerline LiDAR inspection "
-            "points while retaining the map-coverage and two-view candidate "
-            "admission gates."
+            "Diagnostic-only: select exactly two complementary centerline "
+            "LiDAR inspection points. Omit this for robust five-stand full "
+            "exploration so stop spacing determines the complete viewpoint "
+            "set; candidate admission remains fail closed either way."
         ),
     )
     parser.add_argument("--lidar-epoch-sec", type=float, default=8.0)
@@ -1256,8 +1349,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MAX_STARTUP_RESEALS_PER_LEG,
         help=(
             "Maximum fresh-pose A* reseals after a route is rejected before "
-            "motion because AMCL left its certified startup segment. Every "
-            "coverage-leg reseal requires a new typed RUN."
+            "motion because AMCL left its certified startup segment. In an "
+            "execute-* mission, the initial typed RUN covers only bounded "
+            "same-leg, same-target replacements that obtain fresh stationary "
+            "localization and consume a dedicated one-use recovery permit."
         ),
     )
     parser.add_argument(
@@ -1314,7 +1409,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _validate_inputs(parser, args, profile, calibration) -> None:
-    if args.expected_stand_count <= 0:
+    if (
+        type(args.expected_stand_count) is not int
+        or args.expected_stand_count <= 0
+    ):
         parser.error("--expected-stand-count must be positive")
     if args.coverage_leg_limit < 0:
         parser.error("--coverage-leg-limit must be non-negative")
@@ -1420,6 +1518,17 @@ def main(argv=None) -> int:
     try:
         profile = load_real_robot_profile(args.robot_profile)
         calibration = load_camera_calibration(args.camera_calibration)
+        site_contract = validate_physical_site_contract(
+            args.physical_site,
+            profile=profile,
+            requested_expected_stand_count=args.expected_stand_count,
+            semantic_map_id=args.semantic_map_id,
+            map_yaml=args.map,
+            repository_root=ROOT,
+        )
+        args.expected_stand_count = site_contract.expected_stand_count
+        args.physical_site = site_contract.physical_site_path
+        args.map = site_contract.map_yaml_path
         _validate_inputs(parser, args, profile, calibration)
         runtime = profile.resolved_runtime()
         clearance = _physical_clearance(
@@ -1446,11 +1555,6 @@ def main(argv=None) -> int:
         )
         admitted_resume = None
         if resume_mode:
-            _grid, current_map_bundle = load_occupancy_grid_with_bundle(
-                args.map,
-                semantic_map_id=args.semantic_map_id,
-                planning_frame=profile.map_frame,
-            )
             admitted_resume = admit_coverage_resume(
                 args.resume_checkpoint,
                 new_session_id=args.session_id,
@@ -1460,7 +1564,7 @@ def main(argv=None) -> int:
                     args.camera_calibration
                 ),
                 physical_site_sha256=_file_sha256(args.physical_site),
-                map_bundle_sha256=current_map_bundle.bundle_sha256,
+                map_bundle_sha256=site_contract.map_bundle.bundle_sha256,
                 config_sha256=_checkpoint_config_sha256(args),
             )
         session_root.mkdir(parents=True, exist_ok=False)
@@ -1672,12 +1776,14 @@ def main(argv=None) -> int:
             "Each routine child must pass a fresh dry-run and all live gates, "
             "then atomically consume its exact one-leg permit; it will not ask "
             "for another RUN. "
-            "A pre-motion AMCL/start mismatch never inherits this RUN: the "
-            "route is rebuilt and a fresh typed RUN is required. On a coverage "
-            "leg, an exact post-motion global-localization reseal also stops "
-            "first, recollects stationary AMCL/TF evidence, rebuilds the route "
-            "to the same coverage target, reruns every dry/live gate, and may "
-            "reuse this RUN for at most "
+            "A same-target pre-motion AMCL/start mismatch may reuse this RUN "
+            "only after fresh stationary localization, route reconstruction, "
+            "dry-run/certificates, and an exact one-use startup-recovery "
+            "permit all pass. On a "
+            "coverage leg, an exact post-motion global-localization reseal "
+            "also stops first, recollects stationary AMCL/TF evidence, "
+            "rebuilds the route to the same coverage target, reruns every "
+            "dry/live gate, and may reuse this RUN for at most "
             f"{args.max_runtime_localization_reseals_per_leg} reseal(s) per leg "
             "through an exact one-run permit. Route-tube, stale-TF, obstacle, "
             "ownership, target-change, malformed-evidence, and budget failures "
@@ -1747,6 +1853,35 @@ def main(argv=None) -> int:
                 mission_motion_authorization,
             )
         )
+        startup_reseal_motion_authorization_json = (
+            session_root
+            / "motion_authorization"
+            / "startup_reseal_motion_authorization.json"
+        ).absolute()
+        startup_reseal_motion_authorization = (
+            StartupResealMotionAuthorization(
+                session_id=args.session_id,
+                robot_id=profile.robot_id,
+                namespace=runtime.namespace,
+                cmd_vel_topic=runtime.cmd_vel_topic,
+                semantic_map_id=args.semantic_map_id,
+                localization_branch_proof_id=(
+                    args.localization_branch_proof_id
+                ),
+                max_startup_reseals_per_leg=(
+                    args.max_startup_reseals_per_leg
+                ),
+                scope_text=STARTUP_RESEAL_MOTION_AUTHORIZATION_SCOPE,
+                operator_confirmation=STARTUP_RESEAL_RUN_CONFIRMATION,
+                allowed_recovery_kind=STARTUP_RESEAL_RECOVERY_KIND,
+            )
+        )
+        startup_reseal_motion_authorization_hash = (
+            write_startup_reseal_motion_authorization(
+                startup_reseal_motion_authorization_json,
+                startup_reseal_motion_authorization,
+            )
+        )
         _append_jsonl(
             session_root / "adaptive_replans.jsonl",
             {
@@ -1777,7 +1912,17 @@ def main(argv=None) -> int:
                     kind.value for kind in authorized_leg_kinds
                 ],
                 "routine_child_prompts_required": False,
-                "startup_reseal_fresh_typed_run_required": True,
+                "startup_reseal_fresh_typed_run_required": False,
+                "startup_reseal_exact_recovery_permit_required": True,
+                "startup_reseal_motion_authorization_json": str(
+                    startup_reseal_motion_authorization_json
+                ),
+                "startup_reseal_motion_authorization_sha256": (
+                    startup_reseal_motion_authorization_hash
+                ),
+                "max_startup_reseals_per_leg": (
+                    args.max_startup_reseals_per_leg
+                ),
                 "max_runtime_localization_reseals_per_leg": (
                     args.max_runtime_localization_reseals_per_leg
                 ),
@@ -1789,6 +1934,9 @@ def main(argv=None) -> int:
                 ),
                 "allowed_recovery_kind": (
                     RUNTIME_LOCALIZATION_RESEAL_RECOVERY_KIND
+                ),
+                "allowed_startup_recovery_kind": (
+                    STARTUP_RESEAL_RECOVERY_KIND
                 ),
                 "additional_typed_run_required_for_eligible_recovery": False,
             },
@@ -1810,6 +1958,9 @@ def main(argv=None) -> int:
                 ),
                 mission_leg_motion_authorization_json=(
                     mission_leg_motion_authorization_json
+                ),
+                startup_reseal_motion_authorization_json=(
+                    startup_reseal_motion_authorization_json
                 ),
             )
             if outcome.odom_execution_certificate_path is None:
@@ -1835,6 +1986,34 @@ def main(argv=None) -> int:
             )
 
         def fuse_coverage_stop(viewpoint_id, observer_summary_path):
+            progress_before_stop = load_survey_progress(
+                survey_root / "coverage_progress.json",
+                plan,
+            )
+            visited_before_stop = set(
+                progress_before_stop.visited_viewpoint_ids
+            )
+            has_remaining_viewpoint = any(
+                item.viewpoint_id != viewpoint_id
+                and item.viewpoint_id not in visited_before_stop
+                for item in plan.viewpoints
+            )
+            next_leg_localization_evidence = None
+            next_leg_start_pose = None
+            if has_remaining_viewpoint:
+                next_leg_localization_evidence = (
+                    session_root
+                    / "preflight"
+                    / (
+                        f"{args.session_id}_{viewpoint_id}"
+                        "_post_observation_localization.json"
+                    )
+                )
+                next_leg_start_pose = _admit_preplanning_localization(
+                    runtime,
+                    session_root,
+                    evidence_path=next_leg_localization_evidence,
+                )
             return record_stand_coverage_stop(
                 survey_root=survey_root,
                 map_yaml=args.map,
@@ -1843,6 +2022,10 @@ def main(argv=None) -> int:
                 observer_summary_json=observer_summary_path,
                 scan_to_base_position_offset_m=(
                     profile.scan_origin_to_base_offset_m
+                ),
+                next_leg_start_pose=next_leg_start_pose,
+                next_leg_localization_evidence_json=(
+                    next_leg_localization_evidence
                 ),
             )
 

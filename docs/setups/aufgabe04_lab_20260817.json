@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "physical_site_id": "aufgabe04_lab_20260817",
+  "description": "Measured Aufgabe 04 arena with five stands using the arena_1p898x3p9_auto saved map",
+  "recorded_date": "2026-08-17",
+  "map_measurement": {
+    "semantic_map_id": "arena_1p898x3p9_auto",
+    "map_yaml": "maps/aufgabe03/arena_1p898x3p9_auto.yaml",
+    "map_yaml_sha256": "ecee04cbed7ede8ec70f942790c01298ea368561d21393a561d1042c5f8c6d4d",
+    "map_image": "maps/aufgabe03/arena_1p898x3p9_auto.pgm",
+    "map_image_sha256": "2430be49e6ab1d6f258ee018dadd1943b16349d6dd2a4a38036c9acba754e0d1",
+    "map_bundle_sha256": "a0dc0d4c73e96f113ec262640bcdece2bfc2e1f68e8394701ecafd5e569ae17a"
+  },
+  "station_setup": {
+    "expected_stand_count": 5,
+    "stand_coordinates_supplied": false,
+    "placement": "Unknown positions inside the arena; discover all positions autonomously from live multi-view LiDAR observations",
+    "orientation": "Unknown; estimate each stand axis and QR-facing side from synchronized onboard camera and LiDAR evidence"
+  }
+}

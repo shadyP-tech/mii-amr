@@ -15,6 +15,9 @@ from scripts.aufgabe04.real_robot.autonomous_coverage_execution import (
     RuntimeLocalizationPermitContext,
     execute_coverage_leg_with_replans,
 )
+from scripts.aufgabe04.real_robot.autonomous_startup_reseal import (
+    StartupResealPermitContext,
+)
 
 
 def _runtime_localization_stop_details() -> dict[str, object]:
@@ -253,13 +256,14 @@ class AutonomousCoverageExecutionTest(unittest.TestCase):
             )
             run = Mock(side_effect=(rejected, completed))
             seal = Mock(return_value=self._sealed(root))
+            admit = Mock()
 
             outcome = execute_coverage_leg_with_replans(
                 profile=self.profile,
                 config=self._config(),
                 effects=CoverageLegEffects(
                     run_motion_leg=run,
-                    admit_preplanning_localization=Mock(),
+                    admit_preplanning_localization=admit,
                     seal_route=seal,
                 ),
                 **paths,
@@ -328,6 +332,8 @@ class AutonomousCoverageExecutionTest(unittest.TestCase):
             )
             run = Mock(side_effect=(rejected, completed))
             seal = Mock(return_value=self._sealed(root))
+            admitted_pose = Pose2D(-0.48, -0.60, 1.69)
+            admit = Mock(return_value=admitted_pose)
             replan = Mock(
                 return_value={
                     "route_csv": str(replacement_route),
@@ -341,7 +347,7 @@ class AutonomousCoverageExecutionTest(unittest.TestCase):
                 config=self._config(),
                 effects=CoverageLegEffects(
                     run_motion_leg=run,
-                    admit_preplanning_localization=Mock(),
+                    admit_preplanning_localization=admit,
                     seal_route=seal,
                     replan_startup_source=replan,
                 ),
@@ -369,13 +375,26 @@ class AutonomousCoverageExecutionTest(unittest.TestCase):
                 replan.call_args.kwargs["expected_target_viewpoint_id"],
                 "survey_vp_001",
             )
-            event = json.loads(
-                (paths["session_root"] / "adaptive_replans.jsonl")
-                .read_text()
-                .splitlines()[0]
+            self.assertEqual(
+                replan.call_args.kwargs["current_pose"], admitted_pose
             )
-            self.assertEqual(event["event"], "startup_pose_route_resealed")
-            self.assertTrue(event["fresh_confirmation_required"])
+            admit.assert_called_once()
+            events = [
+                json.loads(line)
+                for line in (
+                    paths["session_root"] / "adaptive_replans.jsonl"
+                ).read_text().splitlines()
+            ]
+            self.assertEqual(
+                [event["event"] for event in events],
+                [
+                    "startup_reseal_started",
+                    "startup_localization_admitted",
+                    "startup_pose_route_resealed",
+                    "startup_reseal_route_sealed",
+                ],
+            )
+            self.assertTrue(events[2]["fresh_confirmation_required"])
 
     def test_runtime_reseal_uses_injected_resolved_runtime_and_exact_permit(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -468,6 +487,62 @@ class AutonomousCoverageExecutionTest(unittest.TestCase):
             self.assertFalse(events[-1]["fresh_typed_run_required"])
             self.assertFalse(events[-1]["motion_continues_authorized"])
 
+    def test_startup_reseal_master_yields_only_dedicated_recovery_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self._paths(root)
+            rejected = _startup_mismatch_outcome(
+                root,
+                run_id="mission_coverage_000",
+                route_pose={"x_m": -0.50, "y_m": -0.62, "yaw_rad": 1.70},
+            )
+            completed = _outcome(
+                root,
+                run_id="mission_coverage_000_startup_reseal_001",
+                status="completed",
+                motion_published=True,
+            )
+            run = Mock(side_effect=(rejected, completed))
+            admit = Mock(return_value=Pose2D(-0.48, -0.60, 1.69))
+            replan = Mock(
+                return_value={
+                    "route_csv": str(root / "replacement.csv"),
+                    "diagnostics_json": str(root / "replacement.json"),
+                    "summary_json": str(root / "source_summary.json"),
+                }
+            )
+
+            execute_coverage_leg_with_replans(
+                profile=self.profile,
+                config=self._config(),
+                effects=CoverageLegEffects(
+                    run_motion_leg=run,
+                    admit_preplanning_localization=admit,
+                    seal_route=Mock(return_value=self._sealed(root)),
+                    replan_startup_source=replan,
+                ),
+                **paths,
+                leg_index=0,
+                target_viewpoint_id="survey_vp_001",
+                mission_leg_motion_authorization_json=(
+                    root / "routine_master.json"
+                ),
+                startup_reseal_motion_authorization_json=(
+                    root / "startup_master.json"
+                ),
+            )
+
+            retry = run.call_args_list[1].kwargs
+            self.assertTrue(retry["require_fresh_confirmation"])
+            self.assertEqual(retry["fresh_confirmation_reason"], "startup")
+            self.assertIsNone(retry["mission_leg_permit_context"])
+            context = retry["startup_reseal_permit_context"]
+            self.assertIsInstance(context, StartupResealPermitContext)
+            self.assertEqual(context.leg_index, 0)
+            self.assertEqual(context.target_viewpoint_id, "survey_vp_001")
+            self.assertEqual(context.reseal_index, 1)
+            self.assertEqual(context.rejected_run_id, rejected.run_id)
+
     def test_runtime_reseal_budget_exhaustion_is_terminal_before_admission(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -551,7 +626,9 @@ class AutonomousCoverageExecutionTest(unittest.TestCase):
                     config=self._config(max_startup_reseals_per_leg=1),
                     effects=CoverageLegEffects(
                         run_motion_leg=run,
-                        admit_preplanning_localization=Mock(),
+                        admit_preplanning_localization=Mock(
+                            return_value=Pose2D(-0.48, -0.60, 1.69)
+                        ),
                         seal_route=seal,
                         event_sink=lambda _path, payload: events.append(payload),
                         clock=lambda: 123.0,
@@ -567,7 +644,12 @@ class AutonomousCoverageExecutionTest(unittest.TestCase):
             replan.assert_called_once()
             self.assertEqual(
                 [event["event"] for event in events],
-                ["startup_pose_route_resealed"],
+                [
+                    "startup_reseal_started",
+                    "startup_localization_admitted",
+                    "startup_pose_route_resealed",
+                    "startup_reseal_route_sealed",
+                ],
             )
             self.assertEqual(events[0]["timestamp"], 123.0)
 

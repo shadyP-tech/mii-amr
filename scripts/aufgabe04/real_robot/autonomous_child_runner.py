@@ -50,6 +50,8 @@ class MotionLegOutcome:
     motion_authorization_permit_sha256: str = ""
     mission_leg_motion_permit_path: Path | None = None
     mission_leg_motion_permit_sha256: str = ""
+    startup_reseal_motion_permit_path: Path | None = None
+    startup_reseal_motion_permit_sha256: str = ""
 
 
 def build_child_runner_command(
@@ -60,6 +62,7 @@ def build_child_runner_command(
     certificate_json: Path,
     run_id: str,
     session_root: Path,
+    leg_index: int | None = None,
     coverage_plan: Path | None = None,
     candidate_snapshot: Path | None = None,
     coverage_transient_replan: dict[str, object] | None = None,
@@ -82,9 +85,23 @@ def build_child_runner_command(
     mission_leg_dry_preflight_json: Path | None = None,
     mission_leg_dry_odom_certificate_json: Path | None = None,
     mission_leg_dry_uncertainty_budget_json: Path | None = None,
+    startup_reseal_motion_authorization_json: Path | None = None,
+    startup_reseal_motion_permit_json: Path | None = None,
+    startup_reseal_target_viewpoint_id: str = "",
+    startup_reseal_semantic_map_id: str = "",
     mission_session_id: str = "",
 ) -> list[str]:
     """Build the established single-segment child argv without executing it."""
+
+    resolved_leg_index = leg_index
+    if resolved_leg_index is None and coverage_transient_replan is not None:
+        resolved_leg_index = coverage_transient_replan.get("leg_index")
+    if resolved_leg_index is None and mission_leg_index is not None:
+        resolved_leg_index = mission_leg_index
+    if resolved_leg_index is None:
+        resolved_leg_index = 0
+    if type(resolved_leg_index) is not int or resolved_leg_index < 0:
+        raise ValueError("leg_index must be a non-negative integer")
 
     run_phase = "dry" if dry_run else "execute"
     odom_fields = (
@@ -111,7 +128,7 @@ def build_child_runner_command(
         "--route-certificate-json",
         str(certificate_json),
         "--leg-index",
-        "0",
+        str(resolved_leg_index),
         "--run-id",
         run_id,
         "--robot-id",
@@ -301,6 +318,48 @@ def build_child_runner_command(
                 str(mission_leg_dry_odom_certificate_json),
                 "--mission-leg-dry-uncertainty-budget-json",
                 str(mission_leg_dry_uncertainty_budget_json),
+                "--mission-session-id",
+                str(mission_session_id).strip(),
+            ]
+        )
+    startup_reseal_fields = (
+        startup_reseal_motion_authorization_json,
+        startup_reseal_motion_permit_json,
+        startup_reseal_target_viewpoint_id or None,
+        startup_reseal_semantic_map_id or None,
+    )
+    if any(value is not None for value in startup_reseal_fields):
+        if any(value is None for value in startup_reseal_fields):
+            raise ValueError(
+                "startup-reseal authorization arguments must be supplied together"
+            )
+        if any(value is not None for value in authorization_fields) or any(
+            value is not None for value in mission_leg_fields
+        ):
+            raise ValueError(
+                "startup-reseal, routine-leg, and runtime-localization permits "
+                "are mutually exclusive"
+            )
+        if dry_run:
+            raise ValueError("startup-reseal motion permits are live-run only")
+        if not str(mission_session_id).strip():
+            raise ValueError(
+                "startup-reseal motion permit requires mission_session_id"
+            )
+        if coverage_transient_replan is None:
+            raise ValueError(
+                "startup-reseal motion permit requires a coverage leg"
+            )
+        command.extend(
+            [
+                "--startup-reseal-motion-authorization-json",
+                str(startup_reseal_motion_authorization_json),
+                "--startup-reseal-motion-permit-json",
+                str(startup_reseal_motion_permit_json),
+                "--startup-reseal-target-viewpoint-id",
+                str(startup_reseal_target_viewpoint_id).strip(),
+                "--startup-reseal-semantic-map-id",
+                str(startup_reseal_semantic_map_id).strip(),
                 "--mission-session-id",
                 str(mission_session_id).strip(),
             ]

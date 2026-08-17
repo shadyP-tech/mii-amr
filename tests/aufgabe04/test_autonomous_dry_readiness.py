@@ -62,6 +62,16 @@ class AutonomousDryReadinessTest(unittest.TestCase):
                     "load_camera_calibration",
                     return_value=SimpleNamespace(),
                 ),
+                patch.object(
+                    runner,
+                    "validate_physical_site_contract",
+                    return_value=SimpleNamespace(
+                        expected_stand_count=5,
+                        physical_site_path=(root / "site.json"),
+                        map_yaml_path=(root / "map.yaml"),
+                        map_bundle=SimpleNamespace(bundle_sha256="a" * 64),
+                    ),
+                ) as validate_site,
                 patch.object(runner, "_validate_inputs"),
                 patch.object(
                     runner,
@@ -117,6 +127,13 @@ class AutonomousDryReadinessTest(unittest.TestCase):
                 )
 
             self.assertEqual(status, 0)
+            validate_site.assert_called_once()
+            self.assertEqual(
+                validate_site.call_args.kwargs[
+                    "requested_expected_stand_count"
+                ],
+                None,
+            )
             self.assertEqual(run_leg.call_count, 2)
             self.assertEqual(
                 run_leg.call_args_list[1].kwargs["run_id"],
