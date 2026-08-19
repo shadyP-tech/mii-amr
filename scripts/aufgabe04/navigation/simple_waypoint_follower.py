@@ -3702,7 +3702,20 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                         self.latest_stop_details = pose_lookup.details
                         last_failure = "map-to-base transform unavailable"
                     else:
-                        return ""
+                        # Odom-owned execution still depends on the live
+                        # map<-odom edge as a read-only global-consistency
+                        # monitor.  A newly constructed child TF buffer can
+                        # receive odom<-base before map<-odom, so warm and
+                        # validate that second edge while motion remains zero
+                        # and inside the existing bounded startup wait.
+                        localization_failure = (
+                            self._global_consistency_monitor_failure()
+                        )
+                        if localization_failure:
+                            last_failure = localization_failure
+                        else:
+                            self.latest_stop_details = None
+                            return ""
             if time.monotonic() >= deadline:
                 return last_failure
             self.publish_zero()

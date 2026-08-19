@@ -893,6 +893,43 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             run_prompt.assert_not_called()
             self.assertFalse(output_root.exists())
 
+    def test_exact_two_full_mission_fails_before_loading_runtime_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_root = root / "runs"
+            with (
+                patch.object(
+                    autonomous_wrapper,
+                    "load_real_robot_profile",
+                ) as load_profile,
+                patch("builtins.input") as run_prompt,
+                redirect_stderr(StringIO()),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                autonomous_wrapper.main(
+                    [
+                        "--robot-profile",
+                        str(root / "robot.json"),
+                        "--camera-calibration",
+                        str(root / "camera.json"),
+                        "--physical-site",
+                        str(root / "site.json"),
+                        "--output-root",
+                        str(output_root),
+                        "--session-id",
+                        "five_stand_execute_full",
+                        "--exact-inspection-point-count",
+                        "2",
+                        "--run-mode",
+                        "execute-full",
+                    ]
+                )
+
+            self.assertEqual(raised.exception.code, 2)
+            load_profile.assert_not_called()
+            run_prompt.assert_not_called()
+            self.assertFalse(output_root.exists())
+
     def test_uncertainty_sigma_multiplier_must_be_finite_and_positive(self):
         for invalid in ("0", "-1", "nan", "inf"):
             with self.subTest(invalid=invalid):
@@ -1139,7 +1176,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             self.assertEqual(failure["reason"], reason)
             self.assertFalse(failure["motion_continues_authorized"])
 
-    def test_coverage_runner_receives_persistent_replan_contract(self):
+    def test_coverage_runner_keeps_route_and_mission_leg_indices_distinct(self):
         profile = self._profile()
         command = _runner_command(
             profile=profile,
@@ -1169,7 +1206,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         )
         self.assertEqual(
             command[command.index("--leg-index") + 1],
-            "2",
+            "0",
         )
         self.assertEqual(
             float(
@@ -2231,9 +2268,11 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             root = Path(tmp)
             session_root = root / "session"
             run_id = "mission_coverage_001"
-            route = root / "route.csv"
-            diagnostics = root / "diagnostics.json"
-            map_certificate = root / "map_certificate.json"
+            artifact_root = session_root / "sealed_routes" / run_id
+            artifact_root.mkdir(parents=True)
+            route = artifact_root / "route.csv"
+            diagnostics = artifact_root / "diagnostics.json"
+            map_certificate = artifact_root / "map_certificate.json"
             for path, payload in (
                 (route, "route\n"),
                 (diagnostics, "{}\n"),
@@ -2337,26 +2376,45 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                     ),
                     mission_leg_permit_context=context,
                 )
-            permit = load_mission_leg_motion_permit(permit_path)
+            canonical_permit_path = permit_path.resolve()
+            permit = load_mission_leg_motion_permit(canonical_permit_path)
 
         self.assertEqual(outcome.status, "completed")
         self.assertEqual(run.call_count, 2)
-        self.assertEqual(outcome.mission_leg_motion_permit_path, permit_path)
+        self.assertEqual(
+            outcome.mission_leg_motion_permit_path,
+            canonical_permit_path,
+        )
         self.assertTrue(outcome.mission_leg_motion_permit_sha256)
         self.assertEqual(permit.run_id, run_id)
         self.assertEqual(permit.mission_leg_kind, MissionLegKind.COVERAGE)
         self.assertFalse(permit.additional_typed_run_required)
         self.assertIn("--mission-leg-motion-permit-json", commands[1])
         self.assertNotIn("--runtime-localization-motion-permit-json", commands[1])
+        self.assertEqual(
+            commands[1][commands[1].index("--route-csv") + 1],
+            str(route.resolve()),
+        )
+        self.assertEqual(
+            commands[1][
+                commands[1].index(
+                    "--mission-leg-motion-authorization-json"
+                )
+                + 1
+            ],
+            str(master_path.resolve()),
+        )
 
     def test_runtime_localization_recovery_uses_scoped_permit_without_parent_input(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             session_root = root / "session"
             run_id = "mission_coverage_000_runtime_localization_reseal_001"
-            route = root / "route.csv"
-            diagnostics = root / "diagnostics.json"
-            map_certificate = root / "map_certificate.json"
+            artifact_root = session_root / "sealed_routes" / run_id
+            artifact_root.mkdir(parents=True)
+            route = artifact_root / "route.csv"
+            diagnostics = artifact_root / "diagnostics.json"
+            map_certificate = artifact_root / "map_certificate.json"
             fresh_localization = root / "fresh_localization.json"
             for path, payload in (
                 (route, "route\n"),
@@ -2488,9 +2546,15 @@ class AutonomousStandExplorationTest(unittest.TestCase):
 
             self.assertEqual(outcome.status, "completed")
             self.assertEqual(run.call_count, 2)
-            self.assertEqual(outcome.motion_authorization_permit_path, permit_path)
+            canonical_permit_path = permit_path.resolve()
+            self.assertEqual(
+                outcome.motion_authorization_permit_path,
+                canonical_permit_path,
+            )
             self.assertTrue(outcome.motion_authorization_permit_sha256)
-            permit = load_runtime_localization_motion_permit(permit_path)
+            permit = load_runtime_localization_motion_permit(
+                canonical_permit_path
+            )
             self.assertEqual(permit.run_id, run_id)
             self.assertFalse(permit.additional_typed_run_required)
             self.assertIn(
@@ -2505,6 +2569,19 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                     "2.25",
                 )
             self.assertNotIn("input", run.call_args_list[1].kwargs)
+            self.assertEqual(
+                commands[1][commands[1].index("--route-csv") + 1],
+                str(route.resolve()),
+            )
+            self.assertEqual(
+                commands[1][
+                    commands[1].index(
+                        "--mission-motion-authorization-json"
+                    )
+                    + 1
+                ],
+                str(master_path.resolve()),
+            )
 
     def test_startup_reseal_uses_dedicated_permit_without_parent_input(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2512,9 +2589,11 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             session_root = root / "session"
             rejected_run_id = "mission_coverage_000"
             run_id = f"{rejected_run_id}_startup_reseal_001"
-            route = root / "route.csv"
-            diagnostics = root / "diagnostics.json"
-            map_certificate = root / "map_certificate.json"
+            artifact_root = session_root / "sealed_routes" / run_id
+            artifact_root.mkdir(parents=True)
+            route = artifact_root / "route.csv"
+            diagnostics = artifact_root / "diagnostics.json"
+            map_certificate = artifact_root / "map_certificate.json"
             fresh_localization = root / "fresh_localization.json"
             for path, payload in (
                 (route, "route\n"),
@@ -2682,12 +2761,15 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                     startup_reseal_permit_context=context,
                 )
 
-            permit = load_startup_reseal_motion_permit(permit_path)
+            canonical_permit_path = permit_path.resolve()
+            permit = load_startup_reseal_motion_permit(
+                canonical_permit_path
+            )
             self.assertEqual(outcome.status, "completed")
             self.assertEqual(run.call_count, 2)
             self.assertEqual(
                 outcome.startup_reseal_motion_permit_path,
-                permit_path,
+                canonical_permit_path,
             )
             self.assertTrue(outcome.startup_reseal_motion_permit_sha256)
             self.assertEqual(permit.run_id, run_id)
@@ -2701,6 +2783,19 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             self.assertNotIn(
                 "--runtime-localization-motion-permit-json",
                 commands[1],
+            )
+            self.assertEqual(
+                commands[1][commands[1].index("--route-csv") + 1],
+                str(route.resolve()),
+            )
+            self.assertEqual(
+                commands[1][
+                    commands[1].index(
+                        "--startup-reseal-motion-authorization-json"
+                    )
+                    + 1
+                ],
+                str(master_path.resolve()),
             )
 
     def test_startup_reseal_replans_full_a_star_leg_from_rejected_pose(self):

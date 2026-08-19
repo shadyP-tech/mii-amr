@@ -80,6 +80,74 @@ def _transform(
 
 
 class OdomFollowerExecutionTest(unittest.TestCase):
+    def _initial_wait_node(self):
+        node = object.__new__(SimpleWaypointFollowerNode)
+        node.odom_execution_context = _context()
+        node.follower_config = SimpleNamespace(
+            initial_sensor_wait_sec=1.0,
+            max_scan_age_sec=1.0,
+            max_odom_age_sec=1.0,
+        )
+        node.latest_scan = object()
+        node.latest_scan_receipt = 0.0
+        node.latest_odom = object()
+        node.latest_odom_receipt = 0.0
+        node.latest_stop_details = None
+        node._service_or_wait_for_callbacks = Mock()
+        node._freshness_failure = Mock(return_value="")
+        node._current_pose_lookup = Mock(
+            return_value=PoseLookupResult(Pose2D(0.0, 0.0, 0.0))
+        )
+        node.publish_zero = Mock()
+        return node
+
+    def test_initial_wait_warms_global_consistency_tf_before_motion(self):
+        node = self._initial_wait_node()
+        node._global_consistency_monitor_failure = Mock(
+            side_effect=[
+                "global localization consistency requires zero and reseal",
+                "",
+            ]
+        )
+        node.latest_stop_details = {"fault_code": "localization_reseal_required"}
+
+        with patch(
+            "scripts.aufgabe04.navigation.simple_waypoint_follower.rclpy",
+            SimpleNamespace(ok=lambda: True),
+        ), patch(
+            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            return_value=0.5,
+        ):
+            result = node._wait_for_initial_runtime_inputs(0.0)
+
+        self.assertEqual(result, "")
+        self.assertEqual(node._global_consistency_monitor_failure.call_count, 2)
+        node.publish_zero.assert_called_once_with()
+        self.assertIsNone(node.latest_stop_details)
+
+    def test_initial_wait_keeps_persistent_global_tf_failure_terminal(self):
+        node = self._initial_wait_node()
+        failure = "global localization consistency requires zero and reseal"
+        node._global_consistency_monitor_failure = Mock(return_value=failure)
+        node.latest_stop_details = {"fault_code": "localization_reseal_required"}
+
+        with patch(
+            "scripts.aufgabe04.navigation.simple_waypoint_follower.rclpy",
+            SimpleNamespace(ok=lambda: True),
+        ), patch(
+            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            side_effect=[0.5, 1.0],
+        ):
+            result = node._wait_for_initial_runtime_inputs(0.0)
+
+        self.assertEqual(result, failure)
+        self.assertEqual(node._global_consistency_monitor_failure.call_count, 2)
+        node.publish_zero.assert_called_once_with()
+        self.assertEqual(
+            node.latest_stop_details["fault_code"],
+            "localization_reseal_required",
+        )
+
     def test_control_pose_lookup_targets_odom_not_map(self):
         calls = []
         transform = _transform(x_m=0.4, y_m=-0.2, yaw_rad=0.3)
@@ -274,6 +342,33 @@ class OdomFollowerExecutionTest(unittest.TestCase):
 
         self.assertEqual(result.stop_reason, "obstacle too close")
         node._global_consistency_monitor_failure.assert_not_called()
+        self.assertGreaterEqual(node.publish_repeated_zero.call_count, 2)
+
+    def test_runtime_global_tf_failure_preserves_prior_motion_evidence(self):
+        node = object.__new__(SimpleWaypointFollowerNode)
+        node.waypoints = (Pose2D(0.0, 0.0), Pose2D(0.1, 0.0))
+        node.current_route_kind = "stand_discovery_corridor"
+        node.follower_config = SimpleNamespace(control_rate_hz=10.0)
+        node.distance_estimate_m = 0.04
+        node.motion_published = True
+        node.latest_stop_details = {"fault_code": "localization_reseal_required"}
+        node._wait_for_initial_runtime_inputs = Mock(return_value="")
+        node._drain_runtime_callbacks = Mock()
+        node._safety_failure = Mock(return_value="")
+        failure = "global localization consistency requires zero and reseal"
+        node._global_consistency_monitor_failure = Mock(return_value=failure)
+        node.publish_repeated_zero = Mock()
+
+        with patch(
+            "scripts.aufgabe04.navigation.simple_waypoint_follower.rclpy",
+            SimpleNamespace(ok=lambda: True),
+        ):
+            result = node.run()
+
+        self.assertEqual(result.status, "stopped")
+        self.assertEqual(result.stop_reason, failure)
+        self.assertTrue(result.motion_published)
+        node._global_consistency_monitor_failure.assert_called_once_with()
         self.assertGreaterEqual(node.publish_repeated_zero.call_count, 2)
 
 

@@ -19,6 +19,9 @@ from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
     startup_reseal_motion_authorization_sha256,
     write_startup_reseal_motion_permit,
 )
+from scripts.aufgabe04.real_robot.autonomous_artifact_paths import (
+    resolve_normal_artifact_path,
+)
 
 
 @dataclass(frozen=True)
@@ -82,9 +85,15 @@ def write_startup_reseal_permit_summary(
     pose = (fresh_start_x_m, fresh_start_y_m, fresh_start_yaw_rad)
     if any(isinstance(value, bool) or not math.isfinite(value) for value in pose):
         raise ValueError("startup reseal fresh pose must be finite")
-    route_path = Path(route_csv).absolute()
-    diagnostics_path = Path(diagnostics_json).absolute()
-    destination = Path(path).absolute()
+    route_path = resolve_normal_artifact_path(
+        route_csv,
+        label="startup reseal summary route CSV",
+    )
+    diagnostics_path = resolve_normal_artifact_path(
+        diagnostics_json,
+        label="startup reseal summary diagnostics JSON",
+    )
+    destination = Path(path).resolve(strict=False)
     destination.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema_version": 1,
@@ -134,7 +143,10 @@ def issue_startup_reseal_motion_permit(
     if not str(run_id).strip() or run_id == context.rejected_run_id:
         raise ValueError("startup reseal replacement run_id must be new")
 
-    master_path = Path(context.mission_authorization_json).absolute()
+    master_path = resolve_normal_artifact_path(
+        context.mission_authorization_json,
+        label="startup reseal motion authorization",
+    )
     master = load_startup_reseal_motion_authorization(master_path)
     if master.session_id != context.session_id:
         raise ValueError("startup reseal authorization session mismatch")
@@ -146,30 +158,42 @@ def issue_startup_reseal_motion_permit(
     ):
         raise ValueError("startup reseal authorization budget mismatch")
 
-    def sealed(path: Path) -> tuple[str, str]:
-        canonical = Path(path).absolute()
+    def sealed(path: Path, label: str) -> tuple[str, str]:
+        canonical = resolve_normal_artifact_path(path, label=label)
         return str(canonical), file_sha256(canonical)
 
     rejected_log_path, rejected_log_sha256 = sealed(
-        context.rejected_semantic_log_path
+        context.rejected_semantic_log_path,
+        "startup reseal rejected semantic log",
     )
     startup_summary_path, startup_summary_sha256 = sealed(
-        context.startup_reseal_summary_path
+        context.startup_reseal_summary_path,
+        "startup reseal summary",
     )
     fresh_path, fresh_sha256 = sealed(
-        context.fresh_localization_evidence_path
+        context.fresh_localization_evidence_path,
+        "startup reseal fresh localization evidence",
     )
-    route_path, route_sha256 = sealed(route_csv)
-    diagnostics_path, diagnostics_sha256 = sealed(diagnostics_json)
+    route_path, route_sha256 = sealed(route_csv, "startup reseal route CSV")
+    diagnostics_path, diagnostics_sha256 = sealed(
+        diagnostics_json,
+        "startup reseal diagnostics JSON",
+    )
     certificate_path, certificate_sha256 = sealed(
-        map_route_certificate_json
+        map_route_certificate_json,
+        "startup reseal map-route certificate",
     )
-    dry_preflight_path, dry_preflight_sha256 = sealed(dry_preflight_json)
+    dry_preflight_path, dry_preflight_sha256 = sealed(
+        dry_preflight_json,
+        "startup reseal dry preflight",
+    )
     dry_certificate_path, dry_certificate_sha256 = sealed(
-        dry_odom_certificate_json
+        dry_odom_certificate_json,
+        "startup reseal dry odom certificate",
     )
     dry_budget_path, dry_budget_sha256 = sealed(
-        dry_uncertainty_budget_json
+        dry_uncertainty_budget_json,
+        "startup reseal dry uncertainty budget",
     )
     permit = StartupResealMotionPermit(
         master_authorization_sha256=(
@@ -205,7 +229,7 @@ def issue_startup_reseal_motion_permit(
         dry_run_passed=True,
         additional_typed_run_required=False,
     )
-    permit_path = Path(context.permit_json_path).absolute()
+    permit_path = Path(context.permit_json_path).resolve(strict=False)
     permit_sha256 = write_startup_reseal_motion_permit(permit_path, permit)
     return permit_path, permit_sha256
 

@@ -154,11 +154,14 @@ class AutonomousCoverageExecutionTest(unittest.TestCase):
 
     @staticmethod
     def _sealed(root: Path) -> dict[str, str]:
-        return {
-            "route_csv": str(root / "sealed_route.csv"),
-            "diagnostics_json": str(root / "sealed_diagnostics.json"),
-            "route_certificate_json": str(root / "route_certificate.json"),
+        paths = {
+            "route_csv": root / "sealed_route.csv",
+            "diagnostics_json": root / "sealed_diagnostics.json",
+            "route_certificate_json": root / "route_certificate.json",
         }
+        for path in paths.values():
+            path.write_text("{}\n", encoding="utf-8")
+        return {name: str(path) for name, path in paths.items()}
 
     def test_module_has_no_parent_ros_process_or_prompt_import(self):
         import scripts.aufgabe04.real_robot.autonomous_coverage_execution as module

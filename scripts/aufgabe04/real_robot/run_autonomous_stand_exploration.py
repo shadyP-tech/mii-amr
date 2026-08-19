@@ -109,6 +109,10 @@ from scripts.aufgabe04.real_robot.hardware_profile import (
 from scripts.aufgabe04.real_robot.physical_site_contract import (
     validate_physical_site_contract,
 )
+from scripts.aufgabe04.real_robot.autonomous_artifact_paths import (
+    resolve_child_artifact_paths,
+    resolve_normal_artifact_path,
+)
 from scripts.aufgabe04.real_robot.autonomous_child_runner import (
     DEFAULT_COLLISION_MARGIN_M,
     DEFAULT_LIDAR_STOP_DISTANCE_M,
@@ -159,6 +163,7 @@ from scripts.aufgabe04.real_robot.autonomous_checkpoint_resume import (
 from scripts.aufgabe04.real_robot.autonomous_modes import (
     AutonomousRunMode,
     resolve_autonomous_run_mode,
+    validate_autonomous_viewpoint_scope,
     validate_session_id_mode_label,
 )
 from scripts.aufgabe04.real_robot.autonomous_session_manifest import (
@@ -419,28 +424,41 @@ def _issue_runtime_localization_motion_permit(
         raise ValueError("runtime localization permit reseal_index must be positive")
     if context.reseal_index > context.max_runtime_reseals_per_leg:
         raise ValueError("runtime localization permit reseal budget exhausted")
-    master_path = Path(context.mission_authorization_json).absolute()
+    master_path = resolve_normal_artifact_path(
+        context.mission_authorization_json,
+        label="runtime localization mission authorization",
+    )
     master = load_mission_motion_authorization(master_path)
     decision_evidence = dict(context.runtime_reseal_decision_evidence)
 
-    def sealed(path: Path) -> tuple[str, str]:
-        canonical = Path(path).absolute()
+    def sealed(path: Path, label: str) -> tuple[str, str]:
+        canonical = resolve_normal_artifact_path(path, label=label)
         return str(canonical), authorization_file_sha256(canonical)
 
     fresh_path, fresh_sha256 = sealed(
-        context.fresh_localization_evidence_path
+        context.fresh_localization_evidence_path,
+        "runtime localization fresh localization evidence",
     )
-    route_path, route_sha256 = sealed(route_csv)
-    diagnostics_path, diagnostics_sha256 = sealed(diagnostics_json)
+    route_path, route_sha256 = sealed(route_csv, "runtime localization route CSV")
+    diagnostics_path, diagnostics_sha256 = sealed(
+        diagnostics_json,
+        "runtime localization diagnostics JSON",
+    )
     map_certificate_path, map_certificate_sha256 = sealed(
-        map_route_certificate_json
+        map_route_certificate_json,
+        "runtime localization map-route certificate",
     )
-    dry_preflight_path, dry_preflight_sha256 = sealed(dry_preflight_json)
+    dry_preflight_path, dry_preflight_sha256 = sealed(
+        dry_preflight_json,
+        "runtime localization dry preflight",
+    )
     dry_certificate_path, dry_certificate_sha256 = sealed(
-        dry_odom_certificate_json
+        dry_odom_certificate_json,
+        "runtime localization dry odom certificate",
     )
     dry_budget_path, dry_budget_sha256 = sealed(
-        dry_uncertainty_budget_json
+        dry_uncertainty_budget_json,
+        "runtime localization dry uncertainty budget",
     )
     permit = RuntimeLocalizationMotionPermit(
         master_authorization_sha256=mission_motion_authorization_sha256(master),
@@ -473,7 +491,7 @@ def _issue_runtime_localization_motion_permit(
         dry_run_passed=True,
         additional_typed_run_required=False,
     )
-    permit_path = Path(context.permit_json_path).absolute()
+    permit_path = Path(context.permit_json_path).resolve(strict=False)
     permit_sha256 = write_runtime_localization_motion_permit(
         permit_path,
         permit,
@@ -494,24 +512,36 @@ def _issue_mission_leg_motion_permit(
 ) -> tuple[Path, str]:
     """Seal one exact routine child after its no-motion dry-run passes."""
 
-    master_path = Path(context.mission_authorization_json).absolute()
+    master_path = resolve_normal_artifact_path(
+        context.mission_authorization_json,
+        label="mission leg authorization",
+    )
     master = load_mission_leg_motion_authorization(master_path)
 
-    def sealed(path: Path) -> tuple[str, str]:
-        canonical = Path(path).absolute()
+    def sealed(path: Path, label: str) -> tuple[str, str]:
+        canonical = resolve_normal_artifact_path(path, label=label)
         return str(canonical), authorization_file_sha256(canonical)
 
-    route_path, route_sha256 = sealed(route_csv)
-    diagnostics_path, diagnostics_sha256 = sealed(diagnostics_json)
-    map_certificate_path, map_certificate_sha256 = sealed(
-        map_route_certificate_json
+    route_path, route_sha256 = sealed(route_csv, "mission leg route CSV")
+    diagnostics_path, diagnostics_sha256 = sealed(
+        diagnostics_json,
+        "mission leg diagnostics JSON",
     )
-    dry_preflight_path, dry_preflight_sha256 = sealed(dry_preflight_json)
+    map_certificate_path, map_certificate_sha256 = sealed(
+        map_route_certificate_json,
+        "mission leg map-route certificate",
+    )
+    dry_preflight_path, dry_preflight_sha256 = sealed(
+        dry_preflight_json,
+        "mission leg dry preflight",
+    )
     dry_certificate_path, dry_certificate_sha256 = sealed(
-        dry_odom_certificate_json
+        dry_odom_certificate_json,
+        "mission leg dry odom certificate",
     )
     dry_budget_path, dry_budget_sha256 = sealed(
-        dry_uncertainty_budget_json
+        dry_uncertainty_budget_json,
+        "mission leg dry uncertainty budget",
     )
     permit = MissionLegMotionPermit(
         master_authorization_sha256=(
@@ -545,7 +575,7 @@ def _issue_mission_leg_motion_permit(
         dry_run_passed=True,
         additional_typed_run_required=False,
     )
-    permit_path = Path(context.permit_json_path).absolute()
+    permit_path = Path(context.permit_json_path).resolve(strict=False)
     permit_sha256 = write_mission_leg_motion_permit(permit_path, permit)
     return permit_path, permit_sha256
 
@@ -672,6 +702,34 @@ def _run_motion_leg(
             return outcome
         raise RuntimeError(
             f"dry-run failed for {run_id}: {outcome.stop_reason}"
+        )
+    if permit_context_count:
+        canonical_artifacts = resolve_child_artifact_paths(
+            session_root=session_root,
+            sealed=sealed,
+        )
+        session_root = canonical_artifacts.session_root
+        semantic_log = session_root / "run_events" / f"{run_id}.jsonl"
+        common.update(
+            {
+                "route_csv": canonical_artifacts.route_csv,
+                "diagnostics_json": canonical_artifacts.diagnostics_json,
+                "certificate_json": (
+                    canonical_artifacts.route_certificate_json
+                ),
+                "session_root": session_root,
+            }
+        )
+        odom_root = session_root / "odom_execution"
+        dry_certificate = (
+            None
+            if uncertainty_map_yaml is None
+            else odom_root / f"{run_id}_dry_certificate.json"
+        )
+        dry_budget = (
+            None
+            if uncertainty_map_yaml is None
+            else odom_root / f"{run_id}_dry_uncertainty_budget.json"
         )
     if not execute:
         return MotionLegOutcome(
@@ -834,21 +892,39 @@ def _run_motion_leg(
         if uncertainty_map_yaml is None
         else odom_root / f"{run_id}_execute_uncertainty_budget.json"
     )
+    runtime_authorization_path = (
+        None
+        if runtime_localization_permit_context is None
+        else resolve_normal_artifact_path(
+            runtime_localization_permit_context.mission_authorization_json,
+            label="runtime localization mission authorization",
+        )
+    )
+    startup_authorization_path = (
+        None
+        if startup_reseal_permit_context is None
+        else resolve_normal_artifact_path(
+            startup_reseal_permit_context.mission_authorization_json,
+            label="startup reseal motion authorization",
+        )
+    )
+    mission_leg_authorization_path = (
+        None
+        if mission_leg_permit_context is None
+        else resolve_normal_artifact_path(
+            mission_leg_permit_context.mission_authorization_json,
+            label="mission leg authorization",
+        )
+    )
     runner = _runner_command(
         **common,
         dry_run=False,
         odom_execution_certificate_json=live_certificate,
         uncertainty_budget_json=live_budget,
-        mission_motion_authorization_json=(
-            None
-            if runtime_localization_permit_context is None
-            else runtime_localization_permit_context.mission_authorization_json
-        ),
+        mission_motion_authorization_json=runtime_authorization_path,
         runtime_localization_motion_permit_json=motion_permit_path,
         startup_reseal_motion_authorization_json=(
-            None
-            if startup_reseal_permit_context is None
-            else startup_reseal_permit_context.mission_authorization_json
+            startup_authorization_path
         ),
         startup_reseal_motion_permit_json=startup_reseal_permit_path,
         startup_reseal_target_viewpoint_id=(
@@ -862,9 +938,7 @@ def _run_motion_leg(
             else startup_reseal_permit_context.semantic_map_id
         ),
         mission_leg_motion_authorization_json=(
-            None
-            if mission_leg_permit_context is None
-            else mission_leg_permit_context.mission_authorization_json
+            mission_leg_authorization_path
         ),
         mission_leg_motion_permit_json=mission_leg_permit_path,
         mission_leg_kind=(
@@ -1493,6 +1567,13 @@ def main(argv=None) -> int:
     args.execute = resolved_run_mode.execute
     args.coverage_leg_limit = resolved_run_mode.coverage_leg_limit
     args.stop_after_coverage = resolved_run_mode.stop_after_coverage
+    try:
+        validate_autonomous_viewpoint_scope(
+            resolved_run_mode,
+            exact_inspection_point_count=args.exact_inspection_point_count,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     resume_mode = (
         resolved_run_mode.mode
         is AutonomousRunMode.RESUME_NEXT_COVERAGE_LEG

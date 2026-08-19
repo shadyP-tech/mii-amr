@@ -54,6 +54,39 @@ class MotionLegOutcome:
     startup_reseal_motion_permit_sha256: str = ""
 
 
+def _resolve_route_artifact_leg_index(
+    *,
+    route_artifact_leg_index: int | None,
+    legacy_leg_index: int | None,
+) -> int:
+    """Resolve only the leg identity encoded inside the sealed route CSV.
+
+    Autonomous coverage and candidate routes are sealed independently, so
+    their local route-artifact index is normally zero even when the enclosing
+    mission or coverage-replan index is nonzero.  ``legacy_leg_index`` remains
+    a compatibility alias for callers that explicitly selected a route row;
+    it must never be inferred from either enclosing identity.
+    """
+
+    if route_artifact_leg_index is not None and legacy_leg_index is not None:
+        raise ValueError(
+            "route_artifact_leg_index and legacy leg_index are mutually "
+            "exclusive"
+        )
+    resolved = (
+        route_artifact_leg_index
+        if route_artifact_leg_index is not None
+        else legacy_leg_index
+    )
+    if resolved is None:
+        resolved = 0
+    if type(resolved) is not int or resolved < 0:
+        raise ValueError(
+            "route_artifact_leg_index must be a non-negative integer"
+        )
+    return resolved
+
+
 def build_child_runner_command(
     *,
     profile,
@@ -62,6 +95,7 @@ def build_child_runner_command(
     certificate_json: Path,
     run_id: str,
     session_root: Path,
+    route_artifact_leg_index: int | None = None,
     leg_index: int | None = None,
     coverage_plan: Path | None = None,
     candidate_snapshot: Path | None = None,
@@ -91,17 +125,18 @@ def build_child_runner_command(
     startup_reseal_semantic_map_id: str = "",
     mission_session_id: str = "",
 ) -> list[str]:
-    """Build the established single-segment child argv without executing it."""
+    """Build the established single-segment child argv without executing it.
 
-    resolved_leg_index = leg_index
-    if resolved_leg_index is None and coverage_transient_replan is not None:
-        resolved_leg_index = coverage_transient_replan.get("leg_index")
-    if resolved_leg_index is None and mission_leg_index is not None:
-        resolved_leg_index = mission_leg_index
-    if resolved_leg_index is None:
-        resolved_leg_index = 0
-    if type(resolved_leg_index) is not int or resolved_leg_index < 0:
-        raise ValueError("leg_index must be a non-negative integer")
+    ``route_artifact_leg_index`` selects a leg encoded in ``route_csv``.  It is
+    deliberately independent of ``mission_leg_index`` and the transient
+    coverage-replan ``leg_index``.  The older ``leg_index`` keyword remains a
+    compatibility alias for an explicit route-artifact selection.
+    """
+
+    resolved_route_artifact_leg_index = _resolve_route_artifact_leg_index(
+        route_artifact_leg_index=route_artifact_leg_index,
+        legacy_leg_index=leg_index,
+    )
 
     run_phase = "dry" if dry_run else "execute"
     odom_fields = (
@@ -128,7 +163,7 @@ def build_child_runner_command(
         "--route-certificate-json",
         str(certificate_json),
         "--leg-index",
-        str(resolved_leg_index),
+        str(resolved_route_artifact_leg_index),
         "--run-id",
         run_id,
         "--robot-id",

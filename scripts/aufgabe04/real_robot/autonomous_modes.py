@@ -192,6 +192,42 @@ def validate_session_id_mode_label(
         )
 
 
+def validate_autonomous_viewpoint_scope(
+    resolved: ResolvedAutonomousRunMode,
+    *,
+    exact_inspection_point_count: int | None,
+) -> None:
+    """Keep the two-viewpoint diagnostic out of complete-coverage modes.
+
+    Exact-two planning is useful for focused geometry diagnostics, but it does
+    not provide the redundant observations expected by a complete five-stand
+    discovery pass.  Rejecting the combination before session creation keeps
+    a stale shell option from silently narrowing a full mission.
+    """
+
+    if not isinstance(resolved, ResolvedAutonomousRunMode):
+        raise ValueError("resolved run mode is required")
+    if exact_inspection_point_count is None:
+        return
+    if (
+        isinstance(exact_inspection_point_count, bool)
+        or not isinstance(exact_inspection_point_count, int)
+        or exact_inspection_point_count != 2
+    ):
+        raise ValueError(
+            "exact_inspection_point_count must be exactly 2 when supplied"
+        )
+    if resolved.mode in {
+        AutonomousRunMode.EXECUTE_COVERAGE_ONLY,
+        AutonomousRunMode.EXECUTE_FULL,
+    }:
+        raise ValueError(
+            "--exact-inspection-point-count 2 is diagnostic-only and cannot "
+            f"be used with --run-mode {resolved.mode.value}; omit it so stop "
+            "spacing determines the complete viewpoint set"
+        )
+
+
 def _parse_explicit_mode(
     run_mode: AutonomousRunMode | str | None,
 ) -> AutonomousRunMode | None:

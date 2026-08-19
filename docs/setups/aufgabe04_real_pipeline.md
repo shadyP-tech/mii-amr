@@ -29,6 +29,7 @@ loaded logistics mission or a two-robot run; see
 | `navigation/spatial_assignment.py` | Globally associate stopped-epoch detections with existing candidates by cardinality and total distance | None |
 | `navigation/coverage_candidate_admission.py` | Fail closed between LiDAR coverage and candidate approaches unless coverage and multi-view candidate evidence are complete | None |
 | `real_robot/autonomous_modes.py` | Resolve one explicit workflow mode and authorization scope; reject contradictory legacy flags, unsafe session IDs, and misleading session labels | None |
+| `real_robot/autonomous_artifact_paths.py` | Canonicalize existing sealed child artifacts so dry evidence, permits, and live argv bind one filesystem identity | None |
 | `real_robot/autonomous_child_runner.py` | Build child-runner and bundle argv, and parse one unambiguous append-only terminal outcome | None |
 | `real_robot/autonomous_localization_readiness.py` | Classify the one bounded no-motion retryable uncertainty-admission failure without changing any limit | None |
 | `real_robot/autonomous_session_manifest.py` | Snapshot and content-hash resumable coverage checkpoints; manifests explicitly authorize no motion | None |
@@ -401,10 +402,24 @@ localization reseal; the adopted overlay, source run IDs, route hashes, and
 remaining blockage budget must all verify before a new permit can be minted.
 Missing or mismatched overlay evidence remains terminal.
 
+Each independently sealed route CSV has its own local artifact leg index,
+normally `0`; coverage/replan and mission indices remain separate evidence
+identities and never select a CSV row. After the no-motion dry child has
+created its evidence, the parent canonicalizes the session, route,
+diagnostics, certificate, and authorization paths before hashing, permit
+publication, and live child argv construction. This prevents relative-path or
+platform-alias differences such as macOS `/var` versus `/private/var` from
+invalidating an otherwise exact permit.
+
 Immediately after ROS preflight, the runner also binds the fresh
 `map -> base_footprint` pose to the first certified route segment before it asks
 for motion confirmation. If AMCL has moved outside the unchanged `0.03 m`
 startup tube, no velocity is published and the stale certificate is rejected.
+The follower's bounded initial sensor wait also holds zero until its own fresh
+TF buffer can validate both the odom-owned control pose and the read-only
+`map -> odom` global-consistency edge. A cold missing edge may populate only
+inside that existing wait; persistent absence, stale TF, malformed TF, or
+excess drift remains a terminal zero/reseal result before any nonzero command.
 For an ordinary coverage leg, the autonomous wrapper samples a fresh
 stationary pose, runs a complete same-target A* plan, validates a new
 exact-start connector, seals a new certificate, and repeats the dry-run. The

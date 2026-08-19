@@ -4,6 +4,7 @@ from scripts.aufgabe04.real_robot.autonomous_modes import (
     AutonomousAuthorizationScope,
     AutonomousRunMode,
     resolve_autonomous_run_mode,
+    validate_autonomous_viewpoint_scope,
     validate_session_id_mode_label,
 )
 
@@ -218,6 +219,37 @@ class AutonomousRunModeTests(unittest.TestCase):
                 "safe 1-128 character identifier",
             ):
                 validate_session_id_mode_label(session_id, dry)
+
+    def test_exact_two_is_rejected_for_complete_coverage_modes(self):
+        for mode in ("execute-coverage-only", "execute-full"):
+            with self.subTest(mode=mode), self.assertRaisesRegex(
+                ValueError,
+                "diagnostic-only",
+            ):
+                validate_autonomous_viewpoint_scope(
+                    resolve_autonomous_run_mode(run_mode=mode),
+                    exact_inspection_point_count=2,
+                )
+
+    def test_exact_two_remains_available_to_bounded_diagnostic_modes(self):
+        modes = (
+            resolve_autonomous_run_mode(run_mode="dry-first-leg"),
+            resolve_autonomous_run_mode(
+                run_mode="execute-coverage-checkpoint",
+                coverage_leg_limit=1,
+            ),
+        )
+        for resolved in modes:
+            with self.subTest(mode=resolved.mode.value):
+                validate_autonomous_viewpoint_scope(
+                    resolved,
+                    exact_inspection_point_count=2,
+                )
+
+        validate_autonomous_viewpoint_scope(
+            resolve_autonomous_run_mode(run_mode="execute-full"),
+            exact_inspection_point_count=None,
+        )
 
 
 if __name__ == "__main__":
