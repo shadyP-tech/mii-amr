@@ -10,7 +10,10 @@ import unittest
 from pathlib import Path
 
 from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds
-from scripts.aufgabe04.navigation.costmap import Costmap
+from scripts.aufgabe04.navigation.costmap import (
+    CELL_SOURCE_STATION_KEEPOUT,
+    Costmap,
+)
 from scripts.aufgabe04.navigation.exact_start_connector import (
     prepend_certified_exact_start,
 )
@@ -30,6 +33,7 @@ from scripts.aufgabe04.navigation.stand_coverage_survey import (
     STATUS_PENDING_CAMERA,
     STATUS_PROVISIONAL,
     CoverageSurveyConfig,
+    _optimized_survey_route,
     build_coverage_survey_plan,
     decide_candidate,
     fuse_confirmed_stands,
@@ -198,7 +202,7 @@ class CoverageSurveyPlanTest(unittest.TestCase):
         self.assertEqual(loaded_progress, progress)
         self.assertEqual(loaded_registry, registry)
 
-    def test_live_amcl_start_is_prepended_and_accepted_by_startup_gate(self):
+    def test_live_amcl_start_is_smoothed_and_accepted_by_startup_gate(self):
         map_path = Path("maps/aufgabe03/arena_1p898x3p9_auto.yaml")
         grid, bundle = load_occupancy_grid_with_bundle(
             map_path,
@@ -230,6 +234,11 @@ class CoverageSurveyPlanTest(unittest.TestCase):
         self.assertTrue(leg.exact_start_connector.required)
         self.assertTrue(leg.exact_start_connector.validated)
         self.assertGreater(leg.exact_start_connector.minimum_margin_m, 0.039)
+        self.assertTrue(leg.route_smoothing.optimized)
+        self.assertLess(
+            leg.route_smoothing.output_point_count,
+            leg.route_smoothing.input_point_count,
+        )
         self.assertEqual(leg.route_result.route.points[0].pose, planned_start)
         runtime_pose = Pose2D(
             -0.4074980823903188,
@@ -259,6 +268,30 @@ class CoverageSurveyPlanTest(unittest.TestCase):
                 base_costmap=base,
                 start=start,
                 required_clearance_m=0.20,
+            )
+
+    def test_exact_start_fallback_rejects_live_keepout_overlay(self):
+        base = Costmap.from_occupancy_grid(free_grid())
+        start = Pose2D(0.0, 0.0, 0.0)
+        planning = base.with_blocked_cells(
+            (base.world_to_grid(start),),
+            source=CELL_SOURCE_STATION_KEEPOUT,
+        )
+        result = plan_route(
+            planning,
+            start,
+            Pose2D(0.8, 0.0, 0.0),
+            snap_radius_m=0.30,
+        )
+        self.assertIsNotNone(result.route)
+
+        with self.assertRaisesRegex(ValueError, "live planning overlay"):
+            _optimized_survey_route(
+                result,
+                base_costmap=base,
+                planning_costmap=planning,
+                current_pose=start,
+                required_clearance_m=0.0,
             )
 
     def test_exact_cell_center_start_is_not_duplicated(self):
@@ -345,23 +378,25 @@ class CoverageSurveyPlanTest(unittest.TestCase):
         self.assertIsNotNone(leg)
         assert leg is not None and leg.route_result.route is not None
         points = leg.route_result.route.points
-        self.assertGreaterEqual(len(points), 3)
+        self.assertGreaterEqual(len(points), 2)
         self.assertEqual(points[0].pose, physical_start)
         self.assertNotEqual(points[0].cell, points[1].cell)
-        first_heading = math.atan2(
-            points[1].pose.y_m - points[0].pose.y_m,
-            points[1].pose.x_m - points[0].pose.x_m,
-        )
-        second_heading = math.atan2(
-            points[2].pose.y_m - points[1].pose.y_m,
-            points[2].pose.x_m - points[1].pose.x_m,
-        )
-        turn_rad = abs(
-            (second_heading - first_heading + math.pi)
-            % (2.0 * math.pi)
-            - math.pi
-        )
-        self.assertLess(turn_rad, math.pi / 2.0)
+        if len(points) >= 3:
+            first_heading = math.atan2(
+                points[1].pose.y_m - points[0].pose.y_m,
+                points[1].pose.x_m - points[0].pose.x_m,
+            )
+            second_heading = math.atan2(
+                points[2].pose.y_m - points[1].pose.y_m,
+                points[2].pose.x_m - points[1].pose.x_m,
+            )
+            turn_rad = abs(
+                (second_heading - first_heading + math.pi)
+                % (2.0 * math.pi)
+                - math.pi
+            )
+            self.assertLess(turn_rad, math.pi / 2.0)
+        self.assertTrue(leg.route_smoothing.optimized)
 
 
 class StandSurveyRegistryTest(unittest.TestCase):

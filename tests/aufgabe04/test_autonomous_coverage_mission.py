@@ -19,8 +19,10 @@ from scripts.aufgabe04.real_robot.autonomous_coverage_mission import (
     CoverageCheckpointComplete,
     CoverageCheckpointIdentity,
     CoverageComplete,
+    CoverageContinuationPreparationError,
     CoverageMissionConfig,
     CoverageMissionEffects,
+    PreparedCoverageLeg,
     PublishedCoverageCheckpoint,
     execute_coverage_mission,
 )
@@ -98,6 +100,17 @@ def _summary(
 
 def _completed() -> CompletedCoverageLeg:
     return CompletedCoverageLeg(Path("odom_execution_certificate.json"))
+
+
+def _prepared(request) -> PreparedCoverageLeg:
+    return PreparedCoverageLeg(
+        leg_index=request.leg_index,
+        target_viewpoint_id=request.target_viewpoint_id,
+        source_route=Path(f"prepared_leg_{request.leg_index:03d}.csv"),
+        source_diagnostics=Path(
+            f"prepared_leg_{request.leg_index:03d}_diagnostics.json"
+        ),
+    )
 
 
 def _unexpected(name: str):
@@ -178,6 +191,7 @@ class AutonomousCoverageMissionTest(unittest.TestCase):
                     execute_completed_leg=execute,
                     capture_lidar_epoch=capture,
                     fuse_coverage_stop=fuse,
+                    prepare_next_leg=_unexpected("prepare_next_leg"),
                     build_snapshot=_unexpected("build_snapshot"),
                     read_summary=read_summary,
                     publish_checkpoint=publish,
@@ -210,6 +224,7 @@ class AutonomousCoverageMissionTest(unittest.TestCase):
                 fuse_coverage_stop=lambda viewpoint_id, observer: _summary(
                     "survey_vp_002", visited=1
                 ),
+                prepare_next_leg=_unexpected("prepare_next_leg"),
                 build_snapshot=_unexpected("build_snapshot"),
                 read_summary=lambda path: _summary("survey_vp_001", visited=0),
                 publish_checkpoint=lambda request: PublishedCoverageCheckpoint(
@@ -254,6 +269,7 @@ class AutonomousCoverageMissionTest(unittest.TestCase):
                     execute_completed_leg=event("execute", _completed()),
                     capture_lidar_epoch=event("capture", Path("observer.json")),
                     fuse_coverage_stop=event("fuse", _summary(None, visited=1, total=1)),
+                    prepare_next_leg=_unexpected("prepare_next_leg"),
                     read_summary=lambda path: _summary(
                         "survey_vp_001", visited=0, total=1
                     ),
@@ -322,6 +338,7 @@ class AutonomousCoverageMissionTest(unittest.TestCase):
                                 execute_completed_leg=execute,
                                 capture_lidar_epoch=capture,
                                 fuse_coverage_stop=fuse,
+                                prepare_next_leg=_unexpected("prepare_next_leg"),
                                 build_snapshot=_unexpected("build_snapshot"),
                                 read_summary=lambda path: _summary(
                                     "survey_vp_001", visited=0
@@ -361,6 +378,7 @@ class AutonomousCoverageMissionTest(unittest.TestCase):
                                 fuse_coverage_stop=lambda viewpoint_id, observer: _summary(
                                     None, visited=1, total=1
                                 ),
+                                prepare_next_leg=_unexpected("prepare_next_leg"),
                                 build_snapshot=_unexpected("build_snapshot"),
                                 read_summary=lambda path: _summary(
                                     "survey_vp_001", visited=0, total=1
@@ -377,6 +395,229 @@ class AutonomousCoverageMissionTest(unittest.TestCase):
                                 write_snapshot=_unexpected("write_snapshot"),
                             ),
                         )
+
+    def test_next_leg_is_prepared_after_checkpoint_and_supplies_next_route(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _config(root, leg_limit=2)
+            events: list[str] = []
+            executed = []
+            prepared_requests = []
+
+            def execute(request):
+                events.append(f"execute:{request.target_viewpoint_id}")
+                executed.append(request)
+                return _completed()
+
+            def capture(viewpoint_id, certificate):
+                del certificate
+                events.append(f"capture:{viewpoint_id}")
+                return Path(f"{viewpoint_id}_observer.json")
+
+            def fuse(viewpoint_id, observer):
+                del observer
+                events.append(f"fuse:{viewpoint_id}")
+                visited = int(viewpoint_id.rsplit("_", 1)[1])
+                return _summary(f"survey_vp_{visited + 1:03d}", visited=visited)
+
+            checkpoint_count = 0
+
+            def publish(request):
+                nonlocal checkpoint_count
+                checkpoint_count += 1
+                events.append(f"checkpoint:{request.next_viewpoint_id}")
+                return PublishedCoverageCheckpoint(
+                    root / f"checkpoint_{checkpoint_count}.json",
+                    HASH_C,
+                )
+
+            def prepare(request):
+                events.append(f"prepare:{request.target_viewpoint_id}")
+                prepared_requests.append(request)
+                return _prepared(request)
+
+            outcome = execute_coverage_mission(
+                config,
+                CoverageMissionEffects(
+                    execute_completed_leg=execute,
+                    capture_lidar_epoch=capture,
+                    fuse_coverage_stop=fuse,
+                    prepare_next_leg=prepare,
+                    build_snapshot=_unexpected("build_snapshot"),
+                    read_summary=lambda path: _summary(
+                        "survey_vp_001", visited=0
+                    ),
+                    publish_checkpoint=publish,
+                    load_progress=_unexpected("load_progress"),
+                    load_registry=_unexpected("load_registry"),
+                ),
+            )
+
+            self.assertIsInstance(outcome, CoverageCheckpointComplete)
+            self.assertEqual(
+                events,
+                [
+                    "execute:survey_vp_001",
+                    "capture:survey_vp_001",
+                    "fuse:survey_vp_001",
+                    "checkpoint:survey_vp_002",
+                    "prepare:survey_vp_002",
+                    "execute:survey_vp_002",
+                    "capture:survey_vp_002",
+                    "fuse:survey_vp_002",
+                    "checkpoint:survey_vp_003",
+                ],
+            )
+            self.assertEqual(len(prepared_requests), 1)
+            self.assertEqual(
+                prepared_requests[0].checkpoint_manifest,
+                root / "checkpoint_1.json",
+            )
+            self.assertEqual(
+                executed[0].source_route,
+                config.survey_root / "legs" / "leg_000_route.csv",
+            )
+            self.assertEqual(
+                executed[1].source_route,
+                Path("prepared_leg_001.csv"),
+            )
+            self.assertEqual(
+                executed[1].source_diagnostics,
+                Path("prepared_leg_001_diagnostics.json"),
+            )
+
+    def test_preparation_failure_preserves_published_checkpoint_evidence(self):
+        class NestedPreparationError(RuntimeError):
+            def to_failure_fields(self):
+                return {
+                    "failure_phase": "post_observation_localization",
+                    "localization_failure": "dynamic map->odom unavailable",
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _config(root, leg_limit=0)
+            events: list[str] = []
+
+            def prepare(request):
+                events.append("prepare")
+                raise NestedPreparationError("fresh localization unavailable")
+
+            with self.assertRaises(CoverageContinuationPreparationError) as caught:
+                execute_coverage_mission(
+                    config,
+                    CoverageMissionEffects(
+                        execute_completed_leg=lambda request: (
+                            events.append("execute") or _completed()
+                        ),
+                        capture_lidar_epoch=lambda viewpoint_id, certificate: (
+                            events.append("capture") or Path("observer.json")
+                        ),
+                        fuse_coverage_stop=lambda viewpoint_id, observer: (
+                            events.append("fuse")
+                            or _summary("survey_vp_002", visited=1)
+                        ),
+                        prepare_next_leg=prepare,
+                        build_snapshot=_unexpected("build_snapshot"),
+                        read_summary=lambda path: _summary(
+                            "survey_vp_001", visited=0
+                        ),
+                        publish_checkpoint=lambda request: (
+                            events.append("checkpoint")
+                            or PublishedCoverageCheckpoint(
+                                root / "checkpoint_1.json", HASH_C
+                            )
+                        ),
+                        load_progress=_unexpected("load_progress"),
+                        load_registry=_unexpected("load_registry"),
+                    ),
+                )
+
+            error = caught.exception
+            self.assertEqual(
+                events,
+                ["execute", "capture", "fuse", "checkpoint", "prepare"],
+            )
+            self.assertEqual(error.checkpoint_manifest, root / "checkpoint_1.json")
+            self.assertEqual(error.checkpoint_manifest_sha256, HASH_C)
+            self.assertEqual(error.completed_coverage_legs, 1)
+            self.assertEqual(error.legs_completed_this_run, 1)
+            self.assertEqual(error.next_viewpoint_id, "survey_vp_002")
+            fields = error.to_failure_fields()
+            self.assertEqual(fields["checkpoint_manifest_sha256"], HASH_C)
+            self.assertEqual(fields["completed_coverage_legs"], 1)
+            self.assertEqual(
+                fields["preparation_failure_phase"],
+                "post_observation_localization",
+            )
+            self.assertEqual(
+                fields["localization_failure"],
+                "dynamic map->odom unavailable",
+            )
+            self.assertFalse(fields["motion_authorized"])
+            self.assertTrue(fields["motion_published"])
+            self.assertTrue(fields["prior_leg_motion_published"])
+
+    def test_mismatched_prepared_leg_identity_is_rejected_after_checkpoint(self):
+        cases = (
+            (2, "survey_vp_002", "leg index"),
+            (1, "survey_vp_999", "target"),
+        )
+        for prepared_index, prepared_target, message in cases:
+            with self.subTest(message=message):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    config = _config(root, leg_limit=0)
+
+                    def prepare(request):
+                        return PreparedCoverageLeg(
+                            leg_index=prepared_index,
+                            target_viewpoint_id=prepared_target,
+                            source_route=Path("route.csv"),
+                            source_diagnostics=Path("diagnostics.json"),
+                        )
+
+                    with self.assertRaisesRegex(
+                        CoverageContinuationPreparationError,
+                        message,
+                    ) as caught:
+                        execute_coverage_mission(
+                            config,
+                            CoverageMissionEffects(
+                                execute_completed_leg=lambda request: _completed(),
+                                capture_lidar_epoch=lambda viewpoint_id, certificate: Path(
+                                    "observer.json"
+                                ),
+                                fuse_coverage_stop=lambda viewpoint_id, observer: _summary(
+                                    "survey_vp_002", visited=1
+                                ),
+                                prepare_next_leg=prepare,
+                                build_snapshot=_unexpected("build_snapshot"),
+                                read_summary=lambda path: _summary(
+                                    "survey_vp_001", visited=0
+                                ),
+                                publish_checkpoint=lambda request: (
+                                    PublishedCoverageCheckpoint(
+                                        root / "checkpoint_1.json", HASH_C
+                                    )
+                                ),
+                                load_progress=_unexpected("load_progress"),
+                                load_registry=_unexpected("load_registry"),
+                            ),
+                        )
+                    self.assertEqual(
+                        caught.exception.checkpoint_manifest,
+                        root / "checkpoint_1.json",
+                    )
+
+    def test_prepared_leg_paths_must_be_path_instances(self):
+        with self.assertRaisesRegex(ValueError, "source_route must be a Path"):
+            PreparedCoverageLeg(
+                leg_index=1,
+                target_viewpoint_id="survey_vp_002",
+                source_route="route.csv",
+                source_diagnostics=Path("diagnostics.json"),
+            )
 
     def test_resume_limit_counts_this_run_while_cursor_reports_total(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -417,6 +658,7 @@ class AutonomousCoverageMissionTest(unittest.TestCase):
                         f"{viewpoint_id}_observer.json"
                     ),
                     fuse_coverage_stop=fuse,
+                    prepare_next_leg=_unexpected("prepare_next_leg"),
                     build_snapshot=_unexpected("build_snapshot"),
                     read_summary=lambda path: _summary(
                         "survey_vp_001", visited=0
@@ -465,6 +707,7 @@ class AutonomousCoverageMissionTest(unittest.TestCase):
                         "observer.json"
                     ),
                     fuse_coverage_stop=fuse,
+                    prepare_next_leg=_prepared,
                     build_snapshot=_unexpected("build_snapshot"),
                     read_summary=lambda path: _summary(
                         "survey_vp_001", visited=0

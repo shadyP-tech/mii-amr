@@ -97,6 +97,7 @@ class CoverageMissionConfig:
         if self.plan.map_bundle_sha256 != self.checkpoint_identity.map_bundle_sha256:
             raise ValueError("coverage plan and checkpoint map bundle differ")
 
+
 @dataclass(frozen=True)
 class CoverageLegRequest:
     leg_index: int
@@ -133,6 +134,116 @@ class CoverageCheckpointRequest:
 class PublishedCoverageCheckpoint:
     manifest_path: Path
     manifest_sha256: str
+
+
+@dataclass(frozen=True)
+class CoverageNextLegPreparationRequest:
+    """Evidence-bound request to prepare the already-checkpointed next leg."""
+
+    leg_index: int
+    recorded_viewpoint_id: str
+    target_viewpoint_id: str
+    lidar_observer_summary_path: Path
+    checkpoint_manifest: Path
+    checkpoint_manifest_sha256: str
+
+    def __post_init__(self) -> None:
+        if type(self.leg_index) is not int or self.leg_index < 0:
+            raise ValueError("next coverage leg index must be a non-negative integer")
+        if (
+            not isinstance(self.recorded_viewpoint_id, str)
+            or not self.recorded_viewpoint_id.strip()
+        ):
+            raise ValueError("recorded coverage viewpoint must be non-empty")
+        if (
+            not isinstance(self.target_viewpoint_id, str)
+            or not self.target_viewpoint_id.strip()
+        ):
+            raise ValueError("next coverage target must be a non-empty string")
+        for name in ("lidar_observer_summary_path", "checkpoint_manifest"):
+            if not isinstance(getattr(self, name), Path):
+                raise ValueError(f"{name} must be a Path")
+        _require_sha256(
+            self.checkpoint_manifest_sha256,
+            "checkpoint_manifest_sha256",
+        )
+
+
+@dataclass(frozen=True)
+class PreparedCoverageLeg:
+    """Route artifacts prepared for exactly one checkpointed continuation."""
+
+    leg_index: int
+    target_viewpoint_id: str
+    source_route: Path
+    source_diagnostics: Path
+
+    def __post_init__(self) -> None:
+        if type(self.leg_index) is not int or self.leg_index < 0:
+            raise ValueError("prepared coverage leg index must be non-negative")
+        if (
+            not isinstance(self.target_viewpoint_id, str)
+            or not self.target_viewpoint_id.strip()
+        ):
+            raise ValueError("prepared coverage target must be a non-empty string")
+        for name in ("source_route", "source_diagnostics"):
+            if not isinstance(getattr(self, name), Path):
+                raise ValueError(f"prepared coverage {name} must be a Path")
+
+
+class CoverageContinuationPreparationError(RuntimeError):
+    """Preparation failed after a durable checkpoint made the leg resumable."""
+
+    def __init__(
+        self,
+        *,
+        request: CoverageNextLegPreparationRequest,
+        completed_coverage_legs: int,
+        legs_completed_this_run: int,
+        preparation_error: Exception,
+    ) -> None:
+        self.checkpoint_manifest = request.checkpoint_manifest
+        self.checkpoint_manifest_sha256 = request.checkpoint_manifest_sha256
+        self.completed_coverage_legs = completed_coverage_legs
+        self.legs_completed_this_run = legs_completed_this_run
+        self.recorded_viewpoint_id = request.recorded_viewpoint_id
+        self.next_viewpoint_id = request.target_viewpoint_id
+        self.lidar_observer_summary_path = request.lidar_observer_summary_path
+        self.preparation_error = preparation_error
+        super().__init__(
+            "coverage continuation preparation failed after checkpoint "
+            f"{request.checkpoint_manifest}: {preparation_error}"
+        )
+
+    def to_failure_fields(self) -> dict[str, object]:
+        nested_fields: dict[str, object] = {}
+        nested = getattr(self.preparation_error, "to_failure_fields", None)
+        if callable(nested):
+            try:
+                value = nested()
+            except Exception:
+                value = None
+            if isinstance(value, Mapping):
+                nested_fields.update(value)
+        nested_phase = nested_fields.get("failure_phase")
+        if isinstance(nested_phase, str) and nested_phase.strip():
+            nested_fields["preparation_failure_phase"] = nested_phase
+        nested_fields.update(
+            {
+                "failure_phase": "coverage_continuation_preparation",
+                "checkpoint_manifest": str(self.checkpoint_manifest),
+                "checkpoint_manifest_sha256": self.checkpoint_manifest_sha256,
+                "completed_coverage_legs": self.completed_coverage_legs,
+                "legs_completed_this_run": self.legs_completed_this_run,
+                "recorded_viewpoint_id": self.recorded_viewpoint_id,
+                "next_viewpoint_id": self.next_viewpoint_id,
+                "lidar_observer_summary": str(self.lidar_observer_summary_path),
+                "motion_published": True,
+                "prior_leg_motion_published": True,
+                "motion_authorized": False,
+            }
+        )
+        return nested_fields
 
 
 @dataclass(frozen=True)
@@ -285,6 +396,13 @@ def _write_admission(path: Path, decision: CoverageCandidateAdmissionDecision) -
     )
 
 
+def _prepare_next_leg_unconfigured(
+    request: CoverageNextLegPreparationRequest,
+) -> PreparedCoverageLeg:
+    del request
+    raise RuntimeError("next-leg preparation effect is not configured")
+
+
 @dataclass(frozen=True)
 class CoverageMissionEffects:
     """All environment-visible effects used by the outer transaction."""
@@ -295,6 +413,9 @@ class CoverageMissionEffects:
     build_snapshot: Callable[
         [StandSurveyRegistry, CoverageSurveyPlan, Path, str], CandidateSnapshot
     ]
+    prepare_next_leg: Callable[
+        [CoverageNextLegPreparationRequest], PreparedCoverageLeg
+    ] = _prepare_next_leg_unconfigured
     read_summary: Callable[[Path], Mapping[str, object]] = _read_summary
     publish_checkpoint: Callable[
         [CoverageCheckpointRequest], PublishedCoverageCheckpoint
@@ -331,15 +452,30 @@ def execute_coverage_mission(
     admission_path = config.checkpoint_identity.session_root / "coverage_candidate_admission.json"
     snapshot_path = config.checkpoint_identity.session_root / "candidate_snapshot.json"
     summary = _validated_summary(effects.read_summary(summary_path))
+    prepared_leg: PreparedCoverageLeg | None = None
 
     while (viewpoint_id := _next_viewpoint_id(summary)) is not None:
         legs_root = config.survey_root / "legs"
+        if prepared_leg is None:
+            source_route = legs_root / f"leg_{leg_index:03d}_route.csv"
+            source_diagnostics = (
+                legs_root / f"leg_{leg_index:03d}_diagnostics.json"
+            )
+        else:
+            _validate_prepared_leg(
+                prepared_leg,
+                leg_index=leg_index,
+                target_viewpoint_id=viewpoint_id,
+            )
+            source_route = prepared_leg.source_route
+            source_diagnostics = prepared_leg.source_diagnostics
+            prepared_leg = None
         completed = effects.execute_completed_leg(
             CoverageLegRequest(
                 leg_index=leg_index,
                 target_viewpoint_id=viewpoint_id,
-                source_route=legs_root / f"leg_{leg_index:03d}_route.csv",
-                source_diagnostics=legs_root / f"leg_{leg_index:03d}_diagnostics.json",
+                source_route=source_route,
+                source_diagnostics=source_diagnostics,
             )
         )
         if not isinstance(completed, CompletedCoverageLeg):
@@ -408,6 +544,30 @@ def execute_coverage_mission(
             )
         # A final planned leg falls through to admission even when it reaches
         # the per-invocation limit; a checkpoint must never bypass that gate.
+        if next_viewpoint_id is not None:
+            assert published is not None
+            preparation_request = CoverageNextLegPreparationRequest(
+                leg_index=leg_index,
+                recorded_viewpoint_id=viewpoint_id,
+                target_viewpoint_id=next_viewpoint_id,
+                lidar_observer_summary_path=observer_summary,
+                checkpoint_manifest=published.manifest_path,
+                checkpoint_manifest_sha256=published.manifest_sha256,
+            )
+            try:
+                candidate = effects.prepare_next_leg(preparation_request)
+                prepared_leg = _validate_prepared_leg(
+                    candidate,
+                    leg_index=preparation_request.leg_index,
+                    target_viewpoint_id=preparation_request.target_viewpoint_id,
+                )
+            except Exception as exc:
+                raise CoverageContinuationPreparationError(
+                    request=preparation_request,
+                    completed_coverage_legs=leg_index,
+                    legs_completed_this_run=legs_completed_this_run,
+                    preparation_error=exc,
+                ) from exc
 
     progress = effects.load_progress(progress_path, config.plan)
     registry = effects.load_registry(registry_path, config.plan)
@@ -456,6 +616,29 @@ def execute_coverage_mission(
         resume_parent_checkpoint_path=config.parent_checkpoint_path,
         coverage_status=_admitted_status(admission, registry),
     )
+
+
+def _validate_prepared_leg(
+    value: object,
+    *,
+    leg_index: int,
+    target_viewpoint_id: str,
+) -> PreparedCoverageLeg:
+    if not isinstance(value, PreparedCoverageLeg):
+        raise RuntimeError("next-leg preparation returned invalid evidence")
+    if value.leg_index != leg_index:
+        raise RuntimeError(
+            "prepared coverage leg index does not match the continuation request"
+        )
+    if value.target_viewpoint_id != target_viewpoint_id:
+        raise RuntimeError(
+            "prepared coverage target does not match the continuation request"
+        )
+    if not isinstance(value.source_route, Path):
+        raise RuntimeError("prepared coverage route must be a Path")
+    if not isinstance(value.source_diagnostics, Path):
+        raise RuntimeError("prepared coverage diagnostics must be a Path")
+    return value
 
 
 def _validated_summary(value: Mapping[str, object]) -> Mapping[str, object]:

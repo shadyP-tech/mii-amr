@@ -33,6 +33,15 @@ from scripts.aufgabe04.navigation.dynamic_route_handoff import (
     RouteUpdateKind,
     validate_arena_boundary_evidence,
 )
+from scripts.aufgabe04.navigation.driving_behavior import (
+    CATALOG_PHYSICAL_ROUTE_KINDS,
+    CommandSmoothingConfig,
+    DYNAMIC_VIEWPOINT_ROUTE_KINDS,
+    HEADING_CORRIDOR_ROUTE_KINDS,
+    PHYSICAL_ROUTE_KINDS,
+    STATIC_PHYSICAL_ROUTE_KINDS,
+    controller_config_for_route_kind,
+)
 from scripts.aufgabe04.navigation.content_hashed_evidence import (
     payload_sha256,
     write_content_hashed_json,
@@ -134,18 +143,12 @@ from scripts.aufgabe04.navigation.mission_execution_gate import (
     validate_logistics_execution_bundle,
 )
 from scripts.aufgabe04.navigation.simple_waypoint_follower import (
-    CATALOG_PHYSICAL_ROUTE_KINDS,
-    DYNAMIC_VIEWPOINT_ROUTE_KINDS,
     FollowerConfig,
-    HEADING_CORRIDOR_ROUTE_KINDS,
     INTERMEDIATE_TERMINAL_HEADING_DISTANCE_COMPARISON_EPSILON_M,
     INTERMEDIATE_TERMINAL_HEADING_ENTRY_TOLERANCE_M,
     INTERMEDIATE_TERMINAL_HEADING_HOLD_TOLERANCE_M,
     INTERMEDIATE_TERMINAL_HEADING_TARGET_ENVELOPE_RADIUS_M,
-    PHYSICAL_ROUTE_KINDS,
-    STATIC_PHYSICAL_ROUTE_KINDS,
     certified_static_startup_decision,
-    controller_config_for_route_kind,
     intermediate_terminal_heading_entry_tolerance_m,
     run_simple_waypoint_follower,
 )
@@ -598,6 +601,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stop-heading-error-rad", type=float, default=1.25)
     parser.add_argument("--min-linear-speed-scale", type=float, default=0.35)
     parser.add_argument("--max-progress-advance-m", type=float, default=0.45)
+    parser.add_argument(
+        "--disable-command-smoothing",
+        action="store_true",
+        help=(
+            "Publish raw controller commands after safety checks. By default "
+            "normal commands are rate-limited; hard stops still publish zero "
+            "immediately."
+        ),
+    )
+    parser.add_argument(
+        "--max-linear-accel-mps2",
+        type=float,
+        default=0.10,
+        help="Maximum acceleration for ordinary shaped linear commands.",
+    )
+    parser.add_argument(
+        "--max-angular-accel-radps2",
+        type=float,
+        default=0.60,
+        help="Maximum acceleration for ordinary shaped angular commands.",
+    )
     parser.add_argument("--min-obstacle-distance-m", type=float, default=0.20)
     parser.add_argument(
         "--omnidirectional-hard-stop-distance-m",
@@ -2686,6 +2710,22 @@ def main(argv: list[str] | None = None) -> int:
             "--linear-motion-floor-mps must be positive and no greater than "
             "--max-linear-mps"
         )
+    smoothing_values = {
+        "--max-linear-accel-mps2": args.max_linear_accel_mps2,
+        "--max-angular-accel-radps2": args.max_angular_accel_radps2,
+    }
+    for name, value in smoothing_values.items():
+        if not math.isfinite(value) or value <= 0.0:
+            parser.error(f"{name} must be finite and positive")
+    if (
+        not args.disable_command_smoothing
+        and args.max_linear_accel_mps2 / 10.0 + 1.0e-12
+        < args.linear_motion_floor_mps
+    ):
+        parser.error(
+            "--max-linear-accel-mps2 must reach "
+            "--linear-motion-floor-mps within one 10 Hz control period"
+        )
     if (
         not math.isfinite(args.blockage_confirmation_timeout_sec)
         or args.blockage_confirmation_timeout_sec < 0.5
@@ -3729,6 +3769,11 @@ def main(argv: list[str] | None = None) -> int:
             ),
             exact_vertex_pursuit=leg.route_kind in PHYSICAL_ROUTE_KINDS,
         ),
+        command_smoothing=CommandSmoothingConfig(
+            enabled=not args.disable_command_smoothing,
+            max_linear_accel_mps2=args.max_linear_accel_mps2,
+            max_angular_accel_radps2=args.max_angular_accel_radps2,
+        ),
         min_obstacle_distance_m=args.min_obstacle_distance_m,
         omnidirectional_hard_stop_distance_m=(
             args.omnidirectional_hard_stop_distance_m
@@ -3927,6 +3972,13 @@ def main(argv: list[str] | None = None) -> int:
         exact_vertex_pursuit=resolved_controller_config.exact_vertex_pursuit,
         exact_vertex_alignment_enabled=(
             resolved_controller_config.exact_vertex_pursuit
+        ),
+        command_smoothing_enabled=follower_config.command_smoothing.enabled,
+        max_linear_accel_mps2=(
+            follower_config.command_smoothing.max_linear_accel_mps2
+        ),
+        max_angular_accel_radps2=(
+            follower_config.command_smoothing.max_angular_accel_radps2
         ),
         start_egress_waypoint_index=(
             follower_config.initial_start_egress_waypoint_index

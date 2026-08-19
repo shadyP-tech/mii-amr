@@ -20,10 +20,12 @@ from scripts.aufgabe04.navigation.dynamic_approach_planner import (
     circular_keepout_cells,
     plan_fixed_approach,
     point_clearance_to_blocked_m,
+)
+from scripts.aufgabe04.navigation.models import GridCell, Pose2D
+from scripts.aufgabe04.navigation.route_smoothing import (
     segment_is_collision_free,
     supercover_segment_cells,
 )
-from scripts.aufgabe04.navigation.models import GridCell, Pose2D
 
 
 _KEEPOUT_EPSILON_M = 1.0e-10

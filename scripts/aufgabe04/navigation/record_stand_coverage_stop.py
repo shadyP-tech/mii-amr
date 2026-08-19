@@ -2,13 +2,16 @@
 
 This command consumes the receipt produced by ``stand_explorer_node.py
 --summary-json``.  It marks one planned viewpoint visited, updates stable
-candidate IDs and keepouts, and writes a newly planned next leg.  It does not
-publish velocity or execute that leg.
+candidate IDs and keepouts, and, on the legacy CLI path, writes a newly planned
+next leg.  Importable callers can split epoch commit from fresh-localization
+next-leg planning.  This module does not publish velocity or execute a leg.
 """
 
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -22,6 +25,11 @@ from scripts.aufgabe04.navigation.artifacts import (
     write_diagnostics_json,
     write_route_csv,
 )
+from scripts.aufgabe04.navigation.content_hashed_evidence import (
+    payload_sha256,
+    write_content_hashed_json,
+)
+from scripts.aufgabe04.navigation.costmap import Costmap
 from scripts.aufgabe04.navigation.map_io import load_occupancy_grid_with_bundle
 from scripts.aufgabe04.navigation.models import Pose2D
 from scripts.aufgabe04.navigation.plan_first_detected_station import (
@@ -39,6 +47,9 @@ from scripts.aufgabe04.navigation.stand_coverage_survey import (
     write_stand_survey_registry,
     write_survey_progress,
 )
+from scripts.aufgabe04.navigation.stand_candidate_static_map_admission import (
+    evaluate_stand_candidate_static_map_admission,
+)
 from scripts.aufgabe04.perception.stand_confirmation import (
     StandConfirmationAccumulator,
     StandConfirmationConfig,
@@ -47,6 +58,41 @@ from scripts.aufgabe04.perception.stand_observation import (
     load_observation_jsonl,
     validated_observation_stream_clock,
 )
+from scripts.aufgabe04.real_robot.autonomous_session_manifest import (
+    admit_autonomous_session_manifest,
+    autonomous_session_manifest_sha256,
+)
+
+
+@dataclass(frozen=True)
+class PreparedCoverageStop:
+    survey_root: Path
+    plan_path: Path
+    progress_path: Path
+    registry_path: Path
+    summary_path: Path
+    epoch_path: Path
+    map_yaml: Path
+    semantic_map_id: str
+    grid: object
+    map_bundle: object
+    plan: object
+    progress: object
+    registry: object
+    viewpoint: object
+    scan_pose: Pose2D
+    viewpoint_error_m: float
+    observer_summary_json: Path
+    observations_path: Path
+    observer_summary: dict[str, object]
+    observations: object
+    stands: object
+    next_leg: object | None
+    raw_stands: object = ()
+    static_map_candidate_admission: object | None = None
+    static_map_candidate_admission_payload: dict[str, object] | None = None
+    static_map_candidate_admission_path: Path | None = None
+    static_map_candidate_admission_sha256: str | None = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -176,7 +222,61 @@ def _epoch_stands(observations, plan):
     return accumulator.add_observations(observations)
 
 
-def record_stand_coverage_stop(
+def _validate_pose(pose: Pose2D, name: str) -> None:
+    if not all(math.isfinite(value) for value in (pose.x_m, pose.y_m, pose.yaw_rad)):
+        raise ValueError(f"{name} must be finite")
+
+
+def _validate_localization_evidence_path(path: Path, *, label: str) -> Path:
+    path = Path(path)
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"{label} must be a normal file")
+    return path
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _validate_sha256(value: str, *, label: str) -> str:
+    value = str(value).strip().lower()
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise ValueError(f"{label} must be a SHA-256 hex digest")
+    return value
+
+
+def _validate_file_sha256(path: Path, expected_sha256: str, *, label: str) -> str:
+    expected_sha256 = _validate_sha256(expected_sha256, label=f"{label} SHA-256")
+    actual_sha256 = _file_sha256(path)
+    if actual_sha256 != expected_sha256:
+        raise ValueError(
+            f"{label} SHA-256 mismatch: {actual_sha256} != {expected_sha256}"
+        )
+    return actual_sha256
+
+
+def _next_leg_artifact_paths(
+    survey_root: Path,
+    progress,
+) -> tuple[Path, Path]:
+    leg_index = len(progress.visited_viewpoint_ids)
+    legs_dir = survey_root / "legs"
+    return (
+        legs_dir / f"leg_{leg_index:03d}_route.csv",
+        legs_dir / f"leg_{leg_index:03d}_diagnostics.json",
+    )
+
+
+def _validate_next_leg_artifacts_absent(route_path: Path, diagnostics_path: Path) -> None:
+    if route_path.exists() or diagnostics_path.exists():
+        raise ValueError("refusing to overwrite next-leg artifacts")
+
+
+def _prepare_stand_coverage_stop(
     *,
     survey_root: Path,
     map_yaml: Path,
@@ -188,14 +288,7 @@ def record_stand_coverage_stop(
     scan_to_base_position_offset_m: float = 0.05,
     next_leg_start_pose: Pose2D | None = None,
     next_leg_localization_evidence_json: Path | None = None,
-) -> dict[str, object]:
-    """Fuse one stopped observation epoch and return its persisted status.
-
-    Unlike :func:`main`, this importable API never converts failures to
-    ``SystemExit``.  Callers that own a wider mission boundary can therefore
-    record the original ``ValueError``/``OSError`` as mission-failure evidence.
-    """
-
+) -> PreparedCoverageStop:
     survey_root = Path(survey_root)
     map_yaml = Path(map_yaml)
     observer_summary_json = Path(observer_summary_json)
@@ -215,15 +308,8 @@ def record_stand_coverage_stop(
         raise ValueError(
             "scan-to-base position offset must be finite and non-negative"
         )
-    if next_leg_start_pose is not None and not all(
-        math.isfinite(value)
-        for value in (
-            next_leg_start_pose.x_m,
-            next_leg_start_pose.y_m,
-            next_leg_start_pose.yaw_rad,
-        )
-    ):
-        raise ValueError("next-leg start pose must be finite")
+    if next_leg_start_pose is not None:
+        _validate_pose(next_leg_start_pose, "next-leg start pose")
     if (
         next_leg_localization_evidence_json is not None
         and next_leg_start_pose is None
@@ -231,16 +317,15 @@ def record_stand_coverage_stop(
         raise ValueError(
             "next-leg localization evidence requires a fresh start pose"
         )
-    if next_leg_localization_evidence_json is not None and (
-        next_leg_localization_evidence_json.is_symlink()
-        or not next_leg_localization_evidence_json.is_file()
-    ):
-        raise ValueError(
-            "next-leg localization evidence must be a normal file"
+    if next_leg_localization_evidence_json is not None:
+        next_leg_localization_evidence_json = _validate_localization_evidence_path(
+            next_leg_localization_evidence_json,
+            label="next-leg localization evidence",
         )
     plan_path = survey_root / "coverage_plan.json"
     progress_path = survey_root / "coverage_progress.json"
     registry_path = survey_root / "stand_registry.json"
+    summary_path = survey_root / "survey_summary.json"
     plan = load_coverage_survey_plan(plan_path)
     progress = load_survey_progress(progress_path, plan)
     registry = load_stand_survey_registry(registry_path, plan)
@@ -288,7 +373,37 @@ def record_stand_coverage_stop(
         map_bundle=map_bundle,
         plan=plan,
     )
-    stands = _epoch_stands(observations, plan)
+    raw_stands = _epoch_stands(observations, plan)
+    static_map_candidate_admission = (
+        evaluate_stand_candidate_static_map_admission(
+            Costmap.from_occupancy_grid(grid).with_arena_bounds(
+                plan.arena_bounds
+            ),
+            raw_stands,
+            candidate_radius_m=plan.config.candidate_radius_m,
+            candidate_uncertainty_m=plan.config.candidate_uncertainty_m,
+        )
+    )
+    static_map_candidate_admission_payload = {
+        **static_map_candidate_admission.to_evidence_dict(),
+        "survey_id": plan.survey_id,
+        "viewpoint_id": viewpoint.viewpoint_id,
+        "planning_frame": plan.planning_frame,
+        "map_bundle_sha256": plan.map_bundle_sha256,
+        "coverage_plan_sha256": coverage_survey_plan_sha256(plan),
+    }
+    static_map_candidate_admission_sha256 = payload_sha256(
+        static_map_candidate_admission_payload
+    )
+    static_map_candidate_admission_path = (
+        survey_root
+        / "epochs"
+        / (
+            f"{viewpoint.viewpoint_id}_static_map_candidate_admission_"
+            f"{static_map_candidate_admission_sha256}.json"
+        )
+    )
+    stands = static_map_candidate_admission.admitted_stands
     registry = fuse_confirmed_stands(
         registry,
         stands,
@@ -306,116 +421,505 @@ def record_stand_coverage_stop(
         registry=registry,
         current_pose=next_leg_start_pose or scan_pose,
     )
-    next_viewpoint_id = None
-    next_route_path = None
-    next_diagnostics_path = None
-    if next_leg is not None:
-        leg_index = len(progress.visited_viewpoint_ids)
-        legs_dir = survey_root / "legs"
-        next_route_path = legs_dir / f"leg_{leg_index:03d}_route.csv"
-        next_diagnostics_path = legs_dir / f"leg_{leg_index:03d}_diagnostics.json"
-        if next_route_path.exists() or next_diagnostics_path.exists():
-            raise ValueError("refusing to overwrite next-leg artifacts")
 
     epoch_path = survey_root / "epochs" / f"{viewpoint.viewpoint_id}.json"
     if epoch_path.exists():
         raise ValueError(f"refusing to overwrite survey epoch: {epoch_path}")
-    epoch_path.parent.mkdir(parents=True, exist_ok=True)
+    return PreparedCoverageStop(
+        survey_root=survey_root,
+        plan_path=plan_path,
+        progress_path=progress_path,
+        registry_path=registry_path,
+        summary_path=summary_path,
+        epoch_path=epoch_path,
+        map_yaml=map_yaml,
+        semantic_map_id=resolved_semantic_map_id,
+        grid=grid,
+        map_bundle=map_bundle,
+        plan=plan,
+        progress=progress,
+        registry=registry,
+        viewpoint=viewpoint,
+        scan_pose=scan_pose,
+        viewpoint_error_m=viewpoint_error_m,
+        observer_summary_json=observer_summary_json,
+        observations_path=observations_path,
+        observer_summary=observer_summary,
+        observations=observations,
+        stands=stands,
+        next_leg=next_leg,
+        raw_stands=raw_stands,
+        static_map_candidate_admission=static_map_candidate_admission,
+        static_map_candidate_admission_payload=(
+            static_map_candidate_admission_payload
+        ),
+        static_map_candidate_admission_path=(
+            static_map_candidate_admission_path
+        ),
+        static_map_candidate_admission_sha256=(
+            static_map_candidate_admission_sha256
+        ),
+    )
+
+
+def _write_committed_stop_state(
+    prepared: PreparedCoverageStop,
+    *,
+    next_leg_start_pose: Pose2D,
+    next_leg_start_pose_source: str,
+    next_leg_localization_evidence_json: Path | None,
+    next_route_path: Path | None,
+    next_diagnostics_path: Path | None,
+    write_summary: bool = True,
+) -> dict[str, object]:
+    prepared.epoch_path.parent.mkdir(parents=True, exist_ok=True)
+    if (
+        prepared.static_map_candidate_admission is None
+        or prepared.static_map_candidate_admission_payload is None
+        or prepared.static_map_candidate_admission_path is None
+        or prepared.static_map_candidate_admission_sha256 is None
+    ):
+        raise ValueError("prepared stop has no static-map candidate evidence")
+    written_admission_sha256 = write_content_hashed_json(
+        prepared.static_map_candidate_admission_path,
+        prepared.static_map_candidate_admission_payload,
+        hash_field="static_map_candidate_admission_sha256",
+    )
+    if written_admission_sha256 != prepared.static_map_candidate_admission_sha256:
+        raise RuntimeError("static-map candidate evidence hash changed while writing")
+    admission = prepared.static_map_candidate_admission
     epoch = {
         "schema_version": 1,
-        "survey_id": plan.survey_id,
-        "viewpoint_id": viewpoint.viewpoint_id,
+        "survey_id": prepared.plan.survey_id,
+        "viewpoint_id": prepared.viewpoint.viewpoint_id,
         "planned_pose": {
-            "x_m": viewpoint.pose.x_m,
-            "y_m": viewpoint.pose.y_m,
-            "yaw_rad": viewpoint.pose.yaw_rad,
+            "x_m": prepared.viewpoint.pose.x_m,
+            "y_m": prepared.viewpoint.pose.y_m,
+            "yaw_rad": prepared.viewpoint.pose.yaw_rad,
         },
         "observed_scan_pose": {
-            "x_m": scan_pose.x_m,
-            "y_m": scan_pose.y_m,
-            "yaw_rad": scan_pose.yaw_rad,
+            "x_m": prepared.scan_pose.x_m,
+            "y_m": prepared.scan_pose.y_m,
+            "yaw_rad": prepared.scan_pose.yaw_rad,
         },
         "next_leg_start_pose": {
-            "x_m": (next_leg_start_pose or scan_pose).x_m,
-            "y_m": (next_leg_start_pose or scan_pose).y_m,
-            "yaw_rad": (next_leg_start_pose or scan_pose).yaw_rad,
+            "x_m": next_leg_start_pose.x_m,
+            "y_m": next_leg_start_pose.y_m,
+            "yaw_rad": next_leg_start_pose.yaw_rad,
         },
-        "next_leg_start_pose_source": (
-            "fresh_stationary_localization_admission"
-            if next_leg_start_pose is not None
-            else "observer_frozen_scan_pose"
-        ),
+        "next_leg_start_pose_source": next_leg_start_pose_source,
         "next_leg_localization_evidence_json": (
             None
             if next_leg_localization_evidence_json is None
             else str(next_leg_localization_evidence_json)
         ),
-        "viewpoint_error_m": viewpoint_error_m,
-        "observer_summary_json": str(observer_summary_json),
-        "observations_jsonl": str(observations_path),
-        "processed_scan_count": observer_summary["processed_scan_count"],
-        "accepted_observation_count": len(observations),
-        "confirmed_epoch_candidate_count": len(stands),
+        "viewpoint_error_m": prepared.viewpoint_error_m,
+        "observer_summary_json": str(prepared.observer_summary_json),
+        "observations_jsonl": str(prepared.observations_path),
+        "processed_scan_count": prepared.observer_summary["processed_scan_count"],
+        "accepted_observation_count": len(prepared.observations),
+        "confirmed_epoch_candidate_count": len(prepared.raw_stands),
+        "static_map_candidate_admitted_count": len(admission.admitted_stands),
+        "static_map_candidate_rejected_count": len(admission.rejected_stands),
+        "static_map_candidate_admission_json": str(
+            prepared.static_map_candidate_admission_path
+        ),
+        "static_map_candidate_admission_sha256": (
+            prepared.static_map_candidate_admission_sha256
+        ),
     }
-    epoch_path.write_text(json.dumps(epoch, indent=2, sort_keys=True) + "\n")
-    write_survey_progress(progress_path, progress, plan)
-    write_stand_survey_registry(registry_path, registry, plan)
+    prepared.epoch_path.write_text(json.dumps(epoch, indent=2, sort_keys=True) + "\n")
+    write_survey_progress(prepared.progress_path, prepared.progress, prepared.plan)
+    write_stand_survey_registry(prepared.registry_path, prepared.registry, prepared.plan)
 
-    if next_leg is not None:
-        write_route_csv(
-            next_route_path,
-            (next_leg.route_result,),
-            final_yaw_by_leg={0: next_leg.viewpoint.pose.yaw_rad},
-        )
-        write_diagnostics_json(
-            next_diagnostics_path,
-            (next_leg.route_result,),
-            metadata={
-                "schema_version": 1,
-                "route_kind": "stand_coverage_survey",
-                "motion_authorized": False,
-                "survey_id": plan.survey_id,
-                "plan_sha256": coverage_survey_plan_sha256(plan),
-                "map_bundle_sha256": plan.map_bundle_sha256,
-                "target_viewpoint_id": next_leg.viewpoint.viewpoint_id,
-                "target_pose": {
-                    "x_m": next_leg.viewpoint.pose.x_m,
-                    "y_m": next_leg.viewpoint.pose.y_m,
-                    "yaw_rad": next_leg.viewpoint.pose.yaw_rad,
-                },
-                "candidate_keepout_count": sum(
-                    1
-                    for candidate in registry.candidates
-                    if candidate.status != "rejected"
-                ),
-                "unreachable_viewpoint_ids_before_target": list(
-                    next_leg.unreachable_viewpoint_ids
-                ),
-                "inflation_radius_m": plan.config.inflation_radius_m,
-                "exact_start_connector": (
-                    next_leg.exact_start_connector.to_metadata()
-                ),
-                "arena_boundary_overlay": True,
-                "arena_bounds": plan.arena_bounds.to_metadata(),
-            },
-        )
-        next_viewpoint_id = next_leg.viewpoint.viewpoint_id
-
+    next_viewpoint_id = (
+        None
+        if prepared.next_leg is None
+        else prepared.next_leg.viewpoint.viewpoint_id
+    )
     status = {
         "schema_version": 1,
         "status": "coverage_stop_recorded",
         "motion_published": False,
         "motion_scope": "stopped_observation_epoch",
-        **survey_status(plan, progress, registry),
-        "recorded_viewpoint_id": viewpoint.viewpoint_id,
-        "epoch_json": str(epoch_path),
+        **survey_status(prepared.plan, prepared.progress, prepared.registry),
+        "recorded_viewpoint_id": prepared.viewpoint.viewpoint_id,
+        "epoch_json": str(prepared.epoch_path),
+        "confirmed_epoch_candidate_count": len(prepared.raw_stands),
+        "static_map_candidate_admitted_count": len(admission.admitted_stands),
+        "static_map_candidate_rejected_count": len(admission.rejected_stands),
+        "static_map_candidate_admission_json": str(
+            prepared.static_map_candidate_admission_path
+        ),
+        "static_map_candidate_admission_sha256": (
+            prepared.static_map_candidate_admission_sha256
+        ),
         "next_viewpoint_id": next_viewpoint_id,
         "next_route_csv": None if next_route_path is None else str(next_route_path),
         "next_diagnostics_json": (
             None if next_diagnostics_path is None else str(next_diagnostics_path)
         ),
     }
-    (survey_root / "survey_summary.json").write_text(
+    if write_summary:
+        prepared.summary_path.write_text(
+            json.dumps(status, indent=2, sort_keys=True) + "\n"
+        )
+    return status
+
+
+def _write_next_leg_artifacts(
+    *,
+    prepared: PreparedCoverageStop,
+    next_leg,
+    route_path: Path,
+    diagnostics_path: Path,
+    metadata_overrides: dict[str, object] | None = None,
+) -> None:
+    write_route_csv(
+        route_path,
+        (next_leg.route_result,),
+        final_yaw_by_leg={0: next_leg.viewpoint.pose.yaw_rad},
+    )
+    write_diagnostics_json(
+        diagnostics_path,
+        (next_leg.route_result,),
+        metadata={
+            "schema_version": 1,
+            "route_kind": "stand_coverage_survey",
+            "motion_authorized": False,
+            "survey_id": prepared.plan.survey_id,
+            "plan_sha256": coverage_survey_plan_sha256(prepared.plan),
+            "map_bundle_sha256": prepared.plan.map_bundle_sha256,
+            "target_viewpoint_id": next_leg.viewpoint.viewpoint_id,
+            "target_pose": {
+                "x_m": next_leg.viewpoint.pose.x_m,
+                "y_m": next_leg.viewpoint.pose.y_m,
+                "yaw_rad": next_leg.viewpoint.pose.yaw_rad,
+            },
+            "candidate_keepout_count": sum(
+                1
+                for candidate in prepared.registry.candidates
+                if candidate.status != "rejected"
+            ),
+            "unreachable_viewpoint_ids_before_target": list(
+                next_leg.unreachable_viewpoint_ids
+            ),
+            "inflation_radius_m": prepared.plan.config.inflation_radius_m,
+            "exact_start_connector": next_leg.exact_start_connector.to_metadata(),
+            "line_of_sight_route_optimization": (
+                next_leg.route_smoothing.to_metadata()
+            ),
+            "arena_boundary_overlay": True,
+            "arena_bounds": prepared.plan.arena_bounds.to_metadata(),
+            **(metadata_overrides or {}),
+        },
+    )
+
+
+def commit_stand_coverage_stop(
+    *,
+    survey_root: Path,
+    map_yaml: Path,
+    viewpoint_id: str,
+    observer_summary_json: Path,
+    semantic_map_id: str = "",
+    observations_jsonl: Path | None = None,
+    arrival_tolerance_m: float = 0.18,
+    scan_to_base_position_offset_m: float = 0.05,
+) -> dict[str, object]:
+    """Persist one stopped epoch without writing non-authorizing next-route artifacts."""
+
+    prepared = _prepare_stand_coverage_stop(
+        survey_root=survey_root,
+        map_yaml=map_yaml,
+        semantic_map_id=semantic_map_id,
+        viewpoint_id=viewpoint_id,
+        observer_summary_json=observer_summary_json,
+        observations_jsonl=observations_jsonl,
+        arrival_tolerance_m=arrival_tolerance_m,
+        scan_to_base_position_offset_m=scan_to_base_position_offset_m,
+    )
+    return _write_committed_stop_state(
+        prepared,
+        next_leg_start_pose=prepared.scan_pose,
+        next_leg_start_pose_source="observer_frozen_scan_pose",
+        next_leg_localization_evidence_json=None,
+        next_route_path=None,
+        next_diagnostics_path=None,
+    )
+
+
+def plan_next_stand_coverage_leg(
+    *,
+    survey_root: Path,
+    map_yaml: Path,
+    expected_next_viewpoint_id: str,
+    current_pose: Pose2D,
+    localization_evidence_json: Path,
+    localization_evidence_sha256: str,
+    checkpoint_manifest_json: Path,
+    checkpoint_manifest_sha256: str,
+    semantic_map_id: str = "",
+) -> dict[str, object]:
+    """Plan and persist the next route only from committed state and fresh localization."""
+
+    survey_root = Path(survey_root)
+    map_yaml = Path(map_yaml)
+    expected_next_viewpoint_id = str(expected_next_viewpoint_id).strip()
+    if not expected_next_viewpoint_id:
+        raise ValueError("expected next viewpoint ID is required")
+    _validate_pose(current_pose, "current pose")
+    localization_evidence_json = _validate_localization_evidence_path(
+        localization_evidence_json,
+        label="localization evidence",
+    )
+    localization_evidence_sha256 = _validate_file_sha256(
+        localization_evidence_json,
+        localization_evidence_sha256,
+        label="localization evidence",
+    )
+    checkpoint_manifest_sha256 = _validate_sha256(
+        checkpoint_manifest_sha256,
+        label="checkpoint manifest SHA-256",
+    )
+    checkpoint_manifest = admit_autonomous_session_manifest(
+        Path(checkpoint_manifest_json)
+    )
+    admitted_checkpoint_sha256 = autonomous_session_manifest_sha256(
+        checkpoint_manifest
+    )
+    if admitted_checkpoint_sha256 != checkpoint_manifest_sha256:
+        raise ValueError(
+            "checkpoint manifest SHA-256 mismatch: "
+            f"{admitted_checkpoint_sha256} != {checkpoint_manifest_sha256}"
+        )
+    checkpoint_manifest_json = Path(checkpoint_manifest_json).resolve(
+        strict=True
+    )
+    summary_path = survey_root / "survey_summary.json"
+    _validate_localization_evidence_path(
+        summary_path,
+        label="committed survey summary",
+    )
+    try:
+        committed_summary_bytes = summary_path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"invalid committed survey summary: {exc}") from exc
+    committed_summary_sha256 = hashlib.sha256(committed_summary_bytes).hexdigest()
+    try:
+        summary = json.loads(committed_summary_bytes)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid committed survey summary: {exc}") from exc
+    if not isinstance(summary, dict):
+        raise ValueError("committed survey summary must contain a JSON object")
+    if summary.get("status") != "coverage_stop_recorded":
+        raise ValueError("committed survey summary is not a coverage stop")
+    if summary.get("next_route_csv") is not None or summary.get("next_diagnostics_json") is not None:
+        raise ValueError("committed survey summary already has next-leg artifacts")
+    committed_next_viewpoint_id = summary.get("next_viewpoint_id")
+    if committed_next_viewpoint_id != expected_next_viewpoint_id:
+        raise ValueError(
+            "expected next viewpoint differs from committed survey summary: "
+            f"{expected_next_viewpoint_id!r} != {committed_next_viewpoint_id!r}"
+        )
+
+    plan_path = survey_root / "coverage_plan.json"
+    progress_path = survey_root / "coverage_progress.json"
+    registry_path = survey_root / "stand_registry.json"
+    for state_path, label in (
+        (plan_path, "committed coverage plan"),
+        (progress_path, "committed coverage progress"),
+        (registry_path, "committed stand registry"),
+    ):
+        _validate_localization_evidence_path(state_path, label=label)
+    plan = load_coverage_survey_plan(plan_path)
+    progress = load_survey_progress(progress_path, plan)
+    registry = load_stand_survey_registry(registry_path, plan)
+    current_state_hashes = {
+        "coverage_plan": _file_sha256(plan_path),
+        "coverage_progress": _file_sha256(progress_path),
+        "survey_summary": committed_summary_sha256,
+        "stand_registry": _file_sha256(registry_path),
+    }
+    checkpoint_state_hashes = {
+        "coverage_plan": checkpoint_manifest.coverage_plan.sha256,
+        "coverage_progress": checkpoint_manifest.coverage_progress.sha256,
+        "survey_summary": checkpoint_manifest.survey_summary.sha256,
+        "stand_registry": checkpoint_manifest.stand_registry.sha256,
+    }
+    if current_state_hashes != checkpoint_state_hashes:
+        mismatched = sorted(
+            name
+            for name in current_state_hashes
+            if current_state_hashes[name] != checkpoint_state_hashes[name]
+        )
+        raise ValueError(
+            "checkpoint does not bind the committed survey state: "
+            + ", ".join(mismatched)
+        )
+    if checkpoint_manifest.next_viewpoint_id != expected_next_viewpoint_id:
+        raise ValueError(
+            "checkpoint next viewpoint differs from the committed target"
+        )
+    if checkpoint_manifest.completed_coverage_legs != len(
+        progress.visited_viewpoint_ids
+    ):
+        raise ValueError(
+            "checkpoint completed-leg count differs from committed progress"
+        )
+    if checkpoint_manifest.map_bundle_sha256 != plan.map_bundle_sha256:
+        raise ValueError("checkpoint map bundle differs from coverage plan")
+    grid, map_bundle = load_occupancy_grid_with_bundle(
+        map_yaml,
+        semantic_map_id=semantic_map_id or map_yaml.stem,
+        planning_frame=plan.planning_frame,
+    )
+    if map_bundle.bundle_sha256 != plan.map_bundle_sha256:
+        raise ValueError("runtime map bundle differs from coverage plan")
+    next_leg = plan_next_survey_leg(
+        grid,
+        plan=plan,
+        progress=progress,
+        registry=registry,
+        current_pose=current_pose,
+    )
+    if next_leg is None:
+        raise ValueError("committed survey has no next viewpoint to plan")
+    if next_leg.viewpoint.viewpoint_id != expected_next_viewpoint_id:
+        raise ValueError(
+            "fresh localization changed the next coverage target: "
+            f"{next_leg.viewpoint.viewpoint_id!r} != {expected_next_viewpoint_id!r}"
+        )
+    route_path, diagnostics_path = _next_leg_artifact_paths(survey_root, progress)
+    _validate_next_leg_artifacts_absent(route_path, diagnostics_path)
+    prepared = PreparedCoverageStop(
+        survey_root=survey_root,
+        plan_path=plan_path,
+        progress_path=progress_path,
+        registry_path=registry_path,
+        summary_path=summary_path,
+        epoch_path=Path(str(summary.get("epoch_json", ""))),
+        map_yaml=map_yaml,
+        semantic_map_id=semantic_map_id or map_yaml.stem,
+        grid=grid,
+        map_bundle=map_bundle,
+        plan=plan,
+        progress=progress,
+        registry=registry,
+        viewpoint=plan.viewpoint_for(str(summary.get("recorded_viewpoint_id", ""))),
+        scan_pose=current_pose,
+        viewpoint_error_m=0.0,
+        observer_summary_json=Path(""),
+        observations_path=Path(""),
+        observer_summary={},
+        observations=(),
+        stands=(),
+        next_leg=next_leg,
+    )
+    _write_next_leg_artifacts(
+        prepared=prepared,
+        next_leg=next_leg,
+        route_path=route_path,
+        diagnostics_path=diagnostics_path,
+        metadata_overrides={
+            "checkpoint_manifest_json": str(checkpoint_manifest_json),
+            "checkpoint_manifest_sha256": checkpoint_manifest_sha256,
+            "next_leg_localization_evidence_json": str(localization_evidence_json),
+            "next_leg_localization_evidence_sha256": (
+                localization_evidence_sha256
+            ),
+            "committed_survey_summary_json": str(summary_path),
+            "committed_survey_summary_sha256": committed_summary_sha256,
+        },
+    )
+    return {
+        "schema_version": 1,
+        "status": "next_coverage_leg_prepared",
+        "motion_published": False,
+        "motion_authorized": False,
+        "motion_scope": "non_authorizing_next_leg_preparation",
+        "committed_survey_summary_json": str(summary_path),
+        "committed_survey_summary_sha256": committed_summary_sha256,
+        "checkpoint_manifest_json": str(checkpoint_manifest_json),
+        "checkpoint_manifest_sha256": checkpoint_manifest_sha256,
+        "recorded_viewpoint_id": summary.get("recorded_viewpoint_id"),
+        "next_viewpoint_id": next_leg.viewpoint.viewpoint_id,
+        "next_route_csv": str(route_path),
+        "next_diagnostics_json": str(diagnostics_path),
+        "next_leg_start_pose": {
+            "x_m": current_pose.x_m,
+            "y_m": current_pose.y_m,
+            "yaw_rad": current_pose.yaw_rad,
+        },
+        "next_leg_start_pose_source": "fresh_stationary_localization_admission",
+        "next_leg_localization_evidence_json": str(localization_evidence_json),
+        "next_leg_localization_evidence_sha256": localization_evidence_sha256,
+    }
+
+
+def record_stand_coverage_stop(
+    *,
+    survey_root: Path,
+    map_yaml: Path,
+    viewpoint_id: str,
+    observer_summary_json: Path,
+    semantic_map_id: str = "",
+    observations_jsonl: Path | None = None,
+    arrival_tolerance_m: float = 0.18,
+    scan_to_base_position_offset_m: float = 0.05,
+    next_leg_start_pose: Pose2D | None = None,
+    next_leg_localization_evidence_json: Path | None = None,
+) -> dict[str, object]:
+    """Fuse one stopped observation epoch and return its persisted status.
+
+    Unlike :func:`main`, this importable API never converts failures to
+    ``SystemExit``.  Callers that own a wider mission boundary can therefore
+    record the original ``ValueError``/``OSError`` as mission-failure evidence.
+    """
+
+    prepared = _prepare_stand_coverage_stop(
+        survey_root=survey_root,
+        map_yaml=map_yaml,
+        semantic_map_id=semantic_map_id,
+        viewpoint_id=viewpoint_id,
+        observer_summary_json=observer_summary_json,
+        observations_jsonl=observations_jsonl,
+        arrival_tolerance_m=arrival_tolerance_m,
+        scan_to_base_position_offset_m=scan_to_base_position_offset_m,
+        next_leg_start_pose=next_leg_start_pose,
+        next_leg_localization_evidence_json=next_leg_localization_evidence_json,
+    )
+    route_path = None
+    diagnostics_path = None
+    if prepared.next_leg is not None:
+        route_path, diagnostics_path = _next_leg_artifact_paths(
+            prepared.survey_root,
+            prepared.progress,
+        )
+        _validate_next_leg_artifacts_absent(route_path, diagnostics_path)
+    next_pose = next_leg_start_pose or prepared.scan_pose
+    source = (
+        "fresh_stationary_localization_admission"
+        if next_leg_start_pose is not None
+        else "observer_frozen_scan_pose"
+    )
+    status = _write_committed_stop_state(
+        prepared,
+        next_leg_start_pose=next_pose,
+        next_leg_start_pose_source=source,
+        next_leg_localization_evidence_json=next_leg_localization_evidence_json,
+        next_route_path=route_path,
+        next_diagnostics_path=diagnostics_path,
+        write_summary=False,
+    )
+    if prepared.next_leg is not None:
+        _write_next_leg_artifacts(
+            prepared=prepared,
+            next_leg=prepared.next_leg,
+            route_path=route_path,
+            diagnostics_path=diagnostics_path,
+        )
+    prepared.summary_path.write_text(
         json.dumps(status, indent=2, sort_keys=True) + "\n"
     )
     return status

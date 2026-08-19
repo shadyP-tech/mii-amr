@@ -45,8 +45,6 @@ from scripts.aufgabe04.navigation.dynamic_approach_planner import (
     plan_dynamic_approach,
     plan_fixed_approach,
     point_clearance_to_blocked_m,
-    segment_is_collision_free,
-    supercover_segment_cells,
 )
 from scripts.aufgabe04.navigation.dynamic_replan_policy import (
     DynamicReplanPolicy,
@@ -57,6 +55,10 @@ from scripts.aufgabe04.navigation.map_io import (
     load_occupancy_grid_with_bundle,
 )
 from scripts.aufgabe04.navigation.models import GridCell, Pose2D
+from scripts.aufgabe04.navigation.route_smoothing import (
+    segment_is_collision_free,
+    supercover_segment_cells,
+)
 from scripts.aufgabe04.navigation.route_revision_store import (
     RouteRevisionError,
     RouteRevisionStore,

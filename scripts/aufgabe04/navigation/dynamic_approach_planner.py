@@ -15,6 +15,12 @@ from typing import Iterable, Sequence
 from scripts.aufgabe04.navigation.costmap import CELL_SOURCE_RUN_LOCAL, Costmap
 from scripts.aufgabe04.navigation.global_planner import plan_route
 from scripts.aufgabe04.navigation.models import GridCell, Pose2D
+from scripts.aufgabe04.navigation.route_smoothing import (
+    _segment_intersects_closed_cell as _segment_intersects_closed_cell,
+    greedy_line_of_sight_shortcut,
+    segment_is_collision_free,
+    supercover_segment_cells,
+)
 from scripts.aufgabe04.stations.arrival_pose_geometry import (
     ArrivalGeometryConfig,
     arrival_face_candidates,
@@ -356,100 +362,6 @@ def with_dynamic_stand_keepout(
 
     cells = circular_keepout_cells(costmap, stand, config.stand_keepout_radius_m)
     return costmap.with_blocked_cells(cells, source=CELL_SOURCE_RUN_LOCAL), cells
-
-
-def _segment_intersects_closed_cell(
-    costmap: Costmap,
-    start: Pose2D,
-    end: Pose2D,
-    cell: GridCell,
-) -> bool:
-    origin_x, origin_y, _ = costmap.metadata.origin
-    x_min = origin_x + cell.x * costmap.resolution
-    y_min = origin_y + cell.y * costmap.resolution
-    x_max = x_min + costmap.resolution
-    y_max = y_min + costmap.resolution
-    dx = end.x_m - start.x_m
-    dy = end.y_m - start.y_m
-    t_min = 0.0
-    t_max = 1.0
-    for coordinate, delta, lower, upper in (
-        (start.x_m, dx, x_min, x_max),
-        (start.y_m, dy, y_min, y_max),
-    ):
-        if abs(delta) <= _EPSILON:
-            if coordinate < lower - _EPSILON or coordinate > upper + _EPSILON:
-                return False
-            continue
-        near = (lower - coordinate) / delta
-        far = (upper - coordinate) / delta
-        if near > far:
-            near, far = far, near
-        t_min = max(t_min, near)
-        t_max = min(t_max, far)
-        if t_min > t_max + _EPSILON:
-            return False
-    return True
-
-
-def supercover_segment_cells(
-    costmap: Costmap,
-    start: Pose2D,
-    end: Pose2D,
-) -> tuple[GridCell, ...]:
-    """Return all grid squares touched by a closed world-space segment.
-
-    Closed-square intersection intentionally includes both sides of a grid
-    boundary and all four cells at a corner.  Consequently a diagonal cannot
-    graze or cut the corner of an occupied cell unnoticed.
-    """
-
-    _finite_pose(start, name="segment start")
-    _finite_pose(end, name="segment end")
-    origin_x, origin_y, _ = costmap.metadata.origin
-    resolution = costmap.resolution
-    min_x = math.floor((min(start.x_m, end.x_m) - origin_x) / resolution) - 1
-    max_x = math.floor((max(start.x_m, end.x_m) - origin_x) / resolution) + 1
-    min_y = math.floor((min(start.y_m, end.y_m) - origin_y) / resolution) - 1
-    max_y = math.floor((max(start.y_m, end.y_m) - origin_y) / resolution) + 1
-    touched = []
-    for y in range(min_y, max_y + 1):
-        for x in range(min_x, max_x + 1):
-            cell = GridCell(x, y)
-            if _segment_intersects_closed_cell(costmap, start, end, cell):
-                touched.append(cell)
-    return tuple(sorted(set(touched)))
-
-
-def segment_is_collision_free(costmap: Costmap, start: Pose2D, end: Pose2D) -> bool:
-    """Validate a segment against an already configuration-space costmap."""
-
-    return all(costmap.is_traversable(cell) for cell in supercover_segment_cells(costmap, start, end))
-
-
-def greedy_line_of_sight_shortcut(
-    costmap: Costmap,
-    poses: Sequence[Pose2D],
-) -> tuple[Pose2D, ...]:
-    """Greedily remove grid turns only when the full shortcut is collision-free."""
-
-    if not poses:
-        return ()
-    if len(poses) == 1:
-        return (poses[0],)
-    shortened = [poses[0]]
-    anchor = 0
-    while anchor < len(poses) - 1:
-        selected = None
-        for candidate in range(len(poses) - 1, anchor, -1):
-            if segment_is_collision_free(costmap, poses[anchor], poses[candidate]):
-                selected = candidate
-                break
-        if selected is None:
-            raise ValueError("input polyline contains a colliding segment")
-        shortened.append(poses[selected])
-        anchor = selected
-    return tuple(shortened)
 
 
 def _polyline_length(poses: Iterable[Pose2D]) -> float:

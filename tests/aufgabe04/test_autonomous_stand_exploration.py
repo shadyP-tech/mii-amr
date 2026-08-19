@@ -634,7 +634,23 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 output_dir=sealed_root,
             )
             leg = load_route_leg(Path(outputs["route_csv"]), 0)
-            intermediate = leg.raw_waypoints[1]
+            if len(leg.raw_waypoints) > 2:
+                waypoint_index = 1
+                raw_waypoints = leg.raw_waypoints
+                intermediate = raw_waypoints[waypoint_index]
+            else:
+                waypoint_index = 1
+                start = leg.raw_waypoints[0]
+                final = leg.raw_waypoints[-1]
+                intermediate = replace(
+                    start,
+                    pose=Pose2D(
+                        (start.pose.x_m + final.pose.x_m) / 2.0,
+                        (start.pose.y_m + final.pose.y_m) / 2.0,
+                        float("nan"),
+                    ),
+                )
+                raw_waypoints = (start, intermediate, final)
             malformed_waypoint = replace(
                 intermediate,
                 pose=Pose2D(
@@ -646,9 +662,9 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             malformed_leg = replace(
                 leg,
                 raw_waypoints=(
-                    leg.raw_waypoints[0],
+                    *raw_waypoints[:waypoint_index],
                     malformed_waypoint,
-                    *leg.raw_waypoints[2:],
+                    *raw_waypoints[waypoint_index + 1:],
                 ),
             )
 
@@ -1081,7 +1097,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             ),
             patch.object(
                 autonomous_wrapper,
-                "record_stand_coverage_stop",
+                "commit_stand_coverage_stop",
                 side_effect=record_final_stop,
             ) as record_stop,
             patch.object(
@@ -1147,14 +1163,210 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             self.assertEqual(exit_code, 2)
             record_stop.assert_called_once()
             fusion_call = record_stop.call_args.kwargs
-            self.assertIsNone(fusion_call["next_leg_start_pose"])
-            self.assertIsNone(
-                fusion_call["next_leg_localization_evidence_json"]
-            )
+            self.assertNotIn("next_leg_start_pose", fusion_call)
+            self.assertNotIn("next_leg_localization_evidence_json", fusion_call)
             evaluate_admission.assert_called_once()
             self.assertEqual(failure["reason"], reason)
             self.assertFalse(failure["motion_continues_authorized"])
             self.assertFalse((session_root / "mission_summary.json").exists())
+
+    def test_completed_observation_records_checkpoint_before_next_localization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_id = "post_observation_gap_checkpoint"
+            output_root = root / "runs"
+            session_root = output_root / session_id
+            plan = SimpleNamespace(
+                viewpoints=(
+                    SimpleNamespace(viewpoint_id="survey_vp_001"),
+                    SimpleNamespace(viewpoint_id="survey_vp_002"),
+                ),
+                map_bundle_sha256="a" * 64,
+            )
+            progress = SimpleNamespace(visited_viewpoint_ids=())
+            for fixture_name in ("robot.json", "camera.json", "site.json"):
+                (root / fixture_name).write_text("{}\n")
+            profile = SimpleNamespace(
+                robot_id="turtlebot1",
+                map_frame="map",
+                scan_origin_to_base_offset_m=0.05,
+                resolved_runtime=lambda: SimpleNamespace(
+                    namespace="",
+                    cmd_vel_topic="/cmd_vel",
+                ),
+            )
+            completed = MotionLegOutcome(
+                run_id=f"{session_id}_coverage_000",
+                status="completed",
+                stop_reason="",
+                stop_details={},
+                motion_published=True,
+                returncode=0,
+                semantic_log_path=root / "events.jsonl",
+                odom_execution_certificate_path=root / "odom_certificate.json",
+            )
+            localization_calls = []
+
+            def admit_localization(*_args, **kwargs):
+                localization_calls.append(kwargs.get("evidence_path"))
+                return Pose2D(0.0, 0.0, 0.0)
+
+            def plan_two_legs(command):
+                survey_root = Path(command[command.index("--output-dir") + 1])
+                survey_root.mkdir(parents=True, exist_ok=True)
+                (survey_root / "survey_summary.json").write_text(
+                    json.dumps({"next_viewpoint_id": "survey_vp_001"}) + "\n"
+                )
+                return 0
+
+            def record_stop(**kwargs):
+                self.assertNotIn("next_leg_start_pose", kwargs)
+                self.assertNotIn("next_leg_localization_evidence_json", kwargs)
+                survey_root = Path(kwargs["survey_root"])
+                summary = {
+                    "next_viewpoint_id": "survey_vp_002",
+                    "recorded_viewpoint_id": "survey_vp_001",
+                    "coverage_complete": False,
+                    "visited_coverage_ratio": 0.5,
+                    "visited_viewpoint_count": 1,
+                    "total_viewpoint_count": 2,
+                }
+                (survey_root / "survey_summary.json").write_text(
+                    json.dumps(summary) + "\n"
+                )
+                return summary
+
+            with (
+                patch.object(
+                    autonomous_wrapper,
+                    "load_real_robot_profile",
+                    return_value=profile,
+                ),
+                patch.object(
+                    autonomous_wrapper,
+                    "load_camera_calibration",
+                    return_value=SimpleNamespace(),
+                ),
+                patch.object(
+                    autonomous_wrapper,
+                    "validate_physical_site_contract",
+                    return_value=SimpleNamespace(
+                        expected_stand_count=1,
+                        physical_site_path=(root / "site.json"),
+                        map_yaml_path=(root / "map.yaml"),
+                        map_bundle=SimpleNamespace(bundle_sha256="a" * 64),
+                    ),
+                ),
+                patch.object(autonomous_wrapper, "_validate_inputs"),
+                patch.object(
+                    autonomous_wrapper,
+                    "_physical_clearance",
+                    return_value={
+                        "minimum_active_standoff_m": 0.20,
+                        "minimum_static_inflation_m": 0.25,
+                        "minimum_candidate_transit_radius_m": 0.31,
+                    },
+                ),
+                patch.object(
+                    autonomous_wrapper,
+                    "_admit_preplanning_localization",
+                    side_effect=admit_localization,
+                ),
+                patch.object(
+                    autonomous_wrapper,
+                    "plan_stand_coverage_survey",
+                    side_effect=plan_two_legs,
+                ),
+                patch.object(
+                    autonomous_wrapper,
+                    "load_coverage_survey_plan",
+                    return_value=plan,
+                ),
+                patch.object(
+                    autonomous_wrapper,
+                    "write_mission_leg_motion_authorization",
+                    return_value="mission-leg-authorization-sha256",
+                ),
+                patch.object(
+                    autonomous_wrapper,
+                    "write_mission_motion_authorization",
+                    return_value="mission-authorization-sha256",
+                ),
+                patch.object(
+                    autonomous_wrapper,
+                    "_execute_coverage_leg_with_replans",
+                    return_value=completed,
+                ),
+                patch.object(
+                    autonomous_wrapper,
+                    "_capture_lidar_epoch",
+                    return_value=root / "observer_summary.json",
+                ),
+                patch.object(
+                    autonomous_wrapper,
+                    "commit_stand_coverage_stop",
+                    side_effect=record_stop,
+                ) as record_stop_mock,
+                patch.object(
+                    autonomous_wrapper,
+                    "publish_coverage_checkpoint",
+                    return_value=SimpleNamespace(
+                        manifest_path=root / "checkpoint.json",
+                        manifest_sha256="c" * 64,
+                    ),
+                ) as publish_checkpoint,
+                patch.object(
+                    autonomous_wrapper,
+                    "load_survey_progress",
+                    return_value=progress,
+                ),
+                patch("builtins.input", return_value="RUN") as run_prompt,
+                patch("sys.stderr", new=StringIO()),
+                redirect_stdout(StringIO()),
+            ):
+                exit_code = autonomous_wrapper.main(
+                    [
+                        "--robot-profile",
+                        str(root / "robot.json"),
+                        "--camera-calibration",
+                        str(root / "camera.json"),
+                        "--physical-site",
+                        str(root / "site.json"),
+                        "--session-id",
+                        session_id,
+                        "--output-root",
+                        str(output_root),
+                        "--expected-stand-count",
+                        "1",
+                        "--coverage-leg-limit",
+                        "1",
+                        "--localization-branch-proof-id",
+                        "known_start_marker_20260807",
+                        "--execute",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            run_prompt.assert_called_once()
+            record_stop_mock.assert_called_once()
+            publish_checkpoint.assert_called_once()
+            self.assertEqual(
+                localization_calls,
+                [None],
+            )
+            self.assertFalse(
+                any(
+                    path is not None and "post_observation_localization" in str(path)
+                    for path in localization_calls
+                )
+            )
+            self.assertTrue((session_root / "mission_summary.json").exists())
+            self.assertFalse((session_root / "mission_failure.json").exists())
+            summary = json.loads(
+                (session_root / "mission_summary.json").read_text()
+            )
+            self.assertEqual(summary["status"], "coverage_leg_checkpoint_complete")
+            self.assertEqual(summary["next_viewpoint_id"], "survey_vp_002")
 
     def test_coverage_stop_exception_crosses_mission_failure_boundary(self):
         reason = "coverage stop fusion sentinel"

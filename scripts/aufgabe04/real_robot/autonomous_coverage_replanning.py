@@ -293,6 +293,9 @@ def _replan_coverage_source_from_pose(
             ),
             "inflation_radius_m": plan.config.inflation_radius_m,
             "exact_start_connector": next_leg.exact_start_connector.to_metadata(),
+            "line_of_sight_route_optimization": (
+                next_leg.route_smoothing.to_metadata()
+            ),
             "arena_boundary_overlay": True,
             "arena_bounds": plan.arena_bounds.to_metadata(),
             "reseal_kind": reseal_kind,

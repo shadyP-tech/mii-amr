@@ -19,10 +19,8 @@ import math
 from typing import Iterable, Sequence
 
 from scripts.aufgabe04.navigation.costmap import Costmap
-from scripts.aufgabe04.navigation.dynamic_approach_planner import (
-    segment_is_collision_free,
-)
 from scripts.aufgabe04.navigation.models import GridCell, Pose2D
+from scripts.aufgabe04.navigation.route_smoothing import segment_is_collision_free
 
 
 EGRESS_MODE_FORWARD = "forward"

@@ -16,6 +16,7 @@ from scripts.aufgabe04.navigation.map_io import (
     load_occupancy_grid,
 )
 from scripts.aufgabe04.navigation.models import Pose2D
+from scripts.aufgabe04.navigation.route_smoothing import smooth_plan_route_results
 from scripts.aufgabe04.navigation.station_approach import NavigationTarget, navigation_targets_from_visits
 from scripts.aufgabe04.stations.models import Station, StationVisit
 from scripts.aufgabe04.stations.station_map import DEFAULT_STATIONS
@@ -97,6 +98,7 @@ def build_station_route_dry_run(
     arena_bounds: ArenaBounds | None = None,
     occupancy_grid: OccupancyGrid | None = None,
     map_bundle: FrozenMapBundle | None = None,
+    line_of_sight_optimization: bool = True,
 ) -> StationRouteDryRun:
     selected_arena_bounds = arena_bounds if arena_bounds is not None else ArenaBounds()
     selected_arena_bounds.validate()
@@ -141,6 +143,12 @@ def build_station_route_dry_run(
         if result.route is None:
             break
         current = target.pose
+    smoothed_results = smooth_plan_route_results(
+        tuple(results),
+        costmap=planning_costmap,
+        enabled=line_of_sight_optimization,
+    )
+    results = [item.result for item in smoothed_results]
 
     metadata = build_route_metadata(
         map_yaml,
@@ -151,6 +159,19 @@ def build_station_route_dry_run(
         map_bundle=map_bundle,
     )
     metadata["inflation_radius_m"] = inflation_radius_m
+    metadata["line_of_sight_route_optimization"] = {
+        "enabled": line_of_sight_optimization,
+        "legs": [item.summary.to_metadata() for item in smoothed_results],
+        "input_point_count": sum(
+            item.summary.input_point_count for item in smoothed_results
+        ),
+        "output_point_count": sum(
+            item.summary.output_point_count for item in smoothed_results
+        ),
+        "optimized_leg_count": sum(
+            1 for item in smoothed_results if item.summary.optimized
+        ),
+    }
     return StationRouteDryRun(
         grid=grid,
         station_map=selected_station_map,

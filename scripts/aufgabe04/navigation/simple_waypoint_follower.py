@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
@@ -16,6 +16,20 @@ from scripts.aufgabe04.navigation.controller_trace import (
 from scripts.aufgabe04.navigation.dynamic_route_handoff import (
     RouteUpdate,
     RouteUpdateKind,
+)
+from scripts.aufgabe04.navigation.driving_behavior import (
+    CATALOG_PHYSICAL_ROUTE_KINDS,
+    CommandSmoother,
+    CommandSmoothingConfig,
+    DYNAMIC_PHYSICAL_ROUTE_KINDS,
+    DYNAMIC_VIEWPOINT_ROUTE_KINDS,
+    HEADING_CORRIDOR_ROUTE_KINDS,
+    INTERMEDIATE_ROUTE_KINDS,
+    PHYSICAL_ROUTE_KINDS,
+    STATIC_PHYSICAL_ROUTE_KINDS,
+    STATIC_STARTUP_SEGMENT_JOIN_ROUTE_KINDS,
+    controller_config_for_route_kind,
+    next_control_loop_timing,
 )
 from scripts.aufgabe04.navigation.execution_route_certificate import (
     ExecutionRouteCheck,
@@ -210,13 +224,36 @@ class FollowerConfig:
     certified_corner_hold_tolerance_m: float = 0.025
     certified_corner_alignment_tolerance_rad: float = 0.10
     certified_corner_max_reacquire_attempts: int = 2
+    command_smoothing: CommandSmoothingConfig = field(
+        default_factory=CommandSmoothingConfig
+    )
 
     def __post_init__(self) -> None:
+        if not isinstance(self.command_smoothing, CommandSmoothingConfig):
+            raise ValueError(
+                "command_smoothing must be a CommandSmoothingConfig"
+            )
         if (
             not math.isfinite(self.linear_motion_floor_mps)
             or self.linear_motion_floor_mps <= 0.0
         ):
             raise ValueError("linear_motion_floor_mps must be finite and positive")
+        if (
+            not math.isfinite(self.control_rate_hz)
+            or self.control_rate_hz < 1.0
+        ):
+            raise ValueError("control_rate_hz must be finite and at least 1 Hz")
+        if (
+            self.command_smoothing.enabled
+            and self.command_smoothing.max_linear_accel_mps2
+            / self.control_rate_hz
+            + 1.0e-12
+            < self.linear_motion_floor_mps
+        ):
+            raise ValueError(
+                "linear command smoothing must reach the motion floor within "
+                "one control period"
+            )
         if (
             not math.isfinite(self.blockage_confirmation_timeout_sec)
             or self.blockage_confirmation_timeout_sec <= 0.0
@@ -523,28 +560,6 @@ def certified_startup_route_state(
         join_limit_m=join_limit,
         egress_lock_index=index,
     )
-
-
-INTERMEDIATE_ROUTE_KINDS = frozenset(
-    {"axis_acquisition", "viewpoint_sampling"}
-)
-DYNAMIC_PHYSICAL_ROUTE_KINDS = frozenset(
-    {"synchronized_face_approach", "synchronized_viewpoint"}
-)
-CATALOG_PHYSICAL_ROUTE_KINDS = frozenset({"catalog_face_approach"})
-STATIC_PHYSICAL_ROUTE_KINDS = CATALOG_PHYSICAL_ROUTE_KINDS | frozenset(
-    {"detected_stand_preapproach", "stand_discovery_corridor"}
-)
-STATIC_STARTUP_SEGMENT_JOIN_ROUTE_KINDS = frozenset(
-    {"detected_stand_preapproach", "stand_discovery_corridor"}
-)
-PHYSICAL_ROUTE_KINDS = DYNAMIC_PHYSICAL_ROUTE_KINDS | STATIC_PHYSICAL_ROUTE_KINDS
-HEADING_CORRIDOR_ROUTE_KINDS = PHYSICAL_ROUTE_KINDS - frozenset(
-    {"stand_discovery_corridor"}
-)
-DYNAMIC_VIEWPOINT_ROUTE_KINDS = (
-    INTERMEDIATE_ROUTE_KINDS | DYNAMIC_PHYSICAL_ROUTE_KINDS
-)
 
 
 def certified_static_startup_decision(
@@ -920,86 +935,6 @@ def compute_intermediate_terminal_heading_command(
         hold_tolerance_m,
         viewpoint_sampling_target_distance_m,
         viewpoint_sampling_target_envelope_radius_m,
-    )
-
-
-def controller_config_for_route_kind(
-    config: ControllerConfig,
-    route_kind: str,
-    *,
-    reverse_staging: bool = False,
-    viewpoint_sampling_goal_tolerance_m: float | None = None,
-    viewpoint_sampling_heading_tolerance_rad: float | None = None,
-    physical_waypoint_tolerance_m: float | None = None,
-    physical_goal_tolerance_m: float | None = None,
-) -> ControllerConfig:
-    """Resolve translation and terminal-heading behavior for one route kind.
-
-    Acquisition and viewpoint-sampling waypoints may carry a finite terminal
-    yaw, but enforcing that yaw throughout translation conflicts with pursuit
-    of the geometric segment.  The normal final-position alignment still
-    enforces the yaw once the sampling point has actually been reached.
-
-    Stand-discovery viewpoints have the same terminal-only yaw contract.  Their
-    center-corridor A* path may approach an inspection stop from either travel
-    direction, so the stopped inspection yaw is not a certified segment-heading
-    constraint.  Exact-vertex pursuit and every physical route-tube gate remain
-    enabled for that route kind.
-    """
-
-    if route_kind not in DYNAMIC_VIEWPOINT_ROUTE_KINDS | STATIC_PHYSICAL_ROUTE_KINDS:
-        return config
-    physical = route_kind in PHYSICAL_ROUTE_KINDS
-    goal_tolerance = config.goal_tolerance_m
-    intermediate = route_kind in INTERMEDIATE_ROUTE_KINDS
-    if intermediate:
-        # Acquisition must also end close enough that lateral position error
-        # plus the terminal-yaw tolerance stays inside the observer's camera
-        # centering cone.  At 0.55 m standoff, 0.03 m and 5 degrees remain
-        # comfortably below the 12-degree perception gate.
-        goal_tolerance = min(
-            goal_tolerance,
-            INTERMEDIATE_TERMINAL_HEADING_ENTRY_TOLERANCE_M,
-        )
-        if viewpoint_sampling_goal_tolerance_m is not None:
-            goal_tolerance = min(
-                goal_tolerance,
-                viewpoint_sampling_goal_tolerance_m,
-            )
-    terminal_goal_tolerance = config.terminal_goal_tolerance_m
-    if intermediate and terminal_goal_tolerance is not None:
-        terminal_goal_tolerance = min(
-            terminal_goal_tolerance,
-            goal_tolerance,
-        )
-    if physical and physical_waypoint_tolerance_m is not None:
-        goal_tolerance = min(goal_tolerance, physical_waypoint_tolerance_m)
-    if physical and physical_goal_tolerance_m is not None:
-        terminal_goal_tolerance = min(
-            config.goal_tolerance_m,
-            physical_goal_tolerance_m,
-        )
-    heading_tolerance = config.heading_tolerance_rad
-    if (
-        route_kind in INTERMEDIATE_ROUTE_KINDS
-        and viewpoint_sampling_heading_tolerance_rad is not None
-    ):
-        # Both intermediate phases are camera observation poses.  The generic
-        # 0.25 rad transit tolerance can declare an acquisition goal complete
-        # while the observer's image-centering gate still rejects it (retry
-        # 08 stopped at 0.224 rad).  Use the shared camera-heading tolerance
-        # before starting the bounded stationary hold.
-        heading_tolerance = min(
-            heading_tolerance, viewpoint_sampling_heading_tolerance_rad
-        )
-    return replace(
-        config,
-        goal_tolerance_m=goal_tolerance,
-        terminal_goal_tolerance_m=terminal_goal_tolerance,
-        heading_tolerance_rad=heading_tolerance,
-        enforce_heading_corridor=route_kind in HEADING_CORRIDOR_ROUTE_KINDS,
-        reverse_staging=physical and reverse_staging,
-        exact_vertex_pursuit=physical,
     )
 
 
@@ -1468,6 +1403,9 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         ) = None
         self.certified_corner_latch: CertifiedCornerTransitionLatch | None = None
         self._last_certified_corner_phase: tuple[int, str] | None = None
+        self.command_smoother = CommandSmoother(follower_config.command_smoothing)
+        self.last_command_shape_at: float | None = None
+        self.control_loop_deadline_sec: float | None = None
         self.reverse_staging = False
         self.axis_acquisition_hold_started_at: float | None = None
         self.axis_acquisition_target_revision: int | None = None
@@ -1558,7 +1496,15 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         )
 
     def publish_zero(self) -> None:
+        self.command_smoother.reset()
+        self.last_command_shape_at = None
         self.cmd_vel_pub.publish(Twist())
+
+    def _hold_zero_control_period(self, period_sec: float) -> None:
+        """Preserve a full zero handoff and restart the normal deadline cadence."""
+
+        time.sleep(period_sec)
+        self.control_loop_deadline_sec = time.monotonic() + period_sec
 
     @property
     def callback_service_mode(self) -> str:
@@ -2130,6 +2076,7 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                 self.motion_published,
             )
         loop_sleep_sec = 1.0 / max(self.follower_config.control_rate_hz, 1.0)
+        self.control_loop_deadline_sec = time.monotonic() + loop_sleep_sec
         try:
             while rclpy.ok():
                 self._drain_runtime_callbacks()
@@ -2160,13 +2107,13 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                                 self.latest_stop_details or {},
                             )
                             if recovery == "adopted":
-                                time.sleep(loop_sleep_sec)
+                                self._hold_zero_control_period(loop_sleep_sec)
                                 continue
                             if recovery == "cleared":
                                 # A separately confirmed clear front sector may
                                 # resume only on the next full safety cycle.
                                 self.publish_zero()
-                                time.sleep(loop_sleep_sec)
+                                self._hold_zero_control_period(loop_sleep_sec)
                                 continue
                             if recovery == "stopped":
                                 safety_failure = str(
@@ -2313,7 +2260,7 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                     # A verified handoff still gets one complete zero-command
                     # control period before the new route may command motion.
                     self.publish_zero()
-                    time.sleep(loop_sleep_sec)
+                    self._hold_zero_control_period(loop_sleep_sec)
                     continue
                 if self.last_pose is not None:
                     self.distance_estimate_m += math.hypot(
@@ -2378,7 +2325,7 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                             # is published until the next loop rechecks all
                             # runtime safety inputs and the route tube.
                             self.publish_zero()
-                            time.sleep(loop_sleep_sec)
+                            self._hold_zero_control_period(loop_sleep_sec)
                             continue
                 if self.dynamic_join_pending:
                     join_action, join_failure = certified_startup_join_action(
@@ -2410,7 +2357,7 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                         self.target_started_at = time.monotonic()
                         self._reset_progress_watchdog(time.monotonic())
                         self.publish_zero()
-                        time.sleep(loop_sleep_sec)
+                        self._hold_zero_control_period(loop_sleep_sec)
                         continue
                     # During handoff, pursue only the collision-certified route
                     # start.  Normal progress advancement/lookahead would form
@@ -2464,7 +2411,7 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                             # Make the lock-to-normal transition explicit; the
                             # next control tick may resume ordinary lookahead.
                             self.publish_zero()
-                            time.sleep(loop_sleep_sec)
+                            self._hold_zero_control_period(loop_sleep_sec)
                             continue
                     elif self.start_egress_forward_alignment_index is not None:
                         step = self._reverse_egress_forward_alignment_command(
@@ -2722,7 +2669,7 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                         # and polling the manifest. A physical-face revision
                         # will be adopted at the top of a subsequent cycle.
                         self.publish_zero()
-                        time.sleep(loop_sleep_sec)
+                        self._hold_zero_control_period(loop_sleep_sec)
                         continue
                     if goal_action != "complete":
                         self.latest_stop_details = {
@@ -2855,7 +2802,7 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                         )
                     if recovery in {"adopted", "cleared"}:
                         self.publish_zero()
-                        time.sleep(loop_sleep_sec)
+                        self._hold_zero_control_period(loop_sleep_sec)
                         continue
                     stop_reason = (
                         str(
@@ -2958,7 +2905,7 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                             self.latest_stop_details,
                         )
                     if recovery == "adopted":
-                        time.sleep(loop_sleep_sec)
+                        self._hold_zero_control_period(loop_sleep_sec)
                         continue
                     if recovery == "stopped":
                         progress_failure = str(
@@ -3005,16 +2952,41 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                         self.motion_published,
                         self.latest_stop_details,
                     )
+                raw_effective_command = VelocityCommand(
+                    effective_linear_x_mps,
+                    step.command.angular_z_radps,
+                )
+                command_shape_dt_sec = (
+                    loop_sleep_sec
+                    if self.last_command_shape_at is None
+                    else now_monotonic - self.last_command_shape_at
+                )
+                shaped_command = self.command_smoother.apply(
+                    raw_effective_command,
+                    dt_sec=command_shape_dt_sec,
+                )
+                self.last_command_shape_at = now_monotonic
                 trace_failure = self._append_controller_trace(
                     event="control_cycle",
                     pose=pose,
                     step=step,
                     route_check=route_check,
                     nominal_command=step.command,
-                    effective_command=VelocityCommand(
-                        effective_linear_x_mps,
-                        step.command.angular_z_radps,
-                    ),
+                    effective_command=shaped_command,
+                    diagnostics={
+                        "driving_behavior": {
+                            "command_smoothing_enabled": (
+                                self.follower_config.command_smoothing.enabled
+                            ),
+                            "unshaped_effective_command": {
+                                "linear_x_mps": raw_effective_command.linear_x_mps,
+                                "angular_z_radps": (
+                                    raw_effective_command.angular_z_radps
+                                ),
+                            },
+                            "shape_dt_sec": command_shape_dt_sec,
+                        }
+                    },
                     fail_closed=False,
                 )
                 if trace_failure:
@@ -3028,11 +3000,17 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
                         self.latest_stop_details,
                     )
                 twist = Twist()
-                twist.linear.x = effective_linear_x_mps
-                twist.angular.z = step.command.angular_z_radps
+                twist.linear.x = shaped_command.linear_x_mps
+                twist.angular.z = shaped_command.angular_z_radps
                 self.cmd_vel_pub.publish(twist)
                 self.motion_published = self.motion_published or abs(twist.linear.x) > 0.0 or abs(twist.angular.z) > 0.0
-                time.sleep(loop_sleep_sec)
+                timing = next_control_loop_timing(
+                    previous_deadline_sec=self.control_loop_deadline_sec,
+                    now_sec=time.monotonic(),
+                    control_rate_hz=self.follower_config.control_rate_hz,
+                )
+                self.control_loop_deadline_sec = timing.next_deadline_sec
+                time.sleep(timing.sleep_sec)
         finally:
             self.publish_repeated_zero()
 

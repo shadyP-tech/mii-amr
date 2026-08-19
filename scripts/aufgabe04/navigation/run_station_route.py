@@ -50,6 +50,7 @@ def plan_station_route(
     start: Pose2D | None = None,
     inflation_radius_m: float = 0.0,
     snap_radius_m: float = 0.30,
+    line_of_sight_optimization: bool = True,
 ) -> List[PlanRouteResult]:
     dry_run = build_station_route_dry_run(
         map_yaml,
@@ -58,6 +59,7 @@ def plan_station_route(
         start=start,
         inflation_radius_m=inflation_radius_m,
         snap_radius_m=snap_radius_m,
+        line_of_sight_optimization=line_of_sight_optimization,
     )
     return list(dry_run.results)
 
@@ -87,6 +89,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--arena-center-y-m", type=float, default=ArenaBounds.center_y_m)
     parser.add_argument("--arena-yaw-deg", type=float, default=ArenaBounds.yaw_deg)
     parser.add_argument("--arena-margin-m", type=float, default=ArenaBounds.margin_m)
+    parser.add_argument(
+        "--no-line-of-sight-route-optimization",
+        action="store_true",
+        help=(
+            "Disable planning-time collision-checked A* route compaction. "
+            "The follower still never takes uncertified shortcuts."
+        ),
+    )
     return parser
 
 
@@ -120,6 +130,9 @@ def main(argv: list[str] | None = None) -> int:
             inflation_radius_m=args.inflation_radius_m,
             snap_radius_m=args.snap_radius_m,
             arena_bounds=arena_bounds,
+            line_of_sight_optimization=(
+                not args.no_line_of_sight_route_optimization
+            ),
         )
         results = list(dry_run.results)
         write_route_csv(args.route_csv, dry_run.results)

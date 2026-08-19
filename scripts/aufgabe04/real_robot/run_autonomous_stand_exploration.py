@@ -77,7 +77,8 @@ from scripts.aufgabe04.navigation.runtime_motion_authorization import (
     write_runtime_localization_motion_permit,
 )
 from scripts.aufgabe04.navigation.record_stand_coverage_stop import (
-    record_stand_coverage_stop,
+    commit_stand_coverage_stop,
+    plan_next_stand_coverage_leg,
 )
 from scripts.aufgabe04.navigation.stand_coverage_survey import (
     STATUS_PENDING_CAMERA,
@@ -141,6 +142,7 @@ from scripts.aufgabe04.real_robot.autonomous_coverage_mission import (
     CoverageComplete,
     CoverageMissionConfig,
     CoverageMissionEffects,
+    PreparedCoverageLeg,
     PublishedCoverageCheckpoint,
     execute_coverage_mission,
 )
@@ -165,6 +167,11 @@ from scripts.aufgabe04.real_robot.autonomous_modes import (
     resolve_autonomous_run_mode,
     validate_autonomous_viewpoint_scope,
     validate_session_id_mode_label,
+)
+from scripts.aufgabe04.real_robot.autonomous_post_observation import (
+    PostObservationLocalizationConfig,
+    PostObservationLocalizationEffects,
+    admit_post_observation_localization,
 )
 from scripts.aufgabe04.real_robot.autonomous_session_manifest import (
     publish_coverage_checkpoint,
@@ -1446,9 +1453,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_MAX_LOCALIZATION_READINESS_RETRIES_PER_LEG,
         help=(
-            "Maximum fresh no-motion AMCL dry admissions when the certified "
-            "route uncertainty budget is exhausted before any motion. Safety "
-            "limits remain unchanged; zero disables this bounded retry."
+            "Maximum fresh no-motion AMCL admissions for a sole transient "
+            "dynamic map->odom gap after an observation, and for a certified "
+            "route uncertainty budget exhausted before motion. Other failed "
+            "gates remain terminal; zero disables either bounded retry."
         ),
     )
     parser.add_argument(
@@ -2067,35 +2075,7 @@ def main(argv=None) -> int:
             )
 
         def fuse_coverage_stop(viewpoint_id, observer_summary_path):
-            progress_before_stop = load_survey_progress(
-                survey_root / "coverage_progress.json",
-                plan,
-            )
-            visited_before_stop = set(
-                progress_before_stop.visited_viewpoint_ids
-            )
-            has_remaining_viewpoint = any(
-                item.viewpoint_id != viewpoint_id
-                and item.viewpoint_id not in visited_before_stop
-                for item in plan.viewpoints
-            )
-            next_leg_localization_evidence = None
-            next_leg_start_pose = None
-            if has_remaining_viewpoint:
-                next_leg_localization_evidence = (
-                    session_root
-                    / "preflight"
-                    / (
-                        f"{args.session_id}_{viewpoint_id}"
-                        "_post_observation_localization.json"
-                    )
-                )
-                next_leg_start_pose = _admit_preplanning_localization(
-                    runtime,
-                    session_root,
-                    evidence_path=next_leg_localization_evidence,
-                )
-            return record_stand_coverage_stop(
+            return commit_stand_coverage_stop(
                 survey_root=survey_root,
                 map_yaml=args.map,
                 semantic_map_id=args.semantic_map_id,
@@ -2104,9 +2084,60 @@ def main(argv=None) -> int:
                 scan_to_base_position_offset_m=(
                     profile.scan_origin_to_base_offset_m
                 ),
-                next_leg_start_pose=next_leg_start_pose,
-                next_leg_localization_evidence_json=(
-                    next_leg_localization_evidence
+            )
+
+        def prepare_next_coverage_leg(request):
+            post_observation = admit_post_observation_localization(
+                PostObservationLocalizationConfig(
+                    session_root=session_root,
+                    session_id=args.session_id,
+                    recorded_viewpoint_id=request.recorded_viewpoint_id,
+                    maximum_retry_count=(
+                        args.max_localization_readiness_retries_per_leg
+                    ),
+                ),
+                PostObservationLocalizationEffects(
+                    admit_localization=lambda evidence_path: (
+                        _admit_preplanning_localization(
+                            runtime,
+                            session_root,
+                            evidence_path=evidence_path,
+                        )
+                    ),
+                    event_sink=lambda event: _append_jsonl(
+                        session_root / "adaptive_replans.jsonl",
+                        dict(event),
+                    ),
+                    clock=time.time,
+                ),
+            )
+            planned = plan_next_stand_coverage_leg(
+                survey_root=survey_root,
+                map_yaml=args.map,
+                semantic_map_id=args.semantic_map_id,
+                expected_next_viewpoint_id=request.target_viewpoint_id,
+                current_pose=post_observation.pose,
+                localization_evidence_json=post_observation.evidence_path,
+                localization_evidence_sha256=authorization_file_sha256(
+                    post_observation.evidence_path
+                ),
+                checkpoint_manifest_json=request.checkpoint_manifest,
+                checkpoint_manifest_sha256=request.checkpoint_manifest_sha256,
+            )
+            if planned.get("next_viewpoint_id") != request.target_viewpoint_id:
+                raise RuntimeError(
+                    "prepared coverage receipt changed the checkpointed target"
+                )
+            return PreparedCoverageLeg(
+                leg_index=request.leg_index,
+                target_viewpoint_id=request.target_viewpoint_id,
+                source_route=resolve_normal_artifact_path(
+                    planned["next_route_csv"],
+                    label="prepared coverage route",
+                ),
+                source_diagnostics=resolve_normal_artifact_path(
+                    planned["next_diagnostics_json"],
+                    label="prepared coverage diagnostics",
                 ),
             )
 
@@ -2168,6 +2199,7 @@ def main(argv=None) -> int:
                 execute_completed_leg=execute_completed_coverage_leg,
                 capture_lidar_epoch=capture_coverage_lidar_epoch,
                 fuse_coverage_stop=fuse_coverage_stop,
+                prepare_next_leg=prepare_next_coverage_leg,
                 build_snapshot=build_coverage_candidate_snapshot,
                 publish_checkpoint=publish_coverage_checkpoint_effect,
                 load_progress=load_survey_progress,
@@ -2293,15 +2325,29 @@ def main(argv=None) -> int:
         ValueError,
     ) as exc:
         if session_root.exists():
+            failure = {
+                "schema_version": 1,
+                "status": "failed_closed",
+                "run_mode": args.run_mode,
+                "reason": str(exc),
+                "motion_continues_authorized": False,
+            }
+            structured_fields = getattr(exc, "to_failure_fields", None)
+            if callable(structured_fields):
+                try:
+                    candidate_fields = structured_fields()
+                except Exception:
+                    candidate_fields = None
+                if isinstance(candidate_fields, dict):
+                    failure.update(candidate_fields)
+                    failure["schema_version"] = 1
+                    failure["status"] = "failed_closed"
+                    failure["run_mode"] = args.run_mode
+                    failure["reason"] = str(exc)
+                    failure["motion_continues_authorized"] = False
             _write_json(
                 session_root / "mission_failure.json",
-                {
-                    "schema_version": 1,
-                    "status": "failed_closed",
-                    "run_mode": args.run_mode,
-                    "reason": str(exc),
-                    "motion_continues_authorized": False,
-                },
+                failure,
             )
         parser.exit(2, f"error: {exc}\n")
 

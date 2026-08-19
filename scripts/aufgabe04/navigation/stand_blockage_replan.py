@@ -39,9 +39,6 @@ from scripts.aufgabe04.navigation.coverage_escape_geometry import (
     find_reverse_transition_anchors,
     validate_executable_escape_route,
 )
-from scripts.aufgabe04.navigation.dynamic_approach_planner import (
-    greedy_line_of_sight_shortcut,
-)
 from scripts.aufgabe04.navigation.global_planner import PlanRouteResult, plan_route
 from scripts.aufgabe04.navigation.map_io import (
     OccupancyGrid,
@@ -51,6 +48,9 @@ from scripts.aufgabe04.navigation.models import (
     Pose2D,
     Route,
     RoutePoint,
+)
+from scripts.aufgabe04.navigation.route_smoothing import (
+    greedy_line_of_sight_shortcut,
 )
 from scripts.aufgabe04.navigation.record_stand_coverage_stop import (
     _epoch_stands,
