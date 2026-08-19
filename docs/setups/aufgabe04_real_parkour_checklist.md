@@ -105,9 +105,18 @@ motion. A standalone `run_single_station_segment.py` invocation still has no
 skip repeated child prompts only for the exact routine legs covered by its
 immutable, one-use `mission_leg_motion_permit`; each child still repeats the
 dry-run/live gates, validates the sealed artifacts, and consumes its receipt
-immediately before motion. Startup-route reseals remain outside that mission
-authorization and require a fresh confirmation. Keep an operator beside the
-robot throughout the mission.
+immediately before entering the follower. The initial mission `RUN` may also
+cover a bounded, same-leg, same-target pre-motion recovery after either a
+certified-start mismatch or an exact zero-motion `map <- odom` consistency
+stop. That recovery is valid only after fresh stationary localization, a new
+sealed route/certificate, a passed dry run, and an exact one-use
+`startup_reseal_motion_permit`; generic, malformed, target-changing, budget-
+exhausted, and post-motion failures remain terminal. No additional `RUN` is
+requested for an admitted recovery. In semantic logs, `motion_started` marks
+the child execution-attempt handoff before the follower runs; use the terminal
+`motion_published` field and controller trace to determine whether a nonzero
+Twist was actually published. Keep an operator beside the robot throughout the
+mission.
 
 For the next operator-authorized trial, disable nonessential RViz LaserScan,
 Path, and long-history displays. Start an observe-only external capture of

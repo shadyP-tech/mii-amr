@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+from scripts.aufgabe04.navigation.controller_trace import (
+    ControllerTraceWriter,
+    load_controller_traces,
+)
 from scripts.aufgabe04.navigation.models import Pose2D
 from scripts.aufgabe04.navigation.odom_execution_certificate import (
     PlanarTransform2D,
@@ -101,6 +107,76 @@ class OdomFollowerExecutionTest(unittest.TestCase):
         node.publish_zero = Mock()
         return node
 
+    def _startup_failure_run_node(self, stop_details):
+        node = object.__new__(SimpleWaypointFollowerNode)
+        node.waypoints = (Pose2D(0.0, 0.0), Pose2D(0.1, 0.0))
+        node.current_route_kind = "stand_discovery_corridor"
+        node.distance_estimate_m = 0.0
+        node.motion_published = False
+        node.latest_stop_details = stop_details
+        node.latest_front_clearance_details = None
+        node.latest_odom = None
+        node.target_index = 0
+        node.controller_route_revision = 0
+        node.controller_trace_writer = None
+        node._wait_for_initial_runtime_inputs = Mock(
+            return_value=(
+                "global localization consistency requires zero and reseal"
+            )
+        )
+        node.publish_repeated_zero = Mock()
+        return node
+
+    @staticmethod
+    def _global_consistency_stop_details():
+        return {
+            "reason": (
+                "global localization consistency requires zero and reseal"
+            ),
+            "fault_code": "localization_reseal_required",
+            "source": "global_consistency_monitor",
+            "execution_pose_owner": "odom",
+            "global_consistency_monitor": "amcl",
+            "monitor_action": "FORCE_ZERO_RESEAL",
+            "monitor_reason": "reseal_required",
+            "monitor_warning": "",
+            "continuity": {
+                "schema_version": 1,
+                "accepted": False,
+                "decision": "force_zero_reseal",
+                "reason": "map_from_odom_translation_and_yaw_drift",
+                "fail_closed": True,
+                "requires_zero_cycle": True,
+                "requires_reseal": True,
+                "threshold_semantics": (
+                    "accept_if_observed_less_than_or_equal_to_limit"
+                ),
+                "certificate_sha256": "a" * 64,
+                "map_frame": "map",
+                "odom_frame": "odom",
+                "base_frame": "base_footprint",
+                "frozen_map_from_odom": {
+                    "x_m": 0.0,
+                    "y_m": 0.0,
+                    "yaw_rad": 0.0,
+                },
+                "live_map_from_odom": {
+                    "x_m": 0.102556,
+                    "y_m": 0.0,
+                    "yaw_rad": 0.067884,
+                },
+                "relative_translation_x_m": 0.102556,
+                "relative_translation_y_m": 0.0,
+                "translation_drift_m": 0.102556,
+                "relative_yaw_rad": 0.067884,
+                "absolute_yaw_drift_rad": 0.067884,
+                "max_translation_drift_m": 0.03,
+                "max_yaw_drift_rad": 0.03,
+                "validation_error": None,
+            },
+            "fail_closed": True,
+        }
+
     def test_initial_wait_warms_global_consistency_tf_before_motion(self):
         node = self._initial_wait_node()
         node._global_consistency_monitor_failure = Mock(
@@ -146,6 +222,85 @@ class OdomFollowerExecutionTest(unittest.TestCase):
         self.assertEqual(
             node.latest_stop_details["fault_code"],
             "localization_reseal_required",
+        )
+
+    def test_run_preserves_startup_global_consistency_evidence(self):
+        details = self._global_consistency_stop_details()
+        expected = {
+            **details,
+            "execution_phase": "before_motion",
+            "phase": "initial_runtime_input_wait",
+            "motion_published": False,
+        }
+        node = self._startup_failure_run_node(details)
+
+        result = node.run()
+
+        self.assertEqual(result.status, "stopped")
+        self.assertFalse(result.motion_published)
+        self.assertEqual(result.stop_details, expected)
+        self.assertEqual(
+            result.stop_details["continuity"]["translation_drift_m"],
+            0.102556,
+        )
+        self.assertEqual(node.latest_stop_details, expected)
+        self.assertEqual(node.publish_repeated_zero.call_count, 2)
+
+    def test_startup_phase_marker_does_not_rewrite_conflicting_evidence(self):
+        details = {
+            **self._global_consistency_stop_details(),
+            "execution_phase": "conflicting_phase",
+            "phase": "conflicting_source_phase",
+        }
+        node = self._startup_failure_run_node(details)
+
+        result = node.run()
+
+        self.assertEqual(
+            result.stop_details["execution_phase"],
+            "conflicting_phase",
+        )
+        self.assertEqual(
+            result.stop_details["phase"],
+            "conflicting_source_phase",
+        )
+
+    def test_startup_global_consistency_stop_is_persisted_in_trace(self):
+        details = self._global_consistency_stop_details()
+        expected = {
+            **details,
+            "execution_phase": "before_motion",
+            "phase": "initial_runtime_input_wait",
+            "motion_published": False,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            trace_path = Path(tmp) / "controller_trace.jsonl"
+            node = self._startup_failure_run_node(details)
+            node.controller_trace_writer = ControllerTraceWriter(trace_path)
+
+            result = node.run()
+            records = load_controller_traces(trace_path)
+
+        self.assertEqual(result.stop_details, expected)
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record.event, "initial_runtime_input_stop")
+        self.assertTrue(record.fail_closed)
+        self.assertEqual(record.reason, details["reason"])
+        self.assertEqual(record.effective_command.linear_x_mps, 0.0)
+        self.assertEqual(record.effective_command.angular_z_radps, 0.0)
+        self.assertEqual(
+            record.diagnostics["fault_code"],
+            "localization_reseal_required",
+        )
+        self.assertEqual(
+            record.diagnostics["continuity"]["absolute_yaw_drift_rad"],
+            0.067884,
+        )
+        self.assertEqual(record.diagnostics["execution_phase"], "before_motion")
+        self.assertEqual(
+            record.diagnostics["phase"],
+            "initial_runtime_input_wait",
         )
 
     def test_control_pose_lookup_targets_odom_not_map(self):

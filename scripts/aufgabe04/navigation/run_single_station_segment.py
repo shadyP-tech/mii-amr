@@ -3434,6 +3434,12 @@ def main(argv: list[str] | None = None) -> int:
             "startup_route_rejected",
             run_id=args.run_id,
             leg_index=leg.leg_index,
+            coverage_leg_index=(
+                args.coverage_transient_replan_leg_index
+            ),
+            target_viewpoint_id=(
+                args.coverage_transient_replan_target_viewpoint_id
+            ),
             status=startup_rejection.status,
             stop_reason=startup_rejection.stop_reason,
             motion_published=False,
@@ -3444,6 +3450,12 @@ def main(argv: list[str] | None = None) -> int:
             "safety_stop",
             run_id=args.run_id,
             leg_index=leg.leg_index,
+            coverage_leg_index=(
+                args.coverage_transient_replan_leg_index
+            ),
+            target_viewpoint_id=(
+                args.coverage_transient_replan_target_viewpoint_id
+            ),
             status=startup_rejection.status,
             stop_reason=startup_rejection.stop_reason,
             motion_published=False,
@@ -4216,6 +4228,18 @@ def main(argv: list[str] | None = None) -> int:
                 mission_leg_motion_permit.mission_leg_index
             ),
             target_id=mission_leg_motion_permit.target_id,
+            coverage_leg_index=(
+                mission_leg_motion_permit.mission_leg_index
+                if mission_leg_motion_permit.mission_leg_kind
+                is MissionLegKind.COVERAGE
+                else None
+            ),
+            target_viewpoint_id=(
+                mission_leg_motion_permit.target_id
+                if mission_leg_motion_permit.mission_leg_kind
+                is MissionLegKind.COVERAGE
+                else ""
+            ),
             mission_leg_motion_authorization_json=str(
                 args.mission_leg_motion_authorization_json
             ),
@@ -4276,6 +4300,10 @@ def main(argv: list[str] | None = None) -> int:
             leg_index=leg.leg_index,
             target_viewpoint_id=(
                 startup_reseal_motion_permit.target_viewpoint_id
+            ),
+            coverage_leg_index=startup_reseal_motion_permit.leg_index,
+            recovery_source_kind=(
+                startup_reseal_motion_permit.recovery_source_kind
             ),
             reseal_index=startup_reseal_motion_permit.reseal_index,
             rejected_run_id=startup_reseal_motion_permit.rejected_run_id,
@@ -4339,6 +4367,7 @@ def main(argv: list[str] | None = None) -> int:
             target_viewpoint_id=(
                 runtime_motion_permit.target_viewpoint_id
             ),
+            coverage_leg_index=runtime_motion_permit.leg_index,
             reseal_index=runtime_motion_permit.reseal_index,
             rejected_run_id=runtime_motion_permit.rejected_run_id,
             mission_motion_authorization_json=str(
@@ -4366,6 +4395,14 @@ def main(argv: list[str] | None = None) -> int:
         "motion_started",
         run_id=args.run_id,
         leg_index=leg.leg_index,
+        coverage_leg_index=args.coverage_transient_replan_leg_index,
+        target_viewpoint_id=(
+            args.coverage_transient_replan_target_viewpoint_id
+        ),
+        # This is an execution-attempt boundary, emitted immediately before
+        # entering the follower.  It is not evidence of a nonzero Twist.
+        motion_published=False,
+        event_semantics="child_execution_attempt_started_before_follower",
         resolved_cmd_vel_topic=resolved.cmd_vel_topic,
     )
     follower_kwargs = {}
@@ -4391,6 +4428,15 @@ def main(argv: list[str] | None = None) -> int:
     motion_event_fields = {
         "run_id": args.run_id,
         "leg_index": leg.leg_index,
+        # ``leg_index`` above selects a row in this child route artifact and
+        # is normally zero.  Keep the autonomous coverage identity explicit
+        # so recovery permits never confuse route-local and mission indices.
+        "coverage_leg_index": (
+            args.coverage_transient_replan_leg_index
+        ),
+        "target_viewpoint_id": (
+            args.coverage_transient_replan_target_viewpoint_id
+        ),
         "status": result.status,
         "stop_reason": result.stop_reason,
         "duration_sec": result.duration_sec,

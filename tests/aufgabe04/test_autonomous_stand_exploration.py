@@ -2826,6 +2826,8 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                         "event": "startup_route_rejected",
                         "run_id": rejected_run_id,
                         "leg_index": 0,
+                        "coverage_leg_index": 0,
+                        "target_viewpoint_id": "survey_vp_001",
                         "status": "stopped",
                         "stop_reason": (
                             "pose outside certified startup segment"

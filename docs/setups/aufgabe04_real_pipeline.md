@@ -347,7 +347,8 @@ master authorization. Every child still has to pass its
 own dry-run, preflight, route/certificate binding, uncertainty budget, and live
 revalidation before atomically claiming its permit immediately before motion;
 it does not ask for another `RUN`. A direct standalone child without this
-parent-issued contract remains interactive. An eligible startup mismatch also
+parent-issued contract remains interactive. An eligible certified-start
+mismatch or exact zero-motion prestart `map <- odom` consistency stop also
 does not ask again: it first admits fresh stationary AMCL/TF, reconstructs the
 same target, repeats the dry/live gates, and then uses a separate bounded
 startup-reseal authorization and exact one-use recovery permit. Missing,
@@ -417,19 +418,23 @@ for motion confirmation. If AMCL has moved outside the unchanged `0.03 m`
 startup tube, no velocity is published and the stale certificate is rejected.
 The follower's bounded initial sensor wait also holds zero until its own fresh
 TF buffer can validate both the odom-owned control pose and the read-only
-`map -> odom` global-consistency edge. A cold missing edge may populate only
-inside that existing wait; persistent absence, stale TF, malformed TF, or
-excess drift remains a terminal zero/reseal result before any nonzero command.
-For an ordinary coverage leg, the autonomous wrapper samples a fresh
-stationary pose, runs a complete same-target A* plan, validates a new
-exact-start connector, seals a new certificate, and repeats the dry-run. The
-original mission-level `RUN` covers the replacement only through the dedicated
-startup master plus an exact permit binding the rejected no-motion log, fresh
-localization, replacement route/certificate, and dry artifacts. The child
-claims that permit once after every live gate and immediately before
-`motion_started`; no second prompt occurs. The bounded retry count is
-controlled by `--max-startup-reseals-per-leg`; any adopted dynamic blockage
-overlay must be preserved and rebound rather than discarded by this reseal.
+`map -> odom` global-consistency edge. A cold missing edge may populate inside
+that existing wait. Persistent missing, stale, or future TF and exact
+translation/yaw drift stop the child before a nonzero command and may enter
+the same bounded fresh-localization/reseal path; malformed, conflicting, or
+unknown evidence remains terminal. For an ordinary coverage leg, the
+autonomous wrapper samples a fresh stationary pose, runs a complete
+same-target A* plan, validates a new exact-start connector, seals a new
+certificate, and repeats the dry-run. The original mission-level `RUN` covers
+the replacement only through the dedicated startup master plus an exact permit
+binding the rejected no-motion log, recovery source, fresh localization,
+replacement route/certificate, and dry artifacts. The child claims that
+permit once after every live gate and immediately before the semantic
+`motion_started` execution-attempt marker; that marker precedes the follower
+and is not evidence of a nonzero Twist. No second prompt occurs. The bounded
+retry count is controlled by `--max-startup-reseals-per-leg`; any adopted
+dynamic blockage overlay must be preserved and rebound rather than discarded
+by this reseal.
 
 To continue exactly one remaining coverage leg from a successful checkpoint,
 use a new session ID and repeat every behavior-relevant option from the parent

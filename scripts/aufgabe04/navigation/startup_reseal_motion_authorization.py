@@ -1,10 +1,12 @@
 """ROS-free authorization for bounded pre-motion startup reseals.
 
-A startup reseal is eligible only after an exact child run rejected its sealed
-start before motion.  The master authorization records the operator's mission
-``RUN`` scope.  Each replacement run additionally needs an immutable permit
-binding the rejection log, motion-free reseal summary, fresh stationary
-localization, replacement route certificates, and a passed dry run.
+A startup reseal is eligible only after an exact child run rejected either
+its certified start pose or its prestart localization continuity before
+motion.  The master authorization records the operator's mission ``RUN``
+scope.  Each replacement run additionally needs an immutable permit binding
+the exact recovery source, rejection log, motion-free reseal summary, fresh
+stationary localization, replacement route certificates, and a passed dry
+run.
 """
 
 from __future__ import annotations
@@ -26,8 +28,9 @@ from scripts.aufgabe04.artifacts.content_store import (
 )
 
 
-STARTUP_RESEAL_MOTION_AUTHORIZATION_SCHEMA_VERSION = 1
-STARTUP_RESEAL_MOTION_PERMIT_SCHEMA_VERSION = 1
+STARTUP_RESEAL_MOTION_AUTHORIZATION_SCHEMA_VERSION = 2
+STARTUP_RESEAL_MOTION_PERMIT_SCHEMA_VERSION = 2
+STARTUP_RESEAL_PERMIT_SUMMARY_SCHEMA_VERSION = 2
 STARTUP_RESEAL_MOTION_AUTHORIZATION_HASH_FIELD = (
     "startup_reseal_motion_authorization_sha256"
 )
@@ -36,13 +39,27 @@ STARTUP_RESEAL_MOTION_PERMIT_HASH_FIELD = (
 )
 STARTUP_RESEAL_RECOVERY_KIND = "startup_reseal"
 STARTUP_RESEAL_RUN_CONFIRMATION = "RUN"
+STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH = (
+    "certified_start_pose_mismatch"
+)
+STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY = (
+    "prestart_localization_continuity"
+)
+STARTUP_RESEAL_RECOVERY_SOURCE_KINDS = frozenset(
+    {
+        STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH,
+        STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY,
+    }
+)
 STARTUP_RESEAL_MOTION_AUTHORIZATION_SCOPE = (
     "Reuse this autonomous mission RUN only for bounded same-leg, "
-    "same-target pre-motion startup reseals whose no-motion rejection, "
-    "fresh stationary localization, replacement route certificates, and "
-    "passed dry run are bound by an exact one-use permit; post-motion "
-    "recovery, generic stops, target or leg changes, and motion without a "
-    "consumed permit are not authorized."
+    "same-target pre-motion startup reseals after either a certified start "
+    "pose mismatch or an admitted prestart localization-continuity stop. "
+    "The no-motion rejection, exact recovery source, fresh stationary "
+    "localization, replacement route certificates, and passed dry run must "
+    "be bound by an exact one-use permit; post-motion recovery, generic "
+    "stops, target or leg changes, and motion without a consumed permit are "
+    "not authorized."
 )
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -94,6 +111,7 @@ _PERMIT_FIELDS = frozenset(
         "rejected_motion_published",
         "dry_run_passed",
         "additional_typed_run_required",
+        "recovery_source_kind",
     }
 )
 
@@ -170,6 +188,9 @@ class StartupResealMotionPermit:
     rejected_motion_published: bool
     dry_run_passed: bool
     additional_typed_run_required: bool
+    recovery_source_kind: str = (
+        STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH
+    )
     schema_version: int = STARTUP_RESEAL_MOTION_PERMIT_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -216,6 +237,7 @@ class StartupResealMotionPermit:
             "additional_typed_run_required": (
                 self.additional_typed_run_required
             ),
+            "recovery_source_kind": self.recovery_source_kind,
         }
 
     def to_evidence(self) -> dict[str, object]:
@@ -470,6 +492,9 @@ def load_startup_reseal_motion_permit(path: Path) -> StartupResealMotionPermit:
             additional_typed_run_required=_boolean(
                 payload["additional_typed_run_required"],
                 "additional_typed_run_required",
+            ),
+            recovery_source_kind=_string(
+                payload["recovery_source_kind"], "recovery_source_kind"
             ),
         )
     except (KeyError, TypeError, ValueError) as exc:
@@ -761,6 +786,14 @@ def _validate_permit(permit: StartupResealMotionPermit) -> None:
             "startup reseal motion permit requires "
             "additional_typed_run_required=false"
         )
+    if (
+        not isinstance(permit.recovery_source_kind, str)
+        or permit.recovery_source_kind
+        not in STARTUP_RESEAL_RECOVERY_SOURCE_KINDS
+    ):
+        raise ValueError(
+            "startup reseal motion permit recovery_source_kind is not authorized"
+        )
 
 
 def _validate_permit_references(permit: StartupResealMotionPermit) -> None:
@@ -812,7 +845,20 @@ def _validate_budget(
 
 
 def _validate_startup_evidence(permit: StartupResealMotionPermit) -> None:
-    _validate_rejected_semantic_log(permit)
+    if (
+        permit.recovery_source_kind
+        == STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH
+    ):
+        _validate_rejected_semantic_log(permit)
+    elif (
+        permit.recovery_source_kind
+        == STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY
+    ):
+        _validate_prestart_localization_rejected_semantic_log(permit)
+    else:  # pragma: no cover - guarded by _validate_permit
+        raise ValueError(
+            "startup reseal motion permit recovery_source_kind is not authorized"
+        )
     fresh_start_pose = _validate_startup_reseal_summary(permit)
     _validate_fresh_stationary_localization_evidence(
         permit,
@@ -821,21 +867,7 @@ def _validate_startup_evidence(permit: StartupResealMotionPermit) -> None:
 
 
 def _validate_rejected_semantic_log(permit: StartupResealMotionPermit) -> None:
-    events = _load_jsonl_objects(Path(permit.rejected_semantic_log_path))
-    same_run = [event for event in events if event.get("run_id") == permit.rejected_run_id]
-    for event in same_run:
-        motion_value = event.get("motion_published")
-        if (
-            event.get("event") in {"motion_started", "motion_completed"}
-            or motion_value is True
-            or (
-                "motion_published" in event
-                and type(motion_value) is not bool
-            )
-        ):
-            raise ValueError(
-                "rejected semantic log contains published or started motion"
-            )
+    same_run = _same_run_strict_nomotion_events(permit)
     matches = []
     for event in same_run:
         if event.get("event") != "startup_route_rejected":
@@ -844,8 +876,9 @@ def _validate_rejected_semantic_log(permit: StartupResealMotionPermit) -> None:
         if not isinstance(details, Mapping):
             continue
         if (
-            event.get("leg_index") == permit.leg_index
-            and type(event.get("leg_index")) is int
+            event.get("coverage_leg_index") == permit.leg_index
+            and type(event.get("coverage_leg_index")) is int
+            and event.get("target_viewpoint_id") == permit.target_viewpoint_id
             and event.get("status") == "stopped"
             and event.get("stop_reason")
             == "pose outside certified startup segment"
@@ -862,6 +895,178 @@ def _validate_rejected_semantic_log(permit: StartupResealMotionPermit) -> None:
             "rejected semantic log must contain exactly one same-run "
             "pre-motion startup rejection"
         )
+
+
+def _validate_prestart_localization_rejected_semantic_log(
+    permit: StartupResealMotionPermit,
+) -> None:
+    from scripts.aufgabe04.navigation.prestart_localization_reseal import (
+        evaluate_prestart_localization_reseal,
+    )
+
+    same_run = _same_run_events(permit)
+    for event in same_run:
+        motion_value = event.get("motion_published")
+        if (
+            event.get("event") == "motion_completed"
+            or motion_value is True
+            or ("motion_published" in event and type(motion_value) is not bool)
+        ):
+            raise ValueError(
+                "prestart rejected semantic log contains completed or "
+                "published motion"
+            )
+
+    matches: list[tuple[int, dict[str, object]]] = []
+    for index, event in enumerate(same_run):
+        if (
+            event.get("event") != "safety_stop"
+            or event.get("coverage_leg_index") != permit.leg_index
+            or type(event.get("coverage_leg_index")) is not int
+            or event.get("target_viewpoint_id") != permit.target_viewpoint_id
+        ):
+            continue
+        details = event.get("stop_details")
+        decision = evaluate_prestart_localization_reseal(
+            status=event.get("status"),
+            motion_published=event.get("motion_published"),
+            stop_details=details,
+        )
+        if (
+            decision.eligible
+            and decision.motion_published is False
+            and decision.requires_fresh_localization
+            and decision.requires_new_route_certificate
+            and decision.automatic_motion_authorized is False
+            and isinstance(details, Mapping)
+            and event.get("stop_reason") == details.get("reason")
+        ):
+            matches.append((index, event))
+    if len(matches) != 1:
+        raise ValueError(
+            "rejected semantic log must contain exactly one same-run eligible "
+            "prestart localization-continuity safety stop"
+        )
+    safety_stop_index, _ = matches[0]
+    _validate_prestart_attempt_sequence(
+        permit,
+        same_run=same_run,
+        safety_stop_index=safety_stop_index,
+    )
+
+
+def _same_run_events(
+    permit: StartupResealMotionPermit,
+) -> tuple[dict[str, object], ...]:
+    events = _load_jsonl_objects(Path(permit.rejected_semantic_log_path))
+    return tuple(
+        event
+        for event in events
+        if event.get("run_id") == permit.rejected_run_id
+    )
+
+
+def _same_run_strict_nomotion_events(
+    permit: StartupResealMotionPermit,
+) -> tuple[dict[str, object], ...]:
+    same_run = _same_run_events(permit)
+    for event in same_run:
+        motion_value = event.get("motion_published")
+        if (
+            event.get("event") in {"motion_started", "motion_completed"}
+            or motion_value is True
+            or ("motion_published" in event and type(motion_value) is not bool)
+        ):
+            raise ValueError(
+                "rejected semantic log contains published or started motion"
+            )
+    return same_run
+
+
+def _validate_prestart_attempt_sequence(
+    permit: StartupResealMotionPermit,
+    *,
+    same_run: tuple[dict[str, object], ...],
+    safety_stop_index: int,
+) -> None:
+    consumed_event_names = {
+        "mission_leg_motion_permit_consumed",
+        "startup_reseal_motion_permit_consumed",
+        "runtime_localization_motion_permit_consumed",
+    }
+    consumed = [
+        (index, event)
+        for index, event in enumerate(same_run)
+        if event.get("event") in consumed_event_names
+    ]
+    started = [
+        (index, event)
+        for index, event in enumerate(same_run)
+        if event.get("event") == "motion_started"
+    ]
+    if len(consumed) != 1:
+        raise ValueError(
+            "prestart rejected semantic log must contain exactly one "
+            "same-run motion permit consumption"
+        )
+    if len(started) != 1:
+        raise ValueError(
+            "prestart rejected semantic log must contain exactly one "
+            "same-run child execution attempt"
+        )
+    consumed_index, consumed_event = consumed[0]
+    started_index, started_event = started[0]
+    if not consumed_index < started_index < safety_stop_index:
+        raise ValueError(
+            "prestart rejected semantic log event ordering mismatch"
+        )
+    if (
+        started_event.get("motion_published") is not False
+        or started_event.get("event_semantics")
+        != "child_execution_attempt_started_before_follower"
+    ):
+        raise ValueError(
+            "prestart rejected semantic log child execution-attempt "
+            "semantics mismatch"
+        )
+    for label, event in (
+        ("motion permit consumption", consumed_event),
+        ("child execution attempt", started_event),
+    ):
+        if (
+            event.get("coverage_leg_index") != permit.leg_index
+            or type(event.get("coverage_leg_index")) is not int
+            or event.get("target_viewpoint_id") != permit.target_viewpoint_id
+        ):
+            raise ValueError(
+                f"prestart rejected semantic log {label} identity mismatch"
+            )
+    if (
+        consumed_event.get("covered_by_initial_mission_run") is not True
+        or consumed_event.get("additional_typed_run_required") is not False
+    ):
+        raise ValueError(
+            "prestart rejected semantic log motion permit scope mismatch"
+        )
+    consumed_name = consumed_event.get("event")
+    if consumed_name == "mission_leg_motion_permit_consumed" and (
+        consumed_event.get("mission_leg_kind") != "coverage"
+        or consumed_event.get("mission_leg_index") != permit.leg_index
+        or type(consumed_event.get("mission_leg_index")) is not int
+        or consumed_event.get("target_id") != permit.target_viewpoint_id
+    ):
+        raise ValueError(
+            "prestart rejected semantic log routine permit identity mismatch"
+        )
+    if consumed_name == "startup_reseal_motion_permit_consumed":
+        prior_source = consumed_event.get("recovery_source_kind")
+        if (
+            not isinstance(prior_source, str)
+            or prior_source not in STARTUP_RESEAL_RECOVERY_SOURCE_KINDS
+        ):
+            raise ValueError(
+                "prestart rejected semantic log startup permit source mismatch"
+            )
 
 
 def _validate_startup_reseal_summary(
@@ -882,11 +1087,12 @@ def _validate_startup_reseal_summary(
         "diagnostics_json",
         "same_target_verified",
         "additional_typed_run_required",
+        "recovery_source_kind",
     }
     if frozenset(summary) != expected_fields:
         raise ValueError("startup reseal summary fields mismatch")
     expected = {
-        "schema_version": 1,
+        "schema_version": STARTUP_RESEAL_PERMIT_SUMMARY_SCHEMA_VERSION,
         "status": "startup_route_replanned",
         "motion_published": False,
         "reseal_kind": "startup",
@@ -898,6 +1104,7 @@ def _validate_startup_reseal_summary(
         "diagnostics_json": permit.diagnostics_path,
         "same_target_verified": True,
         "additional_typed_run_required": False,
+        "recovery_source_kind": permit.recovery_source_kind,
     }
     for name, value in expected.items():
         observed = summary.get(name)
@@ -1273,7 +1480,11 @@ __all__ = [
     "STARTUP_RESEAL_MOTION_AUTHORIZATION_SCOPE",
     "STARTUP_RESEAL_MOTION_PERMIT_HASH_FIELD",
     "STARTUP_RESEAL_MOTION_PERMIT_SCHEMA_VERSION",
+    "STARTUP_RESEAL_PERMIT_SUMMARY_SCHEMA_VERSION",
     "STARTUP_RESEAL_RECOVERY_KIND",
+    "STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH",
+    "STARTUP_RESEAL_RECOVERY_SOURCE_KINDS",
+    "STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY",
     "STARTUP_RESEAL_RUN_CONFIRMATION",
     "StartupResealMotionAuthorization",
     "StartupResealMotionPermit",

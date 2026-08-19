@@ -2068,12 +2068,55 @@ class SimpleWaypointFollowerNode(Node):  # pragma: no cover - requires ROS runti
         startup_failure = self._wait_for_initial_runtime_inputs(started_at)
         if startup_failure:
             self.publish_repeated_zero()
+            # ``_wait_for_initial_runtime_inputs`` leaves the most recent
+            # fail-closed sensor/TF evidence in ``latest_stop_details``.  In
+            # particular, the global-consistency monitor records the complete
+            # map<-odom continuity decision there.  Preserve that top-level
+            # contract for the semantic safety_stop instead of returning the
+            # legacy five-field result that silently discarded it.
+            stop_details = dict(self.latest_stop_details or {})
+            if not stop_details:
+                stop_details = {
+                    "reason": startup_failure,
+                    "source": "initial_runtime_input_wait",
+                    "fail_closed": True,
+                }
+            # Recovery policy must be able to distinguish this zero-motion
+            # startup stop from a monitor stop after motion.  Never overwrite
+            # contradictory upstream evidence: retaining it makes the later
+            # classifier reject the malformed/conflicting contract.
+            stop_details.setdefault("execution_phase", "before_motion")
+            stop_details.setdefault("phase", "initial_runtime_input_wait")
+            stop_details.setdefault(
+                "motion_published",
+                bool(self.motion_published),
+            )
+            trace_failure = self._append_controller_trace(
+                event="initial_runtime_input_stop",
+                reason=startup_failure,
+                fail_closed=True,
+                effective_command=VelocityCommand(0.0, 0.0),
+                diagnostics=stop_details,
+            )
+            if trace_failure:
+                # The original runtime-input stop remains primary.  A
+                # secondary evidence-write fault must not replace the
+                # localization/sensor evidence needed by bounded recovery.
+                stop_details = {
+                    **stop_details,
+                    "controller_trace_error": trace_failure,
+                    "controller_trace_fault_code": (
+                        "controller_trace_write_failed"
+                    ),
+                }
+            self.latest_stop_details = stop_details
             return FollowerResult(
                 "stopped",
                 startup_failure,
                 time.monotonic() - started_at,
                 self.distance_estimate_m,
                 self.motion_published,
+                stop_details,
             )
         loop_sleep_sec = 1.0 / max(self.follower_config.control_rate_hz, 1.0)
         self.control_loop_deadline_sec = time.monotonic() + loop_sleep_sec

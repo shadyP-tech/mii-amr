@@ -7,7 +7,13 @@ from pathlib import Path
 from scripts.aufgabe04.artifacts.content_store import payload_sha256
 from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
     STARTUP_RESEAL_MOTION_AUTHORIZATION_SCOPE,
+    STARTUP_RESEAL_MOTION_AUTHORIZATION_SCHEMA_VERSION,
+    STARTUP_RESEAL_MOTION_PERMIT_HASH_FIELD,
+    STARTUP_RESEAL_MOTION_PERMIT_SCHEMA_VERSION,
+    STARTUP_RESEAL_PERMIT_SUMMARY_SCHEMA_VERSION,
     STARTUP_RESEAL_RECOVERY_KIND,
+    STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH,
+    STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY,
     STARTUP_RESEAL_RUN_CONFIRMATION,
     StartupResealMotionAuthorization,
     StartupResealMotionPermit,
@@ -21,6 +27,10 @@ from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
     validate_startup_reseal_motion_permit_for_execution,
     write_startup_reseal_motion_authorization,
     write_startup_reseal_motion_permit,
+)
+from scripts.aufgabe04.real_robot.autonomous_startup_reseal import (
+    StartupResealPermitContext,
+    write_startup_reseal_permit_summary,
 )
 
 
@@ -84,7 +94,9 @@ class StartupResealMotionAuthorizationTest(unittest.TestCase):
             "timestamp": "2026-08-17T12:00:00+00:00",
             "event": "startup_route_rejected",
             "run_id": "mission-001-coverage-003",
-            "leg_index": 3,
+            "leg_index": 0,
+            "coverage_leg_index": 3,
+            "target_viewpoint_id": "survey-vp-007",
             "status": "stopped",
             "stop_reason": "pose outside certified startup segment",
             "motion_published": False,
@@ -103,9 +115,108 @@ class StartupResealMotionAuthorizationTest(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def _write_prestart_rejected_log(
+        self,
+        *extra_events,
+        **event_replacements,
+    ):
+        reason = "global localization consistency requires zero and reseal"
+        details = {
+            "reason": reason,
+            "fault_code": "localization_reseal_required",
+            "source": "global_consistency_monitor",
+            "execution_pose_owner": "odom",
+            "global_consistency_monitor": "amcl",
+            "monitor_action": "FORCE_ZERO_RESEAL",
+            "monitor_reason": "reseal_required",
+            "monitor_warning": "",
+            "motion_published": False,
+            "execution_phase": "before_motion",
+            "phase": "initial_runtime_input_wait",
+            "continuity": {
+                "schema_version": 1,
+                "accepted": False,
+                "decision": "force_zero_reseal",
+                "reason": "map_from_odom_translation_drift",
+                "fail_closed": True,
+                "requires_zero_cycle": True,
+                "requires_reseal": True,
+                "threshold_semantics": (
+                    "accept_if_observed_less_than_or_equal_to_limit"
+                ),
+                "certificate_sha256": "a" * 64,
+                "map_frame": "map",
+                "odom_frame": "odom",
+                "base_frame": "base_footprint",
+                "frozen_map_from_odom": {
+                    "x_m": 0.0,
+                    "y_m": 0.0,
+                    "yaw_rad": 0.0,
+                },
+                "live_map_from_odom": {
+                    "x_m": 0.2,
+                    "y_m": 0.0,
+                    "yaw_rad": 0.0,
+                },
+                "relative_translation_x_m": 0.2,
+                "relative_translation_y_m": 0.0,
+                "translation_drift_m": 0.2,
+                "relative_yaw_rad": 0.0,
+                "absolute_yaw_drift_rad": 0.0,
+                "max_translation_drift_m": 0.1,
+                "max_yaw_drift_rad": 0.1,
+                "validation_error": None,
+            },
+            "fail_closed": True,
+        }
+        event = {
+            "timestamp": "2026-08-19T14:09:01+00:00",
+            "event": "safety_stop",
+            "run_id": "mission-001-coverage-003",
+            "leg_index": 0,
+            "coverage_leg_index": 3,
+            "target_viewpoint_id": "survey-vp-007",
+            "status": "stopped",
+            "stop_reason": reason,
+            "motion_published": False,
+            "stop_details": details,
+        }
+        event.update(event_replacements)
+        permit_consumed = {
+            "timestamp": "2026-08-19T14:09:00+00:00",
+            "event": "mission_leg_motion_permit_consumed",
+            "run_id": "mission-001-coverage-003",
+            "leg_index": 0,
+            "mission_leg_kind": "coverage",
+            "mission_leg_index": 3,
+            "target_id": "survey-vp-007",
+            "coverage_leg_index": 3,
+            "target_viewpoint_id": "survey-vp-007",
+            "covered_by_initial_mission_run": True,
+            "additional_typed_run_required": False,
+        }
+        motion_started = {
+            "timestamp": "2026-08-19T14:09:00.500000+00:00",
+            "event": "motion_started",
+            "run_id": "mission-001-coverage-003",
+            "leg_index": 0,
+            "coverage_leg_index": 3,
+            "target_viewpoint_id": "survey-vp-007",
+            "motion_published": False,
+            "event_semantics": (
+                "child_execution_attempt_started_before_follower"
+            ),
+            "resolved_cmd_vel_topic": "/tb3_0/cmd_vel",
+        }
+        events = (permit_consumed, motion_started, event, *extra_events)
+        self.artifacts["rejected_semantic_log"].write_text(
+            "".join(json.dumps(item, sort_keys=True) + "\n" for item in events),
+            encoding="utf-8",
+        )
+
     def _write_summary(self, **replacements):
         summary = {
-            "schema_version": 1,
+            "schema_version": STARTUP_RESEAL_PERMIT_SUMMARY_SCHEMA_VERSION,
             "status": "startup_route_replanned",
             "motion_published": False,
             "reseal_kind": "startup",
@@ -118,6 +229,9 @@ class StartupResealMotionAuthorizationTest(unittest.TestCase):
             "diagnostics_json": self._path("diagnostics"),
             "same_target_verified": True,
             "additional_typed_run_required": False,
+            "recovery_source_kind": (
+                STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH
+            ),
         }
         summary.update(replacements)
         self.artifacts["startup_reseal_summary"].write_text(
@@ -221,6 +335,9 @@ class StartupResealMotionAuthorizationTest(unittest.TestCase):
             "rejected_motion_published": False,
             "dry_run_passed": True,
             "additional_typed_run_required": False,
+            "recovery_source_kind": (
+                STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH
+            ),
         }
         values.update(replacements)
         return StartupResealMotionPermit(**values)
@@ -267,6 +384,18 @@ class StartupResealMotionAuthorizationTest(unittest.TestCase):
             ),
         )
         self.assertEqual(validated, loaded)
+        self.assertEqual(
+            loaded.schema_version,
+            STARTUP_RESEAL_MOTION_AUTHORIZATION_SCHEMA_VERSION,
+        )
+        self.assertEqual(STARTUP_RESEAL_MOTION_AUTHORIZATION_SCHEMA_VERSION, 2)
+        self.assertEqual(STARTUP_RESEAL_MOTION_PERMIT_SCHEMA_VERSION, 2)
+        self.assertIn("certified start pose mismatch", loaded.scope_text)
+        self.assertIn("prestart localization-continuity", loaded.scope_text)
+        with self.assertRaisesRegex(ValueError, "unsupported.*schema"):
+            replace(self.authorization, schema_version=1)
+        with self.assertRaisesRegex(ValueError, "unsupported.*schema"):
+            replace(self.permit, schema_version=1)
 
     def test_master_rejects_wrong_scope_run_kind_and_budget(self):
         cases = (
@@ -326,6 +455,11 @@ class StartupResealMotionAuthorizationTest(unittest.TestCase):
                 self.permit.rejected_run_id,
                 "must differ from replacement run_id",
             ),
+            (
+                "recovery_source_kind",
+                "generic_stop",
+                "recovery_source_kind is not authorized",
+            ),
         )
         for name, value, message in cases:
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, message):
@@ -335,6 +469,16 @@ class StartupResealMotionAuthorizationTest(unittest.TestCase):
         invalid = (
             (
                 {"run_id": "other-run"},
+                (),
+                "exactly one same-run",
+            ),
+            (
+                {"coverage_leg_index": 4},
+                (),
+                "exactly one same-run",
+            ),
+            (
+                {"target_viewpoint_id": "other-target"},
                 (),
                 "exactly one same-run",
             ),
@@ -385,6 +529,327 @@ class StartupResealMotionAuthorizationTest(unittest.TestCase):
                         self.root / f"bad-log-{len(message)}.json",
                         candidate,
                     )
+
+    def test_prestart_localization_source_round_trips_only_with_eligible_stop(self):
+        source_kind = (
+            STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY
+        )
+        self._write_prestart_rejected_log()
+        self._write_summary(recovery_source_kind=source_kind)
+        candidate = self._new_permit(recovery_source_kind=source_kind)
+
+        path = self.root / "prestart-permit.json"
+        write_startup_reseal_motion_permit(path, candidate)
+        self.assertEqual(
+            load_startup_reseal_motion_permit(path).recovery_source_kind,
+            source_kind,
+        )
+        self.assertEqual(
+            validate_startup_reseal_motion_permit_for_execution(
+                path,
+                **{
+                    **self._execution_kwargs(),
+                    "run_id": candidate.run_id,
+                },
+            ),
+            candidate,
+        )
+
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw.pop(STARTUP_RESEAL_MOTION_PERMIT_HASH_FIELD)
+        raw["recovery_source_kind"] = (
+            STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH
+        )
+        raw[STARTUP_RESEAL_MOTION_PERMIT_HASH_FIELD] = payload_sha256(raw)
+        tampered = self.root / "prestart-permit-cross-kind-tamper.json"
+        tampered.write_text(json.dumps(raw), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "published or started motion"):
+            validate_startup_reseal_motion_permit_for_execution(
+                tampered,
+                **{
+                    **self._execution_kwargs(),
+                    "run_id": candidate.run_id,
+                },
+            )
+
+    def test_prestart_tf_warmup_source_also_requires_a_new_sealed_permit(self):
+        source_kind = (
+            STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY
+        )
+        self._write_prestart_rejected_log()
+        events = [
+            json.loads(line)
+            for line in self.artifacts["rejected_semantic_log"]
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        event = events[-1]
+        details = event["stop_details"]
+        details["monitor_warning"] = "stale_map_from_odom"
+        continuity = details["continuity"]
+        continuity.update(
+            {
+                "reason": "map_from_odom_missing",
+                "live_map_from_odom": None,
+                "relative_translation_x_m": None,
+                "relative_translation_y_m": None,
+                "translation_drift_m": None,
+                "relative_yaw_rad": None,
+                "absolute_yaw_drift_rad": None,
+                "validation_error": "live map_from_odom is missing",
+            }
+        )
+        self.artifacts["rejected_semantic_log"].write_text(
+            "".join(json.dumps(item) + "\n" for item in events),
+            encoding="utf-8",
+        )
+        self._write_summary(recovery_source_kind=source_kind)
+        candidate = self._new_permit(recovery_source_kind=source_kind)
+
+        path = self.root / "prestart-warmup-permit.json"
+        write_startup_reseal_motion_permit(path, candidate)
+        self.assertEqual(
+            load_startup_reseal_motion_permit(path).recovery_source_kind,
+            source_kind,
+        )
+
+    def test_prestart_requires_exact_consumed_started_stopped_sequence(self):
+        source_kind = (
+            STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY
+        )
+        self._write_prestart_rejected_log()
+        base_events = [
+            json.loads(line)
+            for line in self.artifacts["rejected_semantic_log"]
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        self._write_summary(recovery_source_kind=source_kind)
+
+        missing_consumption = base_events[1:]
+        missing_started = [base_events[0], base_events[2]]
+        wrong_order = [base_events[1], base_events[0], base_events[2]]
+        duplicate_started = [
+            base_events[0],
+            base_events[1],
+            dict(base_events[1]),
+            base_events[2],
+        ]
+        motion_completed = [
+            *base_events,
+            {
+                "event": "motion_completed",
+                "run_id": "mission-001-coverage-003",
+            },
+        ]
+        wrong_consumption_identity = json.loads(json.dumps(base_events))
+        wrong_consumption_identity[0]["coverage_leg_index"] = 4
+        wrong_started_identity = json.loads(json.dumps(base_events))
+        wrong_started_identity[1]["target_viewpoint_id"] = "other-target"
+        wrong_started_semantics = json.loads(json.dumps(base_events))
+        wrong_started_semantics[1]["event_semantics"] = "nonzero_motion_started"
+        wrong_scope = json.loads(json.dumps(base_events))
+        wrong_scope[0]["covered_by_initial_mission_run"] = False
+
+        cases = (
+            (
+                "missing-consumption",
+                missing_consumption,
+                "exactly one same-run motion permit consumption",
+            ),
+            (
+                "missing-started",
+                missing_started,
+                "exactly one same-run child execution attempt",
+            ),
+            ("wrong-order", wrong_order, "event ordering mismatch"),
+            (
+                "duplicate-started",
+                duplicate_started,
+                "exactly one same-run child execution attempt",
+            ),
+            (
+                "motion-completed",
+                motion_completed,
+                "completed or published motion",
+            ),
+            (
+                "wrong-consumption-identity",
+                wrong_consumption_identity,
+                "motion permit consumption identity mismatch",
+            ),
+            (
+                "wrong-started-identity",
+                wrong_started_identity,
+                "child execution attempt identity mismatch",
+            ),
+            (
+                "wrong-started-semantics",
+                wrong_started_semantics,
+                "child execution-attempt semantics mismatch",
+            ),
+            ("wrong-scope", wrong_scope, "motion permit scope mismatch"),
+        )
+        for name, events, message in cases:
+            with self.subTest(name=name):
+                self.artifacts["rejected_semantic_log"].write_text(
+                    "".join(json.dumps(item) + "\n" for item in events),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(ValueError, message):
+                    write_startup_reseal_motion_permit(
+                        self.root / f"prestart-sequence-{name}.json",
+                        self._new_permit(recovery_source_kind=source_kind),
+                    )
+
+    def test_prestart_accepts_each_exact_prior_coverage_permit_family(self):
+        source_kind = (
+            STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY
+        )
+        self._write_prestart_rejected_log()
+        base_events = [
+            json.loads(line)
+            for line in self.artifacts["rejected_semantic_log"]
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        self._write_summary(recovery_source_kind=source_kind)
+
+        for prior_event_name in (
+            "mission_leg_motion_permit_consumed",
+            "startup_reseal_motion_permit_consumed",
+            "runtime_localization_motion_permit_consumed",
+        ):
+            with self.subTest(prior_event_name=prior_event_name):
+                events = json.loads(json.dumps(base_events))
+                events[0]["event"] = prior_event_name
+                if prior_event_name == "startup_reseal_motion_permit_consumed":
+                    events[0]["recovery_source_kind"] = (
+                        STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH
+                    )
+                self.artifacts["rejected_semantic_log"].write_text(
+                    "".join(json.dumps(item) + "\n" for item in events),
+                    encoding="utf-8",
+                )
+                write_startup_reseal_motion_permit(
+                    self.root / f"prestart-prior-{prior_event_name}.json",
+                    self._new_permit(recovery_source_kind=source_kind),
+                )
+
+    def test_recovery_source_kinds_cannot_be_cross_applied(self):
+        prestart_kind = (
+            STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY
+        )
+
+        self._write_rejected_log()
+        self._write_summary(recovery_source_kind=prestart_kind)
+        with self.assertRaisesRegex(
+            ValueError,
+            "eligible prestart localization-continuity safety stop",
+        ):
+            write_startup_reseal_motion_permit(
+                self.root / "pose-as-prestart.json",
+                self._new_permit(recovery_source_kind=prestart_kind),
+            )
+
+        self._write_prestart_rejected_log()
+        self._write_summary()
+        with self.assertRaisesRegex(ValueError, "published or started motion"):
+            write_startup_reseal_motion_permit(
+                self.root / "prestart-as-pose.json",
+                self._new_permit(),
+            )
+
+    def test_prestart_source_rejects_motion_conflict_and_summary_kind_tamper(self):
+        source_kind = (
+            STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY
+        )
+        self._write_prestart_rejected_log(motion_published=True)
+        self._write_summary(recovery_source_kind=source_kind)
+        with self.assertRaisesRegex(ValueError, "completed or published motion"):
+            write_startup_reseal_motion_permit(
+                self.root / "prestart-motion-conflict.json",
+                self._new_permit(recovery_source_kind=source_kind),
+            )
+
+        self._write_prestart_rejected_log()
+        self._write_summary(
+            recovery_source_kind=(
+                STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH
+            )
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "summary recovery_source_kind mismatch",
+        ):
+            write_startup_reseal_motion_permit(
+                self.root / "prestart-summary-cross-kind.json",
+                self._new_permit(recovery_source_kind=source_kind),
+            )
+
+        for identity_field, value in (
+            ("coverage_leg_index", 4),
+            ("target_viewpoint_id", "other-target"),
+        ):
+            with self.subTest(identity_field=identity_field):
+                self._write_prestart_rejected_log(**{identity_field: value})
+                self._write_summary(recovery_source_kind=source_kind)
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "eligible prestart localization-continuity safety stop",
+                ):
+                    write_startup_reseal_motion_permit(
+                        self.root / f"prestart-wrong-{identity_field}.json",
+                        self._new_permit(recovery_source_kind=source_kind),
+                    )
+
+    def test_adapter_binds_recovery_source_to_context_and_summary(self):
+        source_kind = (
+            STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY
+        )
+        summary_path = self.root / "adapter-summary.json"
+        write_startup_reseal_permit_summary(
+            summary_path,
+            leg_index=3,
+            target_viewpoint_id="survey-vp-007",
+            reseal_index=1,
+            rejected_run_id="mission-001-coverage-003",
+            fresh_start_x_m=0.1,
+            fresh_start_y_m=0.2,
+            fresh_start_yaw_rad=0.3,
+            route_csv=self.artifacts["route_csv"],
+            diagnostics_json=self.artifacts["diagnostics"],
+            recovery_source_kind=source_kind,
+        )
+        stored = json.loads(summary_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            stored["schema_version"],
+            STARTUP_RESEAL_PERMIT_SUMMARY_SCHEMA_VERSION,
+        )
+        self.assertEqual(stored["recovery_source_kind"], source_kind)
+
+        context = StartupResealPermitContext(
+            mission_authorization_json=self.master_path,
+            session_id=self.authorization.session_id,
+            semantic_map_id=self.authorization.semantic_map_id,
+            leg_index=3,
+            target_viewpoint_id="survey-vp-007",
+            reseal_index=1,
+            max_startup_reseals_per_leg=2,
+            rejected_run_id="mission-001-coverage-003",
+            rejected_semantic_log_path=self.artifacts[
+                "rejected_semantic_log"
+            ],
+            startup_reseal_summary_path=summary_path,
+            fresh_localization_evidence_path=self.artifacts[
+                "fresh_stationary_localization_evidence"
+            ],
+            permit_json_path=self.root / "adapter-permit.json",
+            recovery_source_kind=source_kind,
+        )
+        self.assertEqual(context.recovery_source_kind, source_kind)
+        with self.assertRaisesRegex(ValueError, "not authorized"):
+            replace(context, recovery_source_kind="generic_stop")
 
     def test_summary_binds_no_motion_reseal_rejected_run_target_and_route(self):
         cases = (

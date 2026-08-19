@@ -9,7 +9,10 @@ from pathlib import Path
 from scripts.aufgabe04.artifacts.content_store import write_content_hashed_json
 from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
     STARTUP_RESEAL_MOTION_AUTHORIZATION_SCOPE,
+    STARTUP_RESEAL_PERMIT_SUMMARY_SCHEMA_VERSION,
     STARTUP_RESEAL_RECOVERY_KIND,
+    STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH,
+    STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY,
     STARTUP_RESEAL_RUN_CONFIRMATION,
     StartupResealMotionAuthorization,
     StartupResealMotionPermit,
@@ -108,7 +111,9 @@ class StartupResealMotionConsumptionTest(unittest.TestCase):
         rejected = {
             "event": "startup_route_rejected",
             "run_id": "mission-001-coverage-003",
-            "leg_index": 3,
+            "leg_index": 0,
+            "coverage_leg_index": 3,
+            "target_viewpoint_id": "survey-vp-007",
             "status": "stopped",
             "stop_reason": "pose outside certified startup segment",
             "motion_published": False,
@@ -127,7 +132,7 @@ class StartupResealMotionConsumptionTest(unittest.TestCase):
             self.root / "startup_summary.json"
         )
         summary = {
-            "schema_version": 1,
+            "schema_version": STARTUP_RESEAL_PERMIT_SUMMARY_SCHEMA_VERSION,
             "status": "startup_route_replanned",
             "motion_published": False,
             "reseal_kind": "startup",
@@ -140,6 +145,9 @@ class StartupResealMotionConsumptionTest(unittest.TestCase):
             "diagnostics_json": self._path("diagnostics"),
             "same_target_verified": True,
             "additional_typed_run_required": False,
+            "recovery_source_kind": (
+                STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH
+            ),
         }
         self.artifacts["startup_reseal_summary"].write_text(
             json.dumps(summary) + "\n",
@@ -182,6 +190,9 @@ class StartupResealMotionConsumptionTest(unittest.TestCase):
             rejected_motion_published=False,
             dry_run_passed=True,
             additional_typed_run_required=False,
+            recovery_source_kind=(
+                STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH
+            ),
         )
         write_startup_reseal_motion_permit(self.permit_path, self.permit)
 
@@ -298,6 +309,15 @@ class StartupResealMotionConsumptionTest(unittest.TestCase):
     def test_changed_validated_permit_and_tampered_permit_file_reject(self):
         with self.assertRaisesRegex(ValueError, "changed after validation"):
             self._consume(permit=replace(self.permit, run_id="another-run"))
+        with self.assertRaisesRegex(ValueError, "changed after validation"):
+            self._consume(
+                permit=replace(
+                    self.permit,
+                    recovery_source_kind=(
+                        STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY
+                    ),
+                )
+            )
         raw = json.loads(self.permit_path.read_text(encoding="utf-8"))
         raw["run_id"] = "tampered"
         self.permit_path.write_text(json.dumps(raw), encoding="utf-8")

@@ -13,6 +13,9 @@ import math
 from pathlib import Path
 
 from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
+    STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH,
+    STARTUP_RESEAL_RECOVERY_SOURCE_KINDS,
+    STARTUP_RESEAL_PERMIT_SUMMARY_SCHEMA_VERSION,
     StartupResealMotionPermit,
     file_sha256,
     load_startup_reseal_motion_authorization,
@@ -40,6 +43,9 @@ class StartupResealPermitContext:
     startup_reseal_summary_path: Path
     fresh_localization_evidence_path: Path
     permit_json_path: Path
+    recovery_source_kind: str = (
+        STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH
+    )
 
     def __post_init__(self) -> None:
         if not self.session_id.strip() or not self.semantic_map_id.strip():
@@ -56,6 +62,12 @@ class StartupResealPermitContext:
             or self.reseal_index > self.max_startup_reseals_per_leg
         ):
             raise ValueError("startup reseal permit exceeds its bounded budget")
+        if (
+            not isinstance(self.recovery_source_kind, str)
+            or self.recovery_source_kind
+            not in STARTUP_RESEAL_RECOVERY_SOURCE_KINDS
+        ):
+            raise ValueError("startup reseal recovery_source_kind is not authorized")
 
 
 def write_startup_reseal_permit_summary(
@@ -71,6 +83,9 @@ def write_startup_reseal_permit_summary(
     route_csv: Path,
     diagnostics_json: Path,
     additional_typed_run_required: bool = False,
+    recovery_source_kind: str = (
+        STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH
+    ),
 ) -> Path:
     """Write the exact sealed-route summary later bound by the permit."""
 
@@ -82,6 +97,11 @@ def write_startup_reseal_permit_summary(
         raise ValueError("startup reseal target and rejected run must be non-empty")
     if type(additional_typed_run_required) is not bool:
         raise ValueError("additional_typed_run_required must be boolean")
+    if (
+        not isinstance(recovery_source_kind, str)
+        or recovery_source_kind not in STARTUP_RESEAL_RECOVERY_SOURCE_KINDS
+    ):
+        raise ValueError("startup reseal recovery_source_kind is not authorized")
     pose = (fresh_start_x_m, fresh_start_y_m, fresh_start_yaw_rad)
     if any(isinstance(value, bool) or not math.isfinite(value) for value in pose):
         raise ValueError("startup reseal fresh pose must be finite")
@@ -96,7 +116,7 @@ def write_startup_reseal_permit_summary(
     destination = Path(path).resolve(strict=False)
     destination.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "schema_version": 1,
+        "schema_version": STARTUP_RESEAL_PERMIT_SUMMARY_SCHEMA_VERSION,
         "status": "startup_route_replanned",
         "motion_published": False,
         "reseal_kind": "startup",
@@ -113,6 +133,7 @@ def write_startup_reseal_permit_summary(
         "diagnostics_json": str(diagnostics_path),
         "same_target_verified": True,
         "additional_typed_run_required": additional_typed_run_required,
+        "recovery_source_kind": recovery_source_kind,
     }
     try:
         with destination.open("x", encoding="utf-8") as handle:
@@ -228,6 +249,7 @@ def issue_startup_reseal_motion_permit(
         rejected_motion_published=False,
         dry_run_passed=True,
         additional_typed_run_required=False,
+        recovery_source_kind=context.recovery_source_kind,
     )
     permit_path = Path(context.permit_json_path).resolve(strict=False)
     permit_sha256 = write_startup_reseal_motion_permit(permit_path, permit)
@@ -235,6 +257,7 @@ def issue_startup_reseal_motion_permit(
 
 
 __all__ = [
+    "STARTUP_RESEAL_PERMIT_SUMMARY_SCHEMA_VERSION",
     "StartupResealPermitContext",
     "issue_startup_reseal_motion_permit",
     "write_startup_reseal_permit_summary",

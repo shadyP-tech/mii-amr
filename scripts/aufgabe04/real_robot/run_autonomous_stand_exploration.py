@@ -95,6 +95,8 @@ from scripts.aufgabe04.navigation.stand_discovery_route import (
 from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
     STARTUP_RESEAL_MOTION_AUTHORIZATION_SCOPE,
     STARTUP_RESEAL_RECOVERY_KIND,
+    STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY,
+    STARTUP_RESEAL_RECOVERY_SOURCE_KINDS,
     STARTUP_RESEAL_RUN_CONFIRMATION,
     StartupResealMotionAuthorization,
     write_startup_reseal_motion_authorization,
@@ -847,6 +849,18 @@ def _run_motion_leg(
                 "connector, dry-run, uncertainty budget, and certificate now "
                 "match the newly admitted map pose."
             )
+        elif (
+            startup_reseal_permit_context is not None
+            and startup_reseal_permit_context.recovery_source_kind
+            == STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY
+        ):
+            print(
+                "The prior child stopped before motion because its live "
+                "map<-odom consistency evidence invalidated the frozen odom "
+                "certificate. Fresh stationary AMCL/TF evidence, a new "
+                "same-target A* route, exact-start connector, dry-run, "
+                "uncertainty budget, and certificate now bind this recovery."
+            )
         else:
             print(
                 "The prior route was rejected before motion because AMCL moved "
@@ -1430,10 +1444,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MAX_STARTUP_RESEALS_PER_LEG,
         help=(
             "Maximum fresh-pose A* reseals after a route is rejected before "
-            "motion because AMCL left its certified startup segment. In an "
-            "execute-* mission, the initial typed RUN covers only bounded "
-            "same-leg, same-target replacements that obtain fresh stationary "
-            "localization and consume a dedicated one-use recovery permit."
+            "motion because AMCL left its certified startup segment or the "
+            "live map<-odom consistency monitor invalidated the frozen odom "
+            "certificate. In an execute-* mission, the initial typed RUN "
+            "covers only bounded same-leg, same-target replacements that "
+            "obtain fresh stationary localization and consume a dedicated "
+            "one-use recovery permit."
         ),
     )
     parser.add_argument(
@@ -1865,8 +1881,9 @@ def main(argv=None) -> int:
             "Each routine child must pass a fresh dry-run and all live gates, "
             "then atomically consume its exact one-leg permit; it will not ask "
             "for another RUN. "
-            "A same-target pre-motion AMCL/start mismatch may reuse this RUN "
-            "only after fresh stationary localization, route reconstruction, "
+            "A same-target pre-motion AMCL/start mismatch or an exact "
+            "zero-motion map<-odom consistency stop may reuse this RUN only "
+            "after fresh stationary localization, route reconstruction, "
             "dry-run/certificates, and an exact one-use startup-recovery "
             "permit all pass. On a "
             "coverage leg, an exact post-motion global-localization reseal "
@@ -2026,6 +2043,9 @@ def main(argv=None) -> int:
                 ),
                 "allowed_startup_recovery_kind": (
                     STARTUP_RESEAL_RECOVERY_KIND
+                ),
+                "allowed_startup_recovery_source_kinds": sorted(
+                    STARTUP_RESEAL_RECOVERY_SOURCE_KINDS
                 ),
                 "additional_typed_run_required_for_eligible_recovery": False,
             },

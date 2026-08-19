@@ -9,6 +9,7 @@ ROS.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import json
 import math
@@ -19,9 +20,16 @@ from typing import Any, Callable
 from scripts.aufgabe04.navigation.mission_leg_motion_permit import (
     MissionLegKind,
 )
+from scripts.aufgabe04.navigation.prestart_localization_reseal import (
+    evaluate_prestart_localization_reseal,
+)
 from scripts.aufgabe04.navigation.runtime_localization_reseal import (
     evaluate_runtime_localization_reseal,
     evaluate_runtime_localization_reseal_budget,
+)
+from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
+    STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH,
+    STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY,
 )
 from scripts.aufgabe04.navigation.stand_coverage_survey import CoverageSurveyPlan
 from scripts.aufgabe04.navigation.stand_discovery_route import (
@@ -178,6 +186,17 @@ def _require_completed_motion(outcome: MotionLegOutcome) -> None:
         )
 
 
+def _claims_prestart_localization_phase(stop_details: object) -> bool:
+    """Keep malformed before-motion evidence out of runtime recovery."""
+
+    if not isinstance(stop_details, Mapping):
+        return False
+    return (
+        stop_details.get("execution_phase") == "before_motion"
+        or stop_details.get("phase") == "initial_runtime_input_wait"
+    )
+
+
 def execute_coverage_leg_with_replans(
     *,
     profile: object,
@@ -257,6 +276,9 @@ def execute_coverage_leg_with_replans(
                         "startup_reseal_index": startup_reseal_index,
                         "rejected_run_id": pending_startup_recovery[
                             "rejected_run_id"
+                        ],
+                        "recovery_source_kind": pending_startup_recovery[
+                            "recovery_source_kind"
                         ],
                         "failure": str(exc),
                         "motion_continues_authorized": False,
@@ -345,6 +367,9 @@ def execute_coverage_leg_with_replans(
                     additional_typed_run_required=(
                         startup_reseal_motion_authorization_json is None
                     ),
+                    recovery_source_kind=str(
+                        pending_startup_recovery["recovery_source_kind"]
+                    ),
                 )
             except Exception as exc:
                 emit(
@@ -357,6 +382,9 @@ def execute_coverage_leg_with_replans(
                         "startup_reseal_index": startup_reseal_index,
                         "rejected_run_id": pending_startup_recovery[
                             "rejected_run_id"
+                        ],
+                        "recovery_source_kind": pending_startup_recovery[
+                            "recovery_source_kind"
                         ],
                         "failure": str(exc),
                         "motion_continues_authorized": False,
@@ -394,6 +422,9 @@ def execute_coverage_leg_with_replans(
                         / "startup_reseals"
                         / f"{run_id}_permit.json"
                     ).absolute(),
+                    recovery_source_kind=str(
+                        pending_startup_recovery["recovery_source_kind"]
+                    ),
                 )
             emit(
                 {
@@ -405,6 +436,9 @@ def execute_coverage_leg_with_replans(
                     "replacement_run_id": run_id,
                     "rejected_run_id": pending_startup_recovery[
                         "rejected_run_id"
+                    ],
+                    "recovery_source_kind": pending_startup_recovery[
+                        "recovery_source_kind"
                     ],
                     "replacement_route_csv": sealed["route_csv"],
                     "replacement_diagnostics_json": sealed[
@@ -496,6 +530,11 @@ def execute_coverage_leg_with_replans(
                 }
             )
         if outcome.startup_reseal_motion_permit_path is not None:
+            if pending_startup_permit_context is None:
+                raise RuntimeError(
+                    "startup reseal child reported a permit outside an exact "
+                    "recovery context"
+                )
             emit(
                 {
                     "schema_version": 1,
@@ -504,6 +543,9 @@ def execute_coverage_leg_with_replans(
                     "leg_index": leg_index,
                     "run_id": outcome.run_id,
                     "startup_reseal_index": startup_reseal_index,
+                    "recovery_source_kind": (
+                        pending_startup_permit_context.recovery_source_kind
+                    ),
                     "startup_reseal_motion_permit_json": str(
                         outcome.startup_reseal_motion_permit_path
                     ),
@@ -572,7 +614,45 @@ def execute_coverage_leg_with_replans(
         pending_runtime_permit_context = None
         pending_startup_permit_context = None
         pending_startup_recovery = None
-        if replanning.is_resealable_startup_mismatch(outcome):
+        prestart_localization_decision = evaluate_prestart_localization_reseal(
+            status=outcome.status,
+            motion_published=outcome.motion_published,
+            stop_details=outcome.stop_details,
+        )
+        prestart_localization_admitted = (
+            prestart_localization_decision.eligible
+            and isinstance(outcome.stop_details, Mapping)
+            and outcome.stop_reason == outcome.stop_details.get("reason")
+        )
+        startup_pose_mismatch = replanning.is_resealable_startup_mismatch(
+            outcome
+        )
+        if startup_pose_mismatch or prestart_localization_admitted:
+            if prestart_localization_admitted:
+                if (
+                    prestart_localization_decision.motion_published is not False
+                    or not prestart_localization_decision.requires_fresh_localization
+                    or not prestart_localization_decision.requires_new_route_certificate
+                    or prestart_localization_decision.automatic_motion_authorized
+                ):
+                    raise RuntimeError(
+                        "prestart localization recovery decision violated its "
+                        "fail-closed contract"
+                    )
+                recovery_source_kind = (
+                    STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY
+                )
+                rejected_route_pose: dict[str, float] | None = None
+            else:
+                recovery_source_kind = (
+                    STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH
+                )
+                rejected_pose = replanning.startup_reseal_pose(outcome)
+                rejected_route_pose = {
+                    "x_m": rejected_pose.x_m,
+                    "y_m": rejected_pose.y_m,
+                    "yaw_rad": rejected_pose.yaw_rad,
+                }
             if startup_reseal_index >= config.max_startup_reseals_per_leg:
                 raise RuntimeError(
                     "startup reseal budget exhausted for coverage leg "
@@ -580,7 +660,6 @@ def execute_coverage_leg_with_replans(
                 )
             startup_reseal_index += 1
             localization_readiness_retry_index = 0
-            rejected_pose = replanning.startup_reseal_pose(outcome)
             fresh_localization_evidence_path = (
                 session_root
                 / "preflight"
@@ -596,11 +675,7 @@ def execute_coverage_leg_with_replans(
                 "target_viewpoint_id": target_viewpoint_id,
                 "rejected_run_id": outcome.run_id,
                 "rejected_stop_details": outcome.stop_details,
-                "rejected_route_pose": {
-                    "x_m": rejected_pose.x_m,
-                    "y_m": rejected_pose.y_m,
-                    "yaw_rad": rejected_pose.yaw_rad,
-                },
+                "recovery_source_kind": recovery_source_kind,
                 "fresh_localization_evidence_json": str(
                     fresh_localization_evidence_path
                 ),
@@ -612,6 +687,12 @@ def execute_coverage_leg_with_replans(
                 ),
                 "motion_continues_authorized": False,
             }
+            if rejected_route_pose is not None:
+                startup_event_base["rejected_route_pose"] = rejected_route_pose
+            else:
+                startup_event_base[
+                    "prestart_localization_reseal_decision"
+                ] = prestart_localization_decision.to_evidence()
             emit(
                 {
                     **startup_event_base,
@@ -700,10 +781,15 @@ def execute_coverage_leg_with_replans(
             emit(
                 {
                     "schema_version": 1,
-                    "event": "startup_pose_route_resealed",
+                    "event": (
+                        "startup_pose_route_resealed"
+                        if startup_pose_mismatch
+                        else "prestart_localization_route_resealed"
+                    ),
                     "timestamp": effects.clock(),
                     "leg_index": leg_index,
                     "startup_reseal_index": startup_reseal_index,
+                    "recovery_source_kind": recovery_source_kind,
                     "rejected_run_id": outcome.run_id,
                     "rejected_stop_details": outcome.stop_details,
                     "replacement_route_csv": replanned["route_csv"],
@@ -750,12 +836,39 @@ def execute_coverage_leg_with_replans(
                 "fresh_localization_evidence_path": (
                     fresh_localization_evidence_path
                 ),
+                "recovery_source_kind": recovery_source_kind,
             }
             source_route = Path(replanned["route_csv"])
             source_diagnostics = Path(replanned["diagnostics_json"])
             fresh_confirmation_reason = "startup"
             fresh_localization_evidence_path = None
             continue
+
+        if _claims_prestart_localization_phase(outcome.stop_details):
+            emit(
+                {
+                    "schema_version": 1,
+                    "event": "prestart_localization_reseal_rejected",
+                    "timestamp": effects.clock(),
+                    "leg_index": leg_index,
+                    "target_viewpoint_id": target_viewpoint_id,
+                    "rejected_run_id": outcome.run_id,
+                    "stop_reason": outcome.stop_reason,
+                    "stop_details": outcome.stop_details,
+                    "motion_published": outcome.motion_published,
+                    "prestart_localization_reseal_decision": (
+                        prestart_localization_decision.to_evidence()
+                    ),
+                    "outcome_stop_reason_matches_details": (
+                        isinstance(outcome.stop_details, Mapping)
+                        and outcome.stop_reason
+                        == outcome.stop_details.get("reason")
+                    ),
+                    "motion_continues_authorized": False,
+                    "fail_closed": True,
+                }
+            )
+            _require_completed_motion(outcome)
 
         runtime_localization_decision = evaluate_runtime_localization_reseal(
             status=outcome.status,

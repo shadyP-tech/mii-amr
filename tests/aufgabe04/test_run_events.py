@@ -622,6 +622,101 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
             0.35,
         )
 
+    def test_before_motion_global_consistency_evidence_reaches_safety_stop(self):
+        details = {
+            "reason": (
+                "global localization consistency requires zero and reseal"
+            ),
+            "fault_code": "localization_reseal_required",
+            "source": "global_consistency_monitor",
+            "execution_pose_owner": "odom",
+            "global_consistency_monitor": "amcl",
+            "monitor_action": "FORCE_ZERO_RESEAL",
+            "monitor_reason": "reseal_required",
+            "monitor_warning": "",
+            "execution_phase": "before_motion",
+            "phase": "initial_runtime_input_wait",
+            "motion_published": False,
+            "continuity": {
+                "schema_version": 1,
+                "accepted": False,
+                "decision": "force_zero_reseal",
+                "reason": "map_from_odom_translation_drift",
+                "fail_closed": True,
+                "requires_zero_cycle": True,
+                "requires_reseal": True,
+                "threshold_semantics": (
+                    "accept_if_observed_less_than_or_equal_to_limit"
+                ),
+                "certificate_sha256": "a" * 64,
+                "map_frame": "map",
+                "odom_frame": "odom",
+                "base_frame": "base_footprint",
+                "frozen_map_from_odom": {
+                    "x_m": 0.0,
+                    "y_m": 0.0,
+                    "yaw_rad": 0.0,
+                },
+                "live_map_from_odom": {
+                    "x_m": 0.10,
+                    "y_m": 0.0,
+                    "yaw_rad": 0.0,
+                },
+                "relative_translation_x_m": 0.10,
+                "relative_translation_y_m": 0.0,
+                "translation_drift_m": 0.10,
+                "relative_yaw_rad": 0.0,
+                "absolute_yaw_drift_rad": 0.0,
+                "max_translation_drift_m": 0.03,
+                "max_yaw_drift_rad": 0.03,
+                "validation_error": None,
+            },
+            "fail_closed": True,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            with patch.object(
+                run_single_station_segment,
+                "run_ros_preflight",
+                return_value=passing_preflight(),
+            ), patch.object(
+                run_single_station_segment,
+                "run_simple_waypoint_follower",
+                return_value=FollowerResult(
+                    "stopped",
+                    details["reason"],
+                    0.2,
+                    0.0,
+                    False,
+                    details,
+                ),
+            ), redirect_stdout(StringIO()):
+                status = run_single_station_segment.main(self.base_args(paths))
+
+            safety_stop = next(
+                event
+                for event in read_events(paths["events"])
+                if event["event"] == "safety_stop"
+            )
+            names = [
+                event["event"] for event in read_events(paths["events"])
+            ]
+            execution_attempt = next(
+                event
+                for event in read_events(paths["events"])
+                if event["event"] == "motion_started"
+            )
+
+        self.assertEqual(status, 1)
+        self.assertFalse(safety_stop["motion_published"])
+        self.assertEqual(safety_stop["stop_details"], details)
+        self.assertLess(names.index("motion_started"), names.index("safety_stop"))
+        self.assertFalse(execution_attempt["motion_published"])
+        self.assertEqual(
+            execution_attempt["event_semantics"],
+            "child_execution_attempt_started_before_follower",
+        )
+
     def test_preflight_failure_logs_event_and_skips_follower(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = self.make_paths(Path(tmp))
@@ -866,6 +961,11 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
             adaptive_events = read_events(
                 session / "adaptive_replans.jsonl"
             )
+            motion_event = next(
+                event
+                for event in read_events(semantic_log)
+                if event["event"] == "motion_completed"
+            )
 
         self.assertEqual(len(adaptive_events), 1)
         self.assertEqual(
@@ -874,6 +974,12 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
         )
         self.assertEqual(adaptive_events[0]["run_id"], "run-adoption")
         self.assertEqual(adaptive_events[0]["leg_index"], 7)
+        self.assertEqual(motion_event["leg_index"], 0)
+        self.assertEqual(motion_event["coverage_leg_index"], 7)
+        self.assertEqual(
+            motion_event["target_viewpoint_id"],
+            "survey_vp_001",
+        )
         self.assertEqual(adaptive_events[0]["replan_index"], 2)
         self.assertTrue(
             adaptive_events[0]["post_plan_runtime_revalidated"]
@@ -1472,6 +1578,11 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
             consumed["runtime_motion_consumption_receipt_json"],
             str(receipt_path),
         )
+        self.assertEqual(consumed["coverage_leg_index"], 7)
+        self.assertEqual(
+            consumed["target_viewpoint_id"],
+            "survey_vp_001",
+        )
         self.assertFalse(consumed["additional_typed_run_required"])
 
     def test_routine_leg_permit_claim_precedes_motion_and_skips_child_prompt(self):
@@ -1550,6 +1661,11 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
             consumed["mission_leg_motion_consumption_receipt_json"],
             str(receipt_path),
         )
+        self.assertEqual(consumed["coverage_leg_index"], 1)
+        self.assertEqual(
+            consumed["target_viewpoint_id"],
+            "survey_vp_002",
+        )
         self.assertFalse(consumed["additional_typed_run_required"])
 
     def test_startup_reseal_permit_claim_precedes_motion_and_skips_prompt(self):
@@ -1563,6 +1679,9 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
                     "leg_index": 0,
                     "reseal_index": 1,
                     "rejected_run_id": "run-0",
+                    "recovery_source_kind": (
+                        "certified_start_pose_mismatch"
+                    ),
                 },
             )()
             receipt = object()
@@ -1632,7 +1751,16 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
             ],
             str(receipt_path),
         )
+        self.assertEqual(consumed["coverage_leg_index"], 0)
+        self.assertEqual(
+            consumed["target_viewpoint_id"],
+            "survey_vp_001",
+        )
         self.assertFalse(consumed["additional_typed_run_required"])
+        self.assertEqual(
+            consumed["recovery_source_kind"],
+            "certified_start_pose_mismatch",
+        )
 
     def test_runtime_permit_replay_rejects_before_motion_started(self):
         with tempfile.TemporaryDirectory() as tmp:

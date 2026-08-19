@@ -1,3 +1,10 @@
+**Aufgabe 03 legacy workflow only.** Do not use this command for Aufgabe 04
+autonomous stand exploration: it does not implement the Aufgabe 04 sealed
+route, exact one-use permit, coverage checkpoint, or camera/LiDAR evidence
+chain. Use `aufgabe04_real_parkour_checklist.md` for Aufgabe 04. The arena-side
+assumptions below must be revalidated before any future Aufgabe 03 physical
+run; they are not a current-site localization contract.
+
 Below is the lab terminal setup for the arena-prior two-stage waypoint runner.
 
 **Safety First**
