@@ -107,6 +107,44 @@ from scripts.aufgabe04.stations.candidate_snapshot import (
 MAP = Path("maps/aufgabe03/arena_1p898x3p9_auto.yaml")
 
 
+def _append_child_event(
+    session_root: Path,
+    run_id: str,
+    event: dict[str, object],
+) -> None:
+    event_path = session_root / "run_events" / f"{run_id}.jsonl"
+    event_path.parent.mkdir(parents=True, exist_ok=True)
+    with event_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event) + "\n")
+
+
+def _materialize_dry_child_evidence(
+    command: list[str],
+    session_root: Path,
+    run_id: str,
+) -> None:
+    for flag in (
+        "--preflight-json",
+        "--odom-execution-certificate-json",
+        "--uncertainty-budget-json",
+    ):
+        if flag not in command:
+            continue
+        artifact = Path(command[command.index(flag) + 1])
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text("{}\n", encoding="utf-8")
+    _append_child_event(
+        session_root,
+        run_id,
+        {
+            "event": "dry_run_completed",
+            "run_id": run_id,
+            "status": "dry_run_ok",
+            "motion_published": False,
+        },
+    )
+
+
 def _runtime_localization_stop_details():
     return {
         "reason": "global localization consistency requires zero and reseal",
@@ -1170,70 +1208,51 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             odom_execution_certificate_path=root / "odom_certificate.json",
         )
         with (
-            patch.object(
+            patch.multiple(
                 autonomous_wrapper,
-                "load_real_robot_profile",
-                return_value=profile,
-            ),
-            patch.object(
-                autonomous_wrapper,
-                "load_camera_calibration",
-                return_value=SimpleNamespace(),
-            ),
-            patch.object(
-                autonomous_wrapper,
-                "validate_physical_site_contract",
-                return_value=SimpleNamespace(
+                load_real_robot_profile=lambda *_args, **_kwargs: profile,
+                load_camera_calibration=lambda *_args, **_kwargs: SimpleNamespace(),
+                validate_physical_site_contract=lambda *_args, **_kwargs: SimpleNamespace(
                     expected_stand_count=1,
                     physical_site_path=(root / "site.json"),
                     map_yaml_path=(root / "map.yaml"),
                     map_bundle=SimpleNamespace(bundle_sha256="a" * 64),
                 ),
-            ),
-            patch.object(autonomous_wrapper, "_validate_inputs"),
-            patch.object(
-                autonomous_wrapper,
-                "_physical_clearance",
-                return_value={
+                _validate_inputs=lambda *_args, **_kwargs: None,
+                _physical_clearance=lambda *_args, **_kwargs: {
                     "minimum_active_standoff_m": 0.20,
                     "minimum_static_inflation_m": 0.25,
                     "minimum_candidate_transit_radius_m": 0.31,
                 },
-            ),
-            patch.object(
-                autonomous_wrapper,
-                "_admit_preplanning_localization",
-                return_value=Pose2D(0.0, 0.0, 0.0),
-            ),
-            patch.object(
-                autonomous_wrapper,
-                "plan_stand_coverage_survey",
-                side_effect=plan_one_leg,
-            ),
-            patch.object(
-                autonomous_wrapper,
-                "load_coverage_survey_plan",
-                return_value=plan,
-            ),
-            patch.object(
-                autonomous_wrapper,
-                "write_mission_leg_motion_authorization",
-                return_value="mission-leg-authorization-sha256",
-            ),
-            patch.object(
-                autonomous_wrapper,
-                "write_mission_motion_authorization",
-                return_value="mission-authorization-sha256",
-            ),
-            patch.object(
-                autonomous_wrapper,
-                "_execute_coverage_leg_with_replans",
-                return_value=completed,
-            ),
-            patch.object(
-                autonomous_wrapper,
-                "_capture_lidar_epoch",
-                return_value=root / "observer_summary.json",
+                _admit_preplanning_localization=lambda *_args, **_kwargs: Pose2D(
+                    0.0, 0.0, 0.0
+                ),
+                _admit_observation_tf_readiness=lambda *_args, **_kwargs: (
+                    session_root
+                    / "preflight/lidar_scan_tf_before_authorization.json",
+                    "f" * 64,
+                ),
+                admit_preauthorization_readiness=(
+                    lambda *_args, **_kwargs: SimpleNamespace(
+                        result=SimpleNamespace(attempts=(object(),)),
+                        evidence_path=root / "initial_readiness.json",
+                        evidence_sha256="e" * 64,
+                    )
+                ),
+                plan_stand_coverage_survey=plan_one_leg,
+                load_coverage_survey_plan=lambda *_args, **_kwargs: plan,
+                write_mission_leg_motion_authorization=lambda *_args, **_kwargs: (
+                    "mission-leg-authorization-sha256"
+                ),
+                write_mission_motion_authorization=lambda *_args, **_kwargs: (
+                    "mission-authorization-sha256"
+                ),
+                _execute_coverage_leg_with_replans=lambda *_args, **_kwargs: completed,
+                _capture_lidar_epoch=lambda *_args, **_kwargs: (
+                    root / "observer_summary.json"
+                ),
+                load_stand_survey_registry=lambda *_args, **_kwargs: registry,
+                load_survey_progress=lambda *_args, **_kwargs: progress,
             ),
             patch.object(
                 autonomous_wrapper,
@@ -1248,16 +1267,6 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                     manifest_sha256="c" * 64,
                 ),
             ) as publish_checkpoint,
-            patch.object(
-                autonomous_wrapper,
-                "load_stand_survey_registry",
-                return_value=registry,
-            ),
-            patch.object(
-                autonomous_wrapper,
-                "load_survey_progress",
-                return_value=progress,
-            ),
             patch.object(
                 autonomous_wrapper,
                 "evaluate_coverage_candidate_admission",
@@ -1389,70 +1398,48 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 return summary
 
             with (
-                patch.object(
+                patch.multiple(
                     autonomous_wrapper,
-                    "load_real_robot_profile",
-                    return_value=profile,
-                ),
-                patch.object(
-                    autonomous_wrapper,
-                    "load_camera_calibration",
-                    return_value=SimpleNamespace(),
-                ),
-                patch.object(
-                    autonomous_wrapper,
-                    "validate_physical_site_contract",
-                    return_value=SimpleNamespace(
+                    load_real_robot_profile=lambda *_args, **_kwargs: profile,
+                    load_camera_calibration=lambda *_args, **_kwargs: SimpleNamespace(),
+                    validate_physical_site_contract=lambda *_args, **_kwargs: SimpleNamespace(
                         expected_stand_count=1,
                         physical_site_path=(root / "site.json"),
                         map_yaml_path=(root / "map.yaml"),
                         map_bundle=SimpleNamespace(bundle_sha256="a" * 64),
                     ),
-                ),
-                patch.object(autonomous_wrapper, "_validate_inputs"),
-                patch.object(
-                    autonomous_wrapper,
-                    "_physical_clearance",
-                    return_value={
+                    _validate_inputs=lambda *_args, **_kwargs: None,
+                    _physical_clearance=lambda *_args, **_kwargs: {
                         "minimum_active_standoff_m": 0.20,
                         "minimum_static_inflation_m": 0.25,
                         "minimum_candidate_transit_radius_m": 0.31,
                     },
-                ),
-                patch.object(
-                    autonomous_wrapper,
-                    "_admit_preplanning_localization",
-                    side_effect=admit_localization,
-                ),
-                patch.object(
-                    autonomous_wrapper,
-                    "plan_stand_coverage_survey",
-                    side_effect=plan_two_legs,
-                ),
-                patch.object(
-                    autonomous_wrapper,
-                    "load_coverage_survey_plan",
-                    return_value=plan,
-                ),
-                patch.object(
-                    autonomous_wrapper,
-                    "write_mission_leg_motion_authorization",
-                    return_value="mission-leg-authorization-sha256",
-                ),
-                patch.object(
-                    autonomous_wrapper,
-                    "write_mission_motion_authorization",
-                    return_value="mission-authorization-sha256",
-                ),
-                patch.object(
-                    autonomous_wrapper,
-                    "_execute_coverage_leg_with_replans",
-                    return_value=completed,
-                ),
-                patch.object(
-                    autonomous_wrapper,
-                    "_capture_lidar_epoch",
-                    return_value=root / "observer_summary.json",
+                    _admit_preplanning_localization=admit_localization,
+                    _admit_observation_tf_readiness=lambda *_args, **_kwargs: (
+                        session_root
+                        / "preflight/lidar_scan_tf_before_authorization.json",
+                        "f" * 64,
+                    ),
+                    admit_preauthorization_readiness=(
+                        lambda *_args, **_kwargs: SimpleNamespace(
+                            result=SimpleNamespace(attempts=(object(),)),
+                            evidence_path=root / "initial_readiness.json",
+                            evidence_sha256="e" * 64,
+                        )
+                    ),
+                    plan_stand_coverage_survey=plan_two_legs,
+                    load_coverage_survey_plan=lambda *_args, **_kwargs: plan,
+                    write_mission_leg_motion_authorization=lambda *_args, **_kwargs: (
+                        "mission-leg-authorization-sha256"
+                    ),
+                    write_mission_motion_authorization=lambda *_args, **_kwargs: (
+                        "mission-authorization-sha256"
+                    ),
+                    _execute_coverage_leg_with_replans=lambda *_args, **_kwargs: completed,
+                    _capture_lidar_epoch=lambda *_args, **_kwargs: (
+                        root / "observer_summary.json"
+                    ),
+                    load_survey_progress=lambda *_args, **_kwargs: progress,
                 ),
                 patch.object(
                     autonomous_wrapper,
@@ -1467,11 +1454,6 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                         manifest_sha256="c" * 64,
                     ),
                 ) as publish_checkpoint,
-                patch.object(
-                    autonomous_wrapper,
-                    "load_survey_progress",
-                    return_value=progress,
-                ),
                 patch("builtins.input", return_value="RUN") as run_prompt,
                 patch("sys.stderr", new=StringIO()),
                 redirect_stdout(StringIO()),
@@ -2540,10 +2522,15 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             }
             output = StringIO()
             localization_evidence = root / "runtime_localization.json"
+
+            def run_dry(command, **_kwargs):
+                _materialize_dry_child_evidence(command, root, "resealed")
+                return SimpleNamespace(returncode=0)
+
             with patch(
                 "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
                 "subprocess.run",
-                return_value=SimpleNamespace(returncode=0),
+                side_effect=run_dry,
             ) as run, patch(
                 "builtins.input",
                 side_effect=AssertionError(
@@ -2592,21 +2579,20 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             def run_process(_command, **_kwargs):
                 nonlocal calls
                 calls += 1
-                if calls == 2:
-                    event_path = root / "run_events" / f"{run_id}.jsonl"
-                    event_path.parent.mkdir(parents=True, exist_ok=True)
-                    event_path.write_text(
-                        json.dumps(
-                            {
-                                "event": "motion_completed",
-                                "run_id": run_id,
-                                "status": "completed",
-                                "stop_reason": "",
-                                "stop_details": {},
-                                "motion_published": True,
-                            }
-                        )
-                        + "\n"
+                if calls == 1:
+                    _materialize_dry_child_evidence(_command, root, run_id)
+                else:
+                    _append_child_event(
+                        root,
+                        run_id,
+                        {
+                            "event": "motion_completed",
+                            "run_id": run_id,
+                            "status": "completed",
+                            "stop_reason": "",
+                            "stop_details": {},
+                            "motion_published": True,
+                        },
                     )
                 return SimpleNamespace(returncode=0)
 
@@ -2689,31 +2675,23 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             def run_process(command, **_kwargs):
                 commands.append(command)
                 if "--dry-run" in command:
-                    for flag in (
-                        "--preflight-json",
-                        "--odom-execution-certificate-json",
-                        "--uncertainty-budget-json",
-                    ):
-                        artifact = Path(command[command.index(flag) + 1])
-                        artifact.parent.mkdir(parents=True, exist_ok=True)
-                        artifact.write_text("{}\n")
-                else:
-                    event_path = (
-                        session_root / "run_events" / f"{run_id}.jsonl"
+                    _materialize_dry_child_evidence(
+                        command,
+                        session_root,
+                        run_id,
                     )
-                    event_path.parent.mkdir(parents=True, exist_ok=True)
-                    event_path.write_text(
-                        json.dumps(
-                            {
-                                "event": "motion_completed",
-                                "run_id": run_id,
-                                "status": "completed",
-                                "stop_reason": "",
-                                "stop_details": {},
-                                "motion_published": True,
-                            }
-                        )
-                        + "\n"
+                else:
+                    _append_child_event(
+                        session_root,
+                        run_id,
+                        {
+                            "event": "motion_completed",
+                            "run_id": run_id,
+                            "status": "completed",
+                            "stop_reason": "",
+                            "stop_details": {},
+                            "motion_published": True,
+                        },
                     )
                 return SimpleNamespace(returncode=0)
 
@@ -2846,29 +2824,23 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             def run_process(command, **_kwargs):
                 commands.append(command)
                 if "--dry-run" in command:
-                    for flag in (
-                        "--preflight-json",
-                        "--odom-execution-certificate-json",
-                        "--uncertainty-budget-json",
-                    ):
-                        artifact = Path(command[command.index(flag) + 1])
-                        artifact.parent.mkdir(parents=True, exist_ok=True)
-                        artifact.write_text("{}\n")
+                    _materialize_dry_child_evidence(
+                        command,
+                        session_root,
+                        run_id,
+                    )
                 else:
-                    event_path = session_root / "run_events" / f"{run_id}.jsonl"
-                    event_path.parent.mkdir(parents=True, exist_ok=True)
-                    event_path.write_text(
-                        json.dumps(
-                            {
-                                "event": "motion_completed",
-                                "run_id": run_id,
-                                "status": "completed",
-                                "stop_reason": "",
-                                "stop_details": {},
-                                "motion_published": True,
-                            }
-                        )
-                        + "\n"
+                    _append_child_event(
+                        session_root,
+                        run_id,
+                        {
+                            "event": "motion_completed",
+                            "run_id": run_id,
+                            "status": "completed",
+                            "stop_reason": "",
+                            "stop_details": {},
+                            "motion_published": True,
+                        },
                     )
                 return SimpleNamespace(returncode=0)
 
@@ -3061,31 +3033,23 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             def run_process(command, **_kwargs):
                 commands.append(command)
                 if "--dry-run" in command:
-                    for flag in (
-                        "--preflight-json",
-                        "--odom-execution-certificate-json",
-                        "--uncertainty-budget-json",
-                    ):
-                        artifact = Path(command[command.index(flag) + 1])
-                        artifact.parent.mkdir(parents=True, exist_ok=True)
-                        artifact.write_text("{}\n")
-                else:
-                    event_path = (
-                        session_root / "run_events" / f"{run_id}.jsonl"
+                    _materialize_dry_child_evidence(
+                        command,
+                        session_root,
+                        run_id,
                     )
-                    event_path.parent.mkdir(parents=True, exist_ok=True)
-                    event_path.write_text(
-                        json.dumps(
-                            {
-                                "event": "motion_completed",
-                                "run_id": run_id,
-                                "status": "completed",
-                                "stop_reason": "",
-                                "stop_details": {},
-                                "motion_published": True,
-                            }
-                        )
-                        + "\n"
+                else:
+                    _append_child_event(
+                        session_root,
+                        run_id,
+                        {
+                            "event": "motion_completed",
+                            "run_id": run_id,
+                            "status": "completed",
+                            "stop_reason": "",
+                            "stop_details": {},
+                            "motion_published": True,
+                        },
                     )
                 return SimpleNamespace(returncode=0)
 

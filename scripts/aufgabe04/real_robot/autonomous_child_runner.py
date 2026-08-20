@@ -45,7 +45,9 @@ class MotionLegOutcome:
     returncode: int
     semantic_log_path: Path
     semantic_log_start_offset: int = 0
+    dry_preflight_path: Path | None = None
     odom_execution_certificate_path: Path | None = None
+    dry_uncertainty_budget_path: Path | None = None
     motion_authorization_permit_path: Path | None = None
     motion_authorization_permit_sha256: str = ""
     mission_leg_motion_permit_path: Path | None = None
@@ -520,6 +522,81 @@ def parse_motion_leg_outcome(
     )
 
 
+def parse_dry_run_outcome(
+    semantic_log_path: Path,
+    *,
+    run_id: str,
+    returncode: int,
+    start_offset: int = 0,
+) -> MotionLegOutcome:
+    """Parse one successful dry child invocation from semantic evidence.
+
+    A process exit code is not dry-run evidence.  The child must append exactly
+    one matching ``dry_run_completed`` event which independently states the
+    no-motion terminal contract.  Artifact-path validation remains the
+    autonomous parent's responsibility because those paths are supplied by
+    the parent rather than emitted by this event.
+    """
+
+    if type(returncode) is not int or returncode != 0:
+        raise RuntimeError(
+            f"dry motion runner exit mismatch for {run_id}: "
+            f"returncode={returncode!r}"
+        )
+    try:
+        events = load_jsonl_event_objects(
+            Path(semantic_log_path),
+            start_offset=start_offset,
+        )
+    except ValueError as exc:
+        raise RuntimeError(
+            f"invalid dry motion semantic log for {run_id}: {exc}"
+        ) from exc
+    dry_terminal_events = [
+        event
+        for event in events
+        if event.get("run_id") == run_id
+        and event.get("event") == "dry_run_completed"
+    ]
+    conflicting_terminal_events = [
+        event
+        for event in events
+        if event.get("run_id") == run_id
+        and event.get("event")
+        in {"motion_completed", "safety_stop", "preflight_failed"}
+    ]
+    if not dry_terminal_events:
+        raise RuntimeError(
+            f"dry motion runner produced no dry_run_completed event for {run_id}"
+        )
+    if len(dry_terminal_events) != 1 or conflicting_terminal_events:
+        raise RuntimeError(
+            "dry motion runner produced ambiguous terminal events "
+            f"for {run_id}"
+        )
+    event = dry_terminal_events[0]
+    if event.get("status") != "dry_run_ok":
+        raise RuntimeError(
+            "dry motion runner returned invalid dry status "
+            f"{event.get('status')!r} for {run_id}"
+        )
+    if event.get("motion_published") is not False:
+        raise RuntimeError(
+            "dry_run_completed event must carry false motion_published "
+            f"evidence for {run_id}"
+        )
+    return MotionLegOutcome(
+        run_id=run_id,
+        status="dry_run_ok",
+        stop_reason="",
+        stop_details={},
+        motion_published=False,
+        returncode=returncode,
+        semantic_log_path=Path(semantic_log_path),
+        semantic_log_start_offset=start_offset,
+    )
+
+
 def semantic_log_size(path: Path) -> int:
     """Return a trusted append boundary for one child invocation."""
 
@@ -543,6 +620,7 @@ __all__ = [
     "MotionLegOutcome",
     "build_bundle_command",
     "build_child_runner_command",
+    "parse_dry_run_outcome",
     "parse_motion_leg_outcome",
     "semantic_log_size",
 ]

@@ -103,6 +103,27 @@ class AutonomousRunnerResumeTest(unittest.TestCase):
                 ) as admit_localization,
                 patch.object(
                     runner,
+                    "_admit_observation_tf_readiness",
+                    return_value=(
+                        output_root
+                        / (
+                            "resume_session/preflight/"
+                            "lidar_scan_tf_before_authorization.json"
+                        ),
+                        "f" * 64,
+                    ),
+                ),
+                patch.object(
+                    runner,
+                    "admit_preauthorization_readiness",
+                    side_effect=lambda *_args, **_kwargs: SimpleNamespace(
+                        result=SimpleNamespace(attempts=(object(),)),
+                        evidence_path=root / "initial_readiness.json",
+                        evidence_sha256="e" * 64,
+                    ),
+                ),
+                patch.object(
+                    runner,
                     "validate_physical_site_contract",
                     return_value=SimpleNamespace(
                         expected_stand_count=5,

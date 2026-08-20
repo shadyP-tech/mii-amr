@@ -516,7 +516,16 @@ def survey_status(
         if plan.config.expected_stand_count is None
         else counts[STATUS_CONFIRMED] == plan.config.expected_stand_count
     )
-    camera_resolution_complete = unresolved == 0
+    # An untouched registry has no unresolved candidates only vacuously.  Do
+    # not expose that as camera-resolution completion until candidate
+    # resolution is meaningful: either LiDAR coverage has finished without
+    # finding a candidate, or at least one candidate has entered the registry.
+    camera_resolution_evaluable = (
+        coverage_complete or bool(registry.candidates)
+    )
+    camera_resolution_complete = (
+        camera_resolution_evaluable and unresolved == 0
+    )
     camera_exploration_complete = (
         coverage_complete
         and camera_resolution_complete
@@ -540,6 +549,7 @@ def survey_status(
         "expected_stand_count": plan.config.expected_stand_count,
         "expected_stand_count_met": expected_count_met,
         "camera_confirmed_stand_count": counts[STATUS_CONFIRMED],
+        "camera_candidate_resolution_evaluable": camera_resolution_evaluable,
         "camera_candidate_resolution_complete": camera_resolution_complete,
         "camera_expected_stand_count_met": expected_count_met,
         "camera_exploration_complete": camera_exploration_complete,

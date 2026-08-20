@@ -178,6 +178,23 @@ class CoverageSurveyPlanTest(unittest.TestCase):
         self.assertTrue(status["camera_exploration_complete"])
         self.assertTrue(status["exploration_complete"])
 
+    def test_camera_resolution_is_not_complete_for_empty_initial_state(self):
+        survey = plan()
+
+        status = survey_status(
+            survey,
+            new_survey_progress(survey),
+            new_stand_survey_registry(survey),
+        )
+
+        self.assertFalse(status["coverage_complete"])
+        self.assertEqual(status["candidate_counts"][STATUS_CONFIRMED], 0)
+        self.assertEqual(status["unresolved_candidate_count"], 0)
+        self.assertFalse(status["camera_candidate_resolution_evaluable"])
+        self.assertFalse(status["camera_candidate_resolution_complete"])
+        self.assertFalse(status["camera_exploration_complete"])
+        self.assertFalse(status["exploration_complete"])
+
     def test_plan_progress_and_registry_round_trip(self):
         survey = plan()
         progress = mark_viewpoint_visited(
@@ -577,6 +594,9 @@ class StandSurveyRegistryTest(unittest.TestCase):
 
         unresolved_status = survey_status(survey, progress, registry)
         self.assertTrue(unresolved_status["lidar_coverage_complete"])
+        self.assertTrue(
+            unresolved_status["camera_candidate_resolution_evaluable"]
+        )
         self.assertFalse(
             unresolved_status["camera_candidate_resolution_complete"]
         )
@@ -590,6 +610,9 @@ class StandSurveyRegistryTest(unittest.TestCase):
         )
         confirmed_status = survey_status(survey, progress, registry)
         self.assertEqual(confirmed_status["camera_confirmed_stand_count"], 1)
+        self.assertTrue(
+            confirmed_status["camera_candidate_resolution_evaluable"]
+        )
         self.assertTrue(confirmed_status["camera_candidate_resolution_complete"])
         self.assertTrue(confirmed_status["camera_expected_stand_count_met"])
         self.assertTrue(confirmed_status["camera_exploration_complete"])

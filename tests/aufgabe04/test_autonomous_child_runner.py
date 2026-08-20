@@ -1,5 +1,7 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
+import tempfile
 import unittest
 
 from scripts.aufgabe04.navigation.mission_leg_motion_permit import (
@@ -7,6 +9,7 @@ from scripts.aufgabe04.navigation.mission_leg_motion_permit import (
 )
 from scripts.aufgabe04.real_robot.autonomous_child_runner import (
     build_child_runner_command,
+    parse_dry_run_outcome,
 )
 
 
@@ -175,6 +178,94 @@ class AutonomousChildRunnerRouteIdentityTest(unittest.TestCase):
         )
 
         self.assertEqual(self._option(command, "--leg-index"), "3")
+
+
+class AutonomousChildDryOutcomeTest(unittest.TestCase):
+    @staticmethod
+    def _event(run_id: str = "dry_leg", **updates) -> dict[str, object]:
+        event = {
+            "event": "dry_run_completed",
+            "run_id": run_id,
+            "status": "dry_run_ok",
+            "motion_published": False,
+        }
+        event.update(updates)
+        return event
+
+    @staticmethod
+    def _write(path: Path, *events: dict[str, object]) -> None:
+        path.write_text(
+            "".join(json.dumps(event) + "\n" for event in events),
+            encoding="utf-8",
+        )
+
+    def test_exact_no_motion_dry_terminal_is_admitted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "events.jsonl"
+            self._write(log, self._event())
+
+            outcome = parse_dry_run_outcome(
+                log,
+                run_id="dry_leg",
+                returncode=0,
+            )
+
+        self.assertEqual(outcome.status, "dry_run_ok")
+        self.assertFalse(outcome.motion_published)
+
+    def test_missing_duplicate_or_malformed_dry_terminal_fails_closed(self):
+        cases = {
+            "missing": ({"event": "run_finished", "run_id": "dry_leg"},),
+            "duplicate": (self._event(), self._event()),
+            "wrong_status": (self._event(status="noop"),),
+            "motion_true": (self._event(motion_published=True),),
+            "motion_string": (self._event(motion_published="false"),),
+        }
+        for label, events in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                log = Path(tmp) / "events.jsonl"
+                self._write(log, *events)
+                with self.assertRaises(RuntimeError):
+                    parse_dry_run_outcome(
+                        log,
+                        run_id="dry_leg",
+                        returncode=0,
+                    )
+
+    def test_conflicting_same_run_terminal_is_ambiguous(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "events.jsonl"
+            self._write(
+                log,
+                self._event(),
+                {
+                    "event": "safety_stop",
+                    "run_id": "dry_leg",
+                    "status": "stopped",
+                    "motion_published": False,
+                },
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "ambiguous terminal"):
+                parse_dry_run_outcome(
+                    log,
+                    run_id="dry_leg",
+                    returncode=0,
+                )
+
+    def test_zero_returncode_is_required_exactly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "events.jsonl"
+            self._write(log, self._event())
+            for invalid in (1, False):
+                with self.subTest(returncode=invalid), self.assertRaises(
+                    RuntimeError
+                ):
+                    parse_dry_run_outcome(
+                        log,
+                        run_id="dry_leg",
+                        returncode=invalid,
+                    )
 
 
 if __name__ == "__main__":

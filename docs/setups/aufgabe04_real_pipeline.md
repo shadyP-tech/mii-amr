@@ -311,6 +311,27 @@ preflight without publishing velocity. Require
 `mission_summary.json`. Inspect the coverage plan, first sealed route,
 route diagnostics, and preflight JSON before proceeding.
 
+All autonomous execute modes now perform the same first-route readiness phase
+before displaying the typed `RUN` prompt. The phase passively proves that one
+fresh `LaserScan` has an exact-time `odom <- base_scan` transform, then seals a
+separate nonauthorizing copy of the first route and runs its dry uncertainty
+admission. If the AMCL uncertainty budget is temporarily exhausted, the script
+prints a no-motion retry message. Correct the RViz **2D Pose Estimate** at the
+known physical start while those bounded attempts run; do not compensate by
+raising the uncertainty limit, shrinking the sigma multiplier, or widening the
+certified route tube. A rejection writes
+`preflight/lidar_scan_tf_before_authorization.json` and
+`authorization_readiness/coverage_leg_<index>/readiness.json`, exits without
+requesting `RUN`, and issues no motion authorization or permit. If the bounded
+budget expires, leave the robot stopped, correct the pose, and start a fresh
+session ID; failed session directories remain immutable evidence.
+
+This readiness receipt is advisory, not a motion permit. After the operator
+types `RUN`, the normal execution path independently seals the route again and
+repeats the dry preflight, uncertainty budget, live checks, and one-use permit
+claim. That second chain remains authoritative if AMCL, TF, route bytes, or ROS
+ownership changes while the operator reviews the prompt.
+
 For the first physical checkpoint, clear the arena, keep the unloaded robot in
 view, prepare Ctrl+C plus the physical stop, and keep a second terminal ready
 to publish one zero `Twist` to the profile's exact resolved command topic. Then
@@ -361,8 +382,10 @@ resolve the latter. It continues in the same process under the initial `RUN`,
 while every candidate and opposite-face motion still requires its own sealed
 route, dry-run, live gates, and atomically consumed one-use permit.
 
-Type `RUN` only after the separate no-motion run has passed and the live
-velocity owner is unambiguous. In this checkpoint mode that one mission-level
+Type `RUN` only after the automatic preauthorization readiness report has
+passed (and, when using a staged protocol, after reviewing the separate
+`dry-first-leg` session) and the live velocity owner is unambiguous. In this
+checkpoint mode that one mission-level
 confirmation covers coverage child legs only, through separate immutable
 one-use permits. Candidate and opposite-face leg kinds are absent from the
 master authorization. Every child still has to pass its
@@ -393,6 +416,14 @@ is not classified as a stand and is never auto-replanned. In particular, a
 runtime route-tube departure is terminal for that authorization: there is no
 in-process recovery or retry. Any continuation requires a separately resealed
 route, another no-motion dry-run/preflight, and a new typed `RUN`.
+
+The exact-time LiDAR TF check is repeated immediately before every coverage
+motion and again before starting each LiDAR observer epoch. A missing or stale
+`odom <- base_scan` chain therefore stops before a leg permit/live child or
+before the eight-second observer, respectively. If this gate reports
+`exact_time_transform_unavailable`, restore the TurtleBot bringup/static
+transform publisher and verify `base_footprint -> base_scan`; do not add a
+second velocity publisher or bypass the gate.
 
 The one exception is an exact coverage-leg global-consistency stop whose
 persisted contract contains all of the following: `status=stopped`, prior

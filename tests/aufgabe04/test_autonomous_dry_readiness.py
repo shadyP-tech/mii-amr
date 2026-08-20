@@ -24,7 +24,7 @@ class AutonomousDryReadinessTest(unittest.TestCase):
                 "exhausted: limiting_segment=0 remaining_margin=-0.01 m"
             )
             rejected = MotionLegOutcome(
-                run_id="dry_session_coverage_000_dry",
+                run_id="dry_session_preauthorization_coverage_000_000",
                 status="preflight_failed",
                 stop_reason=reason,
                 stop_details={
@@ -35,20 +35,80 @@ class AutonomousDryReadinessTest(unittest.TestCase):
                 },
                 motion_published=False,
                 returncode=1,
-                semantic_log_path=root / "rejected.jsonl",
+                semantic_log_path=(
+                    output_root
+                    / "dry_session"
+                    / "run_events"
+                    / "dry_session_preauthorization_coverage_000_000.jsonl"
+                ),
             )
             passed = MotionLegOutcome(
-                run_id=(
-                    "dry_session_coverage_000_dry_"
-                    "localization_readiness_001"
-                ),
+                run_id="dry_session_preauthorization_coverage_000_001",
                 status="dry_run_ok",
                 stop_reason="",
                 stop_details={},
                 motion_published=False,
                 returncode=0,
-                semantic_log_path=root / "passed.jsonl",
+                semantic_log_path=(
+                    output_root
+                    / "dry_session"
+                    / "run_events"
+                    / "dry_session_preauthorization_coverage_000_001.jsonl"
+                ),
+                dry_preflight_path=(
+                    output_root
+                    / "dry_session"
+                    / "preflight"
+                    / "dry_session_preauthorization_coverage_000_001_dry.json"
+                ),
+                odom_execution_certificate_path=(
+                    output_root
+                    / "dry_session"
+                    / "odom_execution"
+                    / (
+                        "dry_session_preauthorization_coverage_000_001_"
+                        "dry_certificate.json"
+                    )
+                ),
+                dry_uncertainty_budget_path=(
+                    output_root
+                    / "dry_session"
+                    / "odom_execution"
+                    / (
+                        "dry_session_preauthorization_coverage_000_001_"
+                        "dry_uncertainty_budget.json"
+                    )
+                ),
             )
+            outcomes = iter((rejected, passed))
+
+            def run_motion_leg(**_kwargs):
+                outcome = next(outcomes)
+                if outcome.status == "dry_run_ok":
+                    outcome.semantic_log_path.parent.mkdir(
+                        parents=True,
+                        exist_ok=True,
+                    )
+                    outcome.semantic_log_path.write_text(
+                        json.dumps(
+                            {
+                                "event": "dry_run_completed",
+                                "run_id": outcome.run_id,
+                                "status": "dry_run_ok",
+                                "motion_published": False,
+                            }
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    for artifact in (
+                        outcome.dry_preflight_path,
+                        outcome.odom_execution_certificate_path,
+                        outcome.dry_uncertainty_budget_path,
+                    ):
+                        artifact.parent.mkdir(parents=True, exist_ok=True)
+                        artifact.write_text("{}\n", encoding="utf-8")
+                return outcome
             profile = SimpleNamespace(
                 map_frame="map",
                 robot_radius_m=0.105,
@@ -87,6 +147,18 @@ class AutonomousDryReadinessTest(unittest.TestCase):
                     "_admit_preplanning_localization",
                     return_value=Pose2D(0.0, 0.0, 0.0),
                 ),
+                patch.object(
+                    runner,
+                    "_admit_observation_tf_readiness",
+                    return_value=(
+                        output_root
+                        / (
+                            "dry_session/preflight/"
+                            "lidar_scan_tf_before_authorization.json"
+                        ),
+                        "f" * 64,
+                    ),
+                ),
                 patch.object(runner, "plan_stand_coverage_survey", return_value=0),
                 patch.object(
                     runner,
@@ -96,16 +168,20 @@ class AutonomousDryReadinessTest(unittest.TestCase):
                 patch.object(
                     runner,
                     "seal_stand_discovery_route",
-                    return_value={
-                        "route_csv": "route.csv",
-                        "diagnostics_json": "diagnostics.json",
-                        "route_certificate_json": "certificate.json",
+                    side_effect=lambda **kwargs: {
+                        "route_csv": str(kwargs["output_dir"] / "route.csv"),
+                        "diagnostics_json": str(
+                            kwargs["output_dir"] / "route_diagnostics.json"
+                        ),
+                        "route_certificate_json": str(
+                            kwargs["output_dir"] / "route_certificate.json"
+                        ),
                     },
                 ),
                 patch.object(
                     runner,
                     "_run_motion_leg",
-                    side_effect=(rejected, passed),
+                    side_effect=run_motion_leg,
                 ) as run_leg,
                 redirect_stdout(StringIO()),
             ):
@@ -137,17 +213,24 @@ class AutonomousDryReadinessTest(unittest.TestCase):
             self.assertEqual(run_leg.call_count, 2)
             self.assertEqual(
                 run_leg.call_args_list[1].kwargs["run_id"],
-                "dry_session_coverage_000_dry_localization_readiness_001",
+                "dry_session_preauthorization_coverage_000_001",
             )
             summary = json.loads(
                 (output_root / "dry_session/mission_summary.json").read_text()
             )
             self.assertEqual(summary["localization_readiness_retry_count"], 1)
-            event = json.loads(
-                (output_root / "dry_session/adaptive_replans.jsonl").read_text()
+            events = [
+                json.loads(line)
+                for line in (
+                    output_root / "dry_session/adaptive_replans.jsonl"
+                ).read_text().splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(len(events), 2)
+            self.assertTrue(all(not event["motion_authorized"] for event in events))
+            self.assertTrue(
+                all(event["route_limits_unchanged"] for event in events)
             )
-            self.assertFalse(event["motion_authorized"])
-            self.assertTrue(event["route_limits_unchanged"])
 
 
 if __name__ == "__main__":

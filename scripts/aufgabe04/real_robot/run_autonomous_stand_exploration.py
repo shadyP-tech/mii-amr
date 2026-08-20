@@ -124,6 +124,7 @@ from scripts.aufgabe04.real_robot.autonomous_child_runner import (
     MotionLegOutcome,
     build_bundle_command as _bundle_command,
     build_child_runner_command as _runner_command,
+    parse_dry_run_outcome as _dry_motion_outcome_from_log,
     parse_motion_leg_outcome as _motion_outcome_from_log,
     semantic_log_size as _semantic_log_size,
 )
@@ -153,7 +154,16 @@ from scripts.aufgabe04.real_robot.autonomous_coverage_mission import (
 )
 from scripts.aufgabe04.real_robot.autonomous_localization_readiness import (
     evaluate_localization_readiness_retry,
-    localization_readiness_suffix,
+)
+from scripts.aufgabe04.real_robot.autonomous_preauthorization_readiness import (
+    PreauthorizationReadinessConfig,
+    PreauthorizationReadinessEffects,
+    admit_preauthorization_readiness,
+)
+from scripts.aufgabe04.real_robot.autonomous_observation_tf_readiness import (
+    ObservationTfReadinessConfig,
+    ObservationTfReadinessError,
+    observe_observation_tf_readiness,
 )
 from scripts.aufgabe04.real_robot.autonomous_candidate_approach import (
     CandidateApproachConfig,
@@ -309,6 +319,44 @@ def _default_session_id(run_mode: AutonomousRunMode) -> str:
 def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def _admit_observation_tf_readiness(
+    profile,
+    evidence_path: Path,
+    *,
+    phase: str,
+    typed_run_already_issued: bool = False,
+) -> tuple[Path, str]:
+    """Persist one passive exact-scan TF gate or fail with typed evidence."""
+
+    runtime = profile.resolved_runtime()
+    result = observe_observation_tf_readiness(
+        ObservationTfReadinessConfig(
+            scan_topic=runtime.scan_topic,
+            expected_scan_frame=profile.scan_frame,
+            target_frame=runtime.odom_frame,
+        )
+    )
+    path = Path(evidence_path)
+    digest = write_content_hashed_json(
+        path,
+        {
+            **result.to_dict(),
+            "phase": phase,
+            "typed_run_already_issued": typed_run_already_issued,
+        },
+        hash_field="observation_tf_readiness_sha256",
+    )
+    if not result.ready:
+        raise ObservationTfReadinessError(
+            result,
+            evidence_path=str(path),
+            evidence_sha256=digest,
+            phase=phase,
+            typed_run_already_issued=typed_run_already_issued,
+        )
+    return path, digest
 
 
 def _admit_preplanning_localization(
@@ -656,6 +704,7 @@ def _run_motion_leg(
     ) = None,
     startup_reseal_permit_context: StartupResealPermitContext | None = None,
     mission_leg_permit_context: MissionLegPermitContext | None = None,
+    observation_tf_evidence_path: Path | None = None,
 ) -> MotionLegOutcome:
     if require_fresh_confirmation and fresh_confirmation_reason not in {
         "startup",
@@ -756,6 +805,54 @@ def _run_motion_leg(
         raise RuntimeError(
             f"dry-run failed for {run_id}: {outcome.stop_reason}"
         )
+    try:
+        dry_outcome = _dry_motion_outcome_from_log(
+            semantic_log,
+            run_id=run_id,
+            returncode=dry_result.returncode,
+            start_offset=0,
+        )
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"dry-run success evidence is invalid for {run_id}: {exc}"
+        ) from exc
+    dry_preflight = (
+        session_root
+        / "preflight"
+        / (
+            f"{run_id}_dry.json"
+            if uncertainty_map_yaml is not None
+            else f"{run_id}.json"
+        )
+    )
+    required_dry_artifacts = [
+        ("dry semantic log", semantic_log),
+        ("dry preflight", dry_preflight),
+    ]
+    if uncertainty_map_yaml is not None:
+        if dry_certificate is None or dry_budget is None:
+            raise RuntimeError(
+                f"uncertainty-aware dry-run paths are missing for {run_id}"
+            )
+        required_dry_artifacts.extend(
+            (
+                ("dry odom execution certificate", dry_certificate),
+                ("dry uncertainty budget", dry_budget),
+            )
+        )
+    for label, path in required_dry_artifacts:
+        try:
+            resolve_normal_artifact_path(path, label=label)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"dry-run success artifact is invalid for {run_id}: {exc}"
+            ) from exc
+    dry_outcome = replace(
+        dry_outcome,
+        dry_preflight_path=dry_preflight,
+        odom_execution_certificate_path=dry_certificate,
+        dry_uncertainty_budget_path=dry_budget,
+    )
     if permit_context_count:
         canonical_artifacts = resolve_child_artifact_paths(
             session_root=session_root,
@@ -784,19 +881,15 @@ def _run_motion_leg(
             if uncertainty_map_yaml is None
             else odom_root / f"{run_id}_dry_uncertainty_budget.json"
         )
-    if not execute:
-        return MotionLegOutcome(
-            run_id=run_id,
-            status="dry_run_ok",
-            stop_reason="",
-            stop_details={},
-            motion_published=False,
-            returncode=0,
-            semantic_log_path=(
-                semantic_log
-            ),
-            odom_execution_certificate_path=dry_certificate,
+    if observation_tf_evidence_path is not None:
+        _admit_observation_tf_readiness(
+            profile,
+            observation_tf_evidence_path,
+            phase="coverage_leg_before_motion",
+            typed_run_already_issued=execute,
         )
+    if not execute:
+        return dry_outcome
     motion_permit_path = None
     motion_permit_sha256 = ""
     mission_leg_permit_path = None
@@ -1088,9 +1181,17 @@ def _capture_lidar_epoch(
     survey_root: Path,
     viewpoint_id: str,
     odom_execution_certificate_path: Path | None = None,
+    observation_tf_evidence_path: Path | None = None,
 ) -> Path:
     epoch_root = survey_root / "raw_epochs" / viewpoint_id
     epoch_root.mkdir(parents=True, exist_ok=False)
+    if observation_tf_evidence_path is not None:
+        _admit_observation_tf_readiness(
+            profile,
+            observation_tf_evidence_path,
+            phase="coverage_lidar_epoch_before_observer",
+            typed_run_already_issued=True,
+        )
     summary = epoch_root / "observer_summary.json"
     command = [
         sys.executable,
@@ -1215,7 +1316,14 @@ def _execute_coverage_leg_with_replans(
         ),
     )
     effects = CoverageLegEffects(
-        run_motion_leg=_run_motion_leg,
+        run_motion_leg=lambda **kwargs: _run_motion_leg(
+            **kwargs,
+            observation_tf_evidence_path=(
+                session_root
+                / "preflight"
+                / f"{kwargs['run_id']}_observation_tf_before_motion.json"
+            ),
+        ),
         admit_preplanning_localization=_admit_preplanning_localization,
         seal_route=seal_stand_discovery_route,
         event_sink=_append_jsonl,
@@ -1518,8 +1626,9 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Maximum fresh no-motion AMCL admissions for a sole transient "
             "dynamic map->odom gap after an observation, and for a certified "
-            "route uncertainty budget exhausted before motion. Other failed "
-            "gates remain terminal; zero disables either bounded retry."
+            "route uncertainty budget exhausted during the pre-RUN first-route "
+            "rehearsal or before later motion. Other failed gates remain "
+            "terminal; zero disables these bounded retries."
         ),
     )
     parser.add_argument(
@@ -1721,6 +1830,17 @@ def main(argv=None) -> int:
             )
         session_root.mkdir(parents=True, exist_ok=False)
         survey_root = session_root / "coverage"
+        (
+            preauthorization_observation_tf_path,
+            preauthorization_observation_tf_sha256,
+        ) = _admit_observation_tf_readiness(
+            profile,
+            session_root
+            / "preflight"
+            / "lidar_scan_tf_before_authorization.json",
+            phase="preauthorization_observation_tf_readiness",
+            typed_run_already_issued=False,
+        )
         start = _admit_preplanning_localization(
             runtime,
             session_root,
@@ -1792,73 +1912,52 @@ def main(argv=None) -> int:
                 "count before motion authorization"
             )
 
-        if not args.execute:
-            first_sealed = seal_stand_discovery_route(
-                source_route_csv=survey_root / "legs/leg_000_route.csv",
-                source_diagnostics_json=(
-                    survey_root / "legs/leg_000_diagnostics.json"
+        def run_preauthorization_dry_leg(request):
+            return _run_motion_leg(
+                profile=profile,
+                sealed=request.sealed_route.to_mapping(),
+                run_id=request.run_id,
+                session_root=session_root,
+                execute=False,
+                coverage_plan=plan_path,
+                uncertainty_map_yaml=args.map,
+                uncertainty_sigma_multiplier=args.uncertainty_sigma_multiplier,
+                localization_branch_proof_id=(
+                    args.localization_branch_proof_id or "dry_run_no_motion"
                 ),
-                coverage_plan_path=plan_path,
-                output_dir=session_root / "execution/coverage_leg_000",
             )
-            dry_readiness_retry_index = 0
-            while True:
-                first_dry_outcome = _run_motion_leg(
-                    profile=profile,
-                    sealed=first_sealed,
-                    run_id=(
-                        f"{args.session_id}_coverage_000_dry"
-                        + localization_readiness_suffix(
-                            dry_readiness_retry_index
-                        )
-                    ),
-                    session_root=session_root,
-                    execute=False,
-                    coverage_plan=plan_path,
-                    uncertainty_map_yaml=args.map,
-                    uncertainty_sigma_multiplier=(
-                        args.uncertainty_sigma_multiplier
-                    ),
-                    localization_branch_proof_id=(
-                        args.localization_branch_proof_id
-                        or "dry_run_no_motion"
-                    ),
-                )
-                if first_dry_outcome.status == "dry_run_ok":
-                    break
-                readiness = evaluate_localization_readiness_retry(
-                    status=first_dry_outcome.status,
-                    stop_reason=first_dry_outcome.stop_reason,
-                    stop_details=first_dry_outcome.stop_details,
-                    motion_published=first_dry_outcome.motion_published,
-                )
-                if (
-                    not readiness.retryable
-                    or dry_readiness_retry_index
-                    >= args.max_localization_readiness_retries_per_leg
-                ):
-                    raise RuntimeError(
-                        "first center-corridor dry-run rejected the sealed "
-                        f"route: {first_dry_outcome.stop_reason}"
-                    )
-                dry_readiness_retry_index += 1
-                _append_jsonl(
-                    session_root / "adaptive_replans.jsonl",
-                    {
-                        "schema_version": 1,
-                        "event": "dry_localization_readiness_retry_scheduled",
-                        "timestamp": time.time(),
-                        "rejected_run_id": first_dry_outcome.run_id,
-                        "next_retry_index": dry_readiness_retry_index,
-                        "maximum_retry_count": (
-                            args.max_localization_readiness_retries_per_leg
-                        ),
-                        "motion_published": False,
-                        "motion_authorized": False,
-                        "fresh_nomotion_amcl_preflight_required": True,
-                        "route_limits_unchanged": True,
-                    },
-                )
+
+        initial_admission = admit_preauthorization_readiness(
+            PreauthorizationReadinessConfig(
+                session_root=session_root,
+                survey_root=survey_root,
+                coverage_plan_path=plan_path,
+                session_id=args.session_id,
+                initial_leg_index=initial_leg_index,
+                maximum_localization_readiness_retries=(
+                    args.max_localization_readiness_retries_per_leg
+                ),
+                observation_tf_evidence_path=(
+                    preauthorization_observation_tf_path
+                ),
+                observation_tf_evidence_sha256=(
+                    preauthorization_observation_tf_sha256
+                ),
+            ),
+            PreauthorizationReadinessEffects(
+                seal_route=seal_stand_discovery_route,
+                run_dry_motion_leg=run_preauthorization_dry_leg,
+                append_event=_append_jsonl,
+                publish_hashed_json=write_content_hashed_json,
+                wall_clock=time.time,
+                notify=print,
+            ),
+        )
+        initial_readiness = initial_admission.result
+        initial_readiness_path = initial_admission.evidence_path
+        initial_readiness_sha256 = initial_admission.evidence_sha256
+
+        if not args.execute:
             _write_json(
                 session_root / "mission_summary.json",
                 {
@@ -1872,8 +1971,10 @@ def main(argv=None) -> int:
                         args.uncertainty_sigma_multiplier
                     ),
                     "localization_readiness_retry_count": (
-                        dry_readiness_retry_index
+                        len(initial_readiness.attempts) - 1
                     ),
+                    "initial_readiness_json": str(initial_readiness_path),
+                    "initial_readiness_sha256": initial_readiness_sha256,
                 },
             )
             print(
@@ -1913,6 +2014,14 @@ def main(argv=None) -> int:
             if coverage_scoped_mode
             else "coverage, candidate, and opposite-face child legs"
         )
+        print(
+            "Preauthorization readiness passed without motion: the exact "
+            "first route cleared its AMCL uncertainty budget and the LiDAR "
+            "scan-time TF chain was observable. This evidence is advisory; "
+            "the authorized child will repeat every dry/live gate."
+        )
+        print(f"Initial readiness evidence: {initial_readiness_path}")
+        print(f"Initial readiness SHA-256: {initial_readiness_sha256}")
         print(
             "Physical safety requirements: clear arena; unloaded robot; operator "
             "beside the robot; Ctrl+C and physical stop ready; separate exact-topic "
@@ -2091,6 +2200,15 @@ def main(argv=None) -> int:
                     STARTUP_RESEAL_RECOVERY_SOURCE_KINDS
                 ),
                 "additional_typed_run_required_for_eligible_recovery": False,
+                "initial_readiness_json": str(initial_readiness_path),
+                "initial_readiness_sha256": initial_readiness_sha256,
+                "initial_readiness_reusable_as_motion_permit": False,
+                "preauthorization_observation_tf_json": str(
+                    preauthorization_observation_tf_path
+                ),
+                "preauthorization_observation_tf_sha256": (
+                    preauthorization_observation_tf_sha256
+                ),
             },
         )
 
@@ -2134,6 +2252,12 @@ def main(argv=None) -> int:
                 viewpoint_id=viewpoint_id,
                 odom_execution_certificate_path=(
                     odom_execution_certificate_path
+                ),
+                observation_tf_evidence_path=(
+                    survey_root
+                    / "raw_epochs"
+                    / viewpoint_id
+                    / "observation_tf_readiness.json"
                 ),
             )
 
