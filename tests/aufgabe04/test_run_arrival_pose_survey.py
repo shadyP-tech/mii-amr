@@ -1,6 +1,7 @@
 import argparse
 import json
 import hashlib
+import re
 import subprocess
 import tempfile
 import unittest
@@ -232,6 +233,23 @@ class RunArrivalPoseSurveyTest(unittest.TestCase):
                 "viewpoint_sampling_contract_source_sha256"
             ],
             r"^[0-9a-f]{64}$",
+        )
+        follower_hashes = _survey_config_payload(args)[
+            "follower_module_source_sha256"
+        ]
+        self.assertIn(
+            "scripts/aufgabe04/navigation/waypoint_follower/runtime.py",
+            follower_hashes,
+        )
+        self.assertIn(
+            "scripts/aufgabe04/navigation/waypoint_follower/pose_lookup.py",
+            follower_hashes,
+        )
+        self.assertTrue(
+            all(
+                re.fullmatch(r"[0-9a-f]{64}", digest)
+                for digest in follower_hashes.values()
+            )
         )
         self.assertEqual(
             _survey_config_payload(args)[

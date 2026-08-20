@@ -28,11 +28,12 @@ loaded logistics mission or a two-robot run; see
 | `navigation/startup_reseal_motion_consumption.py` | Atomically consume each startup-reseal permit once immediately before motion | None |
 | `navigation/spatial_assignment.py` | Globally associate stopped-epoch detections with existing candidates by cardinality and total distance | None |
 | `navigation/coverage_candidate_admission.py` | Fail closed between LiDAR coverage and candidate approaches unless coverage and multi-view candidate evidence are complete | None |
+| `navigation/coverage_candidate_lifecycle.py` | Classify LiDAR, multi-view, camera-queue, confirmed, and rejected evidence; evaluate exact-two LiDAR checkpoint completion without constructing a motion snapshot | None |
 | `real_robot/autonomous_modes.py` | Resolve one explicit workflow mode and authorization scope; reject contradictory legacy flags, unsafe session IDs, and misleading session labels | None |
 | `real_robot/autonomous_artifact_paths.py` | Canonicalize existing sealed child artifacts so dry evidence, permits, and live argv bind one filesystem identity | None |
 | `real_robot/autonomous_child_runner.py` | Build child-runner and bundle argv, and parse one unambiguous append-only terminal outcome | None |
 | `real_robot/autonomous_localization_readiness.py` | Classify the one bounded no-motion retryable uncertainty-admission failure without changing any limit | None |
-| `real_robot/autonomous_session_manifest.py` | Snapshot and content-hash resumable coverage checkpoints; manifests explicitly authorize no motion | None |
+| `real_robot/autonomous_session_manifest.py` | Snapshot and content-hash resumable coverage checkpoints and terminal survey evidence; manifests explicitly authorize no motion | None |
 | `real_robot/autonomous_checkpoint_resume.py` | Re-hash, restore, and freshly replan one next coverage leg in a new session | None |
 | `real_robot/autonomous_coverage_replanning.py` | Rebuild a coverage leg from admitted startup/runtime-localization evidence while preserving bounded transient-overlay continuity | None; offline route/artifact reconstruction only |
 | `real_robot/autonomous_startup_reseal.py` | Adapt the startup-reseal safety contract to autonomous coverage execution | None; ROS-free permit construction only |
@@ -338,6 +339,15 @@ while any other value fails before planning, session creation, or a `RUN`
 prompt. The robust workflow lets stop spacing determine the full centerline
 viewpoint set. `--exact-inspection-point-count 2` is diagnostic-only and must
 not be copied into the five-stand full-exploration command.
+
+For a bounded two-stop LiDAR check, combine
+`--exact-inspection-point-count 2`, `--coverage-leg-limit 2`, and
+`--run-mode execute-coverage-checkpoint`. Successful completion means exactly
+five active static-map-admitted LiDAR candidates passed the frozen count and
+basic evidence gate. The result is a terminal, non-resumable checkpoint with
+`camera_approach_authorized=false`; it does not promote single-view candidates
+to `pending_camera`, create a candidate snapshot, or continue into camera
+approach motion.
 
 Type `RUN` only after the separate no-motion run has passed and the live
 velocity owner is unambiguous. In this checkpoint mode that one mission-level

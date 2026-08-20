@@ -27,6 +27,7 @@ AUTONOMOUS_SESSION_MANIFEST_SCHEMA_VERSION = 1
 AUTONOMOUS_SESSION_MANIFEST_KIND = "autonomous_session_checkpoint"
 AUTONOMOUS_SESSION_MANIFEST_HASH_FIELD = "manifest_sha256"
 COVERAGE_LEG_CHECKPOINT_COMPLETE = "coverage_leg_checkpoint_complete"
+COVERAGE_SURVEY_TERMINAL_CHECKPOINT = "coverage_survey_terminal_checkpoint"
 
 AUTONOMOUS_CHECKPOINT_RUN_MODES = frozenset(
     {
@@ -37,7 +38,10 @@ AUTONOMOUS_CHECKPOINT_RUN_MODES = frozenset(
     }
 )
 AUTONOMOUS_CHECKPOINT_STATUSES = frozenset(
-    {COVERAGE_LEG_CHECKPOINT_COMPLETE}
+    {
+        COVERAGE_LEG_CHECKPOINT_COMPLETE,
+        COVERAGE_SURVEY_TERMINAL_CHECKPOINT,
+    }
 )
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -109,7 +113,7 @@ class AutonomousSessionManifest:
     map_bundle_sha256: str
     config_sha256: str
     completed_coverage_legs: int
-    next_viewpoint_id: str
+    next_viewpoint_id: str | None
     coverage_plan: ArtifactFileReference
     coverage_progress: ArtifactFileReference
     survey_summary: ArtifactFileReference
@@ -239,7 +243,10 @@ def validate_autonomous_session_manifest(
             "invalid_cursor",
             "coverage checkpoint requires at least one completed coverage leg",
         )
-    _require_safe_id(manifest.next_viewpoint_id, "next_viewpoint_id")
+    _validate_checkpoint_cursor(
+        status=manifest.status,
+        next_viewpoint_id=manifest.next_viewpoint_id,
+    )
     for name in (
         "coverage_plan",
         "coverage_progress",
@@ -313,16 +320,26 @@ def publish_coverage_checkpoint(
     map_bundle_sha256: str,
     config_sha256: str,
     completed_coverage_legs: int,
-    next_viewpoint_id: str,
+    next_viewpoint_id: str | None,
     coverage_plan_path: Path,
     coverage_progress_path: Path,
     survey_summary_path: Path,
     stand_registry_path: Path,
     lidar_observer_summary_path: Path,
     parent_checkpoint_path: Path | None = None,
+    status: str = COVERAGE_LEG_CHECKPOINT_COMPLETE,
 ) -> PublishedAutonomousCheckpoint:
     """Snapshot mutable survey state and publish its evidence-only manifest."""
 
+    if status not in AUTONOMOUS_CHECKPOINT_STATUSES:
+        raise AutonomousSessionManifestError(
+            "invalid_manifest",
+            f"status must be one of {sorted(AUTONOMOUS_CHECKPOINT_STATUSES)}",
+        )
+    _validate_checkpoint_cursor(
+        status=status,
+        next_viewpoint_id=next_viewpoint_id,
+    )
     root = Path(session_root).resolve(strict=True)
     checkpoint_root = (
         root
@@ -359,7 +376,7 @@ def publish_coverage_checkpoint(
         manifest_kind=AUTONOMOUS_SESSION_MANIFEST_KIND,
         session_id=session_id,
         run_mode=run_mode,
-        status=COVERAGE_LEG_CHECKPOINT_COMPLETE,
+        status=status,
         robot_id=robot_id,
         robot_profile_sha256=robot_profile_sha256,
         calibration_profile_sha256=calibration_profile_sha256,
@@ -460,7 +477,7 @@ def _manifest_from_payload(
             completed_coverage_legs=_integer(
                 payload["completed_coverage_legs"], "completed_coverage_legs"
             ),
-            next_viewpoint_id=_string(
+            next_viewpoint_id=_optional_string(
                 payload["next_viewpoint_id"], "next_viewpoint_id"
             ),
             coverage_plan=_file_reference(payload["coverage_plan"], "coverage_plan"),
@@ -621,6 +638,32 @@ def _require_safe_id(value: object, name: str) -> str:
     return value
 
 
+def _validate_checkpoint_cursor(
+    *,
+    status: str,
+    next_viewpoint_id: object,
+) -> None:
+    if status == COVERAGE_LEG_CHECKPOINT_COMPLETE:
+        if next_viewpoint_id is None:
+            raise AutonomousSessionManifestError(
+                "invalid_cursor",
+                "resumable coverage-leg checkpoint requires a next viewpoint",
+            )
+        _require_safe_id(next_viewpoint_id, "next_viewpoint_id")
+        return
+    if status == COVERAGE_SURVEY_TERMINAL_CHECKPOINT:
+        if next_viewpoint_id is not None:
+            raise AutonomousSessionManifestError(
+                "invalid_cursor",
+                "terminal coverage-survey checkpoint must not have a next viewpoint",
+            )
+        return
+    raise AutonomousSessionManifestError(
+        "invalid_manifest",
+        f"status must be one of {sorted(AUTONOMOUS_CHECKPOINT_STATUSES)}",
+    )
+
+
 def _require_sha256(value: object, name: str) -> str:
     if not isinstance(value, str) or not _SHA256.fullmatch(value):
         raise AutonomousSessionManifestError(
@@ -657,6 +700,12 @@ def _string(value: object, name: str) -> str:
     return value
 
 
+def _optional_string(value: object, name: str) -> str | None:
+    if value is None:
+        return None
+    return _string(value, name)
+
+
 def _integer(value: object, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise AutonomousSessionManifestError(
@@ -680,6 +729,7 @@ __all__ = [
     "AUTONOMOUS_SESSION_MANIFEST_KIND",
     "AUTONOMOUS_SESSION_MANIFEST_SCHEMA_VERSION",
     "COVERAGE_LEG_CHECKPOINT_COMPLETE",
+    "COVERAGE_SURVEY_TERMINAL_CHECKPOINT",
     "ArtifactFileReference",
     "AutonomousSessionManifest",
     "AutonomousSessionManifestError",

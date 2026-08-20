@@ -141,7 +141,9 @@ from scripts.aufgabe04.real_robot.autonomous_coverage_mission import (
     CompletedCoverageLeg,
     CoverageCheckpointComplete,
     CoverageCheckpointIdentity,
+    CoverageCompletionPolicy,
     CoverageComplete,
+    CoverageLidarCheckpointComplete,
     CoverageMissionConfig,
     CoverageMissionEffects,
     PreparedCoverageLeg,
@@ -200,6 +202,37 @@ DEFAULT_MAX_BLOCKAGE_REPLANS_PER_LEG = 3
 DEFAULT_MAX_STARTUP_RESEALS_PER_LEG = 3
 DEFAULT_MAX_RUNTIME_LOCALIZATION_RESEALS_PER_LEG = 1
 DEFAULT_MAX_LOCALIZATION_READINESS_RETRIES_PER_LEG = 2
+
+
+def _coverage_completion_policy(
+    mode: AutonomousRunMode,
+    *,
+    exact_inspection_point_count: int | None,
+) -> CoverageCompletionPolicy:
+    """Select the evidence gate without expanding camera-motion scope."""
+
+    if not isinstance(mode, AutonomousRunMode):
+        raise ValueError("autonomous run mode is required")
+    if mode in {
+        AutonomousRunMode.EXECUTE_COVERAGE_CHECKPOINT,
+        AutonomousRunMode.RESUME_NEXT_COVERAGE_LEG,
+    } and exact_inspection_point_count == 2:
+        return CoverageCompletionPolicy.EXACT_TWO_LIDAR_CHECKPOINT
+    return CoverageCompletionPolicy.CAMERA_READY
+
+
+def _plan_exact_inspection_point_count(
+    plan: CoverageSurveyPlan,
+    *,
+    requested: int | None,
+) -> int | None:
+    """Use frozen plan scope, with a compatibility seam for test doubles."""
+
+    config = getattr(plan, "config", None)
+    value = getattr(config, "exact_inspection_point_count", requested)
+    if value not in {None, 2}:
+        raise ValueError("frozen plan has an invalid exact inspection-point count")
+    return value
 
 
 def _file_sha256(path: Path) -> str:
@@ -2185,6 +2218,7 @@ def main(argv=None) -> int:
                     request.lidar_observer_summary_path
                 ),
                 parent_checkpoint_path=request.parent_checkpoint_path,
+                status=request.checkpoint_status,
             )
             return PublishedCoverageCheckpoint(
                 published.manifest_path,
@@ -2214,6 +2248,15 @@ def main(argv=None) -> int:
                 initial_leg_index=initial_leg_index,
                 coverage_leg_limit=args.coverage_leg_limit,
                 parent_checkpoint_path=resume_parent_checkpoint_path,
+                completion_policy=_coverage_completion_policy(
+                    resolved_run_mode.mode,
+                    exact_inspection_point_count=(
+                        _plan_exact_inspection_point_count(
+                            plan,
+                            requested=args.exact_inspection_point_count,
+                        )
+                    ),
+                ),
             ),
             CoverageMissionEffects(
                 execute_completed_leg=execute_completed_coverage_leg,
@@ -2239,7 +2282,10 @@ def main(argv=None) -> int:
             ),
         )
 
-        if isinstance(coverage_phase, CoverageCheckpointComplete):
+        if isinstance(
+            coverage_phase,
+            (CoverageCheckpointComplete, CoverageLidarCheckpointComplete),
+        ):
             result = coverage_phase.to_mission_summary()
             _write_json(session_root / "mission_summary.json", result)
             print(json.dumps(result, indent=2, sort_keys=True))

@@ -9,6 +9,7 @@ keeps candidate snapshots behind terminal admission and count checks.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 import json
 import math
 from pathlib import Path
@@ -19,6 +20,11 @@ from scripts.aufgabe04.navigation.coverage_candidate_admission import (
     CoverageCandidateAdmissionDecision,
     coverage_candidate_admission_evidence,
     evaluate_coverage_candidate_admission,
+)
+from scripts.aufgabe04.navigation.coverage_candidate_lifecycle import (
+    ExactTwoLidarCheckpointDecision,
+    evaluate_exact_two_lidar_checkpoint,
+    exact_two_lidar_checkpoint_evidence,
 )
 from scripts.aufgabe04.navigation.stand_coverage_survey import (
     STATUS_CONFIRMED,
@@ -32,6 +38,8 @@ from scripts.aufgabe04.navigation.stand_coverage_survey import (
     load_survey_progress,
 )
 from scripts.aufgabe04.real_robot.autonomous_session_manifest import (
+    COVERAGE_LEG_CHECKPOINT_COMPLETE,
+    COVERAGE_SURVEY_TERMINAL_CHECKPOINT,
     publish_coverage_checkpoint,
 )
 from scripts.aufgabe04.stations.candidate_snapshot import (
@@ -41,10 +49,18 @@ from scripts.aufgabe04.stations.candidate_snapshot import (
 )
 
 
-COVERAGE_LEG_CHECKPOINT_COMPLETE = "coverage_leg_checkpoint_complete"
 COVERAGE_COMPLETE = "coverage_complete"
+COVERAGE_LIDAR_CHECKPOINT_COMPLETE = "coverage_lidar_checkpoint_complete"
 RESUME_FROM_CHECKPOINT = "resume-next-coverage-leg"
 CANDIDATE_SNAPSHOT_READY = "candidate_snapshot_ready_for_mode_dispatch"
+LIDAR_CHECKPOINT_READY = "inspect_lidar_checkpoint_evidence"
+
+
+class CoverageCompletionPolicy(str, Enum):
+    """Select the terminal evidence gate without changing motion scope."""
+
+    CAMERA_READY = "camera-ready"
+    EXACT_TWO_LIDAR_CHECKPOINT = "exact-two-lidar-checkpoint"
 
 
 @dataclass(frozen=True)
@@ -85,6 +101,9 @@ class CoverageMissionConfig:
     initial_leg_index: int = 0
     coverage_leg_limit: int = 0
     parent_checkpoint_path: Path | None = None
+    completion_policy: CoverageCompletionPolicy = (
+        CoverageCompletionPolicy.CAMERA_READY
+    )
 
     def __post_init__(self) -> None:
         counts = (
@@ -96,6 +115,28 @@ class CoverageMissionConfig:
             raise ValueError("coverage counts and limits must be non-negative integers")
         if self.plan.map_bundle_sha256 != self.checkpoint_identity.map_bundle_sha256:
             raise ValueError("coverage plan and checkpoint map bundle differ")
+        if not isinstance(self.completion_policy, CoverageCompletionPolicy):
+            raise ValueError("coverage completion policy must be explicit")
+        if (
+            self.completion_policy
+            is CoverageCompletionPolicy.EXACT_TWO_LIDAR_CHECKPOINT
+        ):
+            if self.plan.config.exact_inspection_point_count != 2:
+                raise ValueError(
+                    "exact-two LiDAR checkpoint policy requires an exact-two plan"
+                )
+            if self.checkpoint_identity.run_mode not in {
+                "execute-coverage-checkpoint",
+                "resume-next-coverage-leg",
+            }:
+                raise ValueError(
+                    "exact-two LiDAR completion is limited to coverage "
+                    "checkpoint execution or its one-leg resume"
+                )
+            if self.plan.config.expected_stand_count != self.expected_stand_count:
+                raise ValueError(
+                    "exact-two LiDAR checkpoint count differs from the frozen plan"
+                )
 
 
 @dataclass(frozen=True)
@@ -121,13 +162,14 @@ class CompletedCoverageLeg:
 class CoverageCheckpointRequest:
     identity: CoverageCheckpointIdentity
     completed_coverage_legs: int
-    next_viewpoint_id: str
+    next_viewpoint_id: str | None
     coverage_plan_path: Path
     coverage_progress_path: Path
     survey_summary_path: Path
     stand_registry_path: Path
     lidar_observer_summary_path: Path
     parent_checkpoint_path: Path | None
+    checkpoint_status: str = COVERAGE_LEG_CHECKPOINT_COMPLETE
 
 
 @dataclass(frozen=True)
@@ -310,6 +352,128 @@ class CoverageCheckpointComplete:
 
 
 @dataclass(frozen=True)
+class CoverageLidarCheckpointComplete:
+    """Terminal exact-two LiDAR evidence; never a camera-motion handoff."""
+
+    run_mode: str
+    completed_coverage_legs: int
+    legs_completed_this_run: int
+    survey_root: Path
+    checkpoint_manifest: Path
+    checkpoint_manifest_sha256: str
+    checkpoint_parent_manifest: Path | None
+    lidar_checkpoint_admission_path: Path
+    lidar_checkpoint_admission_sha256: str
+    decision: ExactTwoLidarCheckpointDecision
+    coverage_status: CoverageStatus
+    status: str = field(default=COVERAGE_LIDAR_CHECKPOINT_COMPLETE, init=False)
+    motion_published: bool = field(default=True, init=False)
+    motion_authorized: bool = field(default=False, init=False)
+
+    def to_mission_summary(self) -> dict[str, object]:
+        population = self.decision.population
+        return {
+            "schema_version": 1,
+            "status": self.status,
+            "run_mode": self.run_mode,
+            "motion_published": self.motion_published,
+            "prior_leg_motion_published": self.motion_published,
+            "motion_authorized": self.motion_authorized,
+            "checkpoint_motion_authorized": False,
+            "camera_approach_authorized": False,
+            "completed_coverage_legs": self.completed_coverage_legs,
+            "legs_completed_this_run": self.legs_completed_this_run,
+            "next_viewpoint_id": None,
+            "survey_root": str(self.survey_root),
+            "checkpoint_manifest": str(self.checkpoint_manifest),
+            "checkpoint_manifest_sha256": self.checkpoint_manifest_sha256,
+            "checkpoint_parent_manifest": (
+                None
+                if self.checkpoint_parent_manifest is None
+                else str(self.checkpoint_parent_manifest)
+            ),
+            "lidar_checkpoint_admission": str(
+                self.lidar_checkpoint_admission_path
+            ),
+            "lidar_checkpoint_admission_sha256": (
+                self.lidar_checkpoint_admission_sha256
+            ),
+            "expected_stand_count": self.decision.expected_stand_count,
+            "lidar_static_map_admitted_candidate_count": (
+                self.decision.active_lidar_candidate_count
+            ),
+            "lidar_static_map_admitted_candidate_uids": list(
+                self.decision.admitted_lidar_candidate_uids
+            ),
+            "multi_view_supported_candidate_uids": list(
+                population.multi_view_supported_candidate_uids
+            ),
+            "camera_validation_queue_candidate_uids": list(
+                population.camera_queue_candidate_uids
+            ),
+            "camera_confirmed_candidate_uids": list(
+                population.camera_confirmed_candidate_uids
+            ),
+            "candidate_snapshot": None,
+            **self.coverage_status.to_summary_fields(),
+        }
+
+
+class CoverageLidarCheckpointAdmissionError(RuntimeError):
+    """LiDAR policy failed after a terminal survey checkpoint was published."""
+
+    def __init__(
+        self,
+        *,
+        checkpoint: PublishedCoverageCheckpoint,
+        checkpoint_parent_manifest: Path | None,
+        admission_path: Path,
+        admission_sha256: str,
+        decision: ExactTwoLidarCheckpointDecision,
+        completed_coverage_legs: int,
+        legs_completed_this_run: int,
+    ) -> None:
+        self.checkpoint = checkpoint
+        self.checkpoint_parent_manifest = checkpoint_parent_manifest
+        self.admission_path = admission_path
+        self.admission_sha256 = admission_sha256
+        self.decision = decision
+        self.completed_coverage_legs = completed_coverage_legs
+        self.legs_completed_this_run = legs_completed_this_run
+        super().__init__(
+            "exact-two LiDAR checkpoint admission rejected after terminal "
+            "checkpoint: " + ", ".join(decision.reasons)
+        )
+
+    def to_failure_fields(self) -> dict[str, object]:
+        return {
+            "failure_phase": "exact_two_lidar_checkpoint_admission",
+            "checkpoint_manifest": str(self.checkpoint.manifest_path),
+            "checkpoint_manifest_sha256": self.checkpoint.manifest_sha256,
+            "checkpoint_parent_manifest": (
+                None
+                if self.checkpoint_parent_manifest is None
+                else str(self.checkpoint_parent_manifest)
+            ),
+            "lidar_checkpoint_admission": str(self.admission_path),
+            "lidar_checkpoint_admission_sha256": self.admission_sha256,
+            "lidar_checkpoint_admission_reasons": list(self.decision.reasons),
+            "expected_stand_count": self.decision.expected_stand_count,
+            "lidar_static_map_admitted_candidate_count": (
+                self.decision.active_lidar_candidate_count
+            ),
+            "completed_coverage_legs": self.completed_coverage_legs,
+            "legs_completed_this_run": self.legs_completed_this_run,
+            "next_viewpoint_id": None,
+            "terminal_checkpoint_published": True,
+            "motion_published": True,
+            "prior_leg_motion_published": True,
+            "motion_authorized": False,
+            "camera_approach_authorized": False,
+        }
+
+
+@dataclass(frozen=True)
 class CoverageComplete:
     run_mode: str
     completed_coverage_legs: int
@@ -322,6 +486,8 @@ class CoverageComplete:
     coverage_candidate_admission_sha256: str
     resume_parent_checkpoint_path: Path | None
     coverage_status: CoverageStatus
+    terminal_checkpoint_manifest: Path | None = None
+    terminal_checkpoint_manifest_sha256: str | None = None
     status: str = field(default=COVERAGE_COMPLETE, init=False)
     motion_published: bool = field(default=True, init=False)
     motion_authorized: bool = field(default=False, init=False)
@@ -352,6 +518,14 @@ class CoverageComplete:
                 None
                 if self.resume_parent_checkpoint_path is None
                 else str(self.resume_parent_checkpoint_path)
+            ),
+            "terminal_checkpoint_manifest": (
+                None
+                if self.terminal_checkpoint_manifest is None
+                else str(self.terminal_checkpoint_manifest)
+            ),
+            "terminal_checkpoint_manifest_sha256": (
+                self.terminal_checkpoint_manifest_sha256
             ),
             **self.coverage_status.to_summary_fields(),
         }
@@ -384,6 +558,7 @@ def _publish_checkpoint(request: CoverageCheckpointRequest) -> PublishedCoverage
         stand_registry_path=request.stand_registry_path,
         lidar_observer_summary_path=request.lidar_observer_summary_path,
         parent_checkpoint_path=request.parent_checkpoint_path,
+        status=request.checkpoint_status,
     )
     return PublishedCoverageCheckpoint(published.manifest_path, published.manifest_sha256)
 
@@ -393,6 +568,26 @@ def _write_admission(path: Path, decision: CoverageCandidateAdmissionDecision) -
         path,
         coverage_candidate_admission_evidence(decision),
         hash_field="coverage_candidate_admission_sha256",
+    )
+
+
+def _write_lidar_checkpoint_admission(
+    path: Path,
+    decision: ExactTwoLidarCheckpointDecision,
+    checkpoint: PublishedCoverageCheckpoint,
+) -> str:
+    return write_content_hashed_json(
+        path,
+        {
+            "schema_version": 1,
+            "admission_kind": "exact_two_lidar_terminal_checkpoint",
+            "terminal_checkpoint_manifest": str(checkpoint.manifest_path),
+            "terminal_checkpoint_manifest_sha256": checkpoint.manifest_sha256,
+            "motion_authorized": False,
+            "camera_approach_authorized": False,
+            "decision": exact_two_lidar_checkpoint_evidence(decision),
+        },
+        hash_field="lidar_checkpoint_admission_sha256",
     )
 
 
@@ -411,7 +606,8 @@ class CoverageMissionEffects:
     capture_lidar_epoch: Callable[[str, Path], Path]
     fuse_coverage_stop: Callable[[str, Path], Mapping[str, object]]
     build_snapshot: Callable[
-        [StandSurveyRegistry, CoverageSurveyPlan, Path, str], CandidateSnapshot
+        [StandSurveyRegistry, CoverageSurveyPlan, Path, str],
+        CandidateSnapshot,
     ]
     prepare_next_leg: Callable[
         [CoverageNextLegPreparationRequest], PreparedCoverageLeg
@@ -433,6 +629,18 @@ class CoverageMissionEffects:
     write_admission: Callable[
         [Path, CoverageCandidateAdmissionDecision], str
     ] = _write_admission
+    evaluate_lidar_checkpoint: Callable[
+        [CoverageSurveyPlan, CoverageSurveyProgress, StandSurveyRegistry],
+        ExactTwoLidarCheckpointDecision,
+    ] = evaluate_exact_two_lidar_checkpoint
+    write_lidar_checkpoint_admission: Callable[
+        [
+            Path,
+            ExactTwoLidarCheckpointDecision,
+            PublishedCoverageCheckpoint,
+        ],
+        str,
+    ] = _write_lidar_checkpoint_admission
     write_snapshot: Callable[[Path, CandidateSnapshot], str] = write_candidate_snapshot
     snapshot_sha256: Callable[[CandidateSnapshot], str] = candidate_snapshot_sha256
 
@@ -440,7 +648,7 @@ class CoverageMissionEffects:
 def execute_coverage_mission(
     config: CoverageMissionConfig,
     effects: CoverageMissionEffects,
-) -> CoverageCheckpointComplete | CoverageComplete:
+) -> CoverageCheckpointComplete | CoverageLidarCheckpointComplete | CoverageComplete:
     """Run coverage observation/checkpoint/admission around an injected leg FSM."""
 
     leg_index = config.initial_leg_index
@@ -450,9 +658,15 @@ def execute_coverage_mission(
     summary_path = config.survey_root / "survey_summary.json"
     registry_path = config.survey_root / "stand_registry.json"
     admission_path = config.checkpoint_identity.session_root / "coverage_candidate_admission.json"
+    lidar_admission_path = (
+        config.checkpoint_identity.session_root
+        / "coverage_lidar_checkpoint_admission.json"
+    )
     snapshot_path = config.checkpoint_identity.session_root / "candidate_snapshot.json"
     summary = _validated_summary(effects.read_summary(summary_path))
     prepared_leg: PreparedCoverageLeg | None = None
+    terminal_checkpoint: PublishedCoverageCheckpoint | None = None
+    terminal_checkpoint_parent: Path | None = None
 
     while (viewpoint_id := _next_viewpoint_id(summary)) is not None:
         legs_root = config.survey_root / "legs"
@@ -501,36 +715,42 @@ def execute_coverage_mission(
 
         leg_index += 1
         legs_completed_this_run += 1
-        published = None
         checkpoint_parent = latest_checkpoint
-        if next_viewpoint_id is not None:
-            published = effects.publish_checkpoint(
-                CoverageCheckpointRequest(
-                    identity=config.checkpoint_identity,
-                    completed_coverage_legs=leg_index,
-                    next_viewpoint_id=next_viewpoint_id,
-                    coverage_plan_path=config.coverage_plan_path,
-                    coverage_progress_path=progress_path,
-                    survey_summary_path=summary_path,
-                    stand_registry_path=registry_path,
-                    lidar_observer_summary_path=observer_summary,
-                    parent_checkpoint_path=latest_checkpoint,
-                )
+        checkpoint_status = (
+            COVERAGE_LEG_CHECKPOINT_COMPLETE
+            if next_viewpoint_id is not None
+            else COVERAGE_SURVEY_TERMINAL_CHECKPOINT
+        )
+        published = effects.publish_checkpoint(
+            CoverageCheckpointRequest(
+                identity=config.checkpoint_identity,
+                completed_coverage_legs=leg_index,
+                next_viewpoint_id=next_viewpoint_id,
+                coverage_plan_path=config.coverage_plan_path,
+                coverage_progress_path=progress_path,
+                survey_summary_path=summary_path,
+                stand_registry_path=registry_path,
+                lidar_observer_summary_path=observer_summary,
+                parent_checkpoint_path=latest_checkpoint,
+                checkpoint_status=checkpoint_status,
             )
-            if not isinstance(published, PublishedCoverageCheckpoint):
-                raise RuntimeError("checkpoint callback returned invalid evidence")
-            _require_sha256(
-                published.manifest_sha256,
-                "checkpoint_manifest_sha256",
-            )
-            latest_checkpoint = published.manifest_path
+        )
+        if not isinstance(published, PublishedCoverageCheckpoint):
+            raise RuntimeError("checkpoint callback returned invalid evidence")
+        _require_sha256(
+            published.manifest_sha256,
+            "checkpoint_manifest_sha256",
+        )
+        latest_checkpoint = published.manifest_path
+        if next_viewpoint_id is None:
+            terminal_checkpoint = published
+            terminal_checkpoint_parent = checkpoint_parent
 
         reached_run_limit = (
             config.coverage_leg_limit > 0
             and legs_completed_this_run >= config.coverage_leg_limit
         )
         if reached_run_limit and next_viewpoint_id is not None:
-            assert published is not None
             return CoverageCheckpointComplete(
                 run_mode=config.checkpoint_identity.run_mode,
                 completed_coverage_legs=leg_index,
@@ -545,7 +765,6 @@ def execute_coverage_mission(
         # A final planned leg falls through to admission even when it reaches
         # the per-invocation limit; a checkpoint must never bypass that gate.
         if next_viewpoint_id is not None:
-            assert published is not None
             preparation_request = CoverageNextLegPreparationRequest(
                 leg_index=leg_index,
                 recorded_viewpoint_id=viewpoint_id,
@@ -571,6 +790,56 @@ def execute_coverage_mission(
 
     progress = effects.load_progress(progress_path, config.plan)
     registry = effects.load_registry(registry_path, config.plan)
+    if (
+        config.completion_policy
+        is CoverageCompletionPolicy.EXACT_TWO_LIDAR_CHECKPOINT
+    ):
+        if terminal_checkpoint is None:
+            raise RuntimeError(
+                "exact-two LiDAR completion requires a terminal checkpoint "
+                "published after the final leg"
+            )
+        lidar_decision = effects.evaluate_lidar_checkpoint(
+            config.plan,
+            progress,
+            registry,
+        )
+        lidar_admission_hash = effects.write_lidar_checkpoint_admission(
+            lidar_admission_path,
+            lidar_decision,
+            terminal_checkpoint,
+        )
+        _require_sha256(
+            lidar_admission_hash,
+            "lidar_checkpoint_admission_sha256",
+        )
+        if not lidar_decision.ready:
+            raise CoverageLidarCheckpointAdmissionError(
+                checkpoint=terminal_checkpoint,
+                checkpoint_parent_manifest=terminal_checkpoint_parent,
+                admission_path=lidar_admission_path,
+                admission_sha256=lidar_admission_hash,
+                decision=lidar_decision,
+                completed_coverage_legs=leg_index,
+                legs_completed_this_run=legs_completed_this_run,
+            )
+        return CoverageLidarCheckpointComplete(
+            run_mode=config.checkpoint_identity.run_mode,
+            completed_coverage_legs=leg_index,
+            legs_completed_this_run=legs_completed_this_run,
+            survey_root=config.survey_root,
+            checkpoint_manifest=terminal_checkpoint.manifest_path,
+            checkpoint_manifest_sha256=terminal_checkpoint.manifest_sha256,
+            checkpoint_parent_manifest=terminal_checkpoint_parent,
+            lidar_checkpoint_admission_path=lidar_admission_path,
+            lidar_checkpoint_admission_sha256=lidar_admission_hash,
+            decision=lidar_decision,
+            coverage_status=_lidar_checkpoint_status(
+                lidar_decision,
+                registry,
+            ),
+        )
+
     admission = effects.evaluate_admission(config.plan, progress, registry)
     admission_hash = effects.write_admission(admission_path, admission)
     _require_sha256(admission_hash, "coverage_candidate_admission_sha256")
@@ -615,6 +884,16 @@ def execute_coverage_mission(
         coverage_candidate_admission_sha256=admission_hash,
         resume_parent_checkpoint_path=config.parent_checkpoint_path,
         coverage_status=_admitted_status(admission, registry),
+        terminal_checkpoint_manifest=(
+            None
+            if terminal_checkpoint is None
+            else terminal_checkpoint.manifest_path
+        ),
+        terminal_checkpoint_manifest_sha256=(
+            None
+            if terminal_checkpoint is None
+            else terminal_checkpoint.manifest_sha256
+        ),
     )
 
 
@@ -690,23 +969,45 @@ def _admitted_status(
     admission: CoverageCandidateAdmissionDecision,
     registry: StandSurveyRegistry,
 ) -> CoverageStatus:
+    return CoverageStatus(
+        coverage_complete=admission.coverage_threshold_met,
+        visited_coverage_ratio=admission.visited_coverage_ratio,
+        visited_viewpoint_count=len(admission.visited_viewpoint_ids),
+        total_viewpoint_count=len(admission.planned_viewpoint_ids),
+        candidate_counts=_registry_candidate_counts(registry),
+        next_required_action=CANDIDATE_SNAPSHOT_READY,
+    )
+
+
+def _lidar_checkpoint_status(
+    decision: ExactTwoLidarCheckpointDecision,
+    registry: StandSurveyRegistry,
+) -> CoverageStatus:
+    return CoverageStatus(
+        coverage_complete=(
+            decision.all_planned_viewpoints_visited
+            and decision.coverage_threshold_met
+        ),
+        visited_coverage_ratio=decision.visited_coverage_ratio,
+        visited_viewpoint_count=len(decision.visited_viewpoint_ids),
+        total_viewpoint_count=len(decision.planned_viewpoint_ids),
+        candidate_counts=_registry_candidate_counts(registry),
+        next_required_action=LIDAR_CHECKPOINT_READY,
+    )
+
+
+def _registry_candidate_counts(
+    registry: StandSurveyRegistry,
+) -> tuple[tuple[str, int], ...]:
     statuses = (
         STATUS_CONFIRMED,
         STATUS_PENDING_CAMERA,
         STATUS_PROVISIONAL,
         STATUS_REJECTED,
     )
-    counts = tuple(
+    return tuple(
         (status, sum(item.status == status for item in registry.candidates))
         for status in statuses
-    )
-    return CoverageStatus(
-        coverage_complete=admission.coverage_threshold_met,
-        visited_coverage_ratio=admission.visited_coverage_ratio,
-        visited_viewpoint_count=len(admission.visited_viewpoint_ids),
-        total_viewpoint_count=len(admission.planned_viewpoint_ids),
-        candidate_counts=counts,
-        next_required_action=CANDIDATE_SNAPSHOT_READY,
     )
 
 
@@ -720,6 +1021,7 @@ def _optional_nonnegative_int(
     if type(value) is not int or value < 0:
         raise RuntimeError(f"{name} must be a non-negative integer")
     return value
+
 
 def _candidate_counts(value: object) -> tuple[tuple[str, int], ...]:
     if value is None:
@@ -736,5 +1038,7 @@ def _candidate_counts(value: object) -> tuple[tuple[str, int], ...]:
 
 
 def _require_sha256(value: str, name: str) -> None:
-    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+    if len(value) != 64 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
         raise ValueError(f"{name} must be a lowercase SHA-256")

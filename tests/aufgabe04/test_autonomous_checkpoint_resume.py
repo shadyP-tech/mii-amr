@@ -27,6 +27,7 @@ from scripts.aufgabe04.real_robot.autonomous_checkpoint_resume import (
     restore_and_replan_coverage_resume,
 )
 from scripts.aufgabe04.real_robot.autonomous_session_manifest import (
+    COVERAGE_SURVEY_TERMINAL_CHECKPOINT,
     AutonomousSessionManifestError,
     publish_coverage_checkpoint,
 )
@@ -201,6 +202,54 @@ class AutonomousCheckpointResumeTest(unittest.TestCase):
                 with self.subTest(loader=loader.__name__):
                     with self.assertRaisesRegex(ValueError, "artifact is missing"):
                         loader(published.manifest_path)
+
+    def test_terminal_checkpoint_is_explicitly_non_resumable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            plan, resumable = self._checkpoint(root)
+            terminal_root = root / "terminal_session"
+            terminal_root.mkdir()
+            manifest = resumable.manifest
+            terminal = publish_coverage_checkpoint(
+                session_root=terminal_root,
+                session_id="terminal_session",
+                run_mode="execute-coverage-checkpoint",
+                robot_id=manifest.robot_id,
+                robot_profile_sha256=manifest.robot_profile_sha256,
+                calibration_profile_sha256=(
+                    manifest.calibration_profile_sha256
+                ),
+                physical_site_sha256=manifest.physical_site_sha256,
+                map_bundle_sha256=manifest.map_bundle_sha256,
+                config_sha256=manifest.config_sha256,
+                completed_coverage_legs=2,
+                next_viewpoint_id=None,
+                coverage_plan_path=Path(manifest.coverage_plan.path),
+                coverage_progress_path=Path(manifest.coverage_progress.path),
+                survey_summary_path=Path(manifest.survey_summary.path),
+                stand_registry_path=Path(manifest.stand_registry.path),
+                lidar_observer_summary_path=Path(
+                    manifest.lidar_observer_summary.path
+                ),
+                status=COVERAGE_SURVEY_TERMINAL_CHECKPOINT,
+            )
+
+            with self.assertRaisesRegex(
+                AutonomousSessionManifestError,
+                "evidence-only and cannot be resumed",
+            ) as raised:
+                admit_coverage_resume(
+                    terminal.manifest_path,
+                    new_session_id="resume_terminal_session",
+                    robot_id="tb3_1",
+                    robot_profile_sha256="a" * 64,
+                    calibration_profile_sha256="b" * 64,
+                    physical_site_sha256="c" * 64,
+                    map_bundle_sha256=plan.map_bundle_sha256,
+                    config_sha256="e" * 64,
+                )
+
+            self.assertEqual(raised.exception.code, "invalid_cursor")
 
 
 if __name__ == "__main__":

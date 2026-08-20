@@ -170,6 +170,39 @@ def _stationary_localization_payload(
 
 
 class AutonomousStandExplorationTest(unittest.TestCase):
+    def test_exact_two_checkpoint_selects_lidar_only_completion_policy(self):
+        exact_plan = SimpleNamespace(
+            config=SimpleNamespace(exact_inspection_point_count=2)
+        )
+        self.assertEqual(
+            autonomous_wrapper._plan_exact_inspection_point_count(
+                exact_plan,
+                requested=None,
+            ),
+            2,
+        )
+        self.assertIs(
+            autonomous_wrapper._coverage_completion_policy(
+                autonomous_wrapper.AutonomousRunMode.EXECUTE_COVERAGE_CHECKPOINT,
+                exact_inspection_point_count=2,
+            ),
+            autonomous_wrapper.CoverageCompletionPolicy.EXACT_TWO_LIDAR_CHECKPOINT,
+        )
+        self.assertIs(
+            autonomous_wrapper._coverage_completion_policy(
+                autonomous_wrapper.AutonomousRunMode.EXECUTE_FULL,
+                exact_inspection_point_count=None,
+            ),
+            autonomous_wrapper.CoverageCompletionPolicy.CAMERA_READY,
+        )
+        self.assertIs(
+            autonomous_wrapper._coverage_completion_policy(
+                autonomous_wrapper.AutonomousRunMode.RESUME_NEXT_COVERAGE_LEG,
+                exact_inspection_point_count=2,
+            ),
+            autonomous_wrapper.CoverageCompletionPolicy.EXACT_TWO_LIDAR_CHECKPOINT,
+        )
+
     @staticmethod
     def _profile():
         return SimpleNamespace(
@@ -1102,6 +1135,14 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             ) as record_stop,
             patch.object(
                 autonomous_wrapper,
+                "publish_coverage_checkpoint",
+                return_value=SimpleNamespace(
+                    manifest_path=root / "terminal_checkpoint.json",
+                    manifest_sha256="c" * 64,
+                ),
+            ) as publish_checkpoint,
+            patch.object(
+                autonomous_wrapper,
                 "load_stand_survey_registry",
                 return_value=registry,
             ),
@@ -1144,6 +1185,10 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         run_prompt.assert_called_once_with(
             "Type RUN to authorize the autonomous exploration mission: "
         )
+        if record_error is None:
+            publish_checkpoint.assert_called_once()
+        else:
+            publish_checkpoint.assert_not_called()
         return session_root, raised.exception.code, record_stop, evaluate_admission
 
     def test_final_coverage_leg_limit_reaches_candidate_admission_gate(self):

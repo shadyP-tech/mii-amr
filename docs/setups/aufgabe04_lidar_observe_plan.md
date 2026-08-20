@@ -74,10 +74,20 @@ python3 scripts/aufgabe04/navigation/plan_stand_coverage_survey.py \
 
 The exact-two selector chooses two distinct centerline cells from the normal
 dense plan by maximum union coverage and shared visibility. It still rejects
-the plan unless the unchanged `95%` map-coverage gate passes. After both
-epochs, candidate motion remains blocked unless the registry contains exactly
-the expected `pending_camera` candidates, no provisional extras, and valid
-confidence, hit, and evidence from both planned viewpoints.
+the plan unless the unchanged `95%` map-coverage gate passes. In
+`execute-coverage-checkpoint` mode, the two-stop survey may finish as a
+LiDAR-only checkpoint when exactly the expected number of non-rejected,
+static-map-admitted candidates have valid confidence, hit, and at least one
+known planned-viewpoint observation. The terminal evidence keeps provisional,
+multi-view, camera-queue, confirmed, and rejected states separate. It sets
+`camera_approach_authorized=false`, creates no candidate snapshot, and cannot
+be resumed as a motion checkpoint.
+
+The existing camera-ready gate remains stricter: only `pending_camera`
+candidates enter its approach snapshot. A provisional single-view candidate
+is therefore evidence for the LiDAR-only checkpoint, not authorization to
+drive toward that candidate. Exact-two remains disallowed in `execute-full`
+and `execute-coverage-only` modes.
 
 The generated leg is deliberately marked `motion_authorized: false`. Do not
 feed it directly to the real-robot segment runner. Real survey execution still

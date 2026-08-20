@@ -95,6 +95,17 @@ _ENVELOPE_EPSILON_M = (
     INTERMEDIATE_TERMINAL_HEADING_DISTANCE_COMPARISON_EPSILON_M
     + 1.0e-12
 )
+_FOLLOWER_SOURCE_RELATIVE_PATHS = (
+    "scripts/aufgabe04/navigation/simple_waypoint_follower.py",
+    "scripts/aufgabe04/navigation/waypoint_follower/__init__.py",
+    "scripts/aufgabe04/navigation/waypoint_follower/config.py",
+    "scripts/aufgabe04/navigation/waypoint_follower/pose_lookup.py",
+    "scripts/aufgabe04/navigation/waypoint_follower/route_admission.py",
+    "scripts/aufgabe04/navigation/waypoint_follower/route_phases.py",
+    "scripts/aufgabe04/navigation/waypoint_follower/runtime.py",
+    "scripts/aufgabe04/navigation/waypoint_follower/startup.py",
+    "scripts/aufgabe04/navigation/waypoint_follower/terminal_heading.py",
+)
 
 
 @dataclass(frozen=True)
@@ -114,6 +125,15 @@ def _file_sha256(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _follower_source_sha256_by_path() -> dict[str, str]:
+    """Hash every source file that implements the modular follower boundary."""
+
+    return {
+        relative_path: _file_sha256(ROOT / relative_path)
+        for relative_path in _FOLLOWER_SOURCE_RELATIVE_PATHS
+    }
 
 
 def _arena_bounds_from_args(args) -> ArenaBounds:
@@ -265,6 +285,9 @@ def _survey_config_payload(args) -> dict[str, object]:
             ROOT
             / "scripts/aufgabe04/navigation/"
             "simple_waypoint_follower.py"
+        ),
+        "follower_module_source_sha256": (
+            _follower_source_sha256_by_path()
         ),
         "waypoint_controller_source_sha256": _file_sha256(
             ROOT

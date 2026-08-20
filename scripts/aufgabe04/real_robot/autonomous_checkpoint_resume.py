@@ -30,6 +30,7 @@ from scripts.aufgabe04.navigation.stand_coverage_survey import (
     plan_next_survey_leg,
 )
 from scripts.aufgabe04.real_robot.autonomous_session_manifest import (
+    COVERAGE_LEG_CHECKPOINT_COMPLETE,
     AutonomousSessionManifest,
     AutonomousSessionManifestError,
     admit_autonomous_session_manifest,
@@ -89,6 +90,7 @@ def admit_coverage_resume(
             "resume checkpoint path must be canonical and must not traverse symlinks",
         )
     manifest = admit_autonomous_session_manifest(source)
+    _require_resumable_manifest(manifest)
     if new_session_id == manifest.session_id:
         raise AutonomousSessionManifestError(
             "provenance_mismatch",
@@ -125,6 +127,9 @@ def restore_and_replan_coverage_resume(
 ) -> RestoredCoverageResume:
     """Restore checkpoint snapshots and create a fresh non-authorizing leg."""
 
+    manifest = admitted.manifest
+    _require_resumable_manifest(manifest)
+
     destination = Path(survey_root)
     try:
         destination.mkdir(parents=True, exist_ok=False)
@@ -134,7 +139,6 @@ def restore_and_replan_coverage_resume(
             f"refusing to reuse resumed survey root: {destination}",
         ) from exc
 
-    manifest = admitted.manifest
     restored = {
         "coverage_plan": destination / "coverage_plan.json",
         "coverage_progress": destination / "coverage_progress.json",
@@ -308,6 +312,22 @@ def _copy_verified(
         raise AutonomousSessionManifestError(
             "immutable_conflict", f"cannot restore {name}: {exc}"
         ) from exc
+
+
+def _require_resumable_manifest(
+    manifest: AutonomousSessionManifest,
+) -> None:
+    if manifest.status != COVERAGE_LEG_CHECKPOINT_COMPLETE:
+        raise AutonomousSessionManifestError(
+            "invalid_cursor",
+            "terminal coverage-survey checkpoint is evidence-only and cannot "
+            "be resumed as a next coverage leg",
+        )
+    if manifest.next_viewpoint_id is None:
+        raise AutonomousSessionManifestError(
+            "invalid_cursor",
+            "resumable coverage-leg checkpoint has no next viewpoint",
+        )
 
 
 def _load_json_object(path: Path, name: str) -> dict[str, object]:

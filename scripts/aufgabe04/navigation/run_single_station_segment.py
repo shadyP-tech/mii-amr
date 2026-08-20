@@ -142,15 +142,21 @@ from scripts.aufgabe04.navigation.mission_execution_gate import (
     load_diagnostics_snapshot,
     validate_logistics_execution_bundle,
 )
-from scripts.aufgabe04.navigation.simple_waypoint_follower import (
-    FollowerConfig,
+from scripts.aufgabe04.navigation.viewpoint_sampling_contract import (
     INTERMEDIATE_TERMINAL_HEADING_DISTANCE_COMPARISON_EPSILON_M,
     INTERMEDIATE_TERMINAL_HEADING_ENTRY_TOLERANCE_M,
     INTERMEDIATE_TERMINAL_HEADING_HOLD_TOLERANCE_M,
     INTERMEDIATE_TERMINAL_HEADING_TARGET_ENVELOPE_RADIUS_M,
-    certified_static_startup_decision,
-    intermediate_terminal_heading_entry_tolerance_m,
+)
+from scripts.aufgabe04.navigation.waypoint_follower.config import FollowerConfig
+from scripts.aufgabe04.navigation.waypoint_follower.runtime import (
     run_simple_waypoint_follower,
+)
+from scripts.aufgabe04.navigation.waypoint_follower.startup import (
+    certified_static_startup_decision,
+)
+from scripts.aufgabe04.navigation.waypoint_follower.terminal_heading import (
+    intermediate_terminal_heading_entry_tolerance_m,
 )
 from scripts.aufgabe04.navigation.transient_blockage_policy import (
     DEFAULT_LINEAR_MOTION_FLOOR_MPS,

@@ -9,6 +9,7 @@ from scripts.aufgabe04.real_robot.autonomous_session_manifest import (
     AUTONOMOUS_SESSION_MANIFEST_KIND,
     AUTONOMOUS_SESSION_MANIFEST_SCHEMA_VERSION,
     COVERAGE_LEG_CHECKPOINT_COMPLETE,
+    COVERAGE_SURVEY_TERMINAL_CHECKPOINT,
     AutonomousSessionManifest,
     AutonomousSessionManifestError,
     ParentCheckpointReference,
@@ -172,6 +173,41 @@ class AutonomousSessionManifestTest(unittest.TestCase):
                 with self.assertRaises(AutonomousSessionManifestError):
                     autonomous_session_manifest_sha256(item)
 
+    def test_terminal_checkpoint_cursor_round_trips_without_motion_authority(self):
+        manifest = replace(
+            self._manifest(),
+            status=COVERAGE_SURVEY_TERMINAL_CHECKPOINT,
+            next_viewpoint_id=None,
+        )
+        path = self.root / "terminal_checkpoint.json"
+
+        digest = write_autonomous_session_manifest(path, manifest)
+
+        self.assertEqual(digest, autonomous_session_manifest_sha256(manifest))
+        self.assertEqual(load_autonomous_session_manifest(path), manifest)
+        self.assertEqual(admit_autonomous_session_manifest(path), manifest)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        self.assertIsNone(payload["next_viewpoint_id"])
+        self.assertFalse(payload["motion_authorized"])
+
+    def test_checkpoint_status_and_cursor_must_agree(self):
+        resumable_without_cursor = replace(
+            self._manifest(),
+            status=COVERAGE_LEG_CHECKPOINT_COMPLETE,
+            next_viewpoint_id=None,
+        )
+        terminal_with_cursor = replace(
+            self._manifest(),
+            status=COVERAGE_SURVEY_TERMINAL_CHECKPOINT,
+            next_viewpoint_id="viewpoint_002",
+        )
+
+        for manifest in (resumable_without_cursor, terminal_with_cursor):
+            with self.subTest(status=manifest.status):
+                with self.assertRaises(AutonomousSessionManifestError) as raised:
+                    autonomous_session_manifest_sha256(manifest)
+                self.assertEqual(raised.exception.code, "invalid_cursor")
+
     def test_parent_checkpoint_hash_and_parent_artifacts_are_validated(self):
         parent = self._manifest("parent", session_id="parent_session")
         parent_path = self.root / "parent_checkpoint.json"
@@ -312,6 +348,65 @@ class AutonomousSessionManifestTest(unittest.TestCase):
             publish_coverage_checkpoint(**kwargs)
 
         self.assertEqual(raised.exception.code, "immutable_conflict")
+
+    def test_publisher_round_trips_terminal_checkpoint(self):
+        sources = self._artifact_set("terminal")
+        session_root = self.root / "terminal_session"
+        session_root.mkdir()
+
+        published = publish_coverage_checkpoint(
+            session_root=session_root,
+            session_id="session_terminal",
+            run_mode="execute-coverage-checkpoint",
+            robot_id="tb3_1",
+            robot_profile_sha256="a" * 64,
+            calibration_profile_sha256="b" * 64,
+            physical_site_sha256="c" * 64,
+            map_bundle_sha256="d" * 64,
+            config_sha256="e" * 64,
+            completed_coverage_legs=2,
+            next_viewpoint_id=None,
+            coverage_plan_path=sources["coverage_plan"],
+            coverage_progress_path=sources["coverage_progress"],
+            survey_summary_path=sources["survey_summary"],
+            stand_registry_path=sources["stand_registry"],
+            lidar_observer_summary_path=sources["lidar_observer_summary"],
+            status=COVERAGE_SURVEY_TERMINAL_CHECKPOINT,
+        )
+
+        admitted = admit_autonomous_session_manifest(published.manifest_path)
+        self.assertEqual(admitted.status, COVERAGE_SURVEY_TERMINAL_CHECKPOINT)
+        self.assertIsNone(admitted.next_viewpoint_id)
+        self.assertFalse(admitted.motion_authorized)
+
+    def test_publisher_rejects_status_cursor_mismatch_before_snapshot(self):
+        sources = self._artifact_set("mismatch")
+        session_root = self.root / "mismatch_session"
+        session_root.mkdir()
+
+        with self.assertRaises(AutonomousSessionManifestError) as raised:
+            publish_coverage_checkpoint(
+                session_root=session_root,
+                session_id="session_mismatch",
+                run_mode="execute-coverage-checkpoint",
+                robot_id="tb3_1",
+                robot_profile_sha256="a" * 64,
+                calibration_profile_sha256="b" * 64,
+                physical_site_sha256="c" * 64,
+                map_bundle_sha256="d" * 64,
+                config_sha256="e" * 64,
+                completed_coverage_legs=2,
+                next_viewpoint_id="viewpoint_003",
+                coverage_plan_path=sources["coverage_plan"],
+                coverage_progress_path=sources["coverage_progress"],
+                survey_summary_path=sources["survey_summary"],
+                stand_registry_path=sources["stand_registry"],
+                lidar_observer_summary_path=sources["lidar_observer_summary"],
+                status=COVERAGE_SURVEY_TERMINAL_CHECKPOINT,
+            )
+
+        self.assertEqual(raised.exception.code, "invalid_cursor")
+        self.assertFalse((session_root / "checkpoints").exists())
 
 
 if __name__ == "__main__":

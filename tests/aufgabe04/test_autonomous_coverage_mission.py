@@ -14,17 +14,24 @@ from scripts.aufgabe04.navigation.stand_coverage_survey import (
 from scripts.aufgabe04.real_robot import autonomous_coverage_mission as mission
 from scripts.aufgabe04.real_robot.autonomous_coverage_mission import (
     CANDIDATE_SNAPSHOT_READY,
+    LIDAR_CHECKPOINT_READY,
     RESUME_FROM_CHECKPOINT,
     CompletedCoverageLeg,
     CoverageCheckpointComplete,
     CoverageCheckpointIdentity,
+    CoverageCompletionPolicy,
     CoverageComplete,
     CoverageContinuationPreparationError,
+    CoverageLidarCheckpointAdmissionError,
+    CoverageLidarCheckpointComplete,
     CoverageMissionConfig,
     CoverageMissionEffects,
     PreparedCoverageLeg,
     PublishedCoverageCheckpoint,
     execute_coverage_mission,
+)
+from scripts.aufgabe04.real_robot.autonomous_session_manifest import (
+    COVERAGE_SURVEY_TERMINAL_CHECKPOINT,
 )
 
 
@@ -68,6 +75,30 @@ def _config(
         initial_leg_index=initial_leg_index,
         coverage_leg_limit=leg_limit,
         parent_checkpoint_path=parent_checkpoint,
+    )
+
+
+def _exact_two_config(root: Path) -> CoverageMissionConfig:
+    identity = _identity(root)
+    identity.session_root.mkdir(parents=True)
+    survey_root = identity.session_root / "survey"
+    survey_root.mkdir()
+    return CoverageMissionConfig(
+        survey_root=survey_root,
+        plan=SimpleNamespace(
+            map_bundle_sha256=HASH_A,
+            config=SimpleNamespace(
+                exact_inspection_point_count=2,
+                expected_stand_count=5,
+            ),
+        ),
+        coverage_plan_path=survey_root / "coverage_plan.json",
+        checkpoint_identity=identity,
+        expected_stand_count=5,
+        coverage_leg_limit=2,
+        completion_policy=(
+            CoverageCompletionPolicy.EXACT_TWO_LIDAR_CHECKPOINT
+        ),
     )
 
 
@@ -141,6 +172,27 @@ def _pending_registry(count: int = 1):
             )
             for index in range(count)
         )
+    )
+
+
+def _lidar_decision(*, ready: bool = True):
+    active = tuple(f"candidate_{index}" for index in range(5))
+    return SimpleNamespace(
+        ready=ready,
+        reasons=() if ready else ("active_lidar_candidate_count_mismatch",),
+        expected_stand_count=5,
+        active_lidar_candidate_count=5 if ready else 4,
+        admitted_lidar_candidate_uids=active if ready else (),
+        all_planned_viewpoints_visited=True,
+        coverage_threshold_met=True,
+        visited_coverage_ratio=1.0,
+        visited_viewpoint_ids=("survey_vp_001", "survey_vp_002"),
+        planned_viewpoint_ids=("survey_vp_001", "survey_vp_002"),
+        population=SimpleNamespace(
+            multi_view_supported_candidate_uids=active[:2],
+            camera_queue_candidate_uids=active[:2],
+            camera_confirmed_candidate_uids=(),
+        ),
     )
 
 
@@ -273,7 +325,12 @@ class AutonomousCoverageMissionTest(unittest.TestCase):
                     read_summary=lambda path: _summary(
                         "survey_vp_001", visited=0, total=1
                     ),
-                    publish_checkpoint=_unexpected("publish_checkpoint"),
+                    publish_checkpoint=event(
+                        "checkpoint",
+                        PublishedCoverageCheckpoint(
+                            Path("terminal_checkpoint.json"), HASH_C
+                        ),
+                    ),
                     load_progress=event("load_progress", object()),
                     load_registry=event("load_registry", registry),
                     evaluate_admission=event("admit", _admission()),
@@ -291,6 +348,7 @@ class AutonomousCoverageMissionTest(unittest.TestCase):
                     "execute",
                     "capture",
                     "fuse",
+                    "checkpoint",
                     "load_progress",
                     "load_registry",
                     "admit",
@@ -306,6 +364,169 @@ class AutonomousCoverageMissionTest(unittest.TestCase):
                 outcome.coverage_status.next_required_action,
                 CANDIDATE_SNAPSHOT_READY,
             )
+
+    def test_exact_two_finishes_as_lidar_checkpoint_without_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _exact_two_config(Path(tmp))
+            events: list[str] = []
+            decision = _lidar_decision()
+            registry = SimpleNamespace(
+                candidates=tuple(
+                    SimpleNamespace(
+                        candidate_uid=f"candidate_{index}",
+                        status=(
+                            STATUS_PENDING_CAMERA
+                            if index < 2
+                            else "provisional"
+                        ),
+                    )
+                    for index in range(5)
+                )
+            )
+
+            def event(name, value):
+                def callback(*args):
+                    del args
+                    events.append(name)
+                    return value
+
+                return callback
+
+            def publish(request):
+                events.append("terminal_checkpoint")
+                self.assertIsNone(request.next_viewpoint_id)
+                self.assertEqual(
+                    request.checkpoint_status,
+                    COVERAGE_SURVEY_TERMINAL_CHECKPOINT,
+                )
+                return PublishedCoverageCheckpoint(
+                    Path("terminal_checkpoint.json"),
+                    HASH_C,
+                )
+
+            def write_lidar(path, value, checkpoint):
+                events.append("write_lidar_admission")
+                self.assertEqual(
+                    path.name,
+                    "coverage_lidar_checkpoint_admission.json",
+                )
+                self.assertIs(value, decision)
+                self.assertEqual(
+                    checkpoint,
+                    PublishedCoverageCheckpoint(
+                        Path("terminal_checkpoint.json"),
+                        HASH_C,
+                    ),
+                )
+                return HASH_A
+
+            outcome = execute_coverage_mission(
+                config,
+                CoverageMissionEffects(
+                    execute_completed_leg=event("execute", _completed()),
+                    capture_lidar_epoch=event(
+                        "capture",
+                        Path("observer.json"),
+                    ),
+                    fuse_coverage_stop=event(
+                        "fuse",
+                        _summary(None, visited=2, total=2),
+                    ),
+                    prepare_next_leg=_unexpected("prepare_next_leg"),
+                    build_snapshot=_unexpected("build_snapshot"),
+                    read_summary=lambda path: _summary(
+                        "survey_vp_002",
+                        visited=1,
+                        total=2,
+                    ),
+                    publish_checkpoint=publish,
+                    load_progress=event("load_progress", object()),
+                    load_registry=event("load_registry", registry),
+                    evaluate_admission=_unexpected("legacy_admission"),
+                    write_admission=_unexpected("legacy_write"),
+                    evaluate_lidar_checkpoint=event(
+                        "lidar_admission",
+                        decision,
+                    ),
+                    write_lidar_checkpoint_admission=write_lidar,
+                    write_snapshot=_unexpected("write_snapshot"),
+                ),
+            )
+
+            self.assertIsInstance(outcome, CoverageLidarCheckpointComplete)
+            self.assertEqual(
+                events,
+                [
+                    "execute",
+                    "capture",
+                    "fuse",
+                    "terminal_checkpoint",
+                    "load_progress",
+                    "load_registry",
+                    "lidar_admission",
+                    "write_lidar_admission",
+                ],
+            )
+            summary = outcome.to_mission_summary()
+            self.assertEqual(summary["lidar_static_map_admitted_candidate_count"], 5)
+            self.assertEqual(len(summary["camera_validation_queue_candidate_uids"]), 2)
+            self.assertIsNone(summary["candidate_snapshot"])
+            self.assertFalse(summary["camera_approach_authorized"])
+            self.assertEqual(summary["next_required_action"], LIDAR_CHECKPOINT_READY)
+
+    def test_exact_two_failure_preserves_terminal_checkpoint_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _exact_two_config(Path(tmp))
+            checkpoint = PublishedCoverageCheckpoint(
+                Path("terminal_checkpoint.json"),
+                HASH_C,
+            )
+
+            with self.assertRaises(
+                CoverageLidarCheckpointAdmissionError
+            ) as raised:
+                execute_coverage_mission(
+                    config,
+                    CoverageMissionEffects(
+                        execute_completed_leg=lambda request: _completed(),
+                        capture_lidar_epoch=lambda viewpoint_id, certificate: Path(
+                            "observer.json"
+                        ),
+                        fuse_coverage_stop=lambda viewpoint_id, observer: _summary(
+                            None,
+                            visited=2,
+                            total=2,
+                        ),
+                        prepare_next_leg=_unexpected("prepare_next_leg"),
+                        build_snapshot=_unexpected("build_snapshot"),
+                        read_summary=lambda path: _summary(
+                            "survey_vp_002",
+                            visited=1,
+                            total=2,
+                        ),
+                        publish_checkpoint=lambda request: checkpoint,
+                        load_progress=lambda path, plan: object(),
+                        load_registry=lambda path, plan: _pending_registry(4),
+                        evaluate_admission=_unexpected("legacy_admission"),
+                        write_admission=_unexpected("legacy_write"),
+                        evaluate_lidar_checkpoint=lambda plan, progress, registry: _lidar_decision(
+                            ready=False
+                        ),
+                        write_lidar_checkpoint_admission=(
+                            lambda path, decision, checkpoint: HASH_A
+                        ),
+                        write_snapshot=_unexpected("write_snapshot"),
+                    ),
+                )
+
+            fields = raised.exception.to_failure_fields()
+            self.assertTrue(fields["terminal_checkpoint_published"])
+            self.assertEqual(fields["checkpoint_manifest"], str(checkpoint.manifest_path))
+            self.assertEqual(
+                fields["lidar_checkpoint_admission_reasons"],
+                ["active_lidar_candidate_count_mismatch"],
+            )
+            self.assertFalse(fields["camera_approach_authorized"])
 
     def test_observation_or_fusion_failure_never_publishes_checkpoint(self):
         for failure_stage in ("capture", "fuse"):
@@ -383,13 +604,16 @@ class AutonomousCoverageMissionTest(unittest.TestCase):
                                 read_summary=lambda path: _summary(
                                     "survey_vp_001", visited=0, total=1
                                 ),
-                                publish_checkpoint=_unexpected(
-                                    "publish_checkpoint"
+                                publish_checkpoint=lambda request: (
+                                    PublishedCoverageCheckpoint(
+                                        Path("terminal_checkpoint.json"),
+                                        HASH_C,
+                                    )
                                 ),
                                 load_progress=lambda path, plan: object(),
                                 load_registry=lambda path, plan: registry,
                                 evaluate_admission=lambda plan, progress, registry: _admission(
-                                    ready=ready
+                                    ready=ready,
                                 ),
                                 write_admission=lambda path, decision: HASH_A,
                                 write_snapshot=_unexpected("write_snapshot"),
