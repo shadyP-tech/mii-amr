@@ -173,6 +173,9 @@ class CoverageSurveyPlanTest(unittest.TestCase):
             new_stand_survey_registry(survey),
         )
         self.assertTrue(status["coverage_complete"])
+        self.assertTrue(status["lidar_coverage_complete"])
+        self.assertTrue(status["camera_candidate_resolution_complete"])
+        self.assertTrue(status["camera_exploration_complete"])
         self.assertTrue(status["exploration_complete"])
 
     def test_plan_progress_and_registry_round_trip(self):
@@ -572,17 +575,25 @@ class StandSurveyRegistryTest(unittest.TestCase):
             config=survey.config,
         )
 
+        unresolved_status = survey_status(survey, progress, registry)
+        self.assertTrue(unresolved_status["lidar_coverage_complete"])
         self.assertFalse(
-            survey_status(survey, progress, registry)["exploration_complete"]
+            unresolved_status["camera_candidate_resolution_complete"]
         )
+        self.assertFalse(unresolved_status["camera_expected_stand_count_met"])
+        self.assertFalse(unresolved_status["camera_exploration_complete"])
+        self.assertFalse(unresolved_status["exploration_complete"])
         registry = decide_candidate(
             registry,
             registry.candidates[0].candidate_uid,
             status=STATUS_CONFIRMED,
         )
-        self.assertTrue(
-            survey_status(survey, progress, registry)["exploration_complete"]
-        )
+        confirmed_status = survey_status(survey, progress, registry)
+        self.assertEqual(confirmed_status["camera_confirmed_stand_count"], 1)
+        self.assertTrue(confirmed_status["camera_candidate_resolution_complete"])
+        self.assertTrue(confirmed_status["camera_expected_stand_count_met"])
+        self.assertTrue(confirmed_status["camera_exploration_complete"])
+        self.assertTrue(confirmed_status["exploration_complete"])
 
     def test_next_leg_is_replanned_around_provisional_keepout(self):
         survey = plan()

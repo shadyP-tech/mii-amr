@@ -190,6 +190,19 @@ class AutonomousSessionManifestTest(unittest.TestCase):
         self.assertIsNone(payload["next_viewpoint_id"])
         self.assertFalse(payload["motion_authorized"])
 
+    def test_exact_two_camera_mode_is_valid_checkpoint_provenance(self):
+        manifest = replace(
+            self._manifest(),
+            run_mode="execute-exact-two-camera",
+        )
+        path = self.root / "exact_two_camera_checkpoint.json"
+
+        digest = write_autonomous_session_manifest(path, manifest)
+
+        self.assertEqual(digest, autonomous_session_manifest_sha256(manifest))
+        self.assertEqual(admit_autonomous_session_manifest(path), manifest)
+        self.assertFalse(manifest.motion_authorized)
+
     def test_checkpoint_status_and_cursor_must_agree(self):
         resumable_without_cursor = replace(
             self._manifest(),

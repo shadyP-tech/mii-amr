@@ -33,6 +33,7 @@ AUTONOMOUS_CHECKPOINT_RUN_MODES = frozenset(
     {
         AutonomousRunMode.EXECUTE_COVERAGE_CHECKPOINT.value,
         AutonomousRunMode.EXECUTE_COVERAGE_ONLY.value,
+        AutonomousRunMode.EXECUTE_EXACT_TWO_CAMERA.value,
         AutonomousRunMode.EXECUTE_FULL.value,
         AutonomousRunMode.RESUME_NEXT_COVERAGE_LEG.value,
     }

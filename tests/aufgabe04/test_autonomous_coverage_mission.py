@@ -22,6 +22,8 @@ from scripts.aufgabe04.real_robot.autonomous_coverage_mission import (
     CoverageCompletionPolicy,
     CoverageComplete,
     CoverageContinuationPreparationError,
+    CoverageExactTwoCameraAdmissionError,
+    CoverageExactTwoCameraReady,
     CoverageLidarCheckpointAdmissionError,
     CoverageLidarCheckpointComplete,
     CoverageMissionConfig,
@@ -40,11 +42,15 @@ HASH_B = "b" * 64
 HASH_C = "c" * 64
 
 
-def _identity(root: Path) -> CoverageCheckpointIdentity:
+def _identity(
+    root: Path,
+    *,
+    run_mode: str = "execute-coverage-checkpoint",
+) -> CoverageCheckpointIdentity:
     return CoverageCheckpointIdentity(
         session_root=root / "session",
         session_id="coverage_mission_test",
-        run_mode="execute-coverage-checkpoint",
+        run_mode=run_mode,
         robot_id="turtlebot1",
         robot_profile_sha256=HASH_A,
         calibration_profile_sha256=HASH_B,
@@ -78,8 +84,19 @@ def _config(
     )
 
 
-def _exact_two_config(root: Path) -> CoverageMissionConfig:
-    identity = _identity(root)
+def _exact_two_config(
+    root: Path,
+    *,
+    camera_validation: bool = False,
+) -> CoverageMissionConfig:
+    identity = _identity(
+        root,
+        run_mode=(
+            "execute-exact-two-camera"
+            if camera_validation
+            else "execute-coverage-checkpoint"
+        ),
+    )
     identity.session_root.mkdir(parents=True)
     survey_root = identity.session_root / "survey"
     survey_root.mkdir()
@@ -97,7 +114,9 @@ def _exact_two_config(root: Path) -> CoverageMissionConfig:
         expected_stand_count=5,
         coverage_leg_limit=2,
         completion_policy=(
-            CoverageCompletionPolicy.EXACT_TWO_LIDAR_CHECKPOINT
+            CoverageCompletionPolicy.EXACT_TWO_CAMERA_VALIDATION
+            if camera_validation
+            else CoverageCompletionPolicy.EXACT_TWO_LIDAR_CHECKPOINT
         ),
     )
 
@@ -196,7 +215,54 @@ def _lidar_decision(*, ready: bool = True):
     )
 
 
+def _camera_decision(*, ready: bool = True):
+    active = tuple(f"candidate_{index}" for index in range(5))
+    return SimpleNamespace(
+        ready=ready,
+        reasons=() if ready else ("candidate_population_mismatch",),
+        expected_stand_count=5,
+        admitted_candidate_uids=active if ready else (),
+        multi_view_candidate_uids=active[:2],
+        single_view_candidate_uids=active[2:],
+        blocked_candidate_uids=() if ready else active,
+        source_registry_sha256=HASH_C,
+        active_candidate_count=5,
+        visited_coverage_ratio=1.0,
+        visited_viewpoint_ids=("survey_vp_001", "survey_vp_002"),
+        planned_viewpoint_ids=("survey_vp_001", "survey_vp_002"),
+    )
+
+
 class AutonomousCoverageMissionTest(unittest.TestCase):
+    def test_exact_two_camera_policy_requires_dedicated_run_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _exact_two_config(root, camera_validation=True)
+            self.assertEqual(
+                config.completion_policy,
+                CoverageCompletionPolicy.EXACT_TWO_CAMERA_VALIDATION,
+            )
+            self.assertEqual(
+                config.checkpoint_identity.run_mode,
+                "execute-exact-two-camera",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "requires run mode execute-exact-two-camera",
+            ):
+                CoverageMissionConfig(
+                    survey_root=config.survey_root,
+                    plan=config.plan,
+                    coverage_plan_path=config.coverage_plan_path,
+                    checkpoint_identity=_identity(root),
+                    expected_stand_count=5,
+                    coverage_leg_limit=2,
+                    completion_policy=(
+                        CoverageCompletionPolicy.EXACT_TWO_CAMERA_VALIDATION
+                    ),
+                )
+
     def test_completed_leg_requires_odom_execution_certificate(self):
         with self.assertRaises(ValueError):
             CompletedCoverageLeg(None)
@@ -449,6 +515,18 @@ class AutonomousCoverageMissionTest(unittest.TestCase):
                         decision,
                     ),
                     write_lidar_checkpoint_admission=write_lidar,
+                    evaluate_exact_two_camera_admission=_unexpected(
+                        "camera_admission"
+                    ),
+                    write_exact_two_camera_admission=_unexpected(
+                        "write_camera_admission"
+                    ),
+                    build_exact_two_camera_snapshot=_unexpected(
+                        "build_camera_snapshot"
+                    ),
+                    create_exact_two_camera_handoff=_unexpected(
+                        "create_camera_handoff"
+                    ),
                     write_snapshot=_unexpected("write_snapshot"),
                 ),
             )
@@ -472,6 +550,9 @@ class AutonomousCoverageMissionTest(unittest.TestCase):
             self.assertEqual(len(summary["camera_validation_queue_candidate_uids"]), 2)
             self.assertIsNone(summary["candidate_snapshot"])
             self.assertFalse(summary["camera_approach_authorized"])
+            self.assertTrue(summary["lidar_checkpoint_complete"])
+            self.assertFalse(summary["camera_validation_population_ready"])
+            self.assertFalse(summary["candidate_snapshot_ready"])
             self.assertEqual(summary["next_required_action"], LIDAR_CHECKPOINT_READY)
 
     def test_exact_two_failure_preserves_terminal_checkpoint_evidence(self):
@@ -527,6 +608,359 @@ class AutonomousCoverageMissionTest(unittest.TestCase):
                 ["active_lidar_candidate_count_mismatch"],
             )
             self.assertFalse(fields["camera_approach_authorized"])
+
+    def test_exact_two_camera_publishes_bound_handoff_after_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _exact_two_config(Path(tmp), camera_validation=True)
+            events: list[str] = []
+            lidar_decision = _lidar_decision()
+            camera_decision = _camera_decision()
+            registry = SimpleNamespace(
+                candidates=tuple(
+                    SimpleNamespace(
+                        candidate_uid=f"candidate_{index}",
+                        status=(
+                            STATUS_PENDING_CAMERA if index < 2 else "provisional"
+                        ),
+                    )
+                    for index in range(5)
+                )
+            )
+            snapshot = SimpleNamespace(candidates=registry.candidates)
+            handoff = SimpleNamespace(motion_authorized=False)
+            handoff_requests = []
+
+            def event(name, value):
+                def callback(*args):
+                    del args
+                    events.append(name)
+                    return value
+
+                return callback
+
+            def create_handoff(request):
+                events.append("create_camera_handoff")
+                handoff_requests.append(request)
+                return handoff
+
+            outcome = execute_coverage_mission(
+                config,
+                CoverageMissionEffects(
+                    execute_completed_leg=event("execute", _completed()),
+                    capture_lidar_epoch=event("capture", Path("observer.json")),
+                    fuse_coverage_stop=event(
+                        "fuse", _summary(None, visited=2, total=2)
+                    ),
+                    prepare_next_leg=_unexpected("prepare_next_leg"),
+                    build_snapshot=_unexpected("legacy_snapshot"),
+                    read_summary=lambda path: _summary(
+                        "survey_vp_002", visited=1, total=2
+                    ),
+                    publish_checkpoint=event(
+                        "terminal_checkpoint",
+                        PublishedCoverageCheckpoint(
+                            Path("terminal_checkpoint.json"), HASH_C
+                        ),
+                    ),
+                    load_progress=event("load_progress", object()),
+                    load_registry=event("load_registry", registry),
+                    evaluate_admission=_unexpected("legacy_admission"),
+                    write_admission=_unexpected("legacy_write"),
+                    evaluate_lidar_checkpoint=event(
+                        "lidar_admission", lidar_decision
+                    ),
+                    write_lidar_checkpoint_admission=event(
+                        "write_lidar_admission", HASH_A
+                    ),
+                    evaluate_exact_two_camera_admission=event(
+                        "camera_admission", camera_decision
+                    ),
+                    write_exact_two_camera_admission=event(
+                        "write_camera_admission", HASH_B
+                    ),
+                    exact_two_camera_admission_sha256=event(
+                        "camera_admission_sha256", HASH_B
+                    ),
+                    build_exact_two_camera_snapshot=event(
+                        "build_camera_snapshot", snapshot
+                    ),
+                    write_snapshot=event("write_snapshot", HASH_C),
+                    snapshot_sha256=event("snapshot_sha256", HASH_C),
+                    create_exact_two_camera_handoff=create_handoff,
+                    write_exact_two_camera_handoff=event(
+                        "write_camera_handoff", HASH_A
+                    ),
+                    exact_two_camera_handoff_sha256=event(
+                        "camera_handoff_sha256", HASH_A
+                    ),
+                ),
+            )
+
+            self.assertIsInstance(outcome, CoverageExactTwoCameraReady)
+            self.assertEqual(
+                events,
+                [
+                    "execute",
+                    "capture",
+                    "fuse",
+                    "terminal_checkpoint",
+                    "load_progress",
+                    "load_registry",
+                    "lidar_admission",
+                    "write_lidar_admission",
+                    "camera_admission",
+                    "write_camera_admission",
+                    "camera_admission_sha256",
+                    "build_camera_snapshot",
+                    "write_snapshot",
+                    "snapshot_sha256",
+                    "create_camera_handoff",
+                    "write_camera_handoff",
+                    "camera_handoff_sha256",
+                ],
+            )
+            self.assertEqual(len(handoff_requests), 1)
+            request = handoff_requests[0]
+            self.assertEqual(request.lidar_admission_sha256, HASH_A)
+            self.assertEqual(request.camera_admission_sha256, HASH_B)
+            self.assertEqual(request.candidate_snapshot_sha256, HASH_C)
+            summary = outcome.to_mission_summary()
+            self.assertTrue(summary["lidar_checkpoint_complete"])
+            self.assertTrue(summary["camera_validation_population_ready"])
+            self.assertTrue(summary["candidate_snapshot_ready"])
+            self.assertTrue(summary["coverage_complete"])
+            self.assertFalse(summary["motion_authorized"])
+            self.assertFalse(summary["camera_approach_authorized"])
+            self.assertEqual(
+                summary["next_required_action"],
+                mission.EXACT_TWO_CAMERA_VALIDATION_READY,
+            )
+
+    def test_exact_two_camera_rejection_preserves_both_admissions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _exact_two_config(Path(tmp), camera_validation=True)
+            registry = _pending_registry(5)
+            checkpoint = PublishedCoverageCheckpoint(
+                Path("terminal_checkpoint.json"), HASH_C
+            )
+            camera_decision = _camera_decision(ready=False)
+
+            with self.assertRaises(
+                CoverageExactTwoCameraAdmissionError
+            ) as raised:
+                execute_coverage_mission(
+                    config,
+                    CoverageMissionEffects(
+                        execute_completed_leg=lambda request: _completed(),
+                        capture_lidar_epoch=lambda viewpoint, certificate: Path(
+                            "observer.json"
+                        ),
+                        fuse_coverage_stop=lambda viewpoint, observer: _summary(
+                            None, visited=2, total=2
+                        ),
+                        prepare_next_leg=_unexpected("prepare_next_leg"),
+                        build_snapshot=_unexpected("legacy_snapshot"),
+                        read_summary=lambda path: _summary(
+                            "survey_vp_002", visited=1, total=2
+                        ),
+                        publish_checkpoint=lambda request: checkpoint,
+                        load_progress=lambda path, plan: object(),
+                        load_registry=lambda path, plan: registry,
+                        evaluate_lidar_checkpoint=lambda plan, progress, registry: _lidar_decision(),
+                        write_lidar_checkpoint_admission=lambda path, decision, checkpoint: HASH_A,
+                        evaluate_exact_two_camera_admission=lambda plan, progress, registry, lidar: camera_decision,
+                        write_exact_two_camera_admission=lambda path, decision, checkpoint, lidar_path, lidar_hash: HASH_B,
+                        exact_two_camera_admission_sha256=lambda decision: HASH_B,
+                        build_exact_two_camera_snapshot=_unexpected(
+                            "build_camera_snapshot"
+                        ),
+                        create_exact_two_camera_handoff=_unexpected(
+                            "create_camera_handoff"
+                        ),
+                    ),
+                )
+
+            fields = raised.exception.to_failure_fields()
+            self.assertEqual(fields["checkpoint_manifest_sha256"], HASH_C)
+            self.assertEqual(fields["lidar_checkpoint_admission_sha256"], HASH_A)
+            self.assertEqual(fields["camera_validation_admission_sha256"], HASH_B)
+            self.assertFalse(fields["camera_validation_population_ready"])
+            self.assertFalse(fields["candidate_snapshot_ready"])
+            self.assertFalse(fields["motion_authorized"])
+
+    def test_exact_two_camera_rejects_snapshot_and_handoff_hash_tamper(self):
+        cases = (
+            ("snapshot", "candidate snapshot persistence hash mismatch"),
+            ("handoff", "camera handoff persistence hash mismatch"),
+        )
+        for stage, message in cases:
+            with self.subTest(stage=stage):
+                with tempfile.TemporaryDirectory() as tmp:
+                    config = _exact_two_config(
+                        Path(tmp), camera_validation=True
+                    )
+                    registry = _pending_registry(5)
+                    snapshot = SimpleNamespace(candidates=registry.candidates)
+                    events: list[str] = []
+
+                    def record(name, value):
+                        def callback(*args):
+                            del args
+                            events.append(name)
+                            return value
+
+                        return callback
+
+                    snapshot_written = HASH_A
+                    snapshot_computed = HASH_B if stage == "snapshot" else HASH_A
+                    handoff_written = HASH_B
+                    handoff_computed = HASH_C
+
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        execute_coverage_mission(
+                            config,
+                            CoverageMissionEffects(
+                                execute_completed_leg=lambda request: _completed(),
+                                capture_lidar_epoch=lambda viewpoint, certificate: Path(
+                                    "observer.json"
+                                ),
+                                fuse_coverage_stop=lambda viewpoint, observer: _summary(
+                                    None, visited=2, total=2
+                                ),
+                                prepare_next_leg=_unexpected("prepare_next_leg"),
+                                build_snapshot=_unexpected("legacy_snapshot"),
+                                read_summary=lambda path: _summary(
+                                    "survey_vp_002", visited=1, total=2
+                                ),
+                                publish_checkpoint=lambda request: PublishedCoverageCheckpoint(
+                                    Path("terminal_checkpoint.json"), HASH_C
+                                ),
+                                load_progress=lambda path, plan: object(),
+                                load_registry=lambda path, plan: registry,
+                                evaluate_lidar_checkpoint=lambda plan, progress, registry: _lidar_decision(),
+                                write_lidar_checkpoint_admission=lambda path, decision, checkpoint: HASH_A,
+                                evaluate_exact_two_camera_admission=lambda plan, progress, registry, lidar: _camera_decision(),
+                                write_exact_two_camera_admission=lambda path, decision, checkpoint, lidar_path, lidar_hash: HASH_B,
+                                exact_two_camera_admission_sha256=lambda decision: HASH_B,
+                                build_exact_two_camera_snapshot=lambda plan, registry, decision, snapshot_id: snapshot,
+                                write_snapshot=record(
+                                    "write_snapshot", snapshot_written
+                                ),
+                                snapshot_sha256=record(
+                                    "snapshot_sha256", snapshot_computed
+                                ),
+                                create_exact_two_camera_handoff=record(
+                                    "create_handoff", SimpleNamespace()
+                                ),
+                                write_exact_two_camera_handoff=record(
+                                    "write_handoff", handoff_written
+                                ),
+                                exact_two_camera_handoff_sha256=record(
+                                    "handoff_sha256", handoff_computed
+                                ),
+                            ),
+                        )
+
+                    if stage == "snapshot":
+                        self.assertEqual(
+                            events,
+                            ["write_snapshot", "snapshot_sha256"],
+                        )
+                    else:
+                        self.assertEqual(
+                            events,
+                            [
+                                "write_snapshot",
+                                "snapshot_sha256",
+                                "create_handoff",
+                                "write_handoff",
+                                "handoff_sha256",
+                            ],
+                        )
+
+    def test_exact_two_camera_default_handoff_binds_outer_lidar_artifact_hash(self):
+        # Reuse the canonical exact-two fixture owned by the admission module
+        # tests so this is a real cross-layer contract test, not another
+        # SimpleNamespace approximation of its immutable schemas.
+        from tests.aufgabe04.test_exact_two_camera_admission import _ready_inputs
+
+        plan, progress, registry, lidar_decision, _ = _ready_inputs()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            identity = _identity(
+                root,
+                run_mode="execute-exact-two-camera",
+            )
+            identity.session_root.mkdir(parents=True)
+            survey_root = identity.session_root / "survey"
+            survey_root.mkdir()
+            config = CoverageMissionConfig(
+                survey_root=survey_root,
+                plan=plan,
+                coverage_plan_path=survey_root / "coverage_plan.json",
+                checkpoint_identity=identity,
+                expected_stand_count=5,
+                coverage_leg_limit=2,
+                completion_policy=(
+                    CoverageCompletionPolicy.EXACT_TWO_CAMERA_VALIDATION
+                ),
+            )
+            terminal = PublishedCoverageCheckpoint(
+                identity.session_root / "terminal_checkpoint.json",
+                HASH_C,
+            )
+
+            outcome = execute_coverage_mission(
+                config,
+                CoverageMissionEffects(
+                    execute_completed_leg=lambda request: _completed(),
+                    capture_lidar_epoch=lambda viewpoint, certificate: Path(
+                        "observer.json"
+                    ),
+                    fuse_coverage_stop=lambda viewpoint, observer: _summary(
+                        None, visited=2, total=2
+                    ),
+                    prepare_next_leg=_unexpected("prepare_next_leg"),
+                    build_snapshot=_unexpected("legacy_snapshot"),
+                    read_summary=lambda path: _summary(
+                        "survey_vp_002", visited=1, total=2
+                    ),
+                    publish_checkpoint=lambda request: terminal,
+                    load_progress=lambda path, loaded_plan: progress,
+                    load_registry=lambda path, loaded_plan: registry,
+                ),
+            )
+
+            self.assertIsInstance(outcome, CoverageExactTwoCameraReady)
+            self.assertEqual(outcome.lidar_decision, lidar_decision)
+            self.assertNotEqual(
+                outcome.lidar_checkpoint_admission_sha256,
+                outcome.camera_validation_decision.lidar_checkpoint_sha256,
+            )
+            self.assertEqual(
+                outcome.camera_handoff.lidar_admission_sha256,
+                outcome.lidar_checkpoint_admission_sha256,
+            )
+            self.assertEqual(
+                outcome.camera_handoff.lidar_checkpoint_sha256,
+                outcome.camera_validation_decision.lidar_checkpoint_sha256,
+            )
+            summary = outcome.to_mission_summary()
+            self.assertEqual(summary["stand_count"], 5)
+            self.assertEqual(len(summary["multi_view_candidate_uids"]), 2)
+            self.assertEqual(
+                len(
+                    summary[
+                        "single_view_requires_camera_validation_candidate_uids"
+                    ]
+                ),
+                3,
+            )
+            self.assertTrue(summary["lidar_checkpoint_complete"])
+            self.assertTrue(summary["camera_validation_population_ready"])
+            self.assertTrue(summary["candidate_snapshot_ready"])
+            self.assertTrue(outcome.candidate_snapshot_path.is_file())
+            self.assertTrue(outcome.camera_handoff_path.is_file())
 
     def test_observation_or_fusion_failure_never_publishes_checkpoint(self):
         for failure_stage in ("capture", "fuse"):

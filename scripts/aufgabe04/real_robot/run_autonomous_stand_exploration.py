@@ -143,6 +143,7 @@ from scripts.aufgabe04.real_robot.autonomous_coverage_mission import (
     CoverageCheckpointIdentity,
     CoverageCompletionPolicy,
     CoverageComplete,
+    CoverageExactTwoCameraReady,
     CoverageLidarCheckpointComplete,
     CoverageMissionConfig,
     CoverageMissionEffects,
@@ -171,6 +172,9 @@ from scripts.aufgabe04.real_robot.autonomous_modes import (
     resolve_autonomous_run_mode,
     validate_autonomous_viewpoint_scope,
     validate_session_id_mode_label,
+)
+from scripts.aufgabe04.real_robot.autonomous_mission_reporting import (
+    build_completed_camera_mission_summary as _completed_camera_mission_summary,
 )
 from scripts.aufgabe04.real_robot.autonomous_post_observation import (
     PostObservationLocalizationConfig,
@@ -213,6 +217,13 @@ def _coverage_completion_policy(
 
     if not isinstance(mode, AutonomousRunMode):
         raise ValueError("autonomous run mode is required")
+    if mode is AutonomousRunMode.EXECUTE_EXACT_TWO_CAMERA:
+        if exact_inspection_point_count != 2:
+            raise ValueError(
+                "execute-exact-two-camera requires exactly two inspection "
+                "points"
+            )
+        return CoverageCompletionPolicy.EXACT_TWO_CAMERA_VALIDATION
     if mode in {
         AutonomousRunMode.EXECUTE_COVERAGE_CHECKPOINT,
         AutonomousRunMode.RESUME_NEXT_COVERAGE_LEG,
@@ -1426,10 +1437,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=(2,),
         default=None,
         help=(
-            "Diagnostic-only: select exactly two complementary centerline "
-            "LiDAR inspection points. Omit this for robust five-stand full "
-            "exploration so stop spacing determines the complete viewpoint "
-            "set; candidate admission remains fail closed either way."
+            "Select exactly two complementary centerline LiDAR inspection "
+            "points. This is required by execute-exact-two-camera and is "
+            "also supported by the LiDAR-only checkpoint workflow. Omit it "
+            "for execute-full so stop spacing determines the redundant "
+            "coverage set."
         ),
     )
     parser.add_argument("--lidar-epoch-sec", type=float, default=8.0)
@@ -1459,7 +1471,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help=(
             "Coverage checkpoint leg count. A positive value is required by "
-            "--run-mode execute-coverage-checkpoint; use zero for other modes."
+            "--run-mode execute-coverage-checkpoint. The dedicated exact-two "
+            "camera mode accepts zero/omitted or exactly two and resolves to "
+            "two; use zero for other modes."
         ),
     )
     parser.add_argument(
@@ -1888,11 +1902,7 @@ def main(argv=None) -> int:
         )
 
         authorization_scope = resolved_run_mode.authorization_scope_text
-        coverage_scoped_mode = resolved_run_mode.mode in {
-            AutonomousRunMode.EXECUTE_COVERAGE_CHECKPOINT,
-            AutonomousRunMode.EXECUTE_COVERAGE_ONLY,
-            AutonomousRunMode.RESUME_NEXT_COVERAGE_LEG,
-        }
+        coverage_scoped_mode = not resolved_run_mode.camera_phase_enabled
         authorized_leg_kinds = (
             (MissionLegKind.COVERAGE,)
             if coverage_scoped_mode
@@ -2290,23 +2300,45 @@ def main(argv=None) -> int:
             _write_json(session_root / "mission_summary.json", result)
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0
-        if not isinstance(coverage_phase, CoverageComplete):
+        exact_two_camera_handoff_path: Path | None = None
+        exact_two_camera_handoff_sha256: str | None = None
+        exact_two_camera_summary: dict[str, object] | None = None
+        if isinstance(coverage_phase, CoverageExactTwoCameraReady):
+            if (
+                resolved_run_mode.mode
+                is not AutonomousRunMode.EXECUTE_EXACT_TWO_CAMERA
+            ):
+                raise RuntimeError(
+                    "exact-two camera handoff returned outside its run mode"
+                )
+            snapshot = coverage_phase.candidate_snapshot
+            snapshot_path = coverage_phase.candidate_snapshot_path
+            snapshot_sha256 = coverage_phase.candidate_snapshot_sha256
+            coverage_candidate_admission_path = (
+                coverage_phase.camera_validation_admission_path
+            )
+            coverage_candidate_admission_sha256 = (
+                coverage_phase.camera_validation_admission_sha256
+            )
+            exact_two_camera_handoff_path = coverage_phase.camera_handoff_path
+            exact_two_camera_handoff_sha256 = (
+                coverage_phase.camera_handoff_sha256
+            )
+            exact_two_camera_summary = coverage_phase.to_mission_summary()
+        elif isinstance(coverage_phase, CoverageComplete):
+            snapshot = coverage_phase.candidate_snapshot
+            snapshot_path = coverage_phase.candidate_snapshot_path
+            snapshot_sha256 = coverage_phase.candidate_snapshot_sha256
+            coverage_candidate_admission_path = (
+                coverage_phase.coverage_candidate_admission_path
+            )
+            coverage_candidate_admission_sha256 = (
+                coverage_phase.coverage_candidate_admission_sha256
+            )
+        else:
             raise RuntimeError("coverage transaction returned an unknown outcome")
 
-        snapshot = coverage_phase.candidate_snapshot
-        snapshot_path = coverage_phase.candidate_snapshot_path
-        coverage_candidate_admission_path = (
-            coverage_phase.coverage_candidate_admission_path
-        )
-        coverage_candidate_admission_sha256 = (
-            coverage_phase.coverage_candidate_admission_sha256
-        )
-
-        if resolved_run_mode.mode in {
-            AutonomousRunMode.EXECUTE_COVERAGE_CHECKPOINT,
-            AutonomousRunMode.EXECUTE_COVERAGE_ONLY,
-            AutonomousRunMode.RESUME_NEXT_COVERAGE_LEG,
-        }:
+        if not resolved_run_mode.camera_phase_enabled:
             result = coverage_phase.to_mission_summary()
             _write_json(session_root / "mission_summary.json", result)
             print(json.dumps(result, indent=2, sort_keys=True))
@@ -2340,6 +2372,12 @@ def main(argv=None) -> int:
                 mission_leg_motion_authorization_json=(
                     mission_leg_motion_authorization_json
                 ),
+                exact_two_camera_handoff_path=(
+                    exact_two_camera_handoff_path
+                ),
+                exact_two_camera_handoff_sha256=(
+                    exact_two_camera_handoff_sha256
+                ),
             ),
             CandidateApproachEffects(
                 read_current_pose=lambda: read_current_amcl_pose(
@@ -2362,22 +2400,27 @@ def main(argv=None) -> int:
                 ),
             ),
         )
-        result = {
-            "schema_version": 1,
-            "status": "complete",
-            "run_mode": args.run_mode,
-            "motion_published": True,
-            "session_id": args.session_id,
-            "candidate_snapshot": str(snapshot_path),
-            "survey_root": str(survey_root),
-            "coverage_candidate_admission": str(
+        result = _completed_camera_mission_summary(
+            run_mode=args.run_mode,
+            session_id=args.session_id,
+            snapshot_path=snapshot_path,
+            snapshot_sha256=snapshot_sha256,
+            survey_root=survey_root,
+            candidate_population_admission_path=(
                 coverage_candidate_admission_path
             ),
-            "coverage_candidate_admission_sha256": (
+            candidate_population_admission_sha256=(
                 coverage_candidate_admission_sha256
             ),
-        }
-        result.update(candidate_phase.to_mission_summary_fields())
+            candidate_phase_fields=(
+                candidate_phase.to_mission_summary_fields()
+            ),
+            exact_two_coverage_summary=exact_two_camera_summary,
+            exact_two_camera_handoff_path=exact_two_camera_handoff_path,
+            exact_two_camera_handoff_sha256=(
+                exact_two_camera_handoff_sha256
+            ),
+        )
         _write_json(session_root / "mission_summary.json", result)
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0

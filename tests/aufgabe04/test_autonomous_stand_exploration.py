@@ -203,6 +203,80 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             autonomous_wrapper.CoverageCompletionPolicy.EXACT_TWO_LIDAR_CHECKPOINT,
         )
 
+    def test_exact_two_camera_mode_selects_camera_validation_policy(self):
+        self.assertIs(
+            autonomous_wrapper._coverage_completion_policy(
+                autonomous_wrapper.AutonomousRunMode.EXECUTE_EXACT_TWO_CAMERA,
+                exact_inspection_point_count=2,
+            ),
+            autonomous_wrapper.CoverageCompletionPolicy.EXACT_TWO_CAMERA_VALIDATION,
+        )
+        with self.assertRaisesRegex(ValueError, "requires exactly two"):
+            autonomous_wrapper._coverage_completion_policy(
+                autonomous_wrapper.AutonomousRunMode.EXECUTE_EXACT_TWO_CAMERA,
+                exact_inspection_point_count=None,
+            )
+
+    def test_exact_two_camera_final_summary_separates_phase_completion(self):
+        summary = autonomous_wrapper._completed_camera_mission_summary(
+            run_mode="execute-exact-two-camera",
+            session_id="exact_two_camera_001",
+            snapshot_path=Path("session/candidate_snapshot.json"),
+            snapshot_sha256="a" * 64,
+            survey_root=Path("session/coverage"),
+            candidate_population_admission_path=Path(
+                "session/coverage_exact_two_camera_admission.json"
+            ),
+            candidate_population_admission_sha256="b" * 64,
+            candidate_phase_fields={
+                "stand_count": 5,
+                "stand_facing_catalog": "session/catalog.json",
+                "stand_facing_catalog_sha256": "c" * 64,
+                "station_identity_registry": "session/identities.json",
+                "station_identity_registry_sha256": "d" * 64,
+                "motion_authorized": False,
+            },
+            exact_two_coverage_summary={
+                "lidar_checkpoint_admission": "session/lidar.json",
+                "lidar_checkpoint_admission_sha256": "e" * 64,
+                "camera_validation_admission": "session/camera.json",
+                "camera_validation_admission_sha256": "f" * 64,
+                "camera_validation_candidate_uids": [
+                    f"survey_candidate_{index:04d}" for index in range(1, 6)
+                ],
+                "multi_view_candidate_uids": [
+                    "survey_candidate_0001",
+                    "survey_candidate_0002",
+                ],
+                "single_view_requires_camera_validation_candidate_uids": [
+                    "survey_candidate_0003",
+                    "survey_candidate_0004",
+                    "survey_candidate_0005",
+                ],
+            },
+            exact_two_camera_handoff_path=Path("session/handoff.json"),
+            exact_two_camera_handoff_sha256="1" * 64,
+        )
+
+        self.assertTrue(summary["lidar_coverage_complete"])
+        self.assertTrue(summary["lidar_checkpoint_complete"])
+        self.assertTrue(summary["camera_validation_population_ready"])
+        self.assertTrue(summary["candidate_snapshot_ready"])
+        self.assertTrue(summary["camera_approach_executed"])
+        self.assertTrue(summary["camera_validation_complete"])
+        self.assertTrue(summary["camera_exploration_complete"])
+        self.assertTrue(summary["exploration_complete"])
+        self.assertFalse(summary["camera_approach_authorized"])
+        self.assertFalse(summary["motion_authorized"])
+        self.assertEqual(
+            len(
+                summary[
+                    "single_view_requires_camera_validation_candidate_uids"
+                ]
+            ),
+            3,
+        )
+
     @staticmethod
     def _profile():
         return SimpleNamespace(
@@ -890,6 +964,39 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         self.assertEqual(args.uncertainty_sigma_multiplier, 2.0)
         self.assertFalse(resolved.stop_after_coverage)
         self.assertTrue(resolved.execute)
+
+    def test_exact_two_camera_options_enable_camera_phase(self):
+        args = build_parser().parse_args(
+            [
+                "--robot-profile",
+                "robot.json",
+                "--camera-calibration",
+                "camera.json",
+                "--physical-site",
+                "site.json",
+                "--coverage-leg-limit",
+                "2",
+                "--exact-inspection-point-count",
+                "2",
+                "--run-mode",
+                "execute-exact-two-camera",
+            ]
+        )
+        resolved = autonomous_wrapper.resolve_autonomous_run_mode(
+            run_mode=args.run_mode,
+            execute=args.execute,
+            coverage_leg_limit=args.coverage_leg_limit,
+            stop_after_coverage=args.stop_after_coverage,
+        )
+
+        autonomous_wrapper.validate_autonomous_viewpoint_scope(
+            resolved,
+            exact_inspection_point_count=args.exact_inspection_point_count,
+        )
+        self.assertEqual(resolved.coverage_leg_limit, 2)
+        self.assertTrue(resolved.camera_phase_enabled)
+        self.assertTrue(resolved.execute)
+        self.assertFalse(resolved.stop_after_coverage)
 
     def test_site_count_mismatch_fails_before_session_and_run_prompt(self):
         with tempfile.TemporaryDirectory() as tmp:

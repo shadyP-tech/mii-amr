@@ -2,8 +2,9 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -21,8 +22,10 @@ from scripts.aufgabe04.real_robot.autonomous_candidate_approach import (
     CandidateApproachConfig,
     CandidateApproachEffects,
     CandidateObservation,
+    FacingValidationRequest,
     execute_candidate_approach_phase,
     nearest_candidate,
+    validate_facing_pose,
 )
 from scripts.aufgabe04.real_robot.autonomous_child_runner import MotionLegOutcome
 from scripts.aufgabe04.stations.candidate_snapshot import (
@@ -466,6 +469,29 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             self.assertFalse(
                 (config.session_root / "stand_facing_catalog.json").exists()
             )
+
+    def test_facing_validation_rejects_cross_candidate_recommendation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate = self._candidate("candidate_1", 0.2, 0.0)
+            config = self._config(root, (candidate,))
+            recommendation_path = root / "recommendation.json"
+
+            with patch(
+                "scripts.aufgabe04.real_robot."
+                "autonomous_candidate_approach.load_recommendation",
+                return_value=SimpleNamespace(stand_id="candidate_2"),
+            ):
+                with self.assertRaisesRegex(ValueError, "stand_id mismatch"):
+                    validate_facing_pose(
+                        FacingValidationRequest(
+                            config=config,
+                            candidate=candidate,
+                            recommendation_path=recommendation_path,
+                            current_pose=Pose2D(0.0, 0.0, 0.0),
+                            output_dir=root / "facing",
+                        )
+                    )
 
 
 if __name__ == "__main__":

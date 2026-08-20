@@ -83,11 +83,15 @@ multi-view, camera-queue, confirmed, and rejected states separate. It sets
 `camera_approach_authorized=false`, creates no candidate snapshot, and cannot
 be resumed as a motion checkpoint.
 
-The existing camera-ready gate remains stricter: only `pending_camera`
-candidates enter its approach snapshot. A provisional single-view candidate
-is therefore evidence for the LiDAR-only checkpoint, not authorization to
-drive toward that candidate. Exact-two remains disallowed in `execute-full`
-and `execute-coverage-only` modes.
+Use the separate `execute-exact-two-camera` mode when the intended workflow is
+two LiDAR stops followed by camera validation of all expected candidates. It
+requires exactly two inspection points and exactly the physical-site stand
+count. It writes a content-hashed handoff that binds the terminal coverage
+checkpoint, LiDAR admission, live registry, and frozen candidate snapshot.
+Multi-view `pending_camera` candidates and eligible single-view `provisional`
+candidates remain distinct in that evidence; a provisional candidate can be
+resolved only by the bound camera phase. The generic `execute-full` admission
+is unchanged and still accepts only its multi-view `pending_camera` queue.
 
 The generated leg is deliberately marked `motion_authorized: false`. Do not
 feed it directly to the real-robot segment runner. Real survey execution still
@@ -150,10 +154,11 @@ This command:
 - adds every non-rejected candidate as a keepout;
 - writes a new A* leg to the next reachable unvisited viewpoint.
 
-The survey is not complete merely because no candidate is pending.
-`exploration_complete` becomes true only when the coverage threshold passes,
-there are no provisional or pending-camera candidates, and an optional
-`--expected-stand-count` gate matches.
+The survey is not complete merely because no candidate is pending. Summary
+fields distinguish `lidar_coverage_complete` from
+`camera_exploration_complete`; the legacy `exploration_complete` is an alias
+for camera completion and therefore remains false at a successful LiDAR-only
+checkpoint.
 
 ### 4. Record a stopped camera/operator decision
 

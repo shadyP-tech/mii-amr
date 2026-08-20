@@ -26,6 +26,24 @@ from scripts.aufgabe04.navigation.coverage_candidate_lifecycle import (
     evaluate_exact_two_lidar_checkpoint,
     exact_two_lidar_checkpoint_evidence,
 )
+from scripts.aufgabe04.real_robot.autonomous_exact_two_completion import (
+    COVERAGE_EXACT_TWO_CAMERA_READY,
+    EXACT_TWO_CAMERA_VALIDATION_READY,
+    CoverageExactTwoCameraAdmissionError,
+    CoverageExactTwoCameraHandoffRequest,
+    CoverageExactTwoCameraReady,
+    ExactTwoCameraAdmissionDecision,
+    ExactTwoCameraCompletionRequest,
+    ExactTwoCameraHandoffArtifact,
+    build_exact_two_camera_snapshot_effect,
+    complete_exact_two_camera,
+    create_exact_two_camera_handoff,
+    evaluate_exact_two_camera_admission,
+    exact_two_camera_admission_sha256,
+    exact_two_camera_handoff_sha256,
+    write_bound_exact_two_camera_admission,
+    write_exact_two_camera_handoff,
+)
 from scripts.aufgabe04.navigation.stand_coverage_survey import (
     STATUS_CONFIRMED,
     STATUS_PENDING_CAMERA,
@@ -61,6 +79,7 @@ class CoverageCompletionPolicy(str, Enum):
 
     CAMERA_READY = "camera-ready"
     EXACT_TWO_LIDAR_CHECKPOINT = "exact-two-lidar-checkpoint"
+    EXACT_TWO_CAMERA_VALIDATION = "exact-two-camera-validation"
 
 
 @dataclass(frozen=True)
@@ -117,26 +136,40 @@ class CoverageMissionConfig:
             raise ValueError("coverage plan and checkpoint map bundle differ")
         if not isinstance(self.completion_policy, CoverageCompletionPolicy):
             raise ValueError("coverage completion policy must be explicit")
-        if (
-            self.completion_policy
-            is CoverageCompletionPolicy.EXACT_TWO_LIDAR_CHECKPOINT
-        ):
+        if self.completion_policy in {
+            CoverageCompletionPolicy.EXACT_TWO_LIDAR_CHECKPOINT,
+            CoverageCompletionPolicy.EXACT_TWO_CAMERA_VALIDATION,
+        }:
             if self.plan.config.exact_inspection_point_count != 2:
                 raise ValueError(
-                    "exact-two LiDAR checkpoint policy requires an exact-two plan"
-                )
-            if self.checkpoint_identity.run_mode not in {
-                "execute-coverage-checkpoint",
-                "resume-next-coverage-leg",
-            }:
-                raise ValueError(
-                    "exact-two LiDAR completion is limited to coverage "
-                    "checkpoint execution or its one-leg resume"
+                    "exact-two completion policy requires an exact-two plan"
                 )
             if self.plan.config.expected_stand_count != self.expected_stand_count:
                 raise ValueError(
-                    "exact-two LiDAR checkpoint count differs from the frozen plan"
+                    "exact-two completion count differs from the frozen plan"
                 )
+        if (
+            self.completion_policy
+            is CoverageCompletionPolicy.EXACT_TWO_LIDAR_CHECKPOINT
+            and self.checkpoint_identity.run_mode
+            not in {
+                "execute-coverage-checkpoint",
+                "resume-next-coverage-leg",
+            }
+        ):
+            raise ValueError(
+                "exact-two LiDAR completion is limited to coverage "
+                "checkpoint execution or its one-leg resume"
+            )
+        if (
+            self.completion_policy
+            is CoverageCompletionPolicy.EXACT_TWO_CAMERA_VALIDATION
+            and self.checkpoint_identity.run_mode != "execute-exact-two-camera"
+        ):
+            raise ValueError(
+                "exact-two camera validation requires run mode "
+                "execute-exact-two-camera"
+            )
 
 
 @dataclass(frozen=True)
@@ -347,6 +380,9 @@ class CoverageCheckpointComplete:
             "checkpoint_parent_manifest": (
                 None if self.parent_checkpoint_path is None else str(self.parent_checkpoint_path)
             ),
+            "lidar_checkpoint_complete": False,
+            "camera_validation_population_ready": False,
+            "candidate_snapshot_ready": False,
             **self.coverage_status.to_summary_fields(),
         }
 
@@ -415,6 +451,9 @@ class CoverageLidarCheckpointComplete:
                 population.camera_confirmed_candidate_uids
             ),
             "candidate_snapshot": None,
+            "lidar_checkpoint_complete": True,
+            "camera_validation_population_ready": False,
+            "candidate_snapshot_ready": False,
             **self.coverage_status.to_summary_fields(),
         }
 
@@ -527,6 +566,9 @@ class CoverageComplete:
             "terminal_checkpoint_manifest_sha256": (
                 self.terminal_checkpoint_manifest_sha256
             ),
+            "lidar_checkpoint_complete": True,
+            "camera_validation_population_ready": True,
+            "candidate_snapshot_ready": True,
             **self.coverage_status.to_summary_fields(),
         }
 
@@ -641,6 +683,47 @@ class CoverageMissionEffects:
         ],
         str,
     ] = _write_lidar_checkpoint_admission
+    evaluate_exact_two_camera_admission: Callable[
+        [
+            CoverageSurveyPlan,
+            CoverageSurveyProgress,
+            StandSurveyRegistry,
+            ExactTwoLidarCheckpointDecision,
+        ],
+        ExactTwoCameraAdmissionDecision,
+    ] = evaluate_exact_two_camera_admission
+    write_exact_two_camera_admission: Callable[
+        [
+            Path,
+            ExactTwoCameraAdmissionDecision,
+            PublishedCoverageCheckpoint,
+            Path,
+            str,
+        ],
+        str,
+    ] = write_bound_exact_two_camera_admission
+    exact_two_camera_admission_sha256: Callable[
+        [ExactTwoCameraAdmissionDecision], str
+    ] = exact_two_camera_admission_sha256
+    build_exact_two_camera_snapshot: Callable[
+        [
+            CoverageSurveyPlan,
+            StandSurveyRegistry,
+            ExactTwoCameraAdmissionDecision,
+            str,
+        ],
+        CandidateSnapshot,
+    ] = build_exact_two_camera_snapshot_effect
+    create_exact_two_camera_handoff: Callable[
+        [CoverageExactTwoCameraHandoffRequest],
+        ExactTwoCameraHandoffArtifact,
+    ] = create_exact_two_camera_handoff
+    write_exact_two_camera_handoff: Callable[
+        [Path, ExactTwoCameraHandoffArtifact], str
+    ] = write_exact_two_camera_handoff
+    exact_two_camera_handoff_sha256: Callable[
+        [ExactTwoCameraHandoffArtifact], str
+    ] = exact_two_camera_handoff_sha256
     write_snapshot: Callable[[Path, CandidateSnapshot], str] = write_candidate_snapshot
     snapshot_sha256: Callable[[CandidateSnapshot], str] = candidate_snapshot_sha256
 
@@ -648,7 +731,12 @@ class CoverageMissionEffects:
 def execute_coverage_mission(
     config: CoverageMissionConfig,
     effects: CoverageMissionEffects,
-) -> CoverageCheckpointComplete | CoverageLidarCheckpointComplete | CoverageComplete:
+) -> (
+    CoverageCheckpointComplete
+    | CoverageLidarCheckpointComplete
+    | CoverageExactTwoCameraReady
+    | CoverageComplete
+):
     """Run coverage observation/checkpoint/admission around an injected leg FSM."""
 
     leg_index = config.initial_leg_index
@@ -661,6 +749,14 @@ def execute_coverage_mission(
     lidar_admission_path = (
         config.checkpoint_identity.session_root
         / "coverage_lidar_checkpoint_admission.json"
+    )
+    camera_admission_path = (
+        config.checkpoint_identity.session_root
+        / "coverage_exact_two_camera_admission.json"
+    )
+    camera_handoff_path = (
+        config.checkpoint_identity.session_root
+        / "coverage_exact_two_camera_handoff.json"
     )
     snapshot_path = config.checkpoint_identity.session_root / "candidate_snapshot.json"
     summary = _validated_summary(effects.read_summary(summary_path))
@@ -790,54 +886,23 @@ def execute_coverage_mission(
 
     progress = effects.load_progress(progress_path, config.plan)
     registry = effects.load_registry(registry_path, config.plan)
-    if (
-        config.completion_policy
-        is CoverageCompletionPolicy.EXACT_TWO_LIDAR_CHECKPOINT
-    ):
-        if terminal_checkpoint is None:
-            raise RuntimeError(
-                "exact-two LiDAR completion requires a terminal checkpoint "
-                "published after the final leg"
-            )
-        lidar_decision = effects.evaluate_lidar_checkpoint(
-            config.plan,
-            progress,
-            registry,
-        )
-        lidar_admission_hash = effects.write_lidar_checkpoint_admission(
-            lidar_admission_path,
-            lidar_decision,
-            terminal_checkpoint,
-        )
-        _require_sha256(
-            lidar_admission_hash,
-            "lidar_checkpoint_admission_sha256",
-        )
-        if not lidar_decision.ready:
-            raise CoverageLidarCheckpointAdmissionError(
-                checkpoint=terminal_checkpoint,
-                checkpoint_parent_manifest=terminal_checkpoint_parent,
-                admission_path=lidar_admission_path,
-                admission_sha256=lidar_admission_hash,
-                decision=lidar_decision,
-                completed_coverage_legs=leg_index,
-                legs_completed_this_run=legs_completed_this_run,
-            )
-        return CoverageLidarCheckpointComplete(
-            run_mode=config.checkpoint_identity.run_mode,
+    if config.completion_policy in {
+        CoverageCompletionPolicy.EXACT_TWO_LIDAR_CHECKPOINT,
+        CoverageCompletionPolicy.EXACT_TWO_CAMERA_VALIDATION,
+    }:
+        return _finish_exact_two_completion(
+            config=config,
+            effects=effects,
+            progress=progress,
+            registry=registry,
+            snapshot_path=snapshot_path,
+            lidar_admission_path=lidar_admission_path,
+            camera_admission_path=camera_admission_path,
+            camera_handoff_path=camera_handoff_path,
+            terminal_checkpoint=terminal_checkpoint,
+            terminal_checkpoint_parent=terminal_checkpoint_parent,
             completed_coverage_legs=leg_index,
             legs_completed_this_run=legs_completed_this_run,
-            survey_root=config.survey_root,
-            checkpoint_manifest=terminal_checkpoint.manifest_path,
-            checkpoint_manifest_sha256=terminal_checkpoint.manifest_sha256,
-            checkpoint_parent_manifest=terminal_checkpoint_parent,
-            lidar_checkpoint_admission_path=lidar_admission_path,
-            lidar_checkpoint_admission_sha256=lidar_admission_hash,
-            decision=lidar_decision,
-            coverage_status=_lidar_checkpoint_status(
-                lidar_decision,
-                registry,
-            ),
         )
 
     admission = effects.evaluate_admission(config.plan, progress, registry)
@@ -894,6 +959,100 @@ def execute_coverage_mission(
             if terminal_checkpoint is None
             else terminal_checkpoint.manifest_sha256
         ),
+    )
+
+
+def _finish_exact_two_completion(
+    *,
+    config: CoverageMissionConfig,
+    effects: CoverageMissionEffects,
+    progress: CoverageSurveyProgress,
+    registry: StandSurveyRegistry,
+    snapshot_path: Path,
+    lidar_admission_path: Path,
+    camera_admission_path: Path,
+    camera_handoff_path: Path,
+    terminal_checkpoint: PublishedCoverageCheckpoint | None,
+    terminal_checkpoint_parent: Path | None,
+    completed_coverage_legs: int,
+    legs_completed_this_run: int,
+) -> CoverageLidarCheckpointComplete | CoverageExactTwoCameraReady:
+    """Finish one exact-two policy in strict evidence-publication order."""
+
+    if terminal_checkpoint is None:
+        raise RuntimeError(
+            "exact-two completion requires a terminal checkpoint published "
+            "after the final leg"
+        )
+    lidar_decision = effects.evaluate_lidar_checkpoint(
+        config.plan,
+        progress,
+        registry,
+    )
+    lidar_admission_hash = effects.write_lidar_checkpoint_admission(
+        lidar_admission_path,
+        lidar_decision,
+        terminal_checkpoint,
+    )
+    _require_sha256(
+        lidar_admission_hash,
+        "lidar_checkpoint_admission_sha256",
+    )
+    if not lidar_decision.ready:
+        raise CoverageLidarCheckpointAdmissionError(
+            checkpoint=terminal_checkpoint,
+            checkpoint_parent_manifest=terminal_checkpoint_parent,
+            admission_path=lidar_admission_path,
+            admission_sha256=lidar_admission_hash,
+            decision=lidar_decision,
+            completed_coverage_legs=completed_coverage_legs,
+            legs_completed_this_run=legs_completed_this_run,
+        )
+
+    coverage_status = _lidar_checkpoint_status(lidar_decision, registry)
+    if (
+        config.completion_policy
+        is CoverageCompletionPolicy.EXACT_TWO_LIDAR_CHECKPOINT
+    ):
+        return CoverageLidarCheckpointComplete(
+            run_mode=config.checkpoint_identity.run_mode,
+            completed_coverage_legs=completed_coverage_legs,
+            legs_completed_this_run=legs_completed_this_run,
+            survey_root=config.survey_root,
+            checkpoint_manifest=terminal_checkpoint.manifest_path,
+            checkpoint_manifest_sha256=terminal_checkpoint.manifest_sha256,
+            checkpoint_parent_manifest=terminal_checkpoint_parent,
+            lidar_checkpoint_admission_path=lidar_admission_path,
+            lidar_checkpoint_admission_sha256=lidar_admission_hash,
+            decision=lidar_decision,
+            coverage_status=coverage_status,
+        )
+
+    return complete_exact_two_camera(
+        ExactTwoCameraCompletionRequest(
+            run_mode=config.checkpoint_identity.run_mode,
+            session_id=config.checkpoint_identity.session_id,
+            expected_stand_count=config.expected_stand_count,
+            plan=config.plan,
+            progress=progress,
+            registry=registry,
+            completed_coverage_legs=completed_coverage_legs,
+            legs_completed_this_run=legs_completed_this_run,
+            survey_root=config.survey_root,
+            terminal_checkpoint=terminal_checkpoint,
+            terminal_checkpoint_parent=terminal_checkpoint_parent,
+            lidar_admission_path=lidar_admission_path,
+            lidar_admission_sha256=lidar_admission_hash,
+            lidar_decision=lidar_decision,
+            camera_admission_path=camera_admission_path,
+            candidate_snapshot_path=snapshot_path,
+            camera_handoff_path=camera_handoff_path,
+            coverage_status=_exact_two_camera_status(
+                lidar_decision,
+                registry,
+            ),
+        ),
+        effects,
     )
 
 
@@ -993,6 +1152,23 @@ def _lidar_checkpoint_status(
         total_viewpoint_count=len(decision.planned_viewpoint_ids),
         candidate_counts=_registry_candidate_counts(registry),
         next_required_action=LIDAR_CHECKPOINT_READY,
+    )
+
+
+def _exact_two_camera_status(
+    decision: ExactTwoLidarCheckpointDecision,
+    registry: StandSurveyRegistry,
+) -> CoverageStatus:
+    return CoverageStatus(
+        coverage_complete=(
+            decision.all_planned_viewpoints_visited
+            and decision.coverage_threshold_met
+        ),
+        visited_coverage_ratio=decision.visited_coverage_ratio,
+        visited_viewpoint_count=len(decision.visited_viewpoint_ids),
+        total_viewpoint_count=len(decision.planned_viewpoint_ids),
+        candidate_counts=_registry_candidate_counts(registry),
+        next_required_action=EXACT_TWO_CAMERA_VALIDATION_READY,
     )
 
 

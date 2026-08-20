@@ -516,6 +516,12 @@ def survey_status(
         if plan.config.expected_stand_count is None
         else counts[STATUS_CONFIRMED] == plan.config.expected_stand_count
     )
+    camera_resolution_complete = unresolved == 0
+    camera_exploration_complete = (
+        coverage_complete
+        and camera_resolution_complete
+        and expected_count_met
+    )
     return {
         "survey_id": plan.survey_id,
         "visited_viewpoint_count": len(progress.visited_viewpoint_ids),
@@ -524,13 +530,20 @@ def survey_status(
         "planned_coverage_ratio": plan.planned_coverage_ratio,
         "coverage_threshold": plan.config.coverage_threshold,
         "coverage_complete": coverage_complete,
+        # Phase-scoped names keep LiDAR completion distinct from the later
+        # camera-confirmation lifecycle.  The two legacy keys below remain for
+        # schema-v1 readers, but no new mission summary should rely on them
+        # without also reporting these explicit camera fields.
+        "lidar_coverage_complete": coverage_complete,
         "candidate_counts": counts,
         "unresolved_candidate_count": unresolved,
         "expected_stand_count": plan.config.expected_stand_count,
         "expected_stand_count_met": expected_count_met,
-        "exploration_complete": (
-            coverage_complete and unresolved == 0 and expected_count_met
-        ),
+        "camera_confirmed_stand_count": counts[STATUS_CONFIRMED],
+        "camera_candidate_resolution_complete": camera_resolution_complete,
+        "camera_expected_stand_count_met": expected_count_met,
+        "camera_exploration_complete": camera_exploration_complete,
+        "exploration_complete": camera_exploration_complete,
     }
 
 

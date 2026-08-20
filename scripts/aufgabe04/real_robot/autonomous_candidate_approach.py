@@ -28,6 +28,13 @@ from scripts.aufgabe04.navigation.detected_stand_preapproach import (
     ROBOT_TO_STAND_BEARING_MODE,
     seal_detected_stand_preapproach,
 )
+from scripts.aufgabe04.navigation.exact_two_camera_admission import (
+    exact_two_camera_handoff_sha256,
+    load_exact_two_camera_handoff,
+    require_handoff_candidate_support,
+    validate_live_candidate_snapshot_binding,
+    validate_live_registry_binding,
+)
 from scripts.aufgabe04.navigation.global_planner import plan_route
 from scripts.aufgabe04.navigation.map_io import load_occupancy_grid_with_bundle
 from scripts.aufgabe04.navigation.mission_leg_motion_permit import MissionLegKind
@@ -39,19 +46,19 @@ from scripts.aufgabe04.navigation.route_context import build_station_route_dry_r
 from scripts.aufgabe04.navigation.stand_coverage_survey import (
     CoverageSurveyPlan,
     coverage_survey_plan_sha256,
+    load_stand_survey_registry,
 )
 from scripts.aufgabe04.navigation.viewpoint_recommendation import (
+    REAL_VIEWPOINT_SOURCE,
     load_recommendation,
     normalize_angle,
 )
 from scripts.aufgabe04.real_robot.autonomous_child_runner import MotionLegOutcome
-from scripts.aufgabe04.real_robot.recommendation_builder import (
-    REAL_VIEWPOINT_SOURCE,
-)
 from scripts.aufgabe04.stations.candidate_snapshot import (
     CandidateSnapshot,
     FrozenCandidate,
     candidate_snapshot_sha256,
+    load_candidate_snapshot,
 )
 from scripts.aufgabe04.stations.create_station_identity_registry import (
     create_registry,
@@ -84,6 +91,8 @@ class CandidateApproachConfig:
     uncertainty_sigma_multiplier: float
     localization_branch_proof_id: str
     mission_leg_motion_authorization_json: Path
+    exact_two_camera_handoff_path: Path | None = None
+    exact_two_camera_handoff_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -149,6 +158,8 @@ class FacingValidationRequest:
 class CandidateDecisionRequest:
     survey_root: Path
     receipt_path: Path
+    exact_two_camera_handoff_path: Path | None = None
+    candidate_snapshot_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -186,6 +197,127 @@ def _file_sha256(path: Path) -> str:
 def _write_json(path: Path, payload: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def validate_candidate_approach_handoff(
+    config: CandidateApproachConfig,
+) -> Mapping[str, str] | None:
+    """Validate an optional exact-two handoff before any live robot effect.
+
+    The normal full-coverage path deliberately has no exact-two artifact and
+    returns ``None``.  Exact-two mode must provide a paired path/hash, a live
+    immutable snapshot, and the unmodified source registry.  This keeps stale
+    or tampered evidence from reaching route planning or a motion permit.
+    """
+
+    handoff_path = config.exact_two_camera_handoff_path
+    handoff_sha256 = config.exact_two_camera_handoff_sha256
+    if handoff_path is None and handoff_sha256 is None:
+        return None
+    if handoff_path is None or handoff_sha256 is None:
+        raise ValueError(
+            "exact-two camera handoff path and SHA-256 must be provided together"
+        )
+
+    live_snapshot = load_candidate_snapshot(
+        config.snapshot_path,
+        required_map_bundle_sha256=config.plan.map_bundle_sha256,
+    )
+    if live_snapshot != config.snapshot:
+        raise ValueError(
+            "candidate snapshot object differs from its live artifact"
+        )
+    handoff = load_exact_two_camera_handoff(handoff_path)
+    actual_handoff_sha256 = exact_two_camera_handoff_sha256(handoff)
+    if actual_handoff_sha256 != handoff_sha256:
+        raise ValueError("exact-two camera handoff SHA-256 mismatch")
+    if (
+        handoff.survey_id != config.plan.survey_id
+        or handoff.planning_frame != config.planning_frame
+        or handoff.map_bundle_sha256 != config.plan.map_bundle_sha256
+        or handoff.plan_sha256 != coverage_survey_plan_sha256(config.plan)
+    ):
+        raise ValueError(
+            "exact-two camera handoff differs from the live coverage plan"
+        )
+    validate_live_candidate_snapshot_binding(
+        handoff,
+        live_snapshot,
+        candidate_snapshot_path=config.snapshot_path,
+    )
+    if handoff.camera_population_ready is not True:
+        raise ValueError("exact-two camera handoff population is not ready")
+    if handoff.motion_authorized is not False:
+        raise ValueError("exact-two camera handoff must not authorize motion")
+
+    live_registry = load_stand_survey_registry(
+        config.survey_root / "stand_registry.json",
+        config.plan,
+    )
+    validate_live_registry_binding(handoff, live_registry)
+
+    support_by_uid: dict[str, str] = {}
+    for candidate in live_snapshot.candidates:
+        evidence = require_handoff_candidate_support(
+            handoff,
+            candidate.candidate_uid,
+        )
+        if evidence.support_class is None:
+            raise ValueError(
+                "exact-two camera candidate has no sealed support class: "
+                f"{candidate.candidate_uid!r}"
+            )
+        support_by_uid[candidate.candidate_uid] = evidence.support_class
+    if not support_by_uid:
+        raise ValueError("exact-two camera handoff contains no candidates")
+    return support_by_uid
+
+
+def build_camera_candidate_decision_receipt(
+    *,
+    config: CandidateApproachConfig,
+    candidate: FrozenCandidate,
+    recommendation_path: Path,
+    exact_two_support_by_uid: Mapping[str, str] | None,
+) -> dict[str, object]:
+    """Build the mode-scoped receipt consumed by the stopped state writer."""
+
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "survey_id": config.plan.survey_id,
+        "candidate_uid": candidate.candidate_uid,
+        "decision": "confirmed",
+        "decision_source": "camera_evidence",
+        "camera_evidence_path": str(recommendation_path),
+    }
+    if exact_two_support_by_uid is None:
+        return payload
+    support_class = exact_two_support_by_uid.get(candidate.candidate_uid)
+    if support_class is None:
+        raise RuntimeError(
+            "candidate is absent from the exact-two camera handoff: "
+            f"{candidate.candidate_uid}"
+        )
+    handoff_path = config.exact_two_camera_handoff_path
+    handoff_sha256 = config.exact_two_camera_handoff_sha256
+    if handoff_path is None or handoff_sha256 is None:
+        raise RuntimeError("validated exact-two camera handoff is unavailable")
+    payload.update(
+        {
+            "schema_version": 2,
+            "exact_two_camera_handoff_path": str(handoff_path),
+            "exact_two_camera_handoff_sha256": handoff_sha256,
+            "candidate_snapshot_path": str(config.snapshot_path),
+            "candidate_snapshot_sha256": candidate_snapshot_sha256(
+                config.snapshot
+            ),
+            "candidate_support_class": support_class,
+            "camera_recommendation_sha256": _file_sha256(
+                recommendation_path
+            ),
+        }
+    )
+    return payload
 
 
 def nearest_candidate(
@@ -427,6 +559,12 @@ def validate_facing_pose(request: FacingValidationRequest) -> dict[str, object]:
         expected_source=REAL_VIEWPOINT_SOURCE,
         expected_simulation_only=False,
     )
+    if recommendation.stand_id != candidate.candidate_uid:
+        raise ValueError(
+            "viewpoint recommendation stand_id mismatch: "
+            f"expected {candidate.candidate_uid!r}, "
+            f"got {recommendation.stand_id!r}"
+        )
     target = recommendation.material_target.pose
     grid, map_bundle = load_occupancy_grid_with_bundle(
         config.map_yaml,
@@ -513,15 +651,31 @@ def validate_facing_pose(request: FacingValidationRequest) -> dict[str, object]:
 
 
 def commit_candidate_decision(request: CandidateDecisionRequest) -> None:
-    try:
-        returncode = record_stand_candidate_decision(
+    argv = [
+        "--survey-root",
+        str(request.survey_root),
+        "--decision-receipt-json",
+        str(request.receipt_path),
+    ]
+    if request.exact_two_camera_handoff_path is not None:
+        if request.candidate_snapshot_path is None:
+            raise RuntimeError(
+                "exact-two candidate decision requires its candidate snapshot"
+            )
+        argv.extend(
             [
-                "--survey-root",
-                str(request.survey_root),
-                "--decision-receipt-json",
-                str(request.receipt_path),
+                "--exact-two-camera-handoff-json",
+                str(request.exact_two_camera_handoff_path),
+                "--candidate-snapshot-json",
+                str(request.candidate_snapshot_path),
             ]
         )
+    elif request.candidate_snapshot_path is not None:
+        raise RuntimeError(
+            "candidate snapshot decision argument requires exact-two handoff"
+        )
+    try:
+        returncode = record_stand_candidate_decision(argv)
     except SystemExit as exc:
         raise RuntimeError("failed to commit camera candidate decision") from exc
     if returncode != 0:
@@ -624,6 +778,7 @@ def execute_candidate_approach_phase(
 ) -> CandidateApproachComplete:
     """Execute the post-coverage candidate state machine behind live effects."""
 
+    exact_two_support_by_uid = validate_candidate_approach_handoff(config)
     unresolved = set(config.snapshot.candidate_uids)
     facing_records: list[Mapping[str, object]] = []
     identities: list[StationIdentity] = []
@@ -775,21 +930,25 @@ def execute_candidate_approach_phase(
         )
         facing["qr_id"] = observation.qr_id
         receipt = candidate_root / "candidate_decision.json"
-        _write_json(
-            receipt,
-            {
-                "schema_version": 1,
-                "survey_id": config.plan.survey_id,
-                "candidate_uid": candidate.candidate_uid,
-                "decision": "confirmed",
-                "decision_source": "camera_evidence",
-                "camera_evidence_path": str(observation.recommendation_path),
-            },
+        receipt_payload = build_camera_candidate_decision_receipt(
+            config=config,
+            candidate=candidate,
+            recommendation_path=observation.recommendation_path,
+            exact_two_support_by_uid=exact_two_support_by_uid,
         )
+        _write_json(receipt, receipt_payload)
         effects.commit_decision(
             CandidateDecisionRequest(
                 survey_root=config.survey_root,
                 receipt_path=receipt,
+                exact_two_camera_handoff_path=(
+                    config.exact_two_camera_handoff_path
+                ),
+                candidate_snapshot_path=(
+                    config.snapshot_path
+                    if exact_two_support_by_uid is not None
+                    else None
+                ),
             )
         )
         facing_records.append(facing)
@@ -860,9 +1019,11 @@ __all__ = [
     "CandidatePreapproachRequest",
     "FacingValidationRequest",
     "bounded_approach_offsets",
+    "build_camera_candidate_decision_receipt",
     "execute_candidate_approach_phase",
     "nearest_candidate",
     "opposite_face_normal",
     "plan_candidate_preapproach",
+    "validate_candidate_approach_handoff",
     "validate_facing_pose",
 ]

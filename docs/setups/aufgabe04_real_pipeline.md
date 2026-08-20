@@ -29,6 +29,7 @@ loaded logistics mission or a two-robot run; see
 | `navigation/spatial_assignment.py` | Globally associate stopped-epoch detections with existing candidates by cardinality and total distance | None |
 | `navigation/coverage_candidate_admission.py` | Fail closed between LiDAR coverage and candidate approaches unless coverage and multi-view candidate evidence are complete | None |
 | `navigation/coverage_candidate_lifecycle.py` | Classify LiDAR, multi-view, camera-queue, confirmed, and rejected evidence; evaluate exact-two LiDAR checkpoint completion without constructing a motion snapshot | None |
+| `navigation/exact_two_camera_admission.py` | Build and verify the content-hashed exact-two LiDAR-to-camera population handoff without promoting registry lifecycle state | None |
 | `real_robot/autonomous_modes.py` | Resolve one explicit workflow mode and authorization scope; reject contradictory legacy flags, unsafe session IDs, and misleading session labels | None |
 | `real_robot/autonomous_artifact_paths.py` | Canonicalize existing sealed child artifacts so dry evidence, permits, and live argv bind one filesystem identity | None |
 | `real_robot/autonomous_child_runner.py` | Build child-runner and bundle argv, and parse one unambiguous append-only terminal outcome | None |
@@ -336,9 +337,9 @@ python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
 The physical-site descriptor is the canonical source of the five-stand count.
 `--expected-stand-count 5` is an optional assertion: omitting it derives five,
 while any other value fails before planning, session creation, or a `RUN`
-prompt. The robust workflow lets stop spacing determine the full centerline
-viewpoint set. `--exact-inspection-point-count 2` is diagnostic-only and must
-not be copied into the five-stand full-exploration command.
+prompt. The robust `execute-full` workflow lets stop spacing determine the
+redundant centerline viewpoint set and still rejects
+`--exact-inspection-point-count 2`.
 
 For a bounded two-stop LiDAR check, combine
 `--exact-inspection-point-count 2`, `--coverage-leg-limit 2`, and
@@ -348,6 +349,17 @@ basic evidence gate. The result is a terminal, non-resumable checkpoint with
 `camera_approach_authorized=false`; it does not promote single-view candidates
 to `pending_camera`, create a candidate snapshot, or continue into camera
 approach motion.
+
+For the explicit two-stop-to-camera workflow, use
+`--run-mode execute-exact-two-camera` with
+`--exact-inspection-point-count 2`; omit `--coverage-leg-limit` or set it to
+exactly `2`. This mode first seals terminal LiDAR evidence, then constructs a
+content-hashed handoff for exactly five active static-map-admitted candidates.
+The handoff preserves which candidates are multi-view `pending_camera` and
+which are single-view `provisional`; only its bound camera decision path may
+resolve the latter. It continues in the same process under the initial `RUN`,
+while every candidate and opposite-face motion still requires its own sealed
+route, dry-run, live gates, and atomically consumed one-use permit.
 
 Type `RUN` only after the separate no-motion run has passed and the live
 velocity owner is unambiguous. In this checkpoint mode that one mission-level

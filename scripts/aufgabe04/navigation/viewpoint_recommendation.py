@@ -19,6 +19,7 @@ from scripts.aufgabe04.navigation.models import Pose2D
 
 
 RECOMMENDATION_SCHEMA_VERSION = 1
+REAL_VIEWPOINT_SOURCE = "synchronized_lidar_camera_viewpoint"
 
 _FACE_GEOMETRY_TOLERANCE_RAD = 1.0e-6
 _FACE_POSE_MIN_RADIUS_M = 1.0e-9

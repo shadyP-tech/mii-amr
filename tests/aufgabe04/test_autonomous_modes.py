@@ -58,6 +58,85 @@ class AutonomousRunModeTests(unittest.TestCase):
         self.assertTrue(coverage.execute)
         self.assertTrue(coverage.stop_after_coverage)
 
+    def test_exact_two_camera_has_fixed_scope_and_camera_authority(self):
+        for coverage_leg_limit in (0, 2):
+            with self.subTest(coverage_leg_limit=coverage_leg_limit):
+                resolved = resolve_autonomous_run_mode(
+                    run_mode="execute-exact-two-camera",
+                    coverage_leg_limit=coverage_leg_limit,
+                )
+
+                self.assertTrue(resolved.execute)
+                self.assertEqual(
+                    resolved.mode,
+                    AutonomousRunMode.EXECUTE_EXACT_TWO_CAMERA,
+                )
+                self.assertEqual(resolved.coverage_leg_limit, 2)
+                self.assertFalse(resolved.stop_after_coverage)
+                self.assertTrue(resolved.camera_phase_enabled)
+                self.assertEqual(
+                    resolved.authorization_scope,
+                    AutonomousAuthorizationScope.EXACT_TWO_CAMERA,
+                )
+                self.assertIn(
+                    "camera-approach phase",
+                    resolved.authorization_scope_text,
+                )
+
+        self.assertTrue(
+            resolve_autonomous_run_mode(
+                run_mode="execute-full"
+            ).camera_phase_enabled
+        )
+        for mode in (
+            "dry-first-leg",
+            "execute-coverage-checkpoint",
+            "execute-coverage-only",
+            "resume-next-coverage-leg",
+        ):
+            kwargs = (
+                {"coverage_leg_limit": 1}
+                if mode == "execute-coverage-checkpoint"
+                else {}
+            )
+            with self.subTest(mode=mode):
+                self.assertFalse(
+                    resolve_autonomous_run_mode(
+                        run_mode=mode,
+                        **kwargs,
+                    ).camera_phase_enabled
+                )
+
+    def test_exact_two_camera_rejects_scope_contradictions(self):
+        for kwargs, message in (
+            (
+                {
+                    "run_mode": "execute-exact-two-camera",
+                    "coverage_leg_limit": 1,
+                },
+                "fixed two-leg",
+            ),
+            (
+                {
+                    "run_mode": "execute-exact-two-camera",
+                    "coverage_leg_limit": 3,
+                },
+                "fixed two-leg",
+            ),
+            (
+                {
+                    "run_mode": "execute-exact-two-camera",
+                    "stop_after_coverage": True,
+                },
+                "requires the camera phase",
+            ),
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaisesRegex(
+                ValueError,
+                message,
+            ):
+                resolve_autonomous_run_mode(**kwargs)
+
     def test_resume_mode_has_fixed_one_leg_non_authorizing_intent(self):
         resolved = resolve_autonomous_run_mode(
             run_mode="resume-next-coverage-leg"
@@ -229,6 +308,25 @@ class AutonomousRunModeTests(unittest.TestCase):
                 validate_autonomous_viewpoint_scope(
                     resolve_autonomous_run_mode(run_mode=mode),
                     exact_inspection_point_count=2,
+                )
+
+    def test_exact_two_camera_requires_exactly_two_inspection_points(self):
+        resolved = resolve_autonomous_run_mode(
+            run_mode="execute-exact-two-camera"
+        )
+
+        validate_autonomous_viewpoint_scope(
+            resolved,
+            exact_inspection_point_count=2,
+        )
+        for count in (None, True, 1, 2.0, 3):
+            with self.subTest(count=count), self.assertRaisesRegex(
+                ValueError,
+                "requires --exact-inspection-point-count 2",
+            ):
+                validate_autonomous_viewpoint_scope(
+                    resolved,
+                    exact_inspection_point_count=count,
                 )
 
     def test_exact_two_remains_available_to_bounded_diagnostic_modes(self):

@@ -12,13 +12,11 @@ from scripts.aufgabe04.navigation.viewpoint_recommendation import (
     SideEvidence,
     StandGeometry,
     SynchronizedViewpointRecommendation,
+    REAL_VIEWPOINT_SOURCE,
     angular_distance,
     normalize_angle,
     validate_recommendation,
 )
-
-
-REAL_VIEWPOINT_SOURCE = "synchronized_lidar_camera_viewpoint"
 
 
 def build_real_viewpoint_recommendation(
@@ -122,4 +120,3 @@ def build_real_viewpoint_recommendation(
         required_source=REAL_VIEWPOINT_SOURCE,
     )
     return recommendation
-

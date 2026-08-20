@@ -21,6 +21,7 @@ class AutonomousRunMode(str, Enum):
     DRY_FIRST_LEG = "dry-first-leg"
     EXECUTE_COVERAGE_CHECKPOINT = "execute-coverage-checkpoint"
     EXECUTE_COVERAGE_ONLY = "execute-coverage-only"
+    EXECUTE_EXACT_TWO_CAMERA = "execute-exact-two-camera"
     EXECUTE_FULL = "execute-full"
     RESUME_NEXT_COVERAGE_LEG = "resume-next-coverage-leg"
 
@@ -31,6 +32,7 @@ class AutonomousAuthorizationScope(str, Enum):
     NONE = "none"
     BOUNDED_COVERAGE = "bounded-coverage"
     COVERAGE_ONLY = "coverage-only"
+    EXACT_TWO_CAMERA = "exact-two-camera"
     FULL_MISSION = "full-mission"
     RESUMED_COVERAGE_LEG = "resumed-coverage-leg"
 
@@ -73,6 +75,14 @@ class ResolvedAutonomousRunMode:
             )
         if (
             self.authorization_scope
+            is AutonomousAuthorizationScope.EXACT_TWO_CAMERA
+        ):
+            return (
+                "exactly two center-corridor coverage legs followed by the "
+                "camera-approach phase for all LiDAR-admitted stands"
+            )
+        if (
+            self.authorization_scope
             is AutonomousAuthorizationScope.RESUMED_COVERAGE_LEG
         ):
             return (
@@ -80,6 +90,15 @@ class ResolvedAutonomousRunMode:
                 "admitted immutable checkpoint"
             )
         return "the complete multi-leg stand exploration mission"
+
+    @property
+    def camera_phase_enabled(self) -> bool:
+        """Whether this mode may continue from coverage into camera motion."""
+
+        return self.mode in {
+            AutonomousRunMode.EXECUTE_EXACT_TWO_CAMERA,
+            AutonomousRunMode.EXECUTE_FULL,
+        }
 
 
 _RESOLVED_MODES = {
@@ -96,6 +115,13 @@ _RESOLVED_MODES = {
         coverage_leg_limit=0,
         stop_after_coverage=True,
         authorization_scope=AutonomousAuthorizationScope.COVERAGE_ONLY,
+    ),
+    AutonomousRunMode.EXECUTE_EXACT_TWO_CAMERA: ResolvedAutonomousRunMode(
+        mode=AutonomousRunMode.EXECUTE_EXACT_TWO_CAMERA,
+        execute=True,
+        coverage_leg_limit=2,
+        stop_after_coverage=False,
+        authorization_scope=AutonomousAuthorizationScope.EXACT_TWO_CAMERA,
     ),
     AutonomousRunMode.EXECUTE_FULL: ResolvedAutonomousRunMode(
         mode=AutonomousRunMode.EXECUTE_FULL,
@@ -197,16 +223,29 @@ def validate_autonomous_viewpoint_scope(
     *,
     exact_inspection_point_count: int | None,
 ) -> None:
-    """Keep the two-viewpoint diagnostic out of complete-coverage modes.
+    """Bind exact-two planning to an explicit compatible workflow.
 
     Exact-two planning is useful for focused geometry diagnostics, but it does
     not provide the redundant observations expected by a complete five-stand
-    discovery pass.  Rejecting the combination before session creation keeps
-    a stale shell option from silently narrowing a full mission.
+    discovery pass.  The dedicated camera-continuation mode deliberately owns
+    that reduced evidence contract and therefore requires exactly two points.
+    Other complete-coverage modes still reject it so a stale shell option
+    cannot silently narrow a full mission.
     """
 
     if not isinstance(resolved, ResolvedAutonomousRunMode):
         raise ValueError("resolved run mode is required")
+    if resolved.mode is AutonomousRunMode.EXECUTE_EXACT_TWO_CAMERA:
+        if (
+            isinstance(exact_inspection_point_count, bool)
+            or not isinstance(exact_inspection_point_count, int)
+            or exact_inspection_point_count != 2
+        ):
+            raise ValueError(
+                "--run-mode execute-exact-two-camera requires "
+                "--exact-inspection-point-count 2"
+            )
+        return
     if exact_inspection_point_count is None:
         return
     if (
@@ -326,6 +365,19 @@ def _validate_explicit_mode_compatibility(
         if stop_after_coverage:
             raise ValueError(
                 "execute-coverage-checkpoint contradicts stop_after_coverage"
+            )
+        return
+
+    if mode is AutonomousRunMode.EXECUTE_EXACT_TWO_CAMERA:
+        if coverage_leg_limit not in {0, 2}:
+            raise ValueError(
+                "execute-exact-two-camera owns its fixed two-leg coverage "
+                "scope; coverage_leg_limit must be omitted or exactly 2"
+            )
+        if stop_after_coverage:
+            raise ValueError(
+                "execute-exact-two-camera requires the camera phase and "
+                "contradicts stop_after_coverage"
             )
         return
 
