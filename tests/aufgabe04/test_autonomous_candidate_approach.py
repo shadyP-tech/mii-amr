@@ -1,4 +1,5 @@
 import json
+import math
 from pathlib import Path
 import sys
 import tempfile
@@ -13,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds
 from scripts.aufgabe04.navigation.mission_leg_motion_permit import MissionLegKind
 from scripts.aufgabe04.navigation.models import GridCell, Pose2D
+from scripts.aufgabe04.navigation.read_current_amcl_pose import CurrentAmclPose
 from scripts.aufgabe04.navigation.stand_coverage_survey import (
     CoverageSurveyConfig,
     CoverageSurveyPlan,
@@ -21,6 +23,7 @@ from scripts.aufgabe04.navigation.stand_coverage_survey import (
 from scripts.aufgabe04.real_robot.autonomous_candidate_approach import (
     CandidateApproachConfig,
     CandidateApproachEffects,
+    CandidateApproachPoseError,
     CandidateObservation,
     FacingValidationRequest,
     execute_candidate_approach_phase,
@@ -125,6 +128,19 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             semantic_log_path=request.session_root / f"{request.run_id}.jsonl",
         )
 
+    @staticmethod
+    def _current_amcl_pose() -> CurrentAmclPose:
+        return CurrentAmclPose(
+            x_m=0.0,
+            y_m=0.0,
+            yaw_rad=0.0,
+            frame_id="map",
+            topic="/amcl_pose",
+            header_stamp_sec=10.0,
+            receipt_age_sec=0.1,
+            header_age_sec=0.1,
+        )
+
     def test_equal_distance_candidates_use_uid_tie_break(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = self._config(
@@ -143,6 +159,115 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
 
             self.assertIsNotNone(selected)
             self.assertEqual(selected.candidate_uid, "candidate_a")
+
+    def test_raw_current_amcl_pose_fails_before_candidate_side_effects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self._config(
+                Path(tmp),
+                (self._candidate("candidate_1", 0.2, 0.0),),
+            )
+            plan = Mock()
+            motion = Mock()
+            capture = Mock()
+
+            with self.assertRaises(CandidateApproachPoseError) as raised:
+                execute_candidate_approach_phase(
+                    config,
+                    CandidateApproachEffects(
+                        read_current_pose=self._current_amcl_pose,
+                        run_motion_leg=motion,
+                        capture_observation=capture,
+                        plan_preapproach=plan,
+                    ),
+                )
+
+            self.assertIn("initial_candidate_selection", str(raised.exception))
+            self.assertIn("CurrentAmclPose", str(raised.exception))
+            self.assertEqual(
+                raised.exception.to_failure_fields()["failure_phase"],
+                "candidate_approach_pose_contract",
+            )
+            plan.assert_not_called()
+            motion.assert_not_called()
+            capture.assert_not_called()
+
+    def test_opposite_face_pose_contract_rejects_raw_amcl_sample(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate = self._candidate("candidate_1", 0.2, 0.0)
+            config = self._config(root, (candidate,))
+            axis_path = root / "axis.json"
+            axis_path.write_text(
+                json.dumps(
+                    {
+                        "observation_kind": "real_stand_axis_without_qr",
+                        "stand_axis_rad": 0.0,
+                        "stand_center": {"x_m": 0.2, "y_m": 0.0},
+                        "robot_pose": {"x_m": 0.2, "y_m": 0.7},
+                    }
+                )
+            )
+            poses = iter((Pose2D(0.0, 0.0, 0.0), self._current_amcl_pose()))
+            plan = Mock(return_value={"route_csv": "route.csv"})
+
+            with self.assertRaisesRegex(
+                CandidateApproachPoseError,
+                "opposite_face_preapproach",
+            ):
+                execute_candidate_approach_phase(
+                    config,
+                    CandidateApproachEffects(
+                        read_current_pose=lambda: next(poses),
+                        run_motion_leg=self._completed,
+                        capture_observation=lambda _request: CandidateObservation(
+                            None,
+                            None,
+                            axis_path,
+                        ),
+                        plan_preapproach=plan,
+                    ),
+                )
+
+            self.assertEqual(plan.call_count, 1)
+
+    def test_stopped_pose_contract_rejects_nonfinite_navigation_pose(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate = self._candidate("candidate_1", 0.2, 0.0)
+            config = self._config(root, (candidate,))
+            poses = iter(
+                (
+                    Pose2D(0.0, 0.0, 0.0),
+                    Pose2D(math.nan, 0.0, 0.0),
+                )
+            )
+            validate = Mock()
+            commit = Mock()
+
+            with self.assertRaisesRegex(
+                CandidateApproachPoseError,
+                "stopped_facing_validation",
+            ):
+                execute_candidate_approach_phase(
+                    config,
+                    CandidateApproachEffects(
+                        read_current_pose=lambda: next(poses),
+                        run_motion_leg=self._completed,
+                        capture_observation=lambda request: CandidateObservation(
+                            request.output_dir / "recommendation.json",
+                            "QR_1",
+                            None,
+                        ),
+                        plan_preapproach=lambda _request: {
+                            "route_csv": "route.csv"
+                        },
+                        validate_facing=validate,
+                        commit_decision=commit,
+                    ),
+                )
+
+            validate.assert_not_called()
+            commit.assert_not_called()
 
     def test_direct_qr_visits_nearest_first_and_preserves_exact_leg_identity(self):
         with tempfile.TemporaryDirectory() as tmp:

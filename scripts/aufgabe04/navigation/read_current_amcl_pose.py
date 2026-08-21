@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.aufgabe04.navigation.models import Pose2D
 from scripts.aufgabe04.navigation.ros_runtime_config import RuntimeConfig, resolve_runtime_config
 
 try:  # pragma: no cover - exercised on ROS hosts.
@@ -40,6 +41,56 @@ class CurrentAmclPose:
     header_stamp_sec: float
     receipt_age_sec: float
     header_age_sec: float
+
+
+def pose2d_from_current_amcl_pose(pose: CurrentAmclPose) -> Pose2D:
+    """Convert one validated ROS-facing AMCL sample for pure navigation.
+
+    ``CurrentAmclPose`` deliberately retains topic, frame, and freshness
+    evidence and is not a ``Pose2D``.  Make the boundary explicit so that a
+    metadata-bearing ROS sample cannot leak into costmap APIs which require an
+    exact navigation pose.
+    """
+
+    if not isinstance(pose, CurrentAmclPose):
+        raise TypeError(
+            "pose2d_from_current_amcl_pose requires CurrentAmclPose, got "
+            f"{type(pose).__name__}"
+        )
+    try:
+        values = (
+            float(pose.x_m),
+            float(pose.y_m),
+            float(pose.yaw_rad),
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("CurrentAmclPose coordinates must be numeric") from exc
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("CurrentAmclPose coordinates must be finite")
+    return Pose2D(*values)
+
+
+def read_current_pose2d_from_amcl(
+    *,
+    namespace: str,
+    amcl_topic: str,
+    map_frame: str,
+    timeout_sec: float,
+    max_age_sec: float,
+    nomotion_update_service: str | None = "/request_nomotion_update",
+) -> Pose2D:
+    """Read fresh AMCL evidence and return the pure navigation pose."""
+
+    return pose2d_from_current_amcl_pose(
+        read_current_amcl_pose(
+            namespace=namespace,
+            amcl_topic=amcl_topic,
+            map_frame=map_frame,
+            timeout_sec=timeout_sec,
+            max_age_sec=max_age_sec,
+            nomotion_update_service=nomotion_update_service,
+        )
+    )
 
 
 def _require_ros() -> None:

@@ -13,13 +13,71 @@ from scripts.aufgabe04.navigation.read_current_amcl_pose import (  # noqa: E402
     CurrentAmclPose,
     CurrentAmclPoseReader,
     planner_args_from_pose,
+    pose2d_from_current_amcl_pose,
+    read_current_pose2d_from_amcl,
     validate_current_amcl_pose,
     yaw_from_quaternion,
 )
+from scripts.aufgabe04.navigation.models import Pose2D  # noqa: E402
 from scripts.aufgabe04.navigation import read_current_amcl_pose as pose_reader  # noqa: E402
 
 
 class ReadCurrentAmclPoseTest(unittest.TestCase):
+    @staticmethod
+    def _pose(**overrides) -> CurrentAmclPose:
+        values = {
+            "x_m": 0.125,
+            "y_m": -0.25,
+            "yaw_rad": 0.75,
+            "frame_id": "map",
+            "topic": "/amcl_pose",
+            "header_stamp_sec": 10.0,
+            "receipt_age_sec": 0.1,
+            "header_age_sec": 0.2,
+        }
+        values.update(overrides)
+        return CurrentAmclPose(**values)
+
+    def test_converts_current_amcl_evidence_to_exact_navigation_pose(self):
+        result = pose2d_from_current_amcl_pose(self._pose())
+
+        self.assertEqual(result, Pose2D(0.125, -0.25, 0.75))
+        self.assertIs(type(result), Pose2D)
+
+    def test_navigation_pose_adapter_rejects_wrong_type_and_nonfinite_pose(self):
+        with self.assertRaisesRegex(TypeError, "requires CurrentAmclPose"):
+            pose2d_from_current_amcl_pose(Pose2D(0.0, 0.0, 0.0))
+        for field in ("x_m", "y_m", "yaw_rad"):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, "must be finite"):
+                    pose2d_from_current_amcl_pose(
+                        self._pose(**{field: math.nan})
+                    )
+
+    def test_reads_current_pose2d_through_fresh_amcl_reader(self):
+        with patch.object(
+            pose_reader,
+            "read_current_amcl_pose",
+            return_value=self._pose(x_m=1.25, y_m=-0.5, yaw_rad=0.125),
+        ) as reader:
+            result = read_current_pose2d_from_amcl(
+                namespace="/tb3",
+                amcl_topic="amcl_pose",
+                map_frame="map",
+                timeout_sec=4.0,
+                max_age_sec=1.5,
+            )
+
+        self.assertEqual(result, Pose2D(1.25, -0.5, 0.125))
+        reader.assert_called_once_with(
+            namespace="/tb3",
+            amcl_topic="amcl_pose",
+            map_frame="map",
+            timeout_sec=4.0,
+            max_age_sec=1.5,
+            nomotion_update_service="/request_nomotion_update",
+        )
+
     def test_formats_planner_start_args(self):
         pose = CurrentAmclPose(
             x_m=0.1234567,

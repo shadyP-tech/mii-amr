@@ -60,7 +60,7 @@ from scripts.aufgabe04.navigation.plan_stand_coverage_survey import (
     main as plan_stand_coverage_survey,
 )
 from scripts.aufgabe04.navigation.read_current_amcl_pose import (
-    read_current_amcl_pose,
+    read_current_pose2d_from_amcl,
 )
 from scripts.aufgabe04.navigation.ros_preflight import run_ros_preflight
 from scripts.aufgabe04.navigation.ros_runtime_config import resolve_topic
@@ -2504,7 +2504,7 @@ def main(argv=None) -> int:
                 ),
             ),
             CandidateApproachEffects(
-                read_current_pose=lambda: read_current_amcl_pose(
+                read_current_pose=lambda: read_current_pose2d_from_amcl(
                     namespace=profile.namespace,
                     amcl_topic=profile.amcl_topic,
                     map_frame=profile.map_frame,

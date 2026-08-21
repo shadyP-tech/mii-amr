@@ -7,7 +7,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from scripts.aufgabe04.real_robot import (
     run_autonomous_stand_exploration as autonomous_wrapper,
@@ -944,6 +944,41 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         self.assertIsNone(_resolved_qr_id("auto", ("A", "B")))
         self.assertEqual(_resolved_qr_id("A", ("A",)), "A")
         self.assertIsNone(_resolved_qr_id("A", ("B",)))
+
+    def test_candidate_phase_uses_public_fresh_amcl_pose2d_reader(self):
+        profile = SimpleNamespace(
+            namespace="",
+            amcl_topic="amcl_pose",
+            map_frame="map",
+        )
+
+        with patch.object(
+            autonomous_wrapper,
+            "read_current_pose2d_from_amcl",
+            return_value=Pose2D(-0.9284, -0.0379, 0.1740),
+        ) as reader:
+            pose_reader = autonomous_wrapper.CandidateApproachEffects(
+                read_current_pose=lambda: autonomous_wrapper.read_current_pose2d_from_amcl(
+                    namespace=profile.namespace,
+                    amcl_topic=profile.amcl_topic,
+                    map_frame=profile.map_frame,
+                    timeout_sec=autonomous_wrapper.STATIONARY_AMCL_TIMEOUT_SEC,
+                    max_age_sec=2.0,
+                ),
+                run_motion_leg=Mock(),
+                capture_observation=Mock(),
+            ).read_current_pose
+            pose = pose_reader()
+
+        self.assertIs(type(pose), Pose2D)
+        self.assertEqual(pose, Pose2D(-0.9284, -0.0379, 0.1740))
+        reader.assert_called_once_with(
+            namespace="",
+            amcl_topic="amcl_pose",
+            map_frame="map",
+            timeout_sec=autonomous_wrapper.STATIONARY_AMCL_TIMEOUT_SEC,
+            max_age_sec=2.0,
+        )
 
     def test_axis_only_observation_selects_opposite_face(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -73,6 +73,43 @@ from scripts.aufgabe04.stations.station_identity_registry import (
 SealedRoute = Mapping[str, str]
 
 
+class CandidateApproachPoseError(RuntimeError):
+    """Fail closed when a live pose effect violates the pure pose contract."""
+
+    def __init__(
+        self,
+        *,
+        context: str,
+        observed_type: str,
+        reason: str,
+        candidate_uid: str | None = None,
+    ) -> None:
+        self.context = context
+        self.observed_type = observed_type
+        self.reason = reason
+        self.candidate_uid = candidate_uid
+        candidate_text = (
+            "" if candidate_uid is None else f" for {candidate_uid}"
+        )
+        super().__init__(
+            "candidate pose contract failed during "
+            f"{context}{candidate_text}: {reason}; "
+            f"observed {observed_type}, expected finite Pose2D"
+        )
+
+    def to_failure_fields(self) -> dict[str, object]:
+        fields: dict[str, object] = {
+            "failure_phase": "candidate_approach_pose_contract",
+            "candidate_phase": self.context,
+            "expected_pose_type": "Pose2D",
+            "observed_pose_type": self.observed_type,
+            "pose_contract_reason": self.reason,
+        }
+        if self.candidate_uid is not None:
+            fields["candidate_uid"] = self.candidate_uid
+        return fields
+
+
 @dataclass(frozen=True)
 class CandidateApproachConfig:
     session_root: Path
@@ -722,6 +759,39 @@ class CandidateApproachEffects:
     clock: Callable[[], float] = time.time
 
 
+def _read_finite_pose2d(
+    effects: CandidateApproachEffects,
+    *,
+    context: str,
+    candidate_uid: str | None = None,
+) -> Pose2D:
+    pose = effects.read_current_pose()
+    if not isinstance(pose, Pose2D):
+        raise CandidateApproachPoseError(
+            context=context,
+            candidate_uid=candidate_uid,
+            observed_type=type(pose).__name__,
+            reason="read_current_pose returned the wrong type",
+        )
+    try:
+        values = (float(pose.x_m), float(pose.y_m), float(pose.yaw_rad))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise CandidateApproachPoseError(
+            context=context,
+            candidate_uid=candidate_uid,
+            observed_type=type(pose).__name__,
+            reason="pose coordinates are not numeric",
+        ) from exc
+    if not all(math.isfinite(value) for value in values):
+        raise CandidateApproachPoseError(
+            context=context,
+            candidate_uid=candidate_uid,
+            observed_type=type(pose).__name__,
+            reason="pose coordinates are not finite",
+        )
+    return Pose2D(*values)
+
+
 def _require_completed_motion(
     request: CandidateMotionLegRequest,
     outcome: MotionLegOutcome,
@@ -786,7 +856,10 @@ def execute_candidate_approach_phase(
     candidate_index = 0
 
     while unresolved:
-        current = effects.read_current_pose()
+        current = _read_finite_pose2d(
+            effects,
+            context="initial_candidate_selection",
+        )
         candidate = nearest_candidate(config.snapshot, current, unresolved)
         if candidate is None:
             raise RuntimeError("candidate snapshot has no unresolved candidate")
@@ -844,7 +917,11 @@ def execute_candidate_approach_phase(
             opposite_normal = opposite_face_normal(
                 observation.axis_observation_path
             )
-            opposite_start = effects.read_current_pose()
+            opposite_start = _read_finite_pose2d(
+                effects,
+                context="opposite_face_preapproach",
+                candidate_uid=candidate.candidate_uid,
+            )
             opposite_source = candidate_root / "opposite_face_source"
             opposite_sealed = None
             feasibility_failures = []
@@ -916,7 +993,11 @@ def execute_candidate_approach_phase(
 
         if observation.qr_id is None:
             raise RuntimeError("camera recommendation has no QR identity")
-        stopped_pose = effects.read_current_pose()
+        stopped_pose = _read_finite_pose2d(
+            effects,
+            context="stopped_facing_validation",
+            candidate_uid=candidate.candidate_uid,
+        )
         facing = dict(
             effects.validate_facing(
                 FacingValidationRequest(
@@ -1012,6 +1093,7 @@ __all__ = [
     "CandidateApproachComplete",
     "CandidateApproachConfig",
     "CandidateApproachEffects",
+    "CandidateApproachPoseError",
     "CandidateDecisionRequest",
     "CandidateMotionLegRequest",
     "CandidateObservation",
