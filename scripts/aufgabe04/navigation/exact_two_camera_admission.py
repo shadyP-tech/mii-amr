@@ -15,6 +15,9 @@ from scripts.aufgabe04.navigation.coverage_candidate_lifecycle import (
     evaluate_exact_two_lidar_checkpoint,
     exact_two_lidar_checkpoint_evidence_sha256,
 )
+from scripts.aufgabe04.navigation.coverage_candidate_reconciliation_report import (
+    evidence_only_reconciliation_policy_contract,
+)
 from scripts.aufgabe04.navigation.exact_two_camera_artifacts import (
     ADMISSION_HASH_FIELD,
     HANDOFF_HASH_FIELD,
@@ -60,6 +63,9 @@ from scripts.aufgabe04.navigation.stand_coverage_survey import (
     StandSurveyRegistry,
     coverage_survey_plan_sha256,
     validate_stand_survey_registry,
+)
+from scripts.aufgabe04.perception.lidar_stand_morphology import (
+    stand_width_profile_from_radius,
 )
 from scripts.aufgabe04.stations.candidate_snapshot import (
     CandidateGeometry,
@@ -252,6 +258,14 @@ def exact_two_detector_config_sha256(plan: CoverageSurveyPlan) -> str:
                 "minimum_candidate_hits": plan.config.minimum_candidate_hits,
                 "exact_inspection_point_count": (
                     plan.config.exact_inspection_point_count
+                ),
+                "lidar_track_morphology_profile": (
+                    stand_width_profile_from_radius(
+                        plan.config.candidate_radius_m
+                    ).to_evidence_dict()
+                ),
+                "lidar_visibility_reconciliation": (
+                    evidence_only_reconciliation_policy_contract()
                 ),
             },
         }

@@ -6,6 +6,7 @@ import json
 import math
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -26,7 +27,10 @@ from scripts.aufgabe04.navigation.models import Pose2D
 from scripts.aufgabe04.navigation.record_stand_coverage_stop import (
     commit_stand_coverage_stop,
 )
-from scripts.aufgabe04.navigation import record_stand_coverage_stop as coverage_stop
+from scripts.aufgabe04.navigation import (
+    coverage_stop_perception_admission as perception_admission,
+    record_stand_coverage_stop as coverage_stop,
+)
 from scripts.aufgabe04.navigation.stand_candidate_static_map_admission import (
     STATIC_MAP_CLEARANCE_BELOW_REQUIRED,
     evaluate_stand_candidate_static_map_admission,
@@ -41,6 +45,12 @@ from scripts.aufgabe04.navigation.stand_coverage_survey import (
     write_survey_progress,
 )
 from scripts.aufgabe04.perception.stand_confirmation import ConfirmedStand
+from scripts.aufgabe04.perception.lidar_stand_morphology import (
+    MORPHOLOGY_PROFILE_EVIDENCE_KEY,
+    MORPHOLOGY_PROFILE_SHA256_KEY,
+    PROPOSAL_DETECTOR_CONFIG_EVIDENCE_KEY,
+    stand_width_profile_from_radius,
+)
 
 
 def costmap_from_rows(
@@ -302,6 +312,60 @@ class StandCandidateStaticMapAdmissionTest(unittest.TestCase):
 
 
 class StandCandidateStaticMapAdmissionIntegrationTest(unittest.TestCase):
+    def test_exact_two_observer_morphology_contract_fails_closed(self):
+        plan = SimpleNamespace(
+            config=SimpleNamespace(
+                candidate_radius_m=0.06,
+                exact_inspection_point_count=2,
+            )
+        )
+        profile = stand_width_profile_from_radius(0.06)
+        profile_payload = profile.to_evidence_dict()
+        valid = {
+            MORPHOLOGY_PROFILE_EVIDENCE_KEY: profile_payload,
+            MORPHOLOGY_PROFILE_SHA256_KEY: payload_sha256(
+                profile_payload
+            ),
+            PROPOSAL_DETECTOR_CONFIG_EVIDENCE_KEY: {
+                "min_width_m": 0.03,
+                "max_width_m": 0.45,
+            },
+        }
+
+        with self.assertRaisesRegex(ValueError, "no LiDAR morphology profile"):
+            perception_admission.validate_observer_morphology_contract({}, plan)
+        with self.assertRaisesRegex(ValueError, "profile differs"):
+            perception_admission.validate_observer_morphology_contract(
+                {
+                    **valid,
+                    MORPHOLOGY_PROFILE_EVIDENCE_KEY: {
+                        **profile_payload,
+                        "expected_diameter_m": 0.20,
+                    },
+                },
+                plan,
+            )
+        with self.assertRaisesRegex(ValueError, "would censor"):
+            perception_admission.validate_observer_morphology_contract(
+                {
+                    **valid,
+                    PROPOSAL_DETECTOR_CONFIG_EVIDENCE_KEY: {
+                        "min_width_m": 0.03,
+                        "max_width_m": 0.18,
+                    },
+                },
+                plan,
+            )
+
+        evidence = perception_admission.validate_observer_morphology_contract(
+            valid,
+            plan,
+        )
+        self.assertTrue(
+            evidence["proposal_width_evidence_preservation"]
+            ["preserves_track_morphology_evidence"]
+        )
+
     def test_commit_filters_before_fusion_and_binds_hashed_epoch_evidence(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -370,10 +434,26 @@ class StandCandidateStaticMapAdmissionIntegrationTest(unittest.TestCase):
                 occupied_center.y_m,
             )
 
-            with patch.object(
-                coverage_stop,
-                "_epoch_stands",
-                return_value=(admitted, rejected),
+            morphology = SimpleNamespace(
+                admitted_stands=(admitted, rejected),
+                rejected_stands=(),
+                to_evidence_dict=lambda: {
+                    "schema_version": 1,
+                    "gate": "lidar_stand_track_morphology_admission",
+                    "counts": {"evaluated": 2, "admitted": 2, "rejected": 0},
+                },
+            )
+            with (
+                patch.object(
+                    coverage_stop,
+                    "build_confirmed_epoch_stands",
+                    return_value=(admitted, rejected),
+                ),
+                patch.object(
+                    perception_admission,
+                    "evaluate_stand_morphology_admission",
+                    return_value=morphology,
+                ),
             ):
                 status = commit_stand_coverage_stop(
                     survey_root=survey_root,
@@ -394,12 +474,32 @@ class StandCandidateStaticMapAdmissionIntegrationTest(unittest.TestCase):
                 evidence_path,
                 hash_field="static_map_candidate_admission_sha256",
             )
+            morphology_evidence_path = Path(
+                str(status["lidar_morphology_admission_json"])
+            )
+            morphology_evidence = load_content_hashed_json(
+                morphology_evidence_path,
+                hash_field="lidar_morphology_admission_sha256",
+            )
 
         self.assertEqual(len(registry.candidates), 1)
         self.assertAlmostEqual(registry.candidates[0].x_m, admitted.x_m)
+        self.assertEqual(status["epoch_confirmed_lidar_candidate_count"], 2)
+        self.assertEqual(status["epoch_morphology_admitted_candidate_count"], 2)
+        self.assertEqual(status["epoch_morphology_rejected_candidate_count"], 0)
+        self.assertEqual(status["epoch_static_map_admitted_candidate_count"], 1)
+        self.assertEqual(status["epoch_static_map_rejected_candidate_count"], 1)
+        self.assertEqual(status["fused_registry_active_candidate_count"], 1)
+        self.assertEqual(status["fused_registry_total_candidate_count"], 1)
         self.assertEqual(status["confirmed_epoch_candidate_count"], 2)
         self.assertEqual(status["static_map_candidate_admitted_count"], 1)
         self.assertEqual(status["static_map_candidate_rejected_count"], 1)
+        self.assertEqual(
+            status["legacy_epoch_candidate_count_aliases"][
+                "static_map_candidate_admitted_count"
+            ],
+            "epoch_static_map_admitted_candidate_count",
+        )
         self.assertEqual(
             epoch["static_map_candidate_admission_sha256"],
             status["static_map_candidate_admission_sha256"],
@@ -413,6 +513,18 @@ class StandCandidateStaticMapAdmissionIntegrationTest(unittest.TestCase):
             {"evaluated": 2, "admitted": 1, "rejected": 1},
         )
         self.assertEqual(evidence["rejected_stand_ids"], [rejected.stand_id])
+        self.assertEqual(
+            morphology_evidence["counts"],
+            {"evaluated": 2, "admitted": 2, "rejected": 0},
+        )
+        self.assertEqual(
+            epoch["lidar_morphology_admission_sha256"],
+            status["lidar_morphology_admission_sha256"],
+        )
+        self.assertIn(
+            status["lidar_morphology_admission_sha256"],
+            morphology_evidence_path.name,
+        )
 
     @staticmethod
     def _write_map_with_central_static_cell(root: Path) -> Path:

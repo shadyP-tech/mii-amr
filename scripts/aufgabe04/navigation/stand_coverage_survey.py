@@ -19,6 +19,9 @@ from scripts.aufgabe04.navigation.certified_exact_start_route import (
     certify_and_smooth_exact_start_route,
 )
 from scripts.aufgabe04.navigation.costmap import Costmap
+from scripts.aufgabe04.navigation.coverage_candidate_reporting import (
+    coverage_phase_completion_fields,
+)
 from scripts.aufgabe04.navigation.exact_start_connector import (
     ExactStartConnectorEvidence,
 )
@@ -522,10 +525,10 @@ def survey_status(
     camera_resolution_complete = (
         camera_resolution_evaluable and unresolved == 0
     )
-    camera_exploration_complete = (
-        coverage_complete
-        and camera_resolution_complete
-        and expected_count_met
+    completion_fields = coverage_phase_completion_fields(
+        lidar_coverage_complete=coverage_complete,
+        camera_candidate_resolution_complete=camera_resolution_complete,
+        camera_expected_stand_count_met=expected_count_met,
     )
     return {
         "survey_id": plan.survey_id,
@@ -539,17 +542,13 @@ def survey_status(
         # camera-confirmation lifecycle.  The two legacy keys below remain for
         # schema-v1 readers, but no new mission summary should rely on them
         # without also reporting these explicit camera fields.
-        "lidar_coverage_complete": coverage_complete,
+        **completion_fields,
         "candidate_counts": counts,
         "unresolved_candidate_count": unresolved,
         "expected_stand_count": plan.config.expected_stand_count,
         "expected_stand_count_met": expected_count_met,
         "camera_confirmed_stand_count": counts[STATUS_CONFIRMED],
         "camera_candidate_resolution_evaluable": camera_resolution_evaluable,
-        "camera_candidate_resolution_complete": camera_resolution_complete,
-        "camera_expected_stand_count_met": expected_count_met,
-        "camera_exploration_complete": camera_exploration_complete,
-        "exploration_complete": camera_exploration_complete,
     }
 
 

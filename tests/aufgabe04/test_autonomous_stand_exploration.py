@@ -1725,6 +1725,10 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                     survey_root=root / "survey",
                     viewpoint_id="survey_vp_001",
                     odom_execution_certificate_path=certificate,
+                    coverage_plan=SimpleNamespace(
+                        survey_id="survey_01",
+                        config=SimpleNamespace(candidate_radius_m=0.06),
+                    ),
                 )
 
         command = run.call_args.args[0]
@@ -1737,6 +1741,14 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         self.assertEqual(
             command[command.index("--observation-id-scope") + 1],
             "survey_vp_001",
+        )
+        self.assertEqual(
+            command[command.index("--survey-candidate-radius-m") + 1],
+            "0.06",
+        )
+        self.assertEqual(
+            command[command.index("--visibility-survey-id") + 1],
+            "survey_01",
         )
         self.assertEqual(summary.name, "observer_summary.json")
 

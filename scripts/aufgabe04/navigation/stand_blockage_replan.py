@@ -52,11 +52,11 @@ from scripts.aufgabe04.navigation.models import (
 from scripts.aufgabe04.navigation.route_smoothing import (
     greedy_line_of_sight_shortcut,
 )
-from scripts.aufgabe04.navigation.record_stand_coverage_stop import (
-    _epoch_stands,
-    _load_summary,
-    _observations_from_epoch,
-    _summary_scan_pose,
+from scripts.aufgabe04.navigation.coverage_stop_perception_admission import (
+    build_confirmed_epoch_stands,
+    load_stopped_observer_summary,
+    load_validated_epoch_observations,
+    observer_scan_pose,
 )
 from scripts.aufgabe04.navigation.stand_coverage_survey import (
     CoverageSurveyPlan,
@@ -932,21 +932,21 @@ def record_blockage_replan(
     )
     if map_bundle.bundle_sha256 != plan.map_bundle_sha256:
         raise ValueError("runtime map bundle differs from coverage plan")
-    observer_summary = _load_summary(observer_summary_path)
+    observer_summary = load_stopped_observer_summary(observer_summary_path)
     if observer_summary.get("map_bundle_sha256") != plan.map_bundle_sha256:
         raise ValueError("blockage observer map differs from coverage plan")
     if observer_summary.get("planning_frame") != plan.planning_frame:
         raise ValueError("blockage observer planning frame differs from plan")
-    start = _summary_scan_pose(observer_summary)
+    start = observer_scan_pose(observer_summary)
     observations_path = Path(str(observer_summary.get("output_jsonl", "")))
-    observations = _observations_from_epoch(
+    observations = load_validated_epoch_observations(
         summary=observer_summary,
         observations_path=observations_path,
         map_yaml=map_yaml,
         map_bundle=map_bundle,
         plan=plan,
     )
-    stands = _epoch_stands(observations, plan)
+    stands = build_confirmed_epoch_stands(observations, plan)
     if not stands:
         raise ValueError("blocking LiDAR epoch confirmed no stand")
     updated_registry = fuse_confirmed_stands(

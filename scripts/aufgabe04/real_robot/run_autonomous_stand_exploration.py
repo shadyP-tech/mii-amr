@@ -39,6 +39,9 @@ from scripts.aufgabe04.navigation.coverage_candidate_admission import (
     coverage_candidate_admission_evidence,
     evaluate_coverage_candidate_admission,
 )
+from scripts.aufgabe04.navigation.coverage_candidate_reconciliation_report import (
+    evidence_only_reconciliation_policy_contract,
+)
 from scripts.aufgabe04.navigation.dynamic_approach_planner import (
     DynamicApproachConfig,
     minimum_static_obstacle_inflation_m,
@@ -82,12 +85,16 @@ from scripts.aufgabe04.navigation.record_stand_coverage_stop import (
 )
 from scripts.aufgabe04.navigation.stand_coverage_survey import (
     STATUS_PENDING_CAMERA,
+    CoverageSurveyConfig,
     CoverageSurveyPlan,
     StandSurveyRegistry,
     coverage_survey_plan_sha256,
     load_coverage_survey_plan,
     load_survey_progress,
     load_stand_survey_registry,
+)
+from scripts.aufgabe04.perception.lidar_stand_morphology import (
+    stand_width_profile_from_radius,
 )
 from scripts.aufgabe04.navigation.stand_discovery_route import (
     seal_stand_discovery_route,
@@ -276,6 +283,9 @@ def _checkpoint_config_sha256(args) -> str:
         if args.stand_model_profile is None
         else _file_sha256(args.stand_model_profile)
     )
+    morphology_profile = stand_width_profile_from_radius(
+        CoverageSurveyConfig().candidate_radius_m
+    )
     return payload_sha256(
         {
             "schema_version": 1,
@@ -291,6 +301,16 @@ def _checkpoint_config_sha256(args) -> str:
             "axis_sample_count": args.axis_sample_count,
             "camera_timeout_sec": args.camera_timeout_sec,
             "stand_model_profile_sha256": stand_model_sha256,
+            "lidar_track_morphology_profile": (
+                morphology_profile.to_evidence_dict()
+            ),
+            "lidar_proposal_width_bounds_m": {
+                "minimum": 0.03,
+                "maximum": 0.45,
+            },
+            "lidar_visibility_reconciliation": (
+                evidence_only_reconciliation_policy_contract()
+            ),
             "max_blockage_replans_per_leg": (
                 args.max_blockage_replans_per_leg
             ),
@@ -476,6 +496,11 @@ def candidate_snapshot_from_registry(
                     plan.config.minimum_distinct_viewpoints
                 ),
                 "minimum_candidate_hits": plan.config.minimum_candidate_hits,
+                "lidar_track_morphology_profile": (
+                    stand_width_profile_from_radius(
+                        plan.config.candidate_radius_m
+                    ).to_evidence_dict()
+                ),
             },
         }
     )
@@ -1218,6 +1243,7 @@ def _capture_lidar_epoch(
     viewpoint_id: str,
     odom_execution_certificate_path: Path | None = None,
     observation_tf_evidence_path: Path | None = None,
+    coverage_plan: CoverageSurveyPlan | None = None,
 ) -> Path:
     epoch_root = survey_root / "raw_epochs" / viewpoint_id
     epoch_root.mkdir(parents=True, exist_ok=False)
@@ -1228,6 +1254,9 @@ def _capture_lidar_epoch(
             phase="coverage_lidar_epoch_before_observer",
             typed_run_already_issued=True,
         )
+    selected_plan = coverage_plan or load_coverage_survey_plan(
+        survey_root / "coverage_plan.json"
+    )
     summary = epoch_root / "observer_summary.json"
     command = [
         sys.executable,
@@ -1261,6 +1290,14 @@ def _capture_lidar_epoch(
         "--summary-json",
         str(summary),
         "--observation-id-scope",
+        str(viewpoint_id),
+        "--survey-candidate-radius-m",
+        str(selected_plan.config.candidate_radius_m),
+        "--visibility-receipts-jsonl",
+        str(epoch_root / "visibility_receipts.jsonl"),
+        "--visibility-survey-id",
+        selected_plan.survey_id,
+        "--visibility-viewpoint-id",
         str(viewpoint_id),
     ]
     if odom_execution_certificate_path is not None:
@@ -2383,6 +2420,7 @@ def main(argv=None) -> int:
                     / viewpoint_id
                     / "observation_tf_readiness.json"
                 ),
+                coverage_plan=plan,
             )
 
         def fuse_coverage_stop(viewpoint_id, observer_summary_path):

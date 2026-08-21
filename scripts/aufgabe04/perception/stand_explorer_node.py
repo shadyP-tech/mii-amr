@@ -16,6 +16,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.aufgabe04.navigation.map_io import freeze_map_bundle
+from scripts.aufgabe04.artifacts.content_store import payload_sha256
+from scripts.aufgabe04.navigation.models import Pose2D
 from scripts.aufgabe04.navigation.odom_execution_certificate import (
     OdomExecutionCertificate,
     PlanarTransform2D,
@@ -24,6 +26,29 @@ from scripts.aufgabe04.navigation.odom_execution_certificate import (
 )
 from scripts.aufgabe04.navigation.ros_runtime_config import RuntimeConfig, resolve_runtime_config
 from scripts.aufgabe04.perception.lidar_stand_detector import detect_stand_candidates_from_scan
+from scripts.aufgabe04.perception.lidar_stand_morphology import (
+    MORPHOLOGY_PROFILE_EVIDENCE_KEY,
+    MORPHOLOGY_PROFILE_SHA256_KEY,
+    PROPOSAL_DETECTOR_CONFIG_EVIDENCE_KEY,
+    stand_width_profile_from_radius,
+)
+from scripts.aufgabe04.perception.lidar_visibility_evidence import (
+    VISIBILITY_EVIDENCE_ENABLED_KEY,
+    VISIBILITY_OBSERVER_CONFIG_KEY,
+    VISIBILITY_OBSERVER_CONFIG_SHA256_KEY,
+    VISIBILITY_RECEIPT_COUNT_KEY,
+    VISIBILITY_RECEIPTS_FILE_SHA256_KEY,
+    VISIBILITY_RECEIPTS_JSONL_KEY,
+    VISIBILITY_RECEIPT_SET_SHA256_KEY,
+    lidar_visibility_receipt_from_scan,
+)
+from scripts.aufgabe04.perception.lidar_visibility_session import (
+    FROZEN_ODOM_OBSERVATION_GEOMETRY,
+    LIVE_MAP_OBSERVATION_GEOMETRY,
+    LidarVisibilitySession,
+    disabled_visibility_summary_fields,
+    proposal_detector_config_evidence,
+)
 from scripts.aufgabe04.perception.models import LidarStandDetectorConfig
 from scripts.aufgabe04.perception.stand_confirmation import (
     StandConfirmationAccumulator,
@@ -414,6 +439,41 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
             min_width_m=args.min_width_m,
             max_width_m=args.max_width_m,
         )
+        survey_candidate_radius_m = getattr(
+            args,
+            "survey_candidate_radius_m",
+            None,
+        )
+        self.morphology_profile = (
+            None
+            if survey_candidate_radius_m is None
+            else stand_width_profile_from_radius(survey_candidate_radius_m)
+        )
+        self.visibility_session = LidarVisibilitySession.create(
+            output_path=getattr(args, "visibility_receipts_jsonl", None),
+            survey_id=getattr(args, "visibility_survey_id", ""),
+            viewpoint_id=getattr(args, "visibility_viewpoint_id", ""),
+            runtime_config=self.runtime.as_log_dict(),
+            timing_limits=self.timing_limits.as_dict(),
+            map_bundle_sha256=(
+                None
+                if self.map_bundle is None
+                else self.map_bundle.bundle_sha256
+            ),
+            observation_geometry_mode=(
+                LIVE_MAP_OBSERVATION_GEOMETRY
+                if self.frozen_observer_frame is None
+                else FROZEN_ODOM_OBSERVATION_GEOMETRY
+            ),
+            proposal_detector_config=proposal_detector_config_evidence(
+                self.detector_config
+            ),
+            morphology_profile=(
+                None
+                if self.morphology_profile is None
+                else self.morphology_profile.to_evidence_dict()
+            ),
+        )
         self.accumulator = StandConfirmationAccumulator(
             config=StandConfirmationConfig(
                 merge_distance_m=args.merge_distance_m,
@@ -624,6 +684,36 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
             "y_m": scan_pose_in_map.y_m,
             "yaw_rad": scan_pose_in_map.yaw_rad,
         }
+        if self.visibility_session.enabled:
+            receipt = lidar_visibility_receipt_from_scan(
+                receipt_id=(
+                    f"{self.visibility_session.viewpoint_id}_"
+                    f"{self.processed_scan_count:06d}"
+                ),
+                survey_id=self.visibility_session.survey_id,
+                viewpoint_id=self.visibility_session.viewpoint_id,
+                planning_frame=self.runtime.map_frame,
+                scan_frame=scan_frame,
+                scan_topic=self.runtime.scan_topic,
+                map_bundle_sha256=self.map_bundle.bundle_sha256,
+                observer_config_sha256=(
+                    self.visibility_session.observer_config_sha256
+                ),
+                scan_stamp_sec=scan_stamp_sec,
+                pose_stamp_sec=scan_stamp_sec,
+                observer_clock_sec=observer_clock_sec,
+                scan_pose_map=Pose2D(
+                    scan_pose_in_map.x_m,
+                    scan_pose_in_map.y_m,
+                    scan_pose_in_map.yaw_rad,
+                ),
+                angle_min_rad=msg.angle_min,
+                angle_increment_rad=msg.angle_increment,
+                range_min_m=msg.range_min,
+                range_max_m=msg.range_max,
+                ranges_m=msg.ranges,
+            )
+            self.visibility_session.buffer_receipt(receipt)
         candidates = detect_stand_candidates_from_scan(
             msg.ranges,
             angle_min_rad=msg.angle_min,
@@ -636,6 +726,19 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
 
         runtime_config = dict(self.runtime.as_log_dict())
         runtime_config[RUNTIME_TIMING_LIMITS_KEY] = self.timing_limits.as_dict()
+        runtime_config[PROPOSAL_DETECTOR_CONFIG_EVIDENCE_KEY] = (
+            proposal_detector_config_evidence(self.detector_config)
+        )
+        if self.morphology_profile is not None:
+            morphology_profile_evidence = (
+                self.morphology_profile.to_evidence_dict()
+            )
+            runtime_config[MORPHOLOGY_PROFILE_EVIDENCE_KEY] = (
+                morphology_profile_evidence
+            )
+            runtime_config[MORPHOLOGY_PROFILE_SHA256_KEY] = payload_sha256(
+                morphology_profile_evidence
+            )
         if self.observation_id_scope is not None:
             runtime_config[OBSERVATION_ID_SCOPE_RUNTIME_KEY] = (
                 self.observation_id_scope
@@ -800,6 +903,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-cluster-points", type=int, default=2)
     parser.add_argument("--min-width-m", type=float, default=0.03)
     parser.add_argument("--max-width-m", type=float, default=0.45)
+    parser.add_argument(
+        "--survey-candidate-radius-m",
+        type=float,
+        default=None,
+        help=(
+            "Bind the survey-envelope-derived track morphology policy into "
+            "observer evidence. This does not narrow broad proposal extraction."
+        ),
+    )
+    parser.add_argument(
+        "--visibility-receipts-jsonl",
+        type=Path,
+        default=None,
+        help=(
+            "Optional target-agnostic exact-time scan receipt stream used for "
+            "later fail-closed negative-visibility reconciliation."
+        ),
+    )
+    parser.add_argument("--visibility-survey-id", default="")
+    parser.add_argument("--visibility-viewpoint-id", default="")
     parser.add_argument("--merge-distance-m", type=float, default=0.18)
     parser.add_argument("--min-hits", type=int, default=3)
     parser.add_argument("--max-observation-age-sec", type=float, default=8.0)
@@ -831,7 +954,25 @@ def observer_summary_payload(node: StandExplorerNode) -> dict[str, object]:
         "confirmed_stand_count": node.last_confirmed_stand_count,
         "runtime_config": node.runtime.as_log_dict(),
         "timing_limits": node.timing_limits.as_dict(),
+        PROPOSAL_DETECTOR_CONFIG_EVIDENCE_KEY: proposal_detector_config_evidence(
+            getattr(node, "detector_config", LidarStandDetectorConfig())
+        ),
     }
+    morphology_profile = getattr(node, "morphology_profile", None)
+    if morphology_profile is not None:
+        morphology_profile_evidence = morphology_profile.to_evidence_dict()
+        payload[MORPHOLOGY_PROFILE_EVIDENCE_KEY] = morphology_profile_evidence
+        payload[MORPHOLOGY_PROFILE_SHA256_KEY] = payload_sha256(
+            morphology_profile_evidence
+        )
+    visibility_session = getattr(node, "visibility_session", None)
+    payload.update(
+        disabled_visibility_summary_fields()
+        if visibility_session is None
+        else visibility_session.summary_fields(
+            processed_scan_count=node.processed_scan_count
+        )
+    )
     if frozen_frame is not None:
         payload[FROZEN_FRAME_EVIDENCE_KEY] = frozen_frame.runtime_evidence()
     observation_id_scope = getattr(node, "observation_id_scope", None)
@@ -845,6 +986,11 @@ def write_observer_summary(path: Path, node: StandExplorerNode) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         raise ValueError(f"refusing to overwrite observer summary: {path}")
+    visibility_session = getattr(node, "visibility_session", None)
+    if visibility_session is not None:
+        visibility_session.finalize(
+            processed_scan_count=node.processed_scan_count
+        )
     path.write_text(
         json.dumps(observer_summary_payload(node), indent=2, sort_keys=True) + "\n"
     )
@@ -863,6 +1009,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"refusing to overwrite observer summary: {args.summary_json}")
     try:
         _timing_limits_from_args(args)
+        if args.survey_candidate_radius_m is not None:
+            stand_width_profile_from_radius(args.survey_candidate_radius_m)
     except ValueError as exc:
         parser.error(str(exc))
     _require_ros()

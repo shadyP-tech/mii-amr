@@ -1,6 +1,9 @@
 from collections import deque
 from types import SimpleNamespace
+import json
+import math
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -185,6 +188,7 @@ class StandExplorerTfTest(unittest.TestCase):
         self.assertEqual(defaults.tf_timeout_sec, 0.5)
         self.assertEqual(defaults.pending_scan_limit, 8)
         self.assertIsNone(defaults.summary_json)
+        self.assertIsNone(defaults.survey_candidate_radius_m)
         self.assertEqual(defaults.duration_sec, 0.0)
         self.assertEqual(alias.max_future_timestamp_sec, 0.1)
 
@@ -217,6 +221,136 @@ class StandExplorerTfTest(unittest.TestCase):
             payload["scan_frame_pose_in_planning_frame"]["x_m"],
             1.0,
         )
+        self.assertEqual(
+            payload[
+                stand_explorer_node.PROPOSAL_DETECTOR_CONFIG_EVIDENCE_KEY
+            ]["max_width_m"],
+            0.45,
+        )
+
+    def test_summary_binds_morphology_without_narrowing_proposals(self):
+        profile = stand_explorer_node.stand_width_profile_from_radius(0.06)
+        fake_node = SimpleNamespace(
+            started_unix_sec=10.0,
+            output_jsonl=Path("observations.jsonl"),
+            map_bundle=SimpleNamespace(bundle_sha256="a" * 64),
+            runtime=SimpleNamespace(
+                map_frame="map",
+                as_log_dict=lambda: {"map_frame": "map"},
+            ),
+            timing_limits=SimpleNamespace(as_dict=lambda: {}),
+            last_scan_pose_map=None,
+            last_processed_scan_stamp_sec=None,
+            processed_scan_count=0,
+            detected_candidate_count=0,
+            accepted_observation_count=0,
+            last_confirmed_stand_count=0,
+            detector_config=stand_explorer_node.LidarStandDetectorConfig(),
+            morphology_profile=profile,
+        )
+
+        payload = stand_explorer_node.observer_summary_payload(fake_node)
+
+        self.assertEqual(
+            payload[
+                stand_explorer_node.PROPOSAL_DETECTOR_CONFIG_EVIDENCE_KEY
+            ]["max_width_m"],
+            0.45,
+        )
+        self.assertEqual(
+            payload[stand_explorer_node.MORPHOLOGY_PROFILE_EVIDENCE_KEY],
+            profile.to_evidence_dict(),
+        )
+        self.assertEqual(
+            len(payload[stand_explorer_node.MORPHOLOGY_PROFILE_SHA256_KEY]),
+            64,
+        )
+
+    def test_visibility_receipts_are_flushed_once_and_bound_to_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            receipt_path = root / "visibility.jsonl"
+            profile = stand_explorer_node.stand_width_profile_from_radius(0.06)
+            detector_config = stand_explorer_node.LidarStandDetectorConfig()
+            visibility_session = stand_explorer_node.LidarVisibilitySession.create(
+                output_path=receipt_path,
+                survey_id="survey_01",
+                viewpoint_id="viewpoint_01",
+                runtime_config={"map_frame": "map", "scan_topic": "/scan"},
+                timing_limits={},
+                map_bundle_sha256="a" * 64,
+                observation_geometry_mode=(
+                    stand_explorer_node.FROZEN_ODOM_OBSERVATION_GEOMETRY
+                ),
+                proposal_detector_config=(
+                    stand_explorer_node.proposal_detector_config_evidence(
+                        detector_config
+                    )
+                ),
+                morphology_profile=profile.to_evidence_dict(),
+            )
+            receipt = stand_explorer_node.lidar_visibility_receipt_from_scan(
+                receipt_id="viewpoint_01_000001",
+                survey_id="survey_01",
+                viewpoint_id="viewpoint_01",
+                planning_frame="map",
+                scan_frame="base_scan",
+                scan_topic="/scan",
+                map_bundle_sha256="a" * 64,
+                observer_config_sha256=(
+                    visibility_session.observer_config_sha256
+                ),
+                scan_stamp_sec=1.0,
+                pose_stamp_sec=1.0,
+                observer_clock_sec=1.01,
+                scan_pose_map=stand_explorer_node.Pose2D(0.0, 0.0, 0.0),
+                angle_min_rad=-1.0,
+                angle_increment_rad=1.0,
+                range_min_m=0.08,
+                range_max_m=3.5,
+                ranges_m=(1.0, math.inf, 2.0),
+            )
+            visibility_session.buffer_receipt(receipt)
+            fake_node = SimpleNamespace(
+                started_unix_sec=1.0,
+                output_jsonl=root / "observations.jsonl",
+                map_bundle=SimpleNamespace(bundle_sha256="a" * 64),
+                runtime=SimpleNamespace(
+                    map_frame="map",
+                    as_log_dict=lambda: {"map_frame": "map"},
+                ),
+                timing_limits=SimpleNamespace(as_dict=lambda: {}),
+                last_scan_pose_map={"x_m": 0.0, "y_m": 0.0, "yaw_rad": 0.0},
+                last_processed_scan_stamp_sec=1.0,
+                processed_scan_count=1,
+                detected_candidate_count=0,
+                accepted_observation_count=0,
+                last_confirmed_stand_count=0,
+                detector_config=detector_config,
+                morphology_profile=profile,
+                visibility_session=visibility_session,
+            )
+            summary_path = root / "observer_summary.json"
+
+            stand_explorer_node.write_observer_summary(
+                summary_path,
+                fake_node,
+            )
+            payload = json.loads(summary_path.read_text())
+
+            self.assertEqual(
+                payload[stand_explorer_node.VISIBILITY_RECEIPT_COUNT_KEY],
+                1,
+            )
+            self.assertEqual(
+                len(
+                    payload[
+                        stand_explorer_node.VISIBILITY_RECEIPTS_FILE_SHA256_KEY
+                    ]
+                ),
+                64,
+            )
+            self.assertEqual(len(receipt_path.read_text().splitlines()), 1)
 
     def test_sim_time_override_sets_ros_node_clock_parameter(self):
         class FakeParameter:

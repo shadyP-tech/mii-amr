@@ -546,7 +546,17 @@ class AutonomousCoverageMissionTest(unittest.TestCase):
                 ],
             )
             summary = outcome.to_mission_summary()
+            self.assertEqual(summary["active_lidar_registry_candidate_count"], 5)
+            self.assertEqual(summary["fused_registry_active_candidate_count"], 5)
             self.assertEqual(summary["lidar_static_map_admitted_candidate_count"], 5)
+            self.assertEqual(
+                summary["legacy_lidar_checkpoint_candidate_count_aliases"],
+                {
+                    "lidar_static_map_admitted_candidate_count": (
+                        "active_lidar_registry_candidate_count"
+                    )
+                },
+            )
             self.assertEqual(len(summary["camera_validation_queue_candidate_uids"]), 2)
             self.assertIsNone(summary["candidate_snapshot"])
             self.assertFalse(summary["camera_approach_authorized"])
@@ -607,6 +617,9 @@ class AutonomousCoverageMissionTest(unittest.TestCase):
                 fields["lidar_checkpoint_admission_reasons"],
                 ["active_lidar_candidate_count_mismatch"],
             )
+            self.assertEqual(fields["active_lidar_registry_candidate_count"], 4)
+            self.assertEqual(fields["fused_registry_active_candidate_count"], 4)
+            self.assertEqual(fields["lidar_static_map_admitted_candidate_count"], 4)
             self.assertFalse(fields["camera_approach_authorized"])
 
     def test_exact_two_camera_publishes_bound_handoff_after_snapshot(self):

@@ -26,15 +26,24 @@ from scripts.aufgabe04.navigation.artifacts import (
     write_route_csv,
 )
 from scripts.aufgabe04.navigation.content_hashed_evidence import (
-    payload_sha256,
     write_content_hashed_json,
 )
-from scripts.aufgabe04.navigation.costmap import Costmap
+from scripts.aufgabe04.navigation.coverage_candidate_reporting import (
+    coverage_epoch_candidate_count_fields,
+)
+from scripts.aufgabe04.navigation.coverage_stop_perception_admission import (
+    CoverageEpochPerceptionAdmission,
+    CoverageVisibilityReconciliationAdmission,
+    build_confirmed_epoch_stands,
+    coverage_stop_perception_summary_fields,
+    load_stopped_observer_summary,
+    load_validated_epoch_observations,
+    observer_scan_pose,
+    prepare_coverage_epoch_perception_admission,
+    prepare_coverage_visibility_reconciliation,
+)
 from scripts.aufgabe04.navigation.map_io import load_occupancy_grid_with_bundle
 from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.plan_first_detected_station import (
-    validate_observation_provenance,
-)
 from scripts.aufgabe04.navigation.stand_coverage_survey import (
     coverage_survey_plan_sha256,
     fuse_confirmed_stands,
@@ -46,17 +55,6 @@ from scripts.aufgabe04.navigation.stand_coverage_survey import (
     survey_status,
     write_stand_survey_registry,
     write_survey_progress,
-)
-from scripts.aufgabe04.navigation.stand_candidate_static_map_admission import (
-    evaluate_stand_candidate_static_map_admission,
-)
-from scripts.aufgabe04.perception.stand_confirmation import (
-    StandConfirmationAccumulator,
-    StandConfirmationConfig,
-)
-from scripts.aufgabe04.perception.stand_observation import (
-    load_observation_jsonl,
-    validated_observation_stream_clock,
 )
 from scripts.aufgabe04.real_robot.autonomous_session_manifest import (
     admit_autonomous_session_manifest,
@@ -89,10 +87,10 @@ class PreparedCoverageStop:
     stands: object
     next_leg: object | None
     raw_stands: object = ()
-    static_map_candidate_admission: object | None = None
-    static_map_candidate_admission_payload: dict[str, object] | None = None
-    static_map_candidate_admission_path: Path | None = None
-    static_map_candidate_admission_sha256: str | None = None
+    perception_admission: CoverageEpochPerceptionAdmission | None = None
+    visibility_reconciliation: (
+        CoverageVisibilityReconciliationAdmission | None
+    ) = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -119,107 +117,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Allowed planar scan-frame mounting offset from base_footprint.",
     )
     return parser
-
-
-def _load_summary(path: Path) -> dict[str, object]:
-    try:
-        payload = json.loads(Path(path).read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"invalid observer summary: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise ValueError("observer summary must contain a JSON object")
-    if payload.get("schema_version") != 1:
-        raise ValueError("unsupported observer summary schema")
-    if payload.get("motion_published") is not False:
-        raise ValueError("observer summary must declare motion_published=false")
-    processed = payload.get("processed_scan_count")
-    if type(processed) is not int or processed <= 0:
-        raise ValueError("observer summary contains no processed scans")
-    return payload
-
-
-def _summary_scan_pose(payload: dict[str, object]) -> Pose2D:
-    raw = payload.get("scan_frame_pose_in_planning_frame")
-    if not isinstance(raw, dict):
-        raise ValueError("observer summary has no final scan-frame pose")
-    try:
-        pose = Pose2D(
-            float(raw["x_m"]),
-            float(raw["y_m"]),
-            float(raw["yaw_rad"]),
-        )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("observer summary scan-frame pose is invalid") from exc
-    if not all(math.isfinite(value) for value in (pose.x_m, pose.y_m, pose.yaw_rad)):
-        raise ValueError("observer summary scan-frame pose must be finite")
-    return pose
-
-
-def _observations_from_epoch(
-    *,
-    summary: dict[str, object],
-    observations_path: Path,
-    map_yaml: Path,
-    map_bundle,
-    plan,
-):
-    accepted_count = summary.get("accepted_observation_count")
-    if type(accepted_count) is not int or accepted_count < 0:
-        raise ValueError("observer summary accepted_observation_count is invalid")
-    if accepted_count == 0:
-        if observations_path.exists() and observations_path.stat().st_size > 0:
-            raise ValueError(
-                "observer summary reports no observations but JSONL is non-empty"
-            )
-        return ()
-    if not observations_path.exists():
-        raise ValueError("observer summary reports observations but JSONL is missing")
-    observations = load_observation_jsonl(observations_path)
-    if len(observations) != accepted_count:
-        raise ValueError(
-            "observer summary/JSONL observation count mismatch: "
-            f"{accepted_count} != {len(observations)}"
-        )
-    runtime = summary.get("runtime_config")
-    timing = summary.get("timing_limits")
-    if not isinstance(runtime, dict) or not isinstance(timing, dict):
-        raise ValueError("observer summary runtime/timing metadata is invalid")
-    required_base_frame = str(runtime.get("base_frame", ""))
-    required_localization_source = str(runtime.get("localization_source", ""))
-    for observation in observations:
-        validate_observation_provenance(
-            observation,
-            map_yaml=map_yaml,
-            required_map_frame=plan.planning_frame,
-            required_base_frame=required_base_frame,
-            required_localization_source=required_localization_source,
-            max_tf_age_sec=float(timing["max_tf_age_sec"]),
-            max_scan_age_sec=float(timing["max_scan_age_sec"]),
-            max_future_timestamp_sec=float(timing["max_future_timestamp_sec"]),
-            max_tf_scan_skew_sec=float(timing["max_tf_scan_skew_sec"]),
-            expected_map_yaml_sha256=map_bundle.yaml_sha256,
-            expected_map_bundle_sha256=map_bundle.bundle_sha256,
-        )
-    validated_observation_stream_clock(observations)
-    return observations
-
-
-def _epoch_stands(observations, plan):
-    if not observations:
-        return ()
-    accumulator = StandConfirmationAccumulator(
-        config=StandConfirmationConfig(
-            merge_distance_m=plan.config.candidate_merge_distance_m,
-            min_hits=plan.config.minimum_candidate_hits,
-            max_age_sec=plan.config.observation_epoch_max_age_sec,
-            min_confidence=plan.config.minimum_candidate_confidence,
-            min_boundary_clearance_m=(
-                plan.config.minimum_boundary_clearance_m
-            ),
-        ),
-        arena_bounds=plan.arena_bounds,
-    )
-    return accumulator.add_observations(observations)
 
 
 def _validate_pose(pose: Pose2D, name: str) -> None:
@@ -343,12 +240,12 @@ def _prepare_stand_coverage_stop(
     )
     if map_bundle.bundle_sha256 != plan.map_bundle_sha256:
         raise ValueError("runtime map bundle differs from coverage plan")
-    observer_summary = _load_summary(observer_summary_json)
+    observer_summary = load_stopped_observer_summary(observer_summary_json)
     if observer_summary.get("map_bundle_sha256") != plan.map_bundle_sha256:
         raise ValueError("observer summary map bundle differs from coverage plan")
     if observer_summary.get("planning_frame") != plan.planning_frame:
         raise ValueError("observer summary planning frame differs from plan")
-    scan_pose = _summary_scan_pose(observer_summary)
+    scan_pose = observer_scan_pose(observer_summary)
     viewpoint_error_m = math.hypot(
         scan_pose.x_m - viewpoint.pose.x_m,
         scan_pose.y_m - viewpoint.pose.y_m,
@@ -366,49 +263,39 @@ def _prepare_stand_coverage_stop(
         raise ValueError("observer summary has no observations JSONL path")
     if observations_path.resolve() != summary_output.resolve():
         raise ValueError("observations path differs from the observer summary output")
-    observations = _observations_from_epoch(
+    observations = load_validated_epoch_observations(
         summary=observer_summary,
         observations_path=observations_path,
         map_yaml=map_yaml,
         map_bundle=map_bundle,
         plan=plan,
     )
-    raw_stands = _epoch_stands(observations, plan)
-    static_map_candidate_admission = (
-        evaluate_stand_candidate_static_map_admission(
-            Costmap.from_occupancy_grid(grid).with_arena_bounds(
-                plan.arena_bounds
-            ),
-            raw_stands,
-            candidate_radius_m=plan.config.candidate_radius_m,
-            candidate_uncertainty_m=plan.config.candidate_uncertainty_m,
-        )
+    raw_stands = build_confirmed_epoch_stands(observations, plan)
+    perception_admission = prepare_coverage_epoch_perception_admission(
+        survey_root=survey_root,
+        observer_summary_json=observer_summary_json,
+        observer_summary=observer_summary,
+        plan=plan,
+        viewpoint=viewpoint,
+        occupancy_grid=grid,
+        observations=observations,
+        raw_stands=raw_stands,
     )
-    static_map_candidate_admission_payload = {
-        **static_map_candidate_admission.to_evidence_dict(),
-        "survey_id": plan.survey_id,
-        "viewpoint_id": viewpoint.viewpoint_id,
-        "planning_frame": plan.planning_frame,
-        "map_bundle_sha256": plan.map_bundle_sha256,
-        "coverage_plan_sha256": coverage_survey_plan_sha256(plan),
-    }
-    static_map_candidate_admission_sha256 = payload_sha256(
-        static_map_candidate_admission_payload
-    )
-    static_map_candidate_admission_path = (
-        survey_root
-        / "epochs"
-        / (
-            f"{viewpoint.viewpoint_id}_static_map_candidate_admission_"
-            f"{static_map_candidate_admission_sha256}.json"
-        )
-    )
-    stands = static_map_candidate_admission.admitted_stands
+    stands = perception_admission.admitted_stands
     registry = fuse_confirmed_stands(
         registry,
         stands,
         viewpoint_id=viewpoint.viewpoint_id,
         config=plan.config,
+    )
+    visibility_reconciliation = prepare_coverage_visibility_reconciliation(
+        survey_root=survey_root,
+        plan=plan,
+        progress=progress,
+        current_viewpoint_id=viewpoint.viewpoint_id,
+        current_evidence=perception_admission.visibility_evidence,
+        registry=registry,
+        occupancy_grid=grid,
     )
     progress = mark_viewpoint_visited(plan, progress, viewpoint.viewpoint_id)
 
@@ -449,16 +336,8 @@ def _prepare_stand_coverage_stop(
         stands=stands,
         next_leg=next_leg,
         raw_stands=raw_stands,
-        static_map_candidate_admission=static_map_candidate_admission,
-        static_map_candidate_admission_payload=(
-            static_map_candidate_admission_payload
-        ),
-        static_map_candidate_admission_path=(
-            static_map_candidate_admission_path
-        ),
-        static_map_candidate_admission_sha256=(
-            static_map_candidate_admission_sha256
-        ),
+        perception_admission=perception_admission,
+        visibility_reconciliation=visibility_reconciliation,
     )
 
 
@@ -473,21 +352,48 @@ def _write_committed_stop_state(
     write_summary: bool = True,
 ) -> dict[str, object]:
     prepared.epoch_path.parent.mkdir(parents=True, exist_ok=True)
-    if (
-        prepared.static_map_candidate_admission is None
-        or prepared.static_map_candidate_admission_payload is None
-        or prepared.static_map_candidate_admission_path is None
-        or prepared.static_map_candidate_admission_sha256 is None
-    ):
-        raise ValueError("prepared stop has no static-map candidate evidence")
-    written_admission_sha256 = write_content_hashed_json(
-        prepared.static_map_candidate_admission_path,
-        prepared.static_map_candidate_admission_payload,
-        hash_field="static_map_candidate_admission_sha256",
+    perception_admission = prepared.perception_admission
+    if perception_admission is None:
+        raise ValueError("prepared stop has no perception admission evidence")
+    artifacts = perception_admission.evidence_artifacts
+    if prepared.visibility_reconciliation is not None:
+        artifacts += prepared.visibility_reconciliation.evidence_artifacts
+    for artifact in artifacts:
+        written_sha256 = write_content_hashed_json(
+            artifact.path,
+            artifact.payload,
+            hash_field=artifact.hash_field,
+        )
+        if written_sha256 != artifact.sha256:
+            raise RuntimeError(
+                f"{artifact.kind} evidence hash changed while writing"
+            )
+    morphology_admission = perception_admission.morphology_admission
+    admission = perception_admission.static_map_admission
+    survey_fields = survey_status(
+        prepared.plan,
+        prepared.progress,
+        prepared.registry,
     )
-    if written_admission_sha256 != prepared.static_map_candidate_admission_sha256:
-        raise RuntimeError("static-map candidate evidence hash changed while writing")
-    admission = prepared.static_map_candidate_admission
+    registry_candidate_counts = survey_fields.get("candidate_counts")
+    if not isinstance(registry_candidate_counts, dict):
+        raise RuntimeError("survey status has no fused registry candidate counts")
+    candidate_count_fields = coverage_epoch_candidate_count_fields(
+        confirmed_epoch_candidate_count=len(prepared.raw_stands),
+        morphology_admitted_candidate_count=len(
+            morphology_admission.admitted_stands
+        ),
+        morphology_rejected_candidate_count=len(
+            morphology_admission.rejected_stands
+        ),
+        static_map_admitted_candidate_count=len(admission.admitted_stands),
+        static_map_rejected_candidate_count=len(admission.rejected_stands),
+        fused_registry_candidate_counts=registry_candidate_counts,
+    )
+    perception_fields = coverage_stop_perception_summary_fields(
+        perception_admission,
+        prepared.visibility_reconciliation,
+    )
     epoch = {
         "schema_version": 1,
         "survey_id": prepared.plan.survey_id,
@@ -518,15 +424,8 @@ def _write_committed_stop_state(
         "observations_jsonl": str(prepared.observations_path),
         "processed_scan_count": prepared.observer_summary["processed_scan_count"],
         "accepted_observation_count": len(prepared.observations),
-        "confirmed_epoch_candidate_count": len(prepared.raw_stands),
-        "static_map_candidate_admitted_count": len(admission.admitted_stands),
-        "static_map_candidate_rejected_count": len(admission.rejected_stands),
-        "static_map_candidate_admission_json": str(
-            prepared.static_map_candidate_admission_path
-        ),
-        "static_map_candidate_admission_sha256": (
-            prepared.static_map_candidate_admission_sha256
-        ),
+        **candidate_count_fields,
+        **perception_fields,
     }
     prepared.epoch_path.write_text(json.dumps(epoch, indent=2, sort_keys=True) + "\n")
     write_survey_progress(prepared.progress_path, prepared.progress, prepared.plan)
@@ -542,18 +441,11 @@ def _write_committed_stop_state(
         "status": "coverage_stop_recorded",
         "motion_published": False,
         "motion_scope": "stopped_observation_epoch",
-        **survey_status(prepared.plan, prepared.progress, prepared.registry),
+        **survey_fields,
         "recorded_viewpoint_id": prepared.viewpoint.viewpoint_id,
         "epoch_json": str(prepared.epoch_path),
-        "confirmed_epoch_candidate_count": len(prepared.raw_stands),
-        "static_map_candidate_admitted_count": len(admission.admitted_stands),
-        "static_map_candidate_rejected_count": len(admission.rejected_stands),
-        "static_map_candidate_admission_json": str(
-            prepared.static_map_candidate_admission_path
-        ),
-        "static_map_candidate_admission_sha256": (
-            prepared.static_map_candidate_admission_sha256
-        ),
+        **candidate_count_fields,
+        **perception_fields,
         "next_viewpoint_id": next_viewpoint_id,
         "next_route_csv": None if next_route_path is None else str(next_route_path),
         "next_diagnostics_json": (

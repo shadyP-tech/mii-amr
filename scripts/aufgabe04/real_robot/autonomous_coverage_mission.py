@@ -26,6 +26,10 @@ from scripts.aufgabe04.navigation.coverage_candidate_lifecycle import (
     evaluate_exact_two_lidar_checkpoint,
     exact_two_lidar_checkpoint_evidence,
 )
+from scripts.aufgabe04.navigation.coverage_candidate_reporting import (
+    active_lidar_registry_count_fields,
+    fused_registry_candidate_count_fields,
+)
 from scripts.aufgabe04.real_robot.autonomous_exact_two_completion import (
     COVERAGE_EXACT_TWO_CAMERA_READY,
     EXACT_TWO_CAMERA_VALIDATION_READY,
@@ -342,8 +346,11 @@ class CoverageStatus:
         }
         result.update({key: value for key, value in optional.items() if value is not None})
         if self.candidate_counts:
-            result["candidate_counts"] = dict(self.candidate_counts)
-            result["candidate_count"] = sum(value for _, value in self.candidate_counts)
+            result.update(
+                fused_registry_candidate_count_fields(
+                    dict(self.candidate_counts)
+                )
+            )
         return result
 
 
@@ -435,7 +442,7 @@ class CoverageLidarCheckpointComplete:
                 self.lidar_checkpoint_admission_sha256
             ),
             "expected_stand_count": self.decision.expected_stand_count,
-            "lidar_static_map_admitted_candidate_count": (
+            **active_lidar_registry_count_fields(
                 self.decision.active_lidar_candidate_count
             ),
             "lidar_static_map_admitted_candidate_uids": list(
@@ -498,7 +505,7 @@ class CoverageLidarCheckpointAdmissionError(RuntimeError):
             "lidar_checkpoint_admission_sha256": self.admission_sha256,
             "lidar_checkpoint_admission_reasons": list(self.decision.reasons),
             "expected_stand_count": self.decision.expected_stand_count,
-            "lidar_static_map_admitted_candidate_count": (
+            **active_lidar_registry_count_fields(
                 self.decision.active_lidar_candidate_count
             ),
             "completed_coverage_legs": self.completed_coverage_legs,
