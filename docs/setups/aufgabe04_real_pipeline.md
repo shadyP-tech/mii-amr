@@ -176,14 +176,21 @@ ROS, prompt, launch subprocesses, or publish velocity. Fresh AMCL reads, passive
 camera capture, exact one-use mission-leg permits, and child motion remain
 explicit injected effects supplied by the entrypoint.
 
-The finite yaw on a `stand_discovery_corridor` inspection waypoint is a stopped
-endpoint requirement, not a heading constraint for the entire incoming A*
-segment. The follower keeps exact-vertex pursuit and the certified route tube
-during translation, reaches the inspection position along the sealed segment,
-and only then performs the in-place terminal alignment. This matters at the end
-of the center corridor, where the only collision-free approach direction may be
-opposite the requested inspection yaw. Face-approach route kinds retain their
-heading-corridor behavior.
+The finite yaw on a `stand_discovery_corridor` inspection waypoint or
+`detected_stand_preapproach` camera standoff is a stopped endpoint requirement,
+not a heading constraint for the entire incoming A* segment. The follower keeps
+exact-vertex pursuit and the certified route tube during translation, reaches
+the inspection position along the sealed segment, and only then performs the
+in-place terminal alignment. This matters when the only collision-free approach
+direction may be opposite the requested inspection yaw. Face-approach route
+kinds retain their heading-corridor behavior.
+
+If an authorized candidate startup-reseal child publishes motion and then
+stops, the coordinator remains fail-closed and does not start another reseal or
+camera capture. Its terminal event and `mission_failure.json` preserve the
+child run ID, `stop_reason`, structured stop details, motion state, and consumed
+permit evidence so the actionable controller failure is not hidden by the
+recovery-policy boundary.
 
 The saved occupancy map is not assumed to contain movable stands. During a
 coverage leg the follower first holds a repeated zero command on its normal

@@ -29,6 +29,7 @@ from scripts.aufgabe04.navigation.transient_blockage_policy import (
 from scripts.aufgabe04.navigation.waypoint_controller import (
     CertifiedCornerTransitionLatch,
     ControllerConfig,
+    VelocityCommand,
     compute_join_anchor_command,
     compute_start_egress_vertex_command,
     compute_waypoint_command,
@@ -725,6 +726,19 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         self.assertTrue(discovery.exact_vertex_pursuit)
         self.assertEqual(discovery.goal_tolerance_m, 0.02)
         self.assertEqual(discovery.terminal_goal_tolerance_m, 0.03)
+        detected_preapproach = controller_config_for_route_kind(
+            configured,
+            "detected_stand_preapproach",
+            physical_waypoint_tolerance_m=0.02,
+            physical_goal_tolerance_m=0.03,
+        )
+        self.assertFalse(detected_preapproach.enforce_heading_corridor)
+        self.assertTrue(detected_preapproach.exact_vertex_pursuit)
+        self.assertEqual(detected_preapproach.goal_tolerance_m, 0.02)
+        self.assertEqual(
+            detected_preapproach.terminal_goal_tolerance_m,
+            0.03,
+        )
         acquisition = controller_config_for_route_kind(
             configured,
             "axis_acquisition",
@@ -867,6 +881,76 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         self.assertEqual(terminal_turn.command.linear_x_mps, 0.0)
         self.assertFalse(terminal_turn.reached_goal)
         self.assertTrue(completed.reached_goal)
+
+    def test_recorded_detected_stand_preapproach_yaw_is_terminal_only(self):
+        start = Pose2D(
+            0.951971715233173,
+            -0.04319279069223947,
+            0.1717540796057199,
+        )
+        target = Pose2D(0.755, 0.035, -0.3583366136065122)
+        waypoints = (
+            Pose2D(start.x_m, start.y_m, math.nan),
+            target,
+        )
+        configured = controller_config_for_route_kind(
+            ControllerConfig(
+                goal_tolerance_m=0.02,
+                terminal_goal_tolerance_m=0.03,
+                heading_tolerance_rad=0.25,
+                stop_heading_error_rad=1.25,
+                enforce_heading_corridor=True,
+            ),
+            "detected_stand_preapproach",
+            physical_waypoint_tolerance_m=0.02,
+            physical_goal_tolerance_m=0.03,
+        )
+        travel_heading = math.atan2(
+            target.y_m - start.y_m,
+            target.x_m - start.x_m,
+        )
+
+        align_to_vertex = compute_waypoint_command(
+            start,
+            waypoints,
+            1,
+            configured,
+        )
+        forward_transit = compute_waypoint_command(
+            Pose2D(start.x_m, start.y_m, travel_heading),
+            waypoints,
+            1,
+            configured,
+        )
+        terminal_turn = compute_waypoint_command(
+            Pose2D(target.x_m, target.y_m, travel_heading),
+            waypoints,
+            1,
+            configured,
+        )
+        completed = compute_waypoint_command(
+            target,
+            waypoints,
+            1,
+            configured,
+        )
+
+        self.assertFalse(configured.enforce_heading_corridor)
+        self.assertTrue(configured.exact_vertex_pursuit)
+        self.assertEqual(
+            align_to_vertex.progress_mode,
+            "exact_vertex_alignment",
+        )
+        self.assertNotEqual(align_to_vertex.progress_mode, "heading_corridor")
+        self.assertEqual(align_to_vertex.command.linear_x_mps, 0.0)
+        self.assertEqual(forward_transit.progress_mode, "path_tracking")
+        self.assertNotEqual(forward_transit.progress_mode, "heading_corridor")
+        self.assertGreater(forward_transit.command.linear_x_mps, 0.0)
+        self.assertEqual(terminal_turn.progress_mode, "terminal_heading")
+        self.assertEqual(terminal_turn.command.linear_x_mps, 0.0)
+        self.assertFalse(terminal_turn.reached_goal)
+        self.assertTrue(completed.reached_goal)
+        self.assertEqual(completed.command, VelocityCommand(0.0, 0.0))
 
     def test_exact_vertex_alignment_has_its_own_progress_baseline(self):
         node = bare_follower(RouteUpdate(kind=RouteUpdateKind.UNCHANGED), None)

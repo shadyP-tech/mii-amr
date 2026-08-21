@@ -381,6 +381,91 @@ class CandidateStartupRecoveryTest(unittest.TestCase):
                 self.assertTrue(
                     started["source_rejection_issued_motion_permit_kinds"]
                 )
+                self.assertEqual(
+                    started["source_rejection_stop_reason"],
+                    "pose outside certified startup segment",
+                )
+                self.assertEqual(
+                    started["source_rejection_stop_details"]["source"],
+                    "execution_route_certificate",
+                )
+
+    def test_motion_published_replacement_preserves_child_failure_and_stops(self):
+        retry_one = self.identity.replacement(1)
+        retry_two = self.identity.replacement(2)
+        stop_details = {
+            "reason": "stuck no progress",
+            "fault_code": "no_progress",
+            "elapsed_sec": 11.4,
+            "remaining_distance_m": 0.215,
+            "controller_mode_reversals": 11,
+        }
+        effects, _calls = self._effects(
+            initial=_mismatch(self.root, self.identity.run_id),
+            replacements=[
+                _outcome(
+                    self.root,
+                    run_id=retry_one.run_id,
+                    status="stopped",
+                    stop_reason="stuck no progress",
+                    stop_details=stop_details,
+                    motion_published=True,
+                ),
+                _outcome(
+                    self.root,
+                    run_id=retry_two.run_id,
+                    status="completed",
+                ),
+            ],
+        )
+
+        with self.assertRaisesRegex(
+            CandidateStartupRecoveryError,
+            "stuck no progress",
+        ) as caught:
+            execute_candidate_motion_with_startup_recovery(
+                _Request(self.identity),
+                config=self._config(3),
+                effects=effects,
+            )
+
+        self.assertIn(
+            "fail-closed policy: rejected candidate run published motion",
+            str(caught.exception),
+        )
+        self.assertEqual(len(self.admitted_paths), 1)
+        self.assertEqual(len(self.replanned_attempts), 1)
+        self.assertEqual(len(self.replacement_attempts), 1)
+        self.assertEqual(
+            [event["event"] for event in self.events],
+            [
+                "candidate_startup_recovery_started",
+                "candidate_startup_localization_admitted",
+                "candidate_startup_route_replanned",
+                "candidate_startup_recovery_rejected",
+            ],
+        )
+        self.assertFalse(
+            self.events[0]["source_rejection_published_motion"]
+        )
+
+        rejected = self.events[-1]
+        self.assertEqual(rejected["reason"], "stuck no progress")
+        self.assertEqual(
+            rejected["rejection_policy_reason"],
+            "rejected candidate run published motion",
+        )
+        self.assertEqual(rejected["stop_details"], stop_details)
+        self.assertEqual(rejected["rejected_stop_reason"], "stuck no progress")
+        self.assertEqual(rejected["rejected_stop_details"], stop_details)
+        self.assertTrue(rejected["motion_published"])
+
+        failure = caught.exception.to_failure_fields()
+        self.assertEqual(failure["failure_phase"], "candidate_startup_recovery")
+        self.assertEqual(failure["stop_reason"], "stuck no progress")
+        self.assertTrue(failure["motion_published"])
+        self.assertFalse(failure["motion_continues_authorized"])
+        self.assertTrue(failure["fail_closed"])
 
     def test_motion_and_noneligible_rejections_fail_closed(self):
         cases = (
@@ -485,7 +570,7 @@ class CandidateStartupRecoveryTest(unittest.TestCase):
         with self.assertRaisesRegex(
             CandidateStartupRecoveryError,
             "budget exhausted",
-        ):
+        ) as caught:
             execute_candidate_motion_with_startup_recovery(
                 _Request(self.identity),
                 config=self._config(2),
@@ -500,6 +585,29 @@ class CandidateStartupRecoveryTest(unittest.TestCase):
             self.events[-1]["event"],
             "candidate_startup_recovery_exhausted",
         )
+        self.assertEqual(
+            self.events[-1]["rejected_stop_reason"],
+            "pose outside certified startup segment",
+        )
+        self.assertEqual(
+            self.events[-1]["rejected_stop_details"]["source"],
+            "execution_route_certificate",
+        )
+        failure = caught.exception.to_failure_fields()
+        self.assertEqual(
+            failure["candidate_startup_recovery_phase"],
+            "budget_exhausted",
+        )
+        self.assertEqual(
+            failure["stop_reason"],
+            "pose outside certified startup segment",
+        )
+        self.assertEqual(
+            failure["stop_details"]["source"],
+            "execution_route_certificate",
+        )
+        self.assertFalse(failure["motion_published"])
+        self.assertFalse(failure["motion_continues_authorized"])
 
 
 if __name__ == "__main__":

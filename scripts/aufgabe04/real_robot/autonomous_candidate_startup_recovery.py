@@ -31,6 +31,11 @@ from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
     STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY,
 )
 from scripts.aufgabe04.real_robot.autonomous_child_runner import MotionLegOutcome
+from scripts.aufgabe04.real_robot.autonomous_candidate_recovery_failure import (
+    CandidateStartupRecoveryError,
+    RejectedChildFailure,
+    issued_motion_permit_kinds,
+)
 from scripts.aufgabe04.real_robot.autonomous_coverage_replanning import (
     is_resealable_startup_mismatch,
 )
@@ -40,29 +45,6 @@ _SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _SUPPORTED_ROUTINE_KINDS = frozenset(
     {"candidate_preapproach", "opposite_face"}
 )
-_PERMIT_FIELDS = (
-    (
-        "runtime_localization",
-        "motion_authorization_permit_path",
-        "motion_authorization_permit_sha256",
-    ),
-    (
-        "routine_mission_leg",
-        "mission_leg_motion_permit_path",
-        "mission_leg_motion_permit_sha256",
-    ),
-    (
-        "startup_reseal",
-        "startup_reseal_motion_permit_path",
-        "startup_reseal_motion_permit_sha256",
-    ),
-)
-
-
-class CandidateStartupRecoveryError(RuntimeError):
-    """Fail-closed terminal error from candidate startup recovery."""
-
-
 @dataclass(frozen=True)
 class CandidateRoutineIdentity:
     """Exact candidate routine identity carried by one motion request."""
@@ -167,18 +149,6 @@ class CandidateStartupRecoveryEffects(Generic[RequestT]):
     clock: Callable[[], float] = time.time
 
 
-def issued_motion_permit_kinds(outcome: MotionLegOutcome) -> tuple[str, ...]:
-    """Return every permit class evidenced by an outcome."""
-
-    issued: list[str] = []
-    for kind, path_field, digest_field in _PERMIT_FIELDS:
-        path = getattr(outcome, path_field)
-        digest = getattr(outcome, digest_field)
-        if path is not None or (isinstance(digest, str) and digest.strip()):
-            issued.append(kind)
-    return tuple(issued)
-
-
 def _attempt_paths(
     config: CandidateStartupRecoveryConfig,
     reseal_index: int,
@@ -246,7 +216,8 @@ def _fail_callback(
         },
     )
     return CandidateStartupRecoveryError(
-        f"candidate startup recovery failed during {phase}: {exc}"
+        f"candidate startup recovery failed during {phase}: {exc}",
+        phase=phase,
     )
 
 
@@ -313,26 +284,28 @@ def _reject_outcome(
     expected_run_id: str,
     reseal_index: int,
     reason: str,
-    issued_permits: tuple[str, ...] = (),
+    preserve_child_reason: bool = False,
 ) -> None:
+    rejection = RejectedChildFailure.from_outcome(
+        outcome,
+        policy_reason=reason,
+        preserve_child_reason=preserve_child_reason,
+    )
     _emit(
         config,
         effects,
         {
             "event": "candidate_startup_recovery_rejected",
-            "reason": reason,
             "expected_run_id": expected_run_id,
-            "observed_run_id": outcome.run_id,
             "startup_reseal_index": reseal_index,
-            "status": outcome.status,
-            "stop_reason": outcome.stop_reason,
-            "motion_published": outcome.motion_published,
-            "issued_motion_permit_kinds": list(issued_permits),
+            **rejection.to_event_fields(),
             "fail_closed": True,
         },
     )
     raise CandidateStartupRecoveryError(
-        f"candidate startup recovery rejected {outcome.run_id}: {reason}"
+        rejection.rejection_message(),
+        phase="outcome_rejection",
+        rejected_child=rejection,
     )
 
 
@@ -447,7 +420,7 @@ def execute_candidate_motion_with_startup_recovery(
                 expected_run_id=expected_identity.run_id,
                 reseal_index=completed_reseal_count,
                 reason="rejected candidate run published motion",
-                issued_permits=issued_permits,
+                preserve_child_reason=True,
             )
         recovery_source_kind = _recovery_source_kind(outcome)
         if recovery_source_kind is None:
@@ -460,6 +433,11 @@ def execute_candidate_motion_with_startup_recovery(
                 reason="outcome is not an eligible startup-segment mismatch",
             )
         if completed_reseal_count >= config.max_startup_reseals:
+            rejection = RejectedChildFailure.from_outcome(
+                outcome,
+                policy_reason="candidate startup reseal budget exhausted",
+                preserve_child_reason=True,
+            )
             _emit(
                 config,
                 effects,
@@ -467,14 +445,17 @@ def execute_candidate_motion_with_startup_recovery(
                     "event": "candidate_startup_recovery_exhausted",
                     "rejected_run_id": outcome.run_id,
                     "completed_startup_reseal_count": completed_reseal_count,
-                    "stop_reason": outcome.stop_reason,
+                    **rejection.to_event_fields(),
                     "motion_published": False,
                     "fail_closed": True,
                 },
             )
             raise CandidateStartupRecoveryError(
                 "candidate startup reseal budget exhausted after "
-                f"{completed_reseal_count} replacement attempt(s)"
+                f"{completed_reseal_count} replacement attempt(s); last child "
+                f"{outcome.run_id}: {rejection.reported_reason}",
+                phase="budget_exhausted",
+                rejected_child=rejection,
             )
 
         reseal_index = completed_reseal_count + 1
@@ -507,6 +488,8 @@ def execute_candidate_motion_with_startup_recovery(
                 "fresh_localization_evidence_json": str(evidence_path),
                 "replacement_source_root": str(source_root),
                 "recovery_source_kind": recovery_source_kind,
+                "source_rejection_stop_reason": outcome.stop_reason,
+                "source_rejection_stop_details": dict(outcome.stop_details),
                 "source_rejection_published_motion": False,
                 "source_rejection_issued_motion_permit": bool(issued_permits),
                 "source_rejection_issued_motion_permit_kinds": list(

@@ -3,6 +3,7 @@ import unittest
 from scripts.aufgabe04.navigation.driving_behavior import (
     CommandSmoother,
     CommandSmoothingConfig,
+    controller_config_for_route_kind,
     next_control_loop_timing,
     shape_velocity_command,
 )
@@ -12,6 +13,15 @@ from scripts.aufgabe04.navigation.waypoint_controller import VelocityCommand
 
 
 class DrivingBehaviorTest(unittest.TestCase):
+    def test_detected_stand_preapproach_uses_terminal_heading_only(self):
+        configured = controller_config_for_route_kind(
+            ControllerConfig(enforce_heading_corridor=True),
+            "detected_stand_preapproach",
+        )
+
+        self.assertFalse(configured.enforce_heading_corridor)
+        self.assertTrue(configured.exact_vertex_pursuit)
+
     def test_command_smoother_ramps_from_zero_after_reset(self):
         smoother = CommandSmoother(
             CommandSmoothingConfig(
