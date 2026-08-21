@@ -121,8 +121,14 @@ def build_child_runner_command(
     mission_leg_dry_preflight_json: Path | None = None,
     mission_leg_dry_odom_certificate_json: Path | None = None,
     mission_leg_dry_uncertainty_budget_json: Path | None = None,
+    mission_leg_evidence_kind: MissionLegKind | str | None = None,
+    mission_leg_evidence_index: int | None = None,
+    mission_leg_evidence_target_id: str = "",
     startup_reseal_motion_authorization_json: Path | None = None,
     startup_reseal_motion_permit_json: Path | None = None,
+    startup_reseal_mission_leg_kind: MissionLegKind | str | None = None,
+    startup_reseal_mission_leg_index: int | None = None,
+    startup_reseal_target_id: str = "",
     startup_reseal_target_viewpoint_id: str = "",
     startup_reseal_semantic_map_id: str = "",
     mission_session_id: str = "",
@@ -272,6 +278,57 @@ def build_child_runner_command(
                     str(resume_state_json),
                 ]
             )
+    evidence_fields = (
+        mission_leg_evidence_kind,
+        mission_leg_evidence_index,
+        mission_leg_evidence_target_id or None,
+    )
+    evidence_identity: tuple[MissionLegKind, int, str] | None = None
+    if any(value is not None for value in evidence_fields):
+        if any(value is None for value in evidence_fields):
+            raise ValueError(
+                "non-authorizing mission-leg evidence arguments must be "
+                "supplied together"
+            )
+        evidence_kind = MissionLegKind(mission_leg_evidence_kind)
+        if evidence_kind not in ROUTINE_MISSION_LEG_KINDS:
+            raise ValueError(
+                "mission-leg evidence requires a routine leg kind"
+            )
+        assert mission_leg_evidence_index is not None
+        if (
+            type(mission_leg_evidence_index) is not int
+            or mission_leg_evidence_index < 0
+        ):
+            raise ValueError(
+                "mission-leg evidence index must be non-negative"
+            )
+        evidence_identity = (
+            evidence_kind,
+            mission_leg_evidence_index,
+            str(mission_leg_evidence_target_id).strip(),
+        )
+        if coverage_transient_replan is not None:
+            coverage_identity = (
+                MissionLegKind.COVERAGE,
+                int(coverage_transient_replan["leg_index"]),
+                str(coverage_transient_replan["target_viewpoint_id"]).strip(),
+            )
+            if evidence_identity != coverage_identity:
+                raise ValueError(
+                    "mission-leg evidence and coverage transient-replan "
+                    "identities mismatch"
+                )
+        command.extend(
+            [
+                "--mission-leg-evidence-kind",
+                evidence_kind.value,
+                "--mission-leg-evidence-index",
+                str(mission_leg_evidence_index),
+                "--mission-leg-evidence-target-id",
+                str(mission_leg_evidence_target_id).strip(),
+            ]
+        )
     authorization_fields = (
         mission_motion_authorization_json,
         runtime_localization_motion_permit_json,
@@ -335,6 +392,15 @@ def build_child_runner_command(
         if kind not in ROUTINE_MISSION_LEG_KINDS:
             raise ValueError("mission-leg permit requires a routine leg kind")
         assert mission_leg_index is not None
+        routine_identity = (
+            kind,
+            mission_leg_index,
+            str(mission_leg_target_id).strip(),
+        )
+        if evidence_identity is not None and evidence_identity != routine_identity:
+            raise ValueError(
+                "mission-leg evidence and routine permit identities mismatch"
+            )
         command.extend(
             [
                 "--mission-leg-motion-authorization-json",
@@ -359,16 +425,37 @@ def build_child_runner_command(
                 str(mission_session_id).strip(),
             ]
         )
-    startup_reseal_fields = (
+    startup_reseal_core_fields = (
         startup_reseal_motion_authorization_json,
         startup_reseal_motion_permit_json,
-        startup_reseal_target_viewpoint_id or None,
         startup_reseal_semantic_map_id or None,
     )
-    if any(value is not None for value in startup_reseal_fields):
-        if any(value is None for value in startup_reseal_fields):
+    startup_generic_identity_fields = (
+        startup_reseal_mission_leg_kind,
+        startup_reseal_mission_leg_index,
+        startup_reseal_target_id or None,
+    )
+    startup_legacy_identity_present = bool(
+        str(startup_reseal_target_viewpoint_id).strip()
+    )
+    if (
+        any(value is not None for value in startup_reseal_core_fields)
+        or any(value is not None for value in startup_generic_identity_fields)
+        or startup_legacy_identity_present
+    ):
+        if any(value is None for value in startup_reseal_core_fields):
             raise ValueError(
                 "startup-reseal authorization arguments must be supplied together"
+            )
+        generic_identity_requested = any(
+            value is not None for value in startup_generic_identity_fields
+        )
+        if generic_identity_requested and any(
+            value is None for value in startup_generic_identity_fields
+        ):
+            raise ValueError(
+                "generic startup-reseal identity arguments must be supplied "
+                "together"
             )
         if any(value is not None for value in authorization_fields) or any(
             value is not None for value in mission_leg_fields
@@ -383,9 +470,59 @@ def build_child_runner_command(
             raise ValueError(
                 "startup-reseal motion permit requires mission_session_id"
             )
-        if coverage_transient_replan is None:
+        if generic_identity_requested:
+            startup_kind = MissionLegKind(startup_reseal_mission_leg_kind)
+            if startup_kind not in ROUTINE_MISSION_LEG_KINDS:
+                raise ValueError(
+                    "startup-reseal permit requires a routine leg kind"
+                )
+            assert startup_reseal_mission_leg_index is not None
+            if (
+                type(startup_reseal_mission_leg_index) is not int
+                or startup_reseal_mission_leg_index < 0
+            ):
+                raise ValueError(
+                    "startup-reseal mission leg index must be non-negative"
+                )
+            startup_identity = (
+                startup_kind,
+                startup_reseal_mission_leg_index,
+                str(startup_reseal_target_id).strip(),
+            )
+        else:
+            if coverage_transient_replan is None or not startup_legacy_identity_present:
+                raise ValueError(
+                    "legacy startup-reseal identity requires a coverage leg"
+                )
+            startup_identity = (
+                MissionLegKind.COVERAGE,
+                int(coverage_transient_replan["leg_index"]),
+                str(startup_reseal_target_viewpoint_id).strip(),
+            )
+        if startup_identity[0] is MissionLegKind.COVERAGE:
+            if coverage_transient_replan is None:
+                raise ValueError(
+                    "coverage startup-reseal permit requires coverage "
+                    "transient-replan identity"
+                )
+            coverage_identity = (
+                MissionLegKind.COVERAGE,
+                int(coverage_transient_replan["leg_index"]),
+                str(coverage_transient_replan["target_viewpoint_id"]).strip(),
+            )
+            if startup_identity != coverage_identity:
+                raise ValueError(
+                    "startup-reseal and coverage transient-replan identities "
+                    "mismatch"
+                )
+        elif coverage_transient_replan is not None:
             raise ValueError(
-                "startup-reseal motion permit requires a coverage leg"
+                "non-coverage startup-reseal permit cannot carry coverage "
+                "transient replanning"
+            )
+        if evidence_identity is not None and evidence_identity != startup_identity:
+            raise ValueError(
+                "mission-leg evidence and startup-reseal identities mismatch"
             )
         command.extend(
             [
@@ -393,8 +530,18 @@ def build_child_runner_command(
                 str(startup_reseal_motion_authorization_json),
                 "--startup-reseal-motion-permit-json",
                 str(startup_reseal_motion_permit_json),
+                "--startup-reseal-mission-leg-kind",
+                startup_identity[0].value,
+                "--startup-reseal-mission-leg-index",
+                str(startup_identity[1]),
+                "--startup-reseal-target-id",
+                startup_identity[2],
                 "--startup-reseal-target-viewpoint-id",
-                str(startup_reseal_target_viewpoint_id).strip(),
+                (
+                    startup_identity[2]
+                    if startup_identity[0] is MissionLegKind.COVERAGE
+                    else ""
+                ),
                 "--startup-reseal-semantic-map-id",
                 str(startup_reseal_semantic_map_id).strip(),
                 "--mission-session-id",

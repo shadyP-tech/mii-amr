@@ -26,6 +26,8 @@ from scripts.aufgabe04.stations.station_router import build_station_visits
 @dataclass(frozen=True)
 class StationRouteDryRun:
     grid: OccupancyGrid
+    base_costmap: Costmap
+    planning_costmap: Costmap
     station_map: Mapping[str, Station]
     visits: tuple[StationVisit, ...]
     targets: tuple[NavigationTarget, ...]
@@ -174,6 +176,8 @@ def build_station_route_dry_run(
     }
     return StationRouteDryRun(
         grid=grid,
+        base_costmap=base_costmap,
+        planning_costmap=planning_costmap,
         station_map=selected_station_map,
         visits=visits,
         targets=targets,

@@ -173,6 +173,9 @@ from scripts.aufgabe04.real_robot.autonomous_candidate_approach import (
     CandidateObservationRequest,
     execute_candidate_approach_phase,
 )
+from scripts.aufgabe04.real_robot.autonomous_candidate_startup_recovery import (
+    CandidateStartupRecoveryAttempt,
+)
 from scripts.aufgabe04.real_robot.autonomous_checkpoint_resume import (
     admit_coverage_resume,
     restore_and_replan_coverage_resume,
@@ -197,6 +200,7 @@ from scripts.aufgabe04.real_robot.autonomous_session_manifest import (
 from scripts.aufgabe04.real_robot.autonomous_startup_reseal import (
     StartupResealPermitContext,
     issue_startup_reseal_motion_permit,
+    write_startup_reseal_permit_summary,
 )
 from scripts.aufgabe04.stations.candidate_snapshot import (
     CandidateGeometry,
@@ -745,6 +749,17 @@ def _run_motion_leg(
         raise ValueError(
             "routine mission-leg authorization cannot cover a resealed route"
         )
+    mission_leg_evidence_kind = None
+    mission_leg_evidence_index = None
+    mission_leg_evidence_target_id = ""
+    if mission_leg_permit_context is not None:
+        mission_leg_evidence_kind = mission_leg_permit_context.mission_leg_kind
+        mission_leg_evidence_index = mission_leg_permit_context.mission_leg_index
+        mission_leg_evidence_target_id = mission_leg_permit_context.target_id
+    elif startup_reseal_permit_context is not None:
+        mission_leg_evidence_kind = startup_reseal_permit_context.mission_leg_kind
+        mission_leg_evidence_index = startup_reseal_permit_context.mission_leg_index
+        mission_leg_evidence_target_id = startup_reseal_permit_context.target_id
     semantic_log = session_root / "run_events" / f"{run_id}.jsonl"
     if semantic_log.exists() or semantic_log.is_symlink():
         raise RuntimeError(
@@ -781,6 +796,9 @@ def _run_motion_leg(
         dry_run=True,
         odom_execution_certificate_json=dry_certificate,
         uncertainty_budget_json=dry_budget,
+        mission_leg_evidence_kind=mission_leg_evidence_kind,
+        mission_leg_evidence_index=mission_leg_evidence_index,
+        mission_leg_evidence_target_id=mission_leg_evidence_target_id,
     )
     dry_result = subprocess.run(dry, check=False)
     if dry_result.returncode != 0:
@@ -1085,6 +1103,21 @@ def _run_motion_leg(
             startup_authorization_path
         ),
         startup_reseal_motion_permit_json=startup_reseal_permit_path,
+        startup_reseal_mission_leg_kind=(
+            None
+            if startup_reseal_permit_context is None
+            else startup_reseal_permit_context.mission_leg_kind
+        ),
+        startup_reseal_mission_leg_index=(
+            None
+            if startup_reseal_permit_context is None
+            else startup_reseal_permit_context.mission_leg_index
+        ),
+        startup_reseal_target_id=(
+            ""
+            if startup_reseal_permit_context is None
+            else startup_reseal_permit_context.target_id
+        ),
         startup_reseal_target_viewpoint_id=(
             ""
             if startup_reseal_permit_context is None
@@ -1130,6 +1163,9 @@ def _run_motion_leg(
         mission_leg_dry_uncertainty_budget_json=(
             None if mission_leg_permit_context is None else dry_budget
         ),
+        mission_leg_evidence_kind=mission_leg_evidence_kind,
+        mission_leg_evidence_index=mission_leg_evidence_index,
+        mission_leg_evidence_target_id=mission_leg_evidence_target_id,
         mission_session_id=(
             runtime_localization_permit_context.session_id
             if runtime_localization_permit_context is not None
@@ -1472,6 +1508,93 @@ def _run_candidate_motion_leg(
             target_id=request.target_id,
             permit_json_path=request.permit_json_path,
         ),
+    )
+
+
+def _run_candidate_startup_reseal_motion_leg(
+    *,
+    profile,
+    request: CandidateMotionLegRequest,
+    attempt: CandidateStartupRecoveryAttempt,
+    startup_reseal_motion_authorization_json: Path,
+    max_startup_reseals_per_leg: int,
+) -> MotionLegOutcome:
+    """Run one exact candidate startup replacement under a one-use permit."""
+
+    identity = attempt.identity
+    if (
+        identity.run_id != request.run_id
+        or identity.routine_kind != request.mission_leg_kind.value
+        or identity.routine_index != request.mission_leg_index
+        or identity.target_id != request.target_id
+        or identity.session_id != request.session_id
+        or identity.semantic_map_id != request.semantic_map_id
+    ):
+        raise RuntimeError(
+            "candidate startup replacement request changed its routine identity"
+        )
+    authorization_root = (
+        request.session_root / "motion_authorization" / "startup_reseals"
+    )
+    summary_path = write_startup_reseal_permit_summary(
+        authorization_root / f"{request.run_id}_sealed_summary.json",
+        leg_index=request.mission_leg_index,
+        target_viewpoint_id=request.target_id,
+        mission_leg_kind=request.mission_leg_kind,
+        mission_leg_index=request.mission_leg_index,
+        target_id=request.target_id,
+        reseal_index=attempt.reseal_index,
+        rejected_run_id=attempt.rejected_outcome.run_id,
+        fresh_start_x_m=attempt.fresh_start_pose.x_m,
+        fresh_start_y_m=attempt.fresh_start_pose.y_m,
+        fresh_start_yaw_rad=attempt.fresh_start_pose.yaw_rad,
+        route_csv=Path(request.sealed["route_csv"]),
+        diagnostics_json=Path(request.sealed["diagnostics_json"]),
+        additional_typed_run_required=False,
+        recovery_source_kind=attempt.recovery_source_kind,
+    )
+    permit_context = StartupResealPermitContext(
+        mission_authorization_json=Path(
+            startup_reseal_motion_authorization_json
+        ).absolute(),
+        session_id=request.session_id,
+        semantic_map_id=request.semantic_map_id,
+        leg_index=request.mission_leg_index,
+        target_viewpoint_id=request.target_id,
+        mission_leg_kind=request.mission_leg_kind,
+        mission_leg_index=request.mission_leg_index,
+        target_id=request.target_id,
+        reseal_index=attempt.reseal_index,
+        max_startup_reseals_per_leg=max_startup_reseals_per_leg,
+        rejected_run_id=attempt.rejected_outcome.run_id,
+        rejected_semantic_log_path=Path(
+            attempt.rejected_outcome.semantic_log_path
+        ).absolute(),
+        startup_reseal_summary_path=summary_path,
+        fresh_localization_evidence_path=(
+            attempt.fresh_localization_evidence_path.absolute()
+        ),
+        permit_json_path=(
+            authorization_root / f"{request.run_id}_permit.json"
+        ).absolute(),
+        recovery_source_kind=attempt.recovery_source_kind,
+    )
+    return _run_motion_leg(
+        profile=profile,
+        sealed=dict(request.sealed),
+        run_id=request.run_id,
+        session_root=request.session_root,
+        execute=True,
+        candidate_snapshot=request.candidate_snapshot_path,
+        require_fresh_confirmation=True,
+        fresh_confirmation_reason="startup",
+        fresh_localization_evidence_path=(
+            attempt.fresh_localization_evidence_path
+        ),
+        uncertainty_map_yaml=request.uncertainty_map_yaml,
+        uncertainty_sigma_multiplier=request.uncertainty_sigma_multiplier,
+        localization_branch_proof_id=request.localization_branch_proof_id,
+        startup_reseal_permit_context=permit_context,
     )
 
 
@@ -2132,6 +2255,7 @@ def main(argv=None) -> int:
                 scope_text=STARTUP_RESEAL_MOTION_AUTHORIZATION_SCOPE,
                 operator_confirmation=STARTUP_RESEAL_RUN_CONFIRMATION,
                 allowed_recovery_kind=STARTUP_RESEAL_RECOVERY_KIND,
+                allowed_mission_leg_kinds=authorized_leg_kinds,
             )
         )
         startup_reseal_motion_authorization_hash = (
@@ -2472,6 +2596,10 @@ def main(argv=None) -> int:
             raise RuntimeError(
                 "candidate phase requires mission-leg authorization evidence"
             )
+        if startup_reseal_motion_authorization_json is None:
+            raise RuntimeError(
+                "candidate phase requires startup-reseal authorization evidence"
+            )
         candidate_phase = execute_candidate_approach_phase(
             CandidateApproachConfig(
                 session_root=session_root,
@@ -2496,6 +2624,12 @@ def main(argv=None) -> int:
                 mission_leg_motion_authorization_json=(
                     mission_leg_motion_authorization_json
                 ),
+                startup_reseal_motion_authorization_json=(
+                    startup_reseal_motion_authorization_json
+                ),
+                max_startup_reseals_per_leg=(
+                    args.max_startup_reseals_per_leg
+                ),
                 exact_two_camera_handoff_path=(
                     exact_two_camera_handoff_path
                 ),
@@ -2514,6 +2648,32 @@ def main(argv=None) -> int:
                 run_motion_leg=lambda request: _run_candidate_motion_leg(
                     profile=profile,
                     request=request,
+                ),
+                admit_startup_localization=lambda evidence_path: (
+                    _admit_preplanning_localization(
+                        runtime,
+                        session_root,
+                        evidence_path=evidence_path,
+                    )
+                ),
+                run_startup_reseal_motion_leg=(
+                    lambda request, attempt: (
+                        _run_candidate_startup_reseal_motion_leg(
+                            profile=profile,
+                            request=request,
+                            attempt=attempt,
+                            startup_reseal_motion_authorization_json=(
+                                startup_reseal_motion_authorization_json
+                            ),
+                            max_startup_reseals_per_leg=(
+                                args.max_startup_reseals_per_leg
+                            ),
+                        )
+                    )
+                ),
+                event_sink=lambda path, payload: _append_jsonl(
+                    path,
+                    dict(payload),
                 ),
                 capture_observation=(
                     lambda request: _capture_candidate_observation(

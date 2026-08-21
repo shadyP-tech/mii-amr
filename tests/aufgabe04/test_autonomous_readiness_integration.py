@@ -7,6 +7,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from scripts.aufgabe04.navigation.mission_leg_motion_permit import MissionLegKind
 from scripts.aufgabe04.navigation.models import Pose2D
 from scripts.aufgabe04.real_robot import (
     run_autonomous_stand_exploration as runner,
@@ -215,7 +216,17 @@ class AutonomousReadinessIntegrationTest(unittest.TestCase):
                     session_root=root,
                     execute=True,
                     uncertainty_map_yaml=root / "map.yaml",
-                    mission_leg_permit_context=object(),
+                    mission_leg_permit_context=runner.MissionLegPermitContext(
+                        mission_authorization_json=(
+                            root / "mission_leg_authorization.json"
+                        ),
+                        session_id="mission",
+                        semantic_map_id="arena",
+                        mission_leg_kind=MissionLegKind.COVERAGE,
+                        mission_leg_index=0,
+                        target_id="survey_vp_001",
+                        permit_json_path=root / "permit.json",
+                    ),
                     observation_tf_evidence_path=root / "scan_tf.json",
                 )
 

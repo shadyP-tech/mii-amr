@@ -8,7 +8,7 @@ fallback, and final identity/facing artifacts behind injected effects.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import math
@@ -21,6 +21,9 @@ from scripts.aufgabe04.artifacts.content_store import write_content_hashed_json
 from scripts.aufgabe04.navigation.artifacts import (
     write_diagnostics_json,
     write_route_csv,
+)
+from scripts.aufgabe04.navigation.certified_exact_start_route import (
+    certify_and_smooth_exact_start_route,
 )
 from scripts.aufgabe04.navigation.costmap import Costmap
 from scripts.aufgabe04.navigation.detected_stand_preapproach import (
@@ -54,6 +57,13 @@ from scripts.aufgabe04.navigation.viewpoint_recommendation import (
     normalize_angle,
 )
 from scripts.aufgabe04.real_robot.autonomous_child_runner import MotionLegOutcome
+from scripts.aufgabe04.real_robot.autonomous_candidate_startup_recovery import (
+    CandidateRoutineIdentity,
+    CandidateStartupRecoveryAttempt,
+    CandidateStartupRecoveryConfig,
+    CandidateStartupRecoveryEffects,
+    execute_candidate_motion_with_startup_recovery,
+)
 from scripts.aufgabe04.stations.candidate_snapshot import (
     CandidateSnapshot,
     FrozenCandidate,
@@ -128,6 +138,8 @@ class CandidateApproachConfig:
     uncertainty_sigma_multiplier: float
     localization_branch_proof_id: str
     mission_leg_motion_authorization_json: Path
+    startup_reseal_motion_authorization_json: Path | None = None
+    max_startup_reseals_per_leg: int = 0
     exact_two_camera_handoff_path: Path | None = None
     exact_two_camera_handoff_sha256: str | None = None
 
@@ -234,6 +246,14 @@ def _file_sha256(path: Path) -> str:
 def _write_json(path: Path, payload: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def _append_jsonl(path: Path, payload: Mapping[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+        )
 
 
 def validate_candidate_approach_handoff(
@@ -453,11 +473,21 @@ def plan_candidate_preapproach(
         arena_bounds=plan.arena_bounds,
         occupancy_grid=grid,
         map_bundle=map_bundle,
+        line_of_sight_optimization=False,
     )
     result = dry_run.results[0]
     if result.route is None or result.failure is not None:
         reason = result.failure.reason if result.failure is not None else "no route"
         raise ValueError(f"candidate pre-approach A* failed: {reason}")
+    result, connector, smoothing = certify_and_smooth_exact_start_route(
+        result,
+        base_costmap=dry_run.base_costmap,
+        planning_costmap=dry_run.planning_costmap,
+        exact_start=start,
+        required_clearance_m=inflation_radius_m,
+    )
+    route_results = (result,)
+    assert result.route is not None
     endpoint = result.route.points[-1].pose
     terminal_yaw = math.atan2(
         candidate.geometry.y_m - endpoint.y_m,
@@ -474,7 +504,7 @@ def plan_candidate_preapproach(
     if axis_observation_path is not None:
         local_axis_observation = output_dir / "axis_observation.json"
         shutil.copyfile(axis_observation_path, local_axis_observation)
-    write_route_csv(route_csv, dry_run.results, final_yaw_by_leg={0: terminal_yaw})
+    write_route_csv(route_csv, route_results, final_yaw_by_leg={0: terminal_yaw})
     metadata = dict(dry_run.metadata)
     metadata.update(
         {
@@ -493,6 +523,23 @@ def plan_candidate_preapproach(
             "map_bundle_sha256": map_bundle.bundle_sha256,
             "planning_frame": plan.planning_frame,
             "selected_candidate_stand_id": candidate_uid,
+            "exact_start_connector": connector.to_metadata(),
+            "route_start_pose_provenance": {
+                "source": "autonomous_candidate_current_pose",
+                "planning_frame": plan.planning_frame,
+                "pose": {
+                    "x_m": start.x_m,
+                    "y_m": start.y_m,
+                    "yaw_rad": start.yaw_rad,
+                },
+            },
+            "line_of_sight_route_optimization": {
+                "enabled": True,
+                "legs": [smoothing.to_metadata()],
+                "input_point_count": smoothing.input_point_count,
+                "output_point_count": smoothing.output_point_count,
+                "optimized_leg_count": int(smoothing.optimized),
+            },
             "selected_approach_pose": {
                 "x_m": endpoint.x_m,
                 "y_m": endpoint.y_m,
@@ -514,7 +561,7 @@ def plan_candidate_preapproach(
                 ),
             }
         )
-    write_diagnostics_json(diagnostics_json, dry_run.results, metadata=metadata)
+    write_diagnostics_json(diagnostics_json, route_results, metadata=metadata)
     _write_json(
         pipeline_summary,
         {
@@ -756,6 +803,12 @@ class CandidateApproachEffects:
     commit_decision: Callable[
         [CandidateDecisionRequest], None
     ] = commit_candidate_decision
+    admit_startup_localization: Callable[[Path], Pose2D] | None = None
+    run_startup_reseal_motion_leg: Callable[
+        [CandidateMotionLegRequest, CandidateStartupRecoveryAttempt],
+        MotionLegOutcome,
+    ] | None = None
+    event_sink: Callable[[Path, Mapping[str, object]], None] = _append_jsonl
     clock: Callable[[], float] = time.time
 
 
@@ -790,21 +843,6 @@ def _read_finite_pose2d(
             reason="pose coordinates are not finite",
         )
     return Pose2D(*values)
-
-
-def _require_completed_motion(
-    request: CandidateMotionLegRequest,
-    outcome: MotionLegOutcome,
-) -> None:
-    if outcome.run_id != request.run_id:
-        raise RuntimeError(
-            "candidate motion outcome identity mismatch: "
-            f"expected {request.run_id}, got {outcome.run_id}"
-        )
-    if outcome.status != "completed":
-        raise RuntimeError(
-            f"physical route failed for {outcome.run_id}: {outcome.stop_reason}"
-        )
 
 
 def _motion_request(
@@ -842,6 +880,106 @@ def _motion_request(
     )
 
 
+def _candidate_routine_identity(
+    request: CandidateMotionLegRequest,
+) -> CandidateRoutineIdentity:
+    return CandidateRoutineIdentity(
+        session_id=request.session_id,
+        semantic_map_id=request.semantic_map_id,
+        routine_kind=request.mission_leg_kind.value,
+        routine_index=request.mission_leg_index,
+        target_id=request.target_id,
+        run_id=request.run_id,
+    )
+
+
+def _execute_candidate_motion(
+    *,
+    config: CandidateApproachConfig,
+    effects: CandidateApproachEffects,
+    candidate_root: Path,
+    plan_request: CandidatePreapproachRequest,
+    initial_sealed: SealedRoute,
+    run_id: str,
+    leg_kind: MissionLegKind,
+    candidate_index: int,
+    target_id: str,
+) -> MotionLegOutcome:
+    """Run one candidate routine with bounded same-identity startup recovery."""
+
+    initial_request = _motion_request(
+        config=config,
+        sealed=initial_sealed,
+        run_id=run_id,
+        candidate_snapshot_path=(
+            plan_request.output_dir / "candidate_snapshot.json"
+        ),
+        leg_kind=leg_kind,
+        candidate_index=candidate_index,
+        target_id=target_id,
+    )
+
+    def admit_localization(evidence_path: Path) -> Pose2D:
+        if effects.admit_startup_localization is None:
+            raise RuntimeError(
+                "candidate startup recovery has no stationary localization "
+                "admission effect"
+            )
+        return effects.admit_startup_localization(evidence_path)
+
+    def replan_same_routine(
+        attempt: CandidateStartupRecoveryAttempt,
+    ) -> CandidateMotionLegRequest:
+        replacement_plan = replace(
+            plan_request,
+            start=attempt.fresh_start_pose,
+            output_dir=attempt.source_root,
+        )
+        replacement_sealed = effects.plan_preapproach(replacement_plan)
+        return _motion_request(
+            config=config,
+            sealed=replacement_sealed,
+            run_id=attempt.identity.run_id,
+            candidate_snapshot_path=(
+                attempt.source_root / "candidate_snapshot.json"
+            ),
+            leg_kind=leg_kind,
+            candidate_index=candidate_index,
+            target_id=target_id,
+        )
+
+    def run_replacement(
+        request: CandidateMotionLegRequest,
+        attempt: CandidateStartupRecoveryAttempt,
+    ) -> MotionLegOutcome:
+        if effects.run_startup_reseal_motion_leg is None:
+            raise RuntimeError(
+                "candidate startup recovery has no startup-reseal motion effect"
+            )
+        return effects.run_startup_reseal_motion_leg(request, attempt)
+
+    return execute_candidate_motion_with_startup_recovery(
+        initial_request,
+        config=CandidateStartupRecoveryConfig(
+            initial_identity=_candidate_routine_identity(initial_request),
+            recovery_root=(
+                candidate_root / f"{leg_kind.value}_startup_reseals"
+            ),
+            event_log_path=config.session_root / "adaptive_replans.jsonl",
+            max_startup_reseals=config.max_startup_reseals_per_leg,
+        ),
+        effects=CandidateStartupRecoveryEffects(
+            run_initial=effects.run_motion_leg,
+            run_replacement=run_replacement,
+            admit_fresh_stationary_localization=admit_localization,
+            replan_same_routine=replan_same_routine,
+            describe_request=_candidate_routine_identity,
+            event_sink=lambda path, payload: effects.event_sink(path, payload),
+            clock=effects.clock,
+        ),
+    )
+
+
 def execute_candidate_approach_phase(
     config: CandidateApproachConfig,
     effects: CandidateApproachEffects,
@@ -869,38 +1007,37 @@ def execute_candidate_approach_phase(
             / f"{candidate_index:03d}_{candidate.candidate_uid}"
         )
         source_root = candidate_root / "preapproach_source"
-        sealed = effects.plan_preapproach(
-            CandidatePreapproachRequest(
-                map_yaml=config.map_yaml,
-                semantic_map_id=config.semantic_map_id,
-                plan=config.plan,
-                snapshot=config.snapshot,
-                snapshot_path=config.snapshot_path,
-                candidate_uid=candidate.candidate_uid,
-                start=current,
-                output_dir=source_root,
-                approach_offset_m=config.approach_offset_m,
-                inflation_radius_m=config.inflation_radius_m,
-                candidate_transit_radius_m=(
-                    config.candidate_transit_radius_m
-                ),
-                physical_clearance=config.physical_clearance,
-            )
+        preapproach_plan_request = CandidatePreapproachRequest(
+            map_yaml=config.map_yaml,
+            semantic_map_id=config.semantic_map_id,
+            plan=config.plan,
+            snapshot=config.snapshot,
+            snapshot_path=config.snapshot_path,
+            candidate_uid=candidate.candidate_uid,
+            start=current,
+            output_dir=source_root,
+            approach_offset_m=config.approach_offset_m,
+            inflation_radius_m=config.inflation_radius_m,
+            candidate_transit_radius_m=(
+                config.candidate_transit_radius_m
+            ),
+            physical_clearance=config.physical_clearance,
         )
+        sealed = effects.plan_preapproach(preapproach_plan_request)
         candidate_run_id = (
             f"{config.session_id}_candidate_{candidate_index:03d}"
         )
-        motion_request = _motion_request(
+        outcome = _execute_candidate_motion(
             config=config,
-            sealed=sealed,
+            effects=effects,
+            candidate_root=candidate_root,
+            plan_request=preapproach_plan_request,
+            initial_sealed=sealed,
             run_id=candidate_run_id,
-            candidate_snapshot_path=source_root / "candidate_snapshot.json",
             leg_kind=MissionLegKind.CANDIDATE_PREAPPROACH,
             candidate_index=candidate_index,
             target_id=candidate.candidate_uid,
         )
-        outcome = effects.run_motion_leg(motion_request)
-        _require_completed_motion(motion_request, outcome)
         observation = effects.capture_observation(
             CandidateObservationRequest(
                 candidate=candidate,
@@ -924,33 +1061,35 @@ def execute_candidate_approach_phase(
             )
             opposite_source = candidate_root / "opposite_face_source"
             opposite_sealed = None
+            opposite_plan_request = None
             feasibility_failures = []
             for inspection_offset_m in bounded_approach_offsets(
                 config.approach_offset_m,
                 float(config.physical_clearance["minimum_active_standoff_m"]),
             ):
                 try:
+                    opposite_plan_request = CandidatePreapproachRequest(
+                        map_yaml=config.map_yaml,
+                        semantic_map_id=config.semantic_map_id,
+                        plan=config.plan,
+                        snapshot=config.snapshot,
+                        snapshot_path=config.snapshot_path,
+                        candidate_uid=candidate.candidate_uid,
+                        start=opposite_start,
+                        output_dir=opposite_source,
+                        approach_offset_m=inspection_offset_m,
+                        inflation_radius_m=config.inflation_radius_m,
+                        candidate_transit_radius_m=(
+                            config.candidate_transit_radius_m
+                        ),
+                        physical_clearance=config.physical_clearance,
+                        approach_normal_rad=opposite_normal,
+                        axis_observation_path=(
+                            observation.axis_observation_path
+                        ),
+                    )
                     opposite_sealed = effects.plan_preapproach(
-                        CandidatePreapproachRequest(
-                            map_yaml=config.map_yaml,
-                            semantic_map_id=config.semantic_map_id,
-                            plan=config.plan,
-                            snapshot=config.snapshot,
-                            snapshot_path=config.snapshot_path,
-                            candidate_uid=candidate.candidate_uid,
-                            start=opposite_start,
-                            output_dir=opposite_source,
-                            approach_offset_m=inspection_offset_m,
-                            inflation_radius_m=config.inflation_radius_m,
-                            candidate_transit_radius_m=(
-                                config.candidate_transit_radius_m
-                            ),
-                            physical_clearance=config.physical_clearance,
-                            approach_normal_rad=opposite_normal,
-                            axis_observation_path=(
-                                observation.axis_observation_path
-                            ),
-                        )
+                        opposite_plan_request
                     )
                     break
                 except ValueError as exc:
@@ -959,25 +1098,23 @@ def execute_candidate_approach_phase(
                     feasibility_failures.append(
                         f"{inspection_offset_m:.3f} m: {exc}"
                     )
-            if opposite_sealed is None:
+            if opposite_sealed is None or opposite_plan_request is None:
                 raise RuntimeError(
                     "no physically allowed opposite-face approach was "
                     "A*-reachable: " + "; ".join(feasibility_failures)
                 )
             opposite_run_id = f"{candidate_run_id}_opposite"
-            opposite_request = _motion_request(
+            opposite_outcome = _execute_candidate_motion(
                 config=config,
-                sealed=opposite_sealed,
+                effects=effects,
+                candidate_root=candidate_root,
+                plan_request=opposite_plan_request,
+                initial_sealed=opposite_sealed,
                 run_id=opposite_run_id,
-                candidate_snapshot_path=(
-                    opposite_source / "candidate_snapshot.json"
-                ),
                 leg_kind=MissionLegKind.OPPOSITE_FACE,
                 candidate_index=candidate_index,
                 target_id=candidate.candidate_uid,
             )
-            opposite_outcome = effects.run_motion_leg(opposite_request)
-            _require_completed_motion(opposite_request, opposite_outcome)
             observation = effects.capture_observation(
                 CandidateObservationRequest(
                     candidate=candidate,

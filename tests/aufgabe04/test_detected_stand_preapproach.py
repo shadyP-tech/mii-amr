@@ -140,6 +140,46 @@ class DetectedStandPreapproachTest(unittest.TestCase):
                 status.failures,
             )
 
+    def test_source_connector_tamper_is_rejected_before_sealing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._pipeline(Path(tmpdir))
+            diagnostics_path = root / "route_diagnostics.json"
+            payload = json.loads(diagnostics_path.read_text())
+            payload["metadata"]["exact_start_connector"]["exact_start"][
+                "x_m"
+            ] += 0.01
+            diagnostics_path.write_text(json.dumps(payload))
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "exact-start evidence differs from route waypoint 0",
+            ):
+                seal_detected_stand_preapproach(pipeline_root=root)
+
+    def test_sealed_connector_tamper_fails_binding(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._pipeline(Path(tmpdir))
+            outputs = seal_detected_stand_preapproach(pipeline_root=root)
+            diagnostics_path = Path(outputs["diagnostics_json"])
+            payload = json.loads(diagnostics_path.read_text())
+            payload["metadata"]["exact_start_connector"]["anchor"][
+                "y_m"
+            ] += 0.01
+            diagnostics_path.write_text(json.dumps(payload))
+            leg = load_route_leg(Path(outputs["route_csv"]), 0)
+
+            status = validate_detected_stand_preapproach_binding(
+                diagnostics_path,
+                leg,
+                candidate_snapshot_path=root / "candidate_snapshot.json",
+            )
+
+            self.assertFalse(status.ok)
+            self.assertTrue(
+                any("exact-start anchor" in failure for failure in status.failures),
+                status.failures,
+            )
+
     def test_real_runner_accepts_sealed_route_in_dry_run_only(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = self._pipeline(Path(tmpdir))

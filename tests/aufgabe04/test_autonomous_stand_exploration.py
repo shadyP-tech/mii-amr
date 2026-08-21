@@ -2793,12 +2793,46 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             diagnostics = artifact_root / "diagnostics.json"
             map_certificate = artifact_root / "map_certificate.json"
             fresh_localization = root / "fresh_localization.json"
-            for path, payload in (
-                (route, "route\n"),
-                (diagnostics, "{}\n"),
-                (map_certificate, "{}\n"),
-            ):
-                path.write_text(payload)
+            route.write_text(
+                "leg_index,point_index,grid_x,grid_y,world_x_m,world_y_m,"
+                "yaw_rad,segment_length_m,cumulative_length_m\n"
+                "0,0,0,0,-0.48,-0.60,,0.0,0.0\n"
+                "0,1,1,0,-0.38,-0.60,1.69,0.1,0.1\n"
+            )
+            diagnostics.write_text(
+                json.dumps(
+                    {
+                        "metadata": {
+                            "planning_frame": "map",
+                            "inflation_radius_m": 0.01,
+                            "exact_start_connector": {
+                                "required": True,
+                                "validated": True,
+                                "exact_start": {
+                                    "x_m": -0.48,
+                                    "y_m": -0.60,
+                                    "yaw_rad": 1.69,
+                                },
+                                "anchor": {
+                                    "x_m": -0.38,
+                                    "y_m": -0.60,
+                                    "yaw_rad": 1.69,
+                                },
+                                "connector_length_m": 0.1,
+                                "required_clearance_m": 0.01,
+                                "minimum_sampled_clearance_m": 0.5,
+                                "minimum_continuous_clearance_m": 0.4975,
+                                "minimum_margin_m": 0.4875,
+                                "sample_spacing_m": 0.005,
+                                "sample_count": 21,
+                            },
+                        }
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+            map_certificate.write_text("{}\n")
             fresh_localization.write_text(
                 json.dumps(
                     _stationary_localization_payload(-0.48, -0.60, 1.69)
@@ -2966,12 +3000,46 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             diagnostics = artifact_root / "diagnostics.json"
             map_certificate = artifact_root / "map_certificate.json"
             fresh_localization = root / "fresh_localization.json"
-            for path, payload in (
-                (route, "route\n"),
-                (diagnostics, "{}\n"),
-                (map_certificate, "{}\n"),
-            ):
-                path.write_text(payload)
+            route.write_text(
+                "leg_index,point_index,grid_x,grid_y,world_x_m,world_y_m,"
+                "yaw_rad,segment_length_m,cumulative_length_m\n"
+                "0,0,0,0,-0.48,-0.60,,0.0,0.0\n"
+                "0,1,1,0,-0.38,-0.60,1.69,0.1,0.1\n"
+            )
+            diagnostics.write_text(
+                json.dumps(
+                    {
+                        "metadata": {
+                            "planning_frame": "map",
+                            "inflation_radius_m": 0.01,
+                            "exact_start_connector": {
+                                "required": True,
+                                "validated": True,
+                                "exact_start": {
+                                    "x_m": -0.48,
+                                    "y_m": -0.60,
+                                    "yaw_rad": 1.69,
+                                },
+                                "anchor": {
+                                    "x_m": -0.38,
+                                    "y_m": -0.60,
+                                    "yaw_rad": 1.69,
+                                },
+                                "connector_length_m": 0.1,
+                                "required_clearance_m": 0.01,
+                                "minimum_sampled_clearance_m": 0.5,
+                                "minimum_continuous_clearance_m": 0.4975,
+                                "minimum_margin_m": 0.4875,
+                                "sample_spacing_m": 0.005,
+                                "sample_count": 21,
+                            },
+                        }
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+            map_certificate.write_text("{}\n")
             fresh_localization.write_text(
                 json.dumps(
                     _stationary_localization_payload(-0.48, -0.60, 1.69)

@@ -1,3 +1,5 @@
+import csv
+from dataclasses import replace
 import json
 import math
 from pathlib import Path
@@ -13,6 +15,7 @@ sys.path.insert(0, str(ROOT))
 
 from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds
 from scripts.aufgabe04.navigation.mission_leg_motion_permit import MissionLegKind
+from scripts.aufgabe04.navigation.map_io import load_occupancy_grid_with_bundle
 from scripts.aufgabe04.navigation.models import GridCell, Pose2D
 from scripts.aufgabe04.navigation.read_current_amcl_pose import CurrentAmclPose
 from scripts.aufgabe04.navigation.stand_coverage_survey import (
@@ -28,6 +31,7 @@ from scripts.aufgabe04.real_robot.autonomous_candidate_approach import (
     FacingValidationRequest,
     execute_candidate_approach_phase,
     nearest_candidate,
+    plan_candidate_preapproach,
     validate_facing_pose,
 )
 from scripts.aufgabe04.real_robot.autonomous_child_runner import MotionLegOutcome
@@ -36,7 +40,9 @@ from scripts.aufgabe04.stations.candidate_snapshot import (
     CandidateSource,
     FrozenCandidate,
     new_candidate_snapshot,
+    write_candidate_snapshot,
 )
+from tests.aufgabe04.test_detected_station_exploration import write_free_map
 
 
 class AutonomousCandidateApproachTest(unittest.TestCase):
@@ -159,6 +165,85 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
 
             self.assertIsNotNone(selected)
             self.assertEqual(selected.candidate_uid, "candidate_a")
+
+    def test_preapproach_route_starts_at_exact_live_pose_and_binds_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            map_yaml = write_free_map(root)
+            _, map_bundle = load_occupancy_grid_with_bundle(
+                map_yaml,
+                semantic_map_id="arena",
+                planning_frame="map",
+            )
+            candidate = self._candidate("candidate_1", 0.50, 0.0)
+            snapshot = new_candidate_snapshot(
+                snapshot_id="snapshot",
+                created_unix_sec=3.0,
+                planning_frame="map",
+                map_bundle_sha256=map_bundle.bundle_sha256,
+                candidates=(candidate,),
+            )
+            snapshot_path = root / "candidate_snapshot_input.json"
+            write_candidate_snapshot(snapshot_path, snapshot)
+            survey_cell = GridCell(0, 0)
+            plan = CoverageSurveyPlan(
+                schema_version=1,
+                survey_id="survey",
+                planning_frame="map",
+                map_bundle_sha256=map_bundle.bundle_sha256,
+                arena_bounds=ArenaBounds(),
+                config=CoverageSurveyConfig(snap_radius_m=0.30),
+                viewpoints=(
+                    SurveyViewpoint(
+                        viewpoint_id="survey_vp_001",
+                        pose=Pose2D(0.0, 0.0, 0.0),
+                        cell=survey_cell,
+                        visible_cells=(survey_cell,),
+                    ),
+                ),
+                surveyable_cells=(survey_cell,),
+                planned_covered_cells=(survey_cell,),
+                planned_coverage_ratio=1.0,
+            )
+            live_start = Pose2D(-0.417, 0.013, 0.02)
+            pipeline_root = root / "planned_candidate"
+
+            outputs = plan_candidate_preapproach(
+                map_yaml=map_yaml,
+                semantic_map_id="arena",
+                plan=plan,
+                snapshot=snapshot,
+                snapshot_path=snapshot_path,
+                candidate_uid=candidate.candidate_uid,
+                start=live_start,
+                output_dir=pipeline_root,
+                approach_offset_m=0.70,
+                inflation_radius_m=0.25,
+                candidate_transit_radius_m=0.31,
+                physical_clearance={
+                    "minimum_active_standoff_m": 0.32,
+                    "minimum_candidate_transit_radius_m": 0.31,
+                    "minimum_static_inflation_m": 0.25,
+                },
+            )
+
+            with (pipeline_root / "route.csv").open(newline="") as handle:
+                source_rows = list(csv.DictReader(handle))
+            metadata = json.loads(
+                (pipeline_root / "route_diagnostics.json").read_text()
+            )["metadata"]
+            self.assertAlmostEqual(float(source_rows[0]["world_x_m"]), live_start.x_m)
+            self.assertAlmostEqual(float(source_rows[0]["world_y_m"]), live_start.y_m)
+            self.assertTrue(metadata["exact_start_connector"]["validated"])
+            self.assertEqual(
+                metadata["route_start_pose_provenance"]["source"],
+                "autonomous_candidate_current_pose",
+            )
+            self.assertEqual(
+                metadata["route_start_pose_provenance"]["pose"]["x_m"],
+                live_start.x_m,
+            )
+            self.assertTrue(Path(outputs["route_certificate_json"]).exists())
 
     def test_raw_current_amcl_pose_fails_before_candidate_side_effects(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -493,6 +578,115 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             self.assertFalse(
                 (config.session_root / "station_identity_registry.json").exists()
             )
+
+    def test_startup_mismatch_replans_same_candidate_without_new_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Pin the workstation regression: the original candidate route
+            # started 33.1768 mm from AMCL, just outside the 30 mm route tube.
+            rejected_start_offset_m = 0.03317680255718219
+            candidate = self._candidate("candidate_1", 0.2, 0.0)
+            config = replace(
+                self._config(root, (candidate,)),
+                max_startup_reseals_per_leg=1,
+                startup_reseal_motion_authorization_json=(
+                    root / "startup_authorization.json"
+                ),
+            )
+            poses = iter(
+                (Pose2D(0.0, 0.0, 0.0), Pose2D(0.2, 0.0, 0.0))
+            )
+            plan_requests = []
+            replacement_attempts = []
+            capture = Mock(
+                side_effect=lambda request: CandidateObservation(
+                    request.output_dir / "recommendation.json",
+                    "QR_1",
+                    None,
+                )
+            )
+
+            def plan_preapproach(request):
+                request.output_dir.mkdir(parents=True, exist_ok=False)
+                plan_requests.append(request)
+                return {
+                    "route_csv": str(request.output_dir / "route.csv"),
+                    "diagnostics_json": str(
+                        request.output_dir / "route_diagnostics.json"
+                    ),
+                    "route_certificate_json": str(
+                        request.output_dir / "route_certificate.json"
+                    ),
+                }
+
+            def initial_motion(request):
+                return MotionLegOutcome(
+                    run_id=request.run_id,
+                    status="stopped",
+                    stop_reason="pose outside certified startup segment",
+                    stop_details={
+                        "source": "execution_route_certificate",
+                        "phase": "before_motion_confirmation",
+                        "reason": "pose outside certified startup segment",
+                        "fail_closed": True,
+                        "route_pose": {
+                            "x_m": rejected_start_offset_m,
+                            "y_m": 0.0,
+                            "yaw_rad": 0.0,
+                        },
+                    },
+                    motion_published=False,
+                    returncode=1,
+                    semantic_log_path=root / "initial_events.jsonl",
+                    mission_leg_motion_permit_path=root / "initial_permit.json",
+                    mission_leg_motion_permit_sha256="a" * 64,
+                )
+
+            def admit(evidence_path):
+                evidence_path.parent.mkdir(parents=True, exist_ok=True)
+                evidence_path.write_text("{}\n")
+                return Pose2D(rejected_start_offset_m, 0.0, 0.0)
+
+            def replacement_motion(request, attempt):
+                replacement_attempts.append((request, attempt))
+                return self._completed(request)
+
+            with patch("builtins.input") as prompt:
+                outcome = execute_candidate_approach_phase(
+                    config,
+                    CandidateApproachEffects(
+                        read_current_pose=lambda: next(poses),
+                        run_motion_leg=initial_motion,
+                        run_startup_reseal_motion_leg=replacement_motion,
+                        admit_startup_localization=admit,
+                        capture_observation=capture,
+                        plan_preapproach=plan_preapproach,
+                        validate_facing=lambda request: {
+                            "candidate_uid": request.candidate.candidate_uid
+                        },
+                        commit_decision=lambda request: None,
+                        clock=lambda: 10.0,
+                    ),
+                )
+
+            prompt.assert_not_called()
+            self.assertEqual(outcome.visit_order, (candidate.candidate_uid,))
+            self.assertEqual(len(plan_requests), 2)
+            self.assertEqual(
+                plan_requests[1].start,
+                Pose2D(rejected_start_offset_m, 0.0, 0.0),
+            )
+            self.assertIn("startup_reseal_001", str(plan_requests[1].output_dir))
+            self.assertEqual(len(replacement_attempts), 1)
+            replacement_request, attempt = replacement_attempts[0]
+            self.assertEqual(
+                replacement_request.mission_leg_kind,
+                MissionLegKind.CANDIDATE_PREAPPROACH,
+            )
+            self.assertEqual(replacement_request.target_id, candidate.candidate_uid)
+            self.assertEqual(attempt.reseal_index, 1)
+            self.assertTrue(replacement_request.run_id.endswith("startup_reseal_001"))
+            capture.assert_called_once()
 
     def test_exhausted_opposite_offsets_publish_no_identity_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:

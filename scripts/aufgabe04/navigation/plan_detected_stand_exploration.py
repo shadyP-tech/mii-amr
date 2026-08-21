@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import math
 import sys
 import time
@@ -14,6 +15,9 @@ if str(ROOT) not in sys.path:
 
 from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds
 from scripts.aufgabe04.navigation.artifacts import write_diagnostics_json, write_route_csv
+from scripts.aufgabe04.navigation.certified_exact_start_route import (
+    certify_and_smooth_exact_start_route,
+)
 from scripts.aufgabe04.navigation.candidate_exploration_state import (
     STATUS_CONFIRMED,
     STATUS_REJECTED,
@@ -654,6 +658,19 @@ def main(argv: list[str] | None = None) -> int:
             occupancy_grid=frozen_grid,
             map_bundle=map_bundle,
         )
+        route_results = list(dry_run.results)
+        if not route_results:
+            raise ValueError("candidate route planner produced no route legs")
+        route_results[0], connector, exact_start_smoothing = (
+            certify_and_smooth_exact_start_route(
+                route_results[0],
+                base_costmap=dry_run.base_costmap,
+                planning_costmap=dry_run.planning_costmap,
+                exact_start=start,
+                required_clearance_m=args.inflation_radius_m,
+            )
+        )
+        dry_run = replace(dry_run, results=tuple(route_results))
         validate_route_commitment_ready(dry_run)
         final_yaw_by_leg: dict[int, float] = {}
         persisted_approach_poses: list[dict[str, float]] = []
@@ -697,6 +714,29 @@ def main(argv: list[str] | None = None) -> int:
         )
         write_station_layout_csv(args.layout_csv, stations)
         route_metadata = dict(dry_run.metadata)
+        smoothing_metadata = dict(
+            route_metadata.get("line_of_sight_route_optimization", {})
+        )
+        smoothing_legs = list(smoothing_metadata.get("legs", ()))
+        if smoothing_legs:
+            smoothing_legs[0] = exact_start_smoothing.to_metadata()
+        else:
+            smoothing_legs = [exact_start_smoothing.to_metadata()]
+        smoothing_metadata.update(
+            {
+                "enabled": True,
+                "legs": smoothing_legs,
+                "input_point_count": sum(
+                    int(item["input_point_count"]) for item in smoothing_legs
+                ),
+                "output_point_count": sum(
+                    int(item["output_point_count"]) for item in smoothing_legs
+                ),
+                "optimized_leg_count": sum(
+                    int(bool(item["optimized"])) for item in smoothing_legs
+                ),
+            }
+        )
         route_metadata.update(
             {
                 "source": "lidar_detected_stand_exploration",
@@ -733,7 +773,27 @@ def main(argv: list[str] | None = None) -> int:
                     candidate_snapshot
                 ),
                 "map_bundle_sha256": map_bundle.bundle_sha256,
-                "selected_candidate_stand_id": ordered[0].stand_id if args.plan_mode == "next-candidate" else "",
+                "planning_frame": args.required_map_frame,
+                "exact_start_connector": connector.to_metadata(),
+                "route_start_pose_provenance": {
+                    "source": (
+                        "live_tf_start"
+                        if args.start_from_tf
+                        else "cli_start_argument"
+                    ),
+                    "planning_frame": args.required_map_frame,
+                    "pose": {
+                        "x_m": start.x_m,
+                        "y_m": start.y_m,
+                        "yaw_rad": start.yaw_rad,
+                    },
+                },
+                "line_of_sight_route_optimization": smoothing_metadata,
+                "selected_candidate_stand_id": (
+                    ordered[0].stand_id
+                    if args.plan_mode == "next-candidate"
+                    else ""
+                ),
                 "selected_approach_pose": (
                     persisted_approach_poses[0]
                     if args.plan_mode == "next-candidate"
@@ -747,7 +807,11 @@ def main(argv: list[str] | None = None) -> int:
             dry_run.results,
             final_yaw_by_leg=final_yaw_by_leg,
         )
-        write_diagnostics_json(args.diagnostics_json, dry_run.results, metadata=route_metadata)
+        write_diagnostics_json(
+            args.diagnostics_json,
+            dry_run.results,
+            metadata=route_metadata,
+        )
         write_candidate_snapshot(args.candidate_snapshot_json, candidate_snapshot)
         write_candidate_exploration_state(args.exploration_state_json, state)
         failed = any(result.failure is not None for result in dry_run.results)

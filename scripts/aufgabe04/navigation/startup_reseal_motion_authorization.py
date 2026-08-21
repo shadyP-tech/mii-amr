@@ -26,11 +26,18 @@ from scripts.aufgabe04.artifacts.content_store import (
     payload_sha256,
     write_content_hashed_json,
 )
+from scripts.aufgabe04.navigation.mission_leg_motion_permit import (
+    ROUTINE_MISSION_LEG_KINDS,
+    MissionLegKind,
+)
+from scripts.aufgabe04.navigation.startup_reseal_route_binding import (
+    validate_startup_reseal_route_binding,
+)
 
 
-STARTUP_RESEAL_MOTION_AUTHORIZATION_SCHEMA_VERSION = 2
-STARTUP_RESEAL_MOTION_PERMIT_SCHEMA_VERSION = 2
-STARTUP_RESEAL_PERMIT_SUMMARY_SCHEMA_VERSION = 2
+STARTUP_RESEAL_MOTION_AUTHORIZATION_SCHEMA_VERSION = 3
+STARTUP_RESEAL_MOTION_PERMIT_SCHEMA_VERSION = 3
+STARTUP_RESEAL_PERMIT_SUMMARY_SCHEMA_VERSION = 3
 STARTUP_RESEAL_MOTION_AUTHORIZATION_HASH_FIELD = (
     "startup_reseal_motion_authorization_sha256"
 )
@@ -52,7 +59,7 @@ STARTUP_RESEAL_RECOVERY_SOURCE_KINDS = frozenset(
     }
 )
 STARTUP_RESEAL_MOTION_AUTHORIZATION_SCOPE = (
-    "Reuse this autonomous mission RUN only for bounded same-leg, "
+    "Reuse this autonomous mission RUN only for bounded same-kind, same-leg, "
     "same-target pre-motion startup reseals after either a certified start "
     "pose mismatch or an admitted prestart localization-continuity stop. "
     "The no-motion rejection, exact recovery source, fresh stationary "
@@ -76,6 +83,7 @@ _AUTHORIZATION_FIELDS = frozenset(
         "scope_text",
         "operator_confirmation",
         "allowed_recovery_kind",
+        "allowed_mission_leg_kinds",
     }
 )
 _PERMIT_FIELDS = frozenset(
@@ -86,6 +94,9 @@ _PERMIT_FIELDS = frozenset(
         "run_id",
         "leg_index",
         "target_viewpoint_id",
+        "mission_leg_kind",
+        "mission_leg_index",
+        "target_id",
         "reseal_index",
         "max_startup_reseals_per_leg",
         "rejected_run_id",
@@ -116,6 +127,65 @@ _PERMIT_FIELDS = frozenset(
 )
 
 
+def _mission_leg_kind(value: object, name: str) -> MissionLegKind:
+    try:
+        kind = MissionLegKind(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} is not a known mission leg kind") from exc
+    if kind not in ROUTINE_MISSION_LEG_KINDS:
+        raise ValueError(f"{name} must be a routine mission leg kind")
+    return kind
+
+
+def _canonical_allowed_mission_leg_kinds(
+    values: object,
+) -> tuple[MissionLegKind, ...]:
+    if not isinstance(values, (tuple, list)) or not values:
+        raise ValueError(
+            "allowed_mission_leg_kinds must be a non-empty sequence"
+        )
+    result: list[MissionLegKind] = []
+    for value in values:
+        kind = _mission_leg_kind(value, "allowed_mission_leg_kinds")
+        if kind in result:
+            raise ValueError("allowed_mission_leg_kinds contains duplicates")
+        result.append(kind)
+    order = {kind: index for index, kind in enumerate(ROUTINE_MISSION_LEG_KINDS)}
+    if result != sorted(result, key=order.__getitem__):
+        raise ValueError("allowed_mission_leg_kinds must use canonical order")
+    return tuple(result)
+
+
+def resolve_startup_reseal_mission_leg_identity(
+    *,
+    mission_leg_kind: MissionLegKind | str = MissionLegKind.COVERAGE,
+    mission_leg_index: int | None = None,
+    target_id: str = "",
+    leg_index: int | None = None,
+    target_viewpoint_id: str = "",
+) -> tuple[MissionLegKind, int, str]:
+    """Resolve generic identity with strict coverage-alias compatibility.
+
+    ``leg_index`` and ``target_viewpoint_id`` are persisted compatibility
+    aliases.  They never form a second identity: when generic values are also
+    supplied, both representations must match exactly.
+    """
+
+    kind = _mission_leg_kind(mission_leg_kind, "mission_leg_kind")
+    if mission_leg_index is None:
+        mission_leg_index = leg_index
+    elif leg_index is not None and mission_leg_index != leg_index:
+        raise ValueError("mission_leg_index and leg_index mismatch")
+    _nonnegative_integer(mission_leg_index, "mission_leg_index")
+
+    if not str(target_id).strip():
+        target_id = target_viewpoint_id
+    elif str(target_viewpoint_id).strip() and target_id != target_viewpoint_id:
+        raise ValueError("target_id and target_viewpoint_id mismatch")
+    _require_nonempty(target_id, "target_id")
+    return kind, mission_leg_index, target_id
+
+
 @dataclass(frozen=True)
 class StartupResealMotionAuthorization:
     """Master scope derived from the mission-level operator ``RUN``."""
@@ -130,9 +200,19 @@ class StartupResealMotionAuthorization:
     scope_text: str
     operator_confirmation: str
     allowed_recovery_kind: str
+    allowed_mission_leg_kinds: tuple[MissionLegKind, ...] = (
+        MissionLegKind.COVERAGE,
+    )
     schema_version: int = STARTUP_RESEAL_MOTION_AUTHORIZATION_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "allowed_mission_leg_kinds",
+            _canonical_allowed_mission_leg_kinds(
+                self.allowed_mission_leg_kinds
+            ),
+        )
         _validate_authorization(self)
 
     def to_payload(self) -> dict[str, object]:
@@ -148,6 +228,9 @@ class StartupResealMotionAuthorization:
             "scope_text": self.scope_text,
             "operator_confirmation": self.operator_confirmation,
             "allowed_recovery_kind": self.allowed_recovery_kind,
+            "allowed_mission_leg_kinds": [
+                kind.value for kind in self.allowed_mission_leg_kinds
+            ],
         }
 
     def to_evidence(self) -> dict[str, object]:
@@ -191,9 +274,22 @@ class StartupResealMotionPermit:
     recovery_source_kind: str = (
         STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH
     )
+    mission_leg_kind: MissionLegKind = MissionLegKind.COVERAGE
+    mission_leg_index: int | None = None
+    target_id: str = ""
     schema_version: int = STARTUP_RESEAL_MOTION_PERMIT_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        kind, index, target = resolve_startup_reseal_mission_leg_identity(
+            mission_leg_kind=self.mission_leg_kind,
+            mission_leg_index=self.mission_leg_index,
+            target_id=self.target_id,
+            leg_index=self.leg_index,
+            target_viewpoint_id=self.target_viewpoint_id,
+        )
+        object.__setattr__(self, "mission_leg_kind", kind)
+        object.__setattr__(self, "mission_leg_index", index)
+        object.__setattr__(self, "target_id", target)
         _validate_permit(self)
 
     def to_payload(self) -> dict[str, object]:
@@ -204,6 +300,9 @@ class StartupResealMotionPermit:
             "run_id": self.run_id,
             "leg_index": self.leg_index,
             "target_viewpoint_id": self.target_viewpoint_id,
+            "mission_leg_kind": self.mission_leg_kind.value,
+            "mission_leg_index": self.mission_leg_index,
+            "target_id": self.target_id,
             "reseal_index": self.reseal_index,
             "max_startup_reseals_per_leg": self.max_startup_reseals_per_leg,
             "rejected_run_id": self.rejected_run_id,
@@ -321,6 +420,13 @@ def load_startup_reseal_motion_authorization(
             allowed_recovery_kind=_string(
                 payload["allowed_recovery_kind"], "allowed_recovery_kind"
             ),
+            allowed_mission_leg_kinds=tuple(
+                _mission_leg_kind(value, "allowed_mission_leg_kinds")
+                for value in _list(
+                    payload["allowed_mission_leg_kinds"],
+                    "allowed_mission_leg_kinds",
+                )
+            ),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"invalid startup reseal motion authorization: {exc}") from exc
@@ -407,6 +513,13 @@ def load_startup_reseal_motion_permit(path: Path) -> StartupResealMotionPermit:
             target_viewpoint_id=_string(
                 payload["target_viewpoint_id"], "target_viewpoint_id"
             ),
+            mission_leg_kind=_mission_leg_kind(
+                payload["mission_leg_kind"], "mission_leg_kind"
+            ),
+            mission_leg_index=_integer(
+                payload["mission_leg_index"], "mission_leg_index"
+            ),
+            target_id=_string(payload["target_id"], "target_id"),
             reseal_index=_integer(payload["reseal_index"], "reseal_index"),
             max_startup_reseals_per_leg=_integer(
                 payload["max_startup_reseals_per_leg"],
@@ -532,10 +645,22 @@ def validate_startup_reseal_motion_permit(
     dry_odom_certificate_sha256: str,
     dry_uncertainty_budget_path: Path,
     dry_uncertainty_budget_sha256: str,
+    mission_leg_kind: MissionLegKind | str = MissionLegKind.COVERAGE,
+    mission_leg_index: int | None = None,
+    target_id: str = "",
 ) -> StartupResealMotionPermit:
     """Validate every identity, path, supplied digest, and current byte hash."""
 
     permit = load_startup_reseal_motion_permit(permit_path)
+    expected_kind, expected_index, expected_target = (
+        resolve_startup_reseal_mission_leg_identity(
+            mission_leg_kind=mission_leg_kind,
+            mission_leg_index=mission_leg_index,
+            target_id=target_id,
+            leg_index=leg_index,
+            target_viewpoint_id=target_viewpoint_id,
+        )
+    )
     authorization = _validate_master_reference(permit, master_authorization_path)
     _require_exact_matches(
         "startup reseal motion permit",
@@ -554,6 +679,15 @@ def validate_startup_reseal_motion_permit(
                 target_viewpoint_id,
             ),
             "leg_index": (permit.leg_index, leg_index),
+            "mission_leg_kind": (
+                permit.mission_leg_kind,
+                expected_kind,
+            ),
+            "mission_leg_index": (
+                permit.mission_leg_index,
+                expected_index,
+            ),
+            "target_id": (permit.target_id, expected_target),
             "localization_branch_proof_id": (
                 authorization.localization_branch_proof_id,
                 localization_branch_proof_id,
@@ -654,6 +788,9 @@ def validate_startup_reseal_motion_permit_for_execution(
     route_csv_path: Path,
     diagnostics_path: Path,
     map_route_certificate_path: Path,
+    mission_leg_kind: MissionLegKind | str = MissionLegKind.COVERAGE,
+    mission_leg_index: int | None = None,
+    target_id: str = "",
 ) -> StartupResealMotionPermit:
     """Execution-facing validator with sealed supporting inputs derived inside."""
 
@@ -692,6 +829,9 @@ def validate_startup_reseal_motion_permit_for_execution(
         dry_odom_certificate_sha256=permit.dry_odom_certificate_sha256,
         dry_uncertainty_budget_path=Path(permit.dry_uncertainty_budget_path),
         dry_uncertainty_budget_sha256=permit.dry_uncertainty_budget_sha256,
+        mission_leg_kind=mission_leg_kind,
+        mission_leg_index=mission_leg_index,
+        target_id=target_id,
     )
 
 
@@ -727,6 +867,9 @@ def _validate_authorization(
         )
     if authorization.allowed_recovery_kind != STARTUP_RESEAL_RECOVERY_KIND:
         raise ValueError("startup reseal motion authorization recovery kind mismatch")
+    _canonical_allowed_mission_leg_kinds(
+        authorization.allowed_mission_leg_kinds
+    )
 
 
 def _validate_permit(permit: StartupResealMotionPermit) -> None:
@@ -751,6 +894,14 @@ def _validate_permit(permit: StartupResealMotionPermit) -> None:
         _require_canonical_path_string(getattr(permit, name), name)
     for name in ("run_id", "target_viewpoint_id", "rejected_run_id"):
         _require_nonempty(getattr(permit, name), name)
+    if permit.mission_leg_kind not in ROUTINE_MISSION_LEG_KINDS:
+        raise ValueError("startup reseal permit mission_leg_kind is not routine")
+    _nonnegative_integer(permit.mission_leg_index, "mission_leg_index")
+    _require_nonempty(permit.target_id, "target_id")
+    if permit.mission_leg_index != permit.leg_index:
+        raise ValueError("startup reseal permit mission leg index alias mismatch")
+    if permit.target_id != permit.target_viewpoint_id:
+        raise ValueError("startup reseal permit target alias mismatch")
     _nonnegative_integer(permit.leg_index, "leg_index")
     _positive_integer(permit.reseal_index, "reseal_index")
     _positive_integer(
@@ -842,6 +993,10 @@ def _validate_budget(
         raise ValueError("startup reseal motion permit reseal maximum mismatch")
     if not 1 <= permit.reseal_index <= authorization.max_startup_reseals_per_leg:
         raise ValueError("startup reseal motion permit reseal budget exceeded")
+    if permit.mission_leg_kind not in authorization.allowed_mission_leg_kinds:
+        raise ValueError(
+            "startup reseal motion permit mission leg kind is not authorized"
+        )
 
 
 def _validate_startup_evidence(permit: StartupResealMotionPermit) -> None:
@@ -864,6 +1019,56 @@ def _validate_startup_evidence(permit: StartupResealMotionPermit) -> None:
         permit,
         expected_route_pose=fresh_start_pose,
     )
+    validate_startup_reseal_route_binding(
+        route_csv_path=Path(permit.route_csv_path),
+        diagnostics_path=Path(permit.diagnostics_path),
+        fresh_pose=fresh_start_pose,
+        require_start_pose_provenance=permit.mission_leg_kind
+        in {
+            MissionLegKind.CANDIDATE_PREAPPROACH,
+            MissionLegKind.OPPOSITE_FACE,
+        },
+    )
+
+
+def _event_matches_mission_leg_identity(
+    event: Mapping[str, object],
+    permit: StartupResealMotionPermit,
+) -> bool:
+    """Match generic identity, with a strict legacy fallback for coverage.
+
+    Once any generic field is present, all three generic fields are required;
+    a conflicting generic identity can never be hidden by matching coverage
+    aliases.  Legacy logs without generic fields remain eligible only for the
+    original coverage contract.
+    """
+
+    generic_names = ("mission_leg_kind", "mission_leg_index", "target_id")
+    if any(name in event for name in generic_names):
+        generic_match = (
+            event.get("mission_leg_kind") == permit.mission_leg_kind.value
+            and event.get("mission_leg_index") == permit.mission_leg_index
+            and type(event.get("mission_leg_index")) is int
+            and event.get("target_id") == permit.target_id
+        )
+        if not generic_match:
+            return False
+        if permit.mission_leg_kind is MissionLegKind.COVERAGE and any(
+            name in event
+            for name in ("coverage_leg_index", "target_viewpoint_id")
+        ):
+            return (
+                event.get("coverage_leg_index") == permit.mission_leg_index
+                and type(event.get("coverage_leg_index")) is int
+                and event.get("target_viewpoint_id") == permit.target_id
+            )
+        return True
+    return (
+        permit.mission_leg_kind is MissionLegKind.COVERAGE
+        and event.get("coverage_leg_index") == permit.mission_leg_index
+        and type(event.get("coverage_leg_index")) is int
+        and event.get("target_viewpoint_id") == permit.target_id
+    )
 
 
 def _validate_rejected_semantic_log(permit: StartupResealMotionPermit) -> None:
@@ -876,9 +1081,7 @@ def _validate_rejected_semantic_log(permit: StartupResealMotionPermit) -> None:
         if not isinstance(details, Mapping):
             continue
         if (
-            event.get("coverage_leg_index") == permit.leg_index
-            and type(event.get("coverage_leg_index")) is int
-            and event.get("target_viewpoint_id") == permit.target_viewpoint_id
+            _event_matches_mission_leg_identity(event, permit)
             and event.get("status") == "stopped"
             and event.get("stop_reason")
             == "pose outside certified startup segment"
@@ -921,9 +1124,7 @@ def _validate_prestart_localization_rejected_semantic_log(
     for index, event in enumerate(same_run):
         if (
             event.get("event") != "safety_stop"
-            or event.get("coverage_leg_index") != permit.leg_index
-            or type(event.get("coverage_leg_index")) is not int
-            or event.get("target_viewpoint_id") != permit.target_viewpoint_id
+            or not _event_matches_mission_leg_identity(event, permit)
         ):
             continue
         details = event.get("stop_details")
@@ -1033,11 +1234,7 @@ def _validate_prestart_attempt_sequence(
         ("motion permit consumption", consumed_event),
         ("child execution attempt", started_event),
     ):
-        if (
-            event.get("coverage_leg_index") != permit.leg_index
-            or type(event.get("coverage_leg_index")) is not int
-            or event.get("target_viewpoint_id") != permit.target_viewpoint_id
-        ):
+        if not _event_matches_mission_leg_identity(event, permit):
             raise ValueError(
                 f"prestart rejected semantic log {label} identity mismatch"
             )
@@ -1050,10 +1247,10 @@ def _validate_prestart_attempt_sequence(
         )
     consumed_name = consumed_event.get("event")
     if consumed_name == "mission_leg_motion_permit_consumed" and (
-        consumed_event.get("mission_leg_kind") != "coverage"
-        or consumed_event.get("mission_leg_index") != permit.leg_index
+        consumed_event.get("mission_leg_kind") != permit.mission_leg_kind.value
+        or consumed_event.get("mission_leg_index") != permit.mission_leg_index
         or type(consumed_event.get("mission_leg_index")) is not int
-        or consumed_event.get("target_id") != permit.target_viewpoint_id
+        or consumed_event.get("target_id") != permit.target_id
     ):
         raise ValueError(
             "prestart rejected semantic log routine permit identity mismatch"
@@ -1079,9 +1276,12 @@ def _validate_startup_reseal_summary(
         "motion_published",
         "reseal_kind",
         "leg_index",
+        "mission_leg_kind",
+        "mission_leg_index",
         "startup_reseal_index",
         "rejected_run_id",
         "target_viewpoint_id",
+        "target_id",
         "fresh_start_pose",
         "route_csv",
         "diagnostics_json",
@@ -1097,9 +1297,12 @@ def _validate_startup_reseal_summary(
         "motion_published": False,
         "reseal_kind": "startup",
         "leg_index": permit.leg_index,
+        "mission_leg_kind": permit.mission_leg_kind.value,
+        "mission_leg_index": permit.mission_leg_index,
         "startup_reseal_index": permit.reseal_index,
         "rejected_run_id": permit.rejected_run_id,
         "target_viewpoint_id": permit.target_viewpoint_id,
+        "target_id": permit.target_id,
         "route_csv": permit.route_csv_path,
         "diagnostics_json": permit.diagnostics_path,
         "same_target_verified": True,
@@ -1468,6 +1671,12 @@ def _string(value: object, name: str) -> str:
     return value
 
 
+def _list(value: object, name: str) -> list[object]:
+    if not isinstance(value, list):
+        raise ValueError(f"{name} must be a list")
+    return value
+
+
 def _boolean(value: object, name: str) -> bool:
     if type(value) is not bool:
         raise ValueError(f"{name} must be boolean")
@@ -1491,6 +1700,7 @@ __all__ = [
     "file_sha256",
     "load_startup_reseal_motion_authorization",
     "load_startup_reseal_motion_permit",
+    "resolve_startup_reseal_mission_leg_identity",
     "startup_reseal_motion_authorization_sha256",
     "startup_reseal_motion_permit_sha256",
     "validate_startup_reseal_motion_authorization",

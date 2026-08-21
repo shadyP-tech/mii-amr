@@ -25,13 +25,15 @@ from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
     StartupResealMotionPermit,
     load_startup_reseal_motion_authorization,
     load_startup_reseal_motion_permit,
+    resolve_startup_reseal_mission_leg_identity,
     startup_reseal_motion_authorization_sha256,
     startup_reseal_motion_permit_sha256,
     validate_startup_reseal_motion_permit_for_execution,
 )
+from scripts.aufgabe04.navigation.mission_leg_motion_permit import MissionLegKind
 
 
-STARTUP_RESEAL_MOTION_CONSUMPTION_RECEIPT_SCHEMA_VERSION = 1
+STARTUP_RESEAL_MOTION_CONSUMPTION_RECEIPT_SCHEMA_VERSION = 2
 STARTUP_RESEAL_MOTION_CONSUMPTION_RECEIPT_HASH_FIELD = (
     "startup_reseal_motion_consumption_receipt_sha256"
 )
@@ -46,6 +48,9 @@ _RECEIPT_FIELDS = frozenset(
         "run_id",
         "leg_index",
         "target_viewpoint_id",
+        "mission_leg_kind",
+        "mission_leg_index",
+        "target_id",
         "reseal_index",
     }
 )
@@ -62,9 +67,22 @@ class StartupResealMotionConsumptionReceipt:
     leg_index: int
     target_viewpoint_id: str
     reseal_index: int
+    mission_leg_kind: MissionLegKind = MissionLegKind.COVERAGE
+    mission_leg_index: int | None = None
+    target_id: str = ""
     schema_version: int = STARTUP_RESEAL_MOTION_CONSUMPTION_RECEIPT_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        kind, index, target = resolve_startup_reseal_mission_leg_identity(
+            mission_leg_kind=self.mission_leg_kind,
+            mission_leg_index=self.mission_leg_index,
+            target_id=self.target_id,
+            leg_index=self.leg_index,
+            target_viewpoint_id=self.target_viewpoint_id,
+        )
+        object.__setattr__(self, "mission_leg_kind", kind)
+        object.__setattr__(self, "mission_leg_index", index)
+        object.__setattr__(self, "target_id", target)
         _validate_receipt(self)
 
     def to_payload(self) -> dict[str, object]:
@@ -80,6 +98,9 @@ class StartupResealMotionConsumptionReceipt:
             "run_id": self.run_id,
             "leg_index": self.leg_index,
             "target_viewpoint_id": self.target_viewpoint_id,
+            "mission_leg_kind": self.mission_leg_kind.value,
+            "mission_leg_index": self.mission_leg_index,
+            "target_id": self.target_id,
             "reseal_index": self.reseal_index,
         }
 
@@ -123,6 +144,9 @@ def consume_startup_reseal_motion_permit(
     leg_index: int,
     target_viewpoint_id: str,
     reseal_index: int,
+    mission_leg_kind: MissionLegKind | str | None = None,
+    mission_leg_index: int | None = None,
+    target_id: str = "",
 ) -> StartupResealMotionConsumptionReceipt:
     """Revalidate and atomically claim one startup-reseal permit exactly once."""
 
@@ -140,6 +164,19 @@ def consume_startup_reseal_motion_permit(
         or observed.to_payload() != permit.to_payload()
     ):
         raise ValueError("startup reseal motion permit changed after validation")
+    expected_kind, expected_index, expected_target = (
+        resolve_startup_reseal_mission_leg_identity(
+            mission_leg_kind=(
+                observed.mission_leg_kind
+                if mission_leg_kind is None
+                else mission_leg_kind
+            ),
+            mission_leg_index=mission_leg_index,
+            target_id=target_id,
+            leg_index=leg_index,
+            target_viewpoint_id=target_viewpoint_id,
+        )
+    )
     _require_exact_matches(
         {
             "session_id": (authorization.session_id, session_id),
@@ -150,6 +187,15 @@ def consume_startup_reseal_motion_permit(
                 target_viewpoint_id,
             ),
             "reseal_index": (observed.reseal_index, reseal_index),
+            "mission_leg_kind": (
+                observed.mission_leg_kind,
+                expected_kind,
+            ),
+            "mission_leg_index": (
+                observed.mission_leg_index,
+                expected_index,
+            ),
+            "target_id": (observed.target_id, expected_target),
         }
     )
     # Close the validation-to-consumption window for every reference.  The
@@ -169,6 +215,9 @@ def consume_startup_reseal_motion_permit(
         leg_index=leg_index,
         target_viewpoint_id=target_viewpoint_id,
         reseal_index=reseal_index,
+        mission_leg_kind=expected_kind,
+        mission_leg_index=expected_index,
+        target_id=expected_target,
     )
     receipt_path = _receipt_path_from_binding(
         master_path=master_path,
@@ -220,6 +269,13 @@ def load_startup_reseal_motion_consumption_receipt(
             target_viewpoint_id=_string(
                 payload["target_viewpoint_id"], "target_viewpoint_id"
             ),
+            mission_leg_kind=_string(
+                payload["mission_leg_kind"], "mission_leg_kind"
+            ),
+            mission_leg_index=_integer(
+                payload["mission_leg_index"], "mission_leg_index"
+            ),
+            target_id=_string(payload["target_id"], "target_id"),
             reseal_index=_integer(payload["reseal_index"], "reseal_index"),
         )
     except (KeyError, TypeError, ValueError) as exc:
@@ -247,6 +303,15 @@ def load_startup_reseal_motion_consumption_receipt(
                 permit.target_viewpoint_id,
                 receipt.target_viewpoint_id,
             ),
+            "mission_leg_kind": (
+                permit.mission_leg_kind,
+                receipt.mission_leg_kind,
+            ),
+            "mission_leg_index": (
+                permit.mission_leg_index,
+                receipt.mission_leg_index,
+            ),
+            "target_id": (permit.target_id, receipt.target_id),
             "reseal_index": (permit.reseal_index, receipt.reseal_index),
         }
     )
@@ -325,6 +390,9 @@ def _revalidate_execution_artifacts(
         semantic_map_id=authorization.semantic_map_id,
         target_viewpoint_id=permit.target_viewpoint_id,
         leg_index=permit.leg_index,
+        mission_leg_kind=permit.mission_leg_kind,
+        mission_leg_index=permit.mission_leg_index,
+        target_id=permit.target_id,
         localization_branch_proof_id=(
             authorization.localization_branch_proof_id
         ),
@@ -428,9 +496,19 @@ def _validate_receipt(receipt: StartupResealMotionConsumptionReceipt) -> None:
         receipt.startup_reseal_motion_permit_sha256,
         "startup_reseal_motion_permit_sha256",
     )
-    for name in ("session_id", "run_id", "target_viewpoint_id"):
+    for name in (
+        "session_id",
+        "run_id",
+        "target_viewpoint_id",
+        "target_id",
+    ):
         _require_nonempty(getattr(receipt, name), name)
     _nonnegative_integer(receipt.leg_index, "leg_index")
+    _nonnegative_integer(receipt.mission_leg_index, "mission_leg_index")
+    if receipt.mission_leg_index != receipt.leg_index:
+        raise ValueError("startup reseal receipt mission leg index alias mismatch")
+    if receipt.target_id != receipt.target_viewpoint_id:
+        raise ValueError("startup reseal receipt target alias mismatch")
     _positive_integer(receipt.reseal_index, "reseal_index")
 
 

@@ -5,6 +5,7 @@ from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 from scripts.aufgabe04.artifacts.content_store import payload_sha256
+from scripts.aufgabe04.navigation.mission_leg_motion_permit import MissionLegKind
 from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
     STARTUP_RESEAL_MOTION_AUTHORIZATION_SCOPE,
     STARTUP_RESEAL_MOTION_AUTHORIZATION_SCHEMA_VERSION,
@@ -69,6 +70,7 @@ class StartupResealMotionAuthorizationTest(unittest.TestCase):
             path = self.root / f"{name}.artifact"
             path.write_text(f"sealed {name}\n", encoding="utf-8")
             self.artifacts[name] = path
+        self._write_route_and_diagnostics()
         self.artifacts["rejected_semantic_log"] = (
             self.root / "rejected_run.jsonl"
         )
@@ -88,6 +90,81 @@ class StartupResealMotionAuthorizationTest(unittest.TestCase):
 
     def _sha(self, name):
         return file_sha256(self.artifacts[name])
+
+    def _write_route_and_diagnostics(
+        self,
+        *,
+        route_start_pose=None,
+        exact_start_pose=None,
+        provenance_pose=None,
+        include_provenance=True,
+        first_yaw="",
+    ):
+        route_start = dict(
+            route_start_pose
+            or {"x_m": 0.1, "y_m": 0.2, "yaw_rad": 0.3}
+        )
+        exact_start = dict(exact_start_pose or route_start)
+        provenance = dict(provenance_pose or exact_start)
+        anchor = {
+            "x_m": 0.2,
+            "y_m": 0.2,
+            "yaw_rad": exact_start["yaw_rad"],
+        }
+        length_m = (
+            (anchor["x_m"] - exact_start["x_m"]) ** 2
+            + (anchor["y_m"] - exact_start["y_m"]) ** 2
+        ) ** 0.5
+        sample_count = 21
+        sample_spacing_m = length_m / (sample_count - 1)
+        minimum_sampled_clearance_m = 0.5
+        minimum_continuous_clearance_m = (
+            minimum_sampled_clearance_m - sample_spacing_m / 2.0
+        )
+        inflation_radius_m = 0.01
+        self.artifacts["route_csv"].write_text(
+            "leg_index,point_index,grid_x,grid_y,world_x_m,world_y_m,"
+            "yaw_rad,segment_length_m,cumulative_length_m\n"
+            f"0,0,0,0,{route_start['x_m']},{route_start['y_m']},"
+            f"{first_yaw},0.0,0.0\n"
+            f"0,1,1,0,{anchor['x_m']},{anchor['y_m']},0.3,"
+            f"{length_m},{length_m}\n",
+            encoding="utf-8",
+        )
+        metadata = {
+            "planning_frame": "map",
+            "inflation_radius_m": inflation_radius_m,
+            "exact_start_connector": {
+                "required": True,
+                "validated": True,
+                "exact_start": exact_start,
+                "anchor": anchor,
+                "connector_length_m": length_m,
+                "required_clearance_m": inflation_radius_m,
+                "minimum_sampled_clearance_m": (
+                    minimum_sampled_clearance_m
+                ),
+                "minimum_continuous_clearance_m": (
+                    minimum_continuous_clearance_m
+                ),
+                "minimum_margin_m": (
+                    minimum_continuous_clearance_m - inflation_radius_m
+                ),
+                "sample_spacing_m": sample_spacing_m,
+                "sample_count": sample_count,
+            },
+        }
+        if include_provenance:
+            metadata["route_start_pose_provenance"] = {
+                "source": "autonomous_candidate_current_pose",
+                "planning_frame": "map",
+                "pose": provenance,
+            }
+        self.artifacts["diagnostics"].write_text(
+            json.dumps({"metadata": metadata}, indent=2, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
 
     def _write_rejected_log(self, *extra_events, **event_replacements):
         event = {
@@ -221,9 +298,12 @@ class StartupResealMotionAuthorizationTest(unittest.TestCase):
             "motion_published": False,
             "reseal_kind": "startup",
             "leg_index": 3,
+            "mission_leg_kind": MissionLegKind.COVERAGE.value,
+            "mission_leg_index": 3,
             "startup_reseal_index": 1,
             "rejected_run_id": "mission-001-coverage-003",
             "target_viewpoint_id": "survey-vp-007",
+            "target_id": "survey-vp-007",
             "fresh_start_pose": {"x_m": 0.1, "y_m": 0.2, "yaw_rad": 0.3},
             "route_csv": self._path("route_csv"),
             "diagnostics_json": self._path("diagnostics"),
@@ -388,8 +468,8 @@ class StartupResealMotionAuthorizationTest(unittest.TestCase):
             loaded.schema_version,
             STARTUP_RESEAL_MOTION_AUTHORIZATION_SCHEMA_VERSION,
         )
-        self.assertEqual(STARTUP_RESEAL_MOTION_AUTHORIZATION_SCHEMA_VERSION, 2)
-        self.assertEqual(STARTUP_RESEAL_MOTION_PERMIT_SCHEMA_VERSION, 2)
+        self.assertEqual(STARTUP_RESEAL_MOTION_AUTHORIZATION_SCHEMA_VERSION, 3)
+        self.assertEqual(STARTUP_RESEAL_MOTION_PERMIT_SCHEMA_VERSION, 3)
         self.assertIn("certified start pose mismatch", loaded.scope_text)
         self.assertIn("prestart localization-continuity", loaded.scope_text)
         with self.assertRaisesRegex(ValueError, "unsupported.*schema"):
@@ -397,12 +477,132 @@ class StartupResealMotionAuthorizationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported.*schema"):
             replace(self.permit, schema_version=1)
 
+    def test_candidate_identity_is_bound_and_cannot_collide_with_other_kinds(self):
+        candidate_master = self.root / "candidate_startup_master.json"
+        candidate_authorization = replace(
+            self.authorization,
+            allowed_mission_leg_kinds=(
+                MissionLegKind.COVERAGE,
+                MissionLegKind.CANDIDATE_PREAPPROACH,
+                MissionLegKind.OPPOSITE_FACE,
+            ),
+        )
+        candidate_master_sha = write_startup_reseal_motion_authorization(
+            candidate_master,
+            candidate_authorization,
+        )
+        self._write_rejected_log(
+            mission_leg_kind=MissionLegKind.CANDIDATE_PREAPPROACH.value,
+            mission_leg_index=3,
+            target_id="survey-vp-007",
+            coverage_leg_index=None,
+            target_viewpoint_id="",
+        )
+        self._write_summary(
+            mission_leg_kind=MissionLegKind.CANDIDATE_PREAPPROACH.value,
+            mission_leg_index=3,
+            target_id="survey-vp-007",
+        )
+        candidate = self._new_permit(
+            master_authorization_path=str(candidate_master.absolute()),
+            master_authorization_sha256=candidate_master_sha,
+            mission_leg_kind=MissionLegKind.CANDIDATE_PREAPPROACH,
+            mission_leg_index=3,
+            target_id="survey-vp-007",
+            rejected_semantic_log_sha256=self._sha(
+                "rejected_semantic_log"
+            ),
+            startup_reseal_summary_sha256=self._sha(
+                "startup_reseal_summary"
+            ),
+        )
+        candidate_path = self.root / "candidate_startup_permit.json"
+        write_startup_reseal_motion_permit(candidate_path, candidate)
+        kwargs = {
+            **self._execution_kwargs(),
+            "master_authorization_path": candidate_master,
+            "mission_leg_kind": MissionLegKind.CANDIDATE_PREAPPROACH,
+            "mission_leg_index": 3,
+            "target_id": "survey-vp-007",
+        }
+        loaded = validate_startup_reseal_motion_permit_for_execution(
+            candidate_path,
+            **kwargs,
+        )
+        self.assertEqual(
+            loaded.mission_leg_kind,
+            MissionLegKind.CANDIDATE_PREAPPROACH,
+        )
+        opposite = replace(
+            candidate,
+            mission_leg_kind=MissionLegKind.OPPOSITE_FACE,
+        )
+        self.assertNotEqual(
+            startup_reseal_motion_permit_sha256(candidate),
+            startup_reseal_motion_permit_sha256(opposite),
+        )
+
+        mismatches = {
+            "mission_leg_kind": MissionLegKind.OPPOSITE_FACE,
+            "mission_leg_index": 4,
+            "target_id": "other-target",
+        }
+        for name, value in mismatches.items():
+            with self.subTest(name=name), self.assertRaisesRegex(
+                ValueError, rf"{name}.*mismatch"
+            ):
+                validate_startup_reseal_motion_permit_for_execution(
+                    candidate_path,
+                    **{**kwargs, name: value},
+                )
+
+        self._write_route_and_diagnostics(include_provenance=False)
+        without_provenance = replace(
+            candidate,
+            route_csv_sha256=self._sha("route_csv"),
+            diagnostics_sha256=self._sha("diagnostics"),
+        )
+        with self.assertRaisesRegex(ValueError, "provenance is required"):
+            write_startup_reseal_motion_permit(
+                self.root / "candidate-without-start-provenance.json",
+                without_provenance,
+            )
+
+    def test_coverage_default_master_does_not_authorize_candidate_reseal(self):
+        candidate = self._new_permit(
+            mission_leg_kind=MissionLegKind.CANDIDATE_PREAPPROACH,
+            mission_leg_index=3,
+            target_id="survey-vp-007",
+        )
+        with self.assertRaisesRegex(ValueError, "kind is not authorized"):
+            write_startup_reseal_motion_permit(
+                self.root / "disallowed_candidate.json",
+                candidate,
+            )
     def test_master_rejects_wrong_scope_run_kind_and_budget(self):
         cases = (
             ("scope_text", "generic", "scope_text mismatch"),
             ("operator_confirmation", "yes", "confirmation RUN"),
             ("allowed_recovery_kind", "generic", "recovery kind mismatch"),
             ("max_startup_reseals_per_leg", -1, "non-negative integer"),
+            (
+                "allowed_mission_leg_kinds",
+                (MissionLegKind.COVERAGE, MissionLegKind.COVERAGE),
+                "duplicates",
+            ),
+            (
+                "allowed_mission_leg_kinds",
+                (MissionLegKind.STARTUP_RESEAL,),
+                "routine mission leg kind",
+            ),
+            (
+                "allowed_mission_leg_kinds",
+                (
+                    MissionLegKind.OPPOSITE_FACE,
+                    MissionLegKind.CANDIDATE_PREAPPROACH,
+                ),
+                "canonical order",
+            ),
         )
         for name, value, message in cases:
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, message):
@@ -923,6 +1123,77 @@ class StartupResealMotionAuthorizationTest(unittest.TestCase):
                 self.root / "bad-localization-malformed.json",
                 candidate,
             )
+
+    def test_fresh_pose_is_bound_to_replacement_route_content(self):
+        cases = (
+            (
+                {
+                    "route_start_pose": {
+                        "x_m": 0.11,
+                        "y_m": 0.2,
+                        "yaw_rad": 0.3,
+                    },
+                    "exact_start_pose": {
+                        "x_m": 0.11,
+                        "y_m": 0.2,
+                        "yaw_rad": 0.3,
+                    },
+                    "provenance_pose": {
+                        "x_m": 0.11,
+                        "y_m": 0.2,
+                        "yaw_rad": 0.3,
+                    },
+                },
+                "replacement exact start differs",
+            ),
+            (
+                {
+                    "exact_start_pose": {
+                        "x_m": 0.1,
+                        "y_m": 0.2,
+                        "yaw_rad": 0.31,
+                    },
+                    "provenance_pose": {
+                        "x_m": 0.1,
+                        "y_m": 0.2,
+                        "yaw_rad": 0.31,
+                    },
+                },
+                "replacement exact start differs",
+            ),
+            (
+                {
+                    "provenance_pose": {
+                        "x_m": 0.1,
+                        "y_m": 0.2,
+                        "yaw_rad": 0.31,
+                    },
+                },
+                "provenance differs from fresh stationary pose",
+            ),
+            (
+                {"first_yaw": "0.31"},
+                "waypoint 0 yaw differs",
+            ),
+        )
+        for index, (route_replacements, message) in enumerate(cases):
+            with self.subTest(route_replacements=route_replacements):
+                self._write_route_and_diagnostics(**route_replacements)
+                candidate = self._new_permit()
+                with self.assertRaisesRegex(ValueError, message):
+                    write_startup_reseal_motion_permit(
+                        self.root / f"bad-route-binding-{index}.json",
+                        candidate,
+                    )
+
+    def test_coverage_route_may_omit_start_provenance_but_keeps_connector(self):
+        self._write_route_and_diagnostics(include_provenance=False)
+        candidate = self._new_permit()
+        path = self.root / "coverage-without-start-provenance.json"
+
+        write_startup_reseal_motion_permit(path, candidate)
+
+        self.assertEqual(load_startup_reseal_motion_permit(path), candidate)
 
     def test_full_validator_rejects_substitution_and_false_supplied_hash(self):
         write_startup_reseal_motion_permit(self.permit_path, self.permit)

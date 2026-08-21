@@ -10,6 +10,9 @@ import unittest
 from pathlib import Path
 
 from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds
+from scripts.aufgabe04.navigation.certified_exact_start_route import (
+    certify_and_smooth_exact_start_route,
+)
 from scripts.aufgabe04.navigation.costmap import (
     CELL_SOURCE_STATION_KEEPOUT,
     Costmap,
@@ -33,7 +36,6 @@ from scripts.aufgabe04.navigation.stand_coverage_survey import (
     STATUS_PENDING_CAMERA,
     STATUS_PROVISIONAL,
     CoverageSurveyConfig,
-    _optimized_survey_route,
     build_coverage_survey_plan,
     decide_candidate,
     fuse_confirmed_stands,
@@ -306,11 +308,11 @@ class CoverageSurveyPlanTest(unittest.TestCase):
         self.assertIsNotNone(result.route)
 
         with self.assertRaisesRegex(ValueError, "live planning overlay"):
-            _optimized_survey_route(
+            certify_and_smooth_exact_start_route(
                 result,
                 base_costmap=base,
                 planning_costmap=planning,
-                current_pose=start,
+                exact_start=start,
                 required_clearance_m=0.0,
             )
 

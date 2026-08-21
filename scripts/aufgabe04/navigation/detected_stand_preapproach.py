@@ -17,6 +17,9 @@ from scripts.aufgabe04.navigation.execution_route_certificate import (
     point_to_segment_distance_m,
     write_execution_route_certificate,
 )
+from scripts.aufgabe04.navigation.exact_start_route_binding import (
+    validate_exact_start_route_binding,
+)
 from scripts.aufgabe04.navigation.safety_checks import PreflightStatus
 from scripts.aufgabe04.navigation.waypoint_csv import SelectedRouteLeg, load_route_leg
 from scripts.aufgabe04.stations.candidate_snapshot import (
@@ -69,6 +72,36 @@ def _minimum_route_clearance_m(leg: SelectedRouteLeg, x_m: float, y_m: float) ->
         point_to_segment_distance_m(point, start, end)
         for start, end in zip(poses, poses[1:])
     )
+
+
+def _validate_route_start_pose_provenance(
+    metadata: Mapping[str, object],
+) -> None:
+    provenance = metadata.get("route_start_pose_provenance")
+    if not isinstance(provenance, Mapping):
+        raise ValueError("route start pose provenance is missing")
+    source = provenance.get("source")
+    if not isinstance(source, str) or not source:
+        raise ValueError("route start pose provenance source is missing")
+    if provenance.get("planning_frame") != metadata.get("planning_frame"):
+        raise ValueError("route start pose provenance has the wrong planning frame")
+    pose = provenance.get("pose")
+    connector = metadata.get("exact_start_connector")
+    if not isinstance(pose, Mapping) or not isinstance(connector, Mapping):
+        raise ValueError("route start pose provenance is incomplete")
+    exact_start = connector.get("exact_start")
+    if not isinstance(exact_start, Mapping):
+        raise ValueError("exact-start connector start pose is missing")
+    for field in ("x_m", "y_m", "yaw_rad"):
+        recorded = _finite_number(pose.get(field), f"route start pose {field}")
+        certified = _finite_number(
+            exact_start.get(field),
+            f"exact-start connector {field}",
+        )
+        if not math.isclose(recorded, certified, rel_tol=0.0, abs_tol=1.0e-9):
+            raise ValueError(
+                f"route start pose provenance {field} differs from connector"
+            )
 
 
 def validate_detected_stand_preapproach_binding(
@@ -127,6 +160,17 @@ def validate_detected_stand_preapproach_binding(
         failures.append("detected stand physical clearance was not enforced")
     if metadata.get("route_csv_sha256") != leg.source_sha256:
         failures.append("detected stand route CSV SHA-256 does not match diagnostics")
+    try:
+        validate_exact_start_route_binding(
+            metadata,
+            tuple(
+                (waypoint.pose.x_m, waypoint.pose.y_m)
+                for waypoint in leg.raw_waypoints
+            ),
+        )
+        _validate_route_start_pose_provenance(metadata)
+    except ValueError as exc:
+        failures.append(f"exact-start route binding is invalid: {exc}")
 
     if candidate_snapshot_path is None:
         failures.append("detected stand route requires --candidate-snapshot")
@@ -364,6 +408,17 @@ def seal_detected_stand_preapproach(
         fieldnames = list(reader.fieldnames)
     if len(rows) < 2:
         raise ValueError("source route has fewer than two waypoints")
+    route_xy = []
+    for index, row in enumerate(rows):
+        try:
+            point = (float(row["world_x_m"]), float(row["world_y_m"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"source route waypoint {index} coordinates must be numeric"
+            ) from exc
+        route_xy.append(point)
+    validate_exact_start_route_binding(source_metadata, tuple(route_xy))
+    _validate_route_start_pose_provenance(source_metadata)
     for field in ("protected", "corridor", "simulation_only", "route_kind"):
         if field not in fieldnames:
             fieldnames.append(field)

@@ -169,6 +169,13 @@ class PrestartResealEventChainIntegrationTest(unittest.TestCase):
             route_certificate_json = Path(sealed["route_certificate_json"])
             route_leg = load_route_leg(route_csv, 0)
             first_pose = route_leg.raw_waypoints[0].pose
+            route_diagnostics = json.loads(
+                diagnostics_json.read_text(encoding="utf-8")
+            )
+            fresh_start_yaw_rad = float(
+                route_diagnostics["metadata"]["exact_start_connector"]
+                ["exact_start"]["yaw_rad"]
+            )
             semantic_log = root / "rejected_events.jsonl"
             session_root = root / "mission_session"
             session_root.mkdir(parents=True)
@@ -193,7 +200,7 @@ class PrestartResealEventChainIntegrationTest(unittest.TestCase):
                     "child_frame_id": "base_footprint",
                     "x_m": first_pose.x_m,
                     "y_m": first_pose.y_m,
-                    "yaw_rad": 0.0,
+                    "yaw_rad": fresh_start_yaw_rad,
                 },
             )
             args = [
@@ -365,7 +372,7 @@ class PrestartResealEventChainIntegrationTest(unittest.TestCase):
                 fresh_localization,
                 x_m=first_pose.x_m,
                 y_m=first_pose.y_m,
-                yaw_rad=0.0,
+                yaw_rad=fresh_start_yaw_rad,
             )
             summary_path = root / "startup_reseal_summary.json"
             write_startup_reseal_permit_summary(
@@ -376,7 +383,7 @@ class PrestartResealEventChainIntegrationTest(unittest.TestCase):
                 rejected_run_id=REJECTED_RUN_ID,
                 fresh_start_x_m=first_pose.x_m,
                 fresh_start_y_m=first_pose.y_m,
-                fresh_start_yaw_rad=0.0,
+                fresh_start_yaw_rad=fresh_start_yaw_rad,
                 route_csv=route_csv,
                 diagnostics_json=diagnostics_json,
                 recovery_source_kind=(

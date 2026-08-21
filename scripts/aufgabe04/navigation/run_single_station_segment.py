@@ -93,6 +93,13 @@ from scripts.aufgabe04.navigation.mission_leg_motion_permit import (
     mission_leg_motion_permit_sha256,
     validate_mission_leg_motion_permit_for_execution,
 )
+from scripts.aufgabe04.navigation.mission_leg_identity_args import (
+    build_mission_leg_event_fields,
+    resolve_coverage_mission_leg_identity,
+    resolve_explicit_mission_leg_evidence_identity,
+    resolve_mission_leg_event_identity,
+    resolve_startup_reseal_permit_identity,
+)
 from scripts.aufgabe04.navigation.odom_execution_certificate import (
     OdomExecutionCertificate,
     PlanarTransform2D,
@@ -496,8 +503,32 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Internal one-use permit for this exact startup-reseal child.",
     )
+    parser.add_argument(
+        "--startup-reseal-mission-leg-kind",
+        choices=[
+            MissionLegKind.COVERAGE.value,
+            MissionLegKind.CANDIDATE_PREAPPROACH.value,
+            MissionLegKind.OPPOSITE_FACE.value,
+        ],
+    )
+    parser.add_argument("--startup-reseal-mission-leg-index", type=int)
+    parser.add_argument("--startup-reseal-target-id", default="")
     parser.add_argument("--startup-reseal-target-viewpoint-id", default="")
     parser.add_argument("--startup-reseal-semantic-map-id", default="")
+    parser.add_argument(
+        "--mission-leg-evidence-kind",
+        choices=[
+            MissionLegKind.COVERAGE.value,
+            MissionLegKind.CANDIDATE_PREAPPROACH.value,
+            MissionLegKind.OPPOSITE_FACE.value,
+        ],
+        help=(
+            "Non-authorizing routine-leg identity emitted into dry/live "
+            "semantic evidence. It never bypasses operator confirmation."
+        ),
+    )
+    parser.add_argument("--mission-leg-evidence-index", type=int)
+    parser.add_argument("--mission-leg-evidence-target-id", default="")
     parser.add_argument(
         "--mission-leg-motion-authorization-json",
         type=Path,
@@ -1955,17 +1986,37 @@ def _validated_startup_reseal_motion_permit(
 ) -> StartupResealMotionPermit | None:
     """Return one exact startup-reseal permit or preserve normal prompting."""
 
-    fields = (
+    core_fields = (
         args.startup_reseal_motion_authorization_json,
         args.startup_reseal_motion_permit_json,
-        str(args.startup_reseal_target_viewpoint_id).strip() or None,
         str(args.startup_reseal_semantic_map_id).strip() or None,
     )
-    if all(value is None for value in fields):
+    generic_identity_fields = (
+        args.startup_reseal_mission_leg_kind,
+        args.startup_reseal_mission_leg_index,
+        str(args.startup_reseal_target_id).strip() or None,
+    )
+    legacy_identity_present = bool(
+        str(args.startup_reseal_target_viewpoint_id).strip()
+    )
+    if (
+        all(value is None for value in core_fields)
+        and all(value is None for value in generic_identity_fields)
+        and not legacy_identity_present
+    ):
         return None
-    if any(value is None for value in fields):
+    if any(value is None for value in core_fields):
         raise ValueError(
             "startup-reseal motion authorization arguments must be supplied together"
+        )
+    generic_identity_requested = any(
+        value is not None for value in generic_identity_fields
+    )
+    if generic_identity_requested and any(
+        value is None for value in generic_identity_fields
+    ):
+        raise ValueError(
+            "generic startup-reseal identity arguments must be supplied together"
         )
     if any(
         value is not None
@@ -1990,9 +2041,56 @@ def _validated_startup_reseal_motion_permit(
         raise ValueError(
             "startup-reseal motion permit requires a map route certificate"
         )
-    if args.coverage_transient_replan_leg_index is None:
+    if generic_identity_requested:
+        mission_leg_kind = MissionLegKind(
+            args.startup_reseal_mission_leg_kind
+        )
+        mission_leg_index = args.startup_reseal_mission_leg_index
+        target_id = str(args.startup_reseal_target_id).strip()
+        if mission_leg_index is None or mission_leg_index < 0:
+            raise ValueError(
+                "startup-reseal mission leg index must be non-negative"
+            )
+    else:
+        if (
+            args.coverage_transient_replan_leg_index is None
+            or not legacy_identity_present
+        ):
+            raise ValueError(
+                "legacy startup-reseal identity requires a coverage leg"
+            )
+        mission_leg_kind = MissionLegKind.COVERAGE
+        mission_leg_index = args.coverage_transient_replan_leg_index
+        target_id = str(args.startup_reseal_target_viewpoint_id).strip()
+    if mission_leg_kind is MissionLegKind.COVERAGE:
+        coverage_identity = resolve_coverage_mission_leg_identity(args)
+        if coverage_identity is None:
+            raise ValueError(
+                "coverage startup-reseal permit requires coverage "
+                "transient-replan identity"
+            )
+        if coverage_identity != (
+            mission_leg_kind,
+            mission_leg_index,
+            target_id,
+        ):
+            raise ValueError(
+                "startup-reseal and coverage transient-replan identities "
+                "mismatch"
+            )
+    elif args.coverage_transient_replan_enabled:
         raise ValueError(
-            "startup-reseal motion permit requires a coverage leg index"
+            "non-coverage startup-reseal permit cannot carry coverage "
+            "transient replanning"
+        )
+    evidence_identity = resolve_explicit_mission_leg_evidence_identity(args)
+    if evidence_identity is not None and evidence_identity != (
+        mission_leg_kind,
+        mission_leg_index,
+        target_id,
+    ):
+        raise ValueError(
+            "mission-leg evidence and startup-reseal identities mismatch"
         )
     session_id = str(args.mission_session_id).strip()
     if not session_id:
@@ -2008,10 +2106,11 @@ def _validated_startup_reseal_motion_permit(
         namespace=resolved.namespace,
         cmd_vel_topic=resolved.cmd_vel_topic,
         semantic_map_id=str(args.startup_reseal_semantic_map_id).strip(),
-        target_viewpoint_id=str(
-            args.startup_reseal_target_viewpoint_id
-        ).strip(),
-        leg_index=args.coverage_transient_replan_leg_index,
+        target_viewpoint_id=target_id,
+        leg_index=mission_leg_index,
+        mission_leg_kind=mission_leg_kind,
+        mission_leg_index=mission_leg_index,
+        target_id=target_id,
         localization_branch_proof_id=args.localization_branch_proof_id,
         route_csv_path=route_csv_path,
         diagnostics_path=diagnostics_path,
@@ -2386,6 +2485,10 @@ def main(argv: list[str] | None = None) -> int:
             "session root, map, semantic map ID, target viewpoint ID, positive "
             "robot radius, and positive max count"
         )
+    try:
+        resolve_mission_leg_event_identity(args)
+    except ValueError as exc:
+        parser.error(str(exc))
     args.localization_branch_proof_id = str(
         args.localization_branch_proof_id
     ).strip()
@@ -3360,6 +3463,7 @@ def main(argv: list[str] | None = None) -> int:
             "preflight_failed",
             run_id=args.run_id,
             leg_index=leg.leg_index,
+            **build_mission_leg_event_fields(args),
             failures=[stop_reason],
             observations=[],
             runtime_config=resolved.as_log_dict(),
@@ -3440,12 +3544,7 @@ def main(argv: list[str] | None = None) -> int:
             "startup_route_rejected",
             run_id=args.run_id,
             leg_index=leg.leg_index,
-            coverage_leg_index=(
-                args.coverage_transient_replan_leg_index
-            ),
-            target_viewpoint_id=(
-                args.coverage_transient_replan_target_viewpoint_id
-            ),
+            **build_mission_leg_event_fields(args),
             status=startup_rejection.status,
             stop_reason=startup_rejection.stop_reason,
             motion_published=False,
@@ -3456,12 +3555,7 @@ def main(argv: list[str] | None = None) -> int:
             "safety_stop",
             run_id=args.run_id,
             leg_index=leg.leg_index,
-            coverage_leg_index=(
-                args.coverage_transient_replan_leg_index
-            ),
-            target_viewpoint_id=(
-                args.coverage_transient_replan_target_viewpoint_id
-            ),
+            **build_mission_leg_event_fields(args),
             status=startup_rejection.status,
             stop_reason=startup_rejection.stop_reason,
             motion_published=False,
@@ -3573,6 +3667,7 @@ def main(argv: list[str] | None = None) -> int:
             "dry_run_completed",
             run_id=args.run_id,
             leg_index=leg.leg_index,
+            **build_mission_leg_event_fields(args),
             status=result.status,
             motion_published=result.motion_published,
             results_csv=str(args.results_csv),
@@ -4270,6 +4365,13 @@ def main(argv: list[str] | None = None) -> int:
         )
     if startup_reseal_motion_permit is not None:
         try:
+            (
+                startup_mission_leg_kind,
+                startup_mission_leg_index,
+                startup_target_id,
+            ) = resolve_startup_reseal_permit_identity(
+                startup_reseal_motion_permit
+            )
             startup_receipt_path = (
                 default_startup_reseal_motion_consumption_receipt_path(
                     args.startup_reseal_motion_permit_json
@@ -4285,6 +4387,13 @@ def main(argv: list[str] | None = None) -> int:
                     startup_reseal_motion_permit.target_viewpoint_id
                 ),
                 reseal_index=startup_reseal_motion_permit.reseal_index,
+                mission_leg_kind=(
+                    startup_mission_leg_kind
+                ),
+                mission_leg_index=(
+                    startup_mission_leg_index
+                ),
+                target_id=startup_target_id,
             )
         except ValueError as exc:
             return _record_motion_authorization_rejection(
@@ -4304,10 +4413,23 @@ def main(argv: list[str] | None = None) -> int:
             "startup_reseal_motion_permit_consumed",
             run_id=args.run_id,
             leg_index=leg.leg_index,
-            target_viewpoint_id=(
-                startup_reseal_motion_permit.target_viewpoint_id
+            mission_leg_kind=(
+                startup_mission_leg_kind.value
             ),
-            coverage_leg_index=startup_reseal_motion_permit.leg_index,
+            mission_leg_index=(
+                startup_mission_leg_index
+            ),
+            target_id=startup_target_id,
+            target_viewpoint_id=(
+                startup_target_id
+                if startup_mission_leg_kind is MissionLegKind.COVERAGE
+                else ""
+            ),
+            coverage_leg_index=(
+                startup_mission_leg_index
+                if startup_mission_leg_kind is MissionLegKind.COVERAGE
+                else None
+            ),
             recovery_source_kind=(
                 startup_reseal_motion_permit.recovery_source_kind
             ),
@@ -4401,10 +4523,7 @@ def main(argv: list[str] | None = None) -> int:
         "motion_started",
         run_id=args.run_id,
         leg_index=leg.leg_index,
-        coverage_leg_index=args.coverage_transient_replan_leg_index,
-        target_viewpoint_id=(
-            args.coverage_transient_replan_target_viewpoint_id
-        ),
+        **build_mission_leg_event_fields(args),
         # This is an execution-attempt boundary, emitted immediately before
         # entering the follower.  It is not evidence of a nonzero Twist.
         motion_published=False,
@@ -4437,12 +4556,7 @@ def main(argv: list[str] | None = None) -> int:
         # ``leg_index`` above selects a row in this child route artifact and
         # is normally zero.  Keep the autonomous coverage identity explicit
         # so recovery permits never confuse route-local and mission indices.
-        "coverage_leg_index": (
-            args.coverage_transient_replan_leg_index
-        ),
-        "target_viewpoint_id": (
-            args.coverage_transient_replan_target_viewpoint_id
-        ),
+        **build_mission_leg_event_fields(args),
         "status": result.status,
         "stop_reason": result.stop_reason,
         "duration_sec": result.duration_sec,

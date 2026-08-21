@@ -179,6 +179,119 @@ class AutonomousChildRunnerRouteIdentityTest(unittest.TestCase):
 
         self.assertEqual(self._option(command, "--leg-index"), "3")
 
+    def test_dry_candidate_identity_is_emitted_without_authorizing_motion(self):
+        command = build_child_runner_command(
+            **self._base_arguments(),
+            candidate_snapshot=Path("session/candidate_snapshot.json"),
+            mission_leg_evidence_kind=MissionLegKind.CANDIDATE_PREAPPROACH,
+            mission_leg_evidence_index=4,
+            mission_leg_evidence_target_id="survey_candidate_0005",
+            dry_run=True,
+        )
+
+        self.assertEqual(
+            self._option(command, "--mission-leg-evidence-kind"),
+            MissionLegKind.CANDIDATE_PREAPPROACH.value,
+        )
+        self.assertEqual(
+            self._option(command, "--mission-leg-evidence-index"), "4"
+        )
+        self.assertEqual(
+            self._option(command, "--mission-leg-evidence-target-id"),
+            "survey_candidate_0005",
+        )
+        self.assertNotIn("--startup-reseal-motion-permit-json", command)
+        self.assertNotIn("--mission-leg-motion-permit-json", command)
+
+    def test_candidate_startup_permit_does_not_require_coverage_replanner(self):
+        command = build_child_runner_command(
+            **self._base_arguments(),
+            candidate_snapshot=Path("session/candidate_snapshot.json"),
+            mission_leg_evidence_kind=MissionLegKind.CANDIDATE_PREAPPROACH,
+            mission_leg_evidence_index=4,
+            mission_leg_evidence_target_id="survey_candidate_0005",
+            startup_reseal_motion_authorization_json=Path(
+                "session/startup_authorization.json"
+            ),
+            startup_reseal_motion_permit_json=Path(
+                "session/startup_permits/candidate.json"
+            ),
+            startup_reseal_mission_leg_kind=(
+                MissionLegKind.CANDIDATE_PREAPPROACH
+            ),
+            startup_reseal_mission_leg_index=4,
+            startup_reseal_target_id="survey_candidate_0005",
+            startup_reseal_semantic_map_id="arena",
+            mission_session_id="mission",
+            dry_run=False,
+        )
+
+        self.assertEqual(
+            self._option(command, "--startup-reseal-mission-leg-kind"),
+            MissionLegKind.CANDIDATE_PREAPPROACH.value,
+        )
+        self.assertEqual(
+            self._option(command, "--startup-reseal-mission-leg-index"), "4"
+        )
+        self.assertEqual(
+            self._option(command, "--startup-reseal-target-id"),
+            "survey_candidate_0005",
+        )
+        self.assertNotIn("--coverage-transient-replan-leg-index", command)
+
+    def test_candidate_startup_identity_mismatch_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "identities mismatch"):
+            build_child_runner_command(
+                **self._base_arguments(),
+                mission_leg_evidence_kind=(
+                    MissionLegKind.CANDIDATE_PREAPPROACH
+                ),
+                mission_leg_evidence_index=4,
+                mission_leg_evidence_target_id="survey_candidate_0005",
+                startup_reseal_motion_authorization_json=Path(
+                    "session/startup_authorization.json"
+                ),
+                startup_reseal_motion_permit_json=Path(
+                    "session/startup_permits/candidate.json"
+                ),
+                startup_reseal_mission_leg_kind=(
+                    MissionLegKind.OPPOSITE_FACE
+                ),
+                startup_reseal_mission_leg_index=4,
+                startup_reseal_target_id="survey_candidate_0005",
+                startup_reseal_semantic_map_id="arena",
+                mission_session_id="mission",
+                dry_run=False,
+            )
+
+    def test_legacy_coverage_startup_aliases_resolve_to_generic_identity(self):
+        command = build_child_runner_command(
+            **self._base_arguments(),
+            coverage_transient_replan=self._coverage_replan(2),
+            startup_reseal_motion_authorization_json=Path(
+                "session/startup_authorization.json"
+            ),
+            startup_reseal_motion_permit_json=Path(
+                "session/startup_permits/coverage.json"
+            ),
+            startup_reseal_target_viewpoint_id="survey_vp_002",
+            startup_reseal_semantic_map_id="arena",
+            mission_session_id="mission",
+            dry_run=False,
+        )
+
+        self.assertEqual(
+            self._option(command, "--startup-reseal-mission-leg-kind"),
+            MissionLegKind.COVERAGE.value,
+        )
+        self.assertEqual(
+            self._option(command, "--startup-reseal-mission-leg-index"), "2"
+        )
+        self.assertEqual(
+            self._option(command, "--startup-reseal-target-id"),
+            "survey_vp_002",
+        )
+
 
 class AutonomousChildDryOutcomeTest(unittest.TestCase):
     @staticmethod

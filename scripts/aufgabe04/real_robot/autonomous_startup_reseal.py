@@ -1,7 +1,7 @@
 """Autonomous adapter for one bounded startup-reseal motion permit.
 
 The navigation-level authorization modules own the immutable schema and the
-atomic one-use claim.  This ROS-free adapter owns only the parent/coverage
+atomic one-use claim.  This ROS-free adapter owns only the parent/mission-leg
 context and seals the exact artifacts produced by a replacement dry run.
 """
 
@@ -19,9 +19,11 @@ from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
     StartupResealMotionPermit,
     file_sha256,
     load_startup_reseal_motion_authorization,
+    resolve_startup_reseal_mission_leg_identity,
     startup_reseal_motion_authorization_sha256,
     write_startup_reseal_motion_permit,
 )
+from scripts.aufgabe04.navigation.mission_leg_motion_permit import MissionLegKind
 from scripts.aufgabe04.real_robot.autonomous_artifact_paths import (
     resolve_normal_artifact_path,
 )
@@ -46,14 +48,25 @@ class StartupResealPermitContext:
     recovery_source_kind: str = (
         STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH
     )
+    mission_leg_kind: MissionLegKind = MissionLegKind.COVERAGE
+    mission_leg_index: int | None = None
+    target_id: str = ""
 
     def __post_init__(self) -> None:
         if not self.session_id.strip() or not self.semantic_map_id.strip():
             raise ValueError("startup reseal session and map IDs must be non-empty")
         if not self.target_viewpoint_id.strip() or not self.rejected_run_id.strip():
             raise ValueError("startup reseal target and rejected run must be non-empty")
-        if type(self.leg_index) is not int or self.leg_index < 0:
-            raise ValueError("startup reseal leg_index must be non-negative")
+        kind, index, target = resolve_startup_reseal_mission_leg_identity(
+            mission_leg_kind=self.mission_leg_kind,
+            mission_leg_index=self.mission_leg_index,
+            target_id=self.target_id,
+            leg_index=self.leg_index,
+            target_viewpoint_id=self.target_viewpoint_id,
+        )
+        object.__setattr__(self, "mission_leg_kind", kind)
+        object.__setattr__(self, "mission_leg_index", index)
+        object.__setattr__(self, "target_id", target)
         if type(self.reseal_index) is not int or self.reseal_index <= 0:
             raise ValueError("startup reseal reseal_index must be positive")
         if (
@@ -86,11 +99,21 @@ def write_startup_reseal_permit_summary(
     recovery_source_kind: str = (
         STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH
     ),
+    mission_leg_kind: MissionLegKind | str = MissionLegKind.COVERAGE,
+    mission_leg_index: int | None = None,
+    target_id: str = "",
 ) -> Path:
     """Write the exact sealed-route summary later bound by the permit."""
 
-    if type(leg_index) is not int or leg_index < 0:
-        raise ValueError("startup reseal leg_index must be non-negative")
+    kind, resolved_index, resolved_target = (
+        resolve_startup_reseal_mission_leg_identity(
+            mission_leg_kind=mission_leg_kind,
+            mission_leg_index=mission_leg_index,
+            target_id=target_id,
+            leg_index=leg_index,
+            target_viewpoint_id=target_viewpoint_id,
+        )
+    )
     if type(reseal_index) is not int or reseal_index <= 0:
         raise ValueError("startup reseal reseal_index must be positive")
     if not target_viewpoint_id.strip() or not rejected_run_id.strip():
@@ -121,9 +144,12 @@ def write_startup_reseal_permit_summary(
         "motion_published": False,
         "reseal_kind": "startup",
         "leg_index": leg_index,
+        "mission_leg_kind": kind.value,
+        "mission_leg_index": resolved_index,
         "startup_reseal_index": reseal_index,
         "rejected_run_id": rejected_run_id,
         "target_viewpoint_id": target_viewpoint_id,
+        "target_id": resolved_target,
         "fresh_start_pose": {
             "x_m": fresh_start_x_m,
             "y_m": fresh_start_y_m,
@@ -173,6 +199,10 @@ def issue_startup_reseal_motion_permit(
         raise ValueError("startup reseal authorization session mismatch")
     if master.semantic_map_id != context.semantic_map_id:
         raise ValueError("startup reseal authorization semantic map mismatch")
+    if context.mission_leg_kind not in master.allowed_mission_leg_kinds:
+        raise ValueError(
+            "startup reseal authorization does not allow this mission leg kind"
+        )
     if (
         master.max_startup_reseals_per_leg
         != context.max_startup_reseals_per_leg
@@ -224,6 +254,9 @@ def issue_startup_reseal_motion_permit(
         run_id=run_id,
         leg_index=context.leg_index,
         target_viewpoint_id=context.target_viewpoint_id,
+        mission_leg_kind=context.mission_leg_kind,
+        mission_leg_index=context.mission_leg_index,
+        target_id=context.target_id,
         reseal_index=context.reseal_index,
         max_startup_reseals_per_leg=context.max_startup_reseals_per_leg,
         rejected_run_id=context.rejected_run_id,

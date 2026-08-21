@@ -6,9 +6,14 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
-from scripts.aufgabe04.artifacts.content_store import write_content_hashed_json
+from scripts.aufgabe04.artifacts.content_store import (
+    payload_sha256,
+    write_content_hashed_json,
+)
+from scripts.aufgabe04.navigation.mission_leg_motion_permit import MissionLegKind
 from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
     STARTUP_RESEAL_MOTION_AUTHORIZATION_SCOPE,
+    STARTUP_RESEAL_MOTION_PERMIT_HASH_FIELD,
     STARTUP_RESEAL_PERMIT_SUMMARY_SCHEMA_VERSION,
     STARTUP_RESEAL_RECOVERY_KIND,
     STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH,
@@ -17,6 +22,7 @@ from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
     StartupResealMotionAuthorization,
     StartupResealMotionPermit,
     file_sha256,
+    load_startup_reseal_motion_permit,
     startup_reseal_motion_authorization_sha256,
     startup_reseal_motion_permit_sha256,
     write_startup_reseal_motion_authorization,
@@ -68,6 +74,7 @@ class StartupResealMotionConsumptionTest(unittest.TestCase):
             path = self.root / f"{name}.artifact"
             path.write_text(f"sealed {name}\n", encoding="utf-8")
             self.artifacts[name] = path
+        self._write_route_and_diagnostics()
         pose = {"x_m": 0.1, "y_m": 0.2, "yaw_rad": 0.3}
         localization_evidence = {
             "ok": True,
@@ -137,9 +144,12 @@ class StartupResealMotionConsumptionTest(unittest.TestCase):
             "motion_published": False,
             "reseal_kind": "startup",
             "leg_index": 3,
+            "mission_leg_kind": MissionLegKind.COVERAGE.value,
+            "mission_leg_index": 3,
             "startup_reseal_index": 1,
             "rejected_run_id": "mission-001-coverage-003",
             "target_viewpoint_id": "survey-vp-007",
+            "target_id": "survey-vp-007",
             "fresh_start_pose": pose,
             "route_csv": self._path("route_csv"),
             "diagnostics_json": self._path("diagnostics"),
@@ -205,6 +215,62 @@ class StartupResealMotionConsumptionTest(unittest.TestCase):
     def _sha(self, name):
         return file_sha256(self.artifacts[name])
 
+    def _write_route_and_diagnostics(self, *, start_x_m=0.1):
+        anchor_x_m = 0.2
+        length_m = anchor_x_m - start_x_m
+        sample_count = 21
+        sample_spacing_m = length_m / (sample_count - 1)
+        minimum_sampled_clearance_m = 0.5
+        minimum_continuous_clearance_m = (
+            minimum_sampled_clearance_m - sample_spacing_m / 2.0
+        )
+        self.artifacts["route_csv"].write_text(
+            "leg_index,point_index,grid_x,grid_y,world_x_m,world_y_m,"
+            "yaw_rad,segment_length_m,cumulative_length_m\n"
+            f"0,0,0,0,{start_x_m},0.2,,0.0,0.0\n"
+            f"0,1,1,0,{anchor_x_m},0.2,0.3,{length_m},{length_m}\n",
+            encoding="utf-8",
+        )
+        pose = {"x_m": start_x_m, "y_m": 0.2, "yaw_rad": 0.3}
+        diagnostics = {
+            "metadata": {
+                "planning_frame": "map",
+                "inflation_radius_m": 0.01,
+                "exact_start_connector": {
+                    "required": True,
+                    "validated": True,
+                    "exact_start": pose,
+                    "anchor": {
+                        "x_m": anchor_x_m,
+                        "y_m": 0.2,
+                        "yaw_rad": 0.3,
+                    },
+                    "connector_length_m": length_m,
+                    "required_clearance_m": 0.01,
+                    "minimum_sampled_clearance_m": (
+                        minimum_sampled_clearance_m
+                    ),
+                    "minimum_continuous_clearance_m": (
+                        minimum_continuous_clearance_m
+                    ),
+                    "minimum_margin_m": (
+                        minimum_continuous_clearance_m - 0.01
+                    ),
+                    "sample_spacing_m": sample_spacing_m,
+                    "sample_count": sample_count,
+                },
+                "route_start_pose_provenance": {
+                    "source": "autonomous_candidate_current_pose",
+                    "planning_frame": "map",
+                    "pose": pose,
+                },
+            }
+        }
+        self.artifacts["diagnostics"].write_text(
+            json.dumps(diagnostics, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
     def _consume(self, **replacements):
         values = {
             "permit_path": self.permit_path,
@@ -242,6 +308,86 @@ class StartupResealMotionConsumptionTest(unittest.TestCase):
             receipt.run_id = "other"
         with self.assertRaisesRegex(ValueError, "already consumed"):
             self._consume()
+
+    def test_candidate_identity_is_persisted_in_one_use_receipt(self):
+        candidate_master = self.root / "candidate_startup_master.json"
+        self.authorization = replace(
+            self.authorization,
+            allowed_mission_leg_kinds=(
+                MissionLegKind.COVERAGE,
+                MissionLegKind.CANDIDATE_PREAPPROACH,
+            ),
+        )
+        write_startup_reseal_motion_authorization(
+            candidate_master,
+            self.authorization,
+        )
+        rejected = json.loads(
+            self.artifacts["rejected_semantic_log"].read_text(
+                encoding="utf-8"
+            )
+        )
+        rejected.update(
+            {
+                "mission_leg_kind": (
+                    MissionLegKind.CANDIDATE_PREAPPROACH.value
+                ),
+                "mission_leg_index": 3,
+                "target_id": "survey-vp-007",
+                "coverage_leg_index": None,
+                "target_viewpoint_id": "",
+            }
+        )
+        self.artifacts["rejected_semantic_log"].write_text(
+            json.dumps(rejected) + "\n",
+            encoding="utf-8",
+        )
+        summary = json.loads(
+            self.artifacts["startup_reseal_summary"].read_text(
+                encoding="utf-8"
+            )
+        )
+        summary["mission_leg_kind"] = (
+            MissionLegKind.CANDIDATE_PREAPPROACH.value
+        )
+        self.artifacts["startup_reseal_summary"].write_text(
+            json.dumps(summary) + "\n",
+            encoding="utf-8",
+        )
+        self.permit_path = self.root / "candidate_startup_permit.json"
+        self.permit = replace(
+            self.permit,
+            master_authorization_path=str(candidate_master.absolute()),
+            master_authorization_sha256=(
+                startup_reseal_motion_authorization_sha256(
+                    self.authorization
+                )
+            ),
+            mission_leg_kind=MissionLegKind.CANDIDATE_PREAPPROACH,
+            rejected_semantic_log_sha256=self._sha(
+                "rejected_semantic_log"
+            ),
+            startup_reseal_summary_sha256=self._sha(
+                "startup_reseal_summary"
+            ),
+        )
+        write_startup_reseal_motion_permit(self.permit_path, self.permit)
+
+        receipt = self._consume(
+            mission_leg_kind=MissionLegKind.CANDIDATE_PREAPPROACH,
+            mission_leg_index=3,
+            target_id="survey-vp-007",
+        )
+        self.assertEqual(
+            receipt.mission_leg_kind,
+            MissionLegKind.CANDIDATE_PREAPPROACH,
+        )
+        with self.assertRaisesRegex(ValueError, "already consumed"):
+            self._consume(
+                mission_leg_kind=MissionLegKind.CANDIDATE_PREAPPROACH,
+                mission_leg_index=3,
+                target_id="survey-vp-007",
+            )
 
     def test_byte_identical_permit_copy_converges_on_one_claim(self):
         receipt_path = default_startup_reseal_motion_consumption_receipt_path(
@@ -288,10 +434,13 @@ class StartupResealMotionConsumptionTest(unittest.TestCase):
             "leg_index": 4,
             "target_viewpoint_id": "wrong-target",
             "reseal_index": 2,
+            "mission_leg_kind": MissionLegKind.CANDIDATE_PREAPPROACH,
+            "mission_leg_index": 4,
+            "target_id": "wrong-target",
         }
         for name, value in wrong.items():
             with self.subTest(name=name):
-                with self.assertRaisesRegex(ValueError, rf"{name} mismatch"):
+                with self.assertRaisesRegex(ValueError, rf"{name}.*mismatch"):
                     self._consume(**{name: value})
                 self.assertFalse(receipt_path.exists())
 
@@ -305,6 +454,27 @@ class StartupResealMotionConsumptionTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "dry_preflight hash mismatch"):
             self._consume()
         self.assertFalse(receipt_path.exists())
+
+    def test_rehashed_semantic_route_mismatch_rejects_before_claim(self):
+        self._write_route_and_diagnostics(start_x_m=0.11)
+        raw = json.loads(self.permit_path.read_text(encoding="utf-8"))
+        raw.pop(STARTUP_RESEAL_MOTION_PERMIT_HASH_FIELD)
+        raw["route_csv_sha256"] = self._sha("route_csv")
+        raw["diagnostics_sha256"] = self._sha("diagnostics")
+        raw[STARTUP_RESEAL_MOTION_PERMIT_HASH_FIELD] = payload_sha256(raw)
+        self.permit_path.write_text(
+            json.dumps(raw, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        self.permit = load_startup_reseal_motion_permit(self.permit_path)
+
+        with self.assertRaisesRegex(ValueError, "replacement exact start differs"):
+            self._consume()
+
+        self.assertEqual(
+            list(self.root.glob("startup_reseal_motion_consumption_*.json")),
+            [],
+        )
 
     def test_changed_validated_permit_and_tampered_permit_file_reject(self):
         with self.assertRaisesRegex(ValueError, "changed after validation"):
