@@ -33,8 +33,11 @@ class ProductionImportBoundaryTest(unittest.TestCase):
         self.assertEqual(offenders, [])
 
     def test_single_station_segment_runner_only_imports_navigation_modules(self):
-        runner = ROOT / "scripts" / "aufgabe04" / "navigation" / "run_single_station_segment.py"
-        tree = ast.parse(runner.read_text(), filename=str(runner))
+        navigation_root = ROOT / "scripts" / "aufgabe04" / "navigation"
+        checked_paths = [
+            navigation_root / "run_single_station_segment.py",
+            *sorted((navigation_root / "station_segment").glob("*.py")),
+        ]
         forbidden_prefixes = (
             "scripts.aufgabe04.qr_scanning",
             "scripts.aufgabe04.logistics",
@@ -44,21 +47,25 @@ class ProductionImportBoundaryTest(unittest.TestCase):
         )
         offenders = []
 
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imported_modules = [alias.name for alias in node.names]
-            elif isinstance(node, ast.ImportFrom):
-                imported_modules = [node.module or ""]
-            else:
-                continue
+        for path in checked_paths:
+            tree = ast.parse(path.read_text(), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported_modules = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    imported_modules = [node.module or ""]
+                else:
+                    continue
 
-            for module in imported_modules:
-                if module.startswith(forbidden_prefixes):
-                    offenders.append(module)
-                if module.startswith("scripts.aufgabe04.") and not module.startswith(
-                    "scripts.aufgabe04.navigation."
-                ):
-                    offenders.append(module)
+                for module in imported_modules:
+                    if module.startswith(forbidden_prefixes):
+                        offenders.append((path.name, module))
+                    if module.startswith(
+                        "scripts.aufgabe04."
+                    ) and not module.startswith(
+                        "scripts.aufgabe04.navigation."
+                    ):
+                        offenders.append((path.name, module))
 
         self.assertEqual(offenders, [])
 
@@ -438,7 +445,8 @@ class ProductionImportBoundaryTest(unittest.TestCase):
             / "scripts"
             / "aufgabe04"
             / "real_robot"
-            / "run_autonomous_stand_exploration.py"
+            / "autonomous_runner"
+            / "runtime.py"
         )
         tree = ast.parse(parent_path.read_text(), filename=str(parent_path))
         extracted_modules = {
@@ -493,7 +501,7 @@ class ProductionImportBoundaryTest(unittest.TestCase):
                 ast.literal_eval(export_assignment.value)
             )
 
-        parent_path = real_robot_root / "run_autonomous_stand_exploration.py"
+        parent_path = real_robot_root / "autonomous_runner" / "runtime.py"
         parent_tree = ast.parse(
             parent_path.read_text(),
             filename=str(parent_path),

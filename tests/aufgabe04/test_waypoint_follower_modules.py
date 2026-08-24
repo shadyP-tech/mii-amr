@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_ROOT = ROOT / "scripts/aufgabe04/navigation/waypoint_follower"
+RUNTIME_COMPONENT_ROOT = PACKAGE_ROOT / "runtime_components"
 RUNTIME_MODULE = (
     "scripts.aufgabe04.navigation.waypoint_follower.runtime"
 )
@@ -122,17 +123,59 @@ class WaypointFollowerModuleBoundaryTest(unittest.TestCase):
         self.assertIn("self.cmd_vel_pub = self.create_publisher", runtime_source)
         self.assertIn("self.cmd_vel_pub.publish", runtime_source)
 
-        for path in PACKAGE_ROOT.glob("*.py"):
+        for path in PACKAGE_ROOT.rglob("*.py"):
             if path.name == "runtime.py":
                 continue
             source = path.read_text()
             self.assertNotIn("create_publisher", source, path.name)
             self.assertNotIn("cmd_vel_pub.publish", source, path.name)
 
+    def test_runtime_components_are_split_by_operational_responsibility(self):
+        expected_classes = {
+            "amcl_recovery.py": "AmclRecoveryMixin",
+            "blockage_recovery.py": "BlockageRecoveryRuntimeMixin",
+            "callback_service.py": "CallbackServiceRuntimeMixin",
+            "control_loop.py": "ControlLoopRuntimeMixin",
+            "dynamic_routes.py": "DynamicRouteRuntimeMixin",
+            "localization.py": "LocalizationRuntimeMixin",
+            "localization_evidence.py": "LocalizationEvidenceMixin",
+            "localization_sampling.py": "LocalizationSamplingMixin",
+            "safety.py": "SafetyRuntimeMixin",
+            "simulation_odom_recovery.py": "SimulationOdomRecoveryMixin",
+        }
+
+        for filename, class_name in expected_classes.items():
+            path = RUNTIME_COMPONENT_ROOT / filename
+            self.assertTrue(path.is_file(), filename)
+            tree = ast.parse(path.read_text())
+            classes = {
+                node.name for node in tree.body if isinstance(node, ast.ClassDef)
+            }
+            self.assertIn(class_name, classes, filename)
+
+    def test_runtime_keeps_node_lifecycle_and_motion_output(self):
+        runtime_source = (PACKAGE_ROOT / "runtime.py").read_text()
+        control_loop_source = (
+            RUNTIME_COMPONENT_ROOT / "control_loop.py"
+        ).read_text()
+
+        self.assertIn("class SimpleWaypointFollowerNode(", runtime_source)
+        self.assertIn("def _publish_velocity_command(", runtime_source)
+        self.assertIn("def run_simple_waypoint_follower(", runtime_source)
+        self.assertNotIn("def run(self) -> FollowerResult:", runtime_source)
+        self.assertIn("def run(self) -> FollowerResult:", control_loop_source)
+        self.assertNotIn("cmd_vel_pub.publish", control_loop_source)
+        self.assertNotIn("def _refresh_dynamic_route(", runtime_source)
+        self.assertNotIn("def _current_pose_lookup(", runtime_source)
+
     def test_live_runner_imports_owning_modules_not_legacy_facade(self):
-        source = (
+        facade_source = (
             ROOT
             / "scripts/aufgabe04/navigation/run_single_station_segment.py"
+        ).read_text()
+        source = (
+            ROOT
+            / "scripts/aufgabe04/navigation/station_segment/runtime.py"
         ).read_text()
 
         self.assertNotIn(
@@ -140,6 +183,7 @@ class WaypointFollowerModuleBoundaryTest(unittest.TestCase):
             source,
         )
         self.assertIn("navigation.waypoint_follower.runtime import", source)
+        self.assertIn("navigation.station_segment import runtime", facade_source)
 
 
 if __name__ == "__main__":
