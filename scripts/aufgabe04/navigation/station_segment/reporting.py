@@ -121,6 +121,95 @@ def _append_result(args, resolved, leg, preflight_ok: bool, result: FollowerResu
     )
     append_segment_run(args.results_csv, row)
 
+
+def record_unexpected_follower_exception(
+    *,
+    args,
+    resolved,
+    leg,
+    event_logger,
+    failure: Exception,
+    mission_leg_event_fields: Mapping[str, object],
+) -> None:
+    """Best-effort terminal evidence for an exception inside the follower.
+
+    The follower did not return its authoritative motion history, so this
+    boundary must conservatively report that motion may have been published.
+    Terminal events are attempted before the nonessential CSV write, and no
+    reporting failure is allowed to mask the original follower exception.
+    """
+
+    exception_type = type(failure).__name__
+    exception_message = str(failure)
+    stop_reason = (
+        f"unexpected follower exception: {exception_type}: {exception_message}"
+    )
+    stop_details = {
+        "reason": stop_reason,
+        "fault_code": "unexpected_follower_exception",
+        "source": "station_segment_follower_boundary",
+        "fail_closed": True,
+        "motion_published": True,
+        "motion_history_uncertain": True,
+        "motion_history_uncertainty": (
+            "the follower raised before returning its motion result; "
+            "nonzero command publication cannot be ruled out"
+        ),
+        "exception_type": exception_type,
+        "exception_message": exception_message,
+        "recovery_attempted": False,
+        "continuation_allowed": False,
+    }
+    safety_stop_fields = {
+        "run_id": args.run_id,
+        "leg_index": leg.leg_index,
+        **dict(mission_leg_event_fields),
+        "status": "stopped",
+        "stop_reason": stop_reason,
+        "motion_published": True,
+        "stop_details": stop_details,
+    }
+
+    try:
+        emit_event(event_logger, "safety_stop", **safety_stop_fields)
+    except Exception:
+        pass
+    try:
+        emit_event(
+            event_logger,
+            "run_finished",
+            run_id=args.run_id,
+            final_status="stopped",
+            stop_reason=stop_reason,
+            motion_published=True,
+            motion_history_uncertain=True,
+            fail_closed=True,
+            fault_code="unexpected_follower_exception",
+            results_csv=str(args.results_csv),
+            semantic_log_path=str(args.semantic_log),
+            preflight_json_path=str(args.preflight_json or ""),
+        )
+    except Exception:
+        pass
+
+    row = _base_log_row(args, resolved, leg, preflight_ok=True)
+    row.update(
+        {
+            "status": "stopped",
+            "stop_reason": stop_reason,
+            "duration_sec": "",
+            "distance_estimate_m": "",
+            "motion_published": True,
+            "semantic_log_path": args.semantic_log,
+            "preflight_json_path": args.preflight_json or "",
+        }
+    )
+    try:
+        append_segment_run(args.results_csv, row)
+    except Exception:
+        pass
+
+
 def _append_status_result(
     args,
     resolved,
@@ -148,4 +237,3 @@ def _observation_log_rows(observations) -> list[dict[str, object]]:
         }
         for observation in observations
     ]
-

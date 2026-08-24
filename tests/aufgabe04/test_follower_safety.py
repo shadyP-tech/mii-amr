@@ -2,6 +2,7 @@ import sys
 import unittest
 import math
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -24,6 +25,32 @@ from scripts.aufgabe04.navigation.control.follower_safety import (  # noqa: E402
     waypoint_timeout_failure,
 )
 from scripts.aufgabe04.navigation.foundation.models import Pose2D  # noqa: E402
+from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.safety import (  # noqa: E402
+    SafetyRuntimeMixin,
+)
+
+
+class _CmdVelOwnershipHarness(SafetyRuntimeMixin):
+    def __init__(self, publishers):
+        self.runtime_config = SimpleNamespace(cmd_vel_topic="/cmd_vel")
+        self.publishers = publishers
+        self.queried_topics = []
+
+    def get_publishers_info_by_topic(self, topic):
+        self.queried_topics.append(topic)
+        return self.publishers
+
+    @staticmethod
+    def get_namespace():
+        return "/"
+
+    @staticmethod
+    def get_name():
+        return "aufgabe04_simple_waypoint_follower"
+
+
+def _publisher(namespace: str, name: str):
+    return SimpleNamespace(node_namespace=namespace, node_name=name)
 
 
 class FollowerSafetyTest(unittest.TestCase):
@@ -241,6 +268,27 @@ class FollowerSafetyTest(unittest.TestCase):
                 ["/behavior_server", "/velocity_smoother"],
             ),
             "",
+        )
+
+    def test_runtime_cmd_vel_ownership_accepts_sole_follower_publisher(self):
+        node = _CmdVelOwnershipHarness(
+            [_publisher("/", "aufgabe04_simple_waypoint_follower")]
+        )
+
+        self.assertEqual(node._cmd_vel_ownership_failure(), "")
+        self.assertEqual(node.queried_topics, ["/cmd_vel"])
+
+    def test_runtime_cmd_vel_ownership_rejects_competing_publisher(self):
+        node = _CmdVelOwnershipHarness(
+            [
+                _publisher("/", "aufgabe04_simple_waypoint_follower"),
+                _publisher("/", "teleop_keyboard"),
+            ]
+        )
+
+        self.assertEqual(
+            node._cmd_vel_ownership_failure(),
+            "external cmd_vel publisher during run: /teleop_keyboard",
         )
 
 

@@ -339,9 +339,16 @@ class SafetyRuntimeMixin:
         )
 
     def _cmd_vel_ownership_failure(self) -> str:
-        publishers = self.get_publishers_info_by_topic(self.runtime_config.cmd_vel_topic)
-        publisher_identities = sorted({_node_identity(publisher) for publisher in publishers})
-        self_identity = _format_node_identity(self.get_namespace(), self.get_name())
+        publishers = self.get_publishers_info_by_topic(
+            self.runtime_config.cmd_vel_topic
+        )
+        publisher_identities = sorted(
+            {node_identity(publisher) for publisher in publishers}
+        )
+        self_identity = format_node_identity(
+            self.get_namespace(),
+            self.get_name(),
+        )
         return cmd_vel_ownership_failure(
             publisher_identities,
             self_identity,

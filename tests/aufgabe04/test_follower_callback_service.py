@@ -11,6 +11,119 @@ class FollowerCallbackServiceTest(unittest.TestCase):
     def bare_node(self):
         return object.__new__(follower.SimpleWaypointFollowerNode)
 
+    def exercise_failing_runner(self, original_error, *, zero_error=None):
+        events = []
+
+        class FakeRclpy:
+            def init(self, *, args):
+                events.append("rclpy.init")
+
+            def ok(self):
+                events.append("rclpy.ok")
+                return True
+
+            def shutdown(self):
+                events.append("rclpy.shutdown")
+
+        class FakeListenerNode:
+            def destroy_node(self):
+                events.append("listener_node.destroy")
+
+        class FakeTfListener:
+            def unregister(self):
+                events.append("tf_listener.unregister")
+
+        class FakeFollowerNode:
+            def __init__(self, *args, tf_buffer):
+                events.append("node.init")
+
+            def enable_background_callback_service(self):
+                events.append("node.enable_background")
+
+            def disable_background_callback_service(self):
+                events.append("node.disable_background")
+
+            def run(self):
+                events.append("node.run")
+                raise original_error
+
+            def publish_repeated_zero(self):
+                events.append("node.publish_repeated_zero")
+                if zero_error is not None:
+                    raise zero_error
+
+            def destroy_node(self):
+                events.append("node.destroy")
+
+        class FakeExecutor:
+            def __init__(self, name):
+                self.name = name
+
+            def add_node(self, node):
+                events.append(f"{self.name}.add_node")
+                return True
+
+            def spin(self):
+                events.append(f"{self.name}.spin")
+
+            def shutdown(self):
+                events.append(f"{self.name}.shutdown")
+
+            def remove_node(self, node):
+                events.append(f"{self.name}.remove_node")
+
+        class FakeThread:
+            def __init__(self, *, target, name, daemon):
+                self.name = name
+                self.ident = None
+                events.append(f"thread.init:{name}")
+
+            def start(self):
+                self.ident = 1234
+                events.append(f"thread.start:{self.name}")
+
+            def join(self):
+                events.append(f"thread.join:{self.name}")
+
+        follower_executor = FakeExecutor("follower_executor")
+        tf_executor = FakeExecutor("tf_executor")
+        listener_node = FakeListenerNode()
+        tf_listener = FakeTfListener()
+
+        with patch.object(follower, "rclpy", FakeRclpy()), patch.object(
+            follower,
+            "_create_dedicated_tf_listener",
+            return_value=(listener_node, object(), tf_listener),
+        ), patch.object(
+            follower,
+            "SimpleWaypointFollowerNode",
+            FakeFollowerNode,
+        ), patch.object(
+            follower,
+            "MultiThreadedExecutor",
+            return_value=follower_executor,
+        ), patch.object(
+            follower,
+            "SingleThreadedExecutor",
+            return_value=tf_executor,
+        ), patch.object(
+            follower.threading,
+            "Thread",
+            FakeThread,
+        ):
+            try:
+                follower.run_simple_waypoint_follower(
+                    SimpleNamespace(namespace="/robot1"),
+                    (),
+                    object(),
+                )
+            except BaseException as error:
+                raised_error = error
+            else:
+                self.fail("failing follower runner unexpectedly returned")
+
+        return events, raised_error
+
     def test_background_mode_waits_without_caller_spin(self):
         node = self.bare_node()
         node.enable_background_callback_service()
@@ -372,6 +485,34 @@ class FollowerCallbackServiceTest(unittest.TestCase):
                 "rclpy.shutdown",
             ],
         )
+
+    def test_runner_publishes_emergency_zero_before_teardown(self):
+        original_error = KeyboardInterrupt("control loop failed")
+
+        events, raised_error = self.exercise_failing_runner(original_error)
+
+        self.assertIs(raised_error, original_error)
+        zero_index = events.index("node.publish_repeated_zero")
+        self.assertLess(events.index("node.run"), zero_index)
+        self.assertLess(zero_index, events.index("follower_executor.shutdown"))
+        self.assertLess(zero_index, events.index("tf_executor.shutdown"))
+        self.assertLess(zero_index, events.index("node.destroy"))
+        self.assertEqual(events.count("node.publish_repeated_zero"), 1)
+
+    def test_runner_preserves_original_error_when_emergency_zero_fails(self):
+        original_error = SystemExit("control loop failed")
+        zero_error = RuntimeError("emergency zero failed")
+
+        events, raised_error = self.exercise_failing_runner(
+            original_error,
+            zero_error=zero_error,
+        )
+
+        self.assertIs(raised_error, original_error)
+        zero_index = events.index("node.publish_repeated_zero")
+        self.assertLess(zero_index, events.index("follower_executor.shutdown"))
+        self.assertLess(zero_index, events.index("node.destroy"))
+        self.assertEqual(events[-1], "rclpy.shutdown")
 
 
 if __name__ == "__main__":

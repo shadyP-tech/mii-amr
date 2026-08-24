@@ -719,6 +719,98 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
             "child_execution_attempt_started_before_follower",
         )
 
+    def test_unexpected_follower_exception_writes_fail_closed_terminal_evidence(
+        self,
+    ):
+        failure = NameError("name '_node_identity' is not defined")
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            with patch.object(
+                run_single_station_segment,
+                "run_ros_preflight",
+                return_value=passing_preflight(),
+            ), patch.object(
+                run_single_station_segment,
+                "run_simple_waypoint_follower",
+                side_effect=failure,
+            ), redirect_stdout(StringIO()):
+                with self.assertRaises(NameError) as raised:
+                    run_single_station_segment.main(self.base_args(paths))
+
+            events = read_events(paths["events"])
+            safety_stops = [
+                event for event in events if event["event"] == "safety_stop"
+            ]
+            finish_events = [
+                event for event in events if event["event"] == "run_finished"
+            ]
+            rows = read_result_rows(paths["results"])
+
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(len(safety_stops), 1)
+        self.assertEqual(len(finish_events), 1)
+        self.assertNotIn("motion_completed", [event["event"] for event in events])
+        safety_stop = safety_stops[0]
+        self.assertEqual(safety_stop["status"], "stopped")
+        self.assertTrue(safety_stop["motion_published"])
+        self.assertEqual(
+            safety_stop["stop_details"]["fault_code"],
+            "unexpected_follower_exception",
+        )
+        self.assertTrue(safety_stop["stop_details"]["fail_closed"])
+        self.assertTrue(
+            safety_stop["stop_details"]["motion_history_uncertain"]
+        )
+        self.assertEqual(
+            safety_stop["stop_details"]["exception_type"],
+            "NameError",
+        )
+        self.assertEqual(
+            safety_stop["stop_details"]["exception_message"],
+            "name '_node_identity' is not defined",
+        )
+        self.assertFalse(
+            safety_stop["stop_details"]["recovery_attempted"]
+        )
+        self.assertFalse(
+            safety_stop["stop_details"]["continuation_allowed"]
+        )
+        self.assertEqual(finish_events[0]["final_status"], "stopped")
+        self.assertTrue(finish_events[0]["motion_published"])
+        self.assertTrue(finish_events[0]["motion_history_uncertain"])
+        self.assertTrue(finish_events[0]["fail_closed"])
+        self.assertEqual(
+            finish_events[0]["fault_code"],
+            "unexpected_follower_exception",
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "stopped")
+        self.assertEqual(rows[0]["duration_sec"], "")
+        self.assertEqual(rows[0]["distance_estimate_m"], "")
+        self.assertEqual(rows[0]["motion_published"], "True")
+
+    def test_follower_exception_is_preserved_if_terminal_reporting_fails(self):
+        failure = NameError("original follower failure")
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            with patch.object(
+                run_single_station_segment,
+                "run_ros_preflight",
+                return_value=passing_preflight(),
+            ), patch.object(
+                run_single_station_segment,
+                "run_simple_waypoint_follower",
+                side_effect=failure,
+            ), patch.object(
+                run_single_station_segment,
+                "record_unexpected_follower_exception",
+                side_effect=OSError("event log unavailable"),
+            ), redirect_stdout(StringIO()):
+                with self.assertRaises(NameError) as raised:
+                    run_single_station_segment.main(self.base_args(paths))
+
+        self.assertIs(raised.exception, failure)
+
     def test_preflight_failure_logs_event_and_skips_follower(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = self.make_paths(Path(tmp))

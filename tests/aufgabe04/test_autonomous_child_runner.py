@@ -10,6 +10,7 @@ from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
 from scripts.aufgabe04.real_robot.autonomous_child_runner import (
     build_child_runner_command,
     parse_dry_run_outcome,
+    parse_motion_leg_outcome,
 )
 
 
@@ -379,6 +380,38 @@ class AutonomousChildDryOutcomeTest(unittest.TestCase):
                         run_id="dry_leg",
                         returncode=invalid,
                     )
+
+
+class AutonomousChildMotionOutcomeTest(unittest.TestCase):
+    def test_conservative_exception_safety_stop_is_a_terminal_failure(self):
+        event = {
+            "event": "safety_stop",
+            "run_id": "failed_leg",
+            "status": "stopped",
+            "stop_reason": "unexpected follower exception: NameError",
+            "motion_published": True,
+            "stop_details": {
+                "fault_code": "unexpected_follower_exception",
+                "fail_closed": True,
+                "motion_history_uncertain": True,
+                "continuation_allowed": False,
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "events.jsonl"
+            log.write_text(json.dumps(event) + "\n", encoding="utf-8")
+
+            outcome = parse_motion_leg_outcome(
+                log,
+                run_id="failed_leg",
+                returncode=1,
+            )
+
+        self.assertEqual(outcome.status, "stopped")
+        self.assertTrue(outcome.motion_published)
+        self.assertTrue(outcome.stop_details["fail_closed"])
+        self.assertTrue(outcome.stop_details["motion_history_uncertain"])
+        self.assertFalse(outcome.stop_details["continuation_allowed"])
 
 
 if __name__ == "__main__":

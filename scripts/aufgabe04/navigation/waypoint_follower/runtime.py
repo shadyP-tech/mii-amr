@@ -821,7 +821,18 @@ def run_simple_waypoint_follower(
         # its sensor wait/control loop.
         tf_executor_thread.start()
         follower_executor_thread.start()
-        return node.run()
+        try:
+            return node.run()
+        except BaseException:
+            # Stop at the ROS motion edge before executor and publisher
+            # teardown.  Emergency-zero publication is best effort: a
+            # secondary shutdown-path failure must not replace the original
+            # control-loop exception or traceback.
+            try:
+                node.publish_repeated_zero()
+            except BaseException:
+                pass
+            raise
     finally:
         if follower_executor is not None:
             follower_executor.shutdown()

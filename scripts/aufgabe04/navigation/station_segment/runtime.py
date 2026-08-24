@@ -193,6 +193,7 @@ from .reporting import (
     _append_result,
     _append_status_result,
     _observation_log_rows,
+    record_unexpected_follower_exception,
 )
 
 
@@ -1831,14 +1832,31 @@ def main(argv: list[str] | None = None) -> int:
         )
     if odom_execution_context is not None:
         follower_kwargs["odom_execution_context"] = odom_execution_context
-    result = run_simple_waypoint_follower(
-        resolved,
-        execution_waypoints,
-        follower_config,
-        waypoint_provider,
-        route_update_callback,
-        **follower_kwargs,
-    )
+    try:
+        result = run_simple_waypoint_follower(
+            resolved,
+            execution_waypoints,
+            follower_config,
+            waypoint_provider,
+            route_update_callback,
+            **follower_kwargs,
+        )
+    except Exception as exc:
+        try:
+            record_unexpected_follower_exception(
+                args=args,
+                resolved=resolved,
+                leg=leg,
+                event_logger=event_logger,
+                failure=exc,
+                mission_leg_event_fields=build_mission_leg_event_fields(args),
+            )
+        except Exception:
+            # Reporting is best-effort at this boundary. Preserve the follower
+            # exception as the authoritative failure even if evidence I/O
+            # itself unexpectedly fails.
+            pass
+        raise
     _append_result(args, resolved, leg, preflight_ok=True, result=result)
     motion_event_fields = {
         "run_id": args.run_id,
