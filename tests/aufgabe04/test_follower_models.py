@@ -7,14 +7,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation.follower_models import FollowerResult  # noqa: E402
-from scripts.aufgabe04.navigation.simple_waypoint_follower import (  # noqa: E402
+from scripts.aufgabe04.navigation.control.follower_models import FollowerResult  # noqa: E402
+from scripts.aufgabe04.navigation.waypoint_follower.runtime import (  # noqa: E402
     FollowerConfig,
     FollowerResult as SimpleFollowerResult,
     stuck_progress_details,
     tf_lookup_failure_details,
 )
-from scripts.aufgabe04.navigation.waypoint_controller import ControllerConfig  # noqa: E402
+from scripts.aufgabe04.navigation.control.waypoint_controller import ControllerConfig  # noqa: E402
 
 
 class FollowerModelsTest(unittest.TestCase):

@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from scripts.aufgabe04.navigation.axis_acquisition_feedback import (
+from scripts.aufgabe04.navigation.coverage.axis_acquisition_feedback import (
     AXIS_ACQUISITION_FEEDBACK_CONTRACT,
     AXIS_ACQUISITION_FEEDBACK_SCHEMA_VERSION,
     axis_acquisition_feedback_binding,
@@ -15,14 +15,14 @@ from scripts.aufgabe04.navigation.axis_acquisition_feedback import (
     load_axis_acquisition_feedback,
     write_axis_acquisition_feedback,
 )
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.viewpoint_sampling_contract import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.approach.viewpoint_sampling_contract import (
     ViewpointSamplingMaterialTarget,
 )
 from scripts.aufgabe04.perception.camera_stand_observation import (
     stand_axis_from_camera_yaw,
 )
-from scripts.aufgabe04.navigation.viewpoint_recommendation import (
+from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import (
     FaceCandidate,
     MaterialTarget,
     QrBindingObservation,

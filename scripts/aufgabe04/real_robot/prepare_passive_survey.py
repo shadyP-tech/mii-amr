@@ -22,7 +22,7 @@ from scripts.aufgabe04.artifacts.content_store import (
     payload_sha256,
     write_content_hashed_json,
 )
-from scripts.aufgabe04.navigation.map_io import freeze_map_bundle
+from scripts.aufgabe04.navigation.planning.map_io import freeze_map_bundle
 from scripts.aufgabe04.real_robot.hardware_profile import (
     camera_calibration_sha256,
     load_camera_calibration,
@@ -105,7 +105,7 @@ def _planner_command(
 ):
     command = [
         sys.executable,
-        "scripts/aufgabe04/navigation/plan_synchronized_viewpoint.py",
+        "scripts/aufgabe04/navigation/entrypoints/plan_synchronized_viewpoint.py",
         "--environment",
         "real",
         "--map",

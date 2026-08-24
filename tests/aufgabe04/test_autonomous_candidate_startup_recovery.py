@@ -3,15 +3,15 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.odom_execution_certificate import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
     PlanarTransform2D,
 )
-from scripts.aufgabe04.navigation.odom_route_adapter import (
+from scripts.aufgabe04.navigation.localization.odom_route_adapter import (
     OdomExecutionContext,
     evaluate_map_odom_continuity,
 )
-from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
+from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization import (
     STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY,
 )
 from scripts.aufgabe04.real_robot.autonomous_candidate_startup_recovery import (

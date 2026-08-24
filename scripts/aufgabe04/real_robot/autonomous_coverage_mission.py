@@ -16,17 +16,17 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from scripts.aufgabe04.artifacts.content_store import write_content_hashed_json
-from scripts.aufgabe04.navigation.coverage_candidate_admission import (
+from scripts.aufgabe04.navigation.coverage.coverage_candidate_admission import (
     CoverageCandidateAdmissionDecision,
     coverage_candidate_admission_evidence,
     evaluate_coverage_candidate_admission,
 )
-from scripts.aufgabe04.navigation.coverage_candidate_lifecycle import (
+from scripts.aufgabe04.navigation.coverage.coverage_candidate_lifecycle import (
     ExactTwoLidarCheckpointDecision,
     evaluate_exact_two_lidar_checkpoint,
     exact_two_lidar_checkpoint_evidence,
 )
-from scripts.aufgabe04.navigation.coverage_candidate_reporting import (
+from scripts.aufgabe04.navigation.coverage.coverage_candidate_reporting import (
     active_lidar_registry_count_fields,
     fused_registry_candidate_count_fields,
 )
@@ -48,7 +48,7 @@ from scripts.aufgabe04.real_robot.autonomous_exact_two_completion import (
     write_bound_exact_two_camera_admission,
     write_exact_two_camera_handoff,
 )
-from scripts.aufgabe04.navigation.stand_coverage_survey import (
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STATUS_CONFIRMED,
     STATUS_PENDING_CAMERA,
     STATUS_PROVISIONAL,

@@ -6,18 +6,18 @@ import math
 from dataclasses import dataclass, field
 from typing import Sequence
 
-from scripts.aufgabe04.navigation.driving_behavior import CommandSmoothingConfig
-from scripts.aufgabe04.navigation.transient_blockage_policy import (
+from scripts.aufgabe04.navigation.control.driving_behavior import CommandSmoothingConfig
+from scripts.aufgabe04.navigation.coverage.transient_blockage_policy import (
     DEFAULT_LINEAR_MOTION_FLOOR_MPS,
     PersistentObstacleConfig,
 )
-from scripts.aufgabe04.navigation.viewpoint_sampling_contract import (
+from scripts.aufgabe04.navigation.approach.viewpoint_sampling_contract import (
     DEFAULT_VIEWPOINT_SAMPLING_TARGET_DISTANCE_M,
     INTERMEDIATE_TERMINAL_HEADING_ENTRY_TOLERANCE_M,
     INTERMEDIATE_TERMINAL_HEADING_HOLD_TOLERANCE_M,
     INTERMEDIATE_TERMINAL_HEADING_TARGET_ENVELOPE_RADIUS_M,
 )
-from scripts.aufgabe04.navigation.waypoint_controller import (
+from scripts.aufgabe04.navigation.control.waypoint_controller import (
     CertifiedCornerControlConfig,
     ControllerConfig,
     StartEgressControlConfig,

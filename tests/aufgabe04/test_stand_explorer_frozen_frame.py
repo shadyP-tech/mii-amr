@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import unittest
 
 
-from scripts.aufgabe04.navigation.odom_execution_certificate import (
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
     OdomExecutionCertificate,
     PlanarTransform2D,
     odom_execution_certificate_sha256,

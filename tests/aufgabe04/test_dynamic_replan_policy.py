@@ -6,12 +6,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation.dynamic_replan_policy import (  # noqa: E402
+from scripts.aufgabe04.navigation.coverage.dynamic_replan_policy import (  # noqa: E402
     DynamicReplanPolicy,
     DynamicReplanState,
 )
-from scripts.aufgabe04.navigation.models import Pose2D  # noqa: E402
-from scripts.aufgabe04.navigation.viewpoint_recommendation import (  # noqa: E402
+from scripts.aufgabe04.navigation.foundation.models import Pose2D  # noqa: E402
+from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import (  # noqa: E402
     MaterialTarget,
 )
 

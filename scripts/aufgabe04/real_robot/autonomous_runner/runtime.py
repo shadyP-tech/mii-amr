@@ -35,18 +35,18 @@ from scripts.aufgabe04.artifacts.content_store import (
     payload_sha256,
     write_content_hashed_json,
 )
-from scripts.aufgabe04.navigation.coverage_candidate_admission import (
+from scripts.aufgabe04.navigation.coverage.coverage_candidate_admission import (
     coverage_candidate_admission_evidence,
     evaluate_coverage_candidate_admission,
 )
-from scripts.aufgabe04.navigation.coverage_candidate_reconciliation_report import (
+from scripts.aufgabe04.navigation.coverage.coverage_candidate_reconciliation_report import (
     evidence_only_reconciliation_policy_contract,
 )
-from scripts.aufgabe04.navigation.dynamic_approach_planner import (
+from scripts.aufgabe04.navigation.approach.dynamic_approach_planner import (
     DynamicApproachConfig,
     minimum_static_obstacle_inflation_m,
 )
-from scripts.aufgabe04.navigation.mission_leg_motion_permit import (
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     MISSION_LEG_RUN_CONFIRMATION,
     ROUTINE_MISSION_LEG_KINDS,
@@ -58,16 +58,16 @@ from scripts.aufgabe04.navigation.mission_leg_motion_permit import (
     write_mission_leg_motion_authorization,
     write_mission_leg_motion_permit,
 )
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.plan_stand_coverage_survey import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.missions.plan_stand_coverage_survey import (
     main as plan_stand_coverage_survey,
 )
-from scripts.aufgabe04.navigation.read_current_amcl_pose import (
+from scripts.aufgabe04.navigation.localization.read_current_amcl_pose import (
     read_current_pose2d_from_amcl,
 )
-from scripts.aufgabe04.navigation.ros_preflight import run_ros_preflight
-from scripts.aufgabe04.navigation.ros_runtime_config import resolve_topic
-from scripts.aufgabe04.navigation.runtime_motion_authorization import (
+from scripts.aufgabe04.navigation.localization.ros_preflight import run_ros_preflight
+from scripts.aufgabe04.navigation.foundation.ros_runtime_config import resolve_topic
+from scripts.aufgabe04.navigation.execution.runtime_motion_authorization import (
     MISSION_MOTION_AUTHORIZATION_SCOPE,
     MISSION_RUN_CONFIRMATION,
     RUNTIME_LOCALIZATION_RESEAL_RECOVERY_KIND,
@@ -79,11 +79,11 @@ from scripts.aufgabe04.navigation.runtime_motion_authorization import (
     write_mission_motion_authorization,
     write_runtime_localization_motion_permit,
 )
-from scripts.aufgabe04.navigation.record_stand_coverage_stop import (
+from scripts.aufgabe04.navigation.coverage.record_stand_coverage_stop import (
     commit_stand_coverage_stop,
     plan_next_stand_coverage_leg,
 )
-from scripts.aufgabe04.navigation.stand_coverage_survey import (
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STATUS_PENDING_CAMERA,
     CoverageSurveyConfig,
     CoverageSurveyPlan,
@@ -96,10 +96,10 @@ from scripts.aufgabe04.navigation.stand_coverage_survey import (
 from scripts.aufgabe04.perception.lidar_stand_morphology import (
     stand_width_profile_from_radius,
 )
-from scripts.aufgabe04.navigation.stand_discovery_route import (
+from scripts.aufgabe04.navigation.coverage.stand_discovery_route import (
     seal_stand_discovery_route,
 )
-from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
+from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization import (
     STARTUP_RESEAL_MOTION_AUTHORIZATION_SCOPE,
     STARTUP_RESEAL_RECOVERY_KIND,
     STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY,
@@ -2326,6 +2326,12 @@ def main(argv=None) -> int:
                 ),
                 exact_two_camera_handoff_sha256=(
                     exact_two_camera_handoff_sha256
+                ),
+                camera_selection_linear_speed_mps=(
+                    profile.max_linear_speed_mps
+                ),
+                camera_selection_angular_speed_radps=(
+                    profile.max_angular_speed_radps
                 ),
             ),
             CandidateApproachEffects(

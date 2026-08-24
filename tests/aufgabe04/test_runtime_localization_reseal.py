@@ -1,6 +1,6 @@
 import unittest
 
-from scripts.aufgabe04.navigation.runtime_localization_reseal import (
+from scripts.aufgabe04.navigation.localization.runtime_localization_reseal import (
     evaluate_runtime_localization_reseal,
     evaluate_runtime_localization_reseal_budget,
 )

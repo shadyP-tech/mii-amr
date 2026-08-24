@@ -12,7 +12,7 @@ except ImportError:  # pragma: no cover - keeps offline tests ROS-free.
     rclpy = None
     Time = None
 
-from scripts.aufgabe04.navigation.follower_safety import (
+from scripts.aufgabe04.navigation.control.follower_safety import (
     NO_VALID_FRONT_SECTOR_SCAN_RANGES,
     OBSTACLE_TOO_CLOSE,
     cmd_vel_ownership_failure,

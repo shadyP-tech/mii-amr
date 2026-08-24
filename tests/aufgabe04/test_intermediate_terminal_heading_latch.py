@@ -4,8 +4,8 @@ import json
 import math
 import unittest
 
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.simple_waypoint_follower import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.waypoint_follower.runtime import (
     FollowerConfig,
     INTERMEDIATE_TERMINAL_HEADING_DISTANCE_COMPARISON_EPSILON_M,
     INTERMEDIATE_TERMINAL_HEADING_ENTRY_TOLERANCE_M,
@@ -17,7 +17,7 @@ from scripts.aufgabe04.navigation.simple_waypoint_follower import (
     intermediate_terminal_heading_hold_diagnostics,
     reset_intermediate_terminal_heading_latch,
 )
-from scripts.aufgabe04.navigation.viewpoint_sampling_contract import (
+from scripts.aufgabe04.navigation.approach.viewpoint_sampling_contract import (
     DEFAULT_VIEWPOINT_SAMPLING_STRICT_ARRIVAL_TOLERANCE_M,
     DEFAULT_VIEWPOINT_SAMPLING_TARGET_DISTANCE_M,
     VIEWPOINT_SAMPLING_CONTRACT_NAME,
@@ -27,7 +27,7 @@ from scripts.aufgabe04.navigation.viewpoint_sampling_contract import (
     ViewpointSamplingMaterialTarget,
     viewpoint_sampling_hold_metrics,
 )
-from scripts.aufgabe04.navigation.waypoint_controller import (
+from scripts.aufgabe04.navigation.control.waypoint_controller import (
     ControllerConfig,
     compute_waypoint_command,
 )

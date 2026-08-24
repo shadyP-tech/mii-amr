@@ -12,20 +12,20 @@ try:  # pragma: no cover - exercised on ROS hosts.
 except ImportError:  # pragma: no cover - keeps offline tests ROS-free.
     rclpy = None
 
-from scripts.aufgabe04.navigation.follower_safety import (
+from scripts.aufgabe04.navigation.control.follower_safety import (
     NO_VALID_FRONT_SECTOR_SCAN_RANGES,
     front_sector_decision,
 )
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.transient_blockage_admission import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.coverage.transient_blockage_admission import (
     StationaryBlockageAdmission,
     collect_stationary_blockage_admission,
 )
-from scripts.aufgabe04.navigation.transient_blockage_policy import (
+from scripts.aufgabe04.navigation.coverage.transient_blockage_policy import (
     PersistentObstacleConfig,
     StationaryFrontSectorSample,
 )
-from scripts.aufgabe04.navigation.waypoint_controller import VelocityCommand
+from scripts.aufgabe04.navigation.control.waypoint_controller import VelocityCommand
 from scripts.aufgabe04.navigation.waypoint_follower.pose_lookup import PoseLookupResult
 from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.bindings import (
     RuntimeBindingProxy,

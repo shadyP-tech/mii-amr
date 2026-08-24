@@ -9,17 +9,17 @@ import tempfile
 import unittest
 
 from scripts.aufgabe04.artifacts.content_store import payload_sha256
-from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds
-from scripts.aufgabe04.navigation.map_io import (
+from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds
+from scripts.aufgabe04.navigation.planning.map_io import (
     CELL_FREE,
     MapMetadata,
     OccupancyGrid,
 )
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.plan_stand_coverage_survey import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.missions.plan_stand_coverage_survey import (
     main as plan_coverage_main,
 )
-from scripts.aufgabe04.navigation.stand_coverage_survey import (
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     CoverageSurveyConfig,
     build_coverage_survey_plan,
     load_coverage_survey_plan,

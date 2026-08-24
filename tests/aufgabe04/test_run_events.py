@@ -18,52 +18,54 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation import run_single_station_segment  # noqa: E402
-from scripts.aufgabe04.navigation.dynamic_route_handoff import (  # noqa: E402
+from scripts.aufgabe04.navigation.entrypoints import (  # noqa: E402
+    run_single_station_segment,
+)
+from scripts.aufgabe04.navigation.execution.dynamic_route_handoff import (  # noqa: E402
     RouteUpdate,
     RouteUpdateKind,
 )
-from scripts.aufgabe04.navigation.follower_models import FollowerResult  # noqa: E402
-from scripts.aufgabe04.navigation.models import Pose2D  # noqa: E402
-from scripts.aufgabe04.navigation.mission_leg_motion_permit import (  # noqa: E402
+from scripts.aufgabe04.navigation.control.follower_models import FollowerResult  # noqa: E402
+from scripts.aufgabe04.navigation.foundation.models import Pose2D  # noqa: E402
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (  # noqa: E402
     MissionLegKind,
 )
-from scripts.aufgabe04.navigation.plan_stand_coverage_survey import (  # noqa: E402
+from scripts.aufgabe04.navigation.missions.plan_stand_coverage_survey import (  # noqa: E402
     main as plan_coverage,
 )
-from scripts.aufgabe04.navigation.ros_preflight import (  # noqa: E402
+from scripts.aufgabe04.navigation.localization.ros_preflight import (  # noqa: E402
     RosObservation,
     RosPreflightResult,
 )
-from scripts.aufgabe04.navigation.run_events import (  # noqa: E402
+from scripts.aufgabe04.navigation.foundation.run_events import (  # noqa: E402
     build_event,
     configure_event_logger,
     emit_event,
     event_to_json,
 )
-from scripts.aufgabe04.navigation.route_revision_store import (  # noqa: E402
+from scripts.aufgabe04.navigation.execution.route_revision_store import (  # noqa: E402
     RouteRevisionStore,
     read_committed_revision,
 )
-from scripts.aufgabe04.navigation.stand_blockage_replan import (  # noqa: E402
+from scripts.aufgabe04.navigation.coverage.stand_blockage_replan import (  # noqa: E402
     TRANSIENT_OBSTACLE_OVERLAY_SCHEMA_VERSION,
     TransientObstacleOverlay,
     write_transient_obstacle_overlay,
 )
-from scripts.aufgabe04.navigation.stand_coverage_survey import (  # noqa: E402
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (  # noqa: E402
     STATUS_PROVISIONAL,
     SurveyCandidate,
     load_coverage_survey_plan,
 )
-from scripts.aufgabe04.navigation.stand_discovery_route import (  # noqa: E402
+from scripts.aufgabe04.navigation.coverage.stand_discovery_route import (  # noqa: E402
     seal_stand_discovery_route,
 )
-from scripts.aufgabe04.navigation.transient_overlay_resume_state import (  # noqa: E402
+from scripts.aufgabe04.navigation.coverage.transient_overlay_resume_state import (  # noqa: E402
     bind_transient_overlay_resume_state_to_diagnostics,
     update_transient_overlay_resume_state_from_events,
     write_transient_overlay_resume_state,
 )
-from scripts.aufgabe04.navigation.waypoint_csv import (  # noqa: E402
+from scripts.aufgabe04.navigation.planning.waypoint_csv import (  # noqa: E402
     load_route_leg,
 )
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import unittest
 
-from scripts.aufgabe04.navigation.spatial_assignment import (
+from scripts.aufgabe04.navigation.planning.spatial_assignment import (
     assign_spatial_points,
 )
 

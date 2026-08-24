@@ -4,7 +4,14 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "scripts" / "aufgabe04" / "navigation" / "run_first_detected_station_segment_with_bundle.sh"
+SCRIPT = (
+    ROOT
+    / "scripts"
+    / "aufgabe04"
+    / "navigation"
+    / "entrypoints"
+    / "run_first_detected_station_segment_with_bundle.sh"
+)
 
 
 class FirstDetectedBundleWrapperTest(unittest.TestCase):

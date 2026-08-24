@@ -9,14 +9,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from scripts.aufgabe04.navigation import run_single_station_segment
-from scripts.aufgabe04.navigation.follower_models import FollowerResult
-from scripts.aufgabe04.navigation.mission_leg_motion_permit import MissionLegKind
-from scripts.aufgabe04.navigation.ros_preflight import RosPreflightResult
-from scripts.aufgabe04.navigation.stand_discovery_route import (
+from scripts.aufgabe04.navigation.entrypoints import run_single_station_segment
+from scripts.aufgabe04.navigation.control.follower_models import FollowerResult
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import MissionLegKind
+from scripts.aufgabe04.navigation.localization.ros_preflight import RosPreflightResult
+from scripts.aufgabe04.navigation.coverage.stand_discovery_route import (
     seal_stand_discovery_route,
 )
-from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
+from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization import (
     STARTUP_RESEAL_MOTION_AUTHORIZATION_SCOPE,
     STARTUP_RESEAL_RECOVERY_KIND,
     STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY,
@@ -27,7 +27,7 @@ from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
     validate_startup_reseal_motion_permit_for_execution,
     write_startup_reseal_motion_authorization,
 )
-from scripts.aufgabe04.navigation.waypoint_csv import load_route_leg
+from scripts.aufgabe04.navigation.planning.waypoint_csv import load_route_leg
 from scripts.aufgabe04.real_robot.autonomous_startup_reseal import (
     StartupResealPermitContext,
     issue_startup_reseal_motion_permit,

@@ -12,11 +12,11 @@ from unittest.mock import Mock, patch
 from scripts.aufgabe04.real_robot import (
     run_autonomous_stand_exploration as autonomous_wrapper,
 )
-from scripts.aufgabe04.navigation.plan_stand_coverage_survey import (
+from scripts.aufgabe04.navigation.missions.plan_stand_coverage_survey import (
     main as plan_coverage,
 )
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.mission_leg_motion_permit import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     MISSION_LEG_RUN_CONFIRMATION,
     ROUTINE_MISSION_LEG_KINDS,
@@ -25,11 +25,11 @@ from scripts.aufgabe04.navigation.mission_leg_motion_permit import (
     load_mission_leg_motion_permit,
     write_mission_leg_motion_authorization,
 )
-from scripts.aufgabe04.navigation.ros_preflight import RosPreflightResult
-from scripts.aufgabe04.navigation.runtime_localization_reseal import (
+from scripts.aufgabe04.navigation.localization.ros_preflight import RosPreflightResult
+from scripts.aufgabe04.navigation.localization.runtime_localization_reseal import (
     evaluate_runtime_localization_reseal,
 )
-from scripts.aufgabe04.navigation.runtime_motion_authorization import (
+from scripts.aufgabe04.navigation.execution.runtime_motion_authorization import (
     MISSION_MOTION_AUTHORIZATION_SCOPE,
     MISSION_RUN_CONFIRMATION,
     RUNTIME_LOCALIZATION_RESEAL_RECOVERY_KIND,
@@ -37,25 +37,25 @@ from scripts.aufgabe04.navigation.runtime_motion_authorization import (
     load_runtime_localization_motion_permit,
     write_mission_motion_authorization,
 )
-from scripts.aufgabe04.navigation.run_single_station_segment import (
+from scripts.aufgabe04.navigation.entrypoints.run_single_station_segment import (
     main as run_segment,
 )
-from scripts.aufgabe04.navigation.simple_waypoint_follower import (
+from scripts.aufgabe04.navigation.waypoint_follower.runtime import (
     STATIC_PHYSICAL_ROUTE_KINDS,
 )
-from scripts.aufgabe04.navigation.stand_coverage_survey import (
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STATUS_PENDING_CAMERA,
     SurveyCandidate,
     load_coverage_survey_plan,
     load_stand_survey_registry,
     write_stand_survey_registry,
 )
-from scripts.aufgabe04.navigation.stand_discovery_route import (
+from scripts.aufgabe04.navigation.coverage.stand_discovery_route import (
     STAND_DISCOVERY_ROUTE_KIND,
     seal_stand_discovery_route,
     validate_stand_discovery_route_binding,
 )
-from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
+from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization import (
     STARTUP_RESEAL_MOTION_AUTHORIZATION_SCOPE,
     STARTUP_RESEAL_RECOVERY_KIND,
     STARTUP_RESEAL_RUN_CONFIRMATION,
@@ -63,10 +63,10 @@ from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
     load_startup_reseal_motion_permit,
     write_startup_reseal_motion_authorization,
 )
-from scripts.aufgabe04.navigation.transient_overlay_resume_state import (
+from scripts.aufgabe04.navigation.coverage.transient_overlay_resume_state import (
     TransientOverlayResumeState,
 )
-from scripts.aufgabe04.navigation.waypoint_csv import load_route_leg
+from scripts.aufgabe04.navigation.planning.waypoint_csv import load_route_leg
 from scripts.aufgabe04.real_robot.passive_viewpoint_node import _resolved_qr_id
 from scripts.aufgabe04.real_robot import autonomous_coverage_replanning
 from scripts.aufgabe04.real_robot.autonomous_coverage_replanning import (
@@ -724,7 +724,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             self.assertTrue(diagnostics["metadata"]["motion_authorized"])
 
             with patch(
-                "scripts.aufgabe04.navigation.run_single_station_segment."
+                "scripts.aufgabe04.navigation.entrypoints.run_single_station_segment."
                 "run_ros_preflight",
                 return_value=RosPreflightResult(
                     ok=True,
@@ -740,7 +740,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                     },
                 ),
             ), patch(
-                "scripts.aufgabe04.navigation.run_single_station_segment."
+                "scripts.aufgabe04.navigation.entrypoints.run_single_station_segment."
                 "run_simple_waypoint_follower"
             ) as follower, redirect_stdout(StringIO()):
                 runner_status = run_segment(
@@ -839,7 +839,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             leg = load_route_leg(Path(outputs["route_csv"]), 0)
             events = Path(tmp) / "events.jsonl"
             with patch(
-                "scripts.aufgabe04.navigation.run_single_station_segment."
+                "scripts.aufgabe04.navigation.entrypoints.run_single_station_segment."
                 "run_ros_preflight",
                 return_value=RosPreflightResult(
                     ok=True,
@@ -855,7 +855,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                     },
                 ),
             ), patch(
-                "scripts.aufgabe04.navigation.run_single_station_segment."
+                "scripts.aufgabe04.navigation.entrypoints.run_single_station_segment."
                 "run_simple_waypoint_follower"
             ) as follower, redirect_stdout(StringIO()):
                 status = run_segment(

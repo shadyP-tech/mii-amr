@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from scripts.aufgabe04.navigation.arrival_route_graph import (
+from scripts.aufgabe04.navigation.missions.arrival_route_graph import (
     ArrivalRouteNode,
     NonTargetStandKeepout,
     _continuous_non_target_clearances,
@@ -16,14 +16,14 @@ from scripts.aufgabe04.navigation.arrival_route_graph import (
     resolve_station_arrival_order,
     selected_edges,
 )
-from scripts.aufgabe04.navigation.costmap import Costmap
-from scripts.aufgabe04.navigation.dynamic_approach_planner import (
+from scripts.aufgabe04.navigation.planning.costmap import Costmap
+from scripts.aufgabe04.navigation.approach.dynamic_approach_planner import (
     DynamicApproachConfig,
     FaceNormalCandidate,
     circular_keepout_cells,
 )
-from scripts.aufgabe04.navigation.map_io import CELL_FREE, MapMetadata, OccupancyGrid
-from scripts.aufgabe04.navigation.models import GridCell, Pose2D
+from scripts.aufgabe04.navigation.planning.map_io import CELL_FREE, MapMetadata, OccupancyGrid
+from scripts.aufgabe04.navigation.foundation.models import GridCell, Pose2D
 from scripts.aufgabe04.stations.arrival_pose_geometry import (
     ArrivalGeometryConfig,
     arrival_face_candidates,
@@ -449,7 +449,7 @@ class ArrivalRouteGraphTest(unittest.TestCase):
         first = node("A", Pose2D(1.5, 1.5), 0.0, 0)
         second = node("B", Pose2D(2.8, 2.6), math.pi / 4.0, 1)
         with patch(
-            "scripts.aufgabe04.navigation.arrival_route_graph."
+            "scripts.aufgabe04.navigation.missions.arrival_route_graph."
             "_continuous_non_target_clearances",
             side_effect=ValueError("non_target_stand_route_clearance_failed:test"),
         ):

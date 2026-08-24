@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock
 
-from scripts.aufgabe04.navigation.exact_two_camera_admission import (
+from scripts.aufgabe04.navigation.approach.exact_two_camera_admission import (
     SUPPORT_CLASS_SINGLE_VIEW_REQUIRES_CAMERA_VALIDATION,
     build_exact_two_camera_candidate_snapshot,
     exact_two_camera_handoff_sha256,
@@ -20,11 +20,11 @@ from scripts.aufgabe04.navigation.exact_two_camera_admission import (
     write_exact_two_camera_admission,
     write_exact_two_camera_handoff,
 )
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.record_stand_candidate_decision import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.approach.record_stand_candidate_decision import (
     main as record_candidate_decision,
 )
-from scripts.aufgabe04.navigation.stand_coverage_survey import (
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STATUS_CONFIRMED,
     STATUS_PROVISIONAL,
     load_stand_survey_registry,
@@ -32,7 +32,7 @@ from scripts.aufgabe04.navigation.stand_coverage_survey import (
     write_stand_survey_registry,
     write_survey_progress,
 )
-from scripts.aufgabe04.navigation.viewpoint_recommendation import (
+from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import (
     recommendation_to_payload,
 )
 from scripts.aufgabe04.real_robot.autonomous_candidate_approach import (
@@ -510,6 +510,40 @@ class ExactTwoCameraDecisionTest(unittest.TestCase):
                 support["survey_candidate_0003"],
                 SUPPORT_CLASS_SINGLE_VIEW_REQUIRES_CAMERA_VALIDATION,
             )
+
+    def test_valid_handoff_support_reaches_route_selector_before_motion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _fixture(Path(tmp))
+            read_pose = Mock(return_value=Pose2D(0.0, 0.0, 0.0))
+            motion = Mock()
+            capture = Mock()
+            observed_support = {}
+
+            def inspect_selection(request):
+                observed_support.update(request.support_class_by_uid or {})
+                raise RuntimeError("stop after route-selection admission")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "stop after route-selection admission",
+            ):
+                execute_candidate_approach_phase(
+                    fixture.config,
+                    CandidateApproachEffects(
+                        select_initial_preapproach=inspect_selection,
+                        read_current_pose=read_pose,
+                        run_motion_leg=motion,
+                        capture_observation=capture,
+                    ),
+                )
+
+            self.assertEqual(len(observed_support), 5)
+            self.assertEqual(
+                observed_support["survey_candidate_0003"],
+                SUPPORT_CLASS_SINGLE_VIEW_REQUIRES_CAMERA_VALIDATION,
+            )
+            motion.assert_not_called()
+            capture.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.aufgabe04.navigation.models import Pose2D
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.perception.lidar_visibility_evidence import (
     append_lidar_visibility_receipts,
     lidar_visibility_receipt_from_scan,

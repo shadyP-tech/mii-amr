@@ -16,7 +16,7 @@ from datetime import date
 from pathlib import Path, PurePosixPath
 from typing import Mapping
 
-from scripts.aufgabe04.navigation.map_io import (
+from scripts.aufgabe04.navigation.planning.map_io import (
     FrozenMapBundle,
     freeze_map_bundle,
     read_map_metadata,

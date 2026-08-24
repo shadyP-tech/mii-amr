@@ -21,7 +21,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.aufgabe04.artifacts.content_store import load_content_hashed_json
 from scripts.aufgabe04.artifacts.manifest_store import load_survey_manifest
-from scripts.aufgabe04.navigation.mission_execution_gate import (
+from scripts.aufgabe04.navigation.execution.mission_execution_gate import (
     ARTIFACT_DESCRIPTOR_HASH_FIELD,
     validate_planner_config_descriptor,
 )
@@ -63,7 +63,7 @@ def validate_profile_artifact_bindings(profile, survey, planner_config_path: Pat
 def build_runner_command(args, profile) -> list[str]:
     command = [
         sys.executable,
-        "scripts/aufgabe04/navigation/run_single_station_segment.py",
+        "scripts/aufgabe04/navigation/entrypoints/run_single_station_segment.py",
         "--route-csv",
         str(args.route_csv),
         "--diagnostics-json",

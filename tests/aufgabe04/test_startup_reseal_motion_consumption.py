@@ -10,8 +10,8 @@ from scripts.aufgabe04.artifacts.content_store import (
     payload_sha256,
     write_content_hashed_json,
 )
-from scripts.aufgabe04.navigation.mission_leg_motion_permit import MissionLegKind
-from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import MissionLegKind
+from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization import (
     STARTUP_RESEAL_MOTION_AUTHORIZATION_SCOPE,
     STARTUP_RESEAL_MOTION_PERMIT_HASH_FIELD,
     STARTUP_RESEAL_PERMIT_SUMMARY_SCHEMA_VERSION,
@@ -28,7 +28,7 @@ from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
     write_startup_reseal_motion_authorization,
     write_startup_reseal_motion_permit,
 )
-from scripts.aufgabe04.navigation.startup_reseal_motion_consumption import (
+from scripts.aufgabe04.navigation.execution.startup_reseal_motion_consumption import (
     STARTUP_RESEAL_MOTION_CONSUMPTION_RECEIPT_HASH_FIELD,
     StartupResealMotionConsumptionReceipt,
     consume_startup_reseal_motion_permit,

@@ -4,20 +4,20 @@ import math
 import unittest
 from pathlib import Path
 
-from scripts.aufgabe04.navigation.costmap import Costmap
-from scripts.aufgabe04.navigation.map_io import (
+from scripts.aufgabe04.navigation.planning.costmap import Costmap
+from scripts.aufgabe04.navigation.planning.map_io import (
     CELL_FREE,
     CELL_OCCUPIED,
     MapMetadata,
     OccupancyGrid,
 )
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.route_uncertainty_admission import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.execution.route_uncertainty_admission import (
     RouteUncertaintyAdmissionConfig,
     evaluate_route_uncertainty_admission,
     route_uncertainty_admission_evidence_sha256,
 )
-from scripts.aufgabe04.navigation.route_uncertainty_budget import (
+from scripts.aufgabe04.navigation.execution.route_uncertainty_budget import (
     PlanarCovariance,
     UNCERTAINTY_BUDGET_EXHAUSTED,
 )

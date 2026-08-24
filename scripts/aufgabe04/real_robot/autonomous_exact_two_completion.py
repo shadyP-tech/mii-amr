@@ -13,10 +13,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
-from scripts.aufgabe04.navigation.coverage_candidate_lifecycle import (
+from scripts.aufgabe04.navigation.coverage.coverage_candidate_lifecycle import (
     ExactTwoLidarCheckpointDecision,
 )
-from scripts.aufgabe04.navigation.exact_two_camera_admission import (
+from scripts.aufgabe04.navigation.approach.exact_two_camera_admission import (
     ExactTwoCameraAdmissionDecision,
     ExactTwoCameraHandoffArtifact,
     build_exact_two_camera_candidate_snapshot,
@@ -27,7 +27,7 @@ from scripts.aufgabe04.navigation.exact_two_camera_admission import (
     write_exact_two_camera_admission,
     write_exact_two_camera_handoff,
 )
-from scripts.aufgabe04.navigation.stand_coverage_survey import (
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     CoverageSurveyPlan,
     CoverageSurveyProgress,
     StandSurveyRegistry,

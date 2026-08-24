@@ -10,21 +10,21 @@ import tempfile
 import unittest
 
 from scripts.aufgabe04.artifacts.content_store import payload_sha256
-from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds
-from scripts.aufgabe04.navigation.map_io import CELL_FREE, MapMetadata, OccupancyGrid
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.stand_blockage_replan import (
+from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds
+from scripts.aufgabe04.navigation.planning.map_io import CELL_FREE, MapMetadata, OccupancyGrid
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.coverage.stand_blockage_replan import (
     TRANSIENT_OBSTACLE_OVERLAY_SCHEMA_VERSION,
     TransientObstacleOverlay,
     write_transient_obstacle_overlay,
 )
-from scripts.aufgabe04.navigation.stand_coverage_survey import (
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STATUS_PROVISIONAL,
     CoverageSurveyConfig,
     SurveyCandidate,
     build_coverage_survey_plan,
 )
-from scripts.aufgabe04.navigation.transient_overlay_resume_state import (
+from scripts.aufgabe04.navigation.coverage.transient_overlay_resume_state import (
     TRANSIENT_OVERLAY_RESUME_DIAGNOSTICS_BINDING_KEY,
     TRANSIENT_OVERLAY_RESUME_STATE_HASH_FIELD,
     add_adopted_route_hash,

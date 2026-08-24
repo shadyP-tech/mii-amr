@@ -2,8 +2,8 @@ import math
 import unittest
 from pathlib import Path
 
-from scripts.aufgabe04.navigation.costmap import Costmap
-from scripts.aufgabe04.navigation.coverage_escape_geometry import (
+from scripts.aufgabe04.navigation.planning.costmap import Costmap
+from scripts.aufgabe04.navigation.coverage.coverage_escape_geometry import (
     EGRESS_MODE_FORWARD,
     EGRESS_MODE_STRAIGHT_REVERSE,
     CircularEscapeKeepout,
@@ -12,12 +12,12 @@ from scripts.aufgabe04.navigation.coverage_escape_geometry import (
     find_reverse_transition_anchors,
     validate_executable_escape_route,
 )
-from scripts.aufgabe04.navigation.map_io import (
+from scripts.aufgabe04.navigation.planning.map_io import (
     CELL_FREE,
     MapMetadata,
     OccupancyGrid,
 )
-from scripts.aufgabe04.navigation.models import Pose2D
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
 
 
 def _open_costmap() -> Costmap:

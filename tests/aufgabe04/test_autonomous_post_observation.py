@@ -5,7 +5,7 @@ import inspect
 from pathlib import Path
 import unittest
 
-from scripts.aufgabe04.navigation.models import Pose2D
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.real_robot import autonomous_post_observation as policy
 from scripts.aufgabe04.real_robot.autonomous_post_observation import (
     DYNAMIC_MAP_TO_ODOM_UNAVAILABLE,

@@ -9,8 +9,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation.models import Pose2D  # noqa: E402
-from scripts.aufgabe04.navigation.transient_blockage_policy import (  # noqa: E402
+from scripts.aufgabe04.navigation.foundation.models import Pose2D  # noqa: E402
+from scripts.aufgabe04.navigation.coverage.transient_blockage_policy import (  # noqa: E402
     CLEARANCE_LIMITED_MOTION_FLOOR,
     LINEAR_COMMAND_BELOW_FLOOR,
     LINEAR_COMMAND_MOTION_CAPABLE,

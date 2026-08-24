@@ -8,8 +8,8 @@ from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 from scripts.aufgabe04.artifacts.content_store import payload_sha256
-from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds
-from scripts.aufgabe04.navigation.exact_two_camera_admission import (
+from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds
+from scripts.aufgabe04.navigation.approach.exact_two_camera_admission import (
     SOURCE_KIND_MULTI_VIEW,
     SOURCE_KIND_SINGLE_VIEW_REQUIRES_CAMERA_VALIDATION,
     SUPPORT_CLASS_MULTI_VIEW,
@@ -34,11 +34,11 @@ from scripts.aufgabe04.navigation.exact_two_camera_admission import (
     write_exact_two_camera_admission,
     write_exact_two_camera_handoff,
 )
-from scripts.aufgabe04.navigation.coverage_candidate_lifecycle import (
+from scripts.aufgabe04.navigation.coverage.coverage_candidate_lifecycle import (
     evaluate_exact_two_lidar_checkpoint,
 )
-from scripts.aufgabe04.navigation.models import GridCell, Pose2D
-from scripts.aufgabe04.navigation.stand_coverage_survey import (
+from scripts.aufgabe04.navigation.foundation.models import GridCell, Pose2D
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STATUS_PENDING_CAMERA,
     STATUS_PROVISIONAL,
     SURVEY_PLAN_SCHEMA_VERSION,
@@ -167,9 +167,9 @@ class ExactTwoCameraAdmissionDecisionTest(unittest.TestCase):
     def test_module_slice_is_ros_free_and_does_not_import_parent_runner(self):
         root = Path(__file__).resolve().parents[2]
         module_paths = (
-            root / "scripts/aufgabe04/navigation/exact_two_camera_admission.py",
-            root / "scripts/aufgabe04/navigation/exact_two_camera_contract.py",
-            root / "scripts/aufgabe04/navigation/exact_two_camera_artifacts.py",
+            root / "scripts/aufgabe04/navigation/approach/exact_two_camera_admission.py",
+            root / "scripts/aufgabe04/navigation/approach/exact_two_camera_contract.py",
+            root / "scripts/aufgabe04/navigation/approach/exact_two_camera_artifacts.py",
         )
         forbidden_roots = {"rclpy", "subprocess"}
         contract_types = {

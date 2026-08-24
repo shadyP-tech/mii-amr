@@ -2,8 +2,8 @@ import math
 import unittest
 from pathlib import Path
 
-from scripts.aufgabe04.navigation.costmap import Costmap
-from scripts.aufgabe04.navigation.dynamic_approach_planner import (
+from scripts.aufgabe04.navigation.planning.costmap import Costmap
+from scripts.aufgabe04.navigation.approach.dynamic_approach_planner import (
     DynamicApproachConfig,
     circular_keepout_cells,
     face_normal_candidates,
@@ -16,15 +16,15 @@ from scripts.aufgabe04.navigation.dynamic_approach_planner import (
     supercover_segment_cells,
     with_dynamic_stand_keepout,
 )
-from scripts.aufgabe04.navigation.map_io import (
+from scripts.aufgabe04.navigation.planning.map_io import (
     CELL_FREE,
     CELL_OCCUPIED,
     CELL_UNKNOWN,
     MapMetadata,
     OccupancyGrid,
 )
-from scripts.aufgabe04.navigation.models import GridCell, Pose2D
-from scripts.aufgabe04.navigation.waypoint_controller import (
+from scripts.aufgabe04.navigation.foundation.models import GridCell, Pose2D
+from scripts.aufgabe04.navigation.control.waypoint_controller import (
     ControllerConfig,
     compute_join_anchor_command,
     compute_waypoint_command,

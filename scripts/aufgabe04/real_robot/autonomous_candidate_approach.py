@@ -13,45 +13,50 @@ import hashlib
 import json
 import math
 from pathlib import Path
-import shutil
 import time
 from typing import Callable, Mapping
 
 from scripts.aufgabe04.artifacts.content_store import write_content_hashed_json
-from scripts.aufgabe04.navigation.artifacts import (
+from scripts.aufgabe04.navigation.foundation.artifacts import (
     write_diagnostics_json,
     write_route_csv,
 )
-from scripts.aufgabe04.navigation.certified_exact_start_route import (
-    certify_and_smooth_exact_start_route,
+from scripts.aufgabe04.navigation.planning.costmap import Costmap
+from scripts.aufgabe04.navigation.approach.candidate_preapproach_planning import (
+    CandidatePreapproachPlan,
+    CandidatePreapproachUnreachableError,
+    plan_candidate_preapproach,
 )
-from scripts.aufgabe04.navigation.costmap import Costmap
-from scripts.aufgabe04.navigation.detected_stand_preapproach import (
-    CAMERA_AXIS_FACE_BEARING_MODE,
-    ROBOT_TO_STAND_BEARING_MODE,
-    seal_detected_stand_preapproach,
+from scripts.aufgabe04.navigation.approach.candidate_preapproach_selection import (
+    plan_and_select_camera_candidate,
 )
-from scripts.aufgabe04.navigation.exact_two_camera_admission import (
+from scripts.aufgabe04.navigation.approach.camera_axis_binding import (
+    load_opposite_face_normal,
+)
+from scripts.aufgabe04.navigation.approach.camera_candidate_selection import (
+    CameraCandidateSelectionConfig,
+    NoFeasibleCameraCandidateError,
+)
+from scripts.aufgabe04.navigation.approach.exact_two_camera_admission import (
     exact_two_camera_handoff_sha256,
     load_exact_two_camera_handoff,
     require_handoff_candidate_support,
     validate_live_candidate_snapshot_binding,
     validate_live_registry_binding,
 )
-from scripts.aufgabe04.navigation.global_planner import plan_route
-from scripts.aufgabe04.navigation.map_io import load_occupancy_grid_with_bundle
-from scripts.aufgabe04.navigation.mission_leg_motion_permit import MissionLegKind
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.record_stand_candidate_decision import (
+from scripts.aufgabe04.navigation.planning.global_planner import plan_route
+from scripts.aufgabe04.navigation.planning.map_io import load_occupancy_grid_with_bundle
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import MissionLegKind
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.approach.record_stand_candidate_decision import (
     main as record_stand_candidate_decision,
 )
-from scripts.aufgabe04.navigation.route_context import build_station_route_dry_run
-from scripts.aufgabe04.navigation.stand_coverage_survey import (
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     CoverageSurveyPlan,
     coverage_survey_plan_sha256,
     load_stand_survey_registry,
 )
-from scripts.aufgabe04.navigation.viewpoint_recommendation import (
+from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import (
     REAL_VIEWPOINT_SOURCE,
     load_recommendation,
     normalize_angle,
@@ -142,6 +147,8 @@ class CandidateApproachConfig:
     max_startup_reseals_per_leg: int = 0
     exact_two_camera_handoff_path: Path | None = None
     exact_two_camera_handoff_sha256: str | None = None
+    camera_selection_linear_speed_mps: float = 0.055
+    camera_selection_angular_speed_radps: float = 0.18
 
 
 @dataclass(frozen=True)
@@ -160,6 +167,24 @@ class CandidatePreapproachRequest:
     physical_clearance: Mapping[str, float]
     approach_normal_rad: float | None = None
     axis_observation_path: Path | None = None
+    prepared_plan: CandidatePreapproachPlan | None = None
+    selection_evidence: Mapping[str, object] | None = None
+
+
+@dataclass(frozen=True)
+class CameraCandidateSelectionRequest:
+    config: CandidateApproachConfig
+    current_pose: Pose2D
+    unresolved: frozenset[str]
+    support_class_by_uid: Mapping[str, str] | None
+
+
+@dataclass(frozen=True)
+class CameraCandidateInitialSelection:
+    candidate_uid: str
+    prepared_plan: CandidatePreapproachPlan | None
+    evidence: Mapping[str, object]
+    motion_authorized: bool = False
 
 
 @dataclass(frozen=True)
@@ -382,11 +407,17 @@ def nearest_candidate(
     current_pose: Pose2D,
     unresolved: set[str],
 ) -> FrozenCandidate | None:
-    options = [
+    """Legacy deterministic helper retained only as a test/compatibility seam.
+
+    Production camera exploration uses the route-aware
+    :func:`_select_initial_preapproach` effect instead.
+    """
+
+    options = tuple(
         candidate
         for candidate in snapshot.candidates
         if candidate.candidate_uid in unresolved
-    ]
+    )
     if not options:
         return None
     return min(
@@ -401,204 +432,10 @@ def nearest_candidate(
     )
 
 
-def plan_candidate_preapproach(
-    *,
-    map_yaml: Path,
-    semantic_map_id: str,
-    plan: CoverageSurveyPlan,
-    snapshot: CandidateSnapshot,
-    snapshot_path: Path,
-    candidate_uid: str,
-    start: Pose2D,
-    output_dir: Path,
-    approach_offset_m: float,
-    inflation_radius_m: float,
-    candidate_transit_radius_m: float,
-    physical_clearance: Mapping[str, float],
-    approach_normal_rad: float | None = None,
-    axis_observation_path: Path | None = None,
-) -> dict[str, str]:
-    """Write and seal a robot-side or axis-selected inspection route."""
-
-    candidate = snapshot.candidate_for(candidate_uid)
-    if candidate is None:
-        raise ValueError(f"unknown candidate {candidate_uid!r}")
-    if (approach_normal_rad is None) != (axis_observation_path is None):
-        raise ValueError(
-            "axis-selected approach requires both normal and observation"
-        )
-    if approach_normal_rad is None:
-        bearing = math.atan2(
-            candidate.geometry.y_m - start.y_m,
-            candidate.geometry.x_m - start.x_m,
-        )
-        bearing_mode = ROBOT_TO_STAND_BEARING_MODE
-    else:
-        if not math.isfinite(approach_normal_rad):
-            raise ValueError("approach face normal must be finite")
-        bearing = normalize_angle(approach_normal_rad + math.pi)
-        bearing_mode = CAMERA_AXIS_FACE_BEARING_MODE
-
-    target_station_id = "D00"
-    stations = {}
-    for index, item in enumerate(snapshot.candidates, start=1):
-        yaw = bearing if item.candidate_uid == candidate_uid else 0.0
-        station_id = (
-            target_station_id
-            if item.candidate_uid == candidate_uid
-            else f"K{index:02d}"
-        )
-        stations[station_id] = Station(
-            station_id,
-            StationPose(item.geometry.x_m, item.geometry.y_m, yaw),
-            approach_offset_m,
-            candidate_transit_radius_m,
-        )
-
-    grid, map_bundle = load_occupancy_grid_with_bundle(
-        map_yaml,
-        semantic_map_id=semantic_map_id,
-        planning_frame=plan.planning_frame,
-    )
-    if map_bundle.bundle_sha256 != snapshot.map_bundle_sha256:
-        raise ValueError("candidate snapshot map differs from runtime map")
-    dry_run = build_station_route_dry_run(
-        map_yaml,
-        [target_station_id],
-        station_map=stations,
-        start=start,
-        inflation_radius_m=inflation_radius_m,
-        snap_radius_m=plan.config.snap_radius_m,
-        transit_keepout_radius_m=candidate_transit_radius_m,
-        arena_bounds=plan.arena_bounds,
-        occupancy_grid=grid,
-        map_bundle=map_bundle,
-        line_of_sight_optimization=False,
-    )
-    result = dry_run.results[0]
-    if result.route is None or result.failure is not None:
-        reason = result.failure.reason if result.failure is not None else "no route"
-        raise ValueError(f"candidate pre-approach A* failed: {reason}")
-    result, connector, smoothing = certify_and_smooth_exact_start_route(
-        result,
-        base_costmap=dry_run.base_costmap,
-        planning_costmap=dry_run.planning_costmap,
-        exact_start=start,
-        required_clearance_m=inflation_radius_m,
-    )
-    route_results = (result,)
-    assert result.route is not None
-    endpoint = result.route.points[-1].pose
-    terminal_yaw = math.atan2(
-        candidate.geometry.y_m - endpoint.y_m,
-        candidate.geometry.x_m - endpoint.x_m,
-    )
-
-    output_dir.mkdir(parents=True, exist_ok=False)
-    route_csv = output_dir / "route.csv"
-    diagnostics_json = output_dir / "route_diagnostics.json"
-    pipeline_summary = output_dir / "pipeline_summary.json"
-    local_snapshot = output_dir / "candidate_snapshot.json"
-    shutil.copyfile(snapshot_path, local_snapshot)
-    local_axis_observation = None
-    if axis_observation_path is not None:
-        local_axis_observation = output_dir / "axis_observation.json"
-        shutil.copyfile(axis_observation_path, local_axis_observation)
-    write_route_csv(route_csv, route_results, final_yaw_by_leg={0: terminal_yaw})
-    metadata = dict(dry_run.metadata)
-    metadata.update(
-        {
-            "source": "lidar_detected_stand_exploration",
-            "order": "nearest",
-            "plan_mode": "next-candidate",
-            "stand_count": 1,
-            "candidate_transit_radius_m": candidate_transit_radius_m,
-            "inflation_radius_m": inflation_radius_m,
-            "approach_offset_m": approach_offset_m,
-            "approach_bearing_mode": bearing_mode,
-            "physical_clearance_enforced": True,
-            "physical_clearance": dict(physical_clearance),
-            "candidate_snapshot_json": str(local_snapshot),
-            "candidate_snapshot_sha256": candidate_snapshot_sha256(snapshot),
-            "map_bundle_sha256": map_bundle.bundle_sha256,
-            "planning_frame": plan.planning_frame,
-            "selected_candidate_stand_id": candidate_uid,
-            "exact_start_connector": connector.to_metadata(),
-            "route_start_pose_provenance": {
-                "source": "autonomous_candidate_current_pose",
-                "planning_frame": plan.planning_frame,
-                "pose": {
-                    "x_m": start.x_m,
-                    "y_m": start.y_m,
-                    "yaw_rad": start.yaw_rad,
-                },
-            },
-            "line_of_sight_route_optimization": {
-                "enabled": True,
-                "legs": [smoothing.to_metadata()],
-                "input_point_count": smoothing.input_point_count,
-                "output_point_count": smoothing.output_point_count,
-                "optimized_leg_count": int(smoothing.optimized),
-            },
-            "selected_approach_pose": {
-                "x_m": endpoint.x_m,
-                "y_m": endpoint.y_m,
-                "yaw_rad": terminal_yaw,
-            },
-        }
-    )
-    if local_axis_observation is not None:
-        metadata.update(
-            {
-                "axis_observation_json": str(
-                    local_axis_observation.resolve()
-                ),
-                "axis_observation_sha256": _file_sha256(
-                    local_axis_observation
-                ),
-                "selected_face_normal_rad": normalize_angle(
-                    float(approach_normal_rad)
-                ),
-            }
-        )
-    write_diagnostics_json(diagnostics_json, route_results, metadata=metadata)
-    _write_json(
-        pipeline_summary,
-        {
-            "schema_version": 1,
-            "status": "observe_and_plan_complete",
-            "motion_published": False,
-            "selected_candidate_uid": candidate_uid,
-            "selected_approach_pose": metadata["selected_approach_pose"],
-            "physical_clearance": dict(physical_clearance),
-        },
-    )
-    return seal_detected_stand_preapproach(pipeline_root=output_dir)
-
-
 def opposite_face_normal(axis_observation_path: Path) -> float:
-    """Select the axis-perpendicular face opposite the first camera view."""
+    """Compatibility wrapper for the pure axis-observation binding."""
 
-    payload = json.loads(axis_observation_path.read_text())
-    if payload.get("observation_kind") != "real_stand_axis_without_qr":
-        raise ValueError("unexpected axis observation kind")
-    axis_rad = float(payload["stand_axis_rad"])
-    stand = payload["stand_center"]
-    robot = payload["robot_pose"]
-    robot_side = math.atan2(
-        float(robot["y_m"]) - float(stand["y_m"]),
-        float(robot["x_m"]) - float(stand["x_m"]),
-    )
-    normals = (
-        normalize_angle(axis_rad + math.pi / 2.0),
-        normalize_angle(axis_rad - math.pi / 2.0),
-    )
-    selected = min(normals, key=lambda normal: math.cos(normal - robot_side))
-    if math.cos(selected - robot_side) > -0.5:
-        raise ValueError(
-            "stand axis does not resolve a sufficiently opposite inspection face"
-        )
-    return selected
+    return load_opposite_face_normal(axis_observation_path)
 
 
 def bounded_approach_offsets(
@@ -627,6 +464,8 @@ def bounded_approach_offsets(
 
 
 def is_approach_feasibility_failure(exc: ValueError) -> bool:
+    if isinstance(exc, CandidatePreapproachUnreachableError):
+        return True
     message = str(exc)
     return (
         "candidate pre-approach A* failed" in message
@@ -784,7 +623,65 @@ def _plan_preapproach_from_request(
         physical_clearance=request.physical_clearance,
         approach_normal_rad=request.approach_normal_rad,
         axis_observation_path=request.axis_observation_path,
+        prepared_plan=request.prepared_plan,
+        selection_evidence=request.selection_evidence,
     )
+
+
+def _select_initial_preapproach(
+    request: CameraCandidateSelectionRequest,
+) -> CameraCandidateInitialSelection:
+    config = request.config
+    planned = plan_and_select_camera_candidate(
+        map_yaml=config.map_yaml,
+        semantic_map_id=config.semantic_map_id,
+        plan=config.plan,
+        snapshot=config.snapshot,
+        current_pose=request.current_pose,
+        unresolved=request.unresolved,
+        approach_offset_m=config.approach_offset_m,
+        inflation_radius_m=config.inflation_radius_m,
+        candidate_transit_radius_m=config.candidate_transit_radius_m,
+        physical_clearance=config.physical_clearance,
+        selection_config=CameraCandidateSelectionConfig(
+            linear_speed_mps=config.camera_selection_linear_speed_mps,
+            angular_speed_radps=config.camera_selection_angular_speed_radps,
+        ),
+        support_class_by_uid=request.support_class_by_uid,
+    )
+    return CameraCandidateInitialSelection(
+        candidate_uid=planned.selected_candidate_uid,
+        prepared_plan=planned.selected_plan,
+        evidence=planned.to_evidence(),
+    )
+
+
+def _validate_initial_selection(
+    selection: CameraCandidateInitialSelection,
+    *,
+    unresolved: set[str],
+) -> None:
+    if not isinstance(selection, CameraCandidateInitialSelection):
+        raise TypeError(
+            "camera selection effect must return CameraCandidateInitialSelection"
+        )
+    if selection.motion_authorized is not False:
+        raise RuntimeError("camera candidate selection must not authorize motion")
+    if selection.candidate_uid not in unresolved:
+        raise RuntimeError("camera selector returned a resolved or unknown candidate")
+    if not isinstance(selection.evidence, Mapping):
+        raise TypeError("camera candidate selection evidence must be a mapping")
+    evidence_uid = selection.evidence.get("selected_candidate_uid")
+    if evidence_uid is not None and evidence_uid != selection.candidate_uid:
+        raise RuntimeError("camera candidate selection evidence UID mismatch")
+    evidence_motion = selection.evidence.get("motion_authorized")
+    if evidence_motion not in (None, False):
+        raise RuntimeError("camera candidate evidence must not authorize motion")
+    if (
+        selection.prepared_plan is not None
+        and selection.prepared_plan.candidate_uid != selection.candidate_uid
+    ):
+        raise RuntimeError("camera selector returned a route for another candidate")
 
 
 @dataclass(frozen=True)
@@ -797,6 +694,9 @@ class CandidateApproachEffects:
     plan_preapproach: Callable[
         [CandidatePreapproachRequest], SealedRoute
     ] = _plan_preapproach_from_request
+    select_initial_preapproach: Callable[
+        [CameraCandidateSelectionRequest], CameraCandidateInitialSelection
+    ] = _select_initial_preapproach
     validate_facing: Callable[
         [FacingValidationRequest], Mapping[str, object]
     ] = validate_facing_pose
@@ -934,6 +834,8 @@ def _execute_candidate_motion(
             plan_request,
             start=attempt.fresh_start_pose,
             output_dir=attempt.source_root,
+            prepared_plan=None,
+            selection_evidence=None,
         )
         replacement_sealed = effects.plan_preapproach(replacement_plan)
         return _motion_request(
@@ -998,9 +900,30 @@ def execute_candidate_approach_phase(
             effects,
             context="initial_candidate_selection",
         )
-        candidate = nearest_candidate(config.snapshot, current, unresolved)
+        try:
+            selection = effects.select_initial_preapproach(
+                CameraCandidateSelectionRequest(
+                    config=config,
+                    current_pose=current,
+                    unresolved=frozenset(unresolved),
+                    support_class_by_uid=exact_two_support_by_uid,
+                )
+            )
+        except NoFeasibleCameraCandidateError as exc:
+            effects.event_sink(
+                config.session_root / "candidate_selection.jsonl",
+                {
+                    **exc.to_evidence(),
+                    "event": "camera_candidate_selection_failed",
+                    "timestamp_unix_sec": effects.clock(),
+                    "motion_authorized": False,
+                },
+            )
+            raise
+        _validate_initial_selection(selection, unresolved=unresolved)
+        candidate = config.snapshot.candidate_for(selection.candidate_uid)
         if candidate is None:
-            raise RuntimeError("candidate snapshot has no unresolved candidate")
+            raise RuntimeError("selected candidate disappeared from snapshot")
         candidate_root = (
             config.session_root
             / "candidates"
@@ -1018,12 +941,56 @@ def execute_candidate_approach_phase(
             output_dir=source_root,
             approach_offset_m=config.approach_offset_m,
             inflation_radius_m=config.inflation_radius_m,
-            candidate_transit_radius_m=(
-                config.candidate_transit_radius_m
-            ),
+            candidate_transit_radius_m=config.candidate_transit_radius_m,
             physical_clearance=config.physical_clearance,
+            prepared_plan=selection.prepared_plan,
+            selection_evidence=selection.evidence,
         )
-        sealed = effects.plan_preapproach(preapproach_plan_request)
+        selection_log_path = config.session_root / "candidate_selection.jsonl"
+        effects.event_sink(
+            selection_log_path,
+            {
+                **dict(selection.evidence),
+                "event": "camera_candidate_ranked",
+                "timestamp_unix_sec": effects.clock(),
+                "selected_candidate_uid": candidate.candidate_uid,
+                "route_materialized": False,
+                "motion_authorized": False,
+            },
+        )
+        try:
+            sealed = effects.plan_preapproach(preapproach_plan_request)
+        except Exception as exc:
+            effects.event_sink(
+                selection_log_path,
+                {
+                    **dict(selection.evidence),
+                    "event": "camera_candidate_route_materialization_failed",
+                    "timestamp_unix_sec": effects.clock(),
+                    "selected_candidate_uid": candidate.candidate_uid,
+                    "route_materialized": False,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "motion_authorized": False,
+                },
+            )
+            raise
+        materialized_event = {
+            **dict(selection.evidence),
+            "event": "camera_candidate_route_materialized",
+            "timestamp_unix_sec": effects.clock(),
+            "selected_candidate_uid": candidate.candidate_uid,
+            "materialized_candidate_uid": candidate.candidate_uid,
+            "selected_route_reused_for_materialization": (
+                selection.prepared_plan is not None
+            ),
+            "route_materialized": True,
+            "motion_authorized": False,
+        }
+        effects.event_sink(
+            selection_log_path,
+            materialized_event,
+        )
         candidate_run_id = (
             f"{config.session_id}_candidate_{candidate_index:03d}"
         )
@@ -1178,7 +1145,7 @@ def execute_candidate_approach_phase(
             )
         )
         visit_order.append(candidate.candidate_uid)
-        unresolved.remove(candidate.candidate_uid)
+        unresolved.discard(candidate.candidate_uid)
         candidate_index += 1
 
     identity_registry, _source_sha = create_registry(
@@ -1231,6 +1198,8 @@ __all__ = [
     "CandidateApproachConfig",
     "CandidateApproachEffects",
     "CandidateApproachPoseError",
+    "CameraCandidateInitialSelection",
+    "CameraCandidateSelectionRequest",
     "CandidateDecisionRequest",
     "CandidateMotionLegRequest",
     "CandidateObservation",

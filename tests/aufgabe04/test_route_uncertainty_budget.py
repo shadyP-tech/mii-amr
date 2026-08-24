@@ -2,7 +2,7 @@ import json
 import math
 import unittest
 
-from scripts.aufgabe04.navigation.route_uncertainty_budget import (
+from scripts.aufgabe04.navigation.execution.route_uncertainty_budget import (
     PlanarCovariance,
     RouteClearanceSegment,
     UNCERTAINTY_BUDGET_EXHAUSTED,

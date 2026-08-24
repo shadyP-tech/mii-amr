@@ -17,7 +17,7 @@ from scripts.aufgabe04.perception.stand_observation import (
     ObservationProvenance,
     StandObservation,
 )
-from scripts.aufgabe04.navigation.stand_coverage_survey import (
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
     CoverageSurveyConfig,
     StandSurveyRegistry,

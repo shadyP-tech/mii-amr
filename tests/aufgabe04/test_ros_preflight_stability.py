@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation.ros_preflight import (  # noqa: E402
+from scripts.aufgabe04.navigation.localization.ros_preflight import (  # noqa: E402
     StationaryAmclPoseSample,
     evaluate_latest_stationary_amcl_window,
     evaluate_stationary_amcl_stability,

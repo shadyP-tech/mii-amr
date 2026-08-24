@@ -73,7 +73,7 @@ scripts/aufgabe04/simulation/run_with_debug_bundle.sh "$RUN_ID" \
   --observed "" \
   --semantic-log "$SEMANTIC_LOG" \
   --perception-dir results/aufgabe04/debug/e2e_017_dynamic \
-  -- python3 scripts/aufgabe04/navigation/run_single_station_segment.py \
+  -- python3 scripts/aufgabe04/navigation/entrypoints/run_single_station_segment.py \
     --run-id "$RUN_ID" \
     --semantic-log "$SEMANTIC_LOG" \
     --allow-sim-time \
@@ -149,7 +149,7 @@ Then consume that artifact to compute the final pose and yaw-aware route,
 without reading the hidden layout yaw:
 
 ```bash
-python3 scripts/aufgabe04/navigation/compute_qr_facing_pose.py \
+python3 scripts/aufgabe04/navigation/entrypoints/compute_qr_facing_pose.py \
   --observation-json results/aufgabe04/detected_stations/latest_camera_observation.json \
   --output results/aufgabe04/detected_stations/final_qr_pose.json \
   --map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
@@ -165,7 +165,7 @@ To use a new random layout, generate it first and then pass it to the world
 generator:
 
 ```bash
-python3 scripts/aufgabe04/navigation/generate_random_station_layout.py \
+python3 scripts/aufgabe04/navigation/entrypoints/generate_random_station_layout.py \
   --station-count 3 --seed 42 \
   --output results/aufgabe04/layouts/random_station_layout.json
 python3 -m scripts.aufgabe04.simulation.generate_gazebo_world \

@@ -23,7 +23,7 @@ from scripts.aufgabe04.artifacts.models import (
     SurveyManifest,
     artifact_reference,
 )
-from scripts.aufgabe04.navigation.map_io import freeze_map_bundle
+from scripts.aufgabe04.navigation.planning.map_io import freeze_map_bundle
 from scripts.aufgabe04.real_robot.hardware_profile import (
     camera_calibration_sha256,
     load_camera_calibration,

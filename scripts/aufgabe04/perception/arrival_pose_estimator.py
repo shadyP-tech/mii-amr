@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 
-from scripts.aufgabe04.navigation.viewpoint_recommendation import (
+from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import (
     SynchronizedViewpointRecommendation,
     angular_distance,
     validate_recommendation,

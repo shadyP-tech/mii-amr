@@ -27,9 +27,9 @@ from scripts.aufgabe04.simulation.run_arrival_pose_survey import (
     main,
     SurveyCandidate,
 )
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.route_revision_store import RouteRevisionStore
-from scripts.aufgabe04.navigation.viewpoint_sampling_contract import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.execution.route_revision_store import RouteRevisionStore
+from scripts.aufgabe04.navigation.approach.viewpoint_sampling_contract import (
     VIEWPOINT_SAMPLING_CONTRACT_NAME,
     VIEWPOINT_SAMPLING_CONTRACT_VERSION,
 )

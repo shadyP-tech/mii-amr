@@ -2,7 +2,7 @@ import math
 import unittest
 from dataclasses import replace
 
-from scripts.aufgabe04.navigation.models import Pose2D
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.stations.arrival_pose_geometry import (
     ArrivalGeometryConfig,
     angular_distance_rad,

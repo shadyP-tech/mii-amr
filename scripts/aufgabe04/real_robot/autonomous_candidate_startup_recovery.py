@@ -22,11 +22,11 @@ import time
 from collections.abc import Mapping
 from typing import Callable, Generic, TypeVar
 
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.prestart_localization_reseal import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.localization.prestart_localization_reseal import (
     evaluate_prestart_localization_reseal,
 )
-from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
+from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization import (
     STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH,
     STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY,
 )

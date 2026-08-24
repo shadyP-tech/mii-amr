@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from importlib import import_module
 
-from scripts.aufgabe04.navigation.driving_behavior import (
+from scripts.aufgabe04.navigation.control.driving_behavior import (
     STATIC_PHYSICAL_ROUTE_KINDS,
     controller_config_for_route_kind,
 )
-from scripts.aufgabe04.navigation.follower_models import FollowerResult
+from scripts.aufgabe04.navigation.control.follower_models import FollowerResult
 from scripts.aufgabe04.navigation.waypoint_follower.config import FollowerConfig
 from scripts.aufgabe04.navigation.waypoint_follower.pose_lookup import (
     PoseLookupResult,
@@ -40,7 +40,7 @@ from scripts.aufgabe04.navigation.waypoint_follower.terminal_heading import (
     intermediate_terminal_heading_hold_diagnostics,
     reset_intermediate_terminal_heading_latch,
 )
-from scripts.aufgabe04.navigation.viewpoint_sampling_contract import (
+from scripts.aufgabe04.navigation.approach.viewpoint_sampling_contract import (
     INTERMEDIATE_TERMINAL_HEADING_DISTANCE_COMPARISON_EPSILON_M,
     INTERMEDIATE_TERMINAL_HEADING_ENTRY_TOLERANCE_M,
     INTERMEDIATE_TERMINAL_HEADING_HOLD_TOLERANCE_M,

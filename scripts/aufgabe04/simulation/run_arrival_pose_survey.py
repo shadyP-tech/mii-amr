@@ -18,15 +18,15 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds  # noqa: E402
-from scripts.aufgabe04.navigation.dynamic_approach_planner import (  # noqa: E402
+from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds  # noqa: E402
+from scripts.aufgabe04.navigation.approach.dynamic_approach_planner import (  # noqa: E402
     DynamicApproachConfig,
 )
-from scripts.aufgabe04.navigation.route_revision_store import (  # noqa: E402
+from scripts.aufgabe04.navigation.execution.route_revision_store import (  # noqa: E402
     RouteRevisionError,
     read_route_revision,
 )
-from scripts.aufgabe04.navigation.viewpoint_sampling_contract import (  # noqa: E402
+from scripts.aufgabe04.navigation.approach.viewpoint_sampling_contract import (  # noqa: E402
     DEFAULT_VIEWPOINT_SAMPLING_STRICT_ARRIVAL_TOLERANCE_M,
     DEFAULT_VIEWPOINT_SAMPLING_TARGET_DISTANCE_M,
     INTERMEDIATE_TERMINAL_HEADING_DISTANCE_COMPARISON_EPSILON_M,
@@ -37,16 +37,16 @@ from scripts.aufgabe04.navigation.viewpoint_sampling_contract import (  # noqa: 
     VIEWPOINT_SAMPLING_CONTRACT_VERSION,
     ViewpointSamplingHoldConfig,
 )
-from scripts.aufgabe04.navigation.map_io import (  # noqa: E402
+from scripts.aufgabe04.navigation.planning.map_io import (  # noqa: E402
     load_occupancy_grid_with_bundle,
     write_frozen_map_bundle,
 )
-from scripts.aufgabe04.navigation.models import Pose2D  # noqa: E402
-from scripts.aufgabe04.navigation.axis_acquisition_feedback import (  # noqa: E402
+from scripts.aufgabe04.navigation.foundation.models import Pose2D  # noqa: E402
+from scripts.aufgabe04.navigation.coverage.axis_acquisition_feedback import (  # noqa: E402
     AXIS_ACQUISITION_FEEDBACK_CONTRACT,
     AXIS_ACQUISITION_FEEDBACK_SCHEMA_VERSION,
 )
-from scripts.aufgabe04.navigation.plan_detected_stand_exploration import (  # noqa: E402
+from scripts.aufgabe04.navigation.missions.plan_detected_stand_exploration import (  # noqa: E402
     read_current_tf_pose,
 )
 from scripts.aufgabe04.stations.arrival_pose_catalog import (  # noqa: E402
@@ -96,7 +96,7 @@ _ENVELOPE_EPSILON_M = (
     + 1.0e-12
 )
 _FOLLOWER_SOURCE_RELATIVE_PATHS = (
-    "scripts/aufgabe04/navigation/simple_waypoint_follower.py",
+    "scripts/aufgabe04/navigation/waypoint_follower/runtime.py",
     "scripts/aufgabe04/navigation/waypoint_follower/__init__.py",
     "scripts/aufgabe04/navigation/waypoint_follower/config.py",
     "scripts/aufgabe04/navigation/waypoint_follower/pose_lookup.py",
@@ -189,7 +189,7 @@ def _survey_config_payload(args) -> dict[str, object]:
         ),
         "viewpoint_sampling_contract_source_sha256": _file_sha256(
             ROOT
-            / "scripts/aufgabe04/navigation/"
+            / "scripts/aufgabe04/navigation/approach/"
             "viewpoint_sampling_contract.py"
         ),
         "tangential_correction_gain": args.tangential_correction_gain,
@@ -273,25 +273,25 @@ def _survey_config_payload(args) -> dict[str, object]:
         ),
         "planner_source_sha256": _file_sha256(
             ROOT
-            / "scripts/aufgabe04/navigation/"
+            / "scripts/aufgabe04/navigation/missions/"
             "plan_synchronized_viewpoint.py"
         ),
         "runner_source_sha256": _file_sha256(
             ROOT
-            / "scripts/aufgabe04/navigation/"
-            "run_single_station_segment.py"
+            / "scripts/aufgabe04/navigation/station_segment/"
+            "runtime.py"
         ),
         "follower_source_sha256": _file_sha256(
             ROOT
-            / "scripts/aufgabe04/navigation/"
-            "simple_waypoint_follower.py"
+            / "scripts/aufgabe04/navigation/waypoint_follower/"
+            "runtime.py"
         ),
         "follower_module_source_sha256": (
             _follower_source_sha256_by_path()
         ),
         "waypoint_controller_source_sha256": _file_sha256(
             ROOT
-            / "scripts/aufgabe04/navigation/"
+            / "scripts/aufgabe04/navigation/control/"
             "waypoint_controller.py"
         ),
     }
@@ -956,7 +956,7 @@ def _planner_command(
     )
     command = [
         sys.executable,
-        "scripts/aufgabe04/navigation/plan_synchronized_viewpoint.py",
+        "scripts/aufgabe04/navigation/entrypoints/plan_synchronized_viewpoint.py",
         "--map", str(args.map),
         # Keep signed scientific-notation values attached to their options.
         # argparse otherwise interprets values such as ``-5.0e-06`` as a new
@@ -1043,7 +1043,7 @@ def _planner_command(
 def _runner_command(args, candidate: SurveyCandidate, output: Path):
     command = [
         sys.executable,
-        "scripts/aufgabe04/navigation/run_single_station_segment.py",
+        "scripts/aufgabe04/navigation/entrypoints/run_single_station_segment.py",
         "--leg-index", "0",
         "--route-csv", str(output / "survey_route.csv"),
         "--diagnostics-json", str(output / "survey_route_diagnostics.json"),

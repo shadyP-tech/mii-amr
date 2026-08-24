@@ -5,8 +5,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.simple_waypoint_follower import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.waypoint_follower.runtime import (
     STALE_TF_RECOVERY_MAX_CALLBACKS,
     STALE_TF_RECOVERY_MAX_DURATION_SEC,
     STALE_TF_RECOVERY_SPIN_TIMEOUT_SEC,
@@ -14,7 +14,7 @@ from scripts.aufgabe04.navigation.simple_waypoint_follower import (
     SimpleWaypointFollowerNode,
     tf_lookup_failure_details,
 )
-from scripts.aufgabe04.navigation.tf_stale_recovery_policy import (
+from scripts.aufgabe04.navigation.localization.tf_stale_recovery_policy import (
     OdomStationaritySample,
     TfEdgeSample,
     evaluate_stationarity,
@@ -718,13 +718,13 @@ class FollowerTfStaleRecoveryTest(unittest.TestCase):
         )
 
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.Empty",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.Empty",
             SimpleNamespace(Request=lambda: object()),
         ), patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.rclpy",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.rclpy",
             SimpleNamespace(ok=lambda: True),
         ), patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             return_value=0.0,
         ):
             result = node._real_amcl_stale_tf_recovery(
@@ -770,7 +770,7 @@ class FollowerTfStaleRecoveryTest(unittest.TestCase):
         node.publish_zero = Mock()
 
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             return_value=0.0,
         ):
             result = node._real_amcl_stale_tf_recovery(
@@ -806,10 +806,10 @@ class FollowerTfStaleRecoveryTest(unittest.TestCase):
         node.publish_zero = Mock()
 
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.rclpy",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.rclpy",
             SimpleNamespace(ok=lambda: True),
         ), patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             return_value=0.0,
         ):
             decision, evidence = (
@@ -836,13 +836,13 @@ class FollowerTfStaleRecoveryTest(unittest.TestCase):
         node.publish_zero = Mock()
 
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.Empty",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.Empty",
             SimpleNamespace(Request=lambda: object()),
         ), patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.rclpy",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.rclpy",
             SimpleNamespace(ok=lambda: True),
         ), patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             side_effect=(0.0, 0.0, 0.0, 2.1),
         ):
             result = node._real_amcl_stale_tf_recovery(
@@ -892,13 +892,13 @@ class FollowerTfStaleRecoveryTest(unittest.TestCase):
         )
 
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.Empty",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.Empty",
             SimpleNamespace(Request=lambda: object()),
         ), patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.rclpy",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.rclpy",
             SimpleNamespace(ok=lambda: True),
         ), patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             return_value=0.0,
         ):
             result = node._real_amcl_stale_tf_recovery(
@@ -945,10 +945,10 @@ class FollowerTfStaleRecoveryTest(unittest.TestCase):
         fake_rclpy = SimpleNamespace(spin_once=spin_once)
 
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.rclpy",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.rclpy",
             fake_rclpy,
         ), patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             side_effect=(0.0, 0.0, 0.05, 0.10, 0.15, 0.18, 0.18),
         ):
             deadline_drain = node._drain_runtime_callbacks(
@@ -964,10 +964,10 @@ class FollowerTfStaleRecoveryTest(unittest.TestCase):
 
         spin_once.reset_mock()
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.rclpy",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.rclpy",
             fake_rclpy,
         ), patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             return_value=0.0,
         ):
             capped_drain = node._drain_runtime_callbacks(

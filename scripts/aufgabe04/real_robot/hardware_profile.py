@@ -13,7 +13,7 @@ from scripts.aufgabe04.artifacts.content_store import (
     payload_sha256,
     write_content_hashed_json,
 )
-from scripts.aufgabe04.navigation.ros_runtime_config import (
+from scripts.aufgabe04.navigation.foundation.ros_runtime_config import (
     ResolvedRuntimeConfig,
     RuntimeConfig,
     resolve_runtime_config,

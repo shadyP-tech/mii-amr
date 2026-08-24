@@ -6,28 +6,28 @@ import unittest
 from dataclasses import asdict
 from pathlib import Path
 
-from scripts.aufgabe04.navigation.costmap import Costmap
-from scripts.aufgabe04.navigation.dynamic_approach_planner import (
+from scripts.aufgabe04.navigation.planning.costmap import Costmap
+from scripts.aufgabe04.navigation.approach.dynamic_approach_planner import (
     DynamicApproachConfig,
     plan_dynamic_approach,
 )
-from scripts.aufgabe04.navigation.dynamic_replan_policy import (
+from scripts.aufgabe04.navigation.coverage.dynamic_replan_policy import (
     DynamicReplanPolicy,
     DynamicReplanState,
 )
-from scripts.aufgabe04.navigation.dynamic_route_handoff import (
+from scripts.aufgabe04.navigation.execution.dynamic_route_handoff import (
     DynamicRouteSource,
     RouteUpdateKind,
 )
-from scripts.aufgabe04.navigation.map_io import CELL_FREE, MapMetadata, OccupancyGrid
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.plan_synchronized_viewpoint import (
+from scripts.aufgabe04.navigation.planning.map_io import CELL_FREE, MapMetadata, OccupancyGrid
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint import (
     _diagnostics_payload,
     _route_csv_text,
 )
-from scripts.aufgabe04.navigation.route_revision_store import RouteRevisionStore
-from scripts.aufgabe04.navigation.run_events import build_event
-from scripts.aufgabe04.navigation.viewpoint_recommendation import (
+from scripts.aufgabe04.navigation.execution.route_revision_store import RouteRevisionStore
+from scripts.aufgabe04.navigation.foundation.run_events import build_event
+from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import (
     FaceCandidate,
     MaterialTarget,
     SideEvidence,

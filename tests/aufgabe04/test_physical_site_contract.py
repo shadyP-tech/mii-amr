@@ -5,7 +5,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from scripts.aufgabe04.navigation.map_io import freeze_map_bundle
+from scripts.aufgabe04.navigation.planning.map_io import freeze_map_bundle
 from scripts.aufgabe04.real_robot.hardware_profile import (
     REAL_HARDWARE_PROFILE_SCHEMA_VERSION,
     RealRobotProfile,

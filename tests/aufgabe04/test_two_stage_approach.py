@@ -8,9 +8,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation.compute_qr_facing_pose import main  # noqa: E402
-from scripts.aufgabe04.navigation.models import Pose2D  # noqa: E402
-from scripts.aufgabe04.navigation.two_stage_approach import (  # noqa: E402
+from scripts.aufgabe04.navigation.approach.compute_qr_facing_pose import main  # noqa: E402
+from scripts.aufgabe04.navigation.foundation.models import Pose2D  # noqa: E402
+from scripts.aufgabe04.navigation.approach.two_stage_approach import (  # noqa: E402
     pre_approach_candidates,
     pre_approach_pose,
     qr_facing_pose_from_camera,
@@ -22,7 +22,7 @@ class TwoStageApproachTest(unittest.TestCase):
         completed = subprocess.run(
             [
                 sys.executable,
-                str(ROOT / "scripts/aufgabe04/navigation/compute_qr_facing_pose.py"),
+                str(ROOT / "scripts/aufgabe04/navigation/entrypoints/compute_qr_facing_pose.py"),
                 "--help",
             ],
             cwd=ROOT,

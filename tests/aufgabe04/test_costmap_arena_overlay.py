@@ -6,22 +6,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds  # noqa: E402
-from scripts.aufgabe04.navigation.costmap import (  # noqa: E402
+from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds  # noqa: E402
+from scripts.aufgabe04.navigation.planning.costmap import (  # noqa: E402
     CELL_SOURCE_ARENA_BOUNDARY,
     CELL_SOURCE_INFLATED,
     CELL_SOURCE_STATIC_OCCUPIED,
     CELL_SOURCE_UNKNOWN,
     Costmap,
 )
-from scripts.aufgabe04.navigation.map_io import (  # noqa: E402
+from scripts.aufgabe04.navigation.planning.map_io import (  # noqa: E402
     CELL_FREE,
     CELL_OCCUPIED,
     CELL_UNKNOWN,
     MapMetadata,
     OccupancyGrid,
 )
-from scripts.aufgabe04.navigation.models import GridCell  # noqa: E402
+from scripts.aufgabe04.navigation.foundation.models import GridCell  # noqa: E402
 
 
 def padded_grid() -> OccupancyGrid:

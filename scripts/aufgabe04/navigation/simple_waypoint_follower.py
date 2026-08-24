@@ -2,8 +2,9 @@
 
 The operational implementation lives in
 ``scripts.aufgabe04.navigation.waypoint_follower.runtime`` so the driving
-pipeline is split into testable contracts and one ROS motion edge.  This module
-aliases that runtime to keep existing imports and monkeypatch targets working.
+pipeline remains split into testable contracts and one ROS motion edge.  This
+module aliases that runtime to preserve historical imports and monkeypatch
+targets without introducing a second motion implementation.
 """
 
 from __future__ import annotations

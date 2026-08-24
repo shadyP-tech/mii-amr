@@ -13,12 +13,23 @@ from unittest.mock import Mock, patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds
-from scripts.aufgabe04.navigation.mission_leg_motion_permit import MissionLegKind
-from scripts.aufgabe04.navigation.map_io import load_occupancy_grid_with_bundle
-from scripts.aufgabe04.navigation.models import GridCell, Pose2D
-from scripts.aufgabe04.navigation.read_current_amcl_pose import CurrentAmclPose
-from scripts.aufgabe04.navigation.stand_coverage_survey import (
+from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import MissionLegKind
+from scripts.aufgabe04.navigation.planning.map_io import load_occupancy_grid_with_bundle
+from scripts.aufgabe04.navigation.foundation.models import GridCell, Pose2D
+from scripts.aufgabe04.navigation.localization.read_current_amcl_pose import CurrentAmclPose
+from scripts.aufgabe04.navigation.approach.camera_candidate_selection import (
+    CameraCandidateRouteOption,
+    CameraCandidateSelectionConfig,
+    NoFeasibleCameraCandidateError,
+)
+from scripts.aufgabe04.navigation.approach.candidate_preapproach_selection import (
+    plan_and_select_camera_candidate,
+)
+from scripts.aufgabe04.navigation.approach.candidate_preapproach_planning import (
+    CandidatePreapproachUnreachableError,
+)
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     CoverageSurveyConfig,
     CoverageSurveyPlan,
     SurveyViewpoint,
@@ -28,6 +39,8 @@ from scripts.aufgabe04.real_robot.autonomous_candidate_approach import (
     CandidateApproachEffects,
     CandidateApproachPoseError,
     CandidateObservation,
+    CameraCandidateInitialSelection,
+    CameraCandidateSelectionRequest,
     FacingValidationRequest,
     execute_candidate_approach_phase,
     nearest_candidate,
@@ -123,6 +136,28 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
         )
 
     @staticmethod
+    def _nearest_selection(
+        request: CameraCandidateSelectionRequest,
+    ) -> CameraCandidateInitialSelection:
+        candidate = nearest_candidate(
+            request.config.snapshot,
+            request.current_pose,
+            set(request.unresolved),
+        )
+        if candidate is None:
+            raise RuntimeError("test selector found no unresolved candidate")
+        return CameraCandidateInitialSelection(
+            candidate_uid=candidate.candidate_uid,
+            prepared_plan=None,
+            evidence={
+                "schema_version": 1,
+                "selected_candidate_uid": candidate.candidate_uid,
+                "selection_strategy": "test-nearest",
+                "motion_authorized": False,
+            },
+        )
+
+    @staticmethod
     def _completed(request) -> MotionLegOutcome:
         return MotionLegOutcome(
             run_id=request.run_id,
@@ -165,6 +200,118 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
 
             self.assertIsNotNone(selected)
             self.assertEqual(selected.candidate_uid, "candidate_a")
+
+    def test_route_preview_selection_avoids_inside_standoff_large_turn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            map_yaml = write_free_map(root)
+            _, map_bundle = load_occupancy_grid_with_bundle(
+                map_yaml,
+                semantic_map_id="arena",
+                planning_frame="map",
+            )
+            near_inside = self._candidate("candidate_inside", 0.35, 0.45)
+            forward = self._candidate("candidate_forward", 1.20, 0.0)
+            config = self._config(root, (near_inside, forward))
+            snapshot = new_candidate_snapshot(
+                snapshot_id="candidate_snapshot",
+                created_unix_sec=3.0,
+                planning_frame="map",
+                map_bundle_sha256=map_bundle.bundle_sha256,
+                candidates=(near_inside, forward),
+            )
+            plan = replace(
+                config.plan,
+                map_bundle_sha256=map_bundle.bundle_sha256,
+            )
+
+            planned = plan_and_select_camera_candidate(
+                map_yaml=map_yaml,
+                semantic_map_id="arena",
+                plan=plan,
+                snapshot=snapshot,
+                current_pose=Pose2D(0.0, 0.0, 0.0),
+                unresolved=set(snapshot.candidate_uids),
+                approach_offset_m=0.70,
+                inflation_radius_m=0.25,
+                candidate_transit_radius_m=0.31,
+                physical_clearance=config.physical_clearance,
+                selection_config=CameraCandidateSelectionConfig(
+                    linear_speed_mps=0.055,
+                    angular_speed_radps=0.18,
+                ),
+            )
+            selection = planned.selection
+
+            self.assertEqual(
+                selection.selected_candidate_uid,
+                "candidate_forward",
+            )
+            preview_by_uid = {
+                row.candidate_uid: row.option
+                for row in selection.ranked_candidates
+            }
+            self.assertTrue(
+                preview_by_uid["candidate_inside"].inside_requested_standoff
+            )
+            self.assertGreater(
+                preview_by_uid["candidate_inside"].initial_turn_rad,
+                math.radians(100.0),
+            )
+            self.assertLess(
+                preview_by_uid["candidate_forward"].initial_turn_rad,
+                math.radians(30.0),
+            )
+
+    def test_selection_failure_blocks_planning_motion_and_camera(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate = self._candidate("candidate_1", 0.2, 0.0)
+            config = self._config(root, (candidate,))
+            rejected = CameraCandidateRouteOption(
+                candidate_uid=candidate.candidate_uid,
+                feasible=False,
+                failure_reason="no_path",
+                route_length_m=None,
+                turn_burden_rad=None,
+                initial_turn_rad=None,
+                inside_requested_standoff=True,
+                support_class="coverage_admitted",
+                confidence=candidate.confidence,
+                hit_count=candidate.hit_count,
+            )
+            select = Mock(
+                side_effect=NoFeasibleCameraCandidateError((rejected,))
+            )
+            plan_preapproach = Mock()
+            run_motion = Mock()
+            capture = Mock()
+            events = []
+
+            with self.assertRaises(NoFeasibleCameraCandidateError):
+                execute_candidate_approach_phase(
+                    config,
+                    CandidateApproachEffects(
+                        select_initial_preapproach=select,
+                        read_current_pose=lambda: Pose2D(0.0, 0.0, 0.0),
+                        run_motion_leg=run_motion,
+                        capture_observation=capture,
+                        plan_preapproach=plan_preapproach,
+                        event_sink=lambda _path, payload: events.append(payload),
+                    ),
+                )
+
+            select.assert_called_once()
+            plan_preapproach.assert_not_called()
+            run_motion.assert_not_called()
+            capture.assert_not_called()
+            self.assertEqual(
+                events[0]["event"], "camera_candidate_selection_failed"
+            )
+            self.assertEqual(
+                events[0]["error_code"], "no_feasible_camera_candidate"
+            )
+            self.assertFalse(events[0]["motion_authorized"])
 
     def test_preapproach_route_starts_at_exact_live_pose_and_binds_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -302,6 +449,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                 execute_candidate_approach_phase(
                     config,
                     CandidateApproachEffects(
+                        select_initial_preapproach=self._nearest_selection,
                         read_current_pose=lambda: next(poses),
                         run_motion_leg=self._completed,
                         capture_observation=lambda _request: CandidateObservation(
@@ -336,6 +484,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                 execute_candidate_approach_phase(
                     config,
                     CandidateApproachEffects(
+                        select_initial_preapproach=self._nearest_selection,
                         read_current_pose=lambda: next(poses),
                         run_motion_leg=self._completed,
                         capture_observation=lambda request: CandidateObservation(
@@ -414,6 +563,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             outcome = execute_candidate_approach_phase(
                 config,
                 CandidateApproachEffects(
+                    select_initial_preapproach=self._nearest_selection,
                     read_current_pose=lambda: next(pose_values),
                     run_motion_leg=run_motion,
                     capture_observation=capture,
@@ -453,6 +603,195 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                     events.index(("commit", uid)),
                 )
 
+    def test_direct_qr_route_preview_orders_before_motion_when_map_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            map_yaml = write_free_map(root)
+            _, map_bundle = load_occupancy_grid_with_bundle(
+                map_yaml,
+                semantic_map_id="arena",
+                planning_frame="map",
+            )
+            near_inside = self._candidate("candidate_inside", 0.35, 0.45)
+            forward = self._candidate("candidate_forward", 1.20, 0.0)
+            base = self._config(root, (near_inside, forward))
+            snapshot = new_candidate_snapshot(
+                snapshot_id="candidate_snapshot",
+                created_unix_sec=3.0,
+                planning_frame="map",
+                map_bundle_sha256=map_bundle.bundle_sha256,
+                candidates=(near_inside, forward),
+            )
+            config = replace(
+                base,
+                map_yaml=map_yaml,
+                plan=replace(
+                    base.plan,
+                    map_bundle_sha256=map_bundle.bundle_sha256,
+                ),
+                snapshot=snapshot,
+            )
+            poses = iter(
+                (
+                    Pose2D(0.0, 0.0, 0.0),
+                    Pose2D(0.50, 0.0, 0.0),
+                    Pose2D(0.50, 0.0, 0.0),
+                    Pose2D(-0.08, -0.10, 0.0),
+                )
+            )
+            plan_requests = []
+            selection_events = []
+
+            nearest_without_route_preview = nearest_candidate(
+                snapshot,
+                Pose2D(0.0, 0.0, 0.0),
+                set(snapshot.candidate_uids),
+            )
+            self.assertIsNotNone(nearest_without_route_preview)
+            self.assertEqual(
+                nearest_without_route_preview.candidate_uid,
+                "candidate_inside",
+            )
+
+            def plan_preapproach(request):
+                plan_requests.append(request)
+                return {"route_csv": "route.csv"}
+
+            outcome = execute_candidate_approach_phase(
+                config,
+                CandidateApproachEffects(
+                    read_current_pose=lambda: next(poses),
+                    run_motion_leg=self._completed,
+                    capture_observation=lambda request: CandidateObservation(
+                        request.output_dir / "recommendation.json",
+                        f"QR_{request.candidate.candidate_uid}",
+                        None,
+                    ),
+                    plan_preapproach=plan_preapproach,
+                    validate_facing=lambda request: {
+                        "candidate_uid": request.candidate.candidate_uid
+                    },
+                    commit_decision=lambda request: None,
+                    event_sink=lambda _path, payload: selection_events.append(
+                        payload
+                    ),
+                    clock=lambda: 10.0,
+                ),
+            )
+
+            self.assertEqual(
+                outcome.visit_order,
+                ("candidate_forward", "candidate_inside"),
+            )
+            self.assertEqual(
+                [request.candidate_uid for request in plan_requests],
+                list(outcome.visit_order),
+            )
+            ranked_events = [
+                event
+                for event in selection_events
+                if event["event"] == "camera_candidate_ranked"
+            ]
+            materialized_events = [
+                event
+                for event in selection_events
+                if event["event"] == "camera_candidate_route_materialized"
+            ]
+            self.assertEqual(
+                [event["selected_candidate_uid"] for event in ranked_events],
+                list(outcome.visit_order),
+            )
+            self.assertEqual(
+                [
+                    event["materialized_candidate_uid"]
+                    for event in materialized_events
+                ],
+                list(outcome.visit_order),
+            )
+            for uid, plan_request, ranked, materialized in zip(
+                outcome.visit_order,
+                plan_requests,
+                ranked_events,
+                materialized_events,
+                strict=True,
+            ):
+                self.assertIn("selection_policy", ranked)
+                self.assertEqual(ranked["selected_candidate_uid"], uid)
+                self.assertFalse(ranked["route_materialized"])
+                self.assertFalse(ranked["motion_authorized"])
+                self.assertIsNotNone(plan_request.prepared_plan)
+                self.assertEqual(plan_request.prepared_plan.candidate_uid, uid)
+                self.assertEqual(
+                    plan_request.selection_evidence["selected_candidate_uid"],
+                    uid,
+                )
+                self.assertEqual(materialized["selected_candidate_uid"], uid)
+                self.assertEqual(materialized["materialized_candidate_uid"], uid)
+                self.assertTrue(
+                    materialized["selected_route_reused_for_materialization"]
+                )
+                self.assertTrue(materialized["route_materialized"])
+                self.assertFalse(materialized["motion_authorized"])
+
+    def test_route_materialization_failure_is_logged_before_motion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate = self._candidate("candidate_1", 0.2, 0.0)
+            config = self._config(root, (candidate,))
+            materialize = Mock(
+                side_effect=RuntimeError("prepared route binding mismatch")
+            )
+            run_motion = Mock()
+            capture = Mock()
+            events = []
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "prepared route binding mismatch",
+            ):
+                execute_candidate_approach_phase(
+                    config,
+                    CandidateApproachEffects(
+                        select_initial_preapproach=self._nearest_selection,
+                        read_current_pose=lambda: Pose2D(0.0, 0.0, 0.0),
+                        run_motion_leg=run_motion,
+                        capture_observation=capture,
+                        plan_preapproach=materialize,
+                        event_sink=lambda _path, payload: events.append(payload),
+                        clock=lambda: 10.0,
+                    ),
+                )
+
+            materialize.assert_called_once()
+            run_motion.assert_not_called()
+            capture.assert_not_called()
+            ranked = next(
+                event
+                for event in events
+                if event["event"] == "camera_candidate_ranked"
+            )
+            failed = next(
+                event
+                for event in events
+                if event["event"]
+                == "camera_candidate_route_materialization_failed"
+            )
+            self.assertEqual(
+                ranked["selected_candidate_uid"],
+                candidate.candidate_uid,
+            )
+            self.assertEqual(
+                failed["selected_candidate_uid"],
+                candidate.candidate_uid,
+            )
+            self.assertFalse(failed["route_materialized"])
+            self.assertFalse(failed["motion_authorized"])
+            self.assertEqual(failed["error_type"], "RuntimeError")
+            self.assertEqual(
+                failed["error_message"],
+                "prepared route binding mismatch",
+            )
+
     def test_axis_only_observation_uses_bounded_opposite_face_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -484,8 +823,9 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                 if request.approach_normal_rad is not None:
                     planned_offsets.append(request.approach_offset_m)
                     if len(planned_offsets) < 3:
-                        raise ValueError(
-                            "candidate pre-approach A* failed: target is blocked"
+                        raise CandidatePreapproachUnreachableError(
+                            request.candidate_uid,
+                            "target is blocked",
                         )
                 return {"route_csv": "route.csv"}
 
@@ -506,6 +846,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             outcome = execute_candidate_approach_phase(
                 config,
                 CandidateApproachEffects(
+                    select_initial_preapproach=self._nearest_selection,
                     read_current_pose=lambda: next(poses),
                     run_motion_leg=run_motion,
                     capture_observation=capture,
@@ -565,6 +906,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                 execute_candidate_approach_phase(
                     config,
                     CandidateApproachEffects(
+                        select_initial_preapproach=self._nearest_selection,
                         read_current_pose=lambda: Pose2D(0.0, 0.0, 0.0),
                         run_motion_leg=mismatched_outcome,
                         capture_observation=capture,
@@ -655,6 +997,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                 outcome = execute_candidate_approach_phase(
                     config,
                     CandidateApproachEffects(
+                        select_initial_preapproach=self._nearest_selection,
                         read_current_pose=lambda: next(poses),
                         run_motion_leg=initial_motion,
                         run_startup_reseal_motion_leg=replacement_motion,
@@ -725,6 +1068,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                 execute_candidate_approach_phase(
                     config,
                     CandidateApproachEffects(
+                        select_initial_preapproach=self._nearest_selection,
                         read_current_pose=lambda: next(poses),
                         run_motion_leg=self._completed,
                         capture_observation=lambda request: CandidateObservation(
@@ -764,6 +1108,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                 execute_candidate_approach_phase(
                     config,
                     CandidateApproachEffects(
+                        select_initial_preapproach=self._nearest_selection,
                         read_current_pose=lambda: next(poses),
                         run_motion_leg=self._completed,
                         capture_observation=lambda request: CandidateObservation(

@@ -1,10 +1,10 @@
 import unittest
 
-from scripts.aufgabe04.navigation.odom_execution_certificate import (
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
     PlanarTransform2D,
 )
-from scripts.aufgabe04.navigation.ros_preflight import RosPreflightResult
-from scripts.aufgabe04.navigation.run_single_station_segment import (
+from scripts.aufgabe04.navigation.localization.ros_preflight import RosPreflightResult
+from scripts.aufgabe04.navigation.entrypoints.run_single_station_segment import (
     _admit_stationary_map_from_odom_window,
 )
 

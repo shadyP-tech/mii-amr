@@ -7,9 +7,9 @@ import json
 from pathlib import Path
 from typing import Dict, Mapping
 
-from scripts.aufgabe04.navigation.follower_models import FollowerResult
-from scripts.aufgabe04.navigation.run_events import emit_event
-from scripts.aufgabe04.navigation.segment_run_logger import append_segment_run
+from scripts.aufgabe04.navigation.control.follower_models import FollowerResult
+from scripts.aufgabe04.navigation.foundation.run_events import emit_event
+from scripts.aufgabe04.navigation.foundation.segment_run_logger import append_segment_run
 
 def _append_jsonl(path: Path, payload: Mapping[str, object]) -> None:
     """Append one post-adoption mission event or fail the zero-held handoff."""

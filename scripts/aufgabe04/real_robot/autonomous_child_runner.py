@@ -12,11 +12,11 @@ from dataclasses import dataclass
 from pathlib import Path
 import sys
 
-from scripts.aufgabe04.navigation.mission_leg_motion_permit import (
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     ROUTINE_MISSION_LEG_KINDS,
     MissionLegKind,
 )
-from scripts.aufgabe04.navigation.transient_overlay_resume_state import (
+from scripts.aufgabe04.navigation.coverage.transient_overlay_resume_state import (
     load_jsonl_event_objects,
 )
 
@@ -163,7 +163,7 @@ def build_child_runner_command(
     )
     command = [
         sys.executable,
-        "scripts/aufgabe04/navigation/run_single_station_segment.py",
+        "scripts/aufgabe04/navigation/entrypoints/run_single_station_segment.py",
         "--route-csv",
         str(route_csv),
         "--diagnostics-json",

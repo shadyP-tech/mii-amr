@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from scripts.aufgabe04.navigation.models import Pose2D
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
 
 
 # Gazebo odometry quaternions are unit normalized. A 1e-3 norm tolerance

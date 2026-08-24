@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.aufgabe04.navigation.execution_route_certificate import (
+from scripts.aufgabe04.navigation.execution.execution_route_certificate import (
     ExecutionRouteCertificate,
     check_execution_route_tube,
     execution_route_certificate_sha256,
@@ -11,7 +11,7 @@ from scripts.aufgabe04.navigation.execution_route_certificate import (
     validate_execution_route_identity,
     write_execution_route_certificate,
 )
-from scripts.aufgabe04.navigation.models import Pose2D
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
 
 
 class ExecutionRouteCertificateTest(unittest.TestCase):

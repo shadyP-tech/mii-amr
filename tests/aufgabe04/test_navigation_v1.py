@@ -8,20 +8,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation.costmap import (  # noqa: E402
+from scripts.aufgabe04.navigation.planning.costmap import (  # noqa: E402
     CELL_SOURCE_INFLATED,
     CELL_SOURCE_RUN_LOCAL,
     Costmap,
 )
-from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds  # noqa: E402
-from scripts.aufgabe04.navigation.global_planner import (  # noqa: E402
+from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds  # noqa: E402
+from scripts.aufgabe04.navigation.planning.global_planner import (  # noqa: E402
     FAILURE_GOAL_SNAP_FAILED,
     FAILURE_NO_PATH,
     FAILURE_START_SNAP_FAILED,
     STATUS_OK,
     plan_route,
 )
-from scripts.aufgabe04.navigation.map_io import (  # noqa: E402
+from scripts.aufgabe04.navigation.planning.map_io import (  # noqa: E402
     CELL_FREE,
     CELL_OCCUPIED,
     CELL_UNKNOWN,
@@ -30,18 +30,18 @@ from scripts.aufgabe04.navigation.map_io import (  # noqa: E402
     load_occupancy_grid,
     read_pgm,
 )
-from scripts.aufgabe04.navigation.models import GridCell, Pose2D  # noqa: E402
-from scripts.aufgabe04.navigation.route_context import build_station_route_dry_run  # noqa: E402
-from scripts.aufgabe04.navigation.route_overlay import (  # noqa: E402
+from scripts.aufgabe04.navigation.foundation.models import GridCell, Pose2D  # noqa: E402
+from scripts.aufgabe04.navigation.execution.route_context import build_station_route_dry_run  # noqa: E402
+from scripts.aufgabe04.navigation.planning.route_overlay import (  # noqa: E402
     RouteOverlayInput,
     render_route_overlay_svg,
     world_to_svg_units,
 )
-from scripts.aufgabe04.navigation.run_station_route import (  # noqa: E402
+from scripts.aufgabe04.navigation.missions.run_station_route import (  # noqa: E402
     build_parser as build_route_parser,
     main as run_station_route_main,
 )
-from scripts.aufgabe04.navigation.station_approach import navigation_targets_from_visits  # noqa: E402
+from scripts.aufgabe04.navigation.planning.station_approach import navigation_targets_from_visits  # noqa: E402
 from scripts.aufgabe04.stations.models import ApproachTarget, StationPose, StationVisit  # noqa: E402
 from scripts.aufgabe04.stations.models import Station  # noqa: E402
 from scripts.aufgabe04.stations.station_layout_io import write_station_layout_json  # noqa: E402
@@ -599,15 +599,22 @@ class StationDryRunTest(unittest.TestCase):
     def test_navigation_does_not_import_aufgabe03(self):
         navigation_dir = ROOT / "scripts" / "aufgabe04" / "navigation"
         offenders = []
-        for path in navigation_dir.glob("*.py"):
+        for path in navigation_dir.rglob("*.py"):
             text = path.read_text()
             if "scripts.aufgabe03" in text or "map_path_planner" in text:
-                offenders.append(path.name)
+                offenders.append(str(path.relative_to(navigation_dir)))
 
         self.assertEqual(offenders, [])
 
     def test_route_overlay_keeps_offline_import_boundary(self):
-        text = (ROOT / "scripts" / "aufgabe04" / "navigation" / "route_overlay.py").read_text()
+        text = (
+            ROOT
+            / "scripts"
+            / "aufgabe04"
+            / "navigation"
+            / "planning"
+            / "route_overlay.py"
+        ).read_text()
         banned = ["import rclpy", "nav_msgs", "geometry_msgs", "matplotlib", "PIL"]
         offenders = [pattern for pattern in banned if pattern in text]
 

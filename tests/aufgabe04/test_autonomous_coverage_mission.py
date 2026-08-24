@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import tempfile
 import unittest
 
-from scripts.aufgabe04.navigation.stand_coverage_survey import (
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STATUS_PENDING_CAMERA,
 )
 from scripts.aufgabe04.real_robot import autonomous_coverage_mission as mission

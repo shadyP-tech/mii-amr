@@ -6,8 +6,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import scripts.aufgabe04.navigation.route_revision_store as revision_module
-from scripts.aufgabe04.navigation.route_revision_store import (
+import scripts.aufgabe04.navigation.execution.route_revision_store as revision_module
+from scripts.aufgabe04.navigation.execution.route_revision_store import (
     RouteRevisionError,
     RouteRevisionStore,
     read_committed_revision,

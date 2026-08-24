@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from scripts.aufgabe04.navigation.models import Pose2D
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.real_robot.autonomous_child_runner import MotionLegOutcome
 from scripts.aufgabe04.real_robot import autonomous_coverage_replanning as replanning
 from scripts.aufgabe04.real_robot import autonomous_coverage_execution as execution

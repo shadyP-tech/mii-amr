@@ -33,7 +33,7 @@ Options:
   --help
 
 The command should be a simulation runner such as:
-  python3 scripts/aufgabe04/navigation/run_single_station_segment.py ... --allow-sim-time
+  python3 scripts/aufgabe04/navigation/entrypoints/run_single_station_segment.py ... --allow-sim-time
 EOF
 }
 

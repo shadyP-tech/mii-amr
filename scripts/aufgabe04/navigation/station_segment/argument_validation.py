@@ -7,11 +7,11 @@ import os
 from pathlib import Path
 import uuid
 
-from scripts.aufgabe04.navigation.mission_leg_identity_args import (
+from scripts.aufgabe04.navigation.execution.mission_leg_identity_args import (
     resolve_mission_leg_event_identity,
 )
-from scripts.aufgabe04.navigation.run_events import configure_event_logger
-from scripts.aufgabe04.navigation.viewpoint_sampling_contract import (
+from scripts.aufgabe04.navigation.foundation.run_events import configure_event_logger
+from scripts.aufgabe04.navigation.approach.viewpoint_sampling_contract import (
     INTERMEDIATE_TERMINAL_HEADING_ENTRY_TOLERANCE_M,
     INTERMEDIATE_TERMINAL_HEADING_HOLD_TOLERANCE_M,
     INTERMEDIATE_TERMINAL_HEADING_TARGET_ENVELOPE_RADIUS_M,

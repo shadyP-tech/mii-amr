@@ -14,28 +14,30 @@ from scripts.aufgabe04.artifacts.content_store import (
     load_content_hashed_json,
     payload_sha256,
 )
-from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds
-from scripts.aufgabe04.navigation.costmap import Costmap
-from scripts.aufgabe04.navigation.map_io import (
+from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds
+from scripts.aufgabe04.navigation.planning.costmap import Costmap
+from scripts.aufgabe04.navigation.planning.map_io import (
     CELL_FREE,
     CELL_OCCUPIED,
     MapMetadata,
     OccupancyGrid,
     load_occupancy_grid_with_bundle,
 )
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.record_stand_coverage_stop import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.coverage.record_stand_coverage_stop import (
     commit_stand_coverage_stop,
 )
-from scripts.aufgabe04.navigation import (
-    coverage_stop_perception_admission as perception_admission,
+from scripts.aufgabe04.navigation.coverage import (
     record_stand_coverage_stop as coverage_stop,
 )
-from scripts.aufgabe04.navigation.stand_candidate_static_map_admission import (
+from scripts.aufgabe04.navigation.coverage import (
+    coverage_stop_perception_admission as perception_admission,
+)
+from scripts.aufgabe04.navigation.coverage.stand_candidate_static_map_admission import (
     STATIC_MAP_CLEARANCE_BELOW_REQUIRED,
     evaluate_stand_candidate_static_map_admission,
 )
-from scripts.aufgabe04.navigation.stand_coverage_survey import (
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     build_coverage_survey_plan,
     load_stand_survey_registry,
     new_stand_survey_registry,
@@ -289,7 +291,7 @@ class StandCandidateStaticMapAdmissionTest(unittest.TestCase):
     def test_module_remains_ros_free(self):
         module_path = (
             Path(__file__).resolve().parents[2]
-            / "scripts/aufgabe04/navigation/stand_candidate_static_map_admission.py"
+            / "scripts/aufgabe04/navigation/coverage/stand_candidate_static_map_admission.py"
         )
         tree = ast.parse(module_path.read_text())
         imported = {

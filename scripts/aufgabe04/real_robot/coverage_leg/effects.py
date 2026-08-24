@@ -8,7 +8,7 @@ from pathlib import Path
 import time
 from typing import Any, Callable
 
-from scripts.aufgabe04.navigation.stand_discovery_route import (
+from scripts.aufgabe04.navigation.coverage.stand_discovery_route import (
     seal_stand_discovery_route,
 )
 from scripts.aufgabe04.real_robot import autonomous_coverage_replanning as replanning

@@ -6,9 +6,9 @@ import math
 from dataclasses import dataclass
 from typing import Sequence
 
-from scripts.aufgabe04.navigation.driving_behavior import INTERMEDIATE_ROUTE_KINDS
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.viewpoint_sampling_contract import (
+from scripts.aufgabe04.navigation.control.driving_behavior import INTERMEDIATE_ROUTE_KINDS
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.approach.viewpoint_sampling_contract import (
     DEFAULT_VIEWPOINT_SAMPLING_TARGET_DISTANCE_M,
     INTERMEDIATE_TERMINAL_HEADING_DISTANCE_COMPARISON_EPSILON_M,
     INTERMEDIATE_TERMINAL_HEADING_ENTRY_TOLERANCE_M,
@@ -17,7 +17,7 @@ from scripts.aufgabe04.navigation.viewpoint_sampling_contract import (
     ViewpointSamplingHoldConfig,
     viewpoint_sampling_hold_metrics,
 )
-from scripts.aufgabe04.navigation.waypoint_controller import (
+from scripts.aufgabe04.navigation.control.waypoint_controller import (
     ControllerConfig,
     ControllerStep,
     VelocityCommand,

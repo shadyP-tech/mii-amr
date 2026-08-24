@@ -6,7 +6,9 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from scripts.aufgabe04.navigation import record_stand_coverage_stop as coverage_stop
+from scripts.aufgabe04.navigation.coverage import (
+    record_stand_coverage_stop as coverage_stop,
+)
 
 
 SURVEY_ROOT = Path("survey")

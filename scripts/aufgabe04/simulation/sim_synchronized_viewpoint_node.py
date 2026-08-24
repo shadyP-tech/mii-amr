@@ -23,8 +23,8 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.axis_acquisition_feedback import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.coverage.axis_acquisition_feedback import (
     AXIS_ACQUISITION_FEEDBACK_CONTRACT,
     AXIS_ACQUISITION_FEEDBACK_SCHEMA_VERSION,
     axis_acquisition_feedback_binding,
@@ -32,7 +32,7 @@ from scripts.aufgabe04.navigation.axis_acquisition_feedback import (
     consume_axis_acquisition_feedback,
     load_axis_acquisition_feedback,
 )
-from scripts.aufgabe04.navigation.viewpoint_sampling_contract import (
+from scripts.aufgabe04.navigation.approach.viewpoint_sampling_contract import (
     DEFAULT_VIEWPOINT_SAMPLING_TARGET_DISTANCE_M,
     INTERMEDIATE_TERMINAL_HEADING_HOLD_TOLERANCE_M,
     INTERMEDIATE_TERMINAL_HEADING_TARGET_ENVELOPE_RADIUS_M,
@@ -40,7 +40,7 @@ from scripts.aufgabe04.navigation.viewpoint_sampling_contract import (
     VIEWPOINT_SAMPLING_CONTRACT_VERSION,
     ViewpointSamplingHoldConfig,
 )
-from scripts.aufgabe04.navigation.viewpoint_recommendation import (
+from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import (
     FaceCandidate,
     MaterialTarget,
     QrBindingObservation,

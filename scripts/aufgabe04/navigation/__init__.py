@@ -1,2 +1,1 @@
-"""Navigation adapters for Aufgabe 04."""
-
+"""Modular planning and execution support for Aufgabe 04 navigation."""

@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.aufgabe04.navigation.pre_approach_sampling_state import (
+from scripts.aufgabe04.navigation.approach.pre_approach_sampling_state import (
     initial_sampling_state,
     load_sampling_state,
     write_sampling_state,

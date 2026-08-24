@@ -7,21 +7,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation.costmap import Costmap  # noqa: E402
-from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds  # noqa: E402
-from scripts.aufgabe04.navigation.exact_start_connector import (  # noqa: E402
+from scripts.aufgabe04.navigation.planning.costmap import Costmap  # noqa: E402
+from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds  # noqa: E402
+from scripts.aufgabe04.navigation.planning.exact_start_connector import (  # noqa: E402
     prepend_certified_exact_start,
 )
-from scripts.aufgabe04.navigation.global_planner import plan_route  # noqa: E402
-from scripts.aufgabe04.navigation.map_io import (  # noqa: E402
+from scripts.aufgabe04.navigation.planning.global_planner import plan_route  # noqa: E402
+from scripts.aufgabe04.navigation.planning.map_io import (  # noqa: E402
     CELL_FREE,
     CELL_OCCUPIED,
     MapMetadata,
     OccupancyGrid,
 )
-from scripts.aufgabe04.navigation.models import GridCell, Pose2D  # noqa: E402
-from scripts.aufgabe04.navigation.route_context import build_station_route_dry_run  # noqa: E402
-from scripts.aufgabe04.navigation.route_smoothing import (  # noqa: E402
+from scripts.aufgabe04.navigation.foundation.models import GridCell, Pose2D  # noqa: E402
+from scripts.aufgabe04.navigation.execution.route_context import build_station_route_dry_run  # noqa: E402
+from scripts.aufgabe04.navigation.planning.route_smoothing import (  # noqa: E402
     greedy_line_of_sight_shortcut,
     segment_is_collision_free,
     smooth_plan_route_from_exact_start_with_summary,

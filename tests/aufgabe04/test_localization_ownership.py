@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation.localization_ownership import (  # noqa: E402
+from scripts.aufgabe04.navigation.localization.localization_ownership import (  # noqa: E402
     FAIL_AMBIGUOUS,
     FAIL_AMCL_STALE,
     FAIL_AMCL_WITH_EXTERNAL_TF,

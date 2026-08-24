@@ -14,7 +14,7 @@ except ImportError:  # pragma: no cover
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds  # noqa: E402
+from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds  # noqa: E402
 from scripts.aufgabe04.perception.sim_wall_edge_mask import (  # noqa: E402
     build_confirmed_wall_exclusion_mask,
     ray_distance_to_arena_wall,

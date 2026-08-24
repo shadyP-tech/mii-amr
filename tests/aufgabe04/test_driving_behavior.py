@@ -1,15 +1,15 @@
 import unittest
 
-from scripts.aufgabe04.navigation.driving_behavior import (
+from scripts.aufgabe04.navigation.control.driving_behavior import (
     CommandSmoother,
     CommandSmoothingConfig,
     controller_config_for_route_kind,
     next_control_loop_timing,
     shape_velocity_command,
 )
-from scripts.aufgabe04.navigation.simple_waypoint_follower import FollowerConfig
-from scripts.aufgabe04.navigation.waypoint_controller import ControllerConfig
-from scripts.aufgabe04.navigation.waypoint_controller import VelocityCommand
+from scripts.aufgabe04.navigation.waypoint_follower.runtime import FollowerConfig
+from scripts.aufgabe04.navigation.control.waypoint_controller import ControllerConfig
+from scripts.aufgabe04.navigation.control.waypoint_controller import VelocityCommand
 
 
 class DrivingBehaviorTest(unittest.TestCase):

@@ -17,25 +17,25 @@ from pathlib import Path
 import time
 from typing import Any, Callable
 
-from scripts.aufgabe04.navigation.mission_leg_motion_permit import (
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     MissionLegKind,
 )
-from scripts.aufgabe04.navigation.prestart_localization_reseal import (
+from scripts.aufgabe04.navigation.localization.prestart_localization_reseal import (
     evaluate_prestart_localization_reseal,
 )
-from scripts.aufgabe04.navigation.runtime_localization_reseal import (
+from scripts.aufgabe04.navigation.localization.runtime_localization_reseal import (
     evaluate_runtime_localization_reseal,
     evaluate_runtime_localization_reseal_budget,
 )
-from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
+from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization import (
     STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH,
     STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY,
 )
-from scripts.aufgabe04.navigation.stand_coverage_survey import CoverageSurveyPlan
-from scripts.aufgabe04.navigation.stand_discovery_route import (
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import CoverageSurveyPlan
+from scripts.aufgabe04.navigation.coverage.stand_discovery_route import (
     seal_stand_discovery_route,
 )
-from scripts.aufgabe04.navigation.transient_overlay_resume_state import (
+from scripts.aufgabe04.navigation.coverage.transient_overlay_resume_state import (
     TransientOverlayResumeState,
 )
 from scripts.aufgabe04.real_robot.autonomous_child_runner import (

@@ -12,7 +12,7 @@ import json
 import math
 from pathlib import Path
 
-from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
+from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization import (
     STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH,
     STARTUP_RESEAL_RECOVERY_SOURCE_KINDS,
     STARTUP_RESEAL_PERMIT_SUMMARY_SCHEMA_VERSION,
@@ -23,7 +23,7 @@ from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
     startup_reseal_motion_authorization_sha256,
     write_startup_reseal_motion_permit,
 )
-from scripts.aufgabe04.navigation.mission_leg_motion_permit import MissionLegKind
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import MissionLegKind
 from scripts.aufgabe04.real_robot.autonomous_artifact_paths import (
     resolve_normal_artifact_path,
 )

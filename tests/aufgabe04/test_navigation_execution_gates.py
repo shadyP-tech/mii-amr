@@ -14,11 +14,11 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation.ros_runtime_config import (  # noqa: E402
+from scripts.aufgabe04.navigation.foundation.ros_runtime_config import (  # noqa: E402
     RuntimeConfig,
     resolve_runtime_config,
 )
-from scripts.aufgabe04.navigation.run_single_station_segment import (  # noqa: E402
+from scripts.aufgabe04.navigation.entrypoints.run_single_station_segment import (  # noqa: E402
     _covariance_bounded_continuity_limits,
     _execution_initial_distance_limit,
     _load_execution_route_leg,
@@ -26,20 +26,20 @@ from scripts.aufgabe04.navigation.run_single_station_segment import (  # noqa: E
     build_parser,
     main as run_segment_main,
 )
-from scripts.aufgabe04.navigation.route_uncertainty_budget import (  # noqa: E402
+from scripts.aufgabe04.navigation.execution.route_uncertainty_budget import (  # noqa: E402
     PlanarCovariance,
 )
-from scripts.aufgabe04.navigation.mission_execution_gate import (  # noqa: E402
+from scripts.aufgabe04.navigation.execution.mission_execution_gate import (  # noqa: E402
     load_diagnostics_snapshot,
     validate_planner_config_descriptor,
     validate_route_bundle_descriptor,
 )
-from scripts.aufgabe04.navigation.safety_checks import (  # noqa: E402
+from scripts.aufgabe04.navigation.control.safety_checks import (  # noqa: E402
     catalog_start_egress_certificate,
     validate_route_diagnostics_json,
     validate_speed_limits,
 )
-from scripts.aufgabe04.navigation.waypoint_csv import load_route_leg  # noqa: E402
+from scripts.aufgabe04.navigation.planning.waypoint_csv import load_route_leg  # noqa: E402
 
 
 ROUTE_HEADER = (
@@ -642,7 +642,7 @@ class SegmentRunnerCliGateTest(unittest.TestCase):
             )
             write_diagnostics(diagnostics, length=0.1)
             with patch(
-                "scripts.aufgabe04.navigation.run_single_station_segment.run_ros_preflight"
+                "scripts.aufgabe04.navigation.entrypoints.run_single_station_segment.run_ros_preflight"
             ) as preflight, redirect_stderr(StringIO()):
                 with self.assertRaises(SystemExit) as raised:
                     run_segment_main(
@@ -696,7 +696,7 @@ class SegmentRunnerCliGateTest(unittest.TestCase):
             )
             stderr = StringIO()
             with patch(
-                "scripts.aufgabe04.navigation.run_single_station_segment."
+                "scripts.aufgabe04.navigation.entrypoints.run_single_station_segment."
                 "run_ros_preflight"
             ) as preflight, redirect_stderr(stderr):
                 with self.assertRaises(SystemExit) as raised:

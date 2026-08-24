@@ -114,7 +114,7 @@ Choose the start pose for the later logistics route. If the robot will be reset
 to the bottom-right corner before execution, use that reset pose here:
 
 ```bash
-python3 scripts/aufgabe04/navigation/plan_arrival_catalog_route.py \
+python3 scripts/aufgabe04/navigation/entrypoints/plan_arrival_catalog_route.py \
   --catalog results/aufgabe04/detected_stations/arrival_pose_catalog_session_001.json \
   --map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
   --world simulation/gazebo/worlds/aufgabe04_stands.world \
@@ -147,7 +147,7 @@ snapshot is authoritative for station order; repeated `--fixed-station-order`
 arguments are optional assertions and must match it exactly when supplied:
 
 ```bash
-python3 scripts/aufgabe04/navigation/plan_arrival_catalog_route.py \
+python3 scripts/aufgabe04/navigation/entrypoints/plan_arrival_catalog_route.py \
   --catalog results/aufgabe04/detected_stations/arrival_pose_catalog_session_001.json \
   --map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
   --world simulation/gazebo/worlds/aufgabe04_stands.world \
@@ -186,7 +186,7 @@ surveyed catalog to already be frozen and never rewrites that source catalog.
 Dry-run a leg first while Gazebo topics are available:
 
 ```bash
-python3 scripts/aufgabe04/navigation/run_single_station_segment.py \
+python3 scripts/aufgabe04/navigation/entrypoints/run_single_station_segment.py \
   --route-csv results/aufgabe04/routes/task_route_session_001.csv \
   --diagnostics-json results/aufgabe04/routes/task_route_session_001_diagnostics.json \
   --route-certificate-json results/aufgabe04/routes/task_route_session_001_certificate.json \
@@ -226,7 +226,7 @@ it must pass the same mission, route-bundle, certificate, and runtime-map inputs
 for every sequential leg. The old survey-only demonstration command is:
 
 ```bash
-python3 scripts/aufgabe04/navigation/run_detected_stand_exploration_sim.py \
+python3 scripts/aufgabe04/navigation/entrypoints/run_detected_stand_exploration_sim.py \
   --route-csv results/aufgabe04/routes/optimized_arrival_route_session_001.csv \
   --diagnostics-json results/aufgabe04/routes/optimized_arrival_route_session_001_diagnostics.json \
   --run-id-prefix arrival_route_session_001 \

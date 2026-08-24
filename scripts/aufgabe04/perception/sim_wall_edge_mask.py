@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds
+from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds
 from scripts.aufgabe04.perception.stand_axis_lidar_roi import PlainLaserScan
 from scripts.aufgabe04.simulation.sim_head_roi import project_target_to_camera
 

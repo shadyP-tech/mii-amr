@@ -4,39 +4,39 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.aufgabe04.navigation.driving_behavior import (
+from scripts.aufgabe04.navigation.control.driving_behavior import (
     CATALOG_PHYSICAL_ROUTE_KINDS,
     DYNAMIC_VIEWPOINT_ROUTE_KINDS,
     STATIC_PHYSICAL_ROUTE_KINDS,
 )
-from scripts.aufgabe04.navigation.detected_stand_preapproach import (
+from scripts.aufgabe04.navigation.approach.detected_stand_preapproach import (
     DETECTED_STAND_PREAPPROACH_ROUTE_KIND,
     validate_detected_stand_preapproach_binding,
 )
-from scripts.aufgabe04.navigation.dynamic_route_handoff import (
+from scripts.aufgabe04.navigation.execution.dynamic_route_handoff import (
     validate_arena_boundary_evidence,
 )
-from scripts.aufgabe04.navigation.mission_execution_gate import (
+from scripts.aufgabe04.navigation.execution.mission_execution_gate import (
     MissionExecutionBinding,
     load_diagnostics_snapshot,
     validate_logistics_execution_bundle,
 )
-from scripts.aufgabe04.navigation.route_revision_store import RouteRevisionError
-from scripts.aufgabe04.navigation.run_events import emit_event
-from scripts.aufgabe04.navigation.safety_checks import (
+from scripts.aufgabe04.navigation.execution.route_revision_store import RouteRevisionError
+from scripts.aufgabe04.navigation.foundation.run_events import emit_event
+from scripts.aufgabe04.navigation.control.safety_checks import (
     catalog_start_egress_certificate,
     validate_catalog_route_binding_json,
     validate_route_diagnostics_json,
     validate_speed_limits,
 )
-from scripts.aufgabe04.navigation.stand_discovery_route import (
+from scripts.aufgabe04.navigation.coverage.stand_discovery_route import (
     STAND_DISCOVERY_ROUTE_KIND,
     validate_stand_discovery_route_binding,
 )
-from scripts.aufgabe04.navigation.stand_coverage_survey import (
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     load_coverage_survey_plan,
 )
-from scripts.aufgabe04.navigation.transient_overlay_resume_state import (
+from scripts.aufgabe04.navigation.coverage.transient_overlay_resume_state import (
     TransientOverlayResumeState,
     transient_overlay_resume_state_sha256,
     validate_transient_overlay_resume_state_diagnostics_binding,

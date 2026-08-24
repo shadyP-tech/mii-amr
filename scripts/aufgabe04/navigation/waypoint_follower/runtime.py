@@ -8,24 +8,24 @@ import time
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
-from scripts.aufgabe04.navigation.controller_trace import (
+from scripts.aufgabe04.navigation.control.controller_trace import (
     ControllerTraceRecord,
     ControllerTraceWriter,
 )
-from scripts.aufgabe04.navigation.dynamic_route_handoff import (
+from scripts.aufgabe04.navigation.execution.dynamic_route_handoff import (
     RouteUpdate,
 )
-from scripts.aufgabe04.navigation.driving_behavior import (
+from scripts.aufgabe04.navigation.control.driving_behavior import (
     CommandSmoother,
     STATIC_PHYSICAL_ROUTE_KINDS,
     STATIC_STARTUP_SEGMENT_JOIN_ROUTE_KINDS,
     controller_config_for_route_kind,
 )
-from scripts.aufgabe04.navigation.execution_route_certificate import (
+from scripts.aufgabe04.navigation.execution.execution_route_certificate import (
     ExecutionRouteCheck,
     check_execution_route_tube,
 )
-from scripts.aufgabe04.navigation.odom_route_adapter import (
+from scripts.aufgabe04.navigation.localization.odom_route_adapter import (
     OdomExecutionContext,
 )
 from scripts.aufgabe04.navigation.waypoint_follower.pose_lookup import (
@@ -34,19 +34,19 @@ from scripts.aufgabe04.navigation.waypoint_follower.pose_lookup import (
     _yaw_from_quaternion,
     tf_lookup_failure_details,
 )
-from scripts.aufgabe04.navigation.follower_models import FollowerResult
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.ros_runtime_config import (
+from scripts.aufgabe04.navigation.control.follower_models import FollowerResult
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.foundation.ros_runtime_config import (
     ResolvedRuntimeConfig,
     resolve_topic,
 )
-from scripts.aufgabe04.navigation.viewpoint_sampling_contract import (
+from scripts.aufgabe04.navigation.approach.viewpoint_sampling_contract import (
     INTERMEDIATE_TERMINAL_HEADING_DISTANCE_COMPARISON_EPSILON_M,
     INTERMEDIATE_TERMINAL_HEADING_ENTRY_TOLERANCE_M,
     INTERMEDIATE_TERMINAL_HEADING_HOLD_TOLERANCE_M,
     INTERMEDIATE_TERMINAL_HEADING_TARGET_ENVELOPE_RADIUS_M,
 )
-from scripts.aufgabe04.navigation.waypoint_controller import (
+from scripts.aufgabe04.navigation.control.waypoint_controller import (
     CertifiedCornerControlConfig,
     CertifiedCornerTransitionDecision,
     CertifiedCornerTransitionLatch,

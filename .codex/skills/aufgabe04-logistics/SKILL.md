@@ -75,7 +75,7 @@ For Aufgabe 04 real runs, require:
 - no active competing Nav2/custom follower goal during handoff
 - station keepout and approach-zone validation
 - single-robot validation before two-robot operation
-- `scripts/aufgabe04/navigation/run_single_station_segment.py --dry-run` must
+- `scripts/aufgabe04/navigation/entrypoints/run_single_station_segment.py --dry-run` must
   pass before real single-segment motion
 - `scripts/common/run_with_bundle.sh` should wrap every physical run and use
   the same namespace/topic/frame options as the wrapped command

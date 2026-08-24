@@ -9,17 +9,17 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from scripts.aufgabe04.navigation.coverage_replan_coordinator import (
+from scripts.aufgabe04.navigation.coverage.coverage_replan_coordinator import (
     CoverageReplanCoordinator,
     _front_evidence,
     _load_escape_metadata,
 )
-from scripts.aufgabe04.navigation.dynamic_route_handoff import RouteUpdateKind
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.plan_stand_coverage_survey import (
+from scripts.aufgabe04.navigation.execution.dynamic_route_handoff import RouteUpdateKind
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.missions.plan_stand_coverage_survey import (
     main as plan_coverage,
 )
-from scripts.aufgabe04.navigation.stand_discovery_route import (
+from scripts.aufgabe04.navigation.coverage.stand_discovery_route import (
     STAND_DISCOVERY_ROUTE_KIND,
 )
 
@@ -239,15 +239,15 @@ class CoverageReplanCoordinatorTest(unittest.TestCase):
                 }
 
             with patch(
-                "scripts.aufgabe04.navigation.coverage_replan_coordinator."
+                "scripts.aufgabe04.navigation.coverage.coverage_replan_coordinator."
                 "record_transient_blockage_replan",
                 side_effect=transient_artifacts,
             ) as record, patch(
-                "scripts.aufgabe04.navigation.coverage_replan_coordinator."
+                "scripts.aufgabe04.navigation.coverage.coverage_replan_coordinator."
                 "seal_stand_discovery_route",
                 side_effect=sealed_artifacts,
             ), patch(
-                "scripts.aufgabe04.navigation.coverage_replan_coordinator."
+                "scripts.aufgabe04.navigation.coverage.coverage_replan_coordinator."
                 "load_route_leg",
                 side_effect=legs,
             ):
@@ -407,15 +407,15 @@ class CoverageReplanCoordinatorTest(unittest.TestCase):
                 )
 
             with patch(
-                "scripts.aufgabe04.navigation.coverage_replan_coordinator."
+                "scripts.aufgabe04.navigation.coverage.coverage_replan_coordinator."
                 "record_transient_blockage_replan",
                 side_effect=transient_artifacts,
             ) as record, patch(
-                "scripts.aufgabe04.navigation.coverage_replan_coordinator."
+                "scripts.aufgabe04.navigation.coverage.coverage_replan_coordinator."
                 "seal_stand_discovery_route",
                 side_effect=sealed_artifacts,
             ) as seal, patch(
-                "scripts.aufgabe04.navigation.coverage_replan_coordinator."
+                "scripts.aufgabe04.navigation.coverage.coverage_replan_coordinator."
                 "load_route_leg",
                 side_effect=loaded_leg,
             ):

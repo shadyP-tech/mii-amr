@@ -2,8 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.run_detected_stand_observe_plan import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.missions.run_detected_stand_observe_plan import (
     _artifact_paths,
     _default_output_dir,
     _ensure_new_artifacts,

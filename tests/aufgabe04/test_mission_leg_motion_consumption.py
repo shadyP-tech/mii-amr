@@ -4,12 +4,12 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from scripts.aufgabe04.navigation.mission_leg_motion_consumption import (
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_consumption import (
     consume_mission_leg_motion_permit,
     default_mission_leg_motion_consumption_receipt_path,
     load_mission_leg_motion_consumption_receipt,
 )
-from scripts.aufgabe04.navigation.mission_leg_motion_permit import (
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     MISSION_LEG_RUN_CONFIRMATION,
     ROUTINE_MISSION_LEG_KINDS,

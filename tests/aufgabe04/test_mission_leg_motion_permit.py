@@ -5,7 +5,7 @@ from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 from scripts.aufgabe04.artifacts.content_store import payload_sha256
-from scripts.aufgabe04.navigation.mission_leg_motion_permit import (
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     MISSION_LEG_RUN_CONFIRMATION,
     ROUTINE_MISSION_LEG_KINDS,

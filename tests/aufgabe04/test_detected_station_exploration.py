@@ -17,26 +17,26 @@ from unittest.mock import MagicMock, patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation.plan_first_detected_station import (  # noqa: E402
+from scripts.aufgabe04.navigation.missions.plan_first_detected_station import (  # noqa: E402
     build_parser as build_first_detected_station_parser,
     load_and_validate_confirmation_receipt,
     main as plan_first_detected_station_main,
     validate_observation_provenance,
 )
-from scripts.aufgabe04.navigation.plan_detected_stand_exploration import (  # noqa: E402
+from scripts.aufgabe04.navigation.missions.plan_detected_stand_exploration import (  # noqa: E402
     build_parser as build_detected_stand_exploration_parser,
     main as plan_detected_stand_exploration_main,
     start_pose_from_args,
 )
-from scripts.aufgabe04.navigation import (  # noqa: E402
+from scripts.aufgabe04.navigation.missions import (  # noqa: E402
     plan_detected_stand_exploration as exploration_planner,
 )
-from scripts.aufgabe04.navigation.create_detected_station_confirmation import (  # noqa: E402
+from scripts.aufgabe04.navigation.approach.create_detected_station_confirmation import (  # noqa: E402
     build_parser as build_detected_station_confirmation_parser,
     main as create_detected_station_confirmation_main,
 )
-from scripts.aufgabe04.navigation.route_context import file_sha256  # noqa: E402
-from scripts.aufgabe04.navigation.map_io import freeze_map_bundle  # noqa: E402
+from scripts.aufgabe04.navigation.execution.route_context import file_sha256  # noqa: E402
+from scripts.aufgabe04.navigation.planning.map_io import freeze_map_bundle  # noqa: E402
 from scripts.aufgabe04.perception.models import StandCandidate  # noqa: E402
 from scripts.aufgabe04.perception.stand_confirmation import (  # noqa: E402
     StandConfirmationAccumulator,

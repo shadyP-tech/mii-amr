@@ -15,16 +15,16 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation.map_io import freeze_map_bundle
+from scripts.aufgabe04.navigation.planning.map_io import freeze_map_bundle
 from scripts.aufgabe04.artifacts.content_store import payload_sha256
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.odom_execution_certificate import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
     OdomExecutionCertificate,
     PlanarTransform2D,
     load_odom_execution_certificate,
     odom_execution_certificate_sha256,
 )
-from scripts.aufgabe04.navigation.ros_runtime_config import RuntimeConfig, resolve_runtime_config
+from scripts.aufgabe04.navigation.foundation.ros_runtime_config import RuntimeConfig, resolve_runtime_config
 from scripts.aufgabe04.perception.lidar_stand_detector import detect_stand_candidates_from_scan
 from scripts.aufgabe04.perception.lidar_stand_morphology import (
     MORPHOLOGY_PROFILE_EVIDENCE_KEY,

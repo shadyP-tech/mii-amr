@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
-from scripts.aufgabe04.navigation import simple_waypoint_follower as follower
+from scripts.aufgabe04.navigation.waypoint_follower import runtime as follower
 
 
 class FollowerCallbackServiceTest(unittest.TestCase):

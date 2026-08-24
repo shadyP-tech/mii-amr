@@ -10,17 +10,17 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.aufgabe04.navigation.detected_stand_preapproach import (
+from scripts.aufgabe04.navigation.approach.detected_stand_preapproach import (
     DETECTED_STAND_PREAPPROACH_ROUTE_KIND,
     seal_detected_stand_preapproach,
     validate_detected_stand_preapproach_binding,
 )
-from scripts.aufgabe04.navigation.plan_detected_stand_exploration import main as plan
-from scripts.aufgabe04.navigation.ros_preflight import RosPreflightResult
-from scripts.aufgabe04.navigation.run_single_station_segment import (
+from scripts.aufgabe04.navigation.missions.plan_detected_stand_exploration import main as plan
+from scripts.aufgabe04.navigation.localization.ros_preflight import RosPreflightResult
+from scripts.aufgabe04.navigation.entrypoints.run_single_station_segment import (
     main as run_segment,
 )
-from scripts.aufgabe04.navigation.waypoint_csv import load_route_leg
+from scripts.aufgabe04.navigation.planning.waypoint_csv import load_route_leg
 from scripts.aufgabe04.perception.stand_observation import (
     write_observation_jsonl,
 )
@@ -186,7 +186,7 @@ class DetectedStandPreapproachTest(unittest.TestCase):
             outputs = seal_detected_stand_preapproach(pipeline_root=root)
             leg = load_route_leg(Path(outputs["route_csv"]), 0)
             with patch(
-                "scripts.aufgabe04.navigation.run_single_station_segment."
+                "scripts.aufgabe04.navigation.entrypoints.run_single_station_segment."
                 "run_ros_preflight",
                 return_value=RosPreflightResult(
                     ok=True,
@@ -202,7 +202,7 @@ class DetectedStandPreapproachTest(unittest.TestCase):
                     },
                 ),
             ), patch(
-                "scripts.aufgabe04.navigation.run_single_station_segment."
+                "scripts.aufgabe04.navigation.entrypoints.run_single_station_segment."
                 "run_simple_waypoint_follower"
             ) as follower, redirect_stdout(StringIO()):
                 status = run_segment(

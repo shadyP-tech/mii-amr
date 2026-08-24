@@ -10,17 +10,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation.generate_random_station_layout import (  # noqa: E402
+from scripts.aufgabe04.navigation.planning.generate_random_station_layout import (  # noqa: E402
     build_parser as build_generate_parser,
     main as generate_layout_main,
 )
-from scripts.aufgabe04.navigation.arena_bounds import (  # noqa: E402
+from scripts.aufgabe04.navigation.foundation.arena_bounds import (  # noqa: E402
     DEFAULT_ARENA_LENGTH_M,
     DEFAULT_ARENA_WIDTH_M,
     ArenaBounds,
 )
-from scripts.aufgabe04.navigation.models import Pose2D  # noqa: E402
-from scripts.aufgabe04.navigation.random_station_layout import (  # noqa: E402
+from scripts.aufgabe04.navigation.foundation.models import Pose2D  # noqa: E402
+from scripts.aufgabe04.navigation.planning.random_station_layout import (  # noqa: E402
     RandomStationLayoutConfig,
     generate_random_station_layout,
     station_ids_from_count,

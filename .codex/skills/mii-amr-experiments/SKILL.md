@@ -266,7 +266,7 @@ Current code tree:
 Current single-segment dry run:
 
 ```bash
-python3 scripts/aufgabe04/navigation/run_single_station_segment.py \
+python3 scripts/aufgabe04/navigation/entrypoints/run_single_station_segment.py \
   --dry-run \
   --leg-index 1 \
   --route-csv results/aufgabe04/routes/station_route.csv \

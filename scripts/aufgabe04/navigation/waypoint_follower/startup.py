@@ -5,11 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
-from scripts.aufgabe04.navigation.execution_route_certificate import (
+from scripts.aufgabe04.navigation.execution.execution_route_certificate import (
     ExecutionRouteCheck,
     check_execution_route_tube,
 )
-from scripts.aufgabe04.navigation.models import Pose2D
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.navigation.waypoint_follower.config import FollowerConfig
 
 

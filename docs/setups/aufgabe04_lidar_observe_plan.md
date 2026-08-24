@@ -31,7 +31,7 @@ Use the current localized base pose for `--start-x`, `--start-y`, and
 `--start-yaw`. This command is ROS-free and motion-free:
 
 ```bash
-python3 scripts/aufgabe04/navigation/plan_stand_coverage_survey.py \
+python3 scripts/aufgabe04/navigation/entrypoints/plan_stand_coverage_survey.py \
   --map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
   --semantic-map-id arena_1p898x3p9_auto \
   --planning-frame map \
@@ -57,7 +57,7 @@ For the measured small arena, an explicit minimal two-stop plan can be
 requested without weakening the visibility model:
 
 ```bash
-python3 scripts/aufgabe04/navigation/plan_stand_coverage_survey.py \
+python3 scripts/aufgabe04/navigation/entrypoints/plan_stand_coverage_survey.py \
   --map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
   --semantic-map-id arena_1p898x3p9_auto \
   --planning-frame map \
@@ -134,7 +134,7 @@ fused into one registry.
 ### 3. Fuse candidates and replan
 
 ```bash
-python3 scripts/aufgabe04/navigation/record_stand_coverage_stop.py \
+python3 scripts/aufgabe04/navigation/entrypoints/record_stand_coverage_stop.py \
   --survey-root "$SURVEY_ROOT" \
   --map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
   --semantic-map-id arena_1p898x3p9_auto \
@@ -178,7 +178,7 @@ After inspecting a `pending_camera` candidate, create a small receipt:
 Then record it without invoking motion:
 
 ```bash
-python3 scripts/aufgabe04/navigation/record_stand_candidate_decision.py \
+python3 scripts/aufgabe04/navigation/entrypoints/record_stand_candidate_decision.py \
   --survey-root "$SURVEY_ROOT" \
   --decision-receipt-json candidate_decision.json
 ```
@@ -233,7 +233,7 @@ export ROS_LOCALHOST_ONLY=0
 export TURTLEBOT3_MODEL=burger
 export LDS_MODEL=LDS-02
 
-python3 scripts/aufgabe04/navigation/run_detected_stand_observe_plan.py \
+python3 scripts/aufgabe04/navigation/entrypoints/run_detected_stand_observe_plan.py \
   --map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
   --semantic-map-id arena_1p898x3p9_auto \
   --readiness-timeout-sec 30 \
@@ -274,7 +274,7 @@ command:
 ```bash
 export RUN_ROOT=results/aufgabe04/real_explore_YYYYMMDD_HHMMSS
 
-python3 scripts/aufgabe04/navigation/prepare_detected_stand_preapproach.py \
+python3 scripts/aufgabe04/navigation/entrypoints/prepare_detected_stand_preapproach.py \
   --pipeline-root "$RUN_ROOT"
 ```
 
@@ -293,7 +293,7 @@ by the standard `transform_tolerance: 1.0` configuration. Scan and odometry
 timestamps retain the stricter `0.25 s` future limit.
 
 ```bash
-python3 scripts/aufgabe04/navigation/run_single_station_segment.py \
+python3 scripts/aufgabe04/navigation/entrypoints/run_single_station_segment.py \
   --route-csv "$RUN_ROOT/preapproach_execution/route.csv" \
   --diagnostics-json "$RUN_ROOT/preapproach_execution/route_diagnostics.json" \
   --route-certificate-json "$RUN_ROOT/preapproach_execution/route_certificate.json" \

@@ -7,11 +7,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation.models import Pose2D  # noqa: E402
-from scripts.aufgabe04.navigation.execution_route_certificate import (  # noqa: E402
+from scripts.aufgabe04.navigation.foundation.models import Pose2D  # noqa: E402
+from scripts.aufgabe04.navigation.execution.execution_route_certificate import (  # noqa: E402
     check_execution_route_tube,
 )
-from scripts.aufgabe04.navigation.waypoint_controller import (  # noqa: E402
+from scripts.aufgabe04.navigation.control.waypoint_controller import (  # noqa: E402
     CertifiedCornerControlConfig,
     ControllerConfig,
     StartEgressControlConfig,

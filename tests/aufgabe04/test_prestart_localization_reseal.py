@@ -4,7 +4,7 @@ from dataclasses import FrozenInstanceError
 from pathlib import Path
 import unittest
 
-from scripts.aufgabe04.navigation.prestart_localization_reseal import (
+from scripts.aufgabe04.navigation.localization.prestart_localization_reseal import (
     FRESH_LOCALIZATION_RESEAL,
     TF_WARMUP_RETRY,
     evaluate_prestart_localization_reseal,
@@ -446,6 +446,7 @@ class PrestartLocalizationResealTest(unittest.TestCase):
             / "scripts"
             / "aufgabe04"
             / "navigation"
+            / "localization"
             / "prestart_localization_reseal.py"
         )
         source = module_path.read_text(encoding="utf-8")

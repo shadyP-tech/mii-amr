@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from scripts.aufgabe04.navigation.coverage_candidate_reporting import (
+from scripts.aufgabe04.navigation.coverage.coverage_candidate_reporting import (
     active_lidar_registry_count_fields,
     coverage_epoch_candidate_count_fields,
     coverage_phase_completion_fields,

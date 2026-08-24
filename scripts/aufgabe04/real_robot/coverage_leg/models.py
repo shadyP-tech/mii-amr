@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import math
 from pathlib import Path
 
-from scripts.aufgabe04.navigation.mission_leg_motion_permit import MissionLegKind
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import MissionLegKind
 from scripts.aufgabe04.real_robot.autonomous_child_runner import (
     DEFAULT_UNCERTAINTY_SIGMA_MULTIPLIER,
 )

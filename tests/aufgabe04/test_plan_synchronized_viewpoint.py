@@ -7,17 +7,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from scripts.aufgabe04.navigation.costmap import Costmap
-from scripts.aufgabe04.navigation.axis_acquisition_feedback import (
+from scripts.aufgabe04.navigation.planning.costmap import Costmap
+from scripts.aufgabe04.navigation.coverage.axis_acquisition_feedback import (
     load_axis_acquisition_feedback,
 )
-from scripts.aufgabe04.navigation.dynamic_approach_planner import (
+from scripts.aufgabe04.navigation.approach.dynamic_approach_planner import (
     circular_keepout_cells,
 )
-from scripts.aufgabe04.navigation.map_io import load_occupancy_grid
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.map_io import freeze_map_bundle
-from scripts.aufgabe04.navigation.plan_synchronized_viewpoint import (
+from scripts.aufgabe04.navigation.planning.map_io import load_occupancy_grid
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.planning.map_io import freeze_map_bundle
+from scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint import (
     _axis_acquisition_rejection_feedback,
     _known_stand_keepout_costmap,
     _point_approach_targets,
@@ -25,8 +25,8 @@ from scripts.aufgabe04.navigation.plan_synchronized_viewpoint import (
     load_recommended_pose,
     main,
 )
-from scripts.aufgabe04.navigation.route_revision_store import read_committed_revision
-from scripts.aufgabe04.navigation.viewpoint_recommendation import (
+from scripts.aufgabe04.navigation.execution.route_revision_store import read_committed_revision
+from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import (
     FaceCandidate,
     MaterialTarget,
     SideEvidence,
@@ -262,7 +262,7 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
                 *SYNTHETIC_ARENA_ARGS,
             ]
             with patch(
-                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.time",
+                "scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint.time.time",
                 return_value=100.0,
             ):
                 self.assertEqual(main(common), 0)
@@ -303,7 +303,7 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
                 json.dumps(recommendation_to_dict(committed_rec))
             )
             with patch(
-                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.time",
+                "scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint.time.time",
                 return_value=100.5,
             ):
                 status = main(
@@ -382,7 +382,7 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
             diagnostics = root / "diagnostics.json"
 
             with patch(
-                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.time",
+                "scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint.time.time",
                 return_value=100.0,
             ):
                 status = main(
@@ -413,7 +413,7 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
             # restore the effective material target instead of withdrawing a
             # still-fresh active route.
             with patch(
-                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.time",
+                "scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint.time.time",
                 return_value=100.5,
             ):
                 restart_status = main(
@@ -453,11 +453,11 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
             refreshed_payload["observation_unix_sec"] = 105.0
             recommendation_path.write_text(json.dumps(refreshed_payload))
             with patch(
-                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.time",
+                "scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint.time.time",
                 return_value=105.0,
             ):
                 with patch(
-                    "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.plan_axis_acquisition",
+                    "scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint.plan_axis_acquisition",
                     side_effect=AssertionError(
                         "refresh heartbeat must not run hypothetical live-start A*"
                     ),
@@ -553,7 +553,7 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
             route = root / "route.csv"
             diagnostics = root / "diagnostics.json"
             with patch(
-                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.time",
+                "scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint.time.time",
                 return_value=100.0,
             ):
                 status = main(
@@ -587,11 +587,11 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
             }
             recommendation_path.write_text(json.dumps(refreshed_payload))
             with patch(
-                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.time",
+                "scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint.time.time",
                 return_value=105.0,
             ):
                 with patch(
-                    "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.plan_axis_acquisition",
+                    "scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint.plan_axis_acquisition",
                     side_effect=AssertionError(
                         "terminal-lock heartbeat must not run live-start A*"
                     ),
@@ -646,7 +646,7 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
             )
             common = self._v3_planner_args(root, recommendation_path)
             with patch(
-                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.time",
+                "scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint.time.time",
                 return_value=100.0,
             ):
                 self.assertEqual(main(common), 0)
@@ -706,10 +706,10 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
                 "--watch",
             ]
             with patch(
-                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.time",
+                "scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint.time.time",
                 return_value=101.0,
             ), patch(
-                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.sleep",
+                "scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint.time.sleep",
                 side_effect=KeyboardInterrupt,
             ):
                 status = main(survey)
@@ -762,7 +762,7 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
             )
             common = self._v3_planner_args(root, recommendation_path)
             with patch(
-                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.time",
+                "scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint.time.time",
                 return_value=100.0,
             ):
                 self.assertEqual(main(common), 0)
@@ -806,10 +806,10 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
                 "--watch",
             ]
             with patch(
-                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.time",
+                "scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint.time.time",
                 return_value=101.0,
             ), patch(
-                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.sleep",
+                "scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint.time.sleep",
                 side_effect=KeyboardInterrupt,
             ):
                 status = main(survey)
@@ -1080,7 +1080,7 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
             route = root / "route.csv"
             diagnostics = root / "diagnostics.json"
             with patch(
-                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.time",
+                "scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint.time.time",
                 return_value=100.0,
             ):
                 status = main(
@@ -1298,7 +1298,7 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
             route = root / "route.csv"
             diagnostics = root / "diagnostics.json"
             with patch(
-                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.time",
+                "scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint.time.time",
                 return_value=100.0,
             ):
                 status = main(
@@ -1393,7 +1393,7 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
                 "--diagnostics-json", str(diagnostics),
             ]
             with patch(
-                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.time",
+                "scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint.time.time",
                 return_value=100.0,
             ):
                 self.assertEqual(main(argv), 0)
@@ -1409,10 +1409,10 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
             refreshed["observation_unix_sec"] = 105.0
             recommendation_path.write_text(json.dumps(refreshed))
             with patch(
-                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.time",
+                "scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint.time.time",
                 return_value=105.0,
             ), patch(
-                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.plan_axis_acquisition",
+                "scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint.plan_axis_acquisition",
                 side_effect=AssertionError("safe fallback heartbeat must retain geometry"),
             ):
                 self.assertEqual(main(argv), 0)
@@ -1559,7 +1559,7 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
             route = root / "route.csv"
             diagnostics = root / "diagnostics.json"
             with patch(
-                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.time",
+                "scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint.time.time",
                 return_value=100.0,
             ):
                 status = main(
@@ -1680,7 +1680,7 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
                 *SYNTHETIC_ARENA_ARGS,
             ]
             with patch(
-                "scripts.aufgabe04.navigation.plan_synchronized_viewpoint.time.time",
+                "scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint.time.time",
                 return_value=100.0,
             ):
                 self.assertEqual(main(argv), 1)

@@ -5,12 +5,12 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from scripts.aufgabe04.navigation.dynamic_route_handoff import (
+from scripts.aufgabe04.navigation.execution.dynamic_route_handoff import (
     RouteUpdate,
     RouteUpdateKind,
 )
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.simple_waypoint_follower import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.waypoint_follower.runtime import (
     FollowerConfig,
     SimpleWaypointFollowerNode,
     acquisition_goal_action,
@@ -22,11 +22,11 @@ from scripts.aufgabe04.navigation.simple_waypoint_follower import (
     viewpoint_sampling_timeout_failure,
     viewpoint_sampling_target_timeout_failure,
 )
-from scripts.aufgabe04.navigation.transient_blockage_policy import (
+from scripts.aufgabe04.navigation.coverage.transient_blockage_policy import (
     CLEARANCE_LIMITED_MOTION_FLOOR,
     classify_linear_command,
 )
-from scripts.aufgabe04.navigation.waypoint_controller import (
+from scripts.aufgabe04.navigation.control.waypoint_controller import (
     CertifiedCornerTransitionLatch,
     ControllerConfig,
     VelocityCommand,
@@ -122,7 +122,7 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         node.controller_trace_writer = CaptureWriter()
 
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.rclpy",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.rclpy",
             SimpleNamespace(ok=lambda: True),
         ):
             result = node.run()
@@ -274,7 +274,7 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         node.dynamic_join_pending = False
 
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             side_effect=(10.0, 10.1, 11.0, 11.1),
         ):
             first_vertex = node._start_egress_command(
@@ -574,7 +574,7 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         start = Pose2D(-0.131011, -0.270103, -2.702)
 
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             return_value=10.0,
         ):
             self.assertEqual(node._refresh_dynamic_route(start), "adopted")
@@ -590,7 +590,7 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         self.assertEqual(step.command.linear_x_mps, 0.0)
 
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             return_value=11.0,
         ):
             released = node._start_egress_command(
@@ -614,7 +614,7 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         node.waypoint_provider = lambda _pose: ordinary
         node.initial_route_refresh_pending = True
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             return_value=12.0,
         ):
             self.assertEqual(
@@ -629,7 +629,7 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         odom = object()
 
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             side_effect=(41.0, 42.0),
         ):
             node._scan_callback(scan)
@@ -1095,7 +1095,7 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         node.publish_zero = lambda: None
 
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             return_value=10.0,
         ):
             self.assertEqual(
@@ -1148,7 +1148,7 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         node.publish_zero = lambda: zero_calls.append(True)
 
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             return_value=10.0,
         ):
             result = node._refresh_dynamic_route(Pose2D(0.02, 0.0))
@@ -1242,7 +1242,7 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         node.axis_acquisition_target_revision = 1
         node.publish_zero = lambda: None
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             return_value=10.0,
         ):
             self.assertEqual(
@@ -1265,7 +1265,7 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         node.waypoint_provider = lambda _pose: next_acquisition_ray
         node.initial_route_refresh_pending = True
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             return_value=11.0,
         ):
             self.assertEqual(
@@ -1287,7 +1287,7 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         node.waypoint_provider = lambda _pose: sampling
         node.initial_route_refresh_pending = True
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             return_value=12.0,
         ):
             self.assertEqual(
@@ -1300,7 +1300,7 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
 
         node.initial_route_refresh_pending = True
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             return_value=22.0,
         ):
             self.assertEqual(
@@ -1322,7 +1322,7 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         node.waypoint_provider = lambda _pose: newer_sampling_target
         node.initial_route_refresh_pending = True
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             return_value=25.0,
         ):
             self.assertEqual(
@@ -1344,7 +1344,7 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         node.waypoint_provider = lambda _pose: physical
         node.initial_route_refresh_pending = True
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             return_value=29.0,
         ):
             self.assertEqual(
@@ -1377,7 +1377,7 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         node.publish_zero = lambda: None
 
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             return_value=10.0,
         ):
             self.assertEqual(
@@ -1409,7 +1409,7 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         node.publish_zero = lambda: zeros.append(True)
 
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             return_value=10.0,
         ):
             outcome = node._refresh_dynamic_route(Pose2D(0.02, 0.0))
@@ -1453,7 +1453,7 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         node.publish_zero = lambda: order.append(("zero",))
 
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             return_value=10.0,
         ):
             outcome = node._refresh_dynamic_route(Pose2D(0.02, 0.0))
@@ -1481,7 +1481,7 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         node.publish_zero = lambda: order.append("zero")
 
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             return_value=10.0,
         ):
             outcome = node._refresh_dynamic_route(Pose2D(0.0, 0.0))

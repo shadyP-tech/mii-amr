@@ -2,7 +2,7 @@ import itertools
 import math
 import unittest
 
-from scripts.aufgabe04.navigation.full_route_optimizer import (
+from scripts.aufgabe04.navigation.planning.full_route_optimizer import (
     ExactOptimizationLimitError,
     IncompleteCostMatrixError,
     IncompleteRouteInputError,

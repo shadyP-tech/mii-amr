@@ -11,29 +11,29 @@ try:  # pragma: no cover - exercised on ROS hosts.
 except ImportError:  # pragma: no cover - keeps offline tests ROS-free.
     rclpy = None
 
-from scripts.aufgabe04.navigation.driving_behavior import (
+from scripts.aufgabe04.navigation.control.driving_behavior import (
     PHYSICAL_ROUTE_KINDS,
     controller_config_for_route_kind,
     next_control_loop_timing,
 )
-from scripts.aufgabe04.navigation.execution_route_certificate import (
+from scripts.aufgabe04.navigation.execution.execution_route_certificate import (
     ExecutionRouteCheck,
 )
-from scripts.aufgabe04.navigation.follower_models import FollowerResult
-from scripts.aufgabe04.navigation.follower_safety import (
+from scripts.aufgabe04.navigation.control.follower_models import FollowerResult
+from scripts.aufgabe04.navigation.control.follower_safety import (
     OBSTACLE_TOO_CLOSE,
     initial_pose_failure,
     waypoint_timeout_failure,
 )
-from scripts.aufgabe04.navigation.transient_blockage_policy import (
+from scripts.aufgabe04.navigation.coverage.transient_blockage_policy import (
     CLEARANCE_LIMITED_MOTION_FLOOR,
     classify_linear_command,
     reachable_distance_progress_epsilon,
 )
-from scripts.aufgabe04.navigation.viewpoint_sampling_contract import (
+from scripts.aufgabe04.navigation.approach.viewpoint_sampling_contract import (
     INTERMEDIATE_TERMINAL_HEADING_DISTANCE_COMPARISON_EPSILON_M,
 )
-from scripts.aufgabe04.navigation.waypoint_controller import (
+from scripts.aufgabe04.navigation.control.waypoint_controller import (
     VelocityCommand,
     compute_join_anchor_command,
 )

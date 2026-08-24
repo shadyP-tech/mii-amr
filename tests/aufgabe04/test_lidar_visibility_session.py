@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.aufgabe04.artifacts.content_store import payload_sha256  # noqa: E402
-from scripts.aufgabe04.navigation.models import Pose2D  # noqa: E402
+from scripts.aufgabe04.navigation.foundation.models import Pose2D  # noqa: E402
 from scripts.aufgabe04.perception.lidar_stand_morphology import (  # noqa: E402
     MORPHOLOGY_PROFILE_EVIDENCE_KEY,
     PROPOSAL_DETECTOR_CONFIG_EVIDENCE_KEY,

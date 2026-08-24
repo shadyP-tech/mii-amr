@@ -17,10 +17,10 @@ from pathlib import Path
 import time
 from typing import Callable, Mapping
 
-from scripts.aufgabe04.navigation.localization_ownership import (
+from scripts.aufgabe04.navigation.localization.localization_ownership import (
     FAIL_MAP_TO_ODOM,
 )
-from scripts.aufgabe04.navigation.models import Pose2D
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
 
 
 DYNAMIC_MAP_TO_ODOM_UNAVAILABLE = FAIL_MAP_TO_ODOM

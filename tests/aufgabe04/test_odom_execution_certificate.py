@@ -6,8 +6,8 @@ from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 from scripts.aufgabe04.artifacts.content_store import payload_sha256
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.odom_execution_certificate import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
     MAP_FROM_ODOM_CONVENTION,
     OdomExecutionCertificate,
     PlanarTransform2D,

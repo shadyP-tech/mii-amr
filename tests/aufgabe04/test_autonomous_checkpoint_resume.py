@@ -5,16 +5,16 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from scripts.aufgabe04.navigation.plan_stand_coverage_survey import (
+from scripts.aufgabe04.navigation.missions.plan_stand_coverage_survey import (
     main as plan_coverage,
 )
-from scripts.aufgabe04.navigation.mission_leg_motion_permit import (
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     load_mission_leg_motion_permit,
 )
-from scripts.aufgabe04.navigation.runtime_motion_authorization import (
+from scripts.aufgabe04.navigation.execution.runtime_motion_authorization import (
     load_runtime_localization_motion_permit,
 )
-from scripts.aufgabe04.navigation.stand_coverage_survey import (
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     load_coverage_survey_plan,
     load_stand_survey_registry,
     load_survey_progress,

@@ -6,7 +6,7 @@ import math
 from dataclasses import dataclass
 from typing import Sequence
 
-from scripts.aufgabe04.navigation.models import Pose2D
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
 
 
 @dataclass(frozen=True)

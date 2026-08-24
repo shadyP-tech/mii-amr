@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation.waypoint_generation import station_visits_to_waypoint_rows  # noqa: E402
+from scripts.aufgabe04.navigation.planning.waypoint_generation import station_visits_to_waypoint_rows  # noqa: E402
 from scripts.aufgabe04.stations.station_map import DEFAULT_STATIONS  # noqa: E402
 from scripts.aufgabe04.stations.station_router import build_station_visits  # noqa: E402
 

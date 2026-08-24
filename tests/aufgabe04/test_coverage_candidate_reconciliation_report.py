@@ -4,19 +4,19 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds
-from scripts.aufgabe04.navigation.coverage_candidate_reconciliation import (
+from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds
+from scripts.aufgabe04.navigation.coverage.coverage_candidate_reconciliation import (
     ACTION_REJECT_PROVISIONAL,
     ACTION_RETAIN,
     CoverageCandidateReconciliationConfig,
 )
-from scripts.aufgabe04.navigation.coverage_candidate_reconciliation_report import (
+from scripts.aufgabe04.navigation.coverage.coverage_candidate_reconciliation_report import (
     POLICY_MODE_EVIDENCE_ONLY,
     build_coverage_candidate_reconciliation_report,
 )
-from scripts.aufgabe04.navigation.map_io import MapMetadata, OccupancyGrid
-from scripts.aufgabe04.navigation.models import GridCell, Pose2D
-from scripts.aufgabe04.navigation.stand_coverage_survey import (
+from scripts.aufgabe04.navigation.planning.map_io import MapMetadata, OccupancyGrid
+from scripts.aufgabe04.navigation.foundation.models import GridCell, Pose2D
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
     STATUS_PROVISIONAL,
     SURVEY_PLAN_SCHEMA_VERSION,

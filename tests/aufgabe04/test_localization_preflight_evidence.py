@@ -6,17 +6,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation.localization_ownership import (  # noqa: E402
+from scripts.aufgabe04.navigation.localization.localization_ownership import (  # noqa: E402
     FAIL_MAP_TO_ODOM,
     LocalizationOwnershipEvidence,
     evaluate_localization_ownership,
 )
-from scripts.aufgabe04.navigation.localization_preflight_evidence import (  # noqa: E402
+from scripts.aufgabe04.navigation.localization.localization_preflight_evidence import (  # noqa: E402
     build_dynamic_map_to_odom_freshness,
     build_localization_ownership_observation_data,
     find_external_tf_owner_candidates,
 )
-from scripts.aufgabe04.navigation.ros_runtime_config import (  # noqa: E402
+from scripts.aufgabe04.navigation.foundation.ros_runtime_config import (  # noqa: E402
     RuntimeConfig,
     resolve_runtime_config,
 )

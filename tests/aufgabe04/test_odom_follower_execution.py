@@ -7,18 +7,18 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from scripts.aufgabe04.navigation.controller_trace import (
+from scripts.aufgabe04.navigation.control.controller_trace import (
     ControllerTraceWriter,
     load_controller_traces,
 )
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.odom_execution_certificate import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
     PlanarTransform2D,
 )
-from scripts.aufgabe04.navigation.odom_route_adapter import (
+from scripts.aufgabe04.navigation.localization.odom_route_adapter import (
     OdomExecutionContext,
 )
-from scripts.aufgabe04.navigation.simple_waypoint_follower import (
+from scripts.aufgabe04.navigation.waypoint_follower.runtime import (
     FollowerConfig,
     PoseLookupResult,
     SimpleWaypointFollowerNode,
@@ -188,10 +188,10 @@ class OdomFollowerExecutionTest(unittest.TestCase):
         node.latest_stop_details = {"fault_code": "localization_reseal_required"}
 
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.rclpy",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.rclpy",
             SimpleNamespace(ok=lambda: True),
         ), patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             return_value=0.5,
         ):
             result = node._wait_for_initial_runtime_inputs(0.0)
@@ -208,10 +208,10 @@ class OdomFollowerExecutionTest(unittest.TestCase):
         node.latest_stop_details = {"fault_code": "localization_reseal_required"}
 
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.rclpy",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.rclpy",
             SimpleNamespace(ok=lambda: True),
         ), patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             side_effect=[0.5, 1.0],
         ):
             result = node._wait_for_initial_runtime_inputs(0.0)
@@ -329,10 +329,10 @@ class OdomFollowerExecutionTest(unittest.TestCase):
         )
 
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.Time",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.Time",
             _FakeTime,
         ), patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.Duration",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.Duration",
             lambda *, seconds: SimpleNamespace(seconds=seconds),
         ):
             result = node._current_pose_lookup()
@@ -402,10 +402,10 @@ class OdomFollowerExecutionTest(unittest.TestCase):
         node.latest_stop_details = None
 
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.Time",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.Time",
             _FakeTime,
         ), patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.Duration",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.Duration",
             lambda *, seconds: SimpleNamespace(seconds=seconds),
         ):
             reason = node._global_consistency_monitor_failure()
@@ -459,10 +459,10 @@ class OdomFollowerExecutionTest(unittest.TestCase):
                 )
 
                 with patch(
-                    "scripts.aufgabe04.navigation.simple_waypoint_follower.Time",
+                    "scripts.aufgabe04.navigation.waypoint_follower.runtime.Time",
                     _FakeTime,
                 ), patch(
-                    "scripts.aufgabe04.navigation.simple_waypoint_follower.Duration",
+                    "scripts.aufgabe04.navigation.waypoint_follower.runtime.Duration",
                     lambda *, seconds: SimpleNamespace(seconds=seconds),
                 ):
                     result = node._current_pose_lookup()
@@ -490,7 +490,7 @@ class OdomFollowerExecutionTest(unittest.TestCase):
         node.publish_repeated_zero = Mock()
 
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.rclpy",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.rclpy",
             SimpleNamespace(ok=lambda: True),
         ):
             result = node.run()
@@ -515,7 +515,7 @@ class OdomFollowerExecutionTest(unittest.TestCase):
         node.publish_repeated_zero = Mock()
 
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.rclpy",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.rclpy",
             SimpleNamespace(ok=lambda: True),
         ):
             result = node.run()

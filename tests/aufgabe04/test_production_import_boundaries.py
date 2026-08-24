@@ -35,7 +35,7 @@ class ProductionImportBoundaryTest(unittest.TestCase):
     def test_single_station_segment_runner_only_imports_navigation_modules(self):
         navigation_root = ROOT / "scripts" / "aufgabe04" / "navigation"
         checked_paths = [
-            navigation_root / "run_single_station_segment.py",
+            navigation_root / "entrypoints" / "run_single_station_segment.py",
             *sorted((navigation_root / "station_segment").glob("*.py")),
         ]
         forbidden_prefixes = (
@@ -232,8 +232,8 @@ class ProductionImportBoundaryTest(unittest.TestCase):
 
     def test_navigation_runners_do_not_consume_stand_axis_lidar_roi_debug_artifact(self):
         checked_paths = [
-            ROOT / "scripts" / "aufgabe04" / "navigation" / "plan_first_detected_station.py",
-            ROOT / "scripts" / "aufgabe04" / "navigation" / "run_single_station_segment.py",
+            ROOT / "scripts" / "aufgabe04" / "navigation" / "missions" / "plan_first_detected_station.py",
+            ROOT / "scripts" / "aufgabe04" / "navigation" / "station_segment" / "runtime.py",
         ]
         forbidden_snippets = (
             "stand_axis_lidar_roi",
@@ -395,8 +395,8 @@ class ProductionImportBoundaryTest(unittest.TestCase):
         forbidden_prefixes = (
             "geometry_msgs",
             "nav2_msgs",
-            "scripts.aufgabe04.navigation.run_single_station_segment",
-            "scripts.aufgabe04.navigation.simple_waypoint_follower",
+            "scripts.aufgabe04.navigation.entrypoints.run_single_station_segment",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime",
         )
         offenders = []
         for node in ast.walk(tree):
@@ -423,8 +423,8 @@ class ProductionImportBoundaryTest(unittest.TestCase):
 
     def test_navigation_runners_do_not_consume_structural_diagnostics(self):
         checked_paths = [
-            ROOT / "scripts" / "aufgabe04" / "navigation" / "plan_first_detected_station.py",
-            ROOT / "scripts" / "aufgabe04" / "navigation" / "run_single_station_segment.py",
+            ROOT / "scripts" / "aufgabe04" / "navigation" / "missions" / "plan_first_detected_station.py",
+            ROOT / "scripts" / "aufgabe04" / "navigation" / "station_segment" / "runtime.py",
         ]
         offenders = []
         for path in checked_paths:

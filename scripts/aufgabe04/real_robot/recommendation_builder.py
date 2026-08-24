@@ -5,8 +5,8 @@ from __future__ import annotations
 import math
 import time
 
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.viewpoint_recommendation import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import (
     FaceCandidate,
     MaterialTarget,
     SideEvidence,

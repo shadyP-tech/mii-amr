@@ -1,13 +1,13 @@
 import unittest
 from types import SimpleNamespace
 
-from scripts.aufgabe04.navigation.mission_leg_identity_args import (
+from scripts.aufgabe04.navigation.execution.mission_leg_identity_args import (
     build_mission_leg_event_fields,
     resolve_explicit_mission_leg_evidence_identity,
     resolve_mission_leg_event_identity,
     resolve_startup_reseal_permit_identity,
 )
-from scripts.aufgabe04.navigation.mission_leg_motion_permit import MissionLegKind
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import MissionLegKind
 
 
 def identity_args(**overrides):

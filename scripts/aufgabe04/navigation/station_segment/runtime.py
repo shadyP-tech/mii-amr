@@ -17,23 +17,23 @@ ROOT = Path(__file__).resolve().parents[4]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation.ros_preflight import (
+from scripts.aufgabe04.navigation.localization.ros_preflight import (
     RosPreflightResult,
     run_ros_preflight,
 )
-from scripts.aufgabe04.navigation.ros_runtime_config import (
+from scripts.aufgabe04.navigation.foundation.ros_runtime_config import (
     RuntimeConfig,
     resolve_topic,
     resolve_runtime_config,
 )
-from scripts.aufgabe04.navigation.run_events import configure_event_logger, emit_event
-from scripts.aufgabe04.navigation.dynamic_route_handoff import (
+from scripts.aufgabe04.navigation.foundation.run_events import configure_event_logger, emit_event
+from scripts.aufgabe04.navigation.execution.dynamic_route_handoff import (
     DynamicRouteSource,
     RouteUpdate,
     RouteUpdateKind,
     validate_arena_boundary_evidence,
 )
-from scripts.aufgabe04.navigation.driving_behavior import (
+from scripts.aufgabe04.navigation.control.driving_behavior import (
     CATALOG_PHYSICAL_ROUTE_KINDS,
     CommandSmoothingConfig,
     DYNAMIC_VIEWPOINT_ROUTE_KINDS,
@@ -42,65 +42,65 @@ from scripts.aufgabe04.navigation.driving_behavior import (
     STATIC_PHYSICAL_ROUTE_KINDS,
     controller_config_for_route_kind,
 )
-from scripts.aufgabe04.navigation.content_hashed_evidence import (
+from scripts.aufgabe04.navigation.foundation.content_hashed_evidence import (
     payload_sha256,
     write_content_hashed_json,
 )
-from scripts.aufgabe04.navigation.costmap import Costmap
-from scripts.aufgabe04.navigation.coverage_replan_coordinator import (
+from scripts.aufgabe04.navigation.planning.costmap import Costmap
+from scripts.aufgabe04.navigation.coverage.coverage_replan_coordinator import (
     CoverageReplanCoordinator,
 )
-from scripts.aufgabe04.navigation.route_revision_store import (
+from scripts.aufgabe04.navigation.execution.route_revision_store import (
     LoadedRouteRevision,
     RouteRevisionError,
     read_committed_revision,
     read_route_revision,
 )
-from scripts.aufgabe04.navigation.safety_checks import (
+from scripts.aufgabe04.navigation.control.safety_checks import (
     catalog_start_egress_certificate,
     validate_catalog_route_binding_json,
     validate_route_diagnostics_json,
     validate_speed_limits,
 )
-from scripts.aufgabe04.navigation.detected_stand_preapproach import (
+from scripts.aufgabe04.navigation.approach.detected_stand_preapproach import (
     DETECTED_STAND_PREAPPROACH_ROUTE_KIND,
     validate_detected_stand_preapproach_binding,
 )
-from scripts.aufgabe04.navigation.stand_discovery_route import (
+from scripts.aufgabe04.navigation.coverage.stand_discovery_route import (
     STAND_DISCOVERY_ROUTE_KIND,
     validate_stand_discovery_route_binding,
 )
-from scripts.aufgabe04.navigation.stand_coverage_survey import (
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     load_coverage_survey_plan,
 )
-from scripts.aufgabe04.navigation.segment_run_logger import append_segment_run
-from scripts.aufgabe04.navigation.follower_models import FollowerResult
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.execution_route_certificate import (
+from scripts.aufgabe04.navigation.foundation.segment_run_logger import append_segment_run
+from scripts.aufgabe04.navigation.control.follower_models import FollowerResult
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.execution.execution_route_certificate import (
     execution_route_certificate_sha256,
     load_execution_route_certificate,
     validate_execution_route_identity,
 )
-from scripts.aufgabe04.navigation.map_io import load_occupancy_grid
-from scripts.aufgabe04.navigation.mission_leg_motion_consumption import (
+from scripts.aufgabe04.navigation.planning.map_io import load_occupancy_grid
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_consumption import (
     consume_mission_leg_motion_permit,
     default_mission_leg_motion_consumption_receipt_path,
     mission_leg_motion_consumption_receipt_sha256,
 )
-from scripts.aufgabe04.navigation.mission_leg_motion_permit import (
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     MissionLegKind,
     MissionLegMotionPermit,
     mission_leg_motion_permit_sha256,
     validate_mission_leg_motion_permit_for_execution,
 )
-from scripts.aufgabe04.navigation.mission_leg_identity_args import (
+from scripts.aufgabe04.navigation.execution.mission_leg_identity_args import (
     build_mission_leg_event_fields,
     resolve_coverage_mission_leg_identity,
     resolve_explicit_mission_leg_evidence_identity,
     resolve_mission_leg_event_identity,
     resolve_startup_reseal_permit_identity,
 )
-from scripts.aufgabe04.navigation.odom_execution_certificate import (
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
     OdomExecutionCertificate,
     PlanarTransform2D,
     odom_execution_certificate_sha256,
@@ -110,46 +110,46 @@ from scripts.aufgabe04.navigation.odom_execution_certificate import (
     validate_odom_execution_identity,
     write_odom_execution_certificate,
 )
-from scripts.aufgabe04.navigation.odom_route_adapter import (
+from scripts.aufgabe04.navigation.localization.odom_route_adapter import (
     OdomExecutionContext,
     adapt_map_route_update_to_odom,
     evaluate_map_odom_stationary_stability,
 )
-from scripts.aufgabe04.navigation.route_uncertainty_admission import (
+from scripts.aufgabe04.navigation.execution.route_uncertainty_admission import (
     RouteUncertaintyAdmissionConfig,
     evaluate_route_uncertainty_admission,
     route_uncertainty_admission_evidence_sha256,
 )
-from scripts.aufgabe04.navigation.route_uncertainty_budget import (
+from scripts.aufgabe04.navigation.execution.route_uncertainty_budget import (
     PlanarCovariance,
 )
-from scripts.aufgabe04.navigation.runtime_motion_authorization import (
+from scripts.aufgabe04.navigation.execution.runtime_motion_authorization import (
     RuntimeLocalizationMotionPermit,
     runtime_localization_motion_permit_sha256,
     validate_runtime_localization_motion_permit_for_execution,
 )
-from scripts.aufgabe04.navigation.runtime_motion_consumption import (
+from scripts.aufgabe04.navigation.execution.runtime_motion_consumption import (
     consume_runtime_motion_permit,
     default_runtime_motion_consumption_receipt_path,
     runtime_motion_consumption_receipt_sha256,
 )
-from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
+from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization import (
     StartupResealMotionPermit,
     startup_reseal_motion_permit_sha256,
     validate_startup_reseal_motion_permit_for_execution,
 )
-from scripts.aufgabe04.navigation.startup_reseal_motion_consumption import (
+from scripts.aufgabe04.navigation.execution.startup_reseal_motion_consumption import (
     consume_startup_reseal_motion_permit,
     default_startup_reseal_motion_consumption_receipt_path,
     startup_reseal_motion_consumption_receipt_sha256,
 )
-from scripts.aufgabe04.navigation.mission_execution_gate import (
+from scripts.aufgabe04.navigation.execution.mission_execution_gate import (
     DiagnosticsSnapshot,
     MissionExecutionBinding,
     load_diagnostics_snapshot,
     validate_logistics_execution_bundle,
 )
-from scripts.aufgabe04.navigation.viewpoint_sampling_contract import (
+from scripts.aufgabe04.navigation.approach.viewpoint_sampling_contract import (
     INTERMEDIATE_TERMINAL_HEADING_DISTANCE_COMPARISON_EPSILON_M,
     INTERMEDIATE_TERMINAL_HEADING_ENTRY_TOLERANCE_M,
     INTERMEDIATE_TERMINAL_HEADING_HOLD_TOLERANCE_M,
@@ -165,17 +165,17 @@ from scripts.aufgabe04.navigation.waypoint_follower.startup import (
 from scripts.aufgabe04.navigation.waypoint_follower.terminal_heading import (
     intermediate_terminal_heading_entry_tolerance_m,
 )
-from scripts.aufgabe04.navigation.transient_blockage_policy import (
+from scripts.aufgabe04.navigation.coverage.transient_blockage_policy import (
     DEFAULT_LINEAR_MOTION_FLOOR_MPS,
     PersistentObstacleConfig,
 )
-from scripts.aufgabe04.navigation.transient_overlay_resume_state import (
+from scripts.aufgabe04.navigation.coverage.transient_overlay_resume_state import (
     TransientOverlayResumeState,
     transient_overlay_resume_state_sha256,
     validate_transient_overlay_resume_state_diagnostics_binding,
 )
-from scripts.aufgabe04.navigation.waypoint_controller import ControllerConfig
-from scripts.aufgabe04.navigation.waypoint_csv import (
+from scripts.aufgabe04.navigation.control.waypoint_controller import ControllerConfig
+from scripts.aufgabe04.navigation.planning.waypoint_csv import (
     SelectedRouteLeg,
     load_route_leg,
     poses_from_waypoints,

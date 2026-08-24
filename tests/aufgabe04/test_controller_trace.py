@@ -7,15 +7,15 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from scripts.aufgabe04.navigation.controller_trace import (
+from scripts.aufgabe04.navigation.control.controller_trace import (
     CONTROLLER_TRACE_SCHEMA_VERSION,
     ControllerTraceRecord,
     ControllerTraceWriter,
     append_controller_trace,
     load_controller_traces,
 )
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.waypoint_controller import VelocityCommand
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.control.waypoint_controller import VelocityCommand
 
 
 class ControllerTraceTests(unittest.TestCase):

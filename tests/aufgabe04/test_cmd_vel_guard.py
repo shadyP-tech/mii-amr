@@ -1,11 +1,11 @@
 import unittest
 
-from scripts.aufgabe04.navigation.cmd_vel_guard import (
+from scripts.aufgabe04.navigation.control.cmd_vel_guard import (
     CommandLease,
     GuardedCommand,
     guard_command,
 )
-from scripts.aufgabe04.navigation.waypoint_controller import VelocityCommand
+from scripts.aufgabe04.navigation.control.waypoint_controller import VelocityCommand
 
 
 class CmdVelGuardTest(unittest.TestCase):

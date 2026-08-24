@@ -6,18 +6,18 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from scripts.aufgabe04.navigation.localization_ownership import (
+from scripts.aufgabe04.navigation.localization.localization_ownership import (
     evaluate_global_consistency_monitor,
 )
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.odom_execution_certificate import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
     PlanarTransform2D,
 )
-from scripts.aufgabe04.navigation.odom_route_adapter import (
+from scripts.aufgabe04.navigation.localization.odom_route_adapter import (
     OdomExecutionContext,
     evaluate_map_odom_continuity,
 )
-from scripts.aufgabe04.navigation.startup_reseal_motion_authorization import (
+from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization import (
     STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH,
     STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY,
 )

@@ -1,16 +1,16 @@
 import math
 import unittest
 
-from scripts.aufgabe04.navigation.dynamic_route_handoff import (
+from scripts.aufgabe04.navigation.execution.dynamic_route_handoff import (
     RouteUpdate,
     RouteUpdateKind,
 )
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.odom_execution_certificate import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
     PlanarTransform2D,
     pose_route_sha256,
 )
-from scripts.aufgabe04.navigation.odom_route_adapter import (
+from scripts.aufgabe04.navigation.localization.odom_route_adapter import (
     CONTINUITY_ACCEPTED,
     CONTINUITY_RESEAL,
     OdomExecutionContext,

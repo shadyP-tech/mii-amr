@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import tempfile
 import unittest
 
-from scripts.aufgabe04.navigation.mission_leg_motion_permit import (
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     MissionLegKind,
 )
 from scripts.aufgabe04.real_robot.autonomous_child_runner import (

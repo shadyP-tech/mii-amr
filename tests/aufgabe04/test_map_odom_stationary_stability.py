@@ -2,10 +2,10 @@ import json
 import math
 import unittest
 
-from scripts.aufgabe04.navigation.odom_execution_certificate import (
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
     PlanarTransform2D,
 )
-from scripts.aufgabe04.navigation.odom_route_adapter import (
+from scripts.aufgabe04.navigation.localization.odom_route_adapter import (
     STATIONARY_STABILITY_ACCEPTED,
     STATIONARY_STABILITY_REJECTED,
     evaluate_map_odom_stationary_stability,

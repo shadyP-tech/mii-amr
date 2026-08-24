@@ -1,0 +1,826 @@
+"""Pure collision-safe planning for a dynamically observed stand approach.
+
+The static ``Costmap`` passed to this module is assumed to already contain the
+one and only static-obstacle inflation required by the caller.  This module
+only adds a run-local, configuration-space keepout for the detected stand.
+It deliberately has no ROS, Gazebo, camera, or simulation imports.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import Iterable, Sequence
+
+from scripts.aufgabe04.navigation.planning.costmap import CELL_SOURCE_RUN_LOCAL, Costmap
+from scripts.aufgabe04.navigation.planning.global_planner import plan_route
+from scripts.aufgabe04.navigation.foundation.models import GridCell, Pose2D
+from scripts.aufgabe04.navigation.planning.route_smoothing import (
+    greedy_line_of_sight_shortcut,
+    segment_is_collision_free,
+    supercover_segment_cells,
+)
+from scripts.aufgabe04.stations.arrival_pose_geometry import (
+    ArrivalGeometryConfig,
+    arrival_face_candidates,
+)
+
+
+_EPSILON = 1.0e-10
+
+
+def minimum_static_obstacle_inflation_m(
+    *,
+    robot_radius_m: float,
+    tracking_margin_m: float,
+    lidar_stop_distance_m: float,
+    scan_origin_to_base_offset_m: float,
+    lidar_clearance_margin_m: float,
+) -> float:
+    """Return the nominal map clearance required by body and LiDAR gates.
+
+    Static map inflation protects the robot body and must also make the
+    executor's live scan stop unreachable along the certified tracking tube.
+    Dynamic stand keepouts are handled separately by ``DynamicApproachConfig``.
+    """
+
+    values = {
+        "robot_radius_m": robot_radius_m,
+        "tracking_margin_m": tracking_margin_m,
+        "lidar_stop_distance_m": lidar_stop_distance_m,
+        "scan_origin_to_base_offset_m": scan_origin_to_base_offset_m,
+        "lidar_clearance_margin_m": lidar_clearance_margin_m,
+    }
+    for name, value in values.items():
+        if not math.isfinite(value):
+            raise ValueError(f"{name} must be finite")
+    for name in ("robot_radius_m", "lidar_stop_distance_m"):
+        if values[name] <= 0.0:
+            raise ValueError(f"{name} must be positive")
+    for name in ("tracking_margin_m", "lidar_clearance_margin_m"):
+        if values[name] < 0.0:
+            raise ValueError(f"{name} must be non-negative")
+    return max(
+        robot_radius_m + tracking_margin_m,
+        lidar_stop_distance_m
+        + abs(scan_origin_to_base_offset_m)
+        + lidar_clearance_margin_m
+        + tracking_margin_m,
+    )
+
+
+@dataclass(frozen=True)
+class DynamicApproachConfig:
+    """Physical and geometric constraints for one stand approach."""
+
+    stand_radius_m: float = 0.06
+    stand_position_uncertainty_m: float = 0.02
+    robot_radius_m: float = 0.105
+    collision_margin_m: float = 0.02
+    # Maximum certified deviation of the executed robot centre from the
+    # nominal planned polyline.  Dynamic stand obstacles are not part of the
+    # statically inflated occupancy grid, so their nominal keepouts must carry
+    # this tube explicitly.
+    tracking_margin_m: float = 0.0
+    standoff_distance_m: float = 0.32
+    terminal_corridor_length_m: float = 0.40
+    corridor_sample_spacing_m: float = 0.05
+    lidar_stop_distance_m: float = 0.18
+    scan_origin_to_base_offset_m: float = 0.0
+    lidar_clearance_margin_m: float = 0.02
+    # Optional externally measured robot-centre exclusion radius. Candidate
+    # snapshots use this to carry a conservative keepout across pipeline
+    # stages without weakening the body/LiDAR-derived minimums above.
+    minimum_non_target_keepout_radius_m: float = 0.0
+
+    def __post_init__(self) -> None:
+        finite_values = {
+            "stand_radius_m": self.stand_radius_m,
+            "stand_position_uncertainty_m": self.stand_position_uncertainty_m,
+            "robot_radius_m": self.robot_radius_m,
+            "collision_margin_m": self.collision_margin_m,
+            "tracking_margin_m": self.tracking_margin_m,
+            "standoff_distance_m": self.standoff_distance_m,
+            "terminal_corridor_length_m": self.terminal_corridor_length_m,
+            "corridor_sample_spacing_m": self.corridor_sample_spacing_m,
+            "lidar_stop_distance_m": self.lidar_stop_distance_m,
+            "scan_origin_to_base_offset_m": self.scan_origin_to_base_offset_m,
+            "lidar_clearance_margin_m": self.lidar_clearance_margin_m,
+            "minimum_non_target_keepout_radius_m": (
+                self.minimum_non_target_keepout_radius_m
+            ),
+        }
+        for name, value in finite_values.items():
+            if not math.isfinite(value):
+                raise ValueError(f"{name} must be finite")
+        for name in (
+            "stand_radius_m",
+            "robot_radius_m",
+            "standoff_distance_m",
+            "terminal_corridor_length_m",
+            "corridor_sample_spacing_m",
+            "lidar_stop_distance_m",
+        ):
+            if finite_values[name] <= 0.0:
+                raise ValueError(f"{name} must be positive")
+        for name in (
+            "stand_position_uncertainty_m",
+            "collision_margin_m",
+            "tracking_margin_m",
+            "lidar_clearance_margin_m",
+            "minimum_non_target_keepout_radius_m",
+        ):
+            if finite_values[name] < 0.0:
+                raise ValueError(f"{name} must be non-negative")
+        if not 0.30 <= self.terminal_corridor_length_m <= 0.50:
+            raise ValueError("terminal_corridor_length_m must be in [0.30, 0.50]")
+
+    @property
+    def stand_keepout_radius_m(self) -> float:
+        """Nominal robot-centre exclusion around the active target stand."""
+
+        return (
+            self.stand_radius_m
+            + self.stand_position_uncertainty_m
+            + self.robot_radius_m
+            + self.collision_margin_m
+            + self.tracking_margin_m
+        )
+
+    @property
+    def minimum_lidar_standoff_m(self) -> float:
+        # The sign of a sensor mounting offset is not always available in
+        # recommendation payloads.  Its magnitude is therefore used here as
+        # the conservative reduction in stand clearance.
+        return (
+            self.stand_radius_m
+            + self.lidar_stop_distance_m
+            + abs(self.scan_origin_to_base_offset_m)
+            + self.lidar_clearance_margin_m
+            + self.tracking_margin_m
+        )
+
+    @property
+    def non_target_stand_keepout_radius_m(self) -> float:
+        """Robot-center exclusion radius for stands crossed in transit."""
+
+        return max(
+            self.stand_keepout_radius_m,
+            self.minimum_lidar_standoff_m,
+            # Frozen candidate keepouts describe the required clearance of the
+            # actual robot centre.  Expand that envelope by the execution tube
+            # exactly once for the nominal route.
+            self.minimum_non_target_keepout_radius_m + self.tracking_margin_m,
+        )
+
+
+@dataclass(frozen=True)
+class FaceNormalCandidate:
+    """A stable stand face and its inner/outer approach poses."""
+
+    face_id: int
+    normal_rad: float
+    target: Pose2D
+    entry: Pose2D
+
+
+@dataclass(frozen=True)
+class DynamicApproachWaypoint:
+    pose: Pose2D
+    protected: bool
+    corridor: bool
+
+
+@dataclass(frozen=True)
+class CandidateDiagnostics:
+    face_id: int
+    target: Pose2D
+    entry: Pose2D
+    valid: bool
+    rejection_reasons: tuple[str, ...]
+    astar_cell_count: int = 0
+    astar_expanded_cells: int = 0
+    smoothed_waypoint_count: int = 0
+    route_length_m: float | None = None
+
+
+@dataclass(frozen=True)
+class DynamicApproachDiagnostics:
+    keepout_radius_m: float
+    keepout_cell_count: int
+    minimum_lidar_standoff_m: float
+    start_join_clearance_m: float
+    requested_hard_face_id: int | None
+    selected_face_id: int | None
+    failure_reason: str | None
+    candidates: tuple[CandidateDiagnostics, ...]
+
+
+@dataclass(frozen=True)
+class DynamicApproachPlan:
+    waypoints: tuple[DynamicApproachWaypoint, ...]
+    selected_face_id: int
+    stand: Pose2D
+    target: Pose2D
+    entry: Pose2D
+    length_m: float
+    diagnostics: DynamicApproachDiagnostics
+
+
+@dataclass(frozen=True)
+class DynamicApproachPlanResult:
+    plan: DynamicApproachPlan | None
+    diagnostics: DynamicApproachDiagnostics
+
+
+@dataclass(frozen=True)
+class _ValidCandidate:
+    candidate: FaceNormalCandidate
+    waypoints: tuple[DynamicApproachWaypoint, ...]
+    length_m: float
+    diagnostics: CandidateDiagnostics
+
+
+def _finite_pose(pose: Pose2D, *, name: str) -> None:
+    if not math.isfinite(pose.x_m) or not math.isfinite(pose.y_m):
+        raise ValueError(f"{name} position must be finite")
+
+
+def _normalize_angle(angle_rad: float) -> float:
+    return math.atan2(math.sin(angle_rad), math.cos(angle_rad))
+
+
+def face_normal_candidates(
+    stand: Pose2D,
+    stand_axis_rad: float,
+    config: DynamicApproachConfig = DynamicApproachConfig(),
+) -> tuple[FaceNormalCandidate, FaceNormalCandidate]:
+    """Return stable face 0/1 candidates for an axial stand orientation.
+
+    ``stand_axis_rad`` and ``stand_axis_rad + pi`` produce identical face IDs.
+    Face 0 uses the positive normal of the canonical axis; face 1 is opposite.
+    """
+
+    _finite_pose(stand, name="stand")
+    geometry = arrival_face_candidates(
+        stand,
+        stand_axis_rad,
+        ArrivalGeometryConfig(
+            standoff_distance_m=config.standoff_distance_m,
+            terminal_corridor_length_m=config.terminal_corridor_length_m,
+        ),
+    )
+    return tuple(
+        FaceNormalCandidate(
+            face_id=face.face_id,
+            normal_rad=face.outward_normal_rad,
+            target=Pose2D(
+                face.target_pose.x_m,
+                face.target_pose.y_m,
+                face.target_pose.yaw_rad,
+            ),
+            entry=Pose2D(
+                face.corridor_entry_pose.x_m,
+                face.corridor_entry_pose.y_m,
+                face.corridor_entry_pose.yaw_rad,
+            ),
+        )
+        for face in geometry
+    )
+
+
+def _distance_point_to_cell_square(costmap: Costmap, pose: Pose2D, cell: GridCell) -> float:
+    origin_x, origin_y, _ = costmap.metadata.origin
+    x0 = origin_x + cell.x * costmap.resolution
+    y0 = origin_y + cell.y * costmap.resolution
+    x1 = x0 + costmap.resolution
+    y1 = y0 + costmap.resolution
+    dx = max(x0 - pose.x_m, 0.0, pose.x_m - x1)
+    dy = max(y0 - pose.y_m, 0.0, pose.y_m - y1)
+    return math.hypot(dx, dy)
+
+
+def circular_keepout_cells(
+    costmap: Costmap,
+    center: Pose2D,
+    radius_m: float,
+) -> frozenset[GridCell]:
+    """Rasterize every cell square touched by a closed world-space disk."""
+
+    _finite_pose(center, name="keepout center")
+    if not math.isfinite(radius_m) or radius_m < 0.0:
+        raise ValueError("keepout radius must be finite and non-negative")
+    origin_x, origin_y, _ = costmap.metadata.origin
+    resolution = costmap.resolution
+    min_x = math.floor((center.x_m - radius_m - origin_x) / resolution) - 1
+    max_x = math.floor((center.x_m + radius_m - origin_x) / resolution) + 1
+    min_y = math.floor((center.y_m - radius_m - origin_y) / resolution) - 1
+    max_y = math.floor((center.y_m + radius_m - origin_y) / resolution) + 1
+    touched = set()
+    for y in range(min_y, max_y + 1):
+        for x in range(min_x, max_x + 1):
+            cell = GridCell(x, y)
+            if not costmap.in_bounds(cell):
+                continue
+            if _distance_point_to_cell_square(costmap, center, cell) <= radius_m + _EPSILON:
+                touched.add(cell)
+    return frozenset(touched)
+
+
+def point_clearance_to_blocked_m(costmap: Costmap, pose: Pose2D) -> float:
+    """Return a conservative free-disk radius around an exact world pose."""
+
+    _finite_pose(pose, name="clearance pose")
+    containing = costmap.world_to_grid(pose)
+    if not costmap.is_traversable(containing):
+        return 0.0
+    origin_x, origin_y, _ = costmap.metadata.origin
+    map_max_x = origin_x + costmap.width * costmap.resolution
+    map_max_y = origin_y + costmap.height * costmap.resolution
+    clearance = min(
+        pose.x_m - origin_x,
+        map_max_x - pose.x_m,
+        pose.y_m - origin_y,
+        map_max_y - pose.y_m,
+    )
+    for cell in costmap.blocked_cells:
+        clearance = min(clearance, _distance_point_to_cell_square(costmap, pose, cell))
+        if clearance <= 0.0:
+            return 0.0
+    # Segment/cell checks use closed squares.  Stay strictly inside the free
+    # disk so a join at the advertised limit cannot touch a blocked boundary.
+    return max(0.0, clearance - 1.0e-6)
+
+
+def with_dynamic_stand_keepout(
+    costmap: Costmap,
+    stand: Pose2D,
+    config: DynamicApproachConfig = DynamicApproachConfig(),
+) -> tuple[Costmap, frozenset[GridCell]]:
+    """Overlay only the detected stand keepout; never reinflate static cells."""
+
+    cells = circular_keepout_cells(costmap, stand, config.stand_keepout_radius_m)
+    return costmap.with_blocked_cells(cells, source=CELL_SOURCE_RUN_LOCAL), cells
+
+
+def _polyline_length(poses: Iterable[Pose2D]) -> float:
+    total = 0.0
+    previous = None
+    for pose in poses:
+        if previous is not None:
+            total += math.hypot(pose.x_m - previous.x_m, pose.y_m - previous.y_m)
+        previous = pose
+    return total
+
+
+def _same_position(a: Pose2D, b: Pose2D) -> bool:
+    return math.hypot(a.x_m - b.x_m, a.y_m - b.y_m) <= _EPSILON
+
+
+def _nan_pose(pose: Pose2D) -> Pose2D:
+    return Pose2D(pose.x_m, pose.y_m, math.nan)
+
+
+def _candidate_failure(
+    candidate: FaceNormalCandidate,
+    reasons: Sequence[str],
+    *,
+    astar_cell_count: int = 0,
+    astar_expanded_cells: int = 0,
+) -> CandidateDiagnostics:
+    return CandidateDiagnostics(
+        face_id=candidate.face_id,
+        target=candidate.target,
+        entry=candidate.entry,
+        valid=False,
+        rejection_reasons=tuple(dict.fromkeys(reasons)),
+        astar_cell_count=astar_cell_count,
+        astar_expanded_cells=astar_expanded_cells,
+    )
+
+
+def _terminal_corridor_poses(
+    candidate: FaceNormalCandidate,
+    config: DynamicApproachConfig,
+) -> tuple[Pose2D, ...]:
+    samples = max(
+        1,
+        int(math.ceil(config.terminal_corridor_length_m / config.corridor_sample_spacing_m)),
+    )
+    poses = []
+    for index in range(samples + 1):
+        fraction = index / samples
+        poses.append(
+            Pose2D(
+                candidate.entry.x_m
+                + fraction * (candidate.target.x_m - candidate.entry.x_m),
+                candidate.entry.y_m
+                + fraction * (candidate.target.y_m - candidate.entry.y_m),
+                candidate.target.yaw_rad,
+            )
+        )
+    return tuple(poses)
+
+
+def _validate_candidate(
+    costmap: Costmap,
+    start: Pose2D,
+    candidate: FaceNormalCandidate,
+    config: DynamicApproachConfig,
+    global_reasons: Sequence[str],
+) -> tuple[_ValidCandidate | None, CandidateDiagnostics]:
+    reasons = list(global_reasons)
+    target_cells = supercover_segment_cells(costmap, candidate.target, candidate.target)
+    if not target_cells or any(not costmap.is_traversable(cell) for cell in target_cells):
+        reasons.append("target_not_traversable")
+    entry_cells = supercover_segment_cells(costmap, candidate.entry, candidate.entry)
+    if not entry_cells or any(not costmap.is_traversable(cell) for cell in entry_cells):
+        reasons.append("entry_not_traversable")
+    if not segment_is_collision_free(costmap, candidate.entry, candidate.target):
+        reasons.append("terminal_corridor_blocked")
+    if reasons:
+        diagnostics = _candidate_failure(candidate, reasons)
+        return None, diagnostics
+
+    route_result = plan_route(costmap, start, candidate.entry, snap_radius_m=0.0)
+    expanded = route_result.diagnostics.expanded_cells
+    if route_result.route is None:
+        diagnostics = _candidate_failure(
+            candidate,
+            (f"astar_failed:{route_result.diagnostics.reason}",),
+            astar_expanded_cells=expanded,
+        )
+        return None, diagnostics
+    route = route_result.route
+    entry_cell = costmap.world_to_grid(candidate.entry)
+    if (
+        route_result.diagnostics.snapped_goal_cell != entry_cell
+        or route.points[-1].cell != entry_cell
+    ):
+        diagnostics = _candidate_failure(
+            candidate,
+            ("astar_goal_was_snapped",),
+            astar_cell_count=len(route.points),
+            astar_expanded_cells=expanded,
+        )
+        return None, diagnostics
+
+    goal_center = route.points[-1].pose
+    if not segment_is_collision_free(costmap, goal_center, candidate.entry):
+        diagnostics = _candidate_failure(
+            candidate,
+            ("entry_connector_blocked",),
+            astar_cell_count=len(route.points),
+            astar_expanded_cells=expanded,
+        )
+        return None, diagnostics
+    first_center = route.points[0].pose
+    if not segment_is_collision_free(costmap, start, first_center):
+        diagnostics = _candidate_failure(
+            candidate,
+            ("start_connector_blocked",),
+            astar_cell_count=len(route.points),
+            astar_expanded_cells=expanded,
+        )
+        return None, diagnostics
+
+    # Include the exact world-space entry in line-of-sight smoothing.  Leaving
+    # it until after smoothing preserved an unnecessary final grid-cell-center
+    # kink; on reverse staging that tiny kink could demand a large body turn
+    # immediately before the protected corridor.
+    grid_poses = [start]
+    grid_poses.extend(point.pose for point in route.points)
+    grid_poses.append(candidate.entry)
+    deduplicated_grid = [grid_poses[0]]
+    for pose in grid_poses[1:]:
+        if not _same_position(deduplicated_grid[-1], pose):
+            deduplicated_grid.append(pose)
+    smoothed = list(greedy_line_of_sight_shortcut(costmap, deduplicated_grid))
+    if not _same_position(smoothed[-1], candidate.entry):
+        smoothed.append(candidate.entry)
+
+    waypoints = [
+        DynamicApproachWaypoint(_nan_pose(pose), protected=False, corridor=False)
+        for pose in smoothed
+    ]
+    corridor = _terminal_corridor_poses(candidate, config)
+    for pose in corridor:
+        if _same_position(waypoints[-1].pose, pose):
+            # Preserve a zero-length semantic handoff at the exact entry: the
+            # first copy terminates forward/reverse staging with unconstrained
+            # yaw, and the protected copy switches to forward corridor motion.
+            # Its zero geometric length does not alter route cost or safety.
+            waypoints.append(
+                DynamicApproachWaypoint(pose, protected=True, corridor=True)
+            )
+        else:
+            waypoints.append(
+                DynamicApproachWaypoint(pose, protected=True, corridor=True)
+            )
+    waypoint_tuple = tuple(waypoints)
+    length = _polyline_length(waypoint.pose for waypoint in waypoint_tuple)
+    diagnostics = CandidateDiagnostics(
+        face_id=candidate.face_id,
+        target=candidate.target,
+        entry=candidate.entry,
+        valid=True,
+        rejection_reasons=(),
+        astar_cell_count=len(route.points),
+        astar_expanded_cells=expanded,
+        smoothed_waypoint_count=len(smoothed),
+        route_length_m=length,
+    )
+    return (
+        _ValidCandidate(candidate, waypoint_tuple, length, diagnostics),
+        diagnostics,
+    )
+
+
+def plan_axis_acquisition(
+    costmap: Costmap,
+    start: Pose2D,
+    stand: Pose2D,
+    target: Pose2D,
+    *,
+    config: DynamicApproachConfig = DynamicApproachConfig(),
+) -> DynamicApproachPlanResult:
+    """Plan to one fixed observation pose while the stand axis is unknown.
+
+    The supplied target is produced once from the initial robot-to-stand ray.
+    It is deliberately not recomputed from the moving robot.  No terminal
+    face corridor is created until silhouette consensus commits a stand face.
+    """
+
+    _finite_pose(start, name="start")
+    _finite_pose(stand, name="stand")
+    _finite_pose(target, name="axis acquisition target")
+    planning_costmap, keepout_cells = with_dynamic_stand_keepout(costmap, stand, config)
+    start_join_clearance = point_clearance_to_blocked_m(planning_costmap, start)
+    standoff = math.hypot(target.x_m - stand.x_m, target.y_m - stand.y_m)
+    reasons = []
+    if standoff <= config.stand_keepout_radius_m + _EPSILON:
+        reasons.append("acquisition_target_inside_stand_keepout")
+    if standoff < config.minimum_lidar_standoff_m - _EPSILON:
+        reasons.append("acquisition_target_incompatible_with_lidar_stop")
+    target_cells = supercover_segment_cells(planning_costmap, target, target)
+    if not target_cells or any(not planning_costmap.is_traversable(cell) for cell in target_cells):
+        reasons.append("acquisition_target_not_traversable")
+
+    route = None
+    expanded = 0
+    if not reasons:
+        route_result = plan_route(planning_costmap, start, target, snap_radius_m=0.0)
+        expanded = route_result.diagnostics.expanded_cells
+        route = route_result.route
+        if route is None:
+            reasons.append(f"astar_failed:{route_result.diagnostics.reason}")
+        elif route_result.diagnostics.snapped_goal_cell != planning_costmap.world_to_grid(target):
+            reasons.append("astar_goal_was_snapped")
+
+    waypoints: tuple[DynamicApproachWaypoint, ...] = ()
+    length = None
+    astar_count = 0 if route is None else len(route.points)
+    if route is not None and not reasons:
+        poses = [start, *(point.pose for point in route.points), target]
+        deduplicated = [poses[0]]
+        for pose in poses[1:]:
+            if not _same_position(deduplicated[-1], pose):
+                deduplicated.append(pose)
+        if len(deduplicated) > 1 and not segment_is_collision_free(
+            planning_costmap, start, deduplicated[1]
+        ):
+            reasons.append("start_connector_blocked")
+        else:
+            smoothed = list(greedy_line_of_sight_shortcut(planning_costmap, deduplicated))
+            if not reasons:
+                waypoints = tuple(
+                    DynamicApproachWaypoint(
+                        target if index == len(smoothed) - 1 else _nan_pose(pose),
+                        protected=False,
+                        corridor=False,
+                    )
+                    for index, pose in enumerate(smoothed)
+                )
+                length = _polyline_length(waypoint.pose for waypoint in waypoints)
+
+    candidate_diagnostics = CandidateDiagnostics(
+        face_id=-1,
+        target=target,
+        entry=target,
+        valid=not reasons,
+        rejection_reasons=tuple(dict.fromkeys(reasons)),
+        astar_cell_count=astar_count,
+        astar_expanded_cells=expanded,
+        smoothed_waypoint_count=len(waypoints),
+        route_length_m=length,
+    )
+    diagnostics = DynamicApproachDiagnostics(
+        keepout_radius_m=config.stand_keepout_radius_m,
+        keepout_cell_count=len(keepout_cells),
+        minimum_lidar_standoff_m=config.minimum_lidar_standoff_m,
+        start_join_clearance_m=start_join_clearance,
+        requested_hard_face_id=None,
+        selected_face_id=-1 if not reasons else None,
+        failure_reason=(None if not reasons else reasons[0]),
+        candidates=(candidate_diagnostics,),
+    )
+    if reasons or length is None:
+        return DynamicApproachPlanResult(None, diagnostics)
+    return DynamicApproachPlanResult(
+        DynamicApproachPlan(
+            waypoints=waypoints,
+            selected_face_id=-1,
+            stand=stand,
+            target=target,
+            entry=target,
+            length_m=length,
+            diagnostics=diagnostics,
+        ),
+        diagnostics,
+    )
+
+
+def plan_dynamic_approach(
+    costmap: Costmap,
+    start: Pose2D,
+    stand: Pose2D,
+    stand_axis_rad: float,
+    *,
+    hard_face_id: int | None = None,
+    config: DynamicApproachConfig = DynamicApproachConfig(),
+) -> DynamicApproachPlanResult:
+    """Plan to the safest valid stand face, or explicitly withdraw the target.
+
+    With ambiguous side evidence (``hard_face_id is None``), both faces are
+    evaluated and the shortest valid plan wins; face ID is the deterministic
+    tie-break.  Hard evidence never falls back to the opposite face.
+    """
+
+    _finite_pose(start, name="start")
+    _finite_pose(stand, name="stand")
+    if hard_face_id not in (None, 0, 1):
+        raise ValueError("hard_face_id must be None, 0, or 1")
+    candidates = face_normal_candidates(stand, stand_axis_rad, config)
+    planning_costmap, keepout_cells = with_dynamic_stand_keepout(costmap, stand, config)
+    start_join_clearance = point_clearance_to_blocked_m(planning_costmap, start)
+    global_reasons = []
+    if config.standoff_distance_m <= config.stand_keepout_radius_m + _EPSILON:
+        global_reasons.append("standoff_inside_stand_keepout")
+    if config.standoff_distance_m < config.minimum_lidar_standoff_m - _EPSILON:
+        global_reasons.append("standoff_incompatible_with_lidar_stop")
+
+    valid_by_face: dict[int, _ValidCandidate] = {}
+    diagnostics_by_face = []
+    for candidate in candidates:
+        valid, diagnostics = _validate_candidate(
+            planning_costmap,
+            start,
+            candidate,
+            config,
+            global_reasons,
+        )
+        diagnostics_by_face.append(diagnostics)
+        if valid is not None:
+            valid_by_face[candidate.face_id] = valid
+
+    selected = None
+    failure_reason = None
+    if hard_face_id is not None:
+        selected = valid_by_face.get(hard_face_id)
+        if selected is None:
+            failure_reason = f"hard_face_{hard_face_id}_invalid"
+    elif valid_by_face:
+        selected = min(valid_by_face.values(), key=lambda item: (item.length_m, item.candidate.face_id))
+    else:
+        failure_reason = "no_valid_face_candidate"
+
+    diagnostics = DynamicApproachDiagnostics(
+        keepout_radius_m=config.stand_keepout_radius_m,
+        keepout_cell_count=len(keepout_cells),
+        minimum_lidar_standoff_m=config.minimum_lidar_standoff_m,
+        start_join_clearance_m=start_join_clearance,
+        requested_hard_face_id=hard_face_id,
+        selected_face_id=None if selected is None else selected.candidate.face_id,
+        failure_reason=failure_reason,
+        candidates=tuple(diagnostics_by_face),
+    )
+    if selected is None:
+        return DynamicApproachPlanResult(plan=None, diagnostics=diagnostics)
+    plan = DynamicApproachPlan(
+        waypoints=selected.waypoints,
+        selected_face_id=selected.candidate.face_id,
+        stand=stand,
+        target=selected.candidate.target,
+        entry=selected.candidate.entry,
+        length_m=selected.length_m,
+        diagnostics=diagnostics,
+    )
+    return DynamicApproachPlanResult(plan=plan, diagnostics=diagnostics)
+
+
+def plan_fixed_approach(
+    costmap: Costmap,
+    start: Pose2D,
+    stand: Pose2D,
+    candidate: FaceNormalCandidate,
+    *,
+    config: DynamicApproachConfig = DynamicApproachConfig(),
+) -> DynamicApproachPlanResult:
+    """Plan to one already-selected arrival face without substitution.
+
+    Unlike :func:`plan_dynamic_approach`, this entry point never derives a new
+    face from the live robot pose, compares the opposite side, or snaps the
+    stored target.  It is used when an arrival-pose catalog has frozen the
+    semantic decision and only collision-safe path generation remains.
+    """
+
+    _finite_pose(start, name="start")
+    _finite_pose(stand, name="stand")
+    _finite_pose(candidate.target, name="fixed target")
+    _finite_pose(candidate.entry, name="fixed corridor entry")
+    if type(candidate.face_id) is not int or candidate.face_id < 0:
+        raise ValueError("fixed candidate face_id must be a non-negative integer")
+    if not math.isfinite(candidate.normal_rad):
+        raise ValueError("fixed candidate normal must be finite")
+
+    target_dx = candidate.target.x_m - stand.x_m
+    target_dy = candidate.target.y_m - stand.y_m
+    entry_dx = candidate.entry.x_m - stand.x_m
+    entry_dy = candidate.entry.y_m - stand.y_m
+    target_radius = math.hypot(target_dx, target_dy)
+    entry_radius = math.hypot(entry_dx, entry_dy)
+    expected_yaw = _normalize_angle(candidate.normal_rad + math.pi)
+    geometry_reasons = []
+    if target_radius <= _EPSILON:
+        geometry_reasons.append("fixed_target_at_stand_center")
+    else:
+        target_normal = math.atan2(target_dy, target_dx)
+        if abs(_normalize_angle(target_normal - candidate.normal_rad)) > 1.0e-6:
+            geometry_reasons.append("fixed_target_not_on_normal")
+    if entry_radius <= _EPSILON:
+        geometry_reasons.append("fixed_entry_at_stand_center")
+    else:
+        entry_normal = math.atan2(entry_dy, entry_dx)
+        if abs(_normalize_angle(entry_normal - candidate.normal_rad)) > 1.0e-6:
+            geometry_reasons.append("fixed_entry_not_on_normal")
+    if abs(target_radius - config.standoff_distance_m) > 1.0e-6:
+        geometry_reasons.append("fixed_target_standoff_mismatch")
+    if abs(
+        entry_radius
+        - (config.standoff_distance_m + config.terminal_corridor_length_m)
+    ) > 1.0e-6:
+        geometry_reasons.append("fixed_entry_corridor_length_mismatch")
+    if abs(_normalize_angle(candidate.target.yaw_rad - expected_yaw)) > 1.0e-6:
+        geometry_reasons.append("fixed_target_yaw_mismatch")
+    if abs(_normalize_angle(candidate.entry.yaw_rad - expected_yaw)) > 1.0e-6:
+        geometry_reasons.append("fixed_entry_yaw_mismatch")
+
+    planning_costmap, keepout_cells = with_dynamic_stand_keepout(
+        costmap, stand, config
+    )
+    start_join_clearance = point_clearance_to_blocked_m(planning_costmap, start)
+    if config.standoff_distance_m <= config.stand_keepout_radius_m + _EPSILON:
+        geometry_reasons.append("standoff_inside_stand_keepout")
+    if config.standoff_distance_m < config.minimum_lidar_standoff_m - _EPSILON:
+        geometry_reasons.append("standoff_incompatible_with_lidar_stop")
+
+    selected, candidate_diagnostics = _validate_candidate(
+        planning_costmap,
+        start,
+        candidate,
+        config,
+        geometry_reasons,
+    )
+    failure_reason = (
+        None
+        if selected is not None
+        else (
+            candidate_diagnostics.rejection_reasons[0]
+            if candidate_diagnostics.rejection_reasons
+            else "fixed_arrival_invalid"
+        )
+    )
+    diagnostics = DynamicApproachDiagnostics(
+        keepout_radius_m=config.stand_keepout_radius_m,
+        keepout_cell_count=len(keepout_cells),
+        minimum_lidar_standoff_m=config.minimum_lidar_standoff_m,
+        start_join_clearance_m=start_join_clearance,
+        requested_hard_face_id=candidate.face_id,
+        selected_face_id=(candidate.face_id if selected is not None else None),
+        failure_reason=failure_reason,
+        candidates=(candidate_diagnostics,),
+    )
+    if selected is None:
+        return DynamicApproachPlanResult(None, diagnostics)
+    return DynamicApproachPlanResult(
+        DynamicApproachPlan(
+            waypoints=selected.waypoints,
+            selected_face_id=candidate.face_id,
+            stand=stand,
+            target=candidate.target,
+            entry=candidate.entry,
+            length_m=selected.length_m,
+            diagnostics=diagnostics,
+        ),
+        diagnostics,
+    )

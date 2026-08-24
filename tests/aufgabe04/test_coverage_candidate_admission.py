@@ -4,15 +4,15 @@ import json
 import unittest
 from dataclasses import FrozenInstanceError, replace
 
-from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds
-from scripts.aufgabe04.navigation.coverage_candidate_admission import (
+from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds
+from scripts.aufgabe04.navigation.coverage.coverage_candidate_admission import (
     CoverageCandidateAdmissionDecision,
     coverage_candidate_admission_evidence,
     coverage_candidate_admission_evidence_sha256,
     evaluate_coverage_candidate_admission,
 )
-from scripts.aufgabe04.navigation.models import GridCell, Pose2D
-from scripts.aufgabe04.navigation.stand_coverage_survey import (
+from scripts.aufgabe04.navigation.foundation.models import GridCell, Pose2D
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STATUS_CONFIRMED,
     STATUS_PENDING_CAMERA,
     STATUS_PROVISIONAL,

@@ -6,16 +6,16 @@ import math
 import time
 from dataclasses import replace
 
-from scripts.aufgabe04.navigation.dynamic_route_handoff import (
+from scripts.aufgabe04.navigation.execution.dynamic_route_handoff import (
     RouteUpdate,
     RouteUpdateKind,
 )
-from scripts.aufgabe04.navigation.driving_behavior import PHYSICAL_ROUTE_KINDS
-from scripts.aufgabe04.navigation.execution_route_certificate import (
+from scripts.aufgabe04.navigation.control.driving_behavior import PHYSICAL_ROUTE_KINDS
+from scripts.aufgabe04.navigation.execution.execution_route_certificate import (
     check_execution_route_tube,
 )
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.waypoint_controller import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.control.waypoint_controller import (
     reverse_staging_is_preferred,
 )
 from scripts.aufgabe04.navigation.waypoint_follower.route_admission import (

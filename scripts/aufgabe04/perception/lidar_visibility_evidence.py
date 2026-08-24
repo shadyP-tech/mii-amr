@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 from scripts.aufgabe04.artifacts.content_store import payload_sha256
-from scripts.aufgabe04.navigation.models import Pose2D
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
 
 
 LIDAR_VISIBILITY_RECEIPT_SCHEMA_VERSION = 1

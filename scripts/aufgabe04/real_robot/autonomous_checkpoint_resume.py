@@ -13,15 +13,15 @@ import json
 import os
 from pathlib import Path
 
-from scripts.aufgabe04.navigation.artifacts import (
+from scripts.aufgabe04.navigation.foundation.artifacts import (
     write_diagnostics_json,
     write_route_csv,
 )
-from scripts.aufgabe04.navigation.map_io import (
+from scripts.aufgabe04.navigation.planning.map_io import (
     load_occupancy_grid_with_bundle,
 )
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.stand_coverage_survey import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     CoverageSurveyPlan,
     coverage_survey_plan_sha256,
     load_coverage_survey_plan,

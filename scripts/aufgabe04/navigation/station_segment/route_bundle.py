@@ -7,26 +7,26 @@ import math
 from pathlib import Path
 from typing import Mapping
 
-from scripts.aufgabe04.navigation.driving_behavior import (
+from scripts.aufgabe04.navigation.control.driving_behavior import (
     DYNAMIC_VIEWPOINT_ROUTE_KINDS,
     STATIC_PHYSICAL_ROUTE_KINDS,
 )
-from scripts.aufgabe04.navigation.execution_route_certificate import (
+from scripts.aufgabe04.navigation.execution.execution_route_certificate import (
     execution_route_certificate_sha256,
     load_execution_route_certificate,
     validate_execution_route_identity,
 )
-from scripts.aufgabe04.navigation.follower_models import FollowerResult
-from scripts.aufgabe04.navigation.mission_execution_gate import DiagnosticsSnapshot
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.ros_preflight import RosPreflightResult
-from scripts.aufgabe04.navigation.route_revision_store import (
+from scripts.aufgabe04.navigation.control.follower_models import FollowerResult
+from scripts.aufgabe04.navigation.execution.mission_execution_gate import DiagnosticsSnapshot
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.localization.ros_preflight import RosPreflightResult
+from scripts.aufgabe04.navigation.execution.route_revision_store import (
     LoadedRouteRevision,
     RouteRevisionError,
     read_committed_revision,
     read_route_revision,
 )
-from scripts.aufgabe04.navigation.waypoint_csv import (
+from scripts.aufgabe04.navigation.planning.waypoint_csv import (
     SelectedRouteLeg,
     load_route_leg,
     poses_from_waypoints,

@@ -47,7 +47,7 @@ Dry-run artifact layout:
 The older station-map generator remains useful for offline visualization only:
 
 ```bash
-python3 scripts/aufgabe04/navigation/run_station_route.py \
+python3 scripts/aufgabe04/navigation/entrypoints/run_station_route.py \
   --map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
   --stations A,B,C \
   --route-csv results/aufgabe04/routes/station_route.csv \
@@ -101,7 +101,7 @@ manual/QR gate that turns one unique confirmed LiDAR stand into a station
 identity; it does not move the robot:
 
 ```bash
-python3 scripts/aufgabe04/navigation/create_detected_station_confirmation.py \
+python3 scripts/aufgabe04/navigation/entrypoints/create_detected_station_confirmation.py \
   --observations-jsonl results/aufgabe04/detected_stations/stand_observations.jsonl \
   --map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
   --semantic-map-id arena_1p898x3p9_auto \
@@ -114,7 +114,7 @@ python3 scripts/aufgabe04/navigation/create_detected_station_confirmation.py \
 Create first-station layout and route artifacts from confirmed observations:
 
 ```bash
-python3 scripts/aufgabe04/navigation/read_current_amcl_pose.py \
+python3 scripts/aufgabe04/navigation/entrypoints/read_current_amcl_pose.py \
   --amcl-topic amcl_pose \
   --map-frame map \
   --max-age-sec 2.0
@@ -124,7 +124,7 @@ Use the printed `--start-x`, `--start-y`, and `--start-yaw` arguments in the
 planner command:
 
 ```bash
-python3 scripts/aufgabe04/navigation/plan_first_detected_station.py \
+python3 scripts/aufgabe04/navigation/entrypoints/plan_first_detected_station.py \
   --observations-jsonl results/aufgabe04/detected_stations/stand_observations.jsonl \
   --map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
   --start-x <amcl_x> \
@@ -138,7 +138,7 @@ python3 scripts/aufgabe04/navigation/plan_first_detected_station.py \
 ```
 
 Physical motion remains a separate step through
-`scripts/aufgabe04/navigation/run_single_station_segment.py --dry-run` and then
+`scripts/aufgabe04/navigation/entrypoints/run_single_station_segment.py --dry-run` and then
 the bundle-wrapped real runner with typed `RUN`.
 
 ## Offline Stand-Axis Analysis

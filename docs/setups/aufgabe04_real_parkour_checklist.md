@@ -137,7 +137,7 @@ before ROS preflight. Click the pose estimate at that prompt, press Enter, and
 type `RUN` only after the inner preflight passes:
 
 ```bash
-scripts/aufgabe04/navigation/run_first_detected_station_segment_with_bundle.sh \
+scripts/aufgabe04/navigation/entrypoints/run_first_detected_station_segment_with_bundle.sh \
   aufgabe04_first_detected_real_001 \
   --allow-idle-nav2-publishers \
   --operator-note "first detected station pre-approach"

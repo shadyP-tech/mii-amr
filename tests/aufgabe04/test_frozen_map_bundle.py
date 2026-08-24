@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.aufgabe04.navigation.map_io import (
+from scripts.aufgabe04.navigation.planning.map_io import (
     FrozenMapBundleError,
     freeze_map_bundle,
     frozen_map_bundle_payload,

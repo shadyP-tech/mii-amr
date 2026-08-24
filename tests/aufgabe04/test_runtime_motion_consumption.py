@@ -10,7 +10,7 @@ from scripts.aufgabe04.artifacts.content_store import (
     payload_sha256,
     write_content_hashed_json,
 )
-from scripts.aufgabe04.navigation.runtime_motion_authorization import (
+from scripts.aufgabe04.navigation.execution.runtime_motion_authorization import (
     MISSION_MOTION_AUTHORIZATION_SCOPE,
     MISSION_RUN_CONFIRMATION,
     RUNTIME_LOCALIZATION_RESEAL_RECOVERY_KIND,
@@ -21,7 +21,7 @@ from scripts.aufgabe04.navigation.runtime_motion_authorization import (
     write_mission_motion_authorization,
     write_runtime_localization_motion_permit,
 )
-from scripts.aufgabe04.navigation.runtime_motion_consumption import (
+from scripts.aufgabe04.navigation.execution.runtime_motion_consumption import (
     RUNTIME_MOTION_CONSUMPTION_RECEIPT_HASH_FIELD,
     RuntimeMotionConsumptionReceipt,
     consume_runtime_motion_permit,
@@ -313,7 +313,7 @@ class RuntimeMotionConsumptionTest(unittest.TestCase):
             self._consume(permit_path=noncanonical)
 
     def _permit_payload_sha256(self):
-        from scripts.aufgabe04.navigation.runtime_motion_authorization import (
+        from scripts.aufgabe04.navigation.execution.runtime_motion_authorization import (
             runtime_localization_motion_permit_sha256,
         )
 

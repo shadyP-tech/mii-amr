@@ -19,20 +19,20 @@ except ImportError:  # pragma: no cover - keeps offline tests ROS-free.
     Empty = None
     TransformException = Exception
 
-from scripts.aufgabe04.navigation.dynamic_route_handoff import (
+from scripts.aufgabe04.navigation.execution.dynamic_route_handoff import (
     RouteUpdate,
     RouteUpdateKind,
 )
-from scripts.aufgabe04.navigation.localization_ownership import (
+from scripts.aufgabe04.navigation.localization.localization_ownership import (
     MONITOR_ACTION_FORCE_ZERO_RESEAL,
     evaluate_global_consistency_monitor,
 )
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.odom_execution_certificate import PlanarTransform2D
-from scripts.aufgabe04.navigation.odom_route_adapter import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import PlanarTransform2D
+from scripts.aufgabe04.navigation.localization.odom_route_adapter import (
     evaluate_map_odom_continuity,
 )
-from scripts.aufgabe04.navigation.tf_stale_recovery_policy import (
+from scripts.aufgabe04.navigation.localization.tf_stale_recovery_policy import (
     OdomStationaritySample,
     StationarityDecision,
     TfEdgeSample,

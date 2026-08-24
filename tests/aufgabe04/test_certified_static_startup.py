@@ -1,7 +1,7 @@
 import unittest
 
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.simple_waypoint_follower import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.waypoint_follower.runtime import (
     certified_static_startup_decision,
 )
 

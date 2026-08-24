@@ -34,25 +34,25 @@ from scripts.aufgabe04.logistics.server_validation.models import (
     ValidatedServerTask,
     server_order_sha256,
 )
-from scripts.aufgabe04.navigation import (
+from scripts.aufgabe04.navigation.missions import (
     plan_arrival_catalog_route as planner_module,
 )
-from scripts.aufgabe04.navigation.plan_arrival_catalog_route import main
-from scripts.aufgabe04.navigation.safety_checks import (
+from scripts.aufgabe04.navigation.missions.plan_arrival_catalog_route import main
+from scripts.aufgabe04.navigation.control.safety_checks import (
     validate_catalog_route_binding_json,
     validate_route_diagnostics_json,
 )
-from scripts.aufgabe04.navigation.waypoint_csv import load_route_leg
-from scripts.aufgabe04.navigation.execution_route_certificate import (
+from scripts.aufgabe04.navigation.planning.waypoint_csv import load_route_leg
+from scripts.aufgabe04.navigation.execution.execution_route_certificate import (
     execution_route_certificate_sha256,
     load_execution_route_certificate,
     validate_execution_route_identity,
 )
-from scripts.aufgabe04.navigation.map_io import (
+from scripts.aufgabe04.navigation.planning.map_io import (
     freeze_map_bundle,
     write_frozen_map_bundle,
 )
-from scripts.aufgabe04.navigation.mission_execution_gate import (
+from scripts.aufgabe04.navigation.execution.mission_execution_gate import (
     validate_logistics_execution_bundle,
 )
 from scripts.aufgabe04.stations.arrival_pose_catalog import (
@@ -441,7 +441,7 @@ class PlanArrivalCatalogRouteTest(unittest.TestCase):
             mismatched_bounds_args[arena_length_index + 1] = "19.0"
             mismatched_bounds_stderr = StringIO()
             with patch(
-                "scripts.aufgabe04.navigation.plan_arrival_catalog_route.time.time",
+                "scripts.aufgabe04.navigation.missions.plan_arrival_catalog_route.time.time",
                 return_value=151.0,
             ), redirect_stderr(mismatched_bounds_stderr):
                 with self.assertRaises(SystemExit) as mismatched_bounds_exit:
@@ -464,7 +464,7 @@ class PlanArrivalCatalogRouteTest(unittest.TestCase):
             ]
             wrong_config_stderr = StringIO()
             with patch(
-                "scripts.aufgabe04.navigation.plan_arrival_catalog_route.time.time",
+                "scripts.aufgabe04.navigation.missions.plan_arrival_catalog_route.time.time",
                 return_value=151.0,
             ), redirect_stderr(wrong_config_stderr):
                 with self.assertRaises(SystemExit) as wrong_config_exit:
@@ -474,7 +474,7 @@ class PlanArrivalCatalogRouteTest(unittest.TestCase):
             self.assertFalse(diagnostics.exists())
             output = StringIO()
             with patch(
-                "scripts.aufgabe04.navigation.plan_arrival_catalog_route.time.time",
+                "scripts.aufgabe04.navigation.missions.plan_arrival_catalog_route.time.time",
                 return_value=151.0,
             ), redirect_stdout(output):
                 status = main(planner_args)
@@ -630,7 +630,7 @@ class PlanArrivalCatalogRouteTest(unittest.TestCase):
             )
             stale_stderr = StringIO()
             with patch(
-                "scripts.aufgabe04.navigation.plan_arrival_catalog_route.time.time",
+                "scripts.aufgabe04.navigation.missions.plan_arrival_catalog_route.time.time",
                 return_value=200.0,
             ), redirect_stderr(stale_stderr):
                 with self.assertRaises(SystemExit) as stale_exit:
@@ -647,7 +647,7 @@ class PlanArrivalCatalogRouteTest(unittest.TestCase):
             )
             future_stderr = StringIO()
             with patch(
-                "scripts.aufgabe04.navigation.plan_arrival_catalog_route.time.time",
+                "scripts.aufgabe04.navigation.missions.plan_arrival_catalog_route.time.time",
                 return_value=200.0,
             ), redirect_stderr(future_stderr):
                 with self.assertRaises(SystemExit) as future_exit:
@@ -664,7 +664,7 @@ class PlanArrivalCatalogRouteTest(unittest.TestCase):
             )
             open_catalog_stderr = StringIO()
             with patch(
-                "scripts.aufgabe04.navigation.plan_arrival_catalog_route.time.time",
+                "scripts.aufgabe04.navigation.missions.plan_arrival_catalog_route.time.time",
                 return_value=151.0,
             ), redirect_stderr(open_catalog_stderr):
                 with self.assertRaises(SystemExit) as open_catalog_exit:
@@ -684,11 +684,11 @@ class PlanArrivalCatalogRouteTest(unittest.TestCase):
 
             concurrent_stderr = StringIO()
             with patch(
-                "scripts.aufgabe04.navigation.plan_arrival_catalog_route."
+                "scripts.aufgabe04.navigation.missions.plan_arrival_catalog_route."
                 "build_required_arrival_route_graph",
                 side_effect=mutate_catalog_after_graph,
             ), patch(
-                "scripts.aufgabe04.navigation.plan_arrival_catalog_route.time.time",
+                "scripts.aufgabe04.navigation.missions.plan_arrival_catalog_route.time.time",
                 return_value=151.0,
             ), redirect_stderr(concurrent_stderr):
                 with self.assertRaises(SystemExit) as concurrent_exit:

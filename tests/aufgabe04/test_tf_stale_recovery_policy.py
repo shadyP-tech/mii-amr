@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation.tf_stale_recovery_policy import (  # noqa: E402
+from scripts.aufgabe04.navigation.localization.tf_stale_recovery_policy import (  # noqa: E402
     OdomStationaritySample,
     StationarityLimits,
     TfEdgeSample,

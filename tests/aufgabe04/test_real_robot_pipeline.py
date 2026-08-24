@@ -11,9 +11,9 @@ from scripts.aufgabe04.artifacts.content_store import (
     load_content_hashed_json,
     write_content_hashed_json,
 )
-from scripts.aufgabe04.navigation.map_io import freeze_map_bundle
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.viewpoint_recommendation import (
+from scripts.aufgabe04.navigation.planning.map_io import freeze_map_bundle
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import (
     load_recommendation,
     recommendation_to_dict,
 )

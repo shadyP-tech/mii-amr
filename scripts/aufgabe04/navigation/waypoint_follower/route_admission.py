@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 
-from scripts.aufgabe04.navigation.models import Pose2D
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
 
 
 def dynamic_join_envelope_failure(

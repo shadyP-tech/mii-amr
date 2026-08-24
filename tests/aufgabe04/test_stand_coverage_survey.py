@@ -9,29 +9,29 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds
-from scripts.aufgabe04.navigation.certified_exact_start_route import (
+from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds
+from scripts.aufgabe04.navigation.planning.certified_exact_start_route import (
     certify_and_smooth_exact_start_route,
 )
-from scripts.aufgabe04.navigation.costmap import (
+from scripts.aufgabe04.navigation.planning.costmap import (
     CELL_SOURCE_STATION_KEEPOUT,
     Costmap,
 )
-from scripts.aufgabe04.navigation.exact_start_connector import (
+from scripts.aufgabe04.navigation.planning.exact_start_connector import (
     prepend_certified_exact_start,
 )
-from scripts.aufgabe04.navigation.global_planner import plan_route
-from scripts.aufgabe04.navigation.map_io import (
+from scripts.aufgabe04.navigation.planning.global_planner import plan_route
+from scripts.aufgabe04.navigation.planning.map_io import (
     CELL_FREE,
     MapMetadata,
     OccupancyGrid,
     load_occupancy_grid_with_bundle,
 )
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.simple_waypoint_follower import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.waypoint_follower.runtime import (
     certified_static_startup_decision,
 )
-from scripts.aufgabe04.navigation.stand_coverage_survey import (
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STATUS_CONFIRMED,
     STATUS_PENDING_CAMERA,
     STATUS_PROVISIONAL,
@@ -52,10 +52,10 @@ from scripts.aufgabe04.navigation.stand_coverage_survey import (
     write_stand_survey_registry,
     write_survey_progress,
 )
-from scripts.aufgabe04.navigation.record_stand_coverage_stop import (
+from scripts.aufgabe04.navigation.coverage.record_stand_coverage_stop import (
     main as record_coverage_stop_main,
 )
-from scripts.aufgabe04.navigation.record_stand_candidate_decision import (
+from scripts.aufgabe04.navigation.approach.record_stand_candidate_decision import (
     main as record_candidate_decision_main,
 )
 from scripts.aufgabe04.perception.stand_confirmation import ConfirmedStand

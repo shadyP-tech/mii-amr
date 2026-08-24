@@ -6,11 +6,11 @@ import argparse
 import math
 from pathlib import Path
 
-from scripts.aufgabe04.navigation.mission_leg_motion_permit import MissionLegKind
-from scripts.aufgabe04.navigation.transient_blockage_policy import (
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import MissionLegKind
+from scripts.aufgabe04.navigation.coverage.transient_blockage_policy import (
     DEFAULT_LINEAR_MOTION_FLOOR_MPS,
 )
-from scripts.aufgabe04.navigation.viewpoint_sampling_contract import (
+from scripts.aufgabe04.navigation.approach.viewpoint_sampling_contract import (
     INTERMEDIATE_TERMINAL_HEADING_HOLD_TOLERANCE_M,
     INTERMEDIATE_TERMINAL_HEADING_TARGET_ENVELOPE_RADIUS_M,
 )

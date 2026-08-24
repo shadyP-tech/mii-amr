@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation import ros_preflight  # noqa: E402
+from scripts.aufgabe04.navigation.localization import ros_preflight  # noqa: E402
 
 
 class RosPreflightParameterTest(unittest.TestCase):

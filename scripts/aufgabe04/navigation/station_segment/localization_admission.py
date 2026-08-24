@@ -6,22 +6,22 @@ import math
 from pathlib import Path
 from typing import Mapping
 
-from scripts.aufgabe04.navigation.content_hashed_evidence import (
+from scripts.aufgabe04.navigation.foundation.content_hashed_evidence import (
     payload_sha256,
     write_content_hashed_json,
 )
-from scripts.aufgabe04.navigation.costmap import Costmap
-from scripts.aufgabe04.navigation.coverage_replan_coordinator import (
+from scripts.aufgabe04.navigation.planning.costmap import Costmap
+from scripts.aufgabe04.navigation.coverage.coverage_replan_coordinator import (
     CoverageReplanCoordinator,
 )
-from scripts.aufgabe04.navigation.dynamic_route_handoff import (
+from scripts.aufgabe04.navigation.execution.dynamic_route_handoff import (
     RouteUpdate,
     RouteUpdateKind,
     validate_arena_boundary_evidence,
 )
-from scripts.aufgabe04.navigation.mission_execution_gate import DiagnosticsSnapshot
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.odom_execution_certificate import (
+from scripts.aufgabe04.navigation.execution.mission_execution_gate import DiagnosticsSnapshot
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
     OdomExecutionCertificate,
     PlanarTransform2D,
     odom_pose_to_map,
@@ -30,26 +30,26 @@ from scripts.aufgabe04.navigation.odom_execution_certificate import (
     validate_odom_execution_identity,
     write_odom_execution_certificate,
 )
-from scripts.aufgabe04.navigation.odom_route_adapter import (
+from scripts.aufgabe04.navigation.localization.odom_route_adapter import (
     OdomExecutionContext,
     adapt_map_route_update_to_odom,
     evaluate_map_odom_stationary_stability,
 )
-from scripts.aufgabe04.navigation.ros_preflight import RosPreflightResult
-from scripts.aufgabe04.navigation.route_uncertainty_admission import (
+from scripts.aufgabe04.navigation.localization.ros_preflight import RosPreflightResult
+from scripts.aufgabe04.navigation.execution.route_uncertainty_admission import (
     RouteUncertaintyAdmissionConfig,
     evaluate_route_uncertainty_admission,
     route_uncertainty_admission_evidence_sha256,
 )
-from scripts.aufgabe04.navigation.route_uncertainty_budget import PlanarCovariance
-from scripts.aufgabe04.navigation.waypoint_csv import (
+from scripts.aufgabe04.navigation.execution.route_uncertainty_budget import PlanarCovariance
+from scripts.aufgabe04.navigation.planning.waypoint_csv import (
     SelectedRouteLeg,
     poses_from_waypoints,
 )
 from scripts.aufgabe04.navigation.waypoint_follower.startup import (
     certified_static_startup_decision,
 )
-from scripts.aufgabe04.navigation.map_io import load_occupancy_grid
+from scripts.aufgabe04.navigation.planning.map_io import load_occupancy_grid
 
 from .route_bundle import (
     _resolved_map_execution_certificate,

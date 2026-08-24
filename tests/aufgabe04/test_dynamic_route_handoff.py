@@ -5,12 +5,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from scripts.aufgabe04.navigation.dynamic_route_handoff import (
+from scripts.aufgabe04.navigation.execution.dynamic_route_handoff import (
     DynamicRouteSource,
     RouteUpdateKind,
 )
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.route_revision_store import RouteRevisionStore
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.execution.route_revision_store import RouteRevisionStore
 
 
 def _route_csv(points: list[tuple[float, float]], *, route_kind: str = "") -> str:

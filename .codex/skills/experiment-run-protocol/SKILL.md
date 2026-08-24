@@ -51,7 +51,7 @@ post-run validation. The main project risk is inconsistent data collection.
 - `scripts/aufgabe03/follow_planned_waypoints.py`
 - `scripts/aufgabe03/lidar_obstacle_map.py`
 - `scripts/aufgabe03/analyze_waypoint_follow_runs.py`
-- `scripts/aufgabe04/navigation/run_single_station_segment.py`
+- `scripts/aufgabe04/navigation/entrypoints/run_single_station_segment.py`
 - `scripts/aufgabe04/navigation/ros_preflight.py`
 - `docs/setups/nav2_waypoint.txt`
 - `docs/setups/aufgabe04_real_parkour_checklist.md`
@@ -279,7 +279,7 @@ python3 scripts/aufgabe03/two_stage_waypoint_run.py \
   route segment.
 - Start from `docs/setups/aufgabe04_real_parkour_checklist.md`.
 - The current runner is
-  `scripts/aufgabe04/navigation/run_single_station_segment.py`.
+  `scripts/aufgabe04/navigation/entrypoints/run_single_station_segment.py`.
 - Required preflight evidence:
   route CSV/diagnostics validation, resolved namespace/topic/frame printout,
   fresh `/scan`, `/odom`, AMCL when used, fresh `map -> base_footprint` and
@@ -288,7 +288,7 @@ python3 scripts/aufgabe03/two_stage_waypoint_run.py \
 - Dry run first:
 
 ```bash
-python3 scripts/aufgabe04/navigation/run_single_station_segment.py \
+python3 scripts/aufgabe04/navigation/entrypoints/run_single_station_segment.py \
   --dry-run \
   --leg-index 1 \
   --route-csv results/aufgabe04/routes/station_route.csv \
@@ -299,7 +299,7 @@ python3 scripts/aufgabe04/navigation/run_single_station_segment.py \
 
 ```bash
 scripts/common/run_with_bundle.sh run_001 -- \
-  python3 scripts/aufgabe04/navigation/run_single_station_segment.py \
+  python3 scripts/aufgabe04/navigation/entrypoints/run_single_station_segment.py \
     --leg-index 1 \
     --route-csv results/aufgabe04/routes/station_route.csv \
     --diagnostics-json results/aufgabe04/routes/station_route_diagnostics.json \

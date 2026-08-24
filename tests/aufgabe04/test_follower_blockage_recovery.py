@@ -5,24 +5,24 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from scripts.aufgabe04.navigation.dynamic_route_handoff import (
+from scripts.aufgabe04.navigation.execution.dynamic_route_handoff import (
     RouteUpdate,
     RouteUpdateKind,
 )
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.simple_waypoint_follower import (
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.waypoint_follower.runtime import (
     FollowerConfig,
     PoseLookupResult,
     SimpleWaypointFollowerNode,
 )
-from scripts.aufgabe04.navigation.transient_blockage_admission import (
+from scripts.aufgabe04.navigation.coverage.transient_blockage_admission import (
     StationaryBlockageAdmission,
 )
-from scripts.aufgabe04.navigation.transient_blockage_policy import (
+from scripts.aufgabe04.navigation.coverage.transient_blockage_policy import (
     PersistentObstacleConfig,
     StationaryFrontSectorSample,
 )
-from scripts.aufgabe04.navigation.waypoint_controller import ControllerConfig
+from scripts.aufgabe04.navigation.control.waypoint_controller import ControllerConfig
 
 
 def _bare_node() -> SimpleWaypointFollowerNode:
@@ -231,10 +231,10 @@ class FollowerBlockageRecoveryTest(unittest.TestCase):
         node._stationary_front_sample = sample
         fake_rclpy = SimpleNamespace(ok=lambda: True)
         with patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.rclpy",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.rclpy",
             fake_rclpy,
         ), patch(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower.time.monotonic",
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
             side_effect=clock.tick,
         ):
             admission = node._confirm_stationary_blockage()

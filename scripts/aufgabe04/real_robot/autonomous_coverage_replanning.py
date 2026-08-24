@@ -11,19 +11,19 @@ import json
 import math
 from pathlib import Path
 
-from scripts.aufgabe04.navigation.artifacts import (
+from scripts.aufgabe04.navigation.foundation.artifacts import (
     write_diagnostics_json,
     write_route_csv,
 )
-from scripts.aufgabe04.navigation.map_io import load_occupancy_grid_with_bundle
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.runtime_localization_reseal import (
+from scripts.aufgabe04.navigation.planning.map_io import load_occupancy_grid_with_bundle
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.localization.runtime_localization_reseal import (
     evaluate_runtime_localization_reseal,
 )
-from scripts.aufgabe04.navigation.stand_blockage_replan import (
+from scripts.aufgabe04.navigation.coverage.stand_blockage_replan import (
     replan_transient_blockage_from_overlay,
 )
-from scripts.aufgabe04.navigation.stand_coverage_survey import (
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     CoverageSurveyPlan,
     coverage_survey_plan_sha256,
     load_coverage_survey_plan,
@@ -31,7 +31,7 @@ from scripts.aufgabe04.navigation.stand_coverage_survey import (
     load_survey_progress,
     plan_next_survey_leg,
 )
-from scripts.aufgabe04.navigation.transient_overlay_resume_state import (
+from scripts.aufgabe04.navigation.coverage.transient_overlay_resume_state import (
     TransientOverlayResumeState,
     bind_transient_overlay_resume_state_to_diagnostics,
     load_jsonl_event_objects,

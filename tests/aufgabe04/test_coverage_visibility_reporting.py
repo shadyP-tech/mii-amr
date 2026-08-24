@@ -7,14 +7,14 @@ from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 from scripts.aufgabe04.artifacts.content_store import payload_sha256
-from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds
-from scripts.aufgabe04.navigation.coverage_visibility_reporting import (
+from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds
+from scripts.aufgabe04.navigation.coverage.coverage_visibility_reporting import (
     CoverageVisibilityEvidence,
     coverage_visibility_epoch_fields,
     validate_coverage_visibility_evidence,
 )
-from scripts.aufgabe04.navigation.models import GridCell, Pose2D
-from scripts.aufgabe04.navigation.stand_coverage_survey import (
+from scripts.aufgabe04.navigation.foundation.models import GridCell, Pose2D
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     SURVEY_PLAN_SCHEMA_VERSION,
     CoverageSurveyConfig,
     CoverageSurveyPlan,

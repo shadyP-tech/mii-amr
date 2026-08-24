@@ -36,7 +36,7 @@ class WaypointFollowerModuleBoundaryTest(unittest.TestCase):
 
     def test_legacy_entrypoint_aliases_the_runtime_module(self):
         legacy = importlib.import_module(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower"
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime"
         )
         runtime = importlib.import_module(RUNTIME_MODULE)
 
@@ -44,7 +44,7 @@ class WaypointFollowerModuleBoundaryTest(unittest.TestCase):
 
     def test_legacy_entrypoint_preserves_supported_symbols(self):
         legacy = importlib.import_module(
-            "scripts.aufgabe04.navigation.simple_waypoint_follower"
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime"
         )
         supported_symbols = (
             "CALLBACK_SERVICE_BACKGROUND_EXECUTOR",
@@ -168,10 +168,10 @@ class WaypointFollowerModuleBoundaryTest(unittest.TestCase):
         self.assertNotIn("def _refresh_dynamic_route(", runtime_source)
         self.assertNotIn("def _current_pose_lookup(", runtime_source)
 
-    def test_live_runner_imports_owning_modules_not_legacy_facade(self):
-        facade_source = (
+    def test_live_runner_imports_owning_modules_not_entrypoint(self):
+        entrypoint_source = (
             ROOT
-            / "scripts/aufgabe04/navigation/run_single_station_segment.py"
+            / "scripts/aufgabe04/navigation/entrypoints/run_single_station_segment.py"
         ).read_text()
         source = (
             ROOT
@@ -179,11 +179,11 @@ class WaypointFollowerModuleBoundaryTest(unittest.TestCase):
         ).read_text()
 
         self.assertNotIn(
-            "navigation.simple_waypoint_follower import",
+            "navigation.entrypoints import",
             source,
         )
         self.assertIn("navigation.waypoint_follower.runtime import", source)
-        self.assertIn("navigation.station_segment import runtime", facade_source)
+        self.assertIn("navigation.station_segment import runtime", entrypoint_source)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation.follower_safety import (  # noqa: E402
+from scripts.aufgabe04.navigation.control.follower_safety import (  # noqa: E402
     NO_VALID_FRONT_SECTOR_SCAN_RANGES,
     NO_VALID_SCAN_RANGES,
     OBSTACLE_TOO_CLOSE,
@@ -23,7 +23,7 @@ from scripts.aufgabe04.navigation.follower_safety import (  # noqa: E402
     stuck_progress_failure,
     waypoint_timeout_failure,
 )
-from scripts.aufgabe04.navigation.models import Pose2D  # noqa: E402
+from scripts.aufgabe04.navigation.foundation.models import Pose2D  # noqa: E402
 
 
 class FollowerSafetyTest(unittest.TestCase):

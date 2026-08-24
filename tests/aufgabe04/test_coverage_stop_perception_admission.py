@@ -5,8 +5,8 @@ import dataclasses
 from pathlib import Path
 import unittest
 
-from scripts.aufgabe04.navigation.content_hashed_evidence import payload_sha256
-from scripts.aufgabe04.navigation.coverage_stop_perception_admission import (
+from scripts.aufgabe04.navigation.foundation.content_hashed_evidence import payload_sha256
+from scripts.aufgabe04.navigation.coverage.coverage_stop_perception_admission import (
     ContentHashedAdmissionArtifact,
     CoverageEpochPerceptionAdmission,
     CoverageVisibilityReconciliationAdmission,
@@ -16,9 +16,11 @@ from scripts.aufgabe04.navigation.coverage_stop_perception_admission import (
 ROOT = Path(__file__).resolve().parents[2]
 ADMISSION_MODULE = (
     ROOT
-    / "scripts/aufgabe04/navigation/coverage_stop_perception_admission.py"
+    / "scripts/aufgabe04/navigation/coverage/coverage_stop_perception_admission.py"
 )
-RECORD_MODULE = ROOT / "scripts/aufgabe04/navigation/record_stand_coverage_stop.py"
+RECORD_MODULE = (
+    ROOT / "scripts/aufgabe04/navigation/coverage/record_stand_coverage_stop.py"
+)
 
 
 class CoverageStopPerceptionAdmissionBoundaryTest(unittest.TestCase):
@@ -60,17 +62,17 @@ class CoverageStopPerceptionAdmissionBoundaryTest(unittest.TestCase):
             for node in ast.walk(parent_tree)
             if isinstance(node, ast.ImportFrom)
             and node.module
-            == "scripts.aufgabe04.navigation.coverage_stop_perception_admission"
+            == "scripts.aufgabe04.navigation.coverage.coverage_stop_perception_admission"
         ]
         self.assertEqual(len(facade_imports), 1)
         self.assertTrue(
             all(not alias.name.startswith("_") for alias in facade_imports[0].names)
         )
         prohibited_direct_imports = {
-            "scripts.aufgabe04.navigation.coverage_candidate_reconciliation",
-            "scripts.aufgabe04.navigation.coverage_candidate_reconciliation_report",
-            "scripts.aufgabe04.navigation.coverage_visibility_reporting",
-            "scripts.aufgabe04.navigation.stand_candidate_static_map_admission",
+            "scripts.aufgabe04.navigation.coverage.coverage_candidate_reconciliation",
+            "scripts.aufgabe04.navigation.coverage.coverage_candidate_reconciliation_report",
+            "scripts.aufgabe04.navigation.coverage.coverage_visibility_reporting",
+            "scripts.aufgabe04.navigation.coverage.stand_candidate_static_map_admission",
             "scripts.aufgabe04.perception.lidar_stand_morphology",
             "scripts.aufgabe04.perception.lidar_visibility_evidence",
         }

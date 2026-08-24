@@ -11,14 +11,14 @@ from scripts.aufgabe04.artifacts.content_store import (
     payload_sha256,
     write_content_hashed_json,
 )
-from scripts.aufgabe04.navigation.coverage_candidate_reconciliation_report import (
+from scripts.aufgabe04.navigation.coverage.coverage_candidate_reconciliation_report import (
     evidence_only_reconciliation_policy_contract,
 )
-from scripts.aufgabe04.navigation.dynamic_approach_planner import (
+from scripts.aufgabe04.navigation.approach.dynamic_approach_planner import (
     DynamicApproachConfig,
     minimum_static_obstacle_inflation_m,
 )
-from scripts.aufgabe04.navigation.stand_coverage_survey import (
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STATUS_PENDING_CAMERA,
     CoverageSurveyConfig,
     CoverageSurveyPlan,

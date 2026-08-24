@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from scripts.aufgabe04.navigation.driving_behavior import (
+from scripts.aufgabe04.navigation.control.driving_behavior import (
     DYNAMIC_PHYSICAL_ROUTE_KINDS,
     DYNAMIC_VIEWPOINT_ROUTE_KINDS,
     INTERMEDIATE_ROUTE_KINDS,

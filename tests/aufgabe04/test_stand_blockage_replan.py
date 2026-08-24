@@ -6,30 +6,30 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from scripts.aufgabe04.navigation.map_io import load_occupancy_grid_with_bundle
-from scripts.aufgabe04.navigation.models import Pose2D
-from scripts.aufgabe04.navigation.artifacts import (
+from scripts.aufgabe04.navigation.planning.map_io import load_occupancy_grid_with_bundle
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.foundation.artifacts import (
     write_diagnostics_json,
     write_route_csv,
 )
-from scripts.aufgabe04.navigation.plan_stand_coverage_survey import (
+from scripts.aufgabe04.navigation.missions.plan_stand_coverage_survey import (
     main as plan_coverage,
 )
-from scripts.aufgabe04.navigation.stand_blockage_replan import (
+from scripts.aufgabe04.navigation.coverage.stand_blockage_replan import (
     blocker_candidate_uids,
     load_transient_obstacle_overlay,
     plan_blockage_route_to_viewpoint,
     record_transient_blockage_replan,
     replan_transient_blockage_from_overlay,
 )
-from scripts.aufgabe04.navigation.coverage_escape_geometry import (
+from scripts.aufgabe04.navigation.coverage.coverage_escape_geometry import (
     EGRESS_MODE_STRAIGHT_REVERSE,
 )
-from scripts.aufgabe04.navigation.stand_discovery_route import (
+from scripts.aufgabe04.navigation.coverage.stand_discovery_route import (
     seal_stand_discovery_route,
 )
-from scripts.aufgabe04.navigation.waypoint_csv import load_route_leg
-from scripts.aufgabe04.navigation.stand_coverage_survey import (
+from scripts.aufgabe04.navigation.planning.waypoint_csv import load_route_leg
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STATUS_PROVISIONAL,
     StandSurveyRegistry,
     SurveyCandidate,

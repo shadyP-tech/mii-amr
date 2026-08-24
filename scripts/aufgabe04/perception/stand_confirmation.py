@@ -6,8 +6,8 @@ import math
 from dataclasses import dataclass
 from typing import Iterable
 
-from scripts.aufgabe04.navigation.arena_bounds import ArenaBounds
-from scripts.aufgabe04.navigation.models import Pose2D
+from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.perception.stand_observation import StandObservation
 
 

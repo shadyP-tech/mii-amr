@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.navigation.read_current_amcl_pose import (  # noqa: E402
+from scripts.aufgabe04.navigation.localization.read_current_amcl_pose import (  # noqa: E402
     CurrentAmclPose,
     CurrentAmclPoseReader,
     planner_args_from_pose,
@@ -18,8 +18,10 @@ from scripts.aufgabe04.navigation.read_current_amcl_pose import (  # noqa: E402
     validate_current_amcl_pose,
     yaw_from_quaternion,
 )
-from scripts.aufgabe04.navigation.models import Pose2D  # noqa: E402
-from scripts.aufgabe04.navigation import read_current_amcl_pose as pose_reader  # noqa: E402
+from scripts.aufgabe04.navigation.foundation.models import Pose2D  # noqa: E402
+from scripts.aufgabe04.navigation.localization import (  # noqa: E402
+    read_current_amcl_pose as pose_reader,
+)
 
 
 class ReadCurrentAmclPoseTest(unittest.TestCase):
