@@ -95,6 +95,16 @@ def build_completed_camera_mission_summary(
             "camera_validation_admission",
             "camera_validation_admission_sha256",
             "camera_validation_candidate_uids",
+            "active_lidar_registry_candidate_count",
+            "lidar_static_map_admitted_candidate_count",
+            "lidar_boundary_provisional_candidate_count",
+            "lidar_population_retained_candidate_count",
+            "camera_seed_candidate_count",
+            "camera_seed_selection_mode",
+            "camera_seed_candidate_uids",
+            "camera_seed_boundary_fill_candidate_uids",
+            "camera_seed_boundary_audit_only_candidate_uids",
+            "camera_seed_excluded_candidate_uids",
             "multi_view_candidate_uids",
             "single_view_requires_camera_validation_candidate_uids",
         )
@@ -108,12 +118,23 @@ def build_completed_camera_mission_summary(
         camera_uids = exact_two_coverage_summary[
             "camera_validation_candidate_uids"
         ]
+        seed_uids = exact_two_coverage_summary["camera_seed_candidate_uids"]
+        seed_count = exact_two_coverage_summary["camera_seed_candidate_count"]
         if (
             not isinstance(camera_uids, list)
             or len(camera_uids) != candidate_phase_fields["stand_count"]
         ):
             raise ValueError(
                 "completed camera stand count differs from exact-two handoff"
+            )
+        if (
+            not isinstance(seed_uids, list)
+            or type(seed_count) is not int
+            or seed_count != len(seed_uids)
+            or seed_uids != camera_uids
+        ):
+            raise ValueError(
+                "exact-two camera validation UIDs differ from camera seeds"
             )
         result.update(
             {
@@ -140,6 +161,46 @@ def build_completed_camera_mission_summary(
                     exact_two_camera_handoff_sha256
                 ),
                 "camera_validation_candidate_uids": camera_uids,
+                "active_lidar_registry_candidate_count": (
+                    exact_two_coverage_summary[
+                        "active_lidar_registry_candidate_count"
+                    ]
+                ),
+                "lidar_static_map_admitted_candidate_count": (
+                    exact_two_coverage_summary[
+                        "lidar_static_map_admitted_candidate_count"
+                    ]
+                ),
+                "lidar_boundary_provisional_candidate_count": (
+                    exact_two_coverage_summary[
+                        "lidar_boundary_provisional_candidate_count"
+                    ]
+                ),
+                "lidar_population_retained_candidate_count": (
+                    exact_two_coverage_summary[
+                        "lidar_population_retained_candidate_count"
+                    ]
+                ),
+                "camera_seed_candidate_count": seed_count,
+                "camera_seed_selection_mode": exact_two_coverage_summary[
+                    "camera_seed_selection_mode"
+                ],
+                "camera_seed_candidate_uids": seed_uids,
+                "camera_seed_boundary_fill_candidate_uids": (
+                    exact_two_coverage_summary[
+                        "camera_seed_boundary_fill_candidate_uids"
+                    ]
+                ),
+                "camera_seed_boundary_audit_only_candidate_uids": (
+                    exact_two_coverage_summary[
+                        "camera_seed_boundary_audit_only_candidate_uids"
+                    ]
+                ),
+                "camera_seed_excluded_candidate_uids": (
+                    exact_two_coverage_summary[
+                        "camera_seed_excluded_candidate_uids"
+                    ]
+                ),
                 "multi_view_candidate_uids": exact_two_coverage_summary[
                     "multi_view_candidate_uids"
                 ],

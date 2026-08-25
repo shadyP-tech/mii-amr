@@ -22,6 +22,10 @@ from scripts.aufgabe04.navigation.coverage.stand_candidate_population_retention 
     STATIC_MAP_DISPOSITION_ADMITTED,
     STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL,
 )
+from scripts.aufgabe04.navigation.coverage.exact_two_camera_seed_selection import (
+    ExactTwoCameraSeedSelectionDecision,
+    select_exact_two_camera_seed_candidates,
+)
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STATUS_CONFIRMED,
     STATUS_PENDING_CAMERA,
@@ -39,7 +43,7 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
 
 
 COVERAGE_CANDIDATE_LIFECYCLE_SCHEMA_VERSION = 2
-EXACT_TWO_LIDAR_CHECKPOINT_SCHEMA_VERSION = 2
+EXACT_TWO_LIDAR_CHECKPOINT_SCHEMA_VERSION = 3
 STATIC_MAP_ADMISSION_BASIS = "validated_survey_registry_membership"
 BOUNDARY_PROVISIONAL_STATIC_MAP_BASIS = "boundary_provisional_static_map_shortfall"
 _COVERAGE_COMPARISON_EPSILON = 1.0e-12
@@ -221,8 +225,37 @@ class ExactTwoLidarCheckpointDecision:
     active_lidar_candidate_count_met: bool
     unsupported_active_lidar_candidate_uids: tuple[str, ...]
     active_lidar_candidate_support_met: bool
+    unsupported_selected_lidar_candidate_uids: tuple[str, ...]
+    selected_lidar_candidate_support_met: bool
+    camera_seed_selection: ExactTwoCameraSeedSelectionDecision
     camera_approach_authorized: bool
     population: CoverageCandidatePopulation
+
+    @property
+    def selected_lidar_candidate_uids(self) -> tuple[str, ...]:
+        """Return the exact camera-seed population selected at this gate."""
+
+        return self.camera_seed_selection.selected_candidate_uids
+
+    @property
+    def camera_seed_candidate_count(self) -> int:
+        return self.camera_seed_selection.selected_candidate_count
+
+    @property
+    def camera_seed_candidate_count_met(self) -> bool:
+        return (
+            self.camera_seed_selection.ready
+            and self.expected_stand_count is not None
+            and self.camera_seed_candidate_count == self.expected_stand_count
+        )
+
+    @property
+    def boundary_fill_candidate_uids(self) -> tuple[str, ...]:
+        return self.camera_seed_selection.boundary_fill_candidate_uids
+
+    @property
+    def boundary_audit_only_candidate_uids(self) -> tuple[str, ...]:
+        return self.camera_seed_selection.boundary_audit_only_candidate_uids
 
     @property
     def admitted_lidar_candidate_uids(self) -> tuple[str, ...]:
@@ -230,7 +263,7 @@ class ExactTwoLidarCheckpointDecision:
 
         if not self.ready:
             return ()
-        return self.population.active_lidar_candidate_uids
+        return self.selected_lidar_candidate_uids
 
     def to_evidence_dict(self) -> dict[str, object]:
         return {
@@ -275,10 +308,27 @@ class ExactTwoLidarCheckpointDecision:
                 "active_lidar_candidate_support_met": (
                     self.active_lidar_candidate_support_met
                 ),
+                "unsupported_selected_lidar_candidate_uids": list(
+                    self.unsupported_selected_lidar_candidate_uids
+                ),
+                "selected_lidar_candidate_support_met": (
+                    self.selected_lidar_candidate_support_met
+                ),
+                "gate_support_basis": "selected_camera_seed_candidates",
+                "camera_seed_candidate_count": (
+                    self.camera_seed_candidate_count
+                ),
+                "camera_seed_candidate_count_met": (
+                    self.camera_seed_candidate_count_met
+                ),
+                "gate_count_basis": "selected_camera_seed_candidate_count",
                 "admitted_lidar_candidate_uids": list(
                     self.admitted_lidar_candidate_uids
                 ),
             },
+            "camera_seed_selection": (
+                self.camera_seed_selection.to_evidence_dict()
+            ),
             "population": self.population.to_evidence_dict(),
         }
 
@@ -403,6 +453,32 @@ def evaluate_exact_two_lidar_checkpoint(
         if item.active_lidar and not item.basic_lidar_support
     )
     active_support_met = not unsupported_active
+    active_strict = tuple(
+        item.candidate_uid
+        for item in population.candidates
+        if item.active_lidar and item.lidar_static_map_admitted
+    )
+    active_boundary = tuple(
+        item.candidate_uid
+        for item in population.candidates
+        if (
+            item.active_lidar
+            and item.static_map_disposition
+            == STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL
+        )
+    )
+    camera_seed_selection = select_exact_two_camera_seed_candidates(
+        expected_stand_count=expected_stand_count,
+        static_map_admitted_candidate_uids=active_strict,
+        boundary_provisional_candidate_uids=active_boundary,
+    )
+    selected_uid_set = set(camera_seed_selection.selected_candidate_uids)
+    unsupported_selected = tuple(
+        item.candidate_uid
+        for item in population.candidates
+        if item.candidate_uid in selected_uid_set and not item.basic_lidar_support
+    )
+    selected_support_met = not unsupported_selected
 
     reasons: list[str] = []
     if plan.config.exact_inspection_point_count != 2:
@@ -411,12 +487,14 @@ def evaluate_exact_two_lidar_checkpoint(
         reasons.append("planned_viewpoints_incomplete")
     if not coverage_threshold_met:
         reasons.append("visited_coverage_below_threshold")
-    if expected_stand_count is None:
-        reasons.append("expected_stand_count_unset")
-    elif not active_candidate_count_met:
-        reasons.append("active_lidar_candidate_count_mismatch")
-    if not active_support_met:
-        reasons.append("active_lidar_candidate_support_not_met")
+    reasons.extend(
+        "expected_stand_count_unset"
+        if reason == "expected_stand_count_missing"
+        else reason
+        for reason in camera_seed_selection.reasons
+    )
+    if not selected_support_met:
+        reasons.append("selected_lidar_candidate_support_not_met")
 
     return ExactTwoLidarCheckpointDecision(
         schema_version=EXACT_TWO_LIDAR_CHECKPOINT_SCHEMA_VERSION,
@@ -440,6 +518,9 @@ def evaluate_exact_two_lidar_checkpoint(
         active_lidar_candidate_count_met=active_candidate_count_met,
         unsupported_active_lidar_candidate_uids=unsupported_active,
         active_lidar_candidate_support_met=active_support_met,
+        unsupported_selected_lidar_candidate_uids=unsupported_selected,
+        selected_lidar_candidate_support_met=selected_support_met,
+        camera_seed_selection=camera_seed_selection,
         camera_approach_authorized=False,
         population=population,
     )
@@ -635,6 +716,7 @@ __all__ = [
     "CoverageCandidateLifecycleEvidence",
     "CoverageCandidatePopulation",
     "ExactTwoLidarCheckpointDecision",
+    "ExactTwoCameraSeedSelectionDecision",
     "classify_coverage_candidates",
     "coverage_candidate_population_evidence",
     "coverage_candidate_population_evidence_sha256",

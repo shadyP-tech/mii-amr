@@ -289,6 +289,24 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 "camera_validation_candidate_uids": [
                     f"survey_candidate_{index:04d}" for index in range(1, 6)
                 ],
+                "active_lidar_registry_candidate_count": 6,
+                "lidar_static_map_admitted_candidate_count": 5,
+                "lidar_boundary_provisional_candidate_count": 1,
+                "lidar_population_retained_candidate_count": 6,
+                "camera_seed_candidate_count": 5,
+                "camera_seed_selection_mode": (
+                    "strict_exact_boundary_audit_only"
+                ),
+                "camera_seed_candidate_uids": [
+                    f"survey_candidate_{index:04d}" for index in range(1, 6)
+                ],
+                "camera_seed_boundary_fill_candidate_uids": [],
+                "camera_seed_boundary_audit_only_candidate_uids": [
+                    "survey_candidate_0006"
+                ],
+                "camera_seed_excluded_candidate_uids": [
+                    "survey_candidate_0006"
+                ],
                 "multi_view_candidate_uids": [
                     "survey_candidate_0001",
                     "survey_candidate_0002",
@@ -311,8 +329,12 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         self.assertTrue(summary["camera_validation_complete"])
         self.assertTrue(summary["camera_exploration_complete"])
         self.assertTrue(summary["exploration_complete"])
-        self.assertFalse(summary["camera_approach_authorized"])
-        self.assertFalse(summary["motion_authorized"])
+        self.assertEqual(summary["camera_seed_candidate_count"], 5)
+        self.assertEqual(summary["active_lidar_registry_candidate_count"], 6)
+        self.assertEqual(
+            summary["camera_seed_boundary_audit_only_candidate_uids"],
+            ["survey_candidate_0006"],
+        )
         self.assertEqual(
             len(
                 summary[
@@ -321,7 +343,51 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             ),
             3,
         )
+        self.assertFalse(summary["camera_approach_authorized"])
+        self.assertFalse(summary["motion_authorized"])
 
+    def test_exact_two_final_summary_rejects_camera_seed_uid_mismatch(self):
+        exact_summary = {
+            "lidar_checkpoint_admission": "session/lidar.json",
+            "lidar_checkpoint_admission_sha256": "e" * 64,
+            "camera_validation_admission": "session/camera.json",
+            "camera_validation_admission_sha256": "f" * 64,
+            "camera_validation_candidate_uids": ["candidate_1"],
+            "active_lidar_registry_candidate_count": 2,
+            "lidar_static_map_admitted_candidate_count": 1,
+            "lidar_boundary_provisional_candidate_count": 1,
+            "lidar_population_retained_candidate_count": 2,
+            "camera_seed_candidate_count": 1,
+            "camera_seed_selection_mode": (
+                "strict_exact_boundary_audit_only"
+            ),
+            "camera_seed_candidate_uids": ["candidate_2"],
+            "camera_seed_boundary_fill_candidate_uids": [],
+            "camera_seed_boundary_audit_only_candidate_uids": ["candidate_2"],
+            "camera_seed_excluded_candidate_uids": ["candidate_2"],
+            "multi_view_candidate_uids": ["candidate_1"],
+            "single_view_requires_camera_validation_candidate_uids": [],
+        }
+
+        with self.assertRaisesRegex(ValueError, "differ from camera seeds"):
+            autonomous_wrapper._completed_camera_mission_summary(
+                run_mode="execute-exact-two-camera",
+                session_id="exact_two_camera_mismatch",
+                snapshot_path=Path("session/candidate_snapshot.json"),
+                snapshot_sha256="a" * 64,
+                survey_root=Path("session/coverage"),
+                candidate_population_admission_path=Path(
+                    "session/camera_admission.json"
+                ),
+                candidate_population_admission_sha256="b" * 64,
+                candidate_phase_fields={
+                    "stand_count": 1,
+                    "motion_authorized": False,
+                },
+                exact_two_coverage_summary=exact_summary,
+                exact_two_camera_handoff_path=Path("session/handoff.json"),
+                exact_two_camera_handoff_sha256="1" * 64,
+            )
     @staticmethod
     def _profile():
         return SimpleNamespace(

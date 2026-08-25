@@ -196,12 +196,23 @@ def _pending_registry(count: int = 1):
 
 def _lidar_decision(*, ready: bool = True):
     active = tuple(f"candidate_{index}" for index in range(5))
+    selected = active if ready else ()
     return SimpleNamespace(
         ready=ready,
         reasons=() if ready else ("active_lidar_candidate_count_mismatch",),
         expected_stand_count=5,
         active_lidar_candidate_count=5 if ready else 4,
-        admitted_lidar_candidate_uids=active if ready else (),
+        active_lidar_candidate_count_met=ready,
+        camera_seed_candidate_count=len(selected),
+        camera_seed_candidate_count_met=ready,
+        selected_lidar_candidate_uids=selected,
+        admitted_lidar_candidate_uids=selected,
+        boundary_fill_candidate_uids=(),
+        boundary_audit_only_candidate_uids=(),
+        camera_seed_selection=SimpleNamespace(
+            selection_mode="strict_exact" if ready else "not_ready",
+            excluded_candidate_uids=() if ready else active,
+        ),
         all_planned_viewpoints_visited=True,
         coverage_threshold_met=True,
         visited_coverage_ratio=1.0,
@@ -228,6 +239,7 @@ def _lidar_decision(*, ready: bool = True):
 
 def _camera_decision(*, ready: bool = True):
     active = tuple(f"candidate_{index}" for index in range(5))
+    selected = active if ready else ()
     return SimpleNamespace(
         ready=ready,
         reasons=() if ready else ("candidate_population_mismatch",),
@@ -238,6 +250,12 @@ def _camera_decision(*, ready: bool = True):
         blocked_candidate_uids=() if ready else active,
         source_registry_sha256=HASH_C,
         active_candidate_count=5,
+        selected_candidate_count=len(selected),
+        selected_candidate_uids=selected,
+        camera_seed_selection_mode="strict_exact" if ready else "not_ready",
+        boundary_fill_candidate_uids=(),
+        boundary_audit_only_candidate_uids=(),
+        excluded_candidate_uids=() if ready else active,
         lidar_static_map_admitted_candidate_uids=active,
         lidar_boundary_provisional_candidate_uids=(),
         lidar_population_retained_candidate_uids=active,
@@ -921,9 +939,28 @@ class AutonomousCoverageMissionTest(unittest.TestCase):
         # Reuse the canonical exact-two fixture owned by the admission module
         # tests so this is a real cross-layer contract test, not another
         # SimpleNamespace approximation of its immutable schemas.
-        from tests.aufgabe04.test_exact_two_camera_admission import _ready_inputs
+        from tests.aufgabe04.test_exact_two_camera_admission import (
+            _candidate,
+            _ready_inputs,
+            _registry,
+        )
 
-        plan, progress, registry, lidar_decision, _ = _ready_inputs()
+        plan, progress, base_registry, _, _ = _ready_inputs()
+        surplus_uid = "survey_candidate_0006"
+        registry = _registry(
+            plan,
+            *base_registry.candidates,
+            _candidate(
+                6,
+                viewpoint_ids=("survey_vp_002",),
+                static_map_disposition="boundary_provisional",
+            ),
+        )
+        lidar_decision = mission.evaluate_exact_two_lidar_checkpoint(
+            plan,
+            progress,
+            registry,
+        )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             identity = _identity(
@@ -986,6 +1023,21 @@ class AutonomousCoverageMissionTest(unittest.TestCase):
             )
             summary = outcome.to_mission_summary()
             self.assertEqual(summary["stand_count"], 5)
+            self.assertEqual(summary["active_lidar_registry_candidate_count"], 6)
+            self.assertEqual(summary["camera_seed_candidate_count"], 5)
+            self.assertEqual(
+                summary["camera_seed_boundary_audit_only_candidate_uids"],
+                [surplus_uid],
+            )
+            self.assertEqual(
+                summary["camera_seed_excluded_candidate_uids"],
+                [surplus_uid],
+            )
+            self.assertNotIn(surplus_uid, outcome.candidate_snapshot.candidate_uids)
+            self.assertNotIn(
+                surplus_uid,
+                outcome.camera_handoff.admitted_candidate_uids,
+            )
             self.assertEqual(len(summary["multi_view_candidate_uids"]), 2)
             self.assertEqual(
                 len(

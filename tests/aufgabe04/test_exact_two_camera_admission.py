@@ -327,6 +327,107 @@ class ExactTwoCameraAdmissionDecisionTest(unittest.TestCase):
             SOURCE_KIND_SINGLE_VIEW_REQUIRES_CAMERA_VALIDATION,
         )
 
+    def test_surplus_boundary_candidate_is_audit_only_and_absent_from_snapshot(self):
+        plan = _plan()
+        progress = _complete_progress(plan)
+        surplus_uid = "survey_candidate_0006"
+        registry = _registry(
+            plan,
+            *_latest_run_registry(plan).candidates,
+            _candidate(
+                6,
+                confidence=0.69,
+                hit_count=2,
+                viewpoint_ids=("survey_vp_002",),
+                static_map_disposition=(
+                    STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL
+                ),
+            ),
+        )
+        lidar = evaluate_exact_two_lidar_checkpoint(plan, progress, registry)
+        decision = evaluate_exact_two_camera_admission(
+            plan, progress, registry, lidar
+        )
+
+        self.assertTrue(lidar.ready)
+        self.assertFalse(lidar.active_lidar_candidate_support_met)
+        self.assertTrue(lidar.selected_lidar_candidate_support_met)
+        self.assertTrue(decision.ready)
+        self.assertEqual(decision.active_candidate_count, 6)
+        self.assertEqual(decision.selected_candidate_count, 5)
+        self.assertEqual(
+            decision.boundary_audit_only_candidate_uids,
+            (surplus_uid,),
+        )
+        self.assertEqual(decision.excluded_candidate_uids, (surplus_uid,))
+        boundary = decision.candidate_for(surplus_uid)
+        self.assertIsNotNone(boundary)
+        self.assertFalse(boundary.selected_for_camera_validation)
+        self.assertFalse(boundary.admissible)
+        self.assertIn("boundary_provisional_audit_only", boundary.reasons)
+        with self.assertRaises(ExactTwoCameraAdmissionError) as rejected:
+            require_admitted_candidate_support(decision, surplus_uid)
+        self.assertEqual(rejected.exception.code, "candidate_not_admitted")
+
+        snapshot = build_exact_two_camera_candidate_snapshot(
+            plan,
+            registry,
+            decision,
+            snapshot_id="camera_candidates_surplus_boundary",
+        )
+        self.assertEqual(snapshot.candidate_uids, decision.selected_candidate_uids)
+        self.assertNotIn(surplus_uid, snapshot.candidate_uids)
+
+        forged_snapshot = replace(
+            snapshot,
+            candidates=tuple(
+                sorted(
+                    snapshot.candidates
+                    + (
+                        replace(
+                            snapshot.candidates[0],
+                            candidate_uid=surplus_uid,
+                            source=replace(
+                                snapshot.candidates[0].source,
+                                observation_ids=(
+                                    "surplus_boundary_observation",
+                                ),
+                            ),
+                        ),
+                    ),
+                    key=lambda item: item.candidate_uid,
+                )
+            ),
+        )
+        with self.assertRaises(ExactTwoCameraAdmissionError) as bad_snapshot:
+            new_exact_two_camera_handoff(
+                handoff_id="surplus_boundary_forgery",
+                created_unix_sec=100.0,
+                admission=decision,
+                terminal_checkpoint_path="terminal_checkpoint.json",
+                terminal_checkpoint_sha256=TERMINAL_HASH,
+                lidar_admission_path="lidar_admission.json",
+                lidar_admission_sha256=LIDAR_WRAPPER_HASH,
+                camera_admission_path="camera_admission.json",
+                camera_admission_sha256=(
+                    exact_two_camera_admission_sha256(decision)
+                ),
+                candidate_snapshot_path="candidate_snapshot.json",
+                candidate_snapshot=forged_snapshot,
+            )
+        self.assertEqual(bad_snapshot.exception.code, "live_snapshot_mismatch")
+
+        forged = replace(
+            decision,
+            selected_candidate_uids=tuple(
+                sorted(decision.selected_candidate_uids + (surplus_uid,))
+            ),
+            excluded_candidate_uids=(),
+        )
+        with self.assertRaises(ExactTwoCameraAdmissionError) as tampered:
+            validate_exact_two_camera_admission(forged)
+        self.assertEqual(tampered.exception.code, "invalid_admission")
+
     def test_forged_static_map_admission_cannot_enter_ready_population(self):
         *_, decision = _ready_inputs()
         forged = replace(
@@ -395,7 +496,7 @@ class ExactTwoCameraAdmissionDecisionTest(unittest.TestCase):
         )
         self.assertIn("lidar_checkpoint_not_ready", decision.reasons)
         self.assertIn(
-            "active_candidates_not_camera_admissible", decision.reasons
+            "selected_candidates_not_camera_admissible", decision.reasons
         )
         self.assertIn(
             "confidence_below_minimum",
@@ -423,7 +524,10 @@ class ExactTwoCameraAdmissionDecisionTest(unittest.TestCase):
         self.assertEqual(decision.blocked_candidate_uids, ())
         self.assertEqual(
             decision.reasons,
-            ("lidar_checkpoint_not_ready", "active_candidate_count_mismatch"),
+            (
+                "lidar_checkpoint_not_ready",
+                "selected_candidate_count_mismatch",
+            ),
         )
         self.assertEqual(decision.admitted_candidate_uids, ())
         with self.assertRaisesRegex(
@@ -609,6 +713,25 @@ class ExactTwoCameraArtifactTest(unittest.TestCase):
             with self.assertRaises(ExactTwoCameraAdmissionError) as reordered:
                 load_exact_two_camera_admission(admission_path)
             self.assertEqual(reordered.exception.code, "invalid_admission")
+
+    def test_v2_admission_is_rejected_as_explicitly_nonreusable(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            *_, handoff = self._artifacts(root)
+            payload = exact_two_camera_admission_payload(
+                handoff.admission_decision
+            )
+            del payload["exact_two_camera_admission_sha256"]
+            payload["schema_version"] = 2
+            payload["exact_two_camera_admission_sha256"] = payload_sha256(
+                payload
+            )
+            path = root / "v2_admission.json"
+            path.write_text(json.dumps(payload))
+
+            with self.assertRaises(ExactTwoCameraAdmissionError) as old_schema:
+                load_exact_two_camera_admission(path)
+            self.assertEqual(old_schema.exception.code, "schema_mismatch")
 
     def test_immutable_publication_and_path_hash_substitution_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmpdir:

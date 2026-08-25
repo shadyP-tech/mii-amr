@@ -453,6 +453,30 @@ class CoverageLidarCheckpointComplete:
                     for item in population.candidates
                 ),
             ),
+            "active_lidar_candidate_count_matches_expected": (
+                self.decision.active_lidar_candidate_count_met
+            ),
+            "camera_seed_candidate_count": (
+                self.decision.camera_seed_candidate_count
+            ),
+            "camera_seed_candidate_count_met": (
+                self.decision.camera_seed_candidate_count_met
+            ),
+            "camera_seed_selection_mode": (
+                self.decision.camera_seed_selection.selection_mode
+            ),
+            "camera_seed_candidate_uids": list(
+                self.decision.selected_lidar_candidate_uids
+            ),
+            "camera_seed_boundary_fill_candidate_uids": list(
+                self.decision.boundary_fill_candidate_uids
+            ),
+            "camera_seed_boundary_audit_only_candidate_uids": list(
+                self.decision.boundary_audit_only_candidate_uids
+            ),
+            "camera_seed_excluded_candidate_uids": list(
+                self.decision.camera_seed_selection.excluded_candidate_uids
+            ),
             "lidar_static_map_admitted_candidate_uids": list(
                 population.lidar_static_map_admitted_candidate_uids
             ),
@@ -529,6 +553,30 @@ class CoverageLidarCheckpointAdmissionError(RuntimeError):
                     item.active_lidar and not item.lidar_static_map_admitted
                     for item in self.decision.population.candidates
                 ),
+            ),
+            "active_lidar_candidate_count_matches_expected": (
+                self.decision.active_lidar_candidate_count_met
+            ),
+            "camera_seed_candidate_count": (
+                self.decision.camera_seed_candidate_count
+            ),
+            "camera_seed_candidate_count_met": (
+                self.decision.camera_seed_candidate_count_met
+            ),
+            "camera_seed_selection_mode": (
+                self.decision.camera_seed_selection.selection_mode
+            ),
+            "camera_seed_candidate_uids": list(
+                self.decision.selected_lidar_candidate_uids
+            ),
+            "camera_seed_boundary_fill_candidate_uids": list(
+                self.decision.boundary_fill_candidate_uids
+            ),
+            "camera_seed_boundary_audit_only_candidate_uids": list(
+                self.decision.boundary_audit_only_candidate_uids
+            ),
+            "camera_seed_excluded_candidate_uids": list(
+                self.decision.camera_seed_selection.excluded_candidate_uids
             ),
             "completed_coverage_legs": self.completed_coverage_legs,
             "legs_completed_this_run": self.legs_completed_this_run,

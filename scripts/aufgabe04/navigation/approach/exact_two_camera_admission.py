@@ -105,8 +105,22 @@ def evaluate_exact_two_camera_admission(
         )
 
     population = classify_coverage_candidates(plan, registry)
+    seed_selection = lidar_checkpoint.camera_seed_selection
+    selected_uids = set(seed_selection.selected_candidate_uids)
+    boundary_audit_only_uids = set(
+        seed_selection.boundary_audit_only_candidate_uids
+    )
     evidence = tuple(
-        _camera_evidence(candidate)
+        _camera_evidence(
+            candidate,
+            selected_for_camera_validation=(
+                candidate.candidate_uid in selected_uids
+            ),
+            boundary_audit_only=(
+                candidate.candidate_uid in boundary_audit_only_uids
+            ),
+            seed_selection_ready=seed_selection.ready,
+        )
         for candidate in population.candidates
         if candidate.active_lidar
     )
@@ -122,20 +136,30 @@ def evaluate_exact_two_camera_admission(
         == SUPPORT_CLASS_SINGLE_VIEW_REQUIRES_CAMERA_VALIDATION
         and item.admissible
     )
-    blocked = tuple(item.candidate_uid for item in evidence if not item.admissible)
+    blocked = tuple(
+        item.candidate_uid
+        for item in evidence
+        if item.selected_for_camera_validation and not item.admissible
+    )
+    excluded = tuple(
+        item.candidate_uid
+        for item in evidence
+        if not item.selected_for_camera_validation
+    )
     expected_count = plan.config.expected_stand_count
     active_count = len(evidence)
+    selected_count = len(seed_selection.selected_candidate_uids)
 
     reasons: list[str] = []
     if not lidar_checkpoint.ready:
         reasons.append("lidar_checkpoint_not_ready")
     if expected_count is None:
         reasons.append("expected_stand_count_unset")
-    elif active_count != expected_count:
-        reasons.append("active_candidate_count_mismatch")
+    elif selected_count != expected_count:
+        reasons.append("selected_candidate_count_mismatch")
     if blocked:
-        reasons.append("active_candidates_not_camera_admissible")
-    if len(multi_view) + len(single_view) != active_count:
+        reasons.append("selected_candidates_not_camera_admissible")
+    if len(multi_view) + len(single_view) != selected_count:
         reasons.append("camera_support_partition_incomplete")
 
     decision = ExactTwoCameraAdmissionDecision(
@@ -155,6 +179,15 @@ def evaluate_exact_two_camera_admission(
         motion_authorized=False,
         expected_stand_count=expected_count,
         active_candidate_count=active_count,
+        camera_seed_selection_mode=seed_selection.selection_mode,
+        selected_candidate_uids=seed_selection.selected_candidate_uids,
+        boundary_fill_candidate_uids=(
+            seed_selection.boundary_fill_candidate_uids
+        ),
+        boundary_audit_only_candidate_uids=(
+            seed_selection.boundary_audit_only_candidate_uids
+        ),
+        excluded_candidate_uids=excluded,
         multi_view_candidate_uids=multi_view,
         single_view_candidate_uids=single_view,
         blocked_candidate_uids=blocked,
@@ -272,7 +305,13 @@ def exact_two_detector_config_sha256(plan: CoverageSurveyPlan) -> str:
     )
 
 
-def _camera_evidence(candidate) -> ExactTwoCameraCandidateEvidence:
+def _camera_evidence(
+    candidate,
+    *,
+    selected_for_camera_validation: bool,
+    boundary_audit_only: bool,
+    seed_selection_ready: bool,
+) -> ExactTwoCameraCandidateEvidence:
     reasons: list[str] = []
     support_class: str | None = None
     source_kind: str | None = None
@@ -306,8 +345,19 @@ def _camera_evidence(candidate) -> ExactTwoCameraCandidateEvidence:
     else:
         reasons.append("provisional_candidate_not_single_view")
 
+    if not selected_for_camera_validation:
+        reasons.append(
+            "boundary_provisional_audit_only"
+            if boundary_audit_only
+            else "camera_seed_selection_not_ready"
+            if not seed_selection_ready
+            else "candidate_not_selected_for_camera_validation"
+        )
+
     admissible = (
-        candidate.active_lidar
+        selected_for_camera_validation
+        and seed_selection_ready
+        and candidate.active_lidar
         and candidate.lidar_population_retained
         and candidate.basic_lidar_support
         and support_class is not None
@@ -336,6 +386,7 @@ def _camera_evidence(candidate) -> ExactTwoCameraCandidateEvidence:
         distinct_known_viewpoint_count=candidate.distinct_known_viewpoint_count,
         support_class=support_class,
         source_kind=source_kind,
+        selected_for_camera_validation=selected_for_camera_validation,
         admissible=admissible,
         reasons=tuple(dict.fromkeys(reasons)),
     )

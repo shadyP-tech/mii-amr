@@ -10,6 +10,9 @@ from scripts.aufgabe04.navigation.coverage.stand_candidate_population_retention 
     STATIC_MAP_DISPOSITION_ADMITTED,
     validate_retained_static_map_disposition,
 )
+from scripts.aufgabe04.navigation.coverage.exact_two_camera_seed_selection import (
+    select_exact_two_camera_seed_candidates,
+)
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STATUS_PENDING_CAMERA,
     STATUS_PROVISIONAL,
@@ -19,8 +22,8 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
 )
 
 
-EXACT_TWO_CAMERA_ADMISSION_SCHEMA_VERSION = 2
-EXACT_TWO_CAMERA_HANDOFF_SCHEMA_VERSION = 2
+EXACT_TWO_CAMERA_ADMISSION_SCHEMA_VERSION = 3
+EXACT_TWO_CAMERA_HANDOFF_SCHEMA_VERSION = 3
 
 SUPPORT_CLASS_MULTI_VIEW = "multi_view"
 SUPPORT_CLASS_SINGLE_VIEW_REQUIRES_CAMERA_VALIDATION = (
@@ -74,6 +77,7 @@ class ExactTwoCameraCandidateEvidence:
     distinct_known_viewpoint_count: int
     support_class: str | None
     source_kind: str | None
+    selected_for_camera_validation: bool
     admissible: bool
     reasons: tuple[str, ...]
 
@@ -101,6 +105,9 @@ class ExactTwoCameraCandidateEvidence:
             "distinct_known_viewpoint_count": self.distinct_known_viewpoint_count,
             "support_class": self.support_class,
             "source_kind": self.source_kind,
+            "selected_for_camera_validation": (
+                self.selected_for_camera_validation
+            ),
             "admissible": self.admissible,
             "reasons": list(self.reasons),
         }
@@ -124,6 +131,11 @@ class ExactTwoCameraAdmissionDecision:
     motion_authorized: bool
     expected_stand_count: int | None
     active_candidate_count: int
+    camera_seed_selection_mode: str
+    selected_candidate_uids: tuple[str, ...]
+    boundary_fill_candidate_uids: tuple[str, ...]
+    boundary_audit_only_candidate_uids: tuple[str, ...]
+    excluded_candidate_uids: tuple[str, ...]
     multi_view_candidate_uids: tuple[str, ...]
     single_view_candidate_uids: tuple[str, ...]
     blocked_candidate_uids: tuple[str, ...]
@@ -133,9 +145,11 @@ class ExactTwoCameraAdmissionDecision:
     def admitted_candidate_uids(self) -> tuple[str, ...]:
         if not self.ready:
             return ()
-        return tuple(
-            sorted(self.multi_view_candidate_uids + self.single_view_candidate_uids)
-        )
+        return self.selected_candidate_uids
+
+    @property
+    def selected_candidate_count(self) -> int:
+        return len(self.selected_candidate_uids)
 
     @property
     def lidar_static_map_admitted_candidate_uids(self) -> tuple[str, ...]:
@@ -193,6 +207,16 @@ class ExactTwoCameraAdmissionDecision:
             "motion_authorized": self.motion_authorized,
             "expected_stand_count": self.expected_stand_count,
             "active_candidate_count": self.active_candidate_count,
+            "camera_seed_selection_mode": self.camera_seed_selection_mode,
+            "selected_candidate_count": self.selected_candidate_count,
+            "selected_candidate_uids": list(self.selected_candidate_uids),
+            "boundary_fill_candidate_uids": list(
+                self.boundary_fill_candidate_uids
+            ),
+            "boundary_audit_only_candidate_uids": list(
+                self.boundary_audit_only_candidate_uids
+            ),
+            "excluded_candidate_uids": list(self.excluded_candidate_uids),
             "multi_view_candidate_uids": list(self.multi_view_candidate_uids),
             "single_view_candidate_uids": list(self.single_view_candidate_uids),
             "blocked_candidate_uids": list(self.blocked_candidate_uids),
@@ -278,7 +302,18 @@ def validate_exact_two_camera_admission(
             decision.expected_stand_count, "expected_stand_count"
         )
     nonnegative_integer(decision.active_candidate_count, "active_candidate_count")
+    if (
+        not isinstance(decision.camera_seed_selection_mode, str)
+        or not decision.camera_seed_selection_mode
+    ):
+        raise ExactTwoCameraAdmissionError(
+            "invalid_admission", "camera_seed_selection_mode must be non-empty"
+        )
     for field_name in (
+        "selected_candidate_uids",
+        "boundary_fill_candidate_uids",
+        "boundary_audit_only_candidate_uids",
+        "excluded_candidate_uids",
         "multi_view_candidate_uids",
         "single_view_candidate_uids",
         "blocked_candidate_uids",
@@ -288,11 +323,12 @@ def validate_exact_two_camera_admission(
         set(decision.multi_view_candidate_uids),
         set(decision.single_view_candidate_uids),
         set(decision.blocked_candidate_uids),
+        set(decision.excluded_candidate_uids),
     )
     if any(
         partitions[i].intersection(partitions[j])
-        for i in range(3)
-        for j in range(i + 1, 3)
+        for i in range(len(partitions))
+        for j in range(i + 1, len(partitions))
     ):
         raise ExactTwoCameraAdmissionError(
             "invalid_admission", "candidate UID partitions must be disjoint"
@@ -316,6 +352,51 @@ def validate_exact_two_camera_admission(
         raise ExactTwoCameraAdmissionError(
             "invalid_admission", "candidate partitions do not cover active evidence"
         )
+    strict_uids = tuple(
+        evidence.candidate_uid
+        for evidence in decision.candidate_evidence
+        if evidence.active_lidar and evidence.static_map_admitted
+    )
+    boundary_uids = tuple(
+        evidence.candidate_uid
+        for evidence in decision.candidate_evidence
+        if (
+            evidence.active_lidar
+            and evidence.static_map_population_retained
+            and not evidence.static_map_admitted
+        )
+    )
+    expected_selection = select_exact_two_camera_seed_candidates(
+        expected_stand_count=decision.expected_stand_count,
+        static_map_admitted_candidate_uids=strict_uids,
+        boundary_provisional_candidate_uids=boundary_uids,
+    )
+    selection_fields = {
+        "camera_seed_selection_mode": expected_selection.selection_mode,
+        "selected_candidate_uids": expected_selection.selected_candidate_uids,
+        "boundary_fill_candidate_uids": (
+            expected_selection.boundary_fill_candidate_uids
+        ),
+        "boundary_audit_only_candidate_uids": (
+            expected_selection.boundary_audit_only_candidate_uids
+        ),
+        "excluded_candidate_uids": expected_selection.excluded_candidate_uids,
+    }
+    for field_name, expected_value in selection_fields.items():
+        if getattr(decision, field_name) != expected_value:
+            raise ExactTwoCameraAdmissionError(
+                "invalid_admission",
+                f"{field_name} does not match deterministic seed selection",
+            )
+    if {
+        evidence.candidate_uid
+        for evidence in decision.candidate_evidence
+        if evidence.selected_for_camera_validation
+    } != set(decision.selected_candidate_uids):
+        raise ExactTwoCameraAdmissionError(
+            "invalid_admission",
+            "candidate selection flags do not match selected UIDs",
+        )
     for evidence in decision.candidate_evidence:
         expected_partition = (
             decision.multi_view_candidate_uids
@@ -326,6 +407,8 @@ def validate_exact_two_camera_admission(
             == SUPPORT_CLASS_SINGLE_VIEW_REQUIRES_CAMERA_VALIDATION
             and evidence.admissible
             else decision.blocked_candidate_uids
+            if evidence.selected_for_camera_validation
+            else decision.excluded_candidate_uids
         )
         if evidence.candidate_uid not in expected_partition:
             raise ExactTwoCameraAdmissionError(
@@ -341,17 +424,32 @@ def validate_exact_two_camera_admission(
             raise ExactTwoCameraAdmissionError(
                 "invalid_admission", "ready admission requires expected count"
             )
-        if decision.active_candidate_count != decision.expected_stand_count:
+        if decision.selected_candidate_count != decision.expected_stand_count:
             raise ExactTwoCameraAdmissionError(
-                "invalid_admission", "ready admission count does not match expected"
+                "invalid_admission", "ready selected count does not match expected"
             )
         if decision.blocked_candidate_uids:
             raise ExactTwoCameraAdmissionError(
                 "invalid_admission", "ready admission cannot contain blocked UIDs"
             )
-        if len(decision.admitted_candidate_uids) != decision.active_candidate_count:
+        if (
+            len(decision.admitted_candidate_uids)
+            != decision.selected_candidate_count
+        ):
             raise ExactTwoCameraAdmissionError(
                 "invalid_admission", "ready admission partition is incomplete"
+            )
+        if not expected_selection.ready:
+            raise ExactTwoCameraAdmissionError(
+                "invalid_admission", "ready admission has a not-ready seed selection"
+            )
+        admitted_support_uids = set(decision.multi_view_candidate_uids).union(
+            decision.single_view_candidate_uids
+        )
+        if admitted_support_uids != set(decision.selected_candidate_uids):
+            raise ExactTwoCameraAdmissionError(
+                "invalid_admission",
+                "ready support classes do not cover selected candidates",
             )
     elif not decision.reasons:
         raise ExactTwoCameraAdmissionError(
@@ -379,6 +477,7 @@ def validate_exact_two_camera_candidate_evidence(
         "confidence_supported",
         "hit_count_supported",
         "viewpoint_ids_distinct",
+        "selected_for_camera_validation",
         "admissible",
     ):
         boolean(getattr(evidence, field_name), field_name)
@@ -445,6 +544,7 @@ def validate_exact_two_camera_candidate_evidence(
         not evidence.active_lidar
         or not evidence.static_map_population_retained
         or not evidence.basic_lidar_supported
+        or not evidence.selected_for_camera_validation
         or evidence.support_class is None
         or evidence.reasons
     ):

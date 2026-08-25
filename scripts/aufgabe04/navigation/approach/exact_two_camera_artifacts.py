@@ -57,6 +57,12 @@ _ADMISSION_FIELDS = frozenset(
         "motion_authorized",
         "expected_stand_count",
         "active_candidate_count",
+        "camera_seed_selection_mode",
+        "selected_candidate_count",
+        "selected_candidate_uids",
+        "boundary_fill_candidate_uids",
+        "boundary_audit_only_candidate_uids",
+        "excluded_candidate_uids",
         "multi_view_candidate_uids",
         "single_view_candidate_uids",
         "blocked_candidate_uids",
@@ -85,6 +91,7 @@ _EVIDENCE_FIELDS = frozenset(
         "distinct_known_viewpoint_count",
         "support_class",
         "source_kind",
+        "selected_for_camera_validation",
         "admissible",
         "reasons",
     }
@@ -483,10 +490,19 @@ def admission_from_payload(
     payload: Mapping[str, object],
 ) -> ExactTwoCameraAdmissionDecision:
     item = _mapping(payload, "camera admission")
+    schema_version = _integer(item.get("schema_version"), "schema_version")
+    if schema_version != EXACT_TWO_CAMERA_ADMISSION_SCHEMA_VERSION:
+        raise ExactTwoCameraAdmissionError(
+            "schema_mismatch",
+            "exact-two camera admission artifact is not reusable by this schema",
+        )
     _require_fields(item, _ADMISSION_FIELDS, "camera admission")
     expected = item["expected_stand_count"]
-    return ExactTwoCameraAdmissionDecision(
-        schema_version=_integer(item["schema_version"], "schema_version"),
+    selected_count = _integer(
+        item["selected_candidate_count"], "selected_candidate_count"
+    )
+    decision = ExactTwoCameraAdmissionDecision(
+        schema_version=schema_version,
         survey_id=_string(item["survey_id"], "survey_id"),
         planning_frame=_string(item["planning_frame"], "planning_frame"),
         map_bundle_sha256=_string(item["map_bundle_sha256"], "map_bundle_sha256"),
@@ -512,6 +528,24 @@ def admission_from_payload(
         active_candidate_count=_integer(
             item["active_candidate_count"], "active_candidate_count"
         ),
+        camera_seed_selection_mode=_string(
+            item["camera_seed_selection_mode"],
+            "camera_seed_selection_mode",
+        ),
+        selected_candidate_uids=_strings(
+            item["selected_candidate_uids"], "selected_candidate_uids"
+        ),
+        boundary_fill_candidate_uids=_strings(
+            item["boundary_fill_candidate_uids"],
+            "boundary_fill_candidate_uids",
+        ),
+        boundary_audit_only_candidate_uids=_strings(
+            item["boundary_audit_only_candidate_uids"],
+            "boundary_audit_only_candidate_uids",
+        ),
+        excluded_candidate_uids=_strings(
+            item["excluded_candidate_uids"], "excluded_candidate_uids"
+        ),
         multi_view_candidate_uids=_strings(
             item["multi_view_candidate_uids"], "multi_view_candidate_uids"
         ),
@@ -528,6 +562,12 @@ def admission_from_payload(
             )
         ),
     )
+    if selected_count != decision.selected_candidate_count:
+        raise ExactTwoCameraAdmissionError(
+            "artifact_corrupt",
+            "selected candidate count does not match selected UIDs",
+        )
+    return decision
 
 
 def _evidence_from_payload(
@@ -586,6 +626,10 @@ def _evidence_from_payload(
         ),
         support_class=support,
         source_kind=source,
+        selected_for_camera_validation=_bool(
+            item["selected_for_camera_validation"],
+            f"{name}.selected_for_camera_validation",
+        ),
         admissible=_bool(item["admissible"], f"{name}.admissible"),
         reasons=_strings(item["reasons"], f"{name}.reasons"),
     )
@@ -595,9 +639,15 @@ def _handoff_from_payload(
     payload: Mapping[str, object],
 ) -> ExactTwoCameraHandoffArtifact:
     item = _mapping(payload, "camera handoff")
+    schema_version = _integer(item.get("schema_version"), "schema_version")
+    if schema_version != EXACT_TWO_CAMERA_HANDOFF_SCHEMA_VERSION:
+        raise ExactTwoCameraAdmissionError(
+            "schema_mismatch",
+            "exact-two camera handoff artifact is not reusable by this schema",
+        )
     _require_fields(item, _HANDOFF_FIELDS, "camera handoff")
     return ExactTwoCameraHandoffArtifact(
-        schema_version=_integer(item["schema_version"], "schema_version"),
+        schema_version=schema_version,
         handoff_id=_string(item["handoff_id"], "handoff_id"),
         created_unix_sec=_number(item["created_unix_sec"], "created_unix_sec"),
         survey_id=_string(item["survey_id"], "survey_id"),
