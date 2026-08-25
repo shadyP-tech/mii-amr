@@ -89,6 +89,27 @@ def resolve_mission_leg_event_identity(
                 str(args.startup_reseal_target_id).strip(),
             )
         )
+    runtime_kind = getattr(
+        args, "runtime_localization_mission_leg_kind", None
+    )
+    runtime_index = getattr(
+        args, "runtime_localization_mission_leg_index", None
+    )
+    runtime_target = str(
+        getattr(args, "runtime_localization_target_id", "")
+    ).strip()
+    if (
+        runtime_kind is not None
+        and runtime_index is not None
+        and runtime_target
+    ):
+        identities.append(
+            (
+                MissionLegKind(runtime_kind),
+                runtime_index,
+                runtime_target,
+            )
+        )
     coverage = resolve_coverage_mission_leg_identity(args)
     if coverage is not None:
         identities.append(coverage)
@@ -146,4 +167,34 @@ def resolve_startup_reseal_permit_identity(
     target = generic_values[2]
     if index != permit.leg_index or target != permit.target_viewpoint_id:
         raise ValueError("startup-reseal permit identity aliases mismatch")
+    return kind, index, target
+
+
+def resolve_runtime_localization_permit_identity(
+    permit: Any,
+) -> MissionLegIdentity:
+    """Read generic runtime permit identity with the coverage v1 fallback."""
+
+    generic_values = (
+        getattr(permit, "mission_leg_kind", None),
+        getattr(permit, "mission_leg_index", None),
+        str(getattr(permit, "target_id", "")).strip() or None,
+    )
+    if all(value is None for value in generic_values):
+        return (
+            MissionLegKind.COVERAGE,
+            permit.leg_index,
+            permit.target_viewpoint_id,
+        )
+    if any(value is None for value in generic_values):
+        raise ValueError(
+            "runtime-localization permit has partial mission-leg identity"
+        )
+    kind = MissionLegKind(generic_values[0])
+    index = generic_values[1]
+    target = generic_values[2]
+    if index != permit.leg_index or target != permit.target_viewpoint_id:
+        raise ValueError(
+            "runtime-localization permit identity aliases mismatch"
+        )
     return kind, index, target

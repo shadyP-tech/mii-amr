@@ -98,6 +98,7 @@ from scripts.aufgabe04.navigation.execution.mission_leg_identity_args import (
     resolve_coverage_mission_leg_identity,
     resolve_explicit_mission_leg_evidence_identity,
     resolve_mission_leg_event_identity,
+    resolve_runtime_localization_permit_identity,
     resolve_startup_reseal_permit_identity,
 )
 from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
@@ -306,16 +307,82 @@ def _validated_runtime_localization_motion_permit(
 ) -> RuntimeLocalizationMotionPermit | None:
     """Return the exact recovery permit or preserve normal interactive motion."""
 
-    paths = (
-        args.mission_motion_authorization_json,
-        args.runtime_localization_motion_permit_json,
+    coverage_leg_index = getattr(
+        args, "coverage_transient_replan_leg_index", None
     )
-    if all(path is None for path in paths):
+    coverage_target = str(
+        getattr(args, "coverage_transient_replan_target_viewpoint_id", "")
+    ).strip()
+    explicit_runtime_semantic_map_id = str(
+        getattr(args, "runtime_localization_semantic_map_id", "")
+    ).strip()
+    explicit_runtime_legacy_target = str(
+        getattr(args, "runtime_localization_target_viewpoint_id", "")
+    ).strip()
+    coverage_replan_enabled = bool(
+        getattr(
+            args,
+            "coverage_transient_replan_enabled",
+            coverage_leg_index is not None,
+        )
+    )
+    authorization_path = args.mission_motion_authorization_json
+    permit_path = args.runtime_localization_motion_permit_json
+    generic_identity_fields = (
+        getattr(args, "runtime_localization_mission_leg_kind", None),
+        getattr(args, "runtime_localization_mission_leg_index", None),
+        str(getattr(args, "runtime_localization_target_id", "")).strip()
+        or None,
+    )
+    explicit_runtime_identity_requested = any(
+        value is not None for value in generic_identity_fields
+    ) or bool(
+        explicit_runtime_semantic_map_id
+        or explicit_runtime_legacy_target
+    )
+    if authorization_path is None and permit_path is None:
+        if explicit_runtime_identity_requested:
+            raise ValueError(
+                "runtime-localization identity arguments require mission "
+                "motion authorization and a runtime localization permit"
+            )
         return None
-    if any(path is None for path in paths):
+    if authorization_path is None or permit_path is None:
         raise ValueError(
             "mission motion authorization and runtime localization permit "
-            "must be supplied together"
+            "arguments must be supplied together"
+        )
+    # Coverage fields are compatibility fallbacks only after the caller has
+    # explicitly supplied the authorization/permit pair.  Treating them as a
+    # request signal would make every ordinary transient blockage-replan leg
+    # look like a malformed runtime-localization recovery.
+    runtime_semantic_map_id = explicit_runtime_semantic_map_id or str(
+        getattr(args, "coverage_transient_replan_semantic_map_id", "")
+    ).strip()
+    runtime_legacy_target = explicit_runtime_legacy_target or coverage_target
+    legacy_identity_present = bool(runtime_legacy_target)
+    generic_identity_requested = any(
+        value is not None for value in generic_identity_fields
+    )
+    if generic_identity_requested and any(
+        value is None for value in generic_identity_fields
+    ):
+        raise ValueError(
+            "generic runtime-localization identity arguments must be "
+            "supplied together"
+        )
+    if any(
+        value is not None
+        for value in (
+            getattr(args, "startup_reseal_motion_authorization_json", None),
+            getattr(args, "startup_reseal_motion_permit_json", None),
+            getattr(args, "mission_leg_motion_authorization_json", None),
+            getattr(args, "mission_leg_motion_permit_json", None),
+        )
+    ):
+        raise ValueError(
+            "runtime-localization, startup-reseal, and routine-leg permits "
+            "are mutually exclusive"
         )
     if args.dry_run:
         raise ValueError("runtime localization motion permit is live-run only")
@@ -331,18 +398,72 @@ def _validated_runtime_localization_motion_permit(
         raise ValueError(
             "runtime localization motion permit requires a map route certificate"
         )
-    if args.coverage_transient_replan_leg_index is None:
-        raise ValueError(
-            "runtime localization motion permit requires a coverage leg index"
+    if generic_identity_requested:
+        mission_leg_kind = MissionLegKind(
+            getattr(args, "runtime_localization_mission_leg_kind")
         )
-    target_viewpoint_id = str(
-        args.coverage_transient_replan_target_viewpoint_id
-    ).strip()
-    semantic_map_id = str(
-        args.coverage_transient_replan_semantic_map_id
-    ).strip()
+        mission_leg_index = getattr(
+            args, "runtime_localization_mission_leg_index"
+        )
+        target_id = str(
+            getattr(args, "runtime_localization_target_id")
+        ).strip()
+        if mission_leg_index is None or mission_leg_index < 0:
+            raise ValueError(
+                "runtime localization mission leg index must be non-negative"
+            )
+    else:
+        if (
+            coverage_leg_index is None
+            or not legacy_identity_present
+        ):
+            raise ValueError(
+                "legacy runtime-localization identity requires a coverage leg"
+            )
+        mission_leg_kind = MissionLegKind.COVERAGE
+        mission_leg_index = coverage_leg_index
+        target_id = runtime_legacy_target
+    if mission_leg_kind is MissionLegKind.COVERAGE:
+        if not coverage_replan_enabled or coverage_leg_index is None:
+            raise ValueError(
+                "coverage runtime-localization permit requires coverage "
+                "transient-replan identity"
+            )
+        coverage_identity = (
+            MissionLegKind.COVERAGE,
+            coverage_leg_index,
+            coverage_target,
+        )
+        if coverage_identity != (
+            mission_leg_kind,
+            mission_leg_index,
+            target_id,
+        ):
+            raise ValueError(
+                "runtime-localization and coverage transient-replan "
+                "identities mismatch"
+            )
+    elif coverage_replan_enabled:
+        raise ValueError(
+            "non-coverage runtime-localization permit cannot carry coverage "
+            "transient replanning"
+        )
+    evidence_identity = (
+        resolve_explicit_mission_leg_evidence_identity(args)
+        if hasattr(args, "mission_leg_evidence_kind")
+        else None
+    )
+    if evidence_identity is not None and evidence_identity != (
+        mission_leg_kind,
+        mission_leg_index,
+        target_id,
+    ):
+        raise ValueError(
+            "mission-leg evidence and runtime-localization identities mismatch"
+        )
+    semantic_map_id = runtime_semantic_map_id
     session_id = str(args.mission_session_id).strip()
-    if not target_viewpoint_id or not semantic_map_id or not session_id:
+    if not target_id or not semantic_map_id or not session_id:
         raise ValueError(
             "runtime localization motion permit requires session, semantic map, "
             "and target identities"
@@ -356,8 +477,11 @@ def _validated_runtime_localization_motion_permit(
         namespace=resolved.namespace,
         cmd_vel_topic=resolved.cmd_vel_topic,
         semantic_map_id=semantic_map_id,
-        target_viewpoint_id=target_viewpoint_id,
-        leg_index=args.coverage_transient_replan_leg_index,
+        target_viewpoint_id=target_id,
+        leg_index=mission_leg_index,
+        mission_leg_kind=mission_leg_kind,
+        mission_leg_index=mission_leg_index,
+        target_id=target_id,
         localization_branch_proof_id=args.localization_branch_proof_id,
         route_csv_path=route_csv_path,
         diagnostics_path=diagnostics_path,
@@ -1750,6 +1874,13 @@ def main(argv: list[str] | None = None) -> int:
         )
     if runtime_motion_permit is not None:
         try:
+            (
+                runtime_mission_leg_kind,
+                runtime_mission_leg_index,
+                runtime_target_id,
+            ) = resolve_runtime_localization_permit_identity(
+                runtime_motion_permit
+            )
             receipt_path = default_runtime_motion_consumption_receipt_path(
                 args.runtime_localization_motion_permit_json
             )
@@ -1763,6 +1894,9 @@ def main(argv: list[str] | None = None) -> int:
                     runtime_motion_permit.target_viewpoint_id
                 ),
                 reseal_index=runtime_motion_permit.reseal_index,
+                mission_leg_kind=runtime_mission_leg_kind,
+                mission_leg_index=runtime_mission_leg_index,
+                target_id=runtime_target_id,
             )
         except ValueError as exc:
             return _record_motion_authorization_rejection(
@@ -1783,10 +1917,19 @@ def main(argv: list[str] | None = None) -> int:
             "runtime_localization_motion_permit_consumed",
             run_id=args.run_id,
             leg_index=leg.leg_index,
+            mission_leg_kind=runtime_mission_leg_kind.value,
+            mission_leg_index=runtime_mission_leg_index,
+            target_id=runtime_target_id,
             target_viewpoint_id=(
-                runtime_motion_permit.target_viewpoint_id
+                runtime_target_id
+                if runtime_mission_leg_kind is MissionLegKind.COVERAGE
+                else ""
             ),
-            coverage_leg_index=runtime_motion_permit.leg_index,
+            coverage_leg_index=(
+                runtime_mission_leg_index
+                if runtime_mission_leg_kind is MissionLegKind.COVERAGE
+                else None
+            ),
             reseal_index=runtime_motion_permit.reseal_index,
             rejected_run_id=runtime_motion_permit.rejected_run_id,
             mission_motion_authorization_json=str(

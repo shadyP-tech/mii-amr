@@ -451,6 +451,63 @@ class RunEventsTest(unittest.TestCase):
         )
         self.assertEqual(validate.call_args.kwargs["cmd_vel_topic"], "/cmd_vel")
 
+    def test_candidate_runtime_permit_validates_without_coverage_identity(self):
+        args = type(
+            "Args",
+            (),
+            {
+                "mission_motion_authorization_json": Path("mission.json"),
+                "runtime_localization_motion_permit_json": Path("permit.json"),
+                "runtime_localization_mission_leg_kind": (
+                    MissionLegKind.CANDIDATE_PREAPPROACH.value
+                ),
+                "runtime_localization_mission_leg_index": 4,
+                "runtime_localization_target_id": "survey_candidate_0005",
+                "runtime_localization_target_viewpoint_id": "",
+                "runtime_localization_semantic_map_id": "arena_map",
+                "dry_run": False,
+                "allow_sim_time": False,
+                "execution_pose_frame": "odom",
+                "route_certificate_json": Path("certificate.json"),
+                "mission_session_id": "mission",
+                "run_id": "mission_candidate_004_runtime_reseal_001",
+                "robot_id": "turtlebot1",
+                "localization_branch_proof_id": "known_start",
+            },
+        )()
+        resolved = type(
+            "Resolved",
+            (),
+            {"namespace": "", "cmd_vel_topic": "/cmd_vel"},
+        )()
+        sentinel = object()
+        with patch.object(
+            run_single_station_segment,
+            "validate_runtime_localization_motion_permit_for_execution",
+            return_value=sentinel,
+        ) as validate:
+            validator = getattr(
+                run_single_station_segment,
+                "_validated_runtime_localization_motion_permit",
+            )
+            result = validator(
+                args,
+                resolved,
+                route_csv_path=Path("route.csv"),
+                diagnostics_path=Path("diagnostics.json"),
+            )
+
+        self.assertIs(result, sentinel)
+        self.assertEqual(
+            validate.call_args.kwargs["mission_leg_kind"],
+            MissionLegKind.CANDIDATE_PREAPPROACH,
+        )
+        self.assertEqual(validate.call_args.kwargs["mission_leg_index"], 4)
+        self.assertEqual(
+            validate.call_args.kwargs["target_id"],
+            "survey_candidate_0005",
+        )
+
     def test_partial_runtime_recovery_permit_fails_closed(self):
         args = type(
             "Args",
@@ -467,6 +524,38 @@ class RunEventsTest(unittest.TestCase):
                 route_csv_path=Path("route.csv"),
                 diagnostics_path=Path("diagnostics.json"),
             )
+
+    def test_coverage_replan_args_do_not_request_runtime_permit(self):
+        args = type(
+            "Args",
+            (),
+            {
+                "mission_motion_authorization_json": None,
+                "runtime_localization_motion_permit_json": None,
+                "runtime_localization_mission_leg_kind": None,
+                "runtime_localization_mission_leg_index": None,
+                "runtime_localization_target_id": "",
+                "runtime_localization_target_viewpoint_id": "",
+                "runtime_localization_semantic_map_id": "",
+                "coverage_transient_replan_leg_index": 2,
+                "coverage_transient_replan_target_viewpoint_id": (
+                    "survey_vp_003"
+                ),
+                "coverage_transient_replan_semantic_map_id": "arena_map",
+            },
+        )()
+
+        result = (
+            run_single_station_segment
+            ._validated_runtime_localization_motion_permit(
+                args,
+                object(),
+                route_csv_path=Path("route.csv"),
+                diagnostics_path=Path("diagnostics.json"),
+            )
+        )
+
+        self.assertIsNone(result)
 
     def test_runner_rejects_nav2_direct_publisher_allowlist(self):
         with self.assertRaises(SystemExit) as raised, redirect_stdout(StringIO()):
@@ -1678,6 +1767,101 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
             "survey_vp_001",
         )
         self.assertFalse(consumed["additional_typed_run_required"])
+
+    def test_candidate_runtime_permit_consumes_generic_identity_without_coverage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            permit = type(
+                "Permit",
+                (),
+                {
+                    "mission_leg_kind": MissionLegKind.CANDIDATE_PREAPPROACH,
+                    "mission_leg_index": 4,
+                    "target_id": "survey_candidate_0005",
+                    "target_viewpoint_id": "survey_candidate_0005",
+                    "leg_index": 4,
+                    "reseal_index": 1,
+                    "rejected_run_id": "candidate-run-0",
+                },
+            )()
+            receipt_path = Path(tmp) / "candidate-consumption.json"
+            args = self.base_args(paths) + [
+                "--mission-motion-authorization-json",
+                str(Path(tmp) / "runtime-authorization.json"),
+                "--runtime-localization-motion-permit-json",
+                str(Path(tmp) / "candidate-permit.json"),
+                "--runtime-localization-mission-leg-kind",
+                MissionLegKind.CANDIDATE_PREAPPROACH.value,
+                "--runtime-localization-mission-leg-index",
+                "4",
+                "--runtime-localization-target-id",
+                "survey_candidate_0005",
+                "--runtime-localization-semantic-map-id",
+                "arena",
+                "--mission-session-id",
+                "mission",
+            ]
+            with patch.object(
+                run_single_station_segment,
+                "run_ros_preflight",
+                return_value=passing_preflight(),
+            ), patch.object(
+                run_single_station_segment,
+                "_validated_runtime_localization_motion_permit",
+                return_value=permit,
+            ), patch.object(
+                run_single_station_segment,
+                "default_runtime_motion_consumption_receipt_path",
+                return_value=receipt_path,
+            ), patch.object(
+                run_single_station_segment,
+                "consume_runtime_motion_permit",
+                return_value=object(),
+            ) as consume, patch.object(
+                run_single_station_segment,
+                "runtime_localization_motion_permit_sha256",
+                return_value="a" * 64,
+            ), patch.object(
+                run_single_station_segment,
+                "runtime_motion_consumption_receipt_sha256",
+                return_value="b" * 64,
+            ), patch.object(
+                run_single_station_segment,
+                "_confirm_motion",
+                side_effect=AssertionError("candidate permit must not prompt"),
+            ), patch.object(
+                run_single_station_segment,
+                "run_simple_waypoint_follower",
+                return_value=FollowerResult("completed", "", 1.0, 0.2, True),
+            ), redirect_stdout(StringIO()):
+                status = run_single_station_segment.main(args)
+
+            events = read_events(paths["events"])
+
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            consume.call_args.kwargs["mission_leg_kind"],
+            MissionLegKind.CANDIDATE_PREAPPROACH,
+        )
+        self.assertEqual(consume.call_args.kwargs["mission_leg_index"], 4)
+        self.assertEqual(
+            consume.call_args.kwargs["target_id"],
+            "survey_candidate_0005",
+        )
+        consumed = next(
+            event
+            for event in events
+            if event["event"]
+            == "runtime_localization_motion_permit_consumed"
+        )
+        self.assertEqual(
+            consumed["mission_leg_kind"],
+            MissionLegKind.CANDIDATE_PREAPPROACH.value,
+        )
+        self.assertEqual(consumed["mission_leg_index"], 4)
+        self.assertEqual(consumed["target_id"], "survey_candidate_0005")
+        self.assertIsNone(consumed["coverage_leg_index"])
+        self.assertEqual(consumed["target_viewpoint_id"], "")
 
     def test_routine_leg_permit_claim_precedes_motion_and_skips_child_prompt(self):
         with tempfile.TemporaryDirectory() as tmp:

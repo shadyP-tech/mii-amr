@@ -130,6 +130,52 @@ class WaypointFollowerModuleBoundaryTest(unittest.TestCase):
             self.assertNotIn("create_publisher", source, path.name)
             self.assertNotIn("cmd_vel_pub.publish", source, path.name)
 
+    def test_control_decision_helpers_are_ros_free_and_side_effect_free(self):
+        helper_modules = (
+            "command_admission.py",
+            "control_results.py",
+        )
+        forbidden_import_roots = {
+            "geometry_msgs",
+            "nav_msgs",
+            "rclpy",
+            "sensor_msgs",
+            "std_srvs",
+            "tf2_ros",
+        }
+        forbidden_source_fragments = (
+            "create_publisher",
+            "cmd_vel_pub.publish",
+            "publish_repeated_zero",
+            "publish_zero",
+            "_append_controller_trace",
+            "time.sleep",
+            "spin_once",
+            "scripts.aufgabe03",
+        )
+
+        for filename in helper_modules:
+            path = RUNTIME_COMPONENT_ROOT / filename
+            source = path.read_text()
+            tree = ast.parse(source)
+            imported_roots = {
+                alias.name.split(".", 1)[0]
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Import)
+                for alias in node.names
+            }
+            imported_roots.update(
+                node.module.split(".", 1)[0]
+                for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom) and node.module
+            )
+            self.assertFalse(
+                imported_roots & forbidden_import_roots,
+                f"{filename} imports ROS runtime packages",
+            )
+            for fragment in forbidden_source_fragments:
+                self.assertNotIn(fragment, source, filename)
+
     def test_runtime_components_are_split_by_operational_responsibility(self):
         expected_classes = {
             "amcl_recovery.py": "AmclRecoveryMixin",

@@ -148,6 +148,24 @@ class CoverageExactTwoCameraReady:
             "candidate_snapshot_sha256": self.candidate_snapshot_sha256,
             "stand_count": self.stand_count,
             "expected_stand_count": decision.expected_stand_count,
+            "lidar_static_map_admitted_candidate_count": len(
+                decision.lidar_static_map_admitted_candidate_uids
+            ),
+            "lidar_boundary_provisional_candidate_count": len(
+                decision.lidar_boundary_provisional_candidate_uids
+            ),
+            "lidar_population_retained_candidate_count": len(
+                decision.lidar_population_retained_candidate_uids
+            ),
+            "lidar_static_map_admitted_candidate_uids": list(
+                decision.lidar_static_map_admitted_candidate_uids
+            ),
+            "lidar_boundary_provisional_candidate_uids": list(
+                decision.lidar_boundary_provisional_candidate_uids
+            ),
+            "lidar_population_retained_candidate_uids": list(
+                decision.lidar_population_retained_candidate_uids
+            ),
             "camera_validation_candidate_uids": list(
                 decision.admitted_candidate_uids
             ),
@@ -215,6 +233,24 @@ class CoverageExactTwoCameraAdmissionError(RuntimeError):
                 self.decision.admitted_candidate_uids
             ),
             "active_lidar_candidate_count": self.decision.active_candidate_count,
+            "lidar_static_map_admitted_candidate_count": len(
+                self.decision.lidar_static_map_admitted_candidate_uids
+            ),
+            "lidar_boundary_provisional_candidate_count": len(
+                self.decision.lidar_boundary_provisional_candidate_uids
+            ),
+            "lidar_population_retained_candidate_count": len(
+                self.decision.lidar_population_retained_candidate_uids
+            ),
+            "lidar_static_map_admitted_candidate_uids": list(
+                self.decision.lidar_static_map_admitted_candidate_uids
+            ),
+            "lidar_boundary_provisional_candidate_uids": list(
+                self.decision.lidar_boundary_provisional_candidate_uids
+            ),
+            "lidar_population_retained_candidate_uids": list(
+                self.decision.lidar_population_retained_candidate_uids
+            ),
             "completed_coverage_legs": self.completed_coverage_legs,
             "legs_completed_this_run": self.legs_completed_this_run,
             "next_viewpoint_id": None,

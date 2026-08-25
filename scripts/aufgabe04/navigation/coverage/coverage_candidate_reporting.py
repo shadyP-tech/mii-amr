@@ -88,6 +88,7 @@ def coverage_epoch_candidate_count_fields(
     morphology_admitted_candidate_count: int | None = None,
     morphology_rejected_candidate_count: int | None = None,
     static_map_admitted_candidate_count: int,
+    static_map_boundary_provisional_candidate_count: int = 0,
     static_map_rejected_candidate_count: int,
     fused_registry_candidate_counts: Mapping[str, int],
 ) -> dict[str, object]:
@@ -117,6 +118,10 @@ def coverage_epoch_candidate_count_fields(
         static_map_admitted_candidate_count,
         "static_map_admitted_candidate_count",
     )
+    boundary_provisional_count = _nonnegative_int(
+        static_map_boundary_provisional_candidate_count,
+        "static_map_boundary_provisional_candidate_count",
+    )
     rejected_count = _nonnegative_int(
         static_map_rejected_candidate_count,
         "static_map_rejected_candidate_count",
@@ -126,10 +131,13 @@ def coverage_epoch_candidate_count_fields(
             "confirmed epoch candidate count must equal morphology admitted "
             "plus morphology rejected"
         )
-    if morphology_admitted_count != admitted_count + rejected_count:
+    if (
+        morphology_admitted_count
+        != admitted_count + boundary_provisional_count + rejected_count
+    ):
         raise ValueError(
             "morphology-admitted candidate count must equal admitted plus "
-            "rejected at the static-map gate"
+            "boundary-provisional plus rejected at the static-map gate"
         )
 
     return {
@@ -141,12 +149,21 @@ def coverage_epoch_candidate_count_fields(
             morphology_rejected_count
         ),
         "epoch_static_map_admitted_candidate_count": admitted_count,
+        "epoch_static_map_boundary_provisional_candidate_count": (
+            boundary_provisional_count
+        ),
+        "epoch_static_map_population_retained_candidate_count": (
+            admitted_count + boundary_provisional_count
+        ),
         "epoch_static_map_rejected_candidate_count": rejected_count,
         **fused_registry_candidate_count_fields(fused_registry_candidate_counts),
         # Backward-compatible schema-v1 aliases.  Their scope is one epoch,
         # despite the missing epoch prefix.
         "confirmed_epoch_candidate_count": confirmed_count,
         "static_map_candidate_admitted_count": admitted_count,
+        "static_map_candidate_boundary_provisional_count": (
+            boundary_provisional_count
+        ),
         "static_map_candidate_rejected_count": rejected_count,
         "legacy_epoch_candidate_count_aliases": {
             "confirmed_epoch_candidate_count": (
@@ -154,6 +171,9 @@ def coverage_epoch_candidate_count_fields(
             ),
             "static_map_candidate_admitted_count": (
                 "epoch_static_map_admitted_candidate_count"
+            ),
+            "static_map_candidate_boundary_provisional_count": (
+                "epoch_static_map_boundary_provisional_candidate_count"
             ),
             "static_map_candidate_rejected_count": (
                 "epoch_static_map_rejected_candidate_count"
@@ -164,6 +184,9 @@ def coverage_epoch_candidate_count_fields(
 
 def active_lidar_registry_count_fields(
     active_lidar_candidate_count: int,
+    *,
+    static_map_admitted_candidate_count: int | None = None,
+    boundary_provisional_candidate_count: int = 0,
 ) -> dict[str, object]:
     """Return the exact-two gate count without calling it epoch admission."""
 
@@ -171,14 +194,31 @@ def active_lidar_registry_count_fields(
         active_lidar_candidate_count,
         "active_lidar_candidate_count",
     )
+    strict_count = _nonnegative_int(
+        (
+            active_count
+            if static_map_admitted_candidate_count is None
+            else static_map_admitted_candidate_count
+        ),
+        "static_map_admitted_candidate_count",
+    )
+    boundary_count = _nonnegative_int(
+        boundary_provisional_candidate_count,
+        "boundary_provisional_candidate_count",
+    )
+    if strict_count + boundary_count != active_count:
+        raise ValueError(
+            "active LiDAR count must equal static-map admitted plus "
+            "boundary-provisional candidates"
+        )
     return {
         "active_lidar_registry_candidate_count": active_count,
         "fused_registry_active_candidate_count": active_count,
-        # This historical key never represented one epoch's static-map
-        # admissions.  Preserve it for schema-v1 readers, but mark its alias.
-        "lidar_static_map_admitted_candidate_count": active_count,
+        "lidar_static_map_admitted_candidate_count": strict_count,
+        "lidar_boundary_provisional_candidate_count": boundary_count,
+        "lidar_population_retained_candidate_count": active_count,
         "legacy_lidar_checkpoint_candidate_count_aliases": {
-            "lidar_static_map_admitted_candidate_count": (
+            "fused_registry_active_candidate_count": (
                 "active_lidar_registry_candidate_count"
             ),
         },

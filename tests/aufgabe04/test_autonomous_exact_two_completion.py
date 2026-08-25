@@ -26,6 +26,9 @@ class AutonomousExactTwoCompletionTests(unittest.TestCase):
             admitted_candidate_uids=("candidate_0",),
             multi_view_candidate_uids=("candidate_0",),
             single_view_candidate_uids=(),
+            lidar_static_map_admitted_candidate_uids=("candidate_0",),
+            lidar_boundary_provisional_candidate_uids=(),
+            lidar_population_retained_candidate_uids=("candidate_0",),
             source_registry_sha256=HASH_A,
         )
         handoff = SimpleNamespace(motion_authorized=False)

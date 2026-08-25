@@ -69,6 +69,12 @@ from scripts.aufgabe04.real_robot.autonomous_candidate_startup_recovery import (
     CandidateStartupRecoveryEffects,
     execute_candidate_motion_with_startup_recovery,
 )
+from scripts.aufgabe04.real_robot.autonomous_candidate_runtime_recovery import (
+    CandidateRuntimeRecoveryAttempt,
+    CandidateRuntimeRecoveryConfig,
+    CandidateRuntimeRecoveryEffects,
+    execute_candidate_runtime_localization_recovery,
+)
 from scripts.aufgabe04.stations.candidate_snapshot import (
     CandidateSnapshot,
     FrozenCandidate,
@@ -145,6 +151,8 @@ class CandidateApproachConfig:
     mission_leg_motion_authorization_json: Path
     startup_reseal_motion_authorization_json: Path | None = None
     max_startup_reseals_per_leg: int = 0
+    mission_motion_authorization_json: Path | None = None
+    max_runtime_localization_reseals_per_leg: int = 0
     exact_two_camera_handoff_path: Path | None = None
     exact_two_camera_handoff_sha256: str | None = None
     camera_selection_linear_speed_mps: float = 0.055
@@ -708,6 +716,11 @@ class CandidateApproachEffects:
         [CandidateMotionLegRequest, CandidateStartupRecoveryAttempt],
         MotionLegOutcome,
     ] | None = None
+    admit_runtime_localization: Callable[[Path], Pose2D] | None = None
+    run_runtime_localization_reseal_motion_leg: Callable[
+        [CandidateMotionLegRequest, CandidateRuntimeRecoveryAttempt],
+        MotionLegOutcome,
+    ] | None = None
     event_sink: Callable[[Path, Mapping[str, object]], None] = _append_jsonl
     clock: Callable[[], float] = time.time
 
@@ -805,7 +818,34 @@ def _execute_candidate_motion(
     candidate_index: int,
     target_id: str,
 ) -> MotionLegOutcome:
-    """Run one candidate routine with bounded same-identity startup recovery."""
+    """Run one candidate routine with bounded startup and runtime recovery."""
+
+    runtime_budget = config.max_runtime_localization_reseals_per_leg
+    if type(runtime_budget) is not int or runtime_budget < 0:
+        raise ValueError(
+            "candidate runtime-localization reseal budget must be "
+            "non-negative"
+        )
+    if runtime_budget:
+        authorization_path = config.mission_motion_authorization_json
+        if authorization_path is None:
+            raise RuntimeError(
+                "candidate runtime recovery requires mission motion "
+                "authorization"
+            )
+        authorization_path = Path(authorization_path)
+        if authorization_path.is_symlink() or not authorization_path.is_file():
+            raise RuntimeError(
+                "candidate runtime recovery mission authorization must be "
+                "a normal file"
+            )
+        if (
+            effects.admit_runtime_localization is None
+            or effects.run_runtime_localization_reseal_motion_leg is None
+        ):
+            raise RuntimeError(
+                "candidate runtime recovery effects are incomplete"
+            )
 
     initial_request = _motion_request(
         config=config,
@@ -860,7 +900,49 @@ def _execute_candidate_motion(
             )
         return effects.run_startup_reseal_motion_leg(request, attempt)
 
-    return execute_candidate_motion_with_startup_recovery(
+    def admit_runtime_localization(evidence_path: Path) -> Pose2D:
+        if effects.admit_runtime_localization is None:
+            raise RuntimeError(
+                "candidate runtime recovery has no stationary localization "
+                "admission effect"
+            )
+        return effects.admit_runtime_localization(evidence_path)
+
+    def replan_runtime_same_routine(
+        attempt: CandidateRuntimeRecoveryAttempt,
+    ) -> CandidateMotionLegRequest:
+        replacement_plan = replace(
+            plan_request,
+            start=attempt.fresh_start_pose,
+            output_dir=attempt.source_root,
+            prepared_plan=None,
+            selection_evidence=None,
+        )
+        replacement_sealed = effects.plan_preapproach(replacement_plan)
+        return _motion_request(
+            config=config,
+            sealed=replacement_sealed,
+            run_id=attempt.identity.run_id,
+            candidate_snapshot_path=(
+                attempt.source_root / "candidate_snapshot.json"
+            ),
+            leg_kind=leg_kind,
+            candidate_index=candidate_index,
+            target_id=target_id,
+        )
+
+    def run_runtime_replacement(
+        replacement_request: CandidateMotionLegRequest,
+        attempt: CandidateRuntimeRecoveryAttempt,
+    ) -> MotionLegOutcome:
+        runner = effects.run_runtime_localization_reseal_motion_leg
+        if runner is None:
+            raise RuntimeError(
+                "candidate runtime recovery has no runtime-reseal motion effect"
+            )
+        return runner(replacement_request, attempt)
+
+    startup_outcome = execute_candidate_motion_with_startup_recovery(
         initial_request,
         config=CandidateStartupRecoveryConfig(
             initial_identity=_candidate_routine_identity(initial_request),
@@ -869,6 +951,7 @@ def _execute_candidate_motion(
             ),
             event_log_path=config.session_root / "adaptive_replans.jsonl",
             max_startup_reseals=config.max_startup_reseals_per_leg,
+            allow_runtime_localization_handoff=bool(runtime_budget),
         ),
         effects=CandidateStartupRecoveryEffects(
             run_initial=effects.run_motion_leg,
@@ -876,6 +959,28 @@ def _execute_candidate_motion(
             admit_fresh_stationary_localization=admit_localization,
             replan_same_routine=replan_same_routine,
             describe_request=_candidate_routine_identity,
+            event_sink=lambda path, payload: effects.event_sink(path, payload),
+            clock=effects.clock,
+        ),
+    )
+    return execute_candidate_runtime_localization_recovery(
+        startup_outcome,
+        config=CandidateRuntimeRecoveryConfig(
+            initial_identity=replace(
+                _candidate_routine_identity(initial_request),
+                run_id=startup_outcome.run_id,
+            ),
+            recovery_root=(
+                candidate_root / f"{leg_kind.value}_runtime_reseals"
+            ),
+            event_log_path=config.session_root / "adaptive_replans.jsonl",
+            max_runtime_reseals=runtime_budget,
+        ),
+        effects=CandidateRuntimeRecoveryEffects(
+            admit_fresh_stationary_localization=admit_runtime_localization,
+            replan_same_routine=replan_runtime_same_routine,
+            describe_request=_candidate_routine_identity,
+            run_replacement=run_runtime_replacement,
             event_sink=lambda path, payload: effects.event_sink(path, payload),
             clock=effects.clock,
         ),

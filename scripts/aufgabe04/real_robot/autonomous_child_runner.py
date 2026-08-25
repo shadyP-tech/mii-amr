@@ -112,6 +112,11 @@ def build_child_runner_command(
     uncertainty_budget_json: Path | None = None,
     mission_motion_authorization_json: Path | None = None,
     runtime_localization_motion_permit_json: Path | None = None,
+    runtime_localization_mission_leg_kind: MissionLegKind | str | None = None,
+    runtime_localization_mission_leg_index: int | None = None,
+    runtime_localization_target_id: str = "",
+    runtime_localization_target_viewpoint_id: str = "",
+    runtime_localization_semantic_map_id: str = "",
     mission_leg_motion_authorization_json: Path | None = None,
     mission_leg_motion_permit_json: Path | None = None,
     mission_leg_kind: MissionLegKind | str | None = None,
@@ -329,15 +334,56 @@ def build_child_runner_command(
                 str(mission_leg_evidence_target_id).strip(),
             ]
         )
+    resolved_runtime_semantic_map_id = str(
+        runtime_localization_semantic_map_id
+    ).strip()
+    resolved_runtime_target_viewpoint_id = str(
+        runtime_localization_target_viewpoint_id
+    ).strip()
+    if coverage_transient_replan is not None and (
+        mission_motion_authorization_json is not None
+        or runtime_localization_motion_permit_json is not None
+    ):
+        if not resolved_runtime_semantic_map_id:
+            resolved_runtime_semantic_map_id = str(
+                coverage_transient_replan["semantic_map_id"]
+            ).strip()
+        if not resolved_runtime_target_viewpoint_id:
+            resolved_runtime_target_viewpoint_id = str(
+                coverage_transient_replan["target_viewpoint_id"]
+            ).strip()
     authorization_fields = (
         mission_motion_authorization_json,
         runtime_localization_motion_permit_json,
+        resolved_runtime_semantic_map_id or None,
     )
-    if any(value is not None for value in authorization_fields):
+    runtime_generic_identity_fields = (
+        runtime_localization_mission_leg_kind,
+        runtime_localization_mission_leg_index,
+        runtime_localization_target_id or None,
+    )
+    runtime_legacy_identity_present = bool(
+        resolved_runtime_target_viewpoint_id
+    )
+    if (
+        any(value is not None for value in authorization_fields)
+        or any(value is not None for value in runtime_generic_identity_fields)
+        or runtime_legacy_identity_present
+    ):
         if any(value is None for value in authorization_fields):
             raise ValueError(
                 "mission motion authorization and runtime localization "
-                "permit must be supplied together"
+                "permit arguments must be supplied together"
+            )
+        generic_identity_requested = any(
+            value is not None for value in runtime_generic_identity_fields
+        )
+        if generic_identity_requested and any(
+            value is None for value in runtime_generic_identity_fields
+        ):
+            raise ValueError(
+                "generic runtime-localization identity arguments must be "
+                "supplied together"
             )
         if dry_run:
             raise ValueError(
@@ -347,9 +393,69 @@ def build_child_runner_command(
             raise ValueError(
                 "runtime localization motion permit requires mission_session_id"
             )
-        if coverage_transient_replan is None:
+        if generic_identity_requested:
+            runtime_kind = MissionLegKind(
+                runtime_localization_mission_leg_kind
+            )
+            if runtime_kind not in ROUTINE_MISSION_LEG_KINDS:
+                raise ValueError(
+                    "runtime localization permit requires a routine leg kind"
+                )
+            assert runtime_localization_mission_leg_index is not None
+            if (
+                type(runtime_localization_mission_leg_index) is not int
+                or runtime_localization_mission_leg_index < 0
+            ):
+                raise ValueError(
+                    "runtime localization mission leg index must be "
+                    "non-negative"
+                )
+            runtime_identity = (
+                runtime_kind,
+                runtime_localization_mission_leg_index,
+                str(runtime_localization_target_id).strip(),
+            )
+        else:
+            if (
+                coverage_transient_replan is None
+                or not runtime_legacy_identity_present
+            ):
+                raise ValueError(
+                    "legacy runtime-localization identity requires a "
+                    "coverage leg"
+                )
+            runtime_identity = (
+                MissionLegKind.COVERAGE,
+                int(coverage_transient_replan["leg_index"]),
+                resolved_runtime_target_viewpoint_id,
+            )
+        if runtime_identity[0] is MissionLegKind.COVERAGE:
+            if coverage_transient_replan is None:
+                raise ValueError(
+                    "coverage runtime-localization permit requires coverage "
+                    "transient-replan identity"
+                )
+            coverage_identity = (
+                MissionLegKind.COVERAGE,
+                int(coverage_transient_replan["leg_index"]),
+                str(
+                    coverage_transient_replan["target_viewpoint_id"]
+                ).strip(),
+            )
+            if runtime_identity != coverage_identity:
+                raise ValueError(
+                    "runtime-localization and coverage transient-replan "
+                    "identities mismatch"
+                )
+        elif coverage_transient_replan is not None:
             raise ValueError(
-                "runtime localization motion permit requires a coverage leg"
+                "non-coverage runtime-localization permit cannot carry "
+                "coverage transient replanning"
+            )
+        if evidence_identity is not None and evidence_identity != runtime_identity:
+            raise ValueError(
+                "mission-leg evidence and runtime-localization identities "
+                "mismatch"
             )
         command.extend(
             [
@@ -357,6 +463,20 @@ def build_child_runner_command(
                 str(mission_motion_authorization_json),
                 "--runtime-localization-motion-permit-json",
                 str(runtime_localization_motion_permit_json),
+                "--runtime-localization-mission-leg-kind",
+                runtime_identity[0].value,
+                "--runtime-localization-mission-leg-index",
+                str(runtime_identity[1]),
+                "--runtime-localization-target-id",
+                runtime_identity[2],
+                "--runtime-localization-target-viewpoint-id",
+                (
+                    runtime_identity[2]
+                    if runtime_identity[0] is MissionLegKind.COVERAGE
+                    else ""
+                ),
+                "--runtime-localization-semantic-map-id",
+                resolved_runtime_semantic_map_id,
                 "--mission-session-id",
                 str(mission_session_id).strip(),
             ]

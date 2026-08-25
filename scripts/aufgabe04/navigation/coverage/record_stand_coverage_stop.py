@@ -281,12 +281,15 @@ def _prepare_stand_coverage_stop(
         observations=observations,
         raw_stands=raw_stands,
     )
-    stands = perception_admission.admitted_stands
+    stands = perception_admission.registry_population_stands
     registry = fuse_confirmed_stands(
         registry,
         stands,
         viewpoint_id=viewpoint.viewpoint_id,
         config=plan.config,
+        static_map_disposition_by_stand_id=(
+            perception_admission.registry_static_map_dispositions
+        ),
     )
     visibility_reconciliation = prepare_coverage_visibility_reconciliation(
         survey_root=survey_root,
@@ -387,6 +390,9 @@ def _write_committed_stop_state(
             morphology_admission.rejected_stands
         ),
         static_map_admitted_candidate_count=len(admission.admitted_stands),
+        static_map_boundary_provisional_candidate_count=len(
+            admission.boundary_provisional_stands
+        ),
         static_map_rejected_candidate_count=len(admission.rejected_stands),
         fused_registry_candidate_counts=registry_candidate_counts,
     )

@@ -5,6 +5,9 @@ from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 from scripts.aufgabe04.artifacts.content_store import payload_sha256
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
+    MissionLegKind,
+)
 from scripts.aufgabe04.navigation.execution.runtime_motion_authorization import (
     MISSION_MOTION_AUTHORIZATION_SCOPE,
     MISSION_RUN_CONFIRMATION,
@@ -56,6 +59,11 @@ class RuntimeMotionAuthorizationTest(unittest.TestCase):
             scope_text=MISSION_MOTION_AUTHORIZATION_SCOPE,
             operator_confirmation=MISSION_RUN_CONFIRMATION,
             allowed_recovery_kind=RUNTIME_LOCALIZATION_RESEAL_RECOVERY_KIND,
+            allowed_mission_leg_kinds=(
+                MissionLegKind.COVERAGE,
+                MissionLegKind.CANDIDATE_PREAPPROACH,
+                MissionLegKind.OPPOSITE_FACE,
+            ),
         )
         self.master_sha256 = write_mission_motion_authorization(
             self.master_path, self.authorization
@@ -219,6 +227,40 @@ class RuntimeMotionAuthorizationTest(unittest.TestCase):
         with self.assertRaises(TypeError):
             loaded.runtime_reseal_decision_evidence["eligible"] = False
 
+    def test_legacy_coverage_authorization_and_permit_remain_loadable(self):
+        legacy_authorization = replace(
+            self.authorization,
+            schema_version=1,
+            allowed_mission_leg_kinds=(MissionLegKind.COVERAGE,),
+        )
+        legacy_master_path = self.root / "legacy-master.json"
+        legacy_master_sha256 = write_mission_motion_authorization(
+            legacy_master_path,
+            legacy_authorization,
+        )
+        loaded_master = load_mission_motion_authorization(legacy_master_path)
+        self.assertEqual(loaded_master, legacy_authorization)
+
+        legacy_permit = replace(
+            self.permit,
+            schema_version=1,
+            master_authorization_path=str(legacy_master_path.absolute()),
+            master_authorization_sha256=legacy_master_sha256,
+        )
+        legacy_permit_path = self.root / "legacy-permit.json"
+        write_runtime_localization_motion_permit(
+            legacy_permit_path,
+            legacy_permit,
+        )
+        loaded_permit = load_runtime_localization_motion_permit(
+            legacy_permit_path
+        )
+        self.assertEqual(loaded_permit, legacy_permit)
+        self.assertEqual(
+            loaded_permit.mission_leg_kind,
+            MissionLegKind.COVERAGE,
+        )
+
     def test_write_is_idempotent_but_refuses_different_content(self):
         first = self._write_permit()
         second = self._write_permit()
@@ -307,6 +349,78 @@ class RuntimeMotionAuthorizationTest(unittest.TestCase):
             self.permit_path, **self._execution_kwargs()
         )
         self.assertEqual(validated.to_payload(), self.permit.to_payload())
+
+    def test_candidate_runtime_permit_binds_generic_routine_identity(self):
+        candidate_permit = replace(
+            self.permit,
+            run_id="mission-candidate-004-runtime-reseal-001",
+            leg_index=4,
+            target_viewpoint_id="survey-candidate-004",
+            mission_leg_kind=MissionLegKind.CANDIDATE_PREAPPROACH,
+            mission_leg_index=4,
+            target_id="survey-candidate-004",
+        )
+        candidate_path = self.root / "candidate-runtime-permit.json"
+        write_runtime_localization_motion_permit(
+            candidate_path,
+            candidate_permit,
+        )
+        kwargs = self._execution_kwargs()
+        kwargs.update(
+            {
+                "run_id": candidate_permit.run_id,
+                "leg_index": 4,
+                "target_viewpoint_id": "survey-candidate-004",
+                "mission_leg_kind": MissionLegKind.CANDIDATE_PREAPPROACH,
+                "mission_leg_index": 4,
+                "target_id": "survey-candidate-004",
+            }
+        )
+
+        loaded = validate_runtime_localization_motion_permit_for_execution(
+            candidate_path,
+            **kwargs,
+        )
+
+        self.assertEqual(
+            loaded.mission_leg_kind,
+            MissionLegKind.CANDIDATE_PREAPPROACH,
+        )
+        for field, value in (
+            ("mission_leg_kind", MissionLegKind.OPPOSITE_FACE),
+            ("mission_leg_index", 5),
+            ("target_id", "another-candidate"),
+        ):
+            with self.subTest(field=field):
+                wrong = dict(kwargs)
+                wrong[field] = value
+                with self.assertRaisesRegex(ValueError, rf"{field}.*mismatch"):
+                    validate_runtime_localization_motion_permit_for_execution(
+                        candidate_path,
+                        **wrong,
+                    )
+
+    def test_master_leg_scope_rejects_candidate_runtime_permit(self):
+        coverage_only = replace(
+            self.authorization,
+            allowed_mission_leg_kinds=(MissionLegKind.COVERAGE,),
+        )
+        coverage_master = self.root / "coverage-only-master.json"
+        coverage_hash = write_mission_motion_authorization(
+            coverage_master,
+            coverage_only,
+        )
+        candidate_permit = replace(
+            self.permit,
+            master_authorization_path=str(coverage_master.absolute()),
+            master_authorization_sha256=coverage_hash,
+            mission_leg_kind=MissionLegKind.CANDIDATE_PREAPPROACH,
+        )
+        with self.assertRaisesRegex(ValueError, "kind is not authorized"):
+            write_runtime_localization_motion_permit(
+                self.root / "unauthorized-candidate.json",
+                candidate_permit,
+            )
 
     def test_execution_validator_rejects_every_live_identity_mismatch(self):
         self._write_permit()

@@ -22,6 +22,13 @@ from scripts.aufgabe04.navigation.planning.costmap import Costmap
 from scripts.aufgabe04.navigation.coverage.coverage_candidate_reporting import (
     coverage_phase_completion_fields,
 )
+from scripts.aufgabe04.navigation.coverage.stand_candidate_population_retention import (
+    RETAINED_STATIC_MAP_DISPOSITIONS,
+    STATIC_MAP_DISPOSITION_ADMITTED,
+    STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL,
+    merge_retained_static_map_dispositions,
+    validate_retained_static_map_disposition,
+)
 from scripts.aufgabe04.navigation.planning.exact_start_connector import (
     ExactStartConnectorEvidence,
 )
@@ -36,7 +43,8 @@ from scripts.aufgabe04.stations.models import Station, StationPose
 
 SURVEY_PLAN_SCHEMA_VERSION = 1
 SURVEY_PROGRESS_SCHEMA_VERSION = 1
-STAND_SURVEY_REGISTRY_SCHEMA_VERSION = 1
+LEGACY_STAND_SURVEY_REGISTRY_SCHEMA_VERSION = 1
+STAND_SURVEY_REGISTRY_SCHEMA_VERSION = 2
 
 STATUS_PROVISIONAL = "provisional"
 STATUS_PENDING_CAMERA = "pending_camera"
@@ -203,6 +211,7 @@ class SurveyCandidate:
     source_observation_ids: tuple[str, ...]
     viewpoint_ids: tuple[str, ...]
     status: str
+    static_map_disposition: str = STATIC_MAP_DISPOSITION_ADMITTED
 
 
 @dataclass(frozen=True)
@@ -410,6 +419,7 @@ def fuse_confirmed_stands(
     *,
     viewpoint_id: str,
     config: CoverageSurveyConfig,
+    static_map_disposition_by_stand_id: Mapping[str, str] | None = None,
 ) -> StandSurveyRegistry:
     """Fuse one stopped observation epoch into stable spatial candidate IDs."""
 
@@ -422,6 +432,12 @@ def fuse_confirmed_stands(
     )
     for stand in ordered_stands:
         _validate_confirmed_stand(stand)
+    requested_disposition_by_stand_id = (
+        _validated_static_map_disposition_by_stand_id(
+            static_map_disposition_by_stand_id,
+            stand_ids={stand.stand_id for stand in ordered_stands},
+        )
+    )
 
     matches, replayed_stand_indices = _candidate_matches_for_epoch(
         candidates,
@@ -431,6 +447,10 @@ def fuse_confirmed_stands(
     for stand_index, stand in enumerate(ordered_stands):
         if stand_index in replayed_stand_indices:
             continue
+        incoming_disposition = requested_disposition_by_stand_id.get(
+            stand.stand_id,
+            STATIC_MAP_DISPOSITION_ADMITTED,
+        )
         match_index = matches.get(stand_index)
         if match_index is None:
             candidate = SurveyCandidate(
@@ -449,6 +469,7 @@ def fuse_confirmed_stands(
                 ),
                 viewpoint_ids=(viewpoint_id,),
                 status=STATUS_PROVISIONAL,
+                static_map_disposition=incoming_disposition,
             )
             candidates.append(
                 _advance_candidate_status(candidate, selected_config)
@@ -459,6 +480,7 @@ def fuse_confirmed_stands(
             stand,
             viewpoint_id=viewpoint_id,
             config=selected_config,
+            incoming_static_map_disposition=incoming_disposition,
         )
     updated = replace(
         registry,
@@ -508,6 +530,14 @@ def survey_status(
         )
         for status in sorted(VALID_CANDIDATE_STATUSES)
     }
+    static_map_disposition_counts = {
+        disposition: sum(
+            1
+            for candidate in registry.candidates
+            if candidate.static_map_disposition == disposition
+        )
+        for disposition in sorted(RETAINED_STATIC_MAP_DISPOSITIONS)
+    }
     coverage_complete = ratio + 1.0e-12 >= plan.config.coverage_threshold
     unresolved = counts[STATUS_PROVISIONAL] + counts[STATUS_PENDING_CAMERA]
     expected_count_met = (
@@ -544,6 +574,12 @@ def survey_status(
         # without also reporting these explicit camera fields.
         **completion_fields,
         "candidate_counts": counts,
+        "static_map_disposition_counts": static_map_disposition_counts,
+        "boundary_provisional_candidate_count": (
+            static_map_disposition_counts[
+                STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL
+            ]
+        ),
         "unresolved_candidate_count": unresolved,
         "expected_stand_count": plan.config.expected_stand_count,
         "expected_stand_count_met": expected_count_met,
@@ -854,19 +890,31 @@ def write_stand_survey_registry(
     plan: CoverageSurveyPlan | None = None,
 ) -> None:
     validate_stand_survey_registry(registry, plan)
-    _write_mutable_json(
-        path,
-        {
-            "schema_version": registry.schema_version,
-            "survey_id": registry.survey_id,
-            "planning_frame": registry.planning_frame,
-            "map_bundle_sha256": registry.map_bundle_sha256,
-            "candidates": [
-                _candidate_payload(candidate)
-                for candidate in registry.candidates
-            ],
-        },
-    )
+    _write_mutable_json(path, stand_survey_registry_payload(registry))
+
+
+def stand_survey_registry_payload(
+    registry: StandSurveyRegistry,
+) -> dict[str, object]:
+    """Return the canonical full registry payload used by every hash edge."""
+
+    validate_stand_survey_registry(registry)
+    return {
+        "schema_version": registry.schema_version,
+        "survey_id": registry.survey_id,
+        "planning_frame": registry.planning_frame,
+        "map_bundle_sha256": registry.map_bundle_sha256,
+        "candidates": [
+            survey_candidate_payload(candidate)
+            for candidate in registry.candidates
+        ],
+    }
+
+
+def stand_survey_registry_sha256(registry: StandSurveyRegistry) -> str:
+    """Hash the canonical registry payload including map disposition."""
+
+    return payload_sha256(stand_survey_registry_payload(registry))
 
 
 def load_stand_survey_registry(
@@ -874,13 +922,28 @@ def load_stand_survey_registry(
     plan: CoverageSurveyPlan | None = None,
 ) -> StandSurveyRegistry:
     payload = _load_json_object(path)
+    source_schema_version = int(payload["schema_version"])
+    if source_schema_version not in {
+        LEGACY_STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
+        STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
+    }:
+        raise ValueError(
+            "unsupported stand survey registry schema "
+            f"{source_schema_version!r}"
+        )
     registry = StandSurveyRegistry(
-        schema_version=int(payload["schema_version"]),
+        # Schema v1 registries predate boundary retention; every candidate in
+        # them necessarily passed the strict static-map gate.  Upgrade that
+        # lineage explicitly in memory before any canonical v2 hash is made.
+        schema_version=STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
         survey_id=str(payload["survey_id"]),
         planning_frame=str(payload["planning_frame"]),
         map_bundle_sha256=str(payload["map_bundle_sha256"]),
         candidates=tuple(
-            _candidate_from_payload(item)
+            _candidate_from_payload(
+                item,
+                source_registry_schema_version=source_schema_version,
+            )
             for item in _list(payload.get("candidates", []))
         ),
     )
@@ -1147,6 +1210,7 @@ def _merge_candidate(
     *,
     viewpoint_id: str,
     config: CoverageSurveyConfig,
+    incoming_static_map_disposition: str = STATIC_MAP_DISPOSITION_ADMITTED,
 ) -> SurveyCandidate:
     existing_observations = set(candidate.source_observation_ids)
     new_observation_ids = tuple(
@@ -1180,6 +1244,10 @@ def _merge_candidate(
             sorted({*candidate.source_observation_ids, *new_observation_ids})
         ),
         viewpoint_ids=tuple(sorted({*candidate.viewpoint_ids, viewpoint_id})),
+        static_map_disposition=merge_retained_static_map_dispositions(
+            candidate.static_map_disposition,
+            incoming_static_map_disposition,
+        ),
     )
     return _advance_candidate_status(merged, config)
 
@@ -1198,6 +1266,32 @@ def _advance_candidate_status(
         candidate,
         status=STATUS_PENDING_CAMERA if ready else STATUS_PROVISIONAL,
     )
+
+
+def _validated_static_map_disposition_by_stand_id(
+    disposition_by_stand_id: Mapping[str, str] | None,
+    *,
+    stand_ids: set[str],
+) -> dict[str, str]:
+    if disposition_by_stand_id is None:
+        return {}
+    if not isinstance(disposition_by_stand_id, Mapping):
+        raise ValueError("static-map disposition map must be a mapping")
+    result: dict[str, str] = {}
+    for stand_id, disposition in disposition_by_stand_id.items():
+        parsed_id = str(stand_id)
+        _validate_nonempty_id(parsed_id, "stand_id")
+        result[parsed_id] = validate_retained_static_map_disposition(
+            str(disposition)
+        )
+    supplied_ids = set(result)
+    if supplied_ids != stand_ids:
+        raise ValueError(
+            "static-map disposition map must cover exactly the fused stands: "
+            f"missing={sorted(stand_ids - supplied_ids)}, "
+            f"unknown={sorted(supplied_ids - stand_ids)}"
+        )
+    return result
 
 
 def _next_candidate_uid(candidates: Iterable[SurveyCandidate]) -> str:
@@ -1234,6 +1328,9 @@ def _validate_survey_candidate(candidate: SurveyCandidate) -> None:
         raise ValueError("candidate last_seen_sec precedes first_seen_sec")
     if candidate.status not in VALID_CANDIDATE_STATUSES:
         raise ValueError(f"invalid candidate status {candidate.status!r}")
+    validate_retained_static_map_disposition(
+        candidate.static_map_disposition
+    )
     if not candidate.source_observation_ids:
         raise ValueError("candidate must retain source observations")
     if not candidate.viewpoint_ids:
@@ -1384,7 +1481,10 @@ def _viewpoint_from_payload(payload: object) -> SurveyViewpoint:
     )
 
 
-def _candidate_payload(candidate: SurveyCandidate) -> dict[str, object]:
+def survey_candidate_payload(candidate: SurveyCandidate) -> dict[str, object]:
+    """Return the canonical registry/hash payload for one candidate."""
+
+    _validate_survey_candidate(candidate)
     return {
         "candidate_uid": candidate.candidate_uid,
         "x_m": candidate.x_m,
@@ -1399,11 +1499,35 @@ def _candidate_payload(candidate: SurveyCandidate) -> dict[str, object]:
         "source_observation_ids": list(candidate.source_observation_ids),
         "viewpoint_ids": list(candidate.viewpoint_ids),
         "status": candidate.status,
+        "static_map_disposition": candidate.static_map_disposition,
     }
 
 
-def _candidate_from_payload(payload: object) -> SurveyCandidate:
+def _candidate_from_payload(
+    payload: object,
+    *,
+    source_registry_schema_version: int,
+) -> SurveyCandidate:
     item = _mapping(payload)
+    if source_registry_schema_version == LEGACY_STAND_SURVEY_REGISTRY_SCHEMA_VERSION:
+        if "static_map_disposition" in item:
+            raise ValueError(
+                "stand survey registry schema 1 candidate unexpectedly "
+                "contains static_map_disposition"
+            )
+        static_map_disposition = STATIC_MAP_DISPOSITION_ADMITTED
+    elif source_registry_schema_version == STAND_SURVEY_REGISTRY_SCHEMA_VERSION:
+        if "static_map_disposition" not in item:
+            raise ValueError(
+                "stand survey registry schema 2 candidate is missing "
+                "static_map_disposition"
+            )
+        static_map_disposition = str(item["static_map_disposition"])
+    else:
+        raise ValueError(
+            "unsupported stand survey registry schema "
+            f"{source_registry_schema_version!r}"
+        )
     return SurveyCandidate(
         candidate_uid=str(item["candidate_uid"]),
         x_m=float(item["x_m"]),
@@ -1422,6 +1546,7 @@ def _candidate_from_payload(payload: object) -> SurveyCandidate:
             str(value) for value in _list(item["viewpoint_ids"])
         ),
         status=str(item["status"]),
+        static_map_disposition=static_map_disposition,
     )
 
 

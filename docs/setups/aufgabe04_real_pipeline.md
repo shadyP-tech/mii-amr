@@ -389,10 +389,19 @@ resolve the latter. It continues in the same process under the initial `RUN`,
 while every candidate and opposite-face motion still requires its own sealed
 route, dry-run, live gates, and atomically consumed one-use permit.
 
+If one of those camera routines stops after motion with the exact global
+localization-consistency `FORCE_ZERO_RESEAL` contract, the parent may use the
+independent `--max-runtime-localization-reseals-per-leg` budget. It first
+admits fresh stationary AMCL/TF evidence, replans the same routine and target,
+repeats the dry/live route gates, and issues a new one-use runtime permit. The
+initial mission `RUN` still applies; target changes, generic safety stops,
+malformed evidence, stale localization, permit reuse, and exhausted budgets
+remain terminal.
+
 Type `RUN` only after the automatic preauthorization readiness report has
 passed (and, when using a staged protocol, after reviewing the separate
 `dry-first-leg` session) and the live velocity owner is unambiguous. In this
-checkpoint mode that one mission-level
+`execute-coverage-checkpoint` mode that one mission-level
 confirmation covers coverage child legs only, through separate immutable
 one-use permits. Candidate and opposite-face leg kinds are absent from the
 master authorization. Every child still has to pass its

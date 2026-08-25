@@ -294,6 +294,10 @@ class RuntimeRecoveryMixin:
                     session_id=self.config.session_id,
                     leg_index=self.leg_index,
                     target_viewpoint_id=self.target_viewpoint_id,
+                    mission_leg_kind="coverage",
+                    mission_leg_index=self.leg_index,
+                    target_id=self.target_viewpoint_id,
+                    semantic_map_id=self.config.semantic_map_id,
                     reseal_index=self.runtime_localization_reseal_index,
                     max_runtime_reseals_per_leg=(
                         self.config.max_runtime_localization_reseals_per_leg

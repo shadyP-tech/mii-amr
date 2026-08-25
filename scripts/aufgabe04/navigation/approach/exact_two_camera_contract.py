@@ -6,18 +6,21 @@ import math
 import re
 from dataclasses import dataclass
 
-from scripts.aufgabe04.artifacts.content_store import payload_sha256
+from scripts.aufgabe04.navigation.coverage.stand_candidate_population_retention import (
+    STATIC_MAP_DISPOSITION_ADMITTED,
+    validate_retained_static_map_disposition,
+)
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STATUS_PENDING_CAMERA,
     STATUS_PROVISIONAL,
     StandSurveyRegistry,
-    SurveyCandidate,
+    stand_survey_registry_sha256 as coverage_registry_sha256,
     validate_stand_survey_registry,
 )
 
 
-EXACT_TWO_CAMERA_ADMISSION_SCHEMA_VERSION = 1
-EXACT_TWO_CAMERA_HANDOFF_SCHEMA_VERSION = 1
+EXACT_TWO_CAMERA_ADMISSION_SCHEMA_VERSION = 2
+EXACT_TWO_CAMERA_HANDOFF_SCHEMA_VERSION = 2
 
 SUPPORT_CLASS_MULTI_VIEW = "multi_view"
 SUPPORT_CLASS_SINGLE_VIEW_REQUIRES_CAMERA_VALIDATION = (
@@ -54,7 +57,9 @@ class ExactTwoCameraCandidateEvidence:
     candidate_uid: str
     registry_status: str
     active_lidar: bool
+    static_map_disposition: str
     static_map_admitted: bool
+    static_map_population_retained: bool
     basic_lidar_supported: bool
     confidence: float
     minimum_confidence: float
@@ -77,7 +82,11 @@ class ExactTwoCameraCandidateEvidence:
             "candidate_uid": self.candidate_uid,
             "registry_status": self.registry_status,
             "active_lidar": self.active_lidar,
+            "static_map_disposition": self.static_map_disposition,
             "static_map_admitted": self.static_map_admitted,
+            "static_map_population_retained": (
+                self.static_map_population_retained
+            ),
             "basic_lidar_supported": self.basic_lidar_supported,
             "confidence": self.confidence,
             "minimum_confidence": self.minimum_confidence,
@@ -126,6 +135,34 @@ class ExactTwoCameraAdmissionDecision:
             return ()
         return tuple(
             sorted(self.multi_view_candidate_uids + self.single_view_candidate_uids)
+        )
+
+    @property
+    def lidar_static_map_admitted_candidate_uids(self) -> tuple[str, ...]:
+        return tuple(
+            evidence.candidate_uid
+            for evidence in self.candidate_evidence
+            if evidence.active_lidar and evidence.static_map_admitted
+        )
+
+    @property
+    def lidar_boundary_provisional_candidate_uids(self) -> tuple[str, ...]:
+        return tuple(
+            evidence.candidate_uid
+            for evidence in self.candidate_evidence
+            if (
+                evidence.active_lidar
+                and evidence.static_map_population_retained
+                and not evidence.static_map_admitted
+            )
+        )
+
+    @property
+    def lidar_population_retained_candidate_uids(self) -> tuple[str, ...]:
+        return tuple(
+            evidence.candidate_uid
+            for evidence in self.candidate_evidence
+            if evidence.active_lidar and evidence.static_map_population_retained
         )
 
     def candidate_for(
@@ -337,6 +374,7 @@ def validate_exact_two_camera_candidate_evidence(
     for field_name in (
         "active_lidar",
         "static_map_admitted",
+        "static_map_population_retained",
         "basic_lidar_supported",
         "confidence_supported",
         "hit_count_supported",
@@ -344,6 +382,28 @@ def validate_exact_two_camera_candidate_evidence(
         "admissible",
     ):
         boolean(getattr(evidence, field_name), field_name)
+    try:
+        validate_retained_static_map_disposition(
+            evidence.static_map_disposition
+        )
+    except ValueError as exc:
+        raise ExactTwoCameraAdmissionError(
+            "invalid_admission",
+            str(exc),
+        ) from exc
+    expected_static_admission = (
+        evidence.static_map_disposition == STATIC_MAP_DISPOSITION_ADMITTED
+    )
+    if evidence.static_map_admitted != expected_static_admission:
+        raise ExactTwoCameraAdmissionError(
+            "invalid_admission",
+            "static-map admission flag differs from disposition",
+        )
+    if not evidence.static_map_population_retained:
+        raise ExactTwoCameraAdmissionError(
+            "invalid_admission",
+            "camera evidence must come from a retained LiDAR population",
+        )
     confidence = finite_number(evidence.confidence, "confidence")
     minimum = finite_number(evidence.minimum_confidence, "minimum_confidence")
     if not (0.0 <= confidence <= 1.0 and 0.0 <= minimum <= 1.0):
@@ -383,7 +443,7 @@ def validate_exact_two_camera_candidate_evidence(
         return
     if (
         not evidence.active_lidar
-        or not evidence.static_map_admitted
+        or not evidence.static_map_population_retained
         or not evidence.basic_lidar_supported
         or evidence.support_class is None
         or evidence.reasons
@@ -467,36 +527,7 @@ def stand_survey_registry_sha256(registry: StandSurveyRegistry) -> str:
         validate_stand_survey_registry(registry)
     except ValueError as exc:
         raise ExactTwoCameraAdmissionError("invalid_registry", str(exc)) from exc
-    return payload_sha256(
-        {
-            "schema_version": registry.schema_version,
-            "survey_id": registry.survey_id,
-            "planning_frame": registry.planning_frame,
-            "map_bundle_sha256": registry.map_bundle_sha256,
-            "candidates": [
-                _survey_candidate_payload(candidate)
-                for candidate in registry.candidates
-            ],
-        }
-    )
-
-
-def _survey_candidate_payload(candidate: SurveyCandidate) -> dict[str, object]:
-    return {
-        "candidate_uid": candidate.candidate_uid,
-        "x_m": candidate.x_m,
-        "y_m": candidate.y_m,
-        "radius_m": candidate.radius_m,
-        "uncertainty_m": candidate.uncertainty_m,
-        "keepout_radius_m": candidate.keepout_radius_m,
-        "confidence": candidate.confidence,
-        "hit_count": candidate.hit_count,
-        "first_seen_sec": candidate.first_seen_sec,
-        "last_seen_sec": candidate.last_seen_sec,
-        "source_observation_ids": list(candidate.source_observation_ids),
-        "viewpoint_ids": list(candidate.viewpoint_ids),
-        "status": candidate.status,
-    }
+    return coverage_registry_sha256(registry)
 
 
 def validate_id(value: object, name: str) -> str:

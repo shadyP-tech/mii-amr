@@ -240,6 +240,68 @@ class AutonomousChildRunnerRouteIdentityTest(unittest.TestCase):
         )
         self.assertNotIn("--coverage-transient-replan-leg-index", command)
 
+    def test_candidate_runtime_permit_does_not_require_coverage_replanner(self):
+        command = build_child_runner_command(
+            **self._base_arguments(),
+            candidate_snapshot=Path("session/candidate_snapshot.json"),
+            mission_leg_evidence_kind=MissionLegKind.CANDIDATE_PREAPPROACH,
+            mission_leg_evidence_index=4,
+            mission_leg_evidence_target_id="survey_candidate_0005",
+            mission_motion_authorization_json=Path(
+                "session/runtime_authorization.json"
+            ),
+            runtime_localization_motion_permit_json=Path(
+                "session/runtime_permits/candidate.json"
+            ),
+            runtime_localization_mission_leg_kind=(
+                MissionLegKind.CANDIDATE_PREAPPROACH
+            ),
+            runtime_localization_mission_leg_index=4,
+            runtime_localization_target_id="survey_candidate_0005",
+            runtime_localization_semantic_map_id="arena",
+            mission_session_id="mission",
+            dry_run=False,
+        )
+
+        self.assertEqual(
+            self._option(command, "--runtime-localization-mission-leg-kind"),
+            MissionLegKind.CANDIDATE_PREAPPROACH.value,
+        )
+        self.assertEqual(
+            self._option(command, "--runtime-localization-mission-leg-index"),
+            "4",
+        )
+        self.assertEqual(
+            self._option(command, "--runtime-localization-target-id"),
+            "survey_candidate_0005",
+        )
+        self.assertNotIn("--coverage-transient-replan-leg-index", command)
+
+    def test_candidate_runtime_identity_mismatch_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "identities mismatch"):
+            build_child_runner_command(
+                **self._base_arguments(),
+                mission_leg_evidence_kind=(
+                    MissionLegKind.CANDIDATE_PREAPPROACH
+                ),
+                mission_leg_evidence_index=4,
+                mission_leg_evidence_target_id="survey_candidate_0005",
+                mission_motion_authorization_json=Path(
+                    "session/runtime_authorization.json"
+                ),
+                runtime_localization_motion_permit_json=Path(
+                    "session/runtime_permits/candidate.json"
+                ),
+                runtime_localization_mission_leg_kind=(
+                    MissionLegKind.OPPOSITE_FACE
+                ),
+                runtime_localization_mission_leg_index=4,
+                runtime_localization_target_id="survey_candidate_0005",
+                runtime_localization_semantic_map_id="arena",
+                mission_session_id="mission",
+                dry_run=False,
+            )
+
     def test_candidate_startup_identity_mismatch_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "identities mismatch"):
             build_child_runner_command(

@@ -31,10 +31,7 @@ ROOT = Path(__file__).resolve().parents[4]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.artifacts.content_store import (
-    payload_sha256,
-    write_content_hashed_json,
-)
+from scripts.aufgabe04.artifacts.content_store import write_content_hashed_json
 from scripts.aufgabe04.navigation.coverage.coverage_candidate_admission import (
     coverage_candidate_admission_evidence,
     evaluate_coverage_candidate_admission,
@@ -72,12 +69,8 @@ from scripts.aufgabe04.navigation.execution.runtime_motion_authorization import 
     MISSION_RUN_CONFIRMATION,
     RUNTIME_LOCALIZATION_RESEAL_RECOVERY_KIND,
     MissionMotionAuthorization,
-    RuntimeLocalizationMotionPermit,
     file_sha256 as authorization_file_sha256,
-    load_mission_motion_authorization,
-    mission_motion_authorization_sha256,
     write_mission_motion_authorization,
-    write_runtime_localization_motion_permit,
 )
 from scripts.aufgabe04.navigation.coverage.record_stand_coverage_stop import (
     commit_stand_coverage_stop,
@@ -139,8 +132,12 @@ from scripts.aufgabe04.real_robot.autonomous_coverage_execution import (
     CoverageLegConfig,
     CoverageLegEffects,
     MissionLegPermitContext,
-    RuntimeLocalizationPermitContext,
     execute_coverage_leg_with_replans as execute_coverage_leg_state_machine,
+)
+from scripts.aufgabe04.real_robot.runtime_localization_motion import (
+    RuntimeLocalizationPermitContext,
+    issue_runtime_localization_motion_permit,
+    resolved_runtime_localization_semantic_map_id,
 )
 from scripts.aufgabe04.real_robot.autonomous_coverage_replanning import (
     is_resealable_startup_mismatch,
@@ -182,6 +179,9 @@ from scripts.aufgabe04.real_robot.autonomous_candidate_approach import (
 )
 from scripts.aufgabe04.real_robot.autonomous_candidate_startup_recovery import (
     CandidateStartupRecoveryAttempt,
+)
+from scripts.aufgabe04.real_robot.autonomous_candidate_runtime_recovery import (
+    CandidateRuntimeRecoveryAttempt,
 )
 from scripts.aufgabe04.real_robot.autonomous_checkpoint_resume import (
     admit_coverage_resume,
@@ -341,106 +341,6 @@ def _admit_preplanning_localization(
         raise RuntimeError(
             f"preplanning localization route pose is invalid: {exc}"
         ) from exc
-
-
-
-
-
-
-def _issue_runtime_localization_motion_permit(
-    *,
-    context: RuntimeLocalizationPermitContext,
-    run_id: str,
-    route_csv: Path,
-    diagnostics_json: Path,
-    map_route_certificate_json: Path,
-    dry_preflight_json: Path,
-    dry_odom_certificate_json: Path,
-    dry_uncertainty_budget_json: Path,
-) -> tuple[Path, str]:
-    """Seal one exact child-run permit after the replacement dry-run passes."""
-
-    if run_id == context.rejected_run_id:
-        raise ValueError("runtime localization permit run_id must be new")
-    if context.reseal_index <= 0:
-        raise ValueError("runtime localization permit reseal_index must be positive")
-    if context.reseal_index > context.max_runtime_reseals_per_leg:
-        raise ValueError("runtime localization permit reseal budget exhausted")
-    master_path = resolve_normal_artifact_path(
-        context.mission_authorization_json,
-        label="runtime localization mission authorization",
-    )
-    master = load_mission_motion_authorization(master_path)
-    decision_evidence = dict(context.runtime_reseal_decision_evidence)
-
-    def sealed(path: Path, label: str) -> tuple[str, str]:
-        canonical = resolve_normal_artifact_path(path, label=label)
-        return str(canonical), authorization_file_sha256(canonical)
-
-    fresh_path, fresh_sha256 = sealed(
-        context.fresh_localization_evidence_path,
-        "runtime localization fresh localization evidence",
-    )
-    route_path, route_sha256 = sealed(route_csv, "runtime localization route CSV")
-    diagnostics_path, diagnostics_sha256 = sealed(
-        diagnostics_json,
-        "runtime localization diagnostics JSON",
-    )
-    map_certificate_path, map_certificate_sha256 = sealed(
-        map_route_certificate_json,
-        "runtime localization map-route certificate",
-    )
-    dry_preflight_path, dry_preflight_sha256 = sealed(
-        dry_preflight_json,
-        "runtime localization dry preflight",
-    )
-    dry_certificate_path, dry_certificate_sha256 = sealed(
-        dry_odom_certificate_json,
-        "runtime localization dry odom certificate",
-    )
-    dry_budget_path, dry_budget_sha256 = sealed(
-        dry_uncertainty_budget_json,
-        "runtime localization dry uncertainty budget",
-    )
-    permit = RuntimeLocalizationMotionPermit(
-        master_authorization_sha256=mission_motion_authorization_sha256(master),
-        master_authorization_path=str(master_path),
-        run_id=run_id,
-        leg_index=context.leg_index,
-        target_viewpoint_id=context.target_viewpoint_id,
-        reseal_index=context.reseal_index,
-        max_runtime_reseals_per_leg=(
-            context.max_runtime_reseals_per_leg
-        ),
-        rejected_run_id=context.rejected_run_id,
-        runtime_reseal_decision_evidence=decision_evidence,
-        runtime_reseal_decision_sha256=payload_sha256(decision_evidence),
-        fresh_localization_evidence_path=fresh_path,
-        fresh_localization_evidence_sha256=fresh_sha256,
-        route_csv_path=route_path,
-        route_csv_sha256=route_sha256,
-        diagnostics_path=diagnostics_path,
-        diagnostics_sha256=diagnostics_sha256,
-        map_route_certificate_path=map_certificate_path,
-        map_route_certificate_sha256=map_certificate_sha256,
-        dry_preflight_path=dry_preflight_path,
-        dry_preflight_sha256=dry_preflight_sha256,
-        dry_odom_certificate_path=dry_certificate_path,
-        dry_odom_certificate_sha256=dry_certificate_sha256,
-        dry_uncertainty_budget_path=dry_budget_path,
-        dry_uncertainty_budget_sha256=dry_budget_sha256,
-        same_target_verified=True,
-        dry_run_passed=True,
-        additional_typed_run_required=False,
-    )
-    permit_path = Path(context.permit_json_path).resolve(strict=False)
-    permit_sha256 = write_runtime_localization_motion_permit(
-        permit_path,
-        permit,
-    )
-    return permit_path, permit_sha256
-
-
 def _issue_mission_leg_motion_permit(
     *,
     context: MissionLegPermitContext,
@@ -597,6 +497,16 @@ def _run_motion_leg(
         mission_leg_evidence_kind = startup_reseal_permit_context.mission_leg_kind
         mission_leg_evidence_index = startup_reseal_permit_context.mission_leg_index
         mission_leg_evidence_target_id = startup_reseal_permit_context.target_id
+    elif runtime_localization_permit_context is not None:
+        mission_leg_evidence_kind = (
+            runtime_localization_permit_context.mission_leg_kind
+        )
+        mission_leg_evidence_index = (
+            runtime_localization_permit_context.mission_leg_index
+        )
+        mission_leg_evidence_target_id = (
+            runtime_localization_permit_context.target_id
+        )
     semantic_log = session_root / "run_events" / f"{run_id}.jsonl"
     if semantic_log.exists() or semantic_log.is_symlink():
         raise RuntimeError(
@@ -757,7 +667,7 @@ def _run_motion_leg(
                 "runtime localization permit requires uncertainty-aware dry evidence"
             )
         motion_permit_path, motion_permit_sha256 = (
-            _issue_runtime_localization_motion_permit(
+            issue_runtime_localization_motion_permit(
                 context=runtime_localization_permit_context,
                 run_id=run_id,
                 route_csv=common["route_csv"],
@@ -936,6 +846,38 @@ def _run_motion_leg(
         uncertainty_budget_json=live_budget,
         mission_motion_authorization_json=runtime_authorization_path,
         runtime_localization_motion_permit_json=motion_permit_path,
+        runtime_localization_mission_leg_kind=(
+            None
+            if runtime_localization_permit_context is None
+            else runtime_localization_permit_context.mission_leg_kind
+        ),
+        runtime_localization_mission_leg_index=(
+            None
+            if runtime_localization_permit_context is None
+            else runtime_localization_permit_context.mission_leg_index
+        ),
+        runtime_localization_target_id=(
+            ""
+            if runtime_localization_permit_context is None
+            else runtime_localization_permit_context.target_id
+        ),
+        runtime_localization_target_viewpoint_id=(
+            ""
+            if runtime_localization_permit_context is None
+            else (
+                runtime_localization_permit_context.target_viewpoint_id
+                if runtime_localization_permit_context.mission_leg_kind
+                is MissionLegKind.COVERAGE
+                else ""
+            )
+        ),
+        runtime_localization_semantic_map_id=(
+            ""
+            if runtime_localization_permit_context is None
+            else resolved_runtime_localization_semantic_map_id(
+                runtime_localization_permit_context
+            )
+        ),
         startup_reseal_motion_authorization_json=(
             startup_authorization_path
         ),
@@ -1447,6 +1389,76 @@ def _run_candidate_startup_reseal_motion_leg(
     )
 
 
+def _run_candidate_runtime_localization_reseal_motion_leg(
+    *,
+    profile,
+    request: CandidateMotionLegRequest,
+    attempt: CandidateRuntimeRecoveryAttempt,
+    mission_motion_authorization_json: Path,
+    max_runtime_reseals_per_leg: int,
+) -> MotionLegOutcome:
+    """Run one exact post-motion candidate replacement under a one-use permit."""
+
+    identity = attempt.identity
+    if (
+        identity.run_id != request.run_id
+        or identity.routine_kind != request.mission_leg_kind.value
+        or identity.routine_index != request.mission_leg_index
+        or identity.target_id != request.target_id
+        or identity.session_id != request.session_id
+        or identity.semantic_map_id != request.semantic_map_id
+    ):
+        raise RuntimeError(
+            "candidate runtime replacement request changed its routine identity"
+        )
+    authorization_root = (
+        request.session_root
+        / "motion_authorization"
+        / "runtime_localization"
+    )
+    permit_context = RuntimeLocalizationPermitContext(
+        mission_authorization_json=Path(
+            mission_motion_authorization_json
+        ).absolute(),
+        session_id=request.session_id,
+        leg_index=request.mission_leg_index,
+        target_viewpoint_id=request.target_id,
+        mission_leg_kind=request.mission_leg_kind,
+        mission_leg_index=request.mission_leg_index,
+        target_id=request.target_id,
+        semantic_map_id=request.semantic_map_id,
+        reseal_index=attempt.reseal_index,
+        max_runtime_reseals_per_leg=max_runtime_reseals_per_leg,
+        rejected_run_id=attempt.rejected_outcome.run_id,
+        runtime_reseal_decision_evidence=(
+            attempt.runtime_localization_decision.to_evidence()
+        ),
+        fresh_localization_evidence_path=(
+            attempt.fresh_localization_evidence_path.absolute()
+        ),
+        permit_json_path=(
+            authorization_root / f"{request.run_id}_permit.json"
+        ).absolute(),
+    )
+    return _run_motion_leg(
+        profile=profile,
+        sealed=dict(request.sealed),
+        run_id=request.run_id,
+        session_root=request.session_root,
+        execute=True,
+        candidate_snapshot=request.candidate_snapshot_path,
+        require_fresh_confirmation=True,
+        fresh_confirmation_reason="runtime_localization",
+        fresh_localization_evidence_path=(
+            attempt.fresh_localization_evidence_path
+        ),
+        uncertainty_map_yaml=request.uncertainty_map_yaml,
+        uncertainty_sigma_multiplier=request.uncertainty_sigma_multiplier,
+        localization_branch_proof_id=request.localization_branch_proof_id,
+        runtime_localization_permit_context=permit_context,
+    )
+
+
 def _capture_candidate_observation(
     *,
     profile,
@@ -1850,10 +1862,10 @@ def main(argv=None) -> int:
             "zero-motion map<-odom consistency stop may reuse this RUN only "
             "after fresh stationary localization, route reconstruction, "
             "dry-run/certificates, and an exact one-use startup-recovery "
-            "permit all pass. On a "
-            "coverage leg, an exact post-motion global-localization reseal "
+            "permit all pass. On an authorized routine leg, an exact "
+            "post-motion global-localization reseal "
             "also stops first, recollects stationary AMCL/TF evidence, "
-            "rebuilds the route to the same coverage target, reruns every "
+            "rebuilds the route to the same target, reruns every "
             "dry/live gate, and may reuse this RUN for at most "
             f"{args.max_runtime_localization_reseals_per_leg} reseal(s) per leg "
             "through an exact one-run permit. Route-tube, stale-TF, obstacle, "
@@ -1917,6 +1929,7 @@ def main(argv=None) -> int:
             allowed_recovery_kind=(
                 RUNTIME_LOCALIZATION_RESEAL_RECOVERY_KIND
             ),
+            allowed_mission_leg_kinds=authorized_leg_kinds,
         )
         mission_motion_authorization_hash = (
             write_mission_motion_authorization(
@@ -2321,6 +2334,12 @@ def main(argv=None) -> int:
                 max_startup_reseals_per_leg=(
                     args.max_startup_reseals_per_leg
                 ),
+                mission_motion_authorization_json=(
+                    mission_motion_authorization_json
+                ),
+                max_runtime_localization_reseals_per_leg=(
+                    args.max_runtime_localization_reseals_per_leg
+                ),
                 exact_two_camera_handoff_path=(
                     exact_two_camera_handoff_path
                 ),
@@ -2364,6 +2383,28 @@ def main(argv=None) -> int:
                             ),
                             max_startup_reseals_per_leg=(
                                 args.max_startup_reseals_per_leg
+                            ),
+                        )
+                    )
+                ),
+                admit_runtime_localization=lambda evidence_path: (
+                    _admit_preplanning_localization(
+                        runtime,
+                        session_root,
+                        evidence_path=evidence_path,
+                    )
+                ),
+                run_runtime_localization_reseal_motion_leg=(
+                    lambda request, attempt: (
+                        _run_candidate_runtime_localization_reseal_motion_leg(
+                            profile=profile,
+                            request=request,
+                            attempt=attempt,
+                            mission_motion_authorization_json=(
+                                mission_motion_authorization_json
+                            ),
+                            max_runtime_reseals_per_leg=(
+                                args.max_runtime_localization_reseals_per_leg
                             ),
                         )
                     )

@@ -25,10 +25,16 @@ from scripts.aufgabe04.artifacts.content_store import (
     payload_sha256,
     write_content_hashed_json,
 )
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
+    ROUTINE_MISSION_LEG_KINDS,
+    MissionLegKind,
+)
 
 
-MISSION_MOTION_AUTHORIZATION_SCHEMA_VERSION = 1
-RUNTIME_LOCALIZATION_MOTION_PERMIT_SCHEMA_VERSION = 1
+MISSION_MOTION_AUTHORIZATION_SCHEMA_VERSION = 2
+RUNTIME_LOCALIZATION_MOTION_PERMIT_SCHEMA_VERSION = 2
+LEGACY_MISSION_MOTION_AUTHORIZATION_SCHEMA_VERSION = 1
+LEGACY_RUNTIME_LOCALIZATION_MOTION_PERMIT_SCHEMA_VERSION = 1
 
 MISSION_MOTION_AUTHORIZATION_HASH_FIELD = "mission_motion_authorization_sha256"
 RUNTIME_LOCALIZATION_MOTION_PERMIT_HASH_FIELD = (
@@ -45,7 +51,7 @@ MISSION_MOTION_AUTHORIZATION_SCOPE = (
 )
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_MISSION_FIELDS = frozenset(
+_MISSION_FIELDS_V1 = frozenset(
     {
         "schema_version",
         "session_id",
@@ -60,7 +66,8 @@ _MISSION_FIELDS = frozenset(
         "allowed_recovery_kind",
     }
 )
-_PERMIT_FIELDS = frozenset(
+_MISSION_FIELDS_V2 = _MISSION_FIELDS_V1 | {"allowed_mission_leg_kinds"}
+_PERMIT_FIELDS_V1 = frozenset(
     {
         "schema_version",
         "master_authorization_sha256",
@@ -92,6 +99,11 @@ _PERMIT_FIELDS = frozenset(
         "additional_typed_run_required",
     }
 )
+_PERMIT_FIELDS_V2 = _PERMIT_FIELDS_V1 | {
+    "mission_leg_kind",
+    "mission_leg_index",
+    "target_id",
+}
 _DECISION_FIELDS = frozenset(
     {
         "schema_version",
@@ -108,6 +120,60 @@ _DECISION_FIELDS = frozenset(
 )
 
 
+def _mission_leg_kind(value: object, name: str) -> MissionLegKind:
+    try:
+        kind = MissionLegKind(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} is not a known mission leg kind") from exc
+    if kind not in ROUTINE_MISSION_LEG_KINDS:
+        raise ValueError(f"{name} must be a routine mission leg kind")
+    return kind
+
+
+def _canonical_allowed_mission_leg_kinds(
+    values: object,
+) -> tuple[MissionLegKind, ...]:
+    if not isinstance(values, (tuple, list)) or not values:
+        raise ValueError(
+            "allowed_mission_leg_kinds must be a non-empty sequence"
+        )
+    result: list[MissionLegKind] = []
+    for value in values:
+        kind = _mission_leg_kind(value, "allowed_mission_leg_kinds")
+        if kind in result:
+            raise ValueError("allowed_mission_leg_kinds contains duplicates")
+        result.append(kind)
+    order = {kind: index for index, kind in enumerate(ROUTINE_MISSION_LEG_KINDS)}
+    if result != sorted(result, key=order.__getitem__):
+        raise ValueError("allowed_mission_leg_kinds must use canonical order")
+    return tuple(result)
+
+
+def resolve_runtime_localization_mission_leg_identity(
+    *,
+    mission_leg_kind: MissionLegKind | str = MissionLegKind.COVERAGE,
+    mission_leg_index: int | None = None,
+    target_id: str = "",
+    leg_index: int | None = None,
+    target_viewpoint_id: str = "",
+) -> tuple[MissionLegKind, int, str]:
+    """Resolve generic identity with strict coverage-alias compatibility."""
+
+    kind = _mission_leg_kind(mission_leg_kind, "mission_leg_kind")
+    if mission_leg_index is None:
+        mission_leg_index = leg_index
+    elif leg_index is not None and mission_leg_index != leg_index:
+        raise ValueError("mission_leg_index and leg_index mismatch")
+    _nonnegative_integer(mission_leg_index, "mission_leg_index")
+
+    if not str(target_id).strip():
+        target_id = target_viewpoint_id
+    elif str(target_viewpoint_id).strip() and target_id != target_viewpoint_id:
+        raise ValueError("target_id and target_viewpoint_id mismatch")
+    _require_nonempty(target_id, "target_id")
+    return kind, mission_leg_index, target_id
+
+
 @dataclass(frozen=True)
 class MissionMotionAuthorization:
     """The narrow scope attached to the mission-level typed ``RUN``."""
@@ -122,13 +188,23 @@ class MissionMotionAuthorization:
     scope_text: str
     operator_confirmation: str
     allowed_recovery_kind: str
+    allowed_mission_leg_kinds: tuple[MissionLegKind, ...] = (
+        MissionLegKind.COVERAGE,
+    )
     schema_version: int = MISSION_MOTION_AUTHORIZATION_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "allowed_mission_leg_kinds",
+            _canonical_allowed_mission_leg_kinds(
+                self.allowed_mission_leg_kinds
+            ),
+        )
         _validate_mission(self)
 
     def to_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema_version": self.schema_version,
             "session_id": self.session_id,
             "robot_id": self.robot_id,
@@ -141,6 +217,11 @@ class MissionMotionAuthorization:
             "operator_confirmation": self.operator_confirmation,
             "allowed_recovery_kind": self.allowed_recovery_kind,
         }
+        if self.schema_version >= MISSION_MOTION_AUTHORIZATION_SCHEMA_VERSION:
+            payload["allowed_mission_leg_kinds"] = [
+                kind.value for kind in self.allowed_mission_leg_kinds
+            ]
+        return payload
 
     def to_evidence(self) -> dict[str, object]:
         return self.to_payload()
@@ -177,9 +258,22 @@ class RuntimeLocalizationMotionPermit:
     same_target_verified: bool
     dry_run_passed: bool
     additional_typed_run_required: bool
+    mission_leg_kind: MissionLegKind = MissionLegKind.COVERAGE
+    mission_leg_index: int | None = None
+    target_id: str = ""
     schema_version: int = RUNTIME_LOCALIZATION_MOTION_PERMIT_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        kind, index, target = resolve_runtime_localization_mission_leg_identity(
+            mission_leg_kind=self.mission_leg_kind,
+            mission_leg_index=self.mission_leg_index,
+            target_id=self.target_id,
+            leg_index=self.leg_index,
+            target_viewpoint_id=self.target_viewpoint_id,
+        )
+        object.__setattr__(self, "mission_leg_kind", kind)
+        object.__setattr__(self, "mission_leg_index", index)
+        object.__setattr__(self, "target_id", target)
         # Prevent callers from mutating the decision after construction while
         # retaining a normal JSON mapping at the public boundary.
         evidence = _canonical_decision_copy(self.runtime_reseal_decision_evidence)
@@ -191,7 +285,7 @@ class RuntimeLocalizationMotionPermit:
         _validate_permit(self)
 
     def to_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema_version": self.schema_version,
             "master_authorization_sha256": self.master_authorization_sha256,
             "master_authorization_path": self.master_authorization_path,
@@ -231,6 +325,15 @@ class RuntimeLocalizationMotionPermit:
             "dry_run_passed": self.dry_run_passed,
             "additional_typed_run_required": self.additional_typed_run_required,
         }
+        if self.schema_version >= RUNTIME_LOCALIZATION_MOTION_PERMIT_SCHEMA_VERSION:
+            payload.update(
+                {
+                    "mission_leg_kind": self.mission_leg_kind.value,
+                    "mission_leg_index": self.mission_leg_index,
+                    "target_id": self.target_id,
+                }
+            )
+        return payload
 
     def to_evidence(self) -> dict[str, object]:
         return self.to_payload()
@@ -283,11 +386,17 @@ def load_mission_motion_authorization(path: Path) -> MissionMotionAuthorization:
         )
     except ContentStoreError as exc:
         raise ValueError(str(exc)) from exc
-    if frozenset(payload) != _MISSION_FIELDS:
+    schema_version = _integer(payload.get("schema_version"), "schema_version")
+    expected_fields = (
+        _MISSION_FIELDS_V1
+        if schema_version == LEGACY_MISSION_MOTION_AUTHORIZATION_SCHEMA_VERSION
+        else _MISSION_FIELDS_V2
+    )
+    if frozenset(payload) != expected_fields:
         raise ValueError("mission motion authorization fields mismatch")
     try:
         return MissionMotionAuthorization(
-            schema_version=_integer(payload["schema_version"], "schema_version"),
+            schema_version=schema_version,
             session_id=_string(payload["session_id"], "session_id"),
             robot_id=_string(payload["robot_id"], "robot_id"),
             namespace=_string(payload["namespace"], "namespace"),
@@ -307,6 +416,18 @@ def load_mission_motion_authorization(path: Path) -> MissionMotionAuthorization:
             ),
             allowed_recovery_kind=_string(
                 payload["allowed_recovery_kind"], "allowed_recovery_kind"
+            ),
+            allowed_mission_leg_kinds=(
+                (MissionLegKind.COVERAGE,)
+                if schema_version
+                == LEGACY_MISSION_MOTION_AUTHORIZATION_SCHEMA_VERSION
+                else tuple(
+                    _mission_leg_kind(value, "allowed_mission_leg_kinds")
+                    for value in _sequence(
+                        payload["allowed_mission_leg_kinds"],
+                        "allowed_mission_leg_kinds",
+                    )
+                )
             ),
         )
     except (KeyError, TypeError, ValueError) as exc:
@@ -375,14 +496,21 @@ def load_runtime_localization_motion_permit(
         )
     except ContentStoreError as exc:
         raise ValueError(str(exc)) from exc
-    if frozenset(payload) != _PERMIT_FIELDS:
+    schema_version = _integer(payload.get("schema_version"), "schema_version")
+    expected_fields = (
+        _PERMIT_FIELDS_V1
+        if schema_version
+        == LEGACY_RUNTIME_LOCALIZATION_MOTION_PERMIT_SCHEMA_VERSION
+        else _PERMIT_FIELDS_V2
+    )
+    if frozenset(payload) != expected_fields:
         raise ValueError("runtime localization motion permit fields mismatch")
     try:
         decision = payload["runtime_reseal_decision_evidence"]
         if not isinstance(decision, Mapping):
             raise ValueError("runtime_reseal_decision_evidence must be an object")
         return RuntimeLocalizationMotionPermit(
-            schema_version=_integer(payload["schema_version"], "schema_version"),
+            schema_version=schema_version,
             master_authorization_sha256=_string(
                 payload["master_authorization_sha256"],
                 "master_authorization_sha256",
@@ -464,6 +592,28 @@ def load_runtime_localization_motion_permit(
                 payload["additional_typed_run_required"],
                 "additional_typed_run_required",
             ),
+            mission_leg_kind=(
+                MissionLegKind.COVERAGE
+                if schema_version
+                == LEGACY_RUNTIME_LOCALIZATION_MOTION_PERMIT_SCHEMA_VERSION
+                else _mission_leg_kind(
+                    payload["mission_leg_kind"], "mission_leg_kind"
+                )
+            ),
+            mission_leg_index=(
+                _integer(payload["leg_index"], "leg_index")
+                if schema_version
+                == LEGACY_RUNTIME_LOCALIZATION_MOTION_PERMIT_SCHEMA_VERSION
+                else _integer(
+                    payload["mission_leg_index"], "mission_leg_index"
+                )
+            ),
+            target_id=(
+                _string(payload["target_viewpoint_id"], "target_viewpoint_id")
+                if schema_version
+                == LEGACY_RUNTIME_LOCALIZATION_MOTION_PERMIT_SCHEMA_VERSION
+                else _string(payload["target_id"], "target_id")
+            ),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"invalid runtime localization motion permit: {exc}") from exc
@@ -494,10 +644,22 @@ def validate_runtime_localization_motion_permit(
     dry_uncertainty_budget_sha256: str,
     dry_preflight_path: Path,
     dry_preflight_sha256: str,
+    mission_leg_kind: MissionLegKind | str = MissionLegKind.COVERAGE,
+    mission_leg_index: int | None = None,
+    target_id: str = "",
 ) -> RuntimeLocalizationMotionPermit:
     """Full exact-value validation surface for an execution child."""
 
     permit = load_runtime_localization_motion_permit(permit_path)
+    expected_kind, expected_index, expected_target = (
+        resolve_runtime_localization_mission_leg_identity(
+            mission_leg_kind=mission_leg_kind,
+            mission_leg_index=mission_leg_index,
+            target_id=target_id,
+            leg_index=leg_index,
+            target_viewpoint_id=target_viewpoint_id,
+        )
+    )
     authorization = _validate_master_reference(permit, master_authorization_path)
     checks = {
         "run_id": (permit.run_id, run_id),
@@ -511,6 +673,9 @@ def validate_runtime_localization_motion_permit(
             target_viewpoint_id,
         ),
         "leg_index": (permit.leg_index, leg_index),
+        "mission_leg_kind": (permit.mission_leg_kind, expected_kind),
+        "mission_leg_index": (permit.mission_leg_index, expected_index),
+        "target_id": (permit.target_id, expected_target),
         "localization_branch_proof_id": (
             authorization.localization_branch_proof_id,
             localization_branch_proof_id,
@@ -595,6 +760,9 @@ def validate_runtime_localization_motion_permit_for_execution(
     route_csv_path: Path,
     diagnostics_path: Path,
     map_route_certificate_path: Path,
+    mission_leg_kind: MissionLegKind | str = MissionLegKind.COVERAGE,
+    mission_leg_index: int | None = None,
+    target_id: str = "",
 ) -> RuntimeLocalizationMotionPermit:
     """Validate a permit while deriving sealed dry-artifact inputs internally."""
 
@@ -626,11 +794,17 @@ def validate_runtime_localization_motion_permit_for_execution(
         dry_uncertainty_budget_sha256=permit.dry_uncertainty_budget_sha256,
         dry_preflight_path=Path(permit.dry_preflight_path),
         dry_preflight_sha256=permit.dry_preflight_sha256,
+        mission_leg_kind=mission_leg_kind,
+        mission_leg_index=mission_leg_index,
+        target_id=target_id,
     )
 
 
 def _validate_mission(authorization: MissionMotionAuthorization) -> None:
-    if authorization.schema_version != MISSION_MOTION_AUTHORIZATION_SCHEMA_VERSION:
+    if authorization.schema_version not in {
+        LEGACY_MISSION_MOTION_AUTHORIZATION_SCHEMA_VERSION,
+        MISSION_MOTION_AUTHORIZATION_SCHEMA_VERSION,
+    }:
         raise ValueError("unsupported mission motion authorization schema")
     for name in (
         "session_id",
@@ -657,10 +831,24 @@ def _validate_mission(authorization: MissionMotionAuthorization) -> None:
         != RUNTIME_LOCALIZATION_RESEAL_RECOVERY_KIND
     ):
         raise ValueError("mission motion authorization recovery kind mismatch")
+    allowed = _canonical_allowed_mission_leg_kinds(
+        authorization.allowed_mission_leg_kinds
+    )
+    if (
+        authorization.schema_version
+        == LEGACY_MISSION_MOTION_AUTHORIZATION_SCHEMA_VERSION
+        and allowed != (MissionLegKind.COVERAGE,)
+    ):
+        raise ValueError(
+            "legacy mission motion authorization supports coverage only"
+        )
 
 
 def _validate_permit(permit: RuntimeLocalizationMotionPermit) -> None:
-    if permit.schema_version != RUNTIME_LOCALIZATION_MOTION_PERMIT_SCHEMA_VERSION:
+    if permit.schema_version not in {
+        LEGACY_RUNTIME_LOCALIZATION_MOTION_PERMIT_SCHEMA_VERSION,
+        RUNTIME_LOCALIZATION_MOTION_PERMIT_SCHEMA_VERSION,
+    }:
         raise ValueError("unsupported runtime localization motion permit schema")
     _require_sha256(
         permit.master_authorization_sha256, "master_authorization_sha256"
@@ -680,6 +868,23 @@ def _validate_permit(permit: RuntimeLocalizationMotionPermit) -> None:
     ):
         _require_nonempty(getattr(permit, name), name)
     _nonnegative_integer(permit.leg_index, "leg_index")
+    kind, index, target = resolve_runtime_localization_mission_leg_identity(
+        mission_leg_kind=permit.mission_leg_kind,
+        mission_leg_index=permit.mission_leg_index,
+        target_id=permit.target_id,
+        leg_index=permit.leg_index,
+        target_viewpoint_id=permit.target_viewpoint_id,
+    )
+    if (
+        permit.schema_version
+        == LEGACY_RUNTIME_LOCALIZATION_MOTION_PERMIT_SCHEMA_VERSION
+        and kind is not MissionLegKind.COVERAGE
+    ):
+        raise ValueError(
+            "legacy runtime localization permit supports coverage only"
+        )
+    if index != permit.leg_index or target != permit.target_viewpoint_id:
+        raise ValueError("runtime localization permit identity aliases mismatch")
     _positive_integer(permit.reseal_index, "reseal_index")
     _positive_integer(
         permit.max_runtime_reseals_per_leg,
@@ -776,6 +981,10 @@ def _validate_budget(
         raise ValueError("runtime localization motion permit reseal maximum mismatch")
     if not 1 <= permit.reseal_index <= authorization.max_runtime_reseals_per_leg:
         raise ValueError("runtime localization motion permit reseal budget exceeded")
+    if permit.mission_leg_kind not in authorization.allowed_mission_leg_kinds:
+        raise ValueError(
+            "runtime localization motion permit mission leg kind is not authorized"
+        )
 
 
 def _permit_artifacts(
@@ -903,6 +1112,12 @@ def _string(value: object, name: str) -> str:
     return value
 
 
+def _sequence(value: object, name: str) -> tuple[object, ...]:
+    if not isinstance(value, (tuple, list)):
+        raise ValueError(f"{name} must be a sequence")
+    return tuple(value)
+
+
 def _boolean(value: object, name: str) -> bool:
     if type(value) is not bool:
         raise ValueError(f"{name} must be boolean")
@@ -923,6 +1138,7 @@ __all__ = [
     "load_mission_motion_authorization",
     "load_runtime_localization_motion_permit",
     "mission_motion_authorization_sha256",
+    "resolve_runtime_localization_mission_leg_identity",
     "runtime_localization_motion_permit_sha256",
     "validate_mission_motion_authorization",
     "validate_runtime_localization_motion_permit",

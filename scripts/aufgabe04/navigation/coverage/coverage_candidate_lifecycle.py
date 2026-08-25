@@ -18,6 +18,10 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from scripts.aufgabe04.artifacts.content_store import payload_sha256
+from scripts.aufgabe04.navigation.coverage.stand_candidate_population_retention import (
+    STATIC_MAP_DISPOSITION_ADMITTED,
+    STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL,
+)
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STATUS_CONFIRMED,
     STATUS_PENDING_CAMERA,
@@ -27,15 +31,17 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     StandSurveyRegistry,
     SurveyCandidate,
     coverage_survey_plan_sha256,
+    stand_survey_registry_sha256,
     validate_stand_survey_registry,
     validate_survey_progress,
     visited_coverage_ratio,
 )
 
 
-COVERAGE_CANDIDATE_LIFECYCLE_SCHEMA_VERSION = 1
-EXACT_TWO_LIDAR_CHECKPOINT_SCHEMA_VERSION = 1
+COVERAGE_CANDIDATE_LIFECYCLE_SCHEMA_VERSION = 2
+EXACT_TWO_LIDAR_CHECKPOINT_SCHEMA_VERSION = 2
 STATIC_MAP_ADMISSION_BASIS = "validated_survey_registry_membership"
+BOUNDARY_PROVISIONAL_STATIC_MAP_BASIS = "boundary_provisional_static_map_shortfall"
 _COVERAGE_COMPARISON_EPSILON = 1.0e-12
 
 
@@ -46,7 +52,9 @@ class CoverageCandidateLifecycleEvidence:
     candidate_uid: str
     registry_status: str
     static_map_admission_basis: str
+    static_map_disposition: str
     lidar_static_map_admitted: bool
+    lidar_population_retained: bool
     active_lidar: bool
     confidence: float
     minimum_confidence: float
@@ -75,6 +83,8 @@ class CoverageCandidateLifecycleEvidence:
             "registry_status": self.registry_status,
             "static_map_admission": {
                 "admitted": self.lidar_static_map_admitted,
+                "disposition": self.static_map_disposition,
+                "population_retained": self.lidar_population_retained,
                 "basis": self.static_map_admission_basis,
             },
             "lifecycle": {
@@ -131,6 +141,8 @@ class CoverageCandidatePopulation:
     registry_snapshot_sha256: str
     candidates: tuple[CoverageCandidateLifecycleEvidence, ...]
     lidar_static_map_admitted_candidate_uids: tuple[str, ...]
+    lidar_boundary_provisional_candidate_uids: tuple[str, ...]
+    lidar_population_retained_candidate_uids: tuple[str, ...]
     active_lidar_candidate_uids: tuple[str, ...]
     basic_lidar_supported_candidate_uids: tuple[str, ...]
     multi_view_supported_candidate_uids: tuple[str, ...]
@@ -151,6 +163,12 @@ class CoverageCandidatePopulation:
             "candidate_uids": {
                 "lidar_static_map_admitted": list(
                     self.lidar_static_map_admitted_candidate_uids
+                ),
+                "lidar_boundary_provisional": list(
+                    self.lidar_boundary_provisional_candidate_uids
+                ),
+                "lidar_population_retained": list(
+                    self.lidar_population_retained_candidate_uids
                 ),
                 "active_lidar": list(self.active_lidar_candidate_uids),
                 "basic_lidar_supported": list(
@@ -297,6 +315,16 @@ def classify_coverage_candidates(
         lidar_static_map_admitted_candidate_uids=_selected_uids(
             evidence,
             "lidar_static_map_admitted",
+        ),
+        lidar_boundary_provisional_candidate_uids=tuple(
+            item.candidate_uid
+            for item in evidence
+            if item.static_map_disposition
+            == STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL
+        ),
+        lidar_population_retained_candidate_uids=_selected_uids(
+            evidence,
+            "lidar_population_retained",
         ),
         active_lidar_candidate_uids=_selected_uids(evidence, "active_lidar"),
         basic_lidar_supported_candidate_uids=tuple(
@@ -501,7 +529,13 @@ def _classify_candidate(
         not required_exact_ids
         or set(required_exact_ids).issubset(reported_set)
     )
-    active_lidar = candidate.status != STATUS_REJECTED
+    population_retained = candidate.static_map_disposition in {
+        STATIC_MAP_DISPOSITION_ADMITTED,
+        STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL,
+    }
+    active_lidar = (
+        candidate.status != STATUS_REJECTED and population_retained
+    )
     multi_view_supported = (
         active_lidar
         and basic_lidar_support
@@ -524,11 +558,23 @@ def _classify_candidate(
     return CoverageCandidateLifecycleEvidence(
         candidate_uid=candidate.candidate_uid,
         registry_status=candidate.status,
-        static_map_admission_basis=STATIC_MAP_ADMISSION_BASIS,
+        static_map_admission_basis=(
+            BOUNDARY_PROVISIONAL_STATIC_MAP_BASIS
+            if (
+                candidate.static_map_disposition
+                == STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL
+            )
+            else STATIC_MAP_ADMISSION_BASIS
+        ),
+        static_map_disposition=candidate.static_map_disposition,
         # The autonomous survey registry's producer admits candidates only
-        # after the stopped static-map gate.  This records that lineage; it
-        # does not recompute geometry from coordinates alone.
-        lidar_static_map_admitted=True,
+        # after the stopped static-map gate, except for explicitly retained
+        # boundary-provisional candidates.  This records lineage; it does not
+        # recompute geometry from coordinates alone.
+        lidar_static_map_admitted=(
+            candidate.static_map_disposition == STATIC_MAP_DISPOSITION_ADMITTED
+        ),
+        lidar_population_retained=population_retained,
         active_lidar=active_lidar,
         confidence=candidate.confidence,
         minimum_confidence=plan.config.minimum_candidate_confidence,
@@ -578,44 +624,14 @@ def _progress_snapshot_sha256(progress: CoverageSurveyProgress) -> str:
 
 
 def _registry_snapshot_sha256(registry: StandSurveyRegistry) -> str:
-    return payload_sha256(
-        {
-            "schema_version": registry.schema_version,
-            "survey_id": registry.survey_id,
-            "planning_frame": registry.planning_frame,
-            "map_bundle_sha256": registry.map_bundle_sha256,
-            "candidates": [
-                _candidate_snapshot_payload(candidate)
-                for candidate in registry.candidates
-            ],
-        }
-    )
-
-
-def _candidate_snapshot_payload(
-    candidate: SurveyCandidate,
-) -> dict[str, object]:
-    return {
-        "candidate_uid": candidate.candidate_uid,
-        "x_m": candidate.x_m,
-        "y_m": candidate.y_m,
-        "radius_m": candidate.radius_m,
-        "uncertainty_m": candidate.uncertainty_m,
-        "keepout_radius_m": candidate.keepout_radius_m,
-        "confidence": candidate.confidence,
-        "hit_count": candidate.hit_count,
-        "first_seen_sec": candidate.first_seen_sec,
-        "last_seen_sec": candidate.last_seen_sec,
-        "source_observation_ids": list(candidate.source_observation_ids),
-        "viewpoint_ids": list(candidate.viewpoint_ids),
-        "status": candidate.status,
-    }
+    return stand_survey_registry_sha256(registry)
 
 
 __all__ = [
     "COVERAGE_CANDIDATE_LIFECYCLE_SCHEMA_VERSION",
     "EXACT_TWO_LIDAR_CHECKPOINT_SCHEMA_VERSION",
     "STATIC_MAP_ADMISSION_BASIS",
+    "BOUNDARY_PROVISIONAL_STATIC_MAP_BASIS",
     "CoverageCandidateLifecycleEvidence",
     "CoverageCandidatePopulation",
     "ExactTwoLidarCheckpointDecision",

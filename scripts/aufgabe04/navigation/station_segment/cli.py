@@ -96,6 +96,20 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--runtime-localization-mission-leg-kind",
+        choices=[
+            MissionLegKind.COVERAGE.value,
+            MissionLegKind.CANDIDATE_PREAPPROACH.value,
+            MissionLegKind.OPPOSITE_FACE.value,
+        ],
+    )
+    parser.add_argument("--runtime-localization-mission-leg-index", type=int)
+    parser.add_argument("--runtime-localization-target-id", default="")
+    parser.add_argument(
+        "--runtime-localization-target-viewpoint-id", default=""
+    )
+    parser.add_argument("--runtime-localization-semantic-map-id", default="")
+    parser.add_argument(
         "--startup-reseal-motion-authorization-json",
         type=Path,
         help=(
@@ -609,4 +623,3 @@ def build_parser() -> argparse.ArgumentParser:
         help="Namespace-qualified node identity allowed in preflight, e.g. /robot1/controller_server",
     )
     return parser
-

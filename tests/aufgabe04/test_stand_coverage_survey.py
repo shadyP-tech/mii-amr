@@ -32,6 +32,7 @@ from scripts.aufgabe04.navigation.waypoint_follower.runtime import (
     certified_static_startup_decision,
 )
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
+    STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
     STATUS_CONFIRMED,
     STATUS_PENDING_CAMERA,
     STATUS_PROVISIONAL,
@@ -51,6 +52,10 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     write_coverage_survey_plan,
     write_stand_survey_registry,
     write_survey_progress,
+)
+from scripts.aufgabe04.navigation.coverage.stand_candidate_population_retention import (
+    STATIC_MAP_DISPOSITION_ADMITTED,
+    STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL,
 )
 from scripts.aufgabe04.navigation.coverage.record_stand_coverage_stop import (
     main as record_coverage_stop_main,
@@ -422,6 +427,93 @@ class CoverageSurveyPlanTest(unittest.TestCase):
 
 
 class StandSurveyRegistryTest(unittest.TestCase):
+    def test_schema_one_registry_migrates_to_strict_schema_two_lineage(self):
+        survey = plan()
+        observed = stand(
+            stand_id="legacy_strict",
+            x_m=0.5,
+            y_m=0.1,
+            observation_prefix="legacy",
+            timestamp=10.0,
+        )
+        registry = fuse_confirmed_stands(
+            new_stand_survey_registry(survey),
+            (observed,),
+            viewpoint_id="survey_vp_001",
+            config=survey.config,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry_path = Path(tmpdir) / "registry.json"
+            write_stand_survey_registry(registry_path, registry, survey)
+            legacy_payload = json.loads(registry_path.read_text())
+            legacy_payload["schema_version"] = 1
+            del legacy_payload["candidates"][0]["static_map_disposition"]
+            registry_path.write_text(json.dumps(legacy_payload))
+            loaded = load_stand_survey_registry(registry_path, survey)
+
+        self.assertEqual(
+            loaded.schema_version,
+            STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
+        )
+        self.assertEqual(
+            loaded.candidates[0].static_map_disposition,
+            STATIC_MAP_DISPOSITION_ADMITTED,
+        )
+
+    def test_boundary_disposition_round_trips_and_later_strict_view_upgrades(self):
+        survey = plan()
+        first = stand(
+            stand_id="boundary_local",
+            x_m=0.5,
+            y_m=0.1,
+            observation_prefix="boundary",
+            timestamp=10.0,
+        )
+        registry = fuse_confirmed_stands(
+            new_stand_survey_registry(survey),
+            (first,),
+            viewpoint_id="survey_vp_001",
+            config=survey.config,
+            static_map_disposition_by_stand_id={
+                first.stand_id: STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL,
+            },
+        )
+
+        self.assertEqual(
+            registry.candidates[0].static_map_disposition,
+            STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL,
+        )
+        self.assertEqual(registry.candidates[0].status, STATUS_PROVISIONAL)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry_path = Path(tmpdir) / "registry.json"
+            write_stand_survey_registry(registry_path, registry, survey)
+            loaded = load_stand_survey_registry(registry_path, survey)
+        self.assertEqual(loaded, registry)
+
+        second = stand(
+            stand_id="strict_local",
+            x_m=0.52,
+            y_m=0.09,
+            observation_prefix="strict",
+            timestamp=20.0,
+        )
+        upgraded = fuse_confirmed_stands(
+            loaded,
+            (second,),
+            viewpoint_id="survey_vp_002",
+            config=survey.config,
+            static_map_disposition_by_stand_id={
+                second.stand_id: STATIC_MAP_DISPOSITION_ADMITTED,
+            },
+        )
+
+        self.assertEqual(len(upgraded.candidates), 1)
+        self.assertEqual(
+            upgraded.candidates[0].static_map_disposition,
+            STATIC_MAP_DISPOSITION_ADMITTED,
+        )
+        self.assertEqual(upgraded.candidates[0].status, STATUS_PENDING_CAMERA)
+
     def test_candidate_requires_distinct_viewpoints_before_camera_queue(self):
         survey = plan()
         registry = new_stand_survey_registry(survey)
@@ -636,6 +728,9 @@ class StandSurveyRegistryTest(unittest.TestCase):
             ),
             viewpoint_id=survey.viewpoints[-1].viewpoint_id,
             config=survey.config,
+            static_map_disposition_by_stand_id={
+                "local": STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL,
+            },
         )
         leg = plan_next_survey_leg(
             free_grid(),
@@ -649,6 +744,10 @@ class StandSurveyRegistryTest(unittest.TestCase):
         route = leg.route_result.route
         self.assertIsNotNone(route)
         candidate = registry.candidates[0]
+        self.assertEqual(
+            candidate.static_map_disposition,
+            STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL,
+        )
         for point in route.points:
             distance = (
                 (point.pose.x_m - candidate.x_m) ** 2

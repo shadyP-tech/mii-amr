@@ -443,10 +443,24 @@ class CoverageLidarCheckpointComplete:
             ),
             "expected_stand_count": self.decision.expected_stand_count,
             **active_lidar_registry_count_fields(
-                self.decision.active_lidar_candidate_count
+                self.decision.active_lidar_candidate_count,
+                static_map_admitted_candidate_count=sum(
+                    item.active_lidar and item.lidar_static_map_admitted
+                    for item in population.candidates
+                ),
+                boundary_provisional_candidate_count=sum(
+                    item.active_lidar and not item.lidar_static_map_admitted
+                    for item in population.candidates
+                ),
             ),
             "lidar_static_map_admitted_candidate_uids": list(
-                self.decision.admitted_lidar_candidate_uids
+                population.lidar_static_map_admitted_candidate_uids
+            ),
+            "lidar_boundary_provisional_candidate_uids": list(
+                population.lidar_boundary_provisional_candidate_uids
+            ),
+            "lidar_population_retained_candidate_uids": list(
+                population.lidar_population_retained_candidate_uids
             ),
             "multi_view_supported_candidate_uids": list(
                 population.multi_view_supported_candidate_uids
@@ -506,7 +520,15 @@ class CoverageLidarCheckpointAdmissionError(RuntimeError):
             "lidar_checkpoint_admission_reasons": list(self.decision.reasons),
             "expected_stand_count": self.decision.expected_stand_count,
             **active_lidar_registry_count_fields(
-                self.decision.active_lidar_candidate_count
+                self.decision.active_lidar_candidate_count,
+                static_map_admitted_candidate_count=sum(
+                    item.active_lidar and item.lidar_static_map_admitted
+                    for item in self.decision.population.candidates
+                ),
+                boundary_provisional_candidate_count=sum(
+                    item.active_lidar and not item.lidar_static_map_admitted
+                    for item in self.decision.population.candidates
+                ),
             ),
             "completed_coverage_legs": self.completed_coverage_legs,
             "legs_completed_this_run": self.legs_completed_this_run,

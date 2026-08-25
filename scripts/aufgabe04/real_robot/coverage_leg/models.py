@@ -10,23 +10,11 @@ from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import Mis
 from scripts.aufgabe04.real_robot.autonomous_child_runner import (
     DEFAULT_UNCERTAINTY_SIGMA_MULTIPLIER,
 )
+from scripts.aufgabe04.real_robot.runtime_localization_motion import (
+    RuntimeLocalizationPermitContext,
+)
 
 DEFAULT_MAX_LOCALIZATION_READINESS_RETRIES_PER_LEG = 2
-
-@dataclass(frozen=True)
-class RuntimeLocalizationPermitContext:
-    """Exact mission scope needed to authorize one recovery child run."""
-
-    mission_authorization_json: Path
-    session_id: str
-    leg_index: int
-    target_viewpoint_id: str
-    reseal_index: int
-    max_runtime_reseals_per_leg: int
-    rejected_run_id: str
-    runtime_reseal_decision_evidence: dict[str, object]
-    fresh_localization_evidence_path: Path
-    permit_json_path: Path
 
 @dataclass(frozen=True)
 class MissionLegPermitContext:

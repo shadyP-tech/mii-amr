@@ -10,6 +10,9 @@ from scripts.aufgabe04.artifacts.content_store import (
     payload_sha256,
     write_content_hashed_json,
 )
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
+    MissionLegKind,
+)
 from scripts.aufgabe04.navigation.execution.runtime_motion_authorization import (
     MISSION_MOTION_AUTHORIZATION_SCOPE,
     MISSION_RUN_CONFIRMATION,
@@ -64,6 +67,11 @@ class RuntimeMotionConsumptionTest(unittest.TestCase):
             scope_text=MISSION_MOTION_AUTHORIZATION_SCOPE,
             operator_confirmation=MISSION_RUN_CONFIRMATION,
             allowed_recovery_kind=RUNTIME_LOCALIZATION_RESEAL_RECOVERY_KIND,
+            allowed_mission_leg_kinds=(
+                MissionLegKind.COVERAGE,
+                MissionLegKind.CANDIDATE_PREAPPROACH,
+                MissionLegKind.OPPOSITE_FACE,
+            ),
         )
         write_mission_motion_authorization(
             self.master_path, self.authorization
@@ -173,6 +181,43 @@ class RuntimeMotionConsumptionTest(unittest.TestCase):
             receipt.run_id = "other"
         with self.assertRaisesRegex(ValueError, "already consumed"):
             self._consume()
+
+    def test_candidate_runtime_permit_consumes_with_generic_identity(self):
+        candidate = replace(
+            self.permit,
+            run_id="mission-candidate-003-runtime-reseal-001",
+            leg_index=3,
+            target_viewpoint_id="survey-candidate-003",
+            mission_leg_kind=MissionLegKind.CANDIDATE_PREAPPROACH,
+            mission_leg_index=3,
+            target_id="survey-candidate-003",
+        )
+        candidate_path = self.root / "candidate-runtime-permit.json"
+        write_runtime_localization_motion_permit(candidate_path, candidate)
+
+        receipt = consume_runtime_motion_permit(
+            permit_path=candidate_path,
+            permit=candidate,
+            session_id=self.authorization.session_id,
+            run_id=candidate.run_id,
+            leg_index=candidate.leg_index,
+            target_viewpoint_id=candidate.target_viewpoint_id,
+            reseal_index=candidate.reseal_index,
+            mission_leg_kind=MissionLegKind.CANDIDATE_PREAPPROACH,
+            mission_leg_index=3,
+            target_id="survey-candidate-003",
+        )
+
+        self.assertEqual(
+            receipt.mission_leg_kind,
+            MissionLegKind.CANDIDATE_PREAPPROACH,
+        )
+        self.assertEqual(receipt.mission_leg_index, 3)
+        self.assertEqual(receipt.target_id, "survey-candidate-003")
+        loaded = load_runtime_motion_consumption_receipt(
+            default_runtime_motion_consumption_receipt_path(candidate_path)
+        )
+        self.assertEqual(loaded, receipt)
 
     def test_byte_identical_permit_copy_converges_on_existing_claim(self):
         receipt_path = default_runtime_motion_consumption_receipt_path(

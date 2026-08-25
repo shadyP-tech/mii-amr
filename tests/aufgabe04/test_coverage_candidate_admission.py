@@ -11,6 +11,10 @@ from scripts.aufgabe04.navigation.coverage.coverage_candidate_admission import (
     coverage_candidate_admission_evidence_sha256,
     evaluate_coverage_candidate_admission,
 )
+from scripts.aufgabe04.navigation.coverage.stand_candidate_population_retention import (
+    STATIC_MAP_DISPOSITION_ADMITTED,
+    STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL,
+)
 from scripts.aufgabe04.navigation.foundation.models import GridCell, Pose2D
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STATUS_CONFIRMED,
@@ -90,6 +94,7 @@ def candidate(
         "survey_vp_001",
         "survey_vp_002",
     ),
+    static_map_disposition: str = STATIC_MAP_DISPOSITION_ADMITTED,
 ) -> SurveyCandidate:
     return SurveyCandidate(
         candidate_uid=f"survey_candidate_{index:04d}",
@@ -105,6 +110,7 @@ def candidate(
         source_observation_ids=(f"candidate_{index}_observation",),
         viewpoint_ids=viewpoint_ids,
         status=status,
+        static_map_disposition=static_map_disposition,
     )
 
 
@@ -227,6 +233,34 @@ class CoverageCandidateAdmissionTest(unittest.TestCase):
         self.assertEqual(
             weak_evidence.reasons,
             ("confidence_below_minimum", "hit_count_below_minimum"),
+        )
+
+    def test_legacy_full_coverage_gate_requires_strict_static_map_admission(self):
+        boundary = candidate(
+            2,
+            static_map_disposition=(
+                STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL
+            ),
+        )
+        decision = evaluate_coverage_candidate_admission(
+            self.plan,
+            self.progress,
+            registry(self.plan, candidate(1), boundary),
+        )
+
+        self.assertFalse(decision.ready)
+        self.assertTrue(decision.pending_candidate_count_met)
+        self.assertEqual(
+            decision.candidate_evidence[1].static_map_disposition,
+            STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL,
+        )
+        self.assertEqual(
+            decision.candidate_evidence[1].reasons,
+            ("strict_static_map_admission_required",),
+        )
+        self.assertIn(
+            "pending_candidate_requirements_not_met",
+            decision.reasons,
         )
 
     def test_unknown_viewpoint_cannot_supply_distinct_or_exact_two_evidence(self):

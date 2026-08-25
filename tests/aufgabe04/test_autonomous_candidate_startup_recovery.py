@@ -467,6 +467,58 @@ class CandidateStartupRecoveryTest(unittest.TestCase):
         self.assertFalse(failure["motion_continues_authorized"])
         self.assertTrue(failure["fail_closed"])
 
+    def test_exact_post_motion_localization_stop_can_handoff_without_motion(self):
+        replacement_identity = self.identity.replacement(1)
+        (self.root / "startup.json").write_text("{}\n", encoding="utf-8")
+        runtime_stop = _outcome(
+            self.root,
+            run_id=replacement_identity.run_id,
+            status="stopped",
+            stop_reason=(
+                "global localization consistency requires zero and reseal"
+            ),
+            stop_details={
+                "fault_code": "localization_reseal_required",
+                "source": "global_consistency_monitor",
+                "execution_pose_owner": "odom",
+                "global_consistency_monitor": "amcl",
+                "monitor_action": "FORCE_ZERO_RESEAL",
+                "fail_closed": True,
+                "continuity": {
+                    "accepted": False,
+                    "requires_zero_cycle": True,
+                    "requires_reseal": True,
+                    "decision": "force_zero_reseal",
+                    "reason": "map_from_odom_translation_drift",
+                    "fail_closed": True,
+                },
+            },
+            motion_published=True,
+            startup_reseal_motion_permit_path=self.root / "startup.json",
+            startup_reseal_motion_permit_sha256="a" * 64,
+        )
+        effects, _calls = self._effects(
+            initial=_mismatch(self.root, self.identity.run_id),
+            replacements=[runtime_stop],
+        )
+
+        outcome = execute_candidate_motion_with_startup_recovery(
+            _Request(self.identity),
+            config=replace(
+                self._config(1),
+                allow_runtime_localization_handoff=True,
+            ),
+            effects=effects,
+        )
+
+        self.assertIs(outcome, runtime_stop)
+        self.assertEqual(len(self.replacement_attempts), 1)
+        self.assertEqual(
+            self.events[-1]["event"],
+            "candidate_runtime_localization_handoff_ready",
+        )
+        self.assertFalse(self.events[-1]["motion_continues_authorized"])
+
     def test_motion_and_noneligible_rejections_fail_closed(self):
         cases = (
             _mismatch(

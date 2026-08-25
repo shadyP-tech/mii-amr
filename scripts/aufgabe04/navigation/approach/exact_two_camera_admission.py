@@ -276,8 +276,8 @@ def _camera_evidence(candidate) -> ExactTwoCameraCandidateEvidence:
     reasons: list[str] = []
     support_class: str | None = None
     source_kind: str | None = None
-    if not candidate.lidar_static_map_admitted:
-        reasons.append("static_map_admission_missing")
+    if not candidate.lidar_population_retained:
+        reasons.append("static_map_population_retention_missing")
     if not candidate.basic_lidar_support:
         reasons.extend(candidate.support_reasons)
 
@@ -308,7 +308,7 @@ def _camera_evidence(candidate) -> ExactTwoCameraCandidateEvidence:
 
     admissible = (
         candidate.active_lidar
-        and candidate.lidar_static_map_admitted
+        and candidate.lidar_population_retained
         and candidate.basic_lidar_support
         and support_class is not None
         and not reasons
@@ -317,7 +317,11 @@ def _camera_evidence(candidate) -> ExactTwoCameraCandidateEvidence:
         candidate_uid=candidate.candidate_uid,
         registry_status=candidate.registry_status,
         active_lidar=candidate.active_lidar,
+        static_map_disposition=candidate.static_map_disposition,
         static_map_admitted=candidate.lidar_static_map_admitted,
+        static_map_population_retained=(
+            candidate.lidar_population_retained
+        ),
         basic_lidar_supported=candidate.basic_lidar_support,
         confidence=candidate.confidence,
         minimum_confidence=candidate.minimum_confidence,

@@ -19,6 +19,9 @@ from scripts.aufgabe04.navigation.coverage.coverage_candidate_lifecycle import (
     exact_two_lidar_checkpoint_evidence_sha256,
 )
 from scripts.aufgabe04.navigation.foundation.models import GridCell, Pose2D
+from scripts.aufgabe04.navigation.coverage.stand_candidate_population_retention import (
+    STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL,
+)
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STATUS_CONFIRMED,
     STATUS_PENDING_CAMERA,
@@ -96,6 +99,7 @@ def candidate(
     confidence: float = 0.80,
     hit_count: int = 7,
     viewpoint_ids: tuple[str, ...] = ("survey_vp_001",),
+    static_map_disposition: str = "static_map_admitted",
 ) -> SurveyCandidate:
     return SurveyCandidate(
         candidate_uid=f"survey_candidate_{index:04d}",
@@ -111,6 +115,7 @@ def candidate(
         source_observation_ids=(f"candidate_{index}_observation",),
         viewpoint_ids=viewpoint_ids,
         status=status,
+        static_map_disposition=static_map_disposition,
     )
 
 
@@ -190,11 +195,51 @@ class CoverageCandidateLifecycleTest(unittest.TestCase):
         )
         self.assertFalse(legacy.ready)
 
+    def test_four_strict_plus_one_boundary_candidate_complete_exact_two_count(self):
+        boundary_registry = registry(
+            self.plan,
+            *self.registry.candidates[:-1],
+            replace(
+                self.registry.candidates[-1],
+                static_map_disposition=(
+                    STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL
+                ),
+            ),
+        )
+
+        population = classify_coverage_candidates(
+            self.plan,
+            boundary_registry,
+        )
+        decision = evaluate_exact_two_lidar_checkpoint(
+            self.plan,
+            self.progress,
+            boundary_registry,
+        )
+
+        self.assertEqual(
+            len(population.lidar_static_map_admitted_candidate_uids),
+            4,
+        )
+        self.assertEqual(
+            population.lidar_boundary_provisional_candidate_uids,
+            ("survey_candidate_0005",),
+        )
+        self.assertEqual(len(population.active_lidar_candidate_uids), 5)
+        self.assertTrue(decision.ready)
+        self.assertFalse(decision.camera_approach_authorized)
+
     def test_lifecycle_classes_preserve_status_boundaries(self):
         classified = classify_coverage_candidates(
             self.plan,
             registry(
                 self.plan,
+                candidate(
+                    5,
+                    static_map_disposition=(
+                        STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL
+                    ),
+                ),
                 candidate(1, status=STATUS_PROVISIONAL),
                 candidate(
                     2,
@@ -212,7 +257,12 @@ class CoverageCandidateLifecycleTest(unittest.TestCase):
 
         self.assertEqual(
             classified.lidar_static_map_admitted_candidate_uids,
-            tuple(f"survey_candidate_{index:04d}" for index in range(1, 5)),
+            (
+                "survey_candidate_0001",
+                "survey_candidate_0002",
+                "survey_candidate_0003",
+                "survey_candidate_0004",
+            ),
         )
         self.assertEqual(
             classified.active_lidar_candidate_uids,
@@ -220,7 +270,23 @@ class CoverageCandidateLifecycleTest(unittest.TestCase):
                 "survey_candidate_0001",
                 "survey_candidate_0002",
                 "survey_candidate_0003",
+                "survey_candidate_0005",
             ),
+        )
+        boundary = next(
+            item
+            for item in classified.candidates
+            if item.candidate_uid == "survey_candidate_0005"
+        )
+        self.assertFalse(boundary.lidar_static_map_admitted)
+        self.assertTrue(boundary.lidar_population_retained)
+        self.assertEqual(
+            boundary.static_map_disposition,
+            STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL,
+        )
+        self.assertEqual(
+            boundary.static_map_admission_basis,
+            "boundary_provisional_static_map_shortfall",
         )
         self.assertEqual(
             classified.camera_queue_candidate_uids,
@@ -234,8 +300,13 @@ class CoverageCandidateLifecycleTest(unittest.TestCase):
             classified.rejected_candidate_uids,
             ("survey_candidate_0004",),
         )
+        rejected = next(
+            item
+            for item in classified.candidates
+            if item.candidate_uid == "survey_candidate_0004"
+        )
         self.assertFalse(classified.candidates[0].multi_view_supported)
-        self.assertFalse(classified.candidates[-1].active_lidar)
+        self.assertFalse(rejected.active_lidar)
 
     def test_weak_active_candidate_fails_checkpoint_with_stable_uid(self):
         weak = replace(

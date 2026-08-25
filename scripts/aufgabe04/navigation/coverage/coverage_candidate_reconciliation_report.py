@@ -22,7 +22,7 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STATUS_PROVISIONAL,
     CoverageSurveyPlan,
     StandSurveyRegistry,
-    SurveyCandidate,
+    stand_survey_registry_sha256,
     coverage_survey_plan_sha256,
     validate_stand_survey_registry,
 )
@@ -238,45 +238,7 @@ def stand_survey_registry_snapshot_sha256(
     """Hash all registry content without importing private serializers."""
 
     validate_stand_survey_registry(registry, plan)
-    return payload_sha256(_registry_snapshot_payload(registry))
-
-
-def _registry_snapshot_payload(
-    registry: StandSurveyRegistry,
-) -> dict[str, object]:
-    return {
-        "schema_version": registry.schema_version,
-        "survey_id": registry.survey_id,
-        "planning_frame": registry.planning_frame,
-        "map_bundle_sha256": registry.map_bundle_sha256,
-        "candidates": [
-            _candidate_snapshot_payload(candidate)
-            for candidate in sorted(
-                registry.candidates,
-                key=lambda item: item.candidate_uid,
-            )
-        ],
-    }
-
-
-def _candidate_snapshot_payload(
-    candidate: SurveyCandidate,
-) -> dict[str, object]:
-    return {
-        "candidate_uid": candidate.candidate_uid,
-        "x_m": candidate.x_m,
-        "y_m": candidate.y_m,
-        "radius_m": candidate.radius_m,
-        "uncertainty_m": candidate.uncertainty_m,
-        "keepout_radius_m": candidate.keepout_radius_m,
-        "confidence": candidate.confidence,
-        "hit_count": candidate.hit_count,
-        "first_seen_sec": candidate.first_seen_sec,
-        "last_seen_sec": candidate.last_seen_sec,
-        "source_observation_ids": list(candidate.source_observation_ids),
-        "viewpoint_ids": list(candidate.viewpoint_ids),
-        "status": candidate.status,
-    }
+    return stand_survey_registry_sha256(registry)
 
 
 __all__ = [

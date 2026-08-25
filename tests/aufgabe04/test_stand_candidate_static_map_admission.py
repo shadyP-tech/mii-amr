@@ -33,6 +33,11 @@ from scripts.aufgabe04.navigation.coverage import (
 from scripts.aufgabe04.navigation.coverage import (
     coverage_stop_perception_admission as perception_admission,
 )
+from scripts.aufgabe04.navigation.coverage.stand_candidate_population_retention import (
+    STATIC_MAP_DISPOSITION_ADMITTED,
+    STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL,
+    STATIC_MAP_DISPOSITION_REJECTED,
+)
 from scripts.aufgabe04.navigation.coverage.stand_candidate_static_map_admission import (
     STATIC_MAP_CLEARANCE_BELOW_REQUIRED,
     evaluate_stand_candidate_static_map_admission,
@@ -115,7 +120,9 @@ class StandCandidateStaticMapAdmissionTest(unittest.TestCase):
 
         self.assertAlmostEqual(result.required_clearance_m, 0.08)
         self.assertEqual(result.admitted_stands, (clear,))
+        self.assertEqual(result.boundary_provisional_stands, ())
         self.assertEqual(result.rejected_stands, (too_close,))
+        self.assertEqual(result.camera_population_stands, (clear,))
         self.assertEqual(
             tuple(item.stand_id for item in result.evidence),
             ("stand_close", "stand_clear"),
@@ -125,6 +132,13 @@ class StandCandidateStaticMapAdmissionTest(unittest.TestCase):
             result.evidence[0].reasons,
             (STATIC_MAP_CLEARANCE_BELOW_REQUIRED,),
         )
+        self.assertFalse(result.evidence[0].boundary_provisional)
+        self.assertFalse(result.evidence[0].population_retained)
+        self.assertEqual(
+            result.evidence[0].disposition,
+            STATIC_MAP_DISPOSITION_REJECTED,
+        )
+        self.assertAlmostEqual(result.evidence[0].clearance_shortfall_m, 0.030001)
         self.assertEqual(result.evidence[0].confidence, too_close.confidence)
         self.assertEqual(result.evidence[0].hit_count, too_close.hit_count)
         self.assertEqual(
@@ -151,9 +165,11 @@ class StandCandidateStaticMapAdmissionTest(unittest.TestCase):
         )
 
         self.assertEqual(result.admitted_stands, ())
+        self.assertEqual(result.boundary_provisional_stands, ())
         self.assertEqual(result.rejected_stands, (boundary, occupied))
         self.assertAlmostEqual(result.evidence[0].static_map_clearance_m, 0.049999)
         self.assertEqual(result.evidence[1].static_map_clearance_m, 0.0)
+        self.assertEqual(result.evidence[1].reasons, (STATIC_MAP_CLEARANCE_BELOW_REQUIRED,))
 
     def test_evidence_is_order_independent_and_reports_ordered_counts(self):
         first = stand("stand_b", 0.60, 0.45)
@@ -179,7 +195,13 @@ class StandCandidateStaticMapAdmissionTest(unittest.TestCase):
         )
         self.assertEqual(
             left.to_evidence_dict()["counts"],
-            {"evaluated": 2, "admitted": 2, "rejected": 0},
+            {
+                "evaluated": 2,
+                "admitted": 2,
+                "boundary_provisional": 0,
+                "population_retained": 2,
+                "rejected": 0,
+            },
         )
         self.assertEqual(
             left.to_evidence_dict()["admitted_stand_ids"],
@@ -198,7 +220,51 @@ class StandCandidateStaticMapAdmissionTest(unittest.TestCase):
         self.assertEqual(result.rejected_stands, ())
         self.assertEqual(
             result.to_evidence_dict()["counts"],
-            {"evaluated": 0, "admitted": 0, "rejected": 0},
+            {
+                "evaluated": 0,
+                "admitted": 0,
+                "boundary_provisional": 0,
+                "population_retained": 0,
+                "rejected": 0,
+            },
+        )
+
+    def test_latest_exact_two_borderline_track_is_population_retained_only(self):
+        observed = dataclasses.replace(
+            stand(
+                "detected_stand_01",
+                0.5627138695258773,
+                0.45,
+            ),
+            confidence=0.7250401565194483,
+            hit_count=43,
+            source_observation_ids=tuple(
+                f"stand_observation_survey_vp_002_{index:06d}"
+                for index in range(43)
+            ),
+        )
+
+        result = evaluate_stand_candidate_static_map_admission(
+            _costmap_fixture(),
+            (observed,),
+            candidate_radius_m=0.06,
+            candidate_uncertainty_m=0.02,
+        )
+
+        self.assertEqual(result.admitted_stands, ())
+        self.assertEqual(result.boundary_provisional_stands, (observed,))
+        self.assertEqual(result.rejected_stands, ())
+        item = result.evidence[0]
+        self.assertAlmostEqual(item.static_map_clearance_m, 0.0627128695)
+        self.assertEqual(
+            item.disposition,
+            STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL,
+        )
+        self.assertTrue(item.population_retained)
+        self.assertFalse(item.admitted)
+        self.assertEqual(
+            item.reasons,
+            (STATIC_MAP_CLEARANCE_BELOW_REQUIRED,),
         )
 
     def test_latest_run_vp5_condensed_diagnostic_replay(self):
@@ -427,7 +493,7 @@ class StandCandidateStaticMapAdmissionIntegrationTest(unittest.TestCase):
             occupied_right_edge = occupied_center.x_m + grid.metadata.resolution / 2
             rejected = stand(
                 "stand_static_overlap",
-                occupied_right_edge + 0.05,
+                occupied_right_edge + 0.01,
                 occupied_center.y_m,
             )
             admitted = stand(
@@ -435,21 +501,26 @@ class StandCandidateStaticMapAdmissionIntegrationTest(unittest.TestCase):
                 occupied_right_edge + 0.15,
                 occupied_center.y_m,
             )
+            boundary = stand(
+                "stand_boundary_provisional",
+                occupied_right_edge + 0.065,
+                occupied_center.y_m,
+            )
 
             morphology = SimpleNamespace(
-                admitted_stands=(admitted, rejected),
+                admitted_stands=(admitted, boundary, rejected),
                 rejected_stands=(),
                 to_evidence_dict=lambda: {
                     "schema_version": 1,
                     "gate": "lidar_stand_track_morphology_admission",
-                    "counts": {"evaluated": 2, "admitted": 2, "rejected": 0},
+                    "counts": {"evaluated": 3, "admitted": 3, "rejected": 0},
                 },
             )
             with (
                 patch.object(
                     coverage_stop,
                     "build_confirmed_epoch_stands",
-                    return_value=(admitted, rejected),
+                    return_value=(admitted, boundary, rejected),
                 ),
                 patch.object(
                     perception_admission,
@@ -484,17 +555,34 @@ class StandCandidateStaticMapAdmissionIntegrationTest(unittest.TestCase):
                 hash_field="lidar_morphology_admission_sha256",
             )
 
-        self.assertEqual(len(registry.candidates), 1)
-        self.assertAlmostEqual(registry.candidates[0].x_m, admitted.x_m)
-        self.assertEqual(status["epoch_confirmed_lidar_candidate_count"], 2)
-        self.assertEqual(status["epoch_morphology_admitted_candidate_count"], 2)
+        self.assertEqual(len(registry.candidates), 2)
+        self.assertAlmostEqual(registry.candidates[0].x_m, boundary.x_m)
+        self.assertAlmostEqual(registry.candidates[1].x_m, admitted.x_m)
+        self.assertEqual(
+            tuple(
+                candidate.static_map_disposition
+                for candidate in registry.candidates
+            ),
+            (
+                STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL,
+                STATIC_MAP_DISPOSITION_ADMITTED,
+            ),
+        )
+        self.assertEqual(status["epoch_confirmed_lidar_candidate_count"], 3)
+        self.assertEqual(status["epoch_morphology_admitted_candidate_count"], 3)
         self.assertEqual(status["epoch_morphology_rejected_candidate_count"], 0)
         self.assertEqual(status["epoch_static_map_admitted_candidate_count"], 1)
+        self.assertEqual(
+            status["epoch_static_map_boundary_provisional_candidate_count"], 1
+        )
         self.assertEqual(status["epoch_static_map_rejected_candidate_count"], 1)
-        self.assertEqual(status["fused_registry_active_candidate_count"], 1)
-        self.assertEqual(status["fused_registry_total_candidate_count"], 1)
-        self.assertEqual(status["confirmed_epoch_candidate_count"], 2)
+        self.assertEqual(status["fused_registry_active_candidate_count"], 2)
+        self.assertEqual(status["fused_registry_total_candidate_count"], 2)
+        self.assertEqual(status["confirmed_epoch_candidate_count"], 3)
         self.assertEqual(status["static_map_candidate_admitted_count"], 1)
+        self.assertEqual(
+            status["static_map_candidate_boundary_provisional_count"], 1
+        )
         self.assertEqual(status["static_map_candidate_rejected_count"], 1)
         self.assertEqual(
             status["legacy_epoch_candidate_count_aliases"][
@@ -512,12 +600,22 @@ class StandCandidateStaticMapAdmissionIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(
             evidence["counts"],
-            {"evaluated": 2, "admitted": 1, "rejected": 1},
+            {
+                "evaluated": 3,
+                "admitted": 1,
+                "boundary_provisional": 1,
+                "population_retained": 2,
+                "rejected": 1,
+            },
+        )
+        self.assertEqual(
+            evidence["boundary_provisional_stand_ids"],
+            [boundary.stand_id],
         )
         self.assertEqual(evidence["rejected_stand_ids"], [rejected.stand_id])
         self.assertEqual(
             morphology_evidence["counts"],
-            {"evaluated": 2, "admitted": 2, "rejected": 0},
+            {"evaluated": 3, "admitted": 3, "rejected": 0},
         )
         self.assertEqual(
             epoch["lidar_morphology_admission_sha256"],

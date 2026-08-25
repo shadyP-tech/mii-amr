@@ -1031,6 +1031,189 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             self.assertTrue(replacement_request.run_id.endswith("startup_reseal_001"))
             capture.assert_called_once()
 
+    def test_startup_replacement_runtime_reseal_continues_to_camera(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate = self._candidate("candidate_1", 0.2, 0.0)
+            mission_authorization = root / "mission_authorization.json"
+            mission_authorization.write_text("{}\n", encoding="utf-8")
+            config = replace(
+                self._config(root, (candidate,)),
+                max_startup_reseals_per_leg=1,
+                startup_reseal_motion_authorization_json=(
+                    root / "startup_authorization.json"
+                ),
+                mission_motion_authorization_json=mission_authorization,
+                max_runtime_localization_reseals_per_leg=1,
+            )
+            poses = iter(
+                (Pose2D(0.0, 0.0, 0.0), Pose2D(0.2, 0.0, 0.0))
+            )
+            plan_requests = []
+            startup_attempts = []
+            runtime_attempts = []
+            events = []
+            capture = Mock(
+                side_effect=lambda request: CandidateObservation(
+                    request.output_dir / "recommendation.json",
+                    "QR_1",
+                    None,
+                )
+            )
+
+            def plan_preapproach(request):
+                request.output_dir.mkdir(parents=True, exist_ok=False)
+                plan_requests.append(request)
+                return {
+                    "route_csv": str(request.output_dir / "route.csv"),
+                    "diagnostics_json": str(
+                        request.output_dir / "route_diagnostics.json"
+                    ),
+                    "route_certificate_json": str(
+                        request.output_dir / "route_certificate.json"
+                    ),
+                }
+
+            def initial_motion(request):
+                return MotionLegOutcome(
+                    run_id=request.run_id,
+                    status="stopped",
+                    stop_reason="pose outside certified startup segment",
+                    stop_details={
+                        "source": "execution_route_certificate",
+                        "phase": "before_motion_confirmation",
+                        "reason": "pose outside certified startup segment",
+                        "fail_closed": True,
+                        "route_pose": {
+                            "x_m": 0.0332,
+                            "y_m": 0.0,
+                            "yaw_rad": 0.0,
+                        },
+                    },
+                    motion_published=False,
+                    returncode=1,
+                    semantic_log_path=root / "initial_events.jsonl",
+                )
+
+            def admit(evidence_path):
+                evidence_path.parent.mkdir(parents=True, exist_ok=False)
+                evidence_path.write_text("{}\n", encoding="utf-8")
+                return Pose2D(0.0332, 0.0, 0.0)
+
+            def startup_motion(request, attempt):
+                startup_attempts.append((request, attempt))
+                permit = root / "permits" / f"{request.run_id}_startup.json"
+                permit.parent.mkdir(parents=True, exist_ok=True)
+                permit.write_text("{}\n", encoding="utf-8")
+                return MotionLegOutcome(
+                    run_id=request.run_id,
+                    status="stopped",
+                    stop_reason=(
+                        "global localization consistency requires zero and reseal"
+                    ),
+                    stop_details={
+                        "fault_code": "localization_reseal_required",
+                        "source": "global_consistency_monitor",
+                        "execution_pose_owner": "odom",
+                        "global_consistency_monitor": "amcl",
+                        "monitor_action": "FORCE_ZERO_RESEAL",
+                        "fail_closed": True,
+                        "continuity": {
+                            "accepted": False,
+                            "requires_zero_cycle": True,
+                            "requires_reseal": True,
+                            "decision": "force_zero_reseal",
+                            "reason": "map_from_odom_translation_drift",
+                            "fail_closed": True,
+                        },
+                    },
+                    motion_published=True,
+                    returncode=2,
+                    semantic_log_path=root / "startup_events.jsonl",
+                    startup_reseal_motion_permit_path=permit.resolve(),
+                    startup_reseal_motion_permit_sha256="a" * 64,
+                )
+
+            def runtime_motion(request, attempt):
+                runtime_attempts.append((request, attempt))
+                permit = root / "permits" / f"{request.run_id}_runtime.json"
+                permit.parent.mkdir(parents=True, exist_ok=True)
+                permit.write_text("{}\n", encoding="utf-8")
+                return replace(
+                    self._completed(request),
+                    motion_authorization_permit_path=permit.resolve(),
+                    motion_authorization_permit_sha256="b" * 64,
+                )
+
+            with patch("builtins.input") as prompt:
+                outcome = execute_candidate_approach_phase(
+                    config,
+                    CandidateApproachEffects(
+                        select_initial_preapproach=self._nearest_selection,
+                        read_current_pose=lambda: next(poses),
+                        run_motion_leg=initial_motion,
+                        run_startup_reseal_motion_leg=startup_motion,
+                        admit_startup_localization=admit,
+                        run_runtime_localization_reseal_motion_leg=(
+                            runtime_motion
+                        ),
+                        admit_runtime_localization=admit,
+                        capture_observation=capture,
+                        plan_preapproach=plan_preapproach,
+                        validate_facing=lambda request: {
+                            "candidate_uid": request.candidate.candidate_uid
+                        },
+                        commit_decision=lambda request: None,
+                        event_sink=lambda _path, payload: events.append(payload),
+                        clock=lambda: 10.0,
+                    ),
+                )
+
+            prompt.assert_not_called()
+            self.assertEqual(outcome.visit_order, (candidate.candidate_uid,))
+            self.assertEqual(len(plan_requests), 3)
+            self.assertEqual(len(startup_attempts), 1)
+            self.assertEqual(len(runtime_attempts), 1)
+            runtime_request, runtime_attempt = runtime_attempts[0]
+            self.assertEqual(
+                runtime_request.mission_leg_kind,
+                MissionLegKind.CANDIDATE_PREAPPROACH,
+            )
+            self.assertEqual(runtime_request.mission_leg_index, 0)
+            self.assertEqual(runtime_request.target_id, candidate.candidate_uid)
+            self.assertEqual(
+                runtime_attempt.identity.routine_kind,
+                MissionLegKind.CANDIDATE_PREAPPROACH.value,
+            )
+            self.assertEqual(runtime_attempt.identity.routine_index, 0)
+            self.assertEqual(
+                runtime_attempt.identity.target_id,
+                candidate.candidate_uid,
+            )
+            self.assertEqual(runtime_attempt.reseal_index, 1)
+            self.assertIn(
+                "startup_reseal_001_runtime_localization_reseal_001",
+                runtime_request.run_id,
+            )
+            self.assertEqual(
+                [
+                    event["event"]
+                    for event in events
+                    if str(event.get("event", "")).startswith(
+                        "candidate_runtime_localization"
+                    )
+                ],
+                [
+                    "candidate_runtime_localization_handoff_ready",
+                    "candidate_runtime_localization_reseal_started",
+                    "candidate_runtime_localization_admitted",
+                    "candidate_runtime_localization_route_replanned",
+                    "candidate_runtime_localization_permit_evidenced",
+                    "candidate_runtime_localization_reseal_completed",
+                ],
+            )
+            capture.assert_called_once()
+
     def test_exhausted_opposite_offsets_publish_no_identity_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

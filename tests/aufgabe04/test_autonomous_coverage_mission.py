@@ -208,6 +208,17 @@ def _lidar_decision(*, ready: bool = True):
         visited_viewpoint_ids=("survey_vp_001", "survey_vp_002"),
         planned_viewpoint_ids=("survey_vp_001", "survey_vp_002"),
         population=SimpleNamespace(
+            candidates=tuple(
+                SimpleNamespace(
+                    active_lidar=ready or index < 4,
+                    lidar_static_map_admitted=True,
+                    static_map_disposition="static_map_admitted",
+                )
+                for index, _ in enumerate(active)
+            ),
+            lidar_static_map_admitted_candidate_uids=active,
+            lidar_boundary_provisional_candidate_uids=(),
+            lidar_population_retained_candidate_uids=active,
             multi_view_supported_candidate_uids=active[:2],
             camera_queue_candidate_uids=active[:2],
             camera_confirmed_candidate_uids=(),
@@ -227,6 +238,9 @@ def _camera_decision(*, ready: bool = True):
         blocked_candidate_uids=() if ready else active,
         source_registry_sha256=HASH_C,
         active_candidate_count=5,
+        lidar_static_map_admitted_candidate_uids=active,
+        lidar_boundary_provisional_candidate_uids=(),
+        lidar_population_retained_candidate_uids=active,
         visited_coverage_ratio=1.0,
         visited_viewpoint_ids=("survey_vp_001", "survey_vp_002"),
         planned_viewpoint_ids=("survey_vp_001", "survey_vp_002"),
@@ -552,7 +566,7 @@ class AutonomousCoverageMissionTest(unittest.TestCase):
             self.assertEqual(
                 summary["legacy_lidar_checkpoint_candidate_count_aliases"],
                 {
-                    "lidar_static_map_admitted_candidate_count": (
+                    "fused_registry_active_candidate_count": (
                         "active_lidar_registry_candidate_count"
                     )
                 },
@@ -741,6 +755,18 @@ class AutonomousCoverageMissionTest(unittest.TestCase):
             self.assertTrue(summary["lidar_checkpoint_complete"])
             self.assertTrue(summary["camera_validation_population_ready"])
             self.assertTrue(summary["candidate_snapshot_ready"])
+            self.assertEqual(
+                summary["lidar_static_map_admitted_candidate_count"],
+                5,
+            )
+            self.assertEqual(
+                summary["lidar_boundary_provisional_candidate_count"],
+                0,
+            )
+            self.assertEqual(
+                summary["lidar_population_retained_candidate_count"],
+                5,
+            )
             self.assertTrue(summary["coverage_complete"])
             self.assertFalse(summary["motion_authorized"])
             self.assertFalse(summary["camera_approach_authorized"])

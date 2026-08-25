@@ -17,11 +17,19 @@ from scripts.aufgabe04.navigation.approach.dynamic_approach_planner import (
     point_clearance_to_blocked_m,
 )
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.coverage.stand_candidate_population_retention import (
+    STATIC_MAP_DISPOSITION_ADMITTED,
+    STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL,
+    classify_static_map_population_retention,
+)
 from scripts.aufgabe04.perception.stand_confirmation import ConfirmedStand
 
 
-STAND_CANDIDATE_STATIC_MAP_ADMISSION_SCHEMA_VERSION = 1
+STAND_CANDIDATE_STATIC_MAP_ADMISSION_SCHEMA_VERSION = 2
 STATIC_MAP_CLEARANCE_BELOW_REQUIRED = "static_map_clearance_below_required"
+STATIC_MAP_BOUNDARY_PROVISIONAL = (
+    STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL
+)
 _CLEARANCE_COMPARISON_EPSILON_M = 1.0e-12
 
 
@@ -37,6 +45,10 @@ class StandCandidateStaticMapEvidence:
     source_observation_ids: tuple[str, ...]
     static_map_clearance_m: float
     required_clearance_m: float
+    clearance_shortfall_m: float
+    disposition: str
+    population_retained: bool
+    boundary_provisional: bool
     admitted: bool
     reasons: tuple[str, ...]
 
@@ -49,6 +61,10 @@ class StandCandidateStaticMapEvidence:
             "source_observation_ids": list(self.source_observation_ids),
             "static_map_clearance_m": self.static_map_clearance_m,
             "required_clearance_m": self.required_clearance_m,
+            "clearance_shortfall_m": self.clearance_shortfall_m,
+            "disposition": self.disposition,
+            "population_retained": self.population_retained,
+            "boundary_provisional": self.boundary_provisional,
             "admitted": self.admitted,
             "reasons": list(self.reasons),
         }
@@ -68,7 +84,41 @@ class StandCandidateStaticMapAdmission:
     blocked_cell_count: int
     evidence: tuple[StandCandidateStaticMapEvidence, ...]
     admitted_stands: tuple[ConfirmedStand, ...]
+    boundary_provisional_stands: tuple[ConfirmedStand, ...]
     rejected_stands: tuple[ConfirmedStand, ...]
+
+    @property
+    def population_retained_stands(self) -> tuple[ConfirmedStand, ...]:
+        """Return non-rejected stands retained for later camera validation.
+
+        Boundary-provisional candidates are deliberately not part of
+        ``admitted_stands`` because the static map did not prove their complete
+        footprint clear.  They are retained only so camera validation can try a
+        separately certified, interior-side approach later.
+        """
+
+        return tuple(
+            sorted(
+                self.admitted_stands + self.boundary_provisional_stands,
+                key=lambda stand: (stand.x_m, stand.y_m, stand.stand_id),
+            )
+        )
+
+    @property
+    def camera_population_stands(self) -> tuple[ConfirmedStand, ...]:
+        """Backward-compatible name for population-retained stands."""
+
+        return self.population_retained_stands
+
+    @property
+    def disposition_by_stand_id(self) -> dict[str, str]:
+        """Return explicit lineage for every stand retained in the registry."""
+
+        return {
+            item.stand_id: item.disposition
+            for item in self.evidence
+            if item.population_retained
+        }
 
     def to_evidence_dict(self) -> dict[str, object]:
         return {
@@ -79,6 +129,9 @@ class StandCandidateStaticMapAdmission:
                 "candidate_radius_m": self.candidate_radius_m,
                 "candidate_uncertainty_m": self.candidate_uncertainty_m,
                 "required_clearance_m": self.required_clearance_m,
+                "boundary_provisional_rule": (
+                    "nominal_radius_fits_but_uncertainty_envelope_does_not"
+                ),
                 "comparison_epsilon_m": _CLEARANCE_COMPARISON_EPSILON_M,
             },
             "costmap": {
@@ -90,6 +143,8 @@ class StandCandidateStaticMapAdmission:
             "counts": {
                 "evaluated": len(self.evidence),
                 "admitted": len(self.admitted_stands),
+                "boundary_provisional": len(self.boundary_provisional_stands),
+                "population_retained": len(self.population_retained_stands),
                 "rejected": len(self.rejected_stands),
             },
             "admitted_stand_ids": [
@@ -97,6 +152,12 @@ class StandCandidateStaticMapAdmission:
             ],
             "rejected_stand_ids": [
                 stand.stand_id for stand in self.rejected_stands
+            ],
+            "boundary_provisional_stand_ids": [
+                stand.stand_id for stand in self.boundary_provisional_stands
+            ],
+            "camera_population_stand_ids": [
+                stand.stand_id for stand in self.population_retained_stands
             ],
             "candidate_evidence": [
                 item.to_evidence_dict() for item in self.evidence
@@ -132,7 +193,6 @@ def evaluate_stand_candidate_static_map_admission(
     required_clearance_m = candidate_radius_m + candidate_uncertainty_m
     if not math.isfinite(required_clearance_m):
         raise ValueError("required candidate clearance must be finite")
-
     stand_snapshot = tuple(stands)
     for stand in stand_snapshot:
         _validate_stand_geometry(stand)
@@ -145,6 +205,7 @@ def evaluate_stand_candidate_static_map_admission(
     seen_ids: set[str] = set()
     evidence: list[StandCandidateStaticMapEvidence] = []
     admitted: list[ConfirmedStand] = []
+    boundary_provisional: list[ConfirmedStand] = []
     rejected: list[ConfirmedStand] = []
     for stand in ordered_stands:
         if stand.stand_id in seen_ids:
@@ -154,11 +215,15 @@ def evaluate_stand_candidate_static_map_admission(
             costmap,
             Pose2D(stand.x_m, stand.y_m, 0.0),
         )
-        is_admitted = (
-            clearance_m + _CLEARANCE_COMPARISON_EPSILON_M
-            >= required_clearance_m
+        retention = classify_static_map_population_retention(
+            clearance_m=clearance_m,
+            candidate_radius_m=candidate_radius_m,
+            candidate_uncertainty_m=candidate_uncertainty_m,
         )
-        reasons = () if is_admitted else (STATIC_MAP_CLEARANCE_BELOW_REQUIRED,)
+        reasons = (
+            () if retention.strictly_admitted
+            else (STATIC_MAP_CLEARANCE_BELOW_REQUIRED,)
+        )
         evidence.append(
             StandCandidateStaticMapEvidence(
                 stand_id=stand.stand_id,
@@ -169,11 +234,20 @@ def evaluate_stand_candidate_static_map_admission(
                 source_observation_ids=stand.source_observation_ids,
                 static_map_clearance_m=clearance_m,
                 required_clearance_m=required_clearance_m,
-                admitted=is_admitted,
+                clearance_shortfall_m=retention.clearance_shortfall_m,
+                disposition=retention.disposition,
+                population_retained=retention.population_retained,
+                boundary_provisional=retention.boundary_provisional,
+                admitted=retention.strictly_admitted,
                 reasons=reasons,
             )
         )
-        (admitted if is_admitted else rejected).append(stand)
+        if retention.disposition == STATIC_MAP_DISPOSITION_ADMITTED:
+            admitted.append(stand)
+        elif retention.disposition == STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL:
+            boundary_provisional.append(stand)
+        else:
+            rejected.append(stand)
 
     return StandCandidateStaticMapAdmission(
         schema_version=STAND_CANDIDATE_STATIC_MAP_ADMISSION_SCHEMA_VERSION,
@@ -186,6 +260,7 @@ def evaluate_stand_candidate_static_map_admission(
         blocked_cell_count=len(costmap.blocked_cells),
         evidence=tuple(evidence),
         admitted_stands=tuple(admitted),
+        boundary_provisional_stands=tuple(boundary_provisional),
         rejected_stands=tuple(rejected),
     )
 
@@ -230,6 +305,7 @@ def _validate_stand_geometry(stand: ConfirmedStand) -> None:
 
 __all__ = [
     "STATIC_MAP_CLEARANCE_BELOW_REQUIRED",
+    "STATIC_MAP_BOUNDARY_PROVISIONAL",
     "STAND_CANDIDATE_STATIC_MAP_ADMISSION_SCHEMA_VERSION",
     "StandCandidateStaticMapAdmission",
     "StandCandidateStaticMapEvidence",

@@ -86,6 +86,7 @@ from scripts.aufgabe04.real_robot.run_autonomous_stand_exploration import (
     _execute_coverage_leg_with_replans,
     _motion_outcome_from_log,
     _runner_command,
+    _run_candidate_runtime_localization_reseal_motion_leg,
     _run_motion_leg,
     build_parser,
     candidate_snapshot_from_registry,
@@ -98,6 +99,12 @@ from scripts.aufgabe04.real_robot.autonomous_candidate_approach import (
     bounded_approach_offsets,
     opposite_face_normal,
     plan_candidate_preapproach,
+)
+from scripts.aufgabe04.real_robot.autonomous_candidate_runtime_recovery import (
+    CandidateRuntimeRecoveryAttempt,
+)
+from scripts.aufgabe04.real_robot.autonomous_candidate_startup_recovery import (
+    CandidateRoutineIdentity,
 )
 from scripts.aufgabe04.stations.candidate_snapshot import (
     write_candidate_snapshot,
@@ -2793,6 +2800,115 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             ],
             str(master_path.resolve()),
         )
+
+    def test_candidate_runtime_adapter_builds_generic_one_use_permit_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rejected_run_id = "mission_candidate_004_startup_reseal_001"
+            replacement_run_id = (
+                f"{rejected_run_id}_runtime_localization_reseal_001"
+            )
+            target_id = "survey_candidate_0005"
+            identity = CandidateRoutineIdentity(
+                session_id="mission",
+                semantic_map_id="arena_1p898x3p9_auto",
+                routine_kind=MissionLegKind.CANDIDATE_PREAPPROACH.value,
+                routine_index=4,
+                target_id=target_id,
+                run_id=replacement_run_id,
+            )
+            rejected = MotionLegOutcome(
+                run_id=rejected_run_id,
+                status="stopped",
+                stop_reason=(
+                    "global localization consistency requires zero and reseal"
+                ),
+                stop_details=_runtime_localization_stop_details(),
+                motion_published=True,
+                returncode=2,
+                semantic_log_path=root / "rejected.jsonl",
+            )
+            decision = evaluate_runtime_localization_reseal(
+                status=rejected.status,
+                motion_published=rejected.motion_published,
+                stop_details=rejected.stop_details,
+            )
+            fresh_evidence = root / "fresh_localization.json"
+            request = CandidateMotionLegRequest(
+                sealed={
+                    "route_csv": str(root / "route.csv"),
+                    "diagnostics_json": str(root / "diagnostics.json"),
+                    "route_certificate_json": str(root / "certificate.json"),
+                },
+                run_id=replacement_run_id,
+                session_root=root / "session",
+                candidate_snapshot_path=root / "candidate_snapshot.json",
+                uncertainty_map_yaml=MAP,
+                uncertainty_sigma_multiplier=2.0,
+                localization_branch_proof_id="known_start_marker_20260807",
+                mission_authorization_json=root / "mission_leg_auth.json",
+                session_id="mission",
+                semantic_map_id="arena_1p898x3p9_auto",
+                mission_leg_kind=MissionLegKind.CANDIDATE_PREAPPROACH,
+                mission_leg_index=4,
+                target_id=target_id,
+                permit_json_path=root / "routine_permit.json",
+            )
+            attempt = CandidateRuntimeRecoveryAttempt(
+                identity=identity,
+                reseal_index=1,
+                rejected_outcome=rejected,
+                runtime_localization_decision=decision,
+                fresh_start_pose=Pose2D(0.1, 0.2, 0.3),
+                attempt_root=root / "attempt",
+                fresh_localization_evidence_path=fresh_evidence,
+                source_root=root / "attempt" / "route_source",
+            )
+            sentinel = MotionLegOutcome(
+                run_id=replacement_run_id,
+                status="completed",
+                stop_reason="",
+                stop_details={},
+                motion_published=True,
+                returncode=0,
+                semantic_log_path=root / "completed.jsonl",
+            )
+
+            with patch.object(
+                autonomous_wrapper,
+                "_run_motion_leg",
+                return_value=sentinel,
+            ) as run:
+                result = (
+                    _run_candidate_runtime_localization_reseal_motion_leg(
+                        profile=self._profile(),
+                        request=request,
+                        attempt=attempt,
+                        mission_motion_authorization_json=(
+                            root / "mission_runtime_auth.json"
+                        ),
+                        max_runtime_reseals_per_leg=1,
+                    )
+                )
+
+        self.assertIs(result, sentinel)
+        context = run.call_args.kwargs[
+            "runtime_localization_permit_context"
+        ]
+        self.assertEqual(
+            context.mission_leg_kind,
+            MissionLegKind.CANDIDATE_PREAPPROACH,
+        )
+        self.assertEqual(context.mission_leg_index, 4)
+        self.assertEqual(context.target_id, target_id)
+        self.assertEqual(context.rejected_run_id, rejected_run_id)
+        self.assertEqual(context.reseal_index, 1)
+        self.assertTrue(run.call_args.kwargs["require_fresh_confirmation"])
+        self.assertEqual(
+            run.call_args.kwargs["fresh_confirmation_reason"],
+            "runtime_localization",
+        )
+        self.assertIsNone(run.call_args.kwargs.get("coverage_transient_replan"))
 
     def test_runtime_localization_recovery_uses_scoped_permit_without_parent_input(self):
         with tempfile.TemporaryDirectory() as tmp:

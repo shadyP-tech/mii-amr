@@ -68,7 +68,9 @@ _EVIDENCE_FIELDS = frozenset(
         "candidate_uid",
         "registry_status",
         "active_lidar",
+        "static_map_disposition",
         "static_map_admitted",
+        "static_map_population_retained",
         "basic_lidar_supported",
         "confidence",
         "minimum_confidence",
@@ -540,8 +542,16 @@ def _evidence_from_payload(
         candidate_uid=_string(item["candidate_uid"], f"{name}.candidate_uid"),
         registry_status=_string(item["registry_status"], f"{name}.registry_status"),
         active_lidar=_bool(item["active_lidar"], f"{name}.active_lidar"),
+        static_map_disposition=_string(
+            item["static_map_disposition"],
+            f"{name}.static_map_disposition",
+        ),
         static_map_admitted=_bool(
             item["static_map_admitted"], f"{name}.static_map_admitted"
+        ),
+        static_map_population_retained=_bool(
+            item["static_map_population_retained"],
+            f"{name}.static_map_population_retained",
         ),
         basic_lidar_supported=_bool(
             item["basic_lidar_supported"], f"{name}.basic_lidar_supported"

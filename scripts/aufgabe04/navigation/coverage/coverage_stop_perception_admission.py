@@ -111,6 +111,22 @@ class CoverageEpochPerceptionAdmission:
         return self.static_map_admission.admitted_stands
 
     @property
+    def camera_population_stands(self) -> tuple[ConfirmedStand, ...]:
+        return self.static_map_admission.population_retained_stands
+
+    @property
+    def registry_population_stands(self) -> tuple[ConfirmedStand, ...]:
+        """Return candidates eligible for fusion, never motion authority."""
+
+        return self.static_map_admission.population_retained_stands
+
+    @property
+    def registry_static_map_dispositions(self) -> dict[str, str]:
+        """Bind each fusion input to its strict or boundary disposition."""
+
+        return self.static_map_admission.disposition_by_stand_id
+
+    @property
     def evidence_artifacts(self) -> tuple[ContentHashedAdmissionArtifact, ...]:
         return (self.morphology_artifact, self.static_map_artifact)
 

@@ -27,8 +27,6 @@ from scripts.aufgabe04.navigation.control.follower_safety import (
 )
 from scripts.aufgabe04.navigation.coverage.transient_blockage_policy import (
     CLEARANCE_LIMITED_MOTION_FLOOR,
-    classify_linear_command,
-    reachable_distance_progress_epsilon,
 )
 from scripts.aufgabe04.navigation.approach.viewpoint_sampling_contract import (
     INTERMEDIATE_TERMINAL_HEADING_DISTANCE_COMPARISON_EPSILON_M,
@@ -49,8 +47,18 @@ from scripts.aufgabe04.navigation.waypoint_follower.route_phases import (
 from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.bindings import (
     RuntimeBindingProxy,
 )
-from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.commands import (
-    finite_velocity_command as _finite_velocity_command,
+from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.command_admission import (
+    command_admission_decision,
+    command_shape_interval_sec,
+    stuck_distance_progress_epsilon,
+)
+from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.control_results import (
+    clearance_motion_floor_stop_details,
+    control_result,
+    initial_runtime_input_stop_details,
+    nonfinite_velocity_stop_details,
+    waypoint_timeout_stop_details,
+    with_controller_trace_failure,
 )
 from scripts.aufgabe04.navigation.waypoint_follower.startup import (
     certified_static_startup_decision,
@@ -84,22 +92,10 @@ class ControlLoopRuntimeMixin:
             # map<-odom continuity decision there.  Preserve that top-level
             # contract for the semantic safety_stop instead of returning the
             # legacy five-field result that silently discarded it.
-            stop_details = dict(self.latest_stop_details or {})
-            if not stop_details:
-                stop_details = {
-                    "reason": startup_failure,
-                    "source": "initial_runtime_input_wait",
-                    "fail_closed": True,
-                }
-            # Recovery policy must be able to distinguish this zero-motion
-            # startup stop from a monitor stop after motion.  Never overwrite
-            # contradictory upstream evidence: retaining it makes the later
-            # classifier reject the malformed/conflicting contract.
-            stop_details.setdefault("execution_phase", "before_motion")
-            stop_details.setdefault("phase", "initial_runtime_input_wait")
-            stop_details.setdefault(
-                "motion_published",
-                bool(self.motion_published),
+            stop_details = initial_runtime_input_stop_details(
+                self.latest_stop_details,
+                reason=startup_failure,
+                motion_published=self.motion_published,
             )
             trace_failure = self._append_controller_trace(
                 event="initial_runtime_input_stop",
@@ -112,21 +108,19 @@ class ControlLoopRuntimeMixin:
                 # The original runtime-input stop remains primary.  A
                 # secondary evidence-write fault must not replace the
                 # localization/sensor evidence needed by bounded recovery.
-                stop_details = {
-                    **stop_details,
-                    "controller_trace_error": trace_failure,
-                    "controller_trace_fault_code": (
-                        "controller_trace_write_failed"
-                    ),
-                }
+                stop_details = with_controller_trace_failure(
+                    stop_details,
+                    trace_failure,
+                )
             self.latest_stop_details = stop_details
-            return FollowerResult(
+            return control_result(
                 "stopped",
                 startup_failure,
-                time.monotonic() - started_at,
-                self.distance_estimate_m,
-                self.motion_published,
-                stop_details,
+                started_at=started_at,
+                now_monotonic=time.monotonic(),
+                distance_estimate_m=self.distance_estimate_m,
+                motion_published=self.motion_published,
+                stop_details=stop_details,
             )
         loop_sleep_sec = 1.0 / max(self.follower_config.control_rate_hz, 1.0)
         self.control_loop_deadline_sec = time.monotonic() + loop_sleep_sec
@@ -663,6 +657,11 @@ class ControlLoopRuntimeMixin:
                     if not route_check.ok:
                         route_stop_details = route_check.to_log_dict()
                         self.latest_stop_details = route_stop_details
+                        # Revoke the preceding command before trace I/O.  A
+                        # slow or failing evidence sink must never extend the
+                        # lifetime of the last nonzero Twist after the live
+                        # pose has left the certified route tube.
+                        self.publish_repeated_zero()
                         trace_failure = self._append_controller_trace(
                             event="route_tube_stop",
                             pose=pose,
@@ -677,22 +676,21 @@ class ControlLoopRuntimeMixin:
                             # Route departure remains the primary terminal
                             # safety reason even if secondary evidence storage
                             # also fails.
-                            self.latest_stop_details = {
-                                **route_stop_details,
-                                "controller_trace_error": trace_failure,
-                                "controller_trace_fault_code": (
-                                    "controller_trace_write_failed"
-                                ),
-                                "fail_closed": True,
-                            }
-                        self.publish_repeated_zero()
-                        return FollowerResult(
+                            self.latest_stop_details = (
+                                with_controller_trace_failure(
+                                    route_stop_details,
+                                    trace_failure,
+                                    fail_closed=True,
+                                )
+                            )
+                        return control_result(
                             "stopped",
                             route_check.reason,
-                            time.monotonic() - started_at,
-                            self.distance_estimate_m,
-                            self.motion_published,
-                            self.latest_stop_details,
+                            started_at=started_at,
+                            now_monotonic=time.monotonic(),
+                            distance_estimate_m=self.distance_estimate_m,
+                            motion_published=self.motion_published,
+                            stop_details=self.latest_stop_details,
                         )
                 if step.target_index != self.target_index:
                     self._clear_intermediate_terminal_heading_latch(
@@ -758,69 +756,67 @@ class ControlLoopRuntimeMixin:
                     self.follower_config.waypoint_timeout_sec,
                 )
                 if timeout_failure:
-                    self.latest_stop_details = {
-                        "reason": timeout_failure,
-                        "route_kind": self.current_route_kind,
-                        "elapsed_sec": timeout_elapsed,
-                        "timeout_sec": self.follower_config.waypoint_timeout_sec,
-                        "target_index": step.target_index,
-                        "pursuit_index": step.pursuit_index,
-                        "distance_to_target_m": step.distance_to_target_m,
-                        "progress_mode": step.progress_mode,
-                        "axis_acquisition_target_revision": (
+                    self.latest_stop_details = waypoint_timeout_stop_details(
+                        reason=timeout_failure,
+                        route_kind=self.current_route_kind,
+                        elapsed_sec=timeout_elapsed,
+                        timeout_sec=self.follower_config.waypoint_timeout_sec,
+                        target_index=step.target_index,
+                        pursuit_index=step.pursuit_index,
+                        distance_to_target_m=step.distance_to_target_m,
+                        progress_mode=step.progress_mode,
+                        axis_acquisition_target_revision=(
                             self.axis_acquisition_target_revision
                         ),
-                        "viewpoint_sampling_target_revision": (
+                        viewpoint_sampling_target_revision=(
                             self.viewpoint_sampling_target_revision
                         ),
-                        "robot_pose": {
-                            "x_m": pose.x_m,
-                            "y_m": pose.y_m,
-                            "yaw_rad": pose.yaw_rad,
-                        },
-                        "fail_closed": True,
-                    }
+                        robot_x_m=pose.x_m,
+                        robot_y_m=pose.y_m,
+                        robot_yaw_rad=pose.yaw_rad,
+                    )
                     self.publish_repeated_zero()
-                    return FollowerResult(
+                    return control_result(
                         "stopped",
                         timeout_failure,
-                        timeout_now - started_at,
-                        self.distance_estimate_m,
-                        self.motion_published,
-                        self.latest_stop_details,
+                        started_at=started_at,
+                        now_monotonic=timeout_now,
+                        distance_estimate_m=self.distance_estimate_m,
+                        motion_published=self.motion_published,
+                        stop_details=self.latest_stop_details,
                     )
                 now_monotonic = time.monotonic()
                 front_clearance_scale = self._motion_clearance_linear_scale(
                     step.command.linear_x_mps
                 )
-                effective_linear_x_mps = step.command.linear_x_mps * front_clearance_scale
-                command_floor = classify_linear_command(
-                    step.command.linear_x_mps,
-                    effective_linear_x_mps,
+                command_admission = command_admission_decision(
+                    step.command,
+                    front_clearance_scale=front_clearance_scale,
                     linear_motion_floor_mps=(
                         self.follower_config.linear_motion_floor_mps
                     ),
+                    physical_route=(
+                        self.current_route_kind in PHYSICAL_ROUTE_KINDS
+                    ),
                 )
-                clearance_limited_below_floor = (
-                    self.current_route_kind in PHYSICAL_ROUTE_KINDS
-                    and front_clearance_scale < 1.0 - 1.0e-12
-                    and command_floor.zero_hold_required
+                effective_linear_x_mps = (
+                    command_admission.effective_command.linear_x_mps
                 )
-                if clearance_limited_below_floor:
-                    self.latest_stop_details = {
-                        "reason": CLEARANCE_LIMITED_MOTION_FLOOR,
-                        "source": "linear_motion_floor",
-                        **command_floor.to_log_dict(),
-                        "front_clearance_scale": front_clearance_scale,
-                        "front_clearance": dict(
-                            self.latest_front_clearance_details or {}
+                if command_admission.clearance_limited_below_floor:
+                    self.latest_stop_details = clearance_motion_floor_stop_details(
+                        reason=CLEARANCE_LIMITED_MOTION_FLOOR,
+                        command_floor_details=(
+                            command_admission.command_floor.to_log_dict()
                         ),
-                        "target_index": step.target_index,
-                        "pursuit_index": step.pursuit_index,
-                        "distance_to_target_m": step.distance_to_target_m,
-                        "progress_mode": step.progress_mode,
-                        "fail_closed": True,
-                    }
+                        front_clearance_scale=front_clearance_scale,
+                        front_clearance_details=(
+                            self.latest_front_clearance_details
+                        ),
+                        target_index=step.target_index,
+                        pursuit_index=step.pursuit_index,
+                        distance_to_target_m=step.distance_to_target_m,
+                        progress_mode=step.progress_mode,
+                    )
                     self.publish_repeated_zero()
                     trace_failure = self._append_controller_trace(
                         event="motion_floor_zero_hold",
@@ -833,13 +829,14 @@ class ControlLoopRuntimeMixin:
                         fail_closed=False,
                     )
                     if trace_failure:
-                        return FollowerResult(
+                        return control_result(
                             "stopped",
                             trace_failure,
-                            time.monotonic() - started_at,
-                            self.distance_estimate_m,
-                            self.motion_published,
-                            self.latest_stop_details,
+                            started_at=started_at,
+                            now_monotonic=time.monotonic(),
+                            distance_estimate_m=self.distance_estimate_m,
+                            motion_published=self.motion_published,
+                            stop_details=self.latest_stop_details,
                         )
                     front_evidence = self.latest_front_clearance_details or {}
                     recovery = ""
@@ -867,40 +864,27 @@ class ControlLoopRuntimeMixin:
                         if recovery == "stopped"
                         else CLEARANCE_LIMITED_MOTION_FLOOR
                     )
-                    return FollowerResult(
+                    return control_result(
                         "stopped",
                         stop_reason,
-                        time.monotonic() - started_at,
-                        self.distance_estimate_m,
-                        self.motion_published,
-                        self.latest_stop_details,
+                        started_at=started_at,
+                        now_monotonic=time.monotonic(),
+                        distance_estimate_m=self.distance_estimate_m,
+                        motion_published=self.motion_published,
+                        stop_details=self.latest_stop_details,
                     )
-                distance_progress_epsilon_m = (
-                    self.follower_config.stuck_progress_epsilon_m
+                distance_progress_epsilon_m = stuck_distance_progress_epsilon(
+                    self.follower_config.stuck_progress_epsilon_m,
+                    physical_route=(
+                        self.current_route_kind in PHYSICAL_ROUTE_KINDS
+                    ),
+                    remaining_distance_m=step.distance_to_target_m,
+                    waypoint_tolerance_m=(
+                        self.follower_config.physical_waypoint_tolerance_m
+                    ),
+                    effective_linear_x_mps=effective_linear_x_mps,
+                    stuck_timeout_sec=self.follower_config.stuck_timeout_sec,
                 )
-                if self.current_route_kind in PHYSICAL_ROUTE_KINDS:
-                    bounded_progress_epsilon_m = (
-                        reachable_distance_progress_epsilon(
-                            self.follower_config.stuck_progress_epsilon_m,
-                            remaining_distance_m=step.distance_to_target_m,
-                            waypoint_tolerance_m=(
-                                self.follower_config.physical_waypoint_tolerance_m
-                            ),
-                            expected_effective_travel_m=(
-                                abs(effective_linear_x_mps)
-                                * self.follower_config.stuck_timeout_sec
-                            ),
-                        )
-                    )
-                    if (
-                        bounded_progress_epsilon_m
-                        < self.follower_config.stuck_progress_epsilon_m
-                    ):
-                        # The comparison is strict. Half of the reachable
-                        # headroom remains attainable before vertex capture.
-                        distance_progress_epsilon_m = (
-                            0.5 * bounded_progress_epsilon_m
-                        )
                 progress_failure = self._progress_failure(
                     step.distance_to_target_m,
                     step.controlled_heading_error_rad,
@@ -977,46 +961,39 @@ class ControlLoopRuntimeMixin:
                                 progress_failure,
                             )
                         )
-                    return FollowerResult(
+                    return control_result(
                         "stopped",
                         progress_failure,
-                        time.monotonic() - started_at,
-                        self.distance_estimate_m,
-                        self.motion_published,
-                        self.latest_stop_details,
+                        started_at=started_at,
+                        now_monotonic=time.monotonic(),
+                        distance_estimate_m=self.distance_estimate_m,
+                        motion_published=self.motion_published,
+                        stop_details=self.latest_stop_details,
                     )
-                if not _finite_velocity_command(
-                    effective_linear_x_mps,
-                    step.command.angular_z_radps,
-                ):
+                if not command_admission.finite:
                     self.publish_repeated_zero()
-                    self.latest_stop_details = {
-                        "reason": "controller produced a non-finite velocity command",
-                        "fault_code": "nonfinite_velocity_command",
-                        "linear_x_mps": effective_linear_x_mps,
-                        "angular_z_radps": step.command.angular_z_radps,
-                        "fail_closed": True,
-                    }
-                    return FollowerResult(
+                    self.latest_stop_details = nonfinite_velocity_stop_details(
+                        linear_x_mps=effective_linear_x_mps,
+                        angular_z_radps=step.command.angular_z_radps,
+                    )
+                    return control_result(
                         "stopped",
                         self.latest_stop_details["reason"],
-                        time.monotonic() - started_at,
-                        self.distance_estimate_m,
-                        self.motion_published,
-                        self.latest_stop_details,
+                        started_at=started_at,
+                        now_monotonic=time.monotonic(),
+                        distance_estimate_m=self.distance_estimate_m,
+                        motion_published=self.motion_published,
+                        stop_details=self.latest_stop_details,
                     )
-                raw_effective_command = VelocityCommand(
-                    effective_linear_x_mps,
-                    step.command.angular_z_radps,
-                )
-                command_shape_dt_sec = (
-                    loop_sleep_sec
-                    if self.last_command_shape_at is None
-                    else now_monotonic - self.last_command_shape_at
+                raw_effective_command = command_admission.effective_command
+                shape_dt_sec = command_shape_interval_sec(
+                    loop_period_sec=loop_sleep_sec,
+                    now_monotonic=now_monotonic,
+                    last_shape_at=self.last_command_shape_at,
                 )
                 shaped_command = self.command_smoother.apply(
                     raw_effective_command,
-                    dt_sec=command_shape_dt_sec,
+                    dt_sec=shape_dt_sec,
                 )
                 self.last_command_shape_at = now_monotonic
                 trace_failure = self._append_controller_trace(
@@ -1037,20 +1014,21 @@ class ControlLoopRuntimeMixin:
                                     raw_effective_command.angular_z_radps
                                 ),
                             },
-                            "shape_dt_sec": command_shape_dt_sec,
+                            "shape_dt_sec": shape_dt_sec,
                         }
                     },
                     fail_closed=False,
                 )
                 if trace_failure:
                     self.publish_repeated_zero()
-                    return FollowerResult(
+                    return control_result(
                         "stopped",
                         trace_failure,
-                        time.monotonic() - started_at,
-                        self.distance_estimate_m,
-                        self.motion_published,
-                        self.latest_stop_details,
+                        started_at=started_at,
+                        now_monotonic=time.monotonic(),
+                        distance_estimate_m=self.distance_estimate_m,
+                        motion_published=self.motion_published,
+                        stop_details=self.latest_stop_details,
                     )
                 self._publish_velocity_command(shaped_command)
                 timing = next_control_loop_timing(

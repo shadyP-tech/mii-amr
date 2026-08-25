@@ -14,11 +14,18 @@ from unittest.mock import Mock
 from scripts.aufgabe04.navigation.approach.exact_two_camera_admission import (
     SUPPORT_CLASS_SINGLE_VIEW_REQUIRES_CAMERA_VALIDATION,
     build_exact_two_camera_candidate_snapshot,
+    evaluate_exact_two_camera_admission,
     exact_two_camera_handoff_sha256,
     new_exact_two_camera_handoff,
     require_handoff_candidate_support,
     write_exact_two_camera_admission,
     write_exact_two_camera_handoff,
+)
+from scripts.aufgabe04.navigation.coverage.coverage_candidate_lifecycle import (
+    evaluate_exact_two_lidar_checkpoint,
+)
+from scripts.aufgabe04.navigation.coverage.stand_candidate_population_retention import (
+    STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL,
 )
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.navigation.approach.record_stand_candidate_decision import (
@@ -97,8 +104,32 @@ def _write_recommendation(
     )
 
 
-def _fixture(root: Path):
+def _fixture(root: Path, *, boundary_uid: str | None = None):
     plan, progress, registry, _, admission = _ready_inputs()
+    if boundary_uid is not None:
+        if registry.candidate_for(boundary_uid) is None:
+            raise ValueError(f"unknown boundary fixture UID: {boundary_uid}")
+        registry = replace(
+            registry,
+            candidates=tuple(
+                replace(
+                    candidate,
+                    static_map_disposition=(
+                        STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL
+                    ),
+                )
+                if candidate.candidate_uid == boundary_uid
+                else candidate
+                for candidate in registry.candidates
+            ),
+        )
+        lidar = evaluate_exact_two_lidar_checkpoint(plan, progress, registry)
+        admission = evaluate_exact_two_camera_admission(
+            plan,
+            progress,
+            registry,
+            lidar,
+        )
     survey_root = root / "survey"
     survey_root.mkdir()
     write_coverage_survey_plan(survey_root / "coverage_plan.json", plan)
@@ -542,6 +573,49 @@ class ExactTwoCameraDecisionTest(unittest.TestCase):
                 observed_support["survey_candidate_0003"],
                 SUPPORT_CLASS_SINGLE_VIEW_REQUIRES_CAMERA_VALIDATION,
             )
+            motion.assert_not_called()
+            capture.assert_not_called()
+
+    def test_boundary_candidate_reaches_route_selector_before_motion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            uid = "survey_candidate_0005"
+            fixture = _fixture(Path(tmp), boundary_uid=uid)
+            motion = Mock()
+            capture = Mock()
+            observed_support = {}
+
+            def inspect_selection(request):
+                observed_support.update(request.support_class_by_uid or {})
+                raise RuntimeError("stop after boundary route selection")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "stop after boundary route selection",
+            ):
+                execute_candidate_approach_phase(
+                    fixture.config,
+                    CandidateApproachEffects(
+                        select_initial_preapproach=inspect_selection,
+                        read_current_pose=Mock(
+                            return_value=Pose2D(0.0, 0.0, 0.0)
+                        ),
+                        run_motion_leg=motion,
+                        capture_observation=capture,
+                    ),
+                )
+
+            evidence = fixture.handoff.admission_decision.candidate_for(uid)
+            self.assertIsNotNone(evidence)
+            self.assertEqual(
+                evidence.static_map_disposition,
+                STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL,
+            )
+            self.assertEqual(len(observed_support), 5)
+            self.assertEqual(
+                observed_support[uid],
+                SUPPORT_CLASS_SINGLE_VIEW_REQUIRES_CAMERA_VALIDATION,
+            )
+            self.assertFalse(fixture.handoff.motion_authorized)
             motion.assert_not_called()
             capture.assert_not_called()
 

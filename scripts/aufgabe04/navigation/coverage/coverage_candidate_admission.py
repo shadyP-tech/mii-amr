@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from scripts.aufgabe04.artifacts.content_store import payload_sha256
+from scripts.aufgabe04.navigation.coverage.stand_candidate_population_retention import (
+    STATIC_MAP_DISPOSITION_ADMITTED,
+)
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STATUS_PENDING_CAMERA,
     STATUS_PROVISIONAL,
@@ -21,6 +24,7 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     StandSurveyRegistry,
     SurveyCandidate,
     coverage_survey_plan_sha256,
+    stand_survey_registry_sha256,
     validate_stand_survey_registry,
     validate_survey_progress,
     visited_coverage_ratio,
@@ -37,6 +41,7 @@ class CoverageCandidateEvidence:
 
     candidate_uid: str
     status: str
+    static_map_disposition: str
     confidence: float
     minimum_confidence: float
     confidence_met: bool
@@ -59,6 +64,7 @@ class CoverageCandidateEvidence:
         return {
             "candidate_uid": self.candidate_uid,
             "status": self.status,
+            "static_map_disposition": self.static_map_disposition,
             "admissible": self.admissible,
             "reasons": list(self.reasons),
             "confidence": {
@@ -364,10 +370,16 @@ def _candidate_evidence(
         reasons.append("distinct_known_viewpoint_count_below_minimum")
     if not required_exact_viewpoints_met:
         reasons.append("exact_two_planned_viewpoints_missing")
+    static_map_admitted = (
+        candidate.static_map_disposition == STATIC_MAP_DISPOSITION_ADMITTED
+    )
+    if not static_map_admitted:
+        reasons.append("strict_static_map_admission_required")
 
     return CoverageCandidateEvidence(
         candidate_uid=candidate.candidate_uid,
         status=candidate.status,
+        static_map_disposition=candidate.static_map_disposition,
         confidence=candidate.confidence,
         minimum_confidence=plan.config.minimum_candidate_confidence,
         confidence_met=confidence_met,
@@ -388,6 +400,7 @@ def _candidate_evidence(
             and hit_count_met
             and distinct_known_viewpoints_met
             and required_exact_viewpoints_met
+            and static_map_admitted
         ),
         reasons=tuple(reasons),
     )
@@ -425,38 +438,7 @@ def _progress_snapshot_sha256(progress: CoverageSurveyProgress) -> str:
 
 
 def _registry_snapshot_sha256(registry: StandSurveyRegistry) -> str:
-    return payload_sha256(
-        {
-            "schema_version": registry.schema_version,
-            "survey_id": registry.survey_id,
-            "planning_frame": registry.planning_frame,
-            "map_bundle_sha256": registry.map_bundle_sha256,
-            "candidates": [
-                _candidate_snapshot_payload(candidate)
-                for candidate in registry.candidates
-            ],
-        }
-    )
-
-
-def _candidate_snapshot_payload(
-    candidate: SurveyCandidate,
-) -> dict[str, object]:
-    return {
-        "candidate_uid": candidate.candidate_uid,
-        "x_m": candidate.x_m,
-        "y_m": candidate.y_m,
-        "radius_m": candidate.radius_m,
-        "uncertainty_m": candidate.uncertainty_m,
-        "keepout_radius_m": candidate.keepout_radius_m,
-        "confidence": candidate.confidence,
-        "hit_count": candidate.hit_count,
-        "first_seen_sec": candidate.first_seen_sec,
-        "last_seen_sec": candidate.last_seen_sec,
-        "source_observation_ids": list(candidate.source_observation_ids),
-        "viewpoint_ids": list(candidate.viewpoint_ids),
-        "status": candidate.status,
-    }
+    return stand_survey_registry_sha256(registry)
 
 
 __all__ = [

@@ -26,6 +26,9 @@ from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.navigation.localization.prestart_localization_reseal import (
     evaluate_prestart_localization_reseal,
 )
+from scripts.aufgabe04.navigation.localization.runtime_localization_reseal import (
+    evaluate_runtime_localization_reseal,
+)
 from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization import (
     STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH,
     STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY,
@@ -98,6 +101,7 @@ class CandidateStartupRecoveryConfig:
     recovery_root: Path
     event_log_path: Path
     max_startup_reseals: int
+    allow_runtime_localization_handoff: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.initial_identity, CandidateRoutineIdentity):
@@ -107,6 +111,10 @@ class CandidateStartupRecoveryConfig:
             or self.max_startup_reseals < 0
         ):
             raise ValueError("max_startup_reseals must be non-negative")
+        if type(self.allow_runtime_localization_handoff) is not bool:
+            raise TypeError(
+                "allow_runtime_localization_handoff must be boolean"
+            )
 
 
 @dataclass(frozen=True)
@@ -395,6 +403,37 @@ def execute_candidate_motion_with_startup_recovery(
                 reseal_index=completed_reseal_count,
                 reason="motion outcome run identity mismatch",
             )
+        if (
+            config.allow_runtime_localization_handoff
+            and outcome.motion_published is True
+        ):
+            runtime_decision = evaluate_runtime_localization_reseal(
+                status=outcome.status,
+                motion_published=outcome.motion_published,
+                stop_details=outcome.stop_details,
+            )
+            if runtime_decision.eligible:
+                _emit(
+                    config,
+                    effects,
+                    {
+                        "event": (
+                            "candidate_runtime_localization_handoff_ready"
+                        ),
+                        "run_id": outcome.run_id,
+                        "completed_startup_reseal_count": (
+                            completed_reseal_count
+                        ),
+                        "runtime_localization_reseal_decision": (
+                            runtime_decision.to_evidence()
+                        ),
+                        "issued_motion_permit_kinds": list(
+                            issued_motion_permit_kinds(outcome)
+                        ),
+                        "motion_continues_authorized": False,
+                    },
+                )
+                return outcome
         if outcome.status == "completed":
             if completed_reseal_count:
                 _emit(

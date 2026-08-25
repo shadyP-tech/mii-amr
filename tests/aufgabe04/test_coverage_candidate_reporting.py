@@ -25,10 +25,20 @@ class CoverageCandidateReportingTest(unittest.TestCase):
         )
 
         self.assertEqual(fields["epoch_static_map_admitted_candidate_count"], 5)
+        self.assertEqual(
+            fields["epoch_static_map_boundary_provisional_candidate_count"], 0
+        )
         self.assertEqual(fields["epoch_static_map_rejected_candidate_count"], 0)
+        self.assertEqual(
+            fields["epoch_static_map_population_retained_candidate_count"],
+            5,
+        )
         self.assertEqual(fields["fused_registry_active_candidate_count"], 6)
         self.assertEqual(fields["fused_registry_total_candidate_count"], 6)
         self.assertEqual(fields["static_map_candidate_admitted_count"], 5)
+        self.assertEqual(
+            fields["static_map_candidate_boundary_provisional_count"], 0
+        )
         self.assertEqual(
             fields["legacy_epoch_candidate_count_aliases"][
                 "static_map_candidate_admitted_count"
@@ -52,14 +62,20 @@ class CoverageCandidateReportingTest(unittest.TestCase):
         )
 
     def test_exact_two_count_uses_registry_name_and_marks_legacy_alias(self):
-        fields = active_lidar_registry_count_fields(6)
+        fields = active_lidar_registry_count_fields(
+            6,
+            static_map_admitted_candidate_count=4,
+            boundary_provisional_candidate_count=2,
+        )
 
         self.assertEqual(fields["active_lidar_registry_candidate_count"], 6)
         self.assertEqual(fields["fused_registry_active_candidate_count"], 6)
-        self.assertEqual(fields["lidar_static_map_admitted_candidate_count"], 6)
+        self.assertEqual(fields["lidar_static_map_admitted_candidate_count"], 4)
+        self.assertEqual(fields["lidar_boundary_provisional_candidate_count"], 2)
+        self.assertEqual(fields["lidar_population_retained_candidate_count"], 6)
         self.assertEqual(
             fields["legacy_lidar_checkpoint_candidate_count_aliases"][
-                "lidar_static_map_admitted_candidate_count"
+                "fused_registry_active_candidate_count"
             ],
             "active_lidar_registry_candidate_count",
         )
@@ -67,11 +83,12 @@ class CoverageCandidateReportingTest(unittest.TestCase):
     def test_epoch_partition_must_match_confirmed_count(self):
         with self.assertRaisesRegex(
             ValueError,
-            "must equal admitted plus rejected",
+            "must equal admitted plus boundary-provisional plus rejected",
         ):
             coverage_epoch_candidate_count_fields(
                 confirmed_epoch_candidate_count=5,
                 static_map_admitted_candidate_count=4,
+                static_map_boundary_provisional_candidate_count=0,
                 static_map_rejected_candidate_count=0,
                 fused_registry_candidate_counts={"provisional": 4},
             )

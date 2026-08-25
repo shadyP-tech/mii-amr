@@ -37,6 +37,9 @@ from scripts.aufgabe04.navigation.approach.exact_two_camera_admission import (
 from scripts.aufgabe04.navigation.coverage.coverage_candidate_lifecycle import (
     evaluate_exact_two_lidar_checkpoint,
 )
+from scripts.aufgabe04.navigation.coverage.stand_candidate_population_retention import (
+    STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL,
+)
 from scripts.aufgabe04.navigation.foundation.models import GridCell, Pose2D
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STATUS_PENDING_CAMERA,
@@ -113,6 +116,7 @@ def _candidate(
     confidence: float = 0.82,
     hit_count: int = 7,
     viewpoint_ids: tuple[str, ...] = ("survey_vp_001",),
+    static_map_disposition: str = "static_map_admitted",
 ) -> SurveyCandidate:
     return SurveyCandidate(
         candidate_uid=f"survey_candidate_{index:04d}",
@@ -128,6 +132,7 @@ def _candidate(
         source_observation_ids=(f"observation_{index:04d}",),
         viewpoint_ids=viewpoint_ids,
         status=status,
+        static_map_disposition=static_map_disposition,
     )
 
 
@@ -248,6 +253,77 @@ class ExactTwoCameraAdmissionDecisionTest(unittest.TestCase):
         self.assertEqual(direct.source_kind, SOURCE_KIND_MULTI_VIEW)
         self.assertEqual(
             single.source_kind,
+            SOURCE_KIND_SINGLE_VIEW_REQUIRES_CAMERA_VALIDATION,
+        )
+
+    def test_boundary_provisional_candidate_enters_motion_neutral_camera_population(self):
+        plan = _plan()
+        progress = _complete_progress(plan)
+        registry = _registry(
+            plan,
+            _candidate(
+                1,
+                status=STATUS_PENDING_CAMERA,
+                viewpoint_ids=("survey_vp_001", "survey_vp_002"),
+            ),
+            _candidate(2),
+            _candidate(3, viewpoint_ids=("survey_vp_002",)),
+            _candidate(4),
+            _candidate(
+                5,
+                static_map_disposition=(
+                    STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL
+                ),
+            ),
+        )
+        lidar = evaluate_exact_two_lidar_checkpoint(plan, progress, registry)
+        decision = evaluate_exact_two_camera_admission(
+            plan, progress, registry, lidar
+        )
+
+        self.assertTrue(lidar.ready)
+        self.assertTrue(decision.ready)
+        self.assertFalse(decision.motion_authorized)
+        self.assertEqual(decision.active_candidate_count, 5)
+        boundary = require_admitted_candidate_support(
+            decision,
+            "survey_candidate_0005",
+            SUPPORT_CLASS_SINGLE_VIEW_REQUIRES_CAMERA_VALIDATION,
+        )
+        self.assertEqual(
+            boundary.static_map_disposition,
+            STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL,
+        )
+        self.assertFalse(boundary.static_map_admitted)
+        self.assertTrue(boundary.static_map_population_retained)
+        self.assertTrue(boundary.admissible)
+        self.assertEqual(boundary.reasons, ())
+        self.assertEqual(
+            len(decision.lidar_static_map_admitted_candidate_uids),
+            4,
+        )
+        self.assertEqual(
+            decision.lidar_boundary_provisional_candidate_uids,
+            ("survey_candidate_0005",),
+        )
+        self.assertEqual(
+            len(decision.lidar_population_retained_candidate_uids),
+            5,
+        )
+        self.assertEqual(
+            boundary.source_kind,
+            SOURCE_KIND_SINGLE_VIEW_REQUIRES_CAMERA_VALIDATION,
+        )
+        snapshot = build_exact_two_camera_candidate_snapshot(
+            plan, registry, decision, snapshot_id="camera_candidates_boundary"
+        )
+        snapshot_candidate = next(
+            item
+            for item in snapshot.candidates
+            if item.candidate_uid == "survey_candidate_0005"
+        )
+        self.assertEqual(
+            snapshot_candidate.source.source_kind,
             SOURCE_KIND_SINGLE_VIEW_REQUIRES_CAMERA_VALIDATION,
         )
 

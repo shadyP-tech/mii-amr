@@ -27,17 +27,22 @@ from scripts.aufgabe04.navigation.execution.runtime_motion_authorization import 
     load_mission_motion_authorization,
     load_runtime_localization_motion_permit,
     mission_motion_authorization_sha256,
+    resolve_runtime_localization_mission_leg_identity,
     runtime_localization_motion_permit_sha256,
+)
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
+    MissionLegKind,
 )
 
 
-RUNTIME_MOTION_CONSUMPTION_RECEIPT_SCHEMA_VERSION = 1
+RUNTIME_MOTION_CONSUMPTION_RECEIPT_SCHEMA_VERSION = 2
+LEGACY_RUNTIME_MOTION_CONSUMPTION_RECEIPT_SCHEMA_VERSION = 1
 RUNTIME_MOTION_CONSUMPTION_RECEIPT_HASH_FIELD = (
     "runtime_motion_consumption_receipt_sha256"
 )
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_RECEIPT_FIELDS = frozenset(
+_RECEIPT_FIELDS_V1 = frozenset(
     {
         "schema_version",
         "runtime_localization_motion_permit_path",
@@ -49,6 +54,11 @@ _RECEIPT_FIELDS = frozenset(
         "reseal_index",
     }
 )
+_RECEIPT_FIELDS_V2 = _RECEIPT_FIELDS_V1 | {
+    "mission_leg_kind",
+    "mission_leg_index",
+    "target_id",
+}
 
 
 @dataclass(frozen=True)
@@ -62,13 +72,26 @@ class RuntimeMotionConsumptionReceipt:
     leg_index: int
     target_viewpoint_id: str
     reseal_index: int
+    mission_leg_kind: MissionLegKind = MissionLegKind.COVERAGE
+    mission_leg_index: int | None = None
+    target_id: str = ""
     schema_version: int = RUNTIME_MOTION_CONSUMPTION_RECEIPT_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        kind, index, target = resolve_runtime_localization_mission_leg_identity(
+            mission_leg_kind=self.mission_leg_kind,
+            mission_leg_index=self.mission_leg_index,
+            target_id=self.target_id,
+            leg_index=self.leg_index,
+            target_viewpoint_id=self.target_viewpoint_id,
+        )
+        object.__setattr__(self, "mission_leg_kind", kind)
+        object.__setattr__(self, "mission_leg_index", index)
+        object.__setattr__(self, "target_id", target)
         _validate_receipt(self)
 
     def to_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema_version": self.schema_version,
             "runtime_localization_motion_permit_path": (
                 self.runtime_localization_motion_permit_path
@@ -82,6 +105,15 @@ class RuntimeMotionConsumptionReceipt:
             "target_viewpoint_id": self.target_viewpoint_id,
             "reseal_index": self.reseal_index,
         }
+        if self.schema_version >= RUNTIME_MOTION_CONSUMPTION_RECEIPT_SCHEMA_VERSION:
+            payload.update(
+                {
+                    "mission_leg_kind": self.mission_leg_kind.value,
+                    "mission_leg_index": self.mission_leg_index,
+                    "target_id": self.target_id,
+                }
+            )
+        return payload
 
     def to_evidence(self) -> dict[str, object]:
         return self.to_payload()
@@ -115,6 +147,9 @@ def consume_runtime_motion_permit(
     leg_index: int,
     target_viewpoint_id: str,
     reseal_index: int,
+    mission_leg_kind: MissionLegKind | str = MissionLegKind.COVERAGE,
+    mission_leg_index: int | None = None,
+    target_id: str = "",
 ) -> RuntimeMotionConsumptionReceipt:
     """Atomically claim one previously validated permit exactly once.
 
@@ -137,6 +172,15 @@ def consume_runtime_motion_permit(
         raise ValueError("runtime localization motion permit changed after validation")
 
     authorization = _load_bound_master(observed, master_path)
+    expected_kind, expected_index, expected_target = (
+        resolve_runtime_localization_mission_leg_identity(
+            mission_leg_kind=mission_leg_kind,
+            mission_leg_index=mission_leg_index,
+            target_id=target_id,
+            leg_index=leg_index,
+            target_viewpoint_id=target_viewpoint_id,
+        )
+    )
     checks = {
         "run_id": (observed.run_id, run_id),
         "session_id": (authorization.session_id, session_id),
@@ -146,6 +190,9 @@ def consume_runtime_motion_permit(
             target_viewpoint_id,
         ),
         "reseal_index": (observed.reseal_index, reseal_index),
+        "mission_leg_kind": (observed.mission_leg_kind, expected_kind),
+        "mission_leg_index": (observed.mission_leg_index, expected_index),
+        "target_id": (observed.target_id, expected_target),
     }
     _require_exact_matches(checks)
 
@@ -157,6 +204,9 @@ def consume_runtime_motion_permit(
         leg_index=leg_index,
         target_viewpoint_id=target_viewpoint_id,
         reseal_index=reseal_index,
+        mission_leg_kind=expected_kind,
+        mission_leg_index=expected_index,
+        target_id=expected_target,
     )
     receipt_path = _receipt_path_from_binding(
         master_path=master_path,
@@ -193,11 +243,18 @@ def load_runtime_motion_consumption_receipt(
         )
     except ContentStoreError as exc:
         raise ValueError(str(exc)) from exc
-    if frozenset(payload) != _RECEIPT_FIELDS:
+    schema_version = _integer(payload.get("schema_version"), "schema_version")
+    expected_fields = (
+        _RECEIPT_FIELDS_V1
+        if schema_version
+        == LEGACY_RUNTIME_MOTION_CONSUMPTION_RECEIPT_SCHEMA_VERSION
+        else _RECEIPT_FIELDS_V2
+    )
+    if frozenset(payload) != expected_fields:
         raise ValueError("runtime motion consumption receipt fields mismatch")
     try:
         receipt = RuntimeMotionConsumptionReceipt(
-            schema_version=_integer(payload["schema_version"], "schema_version"),
+            schema_version=schema_version,
             runtime_localization_motion_permit_path=_string(
                 payload["runtime_localization_motion_permit_path"],
                 "runtime_localization_motion_permit_path",
@@ -213,6 +270,26 @@ def load_runtime_motion_consumption_receipt(
                 payload["target_viewpoint_id"], "target_viewpoint_id"
             ),
             reseal_index=_integer(payload["reseal_index"], "reseal_index"),
+            mission_leg_kind=(
+                MissionLegKind.COVERAGE
+                if schema_version
+                == LEGACY_RUNTIME_MOTION_CONSUMPTION_RECEIPT_SCHEMA_VERSION
+                else payload["mission_leg_kind"]
+            ),
+            mission_leg_index=(
+                _integer(payload["leg_index"], "leg_index")
+                if schema_version
+                == LEGACY_RUNTIME_MOTION_CONSUMPTION_RECEIPT_SCHEMA_VERSION
+                else _integer(
+                    payload["mission_leg_index"], "mission_leg_index"
+                )
+            ),
+            target_id=(
+                _string(payload["target_viewpoint_id"], "target_viewpoint_id")
+                if schema_version
+                == LEGACY_RUNTIME_MOTION_CONSUMPTION_RECEIPT_SCHEMA_VERSION
+                else _string(payload["target_id"], "target_id")
+            ),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"invalid runtime motion consumption receipt: {exc}") from exc
@@ -234,6 +311,15 @@ def load_runtime_motion_consumption_receipt(
             receipt.target_viewpoint_id,
         ),
         "reseal_index": (permit.reseal_index, receipt.reseal_index),
+        "mission_leg_kind": (
+            permit.mission_leg_kind,
+            receipt.mission_leg_kind,
+        ),
+        "mission_leg_index": (
+            permit.mission_leg_index,
+            receipt.mission_leg_index,
+        ),
+        "target_id": (permit.target_id, receipt.target_id),
     }
     _require_exact_matches(checks)
     expected_path = _receipt_path_from_binding(
@@ -362,10 +448,10 @@ def _canonical_normal_file_path(path: Path, label: str) -> str:
 
 
 def _validate_receipt(receipt: RuntimeMotionConsumptionReceipt) -> None:
-    if (
-        receipt.schema_version
-        != RUNTIME_MOTION_CONSUMPTION_RECEIPT_SCHEMA_VERSION
-    ):
+    if receipt.schema_version not in {
+        LEGACY_RUNTIME_MOTION_CONSUMPTION_RECEIPT_SCHEMA_VERSION,
+        RUNTIME_MOTION_CONSUMPTION_RECEIPT_SCHEMA_VERSION,
+    }:
         raise ValueError("unsupported runtime motion consumption receipt schema")
     _require_canonical_path_string(
         receipt.runtime_localization_motion_permit_path,
@@ -379,6 +465,23 @@ def _validate_receipt(receipt: RuntimeMotionConsumptionReceipt) -> None:
         _require_nonempty(getattr(receipt, name), name)
     _nonnegative_integer(receipt.leg_index, "leg_index")
     _positive_integer(receipt.reseal_index, "reseal_index")
+    kind, index, target = resolve_runtime_localization_mission_leg_identity(
+        mission_leg_kind=receipt.mission_leg_kind,
+        mission_leg_index=receipt.mission_leg_index,
+        target_id=receipt.target_id,
+        leg_index=receipt.leg_index,
+        target_viewpoint_id=receipt.target_viewpoint_id,
+    )
+    if (
+        receipt.schema_version
+        == LEGACY_RUNTIME_MOTION_CONSUMPTION_RECEIPT_SCHEMA_VERSION
+        and kind is not MissionLegKind.COVERAGE
+    ):
+        raise ValueError(
+            "legacy runtime motion consumption receipt supports coverage only"
+        )
+    if index != receipt.leg_index or target != receipt.target_viewpoint_id:
+        raise ValueError("runtime motion receipt identity aliases mismatch")
 
 
 def _require_exact_matches(
