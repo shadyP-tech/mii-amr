@@ -22,7 +22,6 @@ import hashlib
 import json
 import math
 from pathlib import Path
-import signal
 import subprocess
 import sys
 import time
@@ -111,6 +110,13 @@ from scripts.aufgabe04.real_robot.hardware_profile import (
 )
 from scripts.aufgabe04.real_robot.physical_site_contract import (
     validate_physical_site_contract,
+)
+from scripts.aufgabe04.real_robot.passive_observer_diagnostics import (
+    format_passive_observer_failure,
+    load_passive_observer_status,
+)
+from scripts.aufgabe04.real_robot.passive_observer_process import (
+    monitor_passive_observer_process,
 )
 from scripts.aufgabe04.real_robot.autonomous_artifact_paths import (
     resolve_child_artifact_paths,
@@ -1188,6 +1194,8 @@ def _capture_camera_recommendation(
 ) -> tuple[Path | None, str | None, Path | None]:
     output_dir.mkdir(parents=True, exist_ok=False)
     status_path = output_dir / "observer_status.json"
+    status_events_path = output_dir / "observer_events.jsonl"
+    process_evidence_path = output_dir / "observer_process.json"
     recommendation_path = output_dir / "recommendation.json"
     axis_observation_path = output_dir / "axis_observation.json"
     command = [
@@ -1217,6 +1225,8 @@ def _capture_camera_recommendation(
         str(args.axis_sample_count),
         "--status-json",
         str(status_path),
+        "--status-events-jsonl",
+        str(status_events_path),
         "--recommended-pose-json",
         str(recommendation_path),
         "--axis-observation-json",
@@ -1236,38 +1246,54 @@ def _capture_camera_recommendation(
             ]
         )
     process = subprocess.Popen(command)
-    deadline = time.monotonic() + args.camera_timeout_sec
-    try:
-        while process.poll() is None and time.monotonic() < deadline:
-            if recommendation_path.exists():
-                try:
-                    process.wait(timeout=3.0)
-                except subprocess.TimeoutExpired:
-                    process.send_signal(signal.SIGINT)
-                break
-            time.sleep(0.1)
-        if process.poll() is None:
-            process.send_signal(signal.SIGINT)
-        process.wait(timeout=5.0)
-    except subprocess.TimeoutExpired:
-        process.terminate()
-        process.wait(timeout=5.0)
-    if not recommendation_path.exists():
-        if axis_observation_path.exists():
-            return None, None, axis_observation_path
-        state = (
-            json.loads(status_path.read_text()).get("state")
-            if status_path.exists()
-            else "no_status"
-        )
+    process_evidence = monitor_passive_observer_process(
+        process=process,
+        recommendation_path=recommendation_path,
+        axis_observation_path=axis_observation_path,
+        timeout_sec=args.camera_timeout_sec,
+    )
+    write_content_hashed_json(
+        process_evidence_path,
+        process_evidence.to_dict(),
+        hash_field="observer_process_evidence_sha256",
+    )
+    if process_evidence.artifact_kind == "axis_observation":
+        return None, None, axis_observation_path
+    if process_evidence.artifact_kind != "recommendation":
+        status_evidence = load_passive_observer_status(status_path)
         raise RuntimeError(
-            f"camera/LiDAR observation timed out for "
-            f"{candidate.candidate_uid} without a usable axis: {state}"
+            format_passive_observer_failure(
+                candidate_uid=candidate.candidate_uid,
+                process=process_evidence,
+                status=status_evidence,
+                process_evidence_path=process_evidence_path,
+            )
         )
-    status = json.loads(status_path.read_text())
-    qr_texts = tuple(status.get("qr_texts", ()))
+    try:
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "camera recommendation committed but its terminal observer status "
+            f"is unreadable: {type(exc).__name__}; observer_process_evidence="
+            f"{process_evidence_path}"
+        ) from exc
+    if not isinstance(status, dict):
+        raise RuntimeError(
+            "camera recommendation terminal observer status must be a JSON "
+            f"object; observer_process_evidence={process_evidence_path}"
+        )
+    qr_texts_value = status.get("qr_texts", ())
+    if not isinstance(qr_texts_value, (list, tuple)):
+        raise RuntimeError(
+            "camera recommendation terminal observer status has invalid "
+            f"qr_texts; observer_process_evidence={process_evidence_path}"
+        )
+    qr_texts = tuple(qr_texts_value)
     if len(qr_texts) != 1 or not str(qr_texts[0]).strip():
-        raise RuntimeError("camera recommendation did not bind one QR identity")
+        raise RuntimeError(
+            "camera recommendation did not bind one QR identity; "
+            f"observer_process_evidence={process_evidence_path}"
+        )
     return recommendation_path, str(qr_texts[0]), (
         axis_observation_path if axis_observation_path.exists() else None
     )

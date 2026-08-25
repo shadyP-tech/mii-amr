@@ -2,5 +2,6 @@
 
 
 PASSIVE_VIEWPOINT_OBSERVER_VERSION = (
-    "aufgabe04-real-passive-viewpoint-v2-profile-calibrated-image-vertical"
+    "aufgabe04-real-passive-viewpoint-v3-profile-calibrated-image-vertical-"
+    "exact-time-tf-retry"
 )

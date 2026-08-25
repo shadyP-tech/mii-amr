@@ -81,6 +81,9 @@ from scripts.aufgabe04.real_robot.hardware_profile import (
 from scripts.aufgabe04.real_robot.observer_contract import (
     PASSIVE_VIEWPOINT_OBSERVER_VERSION,
 )
+from scripts.aufgabe04.real_robot.passive_observer_tf_retry import (
+    PassiveObserverTfRetryScheduler,
+)
 from scripts.aufgabe04.real_robot.recommendation_builder import (
     build_real_viewpoint_recommendation,
 )
@@ -136,6 +139,15 @@ def _resolved_qr_id(
 class _StampedMessage:
     stamp_sec: float
     value: object
+
+
+@dataclass(frozen=True)
+class _SynchronizedSensorTuple:
+    """One immutable image/scan/CameraInfo tuple retried at exact TF time."""
+
+    image: _StampedMessage
+    scan: _StampedMessage
+    camera_info: _StampedMessage
 
 
 def _stamp_sec(message) -> float:
@@ -214,6 +226,18 @@ def _atomic_json(path: Path, payload: dict[str, object]) -> None:
             pass
 
 
+def _append_jsonl(path: Path, payload: dict[str, object]) -> None:
+    """Append one durable observer state without replacing prior evidence."""
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        json.dump(payload, handle, sort_keys=True, allow_nan=False)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 def _stand_axis_profile_from_args(args) -> RealCameraStandAxisProfile:
     """Build the pure real-camera estimator profile from parsed CLI values."""
 
@@ -283,6 +307,10 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self.scans: deque[_StampedMessage] = deque(maxlen=20)
         self.camera_infos: deque[_StampedMessage] = deque(maxlen=8)
         self.last_processed_image_stamp = -math.inf
+        self.tf_retry_scheduler = (
+            PassiveObserverTfRetryScheduler[_SynchronizedSensorTuple]()
+        )
+        self._active_tf_request: dict[str, object] | None = None
         self.last_pose: Pose2D | None = None
         self.consensus = AxisConsensusAccumulator(
             required_samples=args.consensus_frames,
@@ -314,6 +342,10 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             1.0 / max(args.process_rate_hz, 0.5),
             self._process_latest,
         )
+        self.node.create_timer(
+            1.0 / max(args.tf_retry_rate_hz, 1.0),
+            self._retry_pending_exact_tf,
+        )
         self._write_status(
             "waiting_for_sensors",
             resolved_runtime=self.runtime.as_log_dict(),
@@ -336,22 +368,59 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         except ValueError:
             return
 
+    def _retry_pending_exact_tf(self) -> None:
+        """Yield-driven retry for one frozen tuple while TF callbacks advance."""
+
+        if self.tf_retry_scheduler.pending_frame is not None:
+            self._process_latest()
+
     def _lookup(self, target_frame: str, source_frame: str, stamp) -> object:
         query_time = self.Time.from_msg(stamp)
+        query_stamp_sec = (
+            float(stamp.sec) + float(stamp.nanosec) / 1_000_000_000.0
+        )
+        self._active_tf_request = {
+            "target_frame": target_frame,
+            "source_frame": source_frame,
+            "query_kind": "exact_sensor_time",
+            "query_stamp_sec": query_stamp_sec,
+        }
         return self.tf_buffer.lookup_transform(
             target_frame,
             source_frame,
             query_time,
-            timeout=self.Duration(seconds=self.args.tf_timeout_sec),
+            timeout=self.Duration(seconds=0.0),
         )
 
-    def _process_latest(self) -> None:
-        if self.completed or not self.images:
-            return
+    def _lookup_static_transform(
+        self,
+        target_frame: str,
+        source_frame: str,
+    ) -> object:
+        """Read the time-invariant, calibration-checked camera extrinsic."""
+
+        self._active_tf_request = {
+            "target_frame": target_frame,
+            "source_frame": source_frame,
+            "query_kind": "time_invariant_camera_extrinsic",
+            "query_stamp_sec": None,
+        }
+        return self.tf_buffer.lookup_transform(
+            target_frame,
+            source_frame,
+            self.Time(),
+            timeout=self.Duration(seconds=0.0),
+        )
+
+    def _next_sensor_tuple(self) -> _SynchronizedSensorTuple | None:
+        pending = self.tf_retry_scheduler.pending_frame
+        if pending is not None:
+            return pending.frame
+        if not self.images:
+            return None
         image = self.images[-1]
         if image.stamp_sec <= self.last_processed_image_stamp:
-            return
-        self.last_processed_image_stamp = image.stamp_sec
+            return None
         scan = _nearest(
             tuple(self.scans),
             stamp_sec=image.stamp_sec,
@@ -363,6 +432,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             tolerance_sec=self.args.camera_info_tolerance_sec,
         )
         if scan is None or camera_info is None:
+            self.last_processed_image_stamp = image.stamp_sec
             self.consensus.reset()
             self._write_status(
                 "awaiting_synchronized_sensors",
@@ -370,18 +440,114 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 scan_available=scan is not None,
                 camera_info_available=camera_info is not None,
             )
+            return None
+        sensor_tuple = _SynchronizedSensorTuple(
+            image=image,
+            scan=scan,
+            camera_info=camera_info,
+        )
+        accepted = self.tf_retry_scheduler.offer(
+            sensor_tuple,
+            stamp_sec=image.stamp_sec,
+        )
+        if not accepted:
+            raise RuntimeError("new sensor tuple replaced pending TF retry")
+        return sensor_tuple
+
+    def _discard_sensor_tuple(
+        self,
+        sensor_tuple: _SynchronizedSensorTuple,
+        *,
+        reason: str,
+    ) -> None:
+        stamp_sec = sensor_tuple.image.stamp_sec
+        self.tf_retry_scheduler.discard(
+            stamp_sec=stamp_sec,
+            reason=reason,
+        )
+        self.last_processed_image_stamp = stamp_sec
+
+    def _consume_transform_ready_tuple(
+        self,
+        sensor_tuple: _SynchronizedSensorTuple,
+    ) -> None:
+        stamp_sec = sensor_tuple.image.stamp_sec
+        self.tf_retry_scheduler.mark_transform_ready(stamp_sec=stamp_sec)
+        self.tf_retry_scheduler.consume(stamp_sec=stamp_sec)
+        self.last_processed_image_stamp = stamp_sec
+
+    def _defer_for_exact_tf(
+        self,
+        sensor_tuple: _SynchronizedSensorTuple,
+        *,
+        reason: str,
+    ) -> None:
+        observed_sec = time.time()
+        stamp_sec = sensor_tuple.image.stamp_sec
+        evidence = self.tf_retry_scheduler.mark_transform_unavailable(
+            stamp_sec=stamp_sec,
+            observed_sec=observed_sec,
+            reason=reason,
+        )
+        first_failure = evidence.first_failure_time_sec
+        retry_elapsed_sec = (
+            0.0
+            if first_failure is None
+            else max(0.0, observed_sec - first_failure)
+        )
+        retry_exhausted = retry_elapsed_sec >= self.args.tf_timeout_sec
+        state = "tf_pending_exact_time"
+        if retry_exhausted:
+            self._discard_sensor_tuple(
+                sensor_tuple,
+                reason="exact-time TF retry budget exhausted",
+            )
+            state = "tf_retry_exhausted"
+        # Persist the transition and its terminal result, not every 50 Hz
+        # poll.  Repeated fsyncs inside this single-threaded ROS callback would
+        # delay the TF subscription callbacks that the retry is yielding to.
+        if evidence.retry_count == 1 or retry_exhausted:
+            self._write_status(
+                state,
+                reason=reason,
+                transform_request=self._active_tf_request,
+                image_stamp_sec=sensor_tuple.image.stamp_sec,
+                scan_stamp_sec=sensor_tuple.scan.stamp_sec,
+                tf_retry_attempt=asdict(evidence),
+                tf_retry_elapsed_sec=retry_elapsed_sec,
+                tf_retry_timeout_sec=self.args.tf_timeout_sec,
+                retry_exhausted=retry_exhausted,
+            )
+
+    def _process_latest(self) -> None:
+        if self.completed:
             return
+        sensor_tuple = self._next_sensor_tuple()
+        if sensor_tuple is None:
+            return
+        image = sensor_tuple.image
+        scan = sensor_tuple.scan
+        camera_info = sensor_tuple.camera_info
         now_sec = self.node.get_clock().now().nanoseconds / 1_000_000_000.0
         image_age = now_sec - image.stamp_sec
         if (
             image_age < -self.args.max_future_timestamp_sec
             or image_age > self.args.max_sensor_age_sec
         ):
-            self.consensus.reset()
+            had_transient_tf_retry = (
+                self.tf_retry_scheduler.evidence.retry_count > 0
+            )
+            if not had_transient_tf_retry:
+                self.consensus.reset()
+            self._discard_sensor_tuple(
+                sensor_tuple,
+                reason="sensor tuple outside freshness window",
+            )
             self._write_status(
                 "stale_sensor_tuple",
                 image_stamp_sec=image.stamp_sec,
                 image_age_sec=image_age,
+                transient_tf_retry=had_transient_tf_retry,
             )
             return
         info_mismatches = camera_info_mismatches(
@@ -390,6 +556,10 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         )
         if info_mismatches:
             self.consensus.reset()
+            self._discard_sensor_tuple(
+                sensor_tuple,
+                reason="CameraInfo does not match sealed calibration",
+            )
             self._write_status(
                 "camera_info_mismatch",
                 mismatches=list(info_mismatches),
@@ -411,6 +581,10 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             )
         if frame_mismatches:
             self.consensus.reset()
+            self._discard_sensor_tuple(
+                sensor_tuple,
+                reason="sensor frame does not match sealed profile",
+            )
             self._write_status(
                 "sensor_frame_mismatch",
                 mismatches=frame_mismatches,
@@ -437,16 +611,14 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 self.profile.map_frame,
                 scan_message.header.stamp,
             )
-            base_from_camera = self.tf_buffer.lookup_transform(
+            base_from_camera = self._lookup_static_transform(
                 self.profile.base_frame,
                 self.profile.camera_optical_frame,
-                self.Time(),
-                timeout=self.Duration(seconds=self.args.tf_timeout_sec),
             )
         except self.TransformException as exc:
-            self.consensus.reset()
-            self._write_status("tf_unavailable", reason=str(exc))
+            self._defer_for_exact_tf(sensor_tuple, reason=str(exc))
             return
+        self._consume_transform_ready_tuple(sensor_tuple)
         extrinsic_mismatches = transform_mismatches(
             self.calibration.base_to_camera,
             base_from_camera,
@@ -868,6 +1040,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                     },
                 )
                 self.axis_observation_committed = True
+                self.completed = True
             self._write_status(
                 "axis_committed_qr_unresolved",
                 axis_observation=(
@@ -953,18 +1126,27 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         )
 
     def _write_status(self, state: str, **details) -> None:
+        payload = {
+            "schema_version": 2,
+            "observer_version": OBSERVER_VERSION,
+            "state": state,
+            "motion_capability": "none",
+            "observed_unix_sec": time.time(),
+            "stand_axis_profile": asdict(self.stand_axis_profile),
+            "axis_consensus": {
+                "sample_count": self.consensus.sample_count,
+                "required_sample_count": self.consensus.required_samples,
+            },
+            "tf_retry": asdict(self.tf_retry_scheduler.evidence),
+            **details,
+        }
         _atomic_json(
             self.args.status_json,
-            {
-                "schema_version": 1,
-                "observer_version": OBSERVER_VERSION,
-                "state": state,
-                "motion_capability": "none",
-                "observed_unix_sec": time.time(),
-                "stand_axis_profile": asdict(self.stand_axis_profile),
-                **details,
-            },
+            payload,
         )
+        status_events_jsonl = getattr(self.args, "status_events_jsonl", None)
+        if status_events_jsonl is not None:
+            _append_jsonl(status_events_jsonl, payload)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -996,7 +1178,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera-info-tolerance-sec", type=float, default=1.0)
     parser.add_argument("--max-sensor-age-sec", type=float, default=0.5)
     parser.add_argument("--max-future-timestamp-sec", type=float, default=0.05)
-    parser.add_argument("--tf-timeout-sec", type=float, default=0.15)
+    parser.add_argument(
+        "--tf-timeout-sec",
+        type=float,
+        default=0.15,
+        help=(
+            "Maximum accumulated nonblocking retry time for one exact sensor "
+            "tuple; ROS callbacks continue running between polls."
+        ),
+    )
+    parser.add_argument("--tf-retry-rate-hz", type=float, default=50.0)
     parser.add_argument("--process-rate-hz", type=float, default=5.0)
     parser.add_argument("--stationary-translation-m", type=float, default=0.01)
     parser.add_argument("--stationary-rotation-deg", type=float, default=2.0)
@@ -1016,6 +1207,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--canny-low", type=int, default=20)
     parser.add_argument("--canny-high", type=int, default=60)
     parser.add_argument("--status-json", required=True, type=Path)
+    parser.add_argument("--status-events-jsonl", type=Path, default=None)
     parser.add_argument("--recommended-pose-json", required=True, type=Path)
     parser.add_argument("--axis-observation-json", type=Path, default=None)
     parser.add_argument("--debug-dir", type=Path, default=None)
@@ -1035,6 +1227,7 @@ def _validate_args(parser: argparse.ArgumentParser, args) -> None:
         "--camera-info-tolerance-sec": args.camera_info_tolerance_sec,
         "--max-sensor-age-sec": args.max_sensor_age_sec,
         "--tf-timeout-sec": args.tf_timeout_sec,
+        "--tf-retry-rate-hz": args.tf_retry_rate_hz,
         "--process-rate-hz": args.process_rate_hz,
         "--consensus-max-deviation-deg": args.consensus_max_deviation_deg,
         "--max-obliqueness-deg": args.max_obliqueness_deg,
@@ -1075,10 +1268,15 @@ def _validate_args(parser: argparse.ArgumentParser, args) -> None:
     if args.status_json.resolve() == args.recommended_pose_json.resolve():
         parser.error("status and recommendation outputs must be distinct")
     output_paths = [args.status_json.resolve(), args.recommended_pose_json.resolve()]
+    if args.status_events_jsonl is not None:
+        output_paths.append(args.status_events_jsonl.resolve())
     if args.axis_observation_json is not None:
         output_paths.append(args.axis_observation_json.resolve())
     if len(set(output_paths)) != len(output_paths):
-        parser.error("status, recommendation, and axis outputs must be distinct")
+        parser.error(
+            "status, status events, recommendation, and axis outputs must "
+            "be distinct"
+        )
 
 
 def main(argv=None) -> int:
@@ -1096,6 +1294,13 @@ def main(argv=None) -> int:
         while rclpy.ok() and not (args.once and adapter.completed):
             rclpy.spin_once(adapter.node, timeout_sec=0.1)
         return 0 if adapter.completed or not args.once else 2
+    except KeyboardInterrupt:
+        return (
+            0
+            if adapter is not None
+            and (adapter.completed or adapter.axis_observation_committed)
+            else 130
+        )
     except (OSError, RuntimeError, ValueError) as exc:
         parser.exit(2, f"error: {exc}\n")
     finally:

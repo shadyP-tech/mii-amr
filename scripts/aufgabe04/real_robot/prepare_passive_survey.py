@@ -83,6 +83,8 @@ def _observer_command(args, profile, calibration, candidate, identity, output):
         str(args.axis_sample_count),
         "--status-json",
         str(output / "observer_status.json"),
+        "--status-events-jsonl",
+        str(output / "observer_events.jsonl"),
         "--recommended-pose-json",
         str(output / "recommendation.json"),
         "--debug-dir",

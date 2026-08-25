@@ -343,6 +343,8 @@ class PassiveObservationCoreTest(unittest.TestCase):
         default_profile = _stand_axis_profile_from_args(defaults)
         self.assertEqual(defaults.edge_preprocess, "channel-union")
         self.assertEqual(default_profile.edge_preprocess, "channel_union")
+        self.assertEqual(defaults.tf_timeout_sec, 0.15)
+        self.assertEqual(defaults.tf_retry_rate_hz, 50.0)
 
         override = parser.parse_args(
             [
@@ -752,6 +754,7 @@ class PreparePassiveSurveyTest(unittest.TestCase):
         observer = plan["candidate_runs"][0]["observer_command"]
         planner = plan["candidate_runs"][0]["catalog_validation_command"]
         self.assertIn("passive_viewpoint_node.py", observer[1])
+        self.assertIn("--status-events-jsonl", observer)
         self.assertNotIn("cmd_vel", " ".join(observer))
         self.assertNotIn("--allow-sim-time", planner)
         self.assertEqual(planner[planner.index("--environment") + 1], "real")

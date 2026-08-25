@@ -51,6 +51,12 @@ class AxisConsensusAccumulator:
         self._values: deque[float] = deque(maxlen=required_samples)
         self._key: tuple[str, str, object] | None = None
 
+    @property
+    def sample_count(self) -> int:
+        """Number of currently retained, mutually compatible axis samples."""
+
+        return len(self._values)
+
     def add(
         self,
         *,
