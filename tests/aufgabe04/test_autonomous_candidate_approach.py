@@ -16,7 +16,14 @@ sys.path.insert(0, str(ROOT))
 from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import MissionLegKind
 from scripts.aufgabe04.navigation.planning.map_io import load_occupancy_grid_with_bundle
-from scripts.aufgabe04.navigation.foundation.models import GridCell, Pose2D
+from scripts.aufgabe04.navigation.foundation.models import (
+    GridCell,
+    PlanningDiagnostics,
+    Pose2D,
+    Route,
+    RoutePoint,
+)
+from scripts.aufgabe04.navigation.planning.global_planner import PlanRouteResult
 from scripts.aufgabe04.navigation.localization.read_current_amcl_pose import CurrentAmclPose
 from scripts.aufgabe04.navigation.approach.camera_candidate_selection import (
     CameraCandidateRouteOption,
@@ -129,6 +136,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             candidate_transit_radius_m=0.31,
             physical_clearance={
                 "minimum_active_standoff_m": 0.32,
+                "minimum_collision_standoff_m": 0.28,
                 "minimum_candidate_transit_radius_m": 0.31,
                 "minimum_static_inflation_m": 0.25,
             },
@@ -1498,6 +1506,213 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                             output_dir=root / "facing",
                         )
                     )
+
+    def test_facing_validation_rejects_target_inside_active_standoff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate = self._candidate("candidate_1", 0.0, 0.0)
+            config = self._config(root, (candidate,))
+            recommendation = SimpleNamespace(
+                stand_id=candidate.candidate_uid,
+                material_target=SimpleNamespace(
+                    face_id="qr_face",
+                    pose=Pose2D(0.31, 0.0, math.pi),
+                ),
+            )
+
+            with (
+                patch(
+                    "scripts.aufgabe04.real_robot.candidate."
+                    "approach.load_recommendation",
+                    return_value=recommendation,
+                ),
+                patch(
+                    "scripts.aufgabe04.real_robot.candidate."
+                    "approach.load_occupancy_grid_with_bundle"
+                ) as load_map,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "violates the active-stand standoff",
+                ):
+                    validate_facing_pose(
+                        FacingValidationRequest(
+                            config=config,
+                            candidate=candidate,
+                            recommendation_path=root / "recommendation.json",
+                            current_pose=Pose2D(-0.7, 0.0, 0.0),
+                            output_dir=root / "facing",
+                        )
+                    )
+
+            load_map.assert_not_called()
+            self.assertFalse((root / "facing").exists())
+
+    def test_measured_model_facing_target_remains_reachable_at_035_m(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            map_yaml = write_free_map(
+                root,
+                width=80,
+                height=40,
+                resolution=0.05,
+            )
+            _, map_bundle = load_occupancy_grid_with_bundle(
+                map_yaml,
+                semantic_map_id="arena",
+                planning_frame="map",
+            )
+            candidate = self._candidate("candidate_1", 0.0, 0.0)
+            base_config = self._config(root, (candidate,))
+            config = replace(
+                base_config,
+                map_yaml=map_yaml,
+                plan=replace(
+                    base_config.plan,
+                    map_bundle_sha256=map_bundle.bundle_sha256,
+                ),
+                physical_clearance={
+                    "minimum_active_standoff_m": 0.33,
+                    "minimum_collision_standoff_m": 0.285,
+                    "minimum_candidate_transit_radius_m": 0.34,
+                    "minimum_static_inflation_m": 0.25,
+                },
+            )
+            start = Pose2D(-0.70, 0.0, 0.0)
+            target = Pose2D(-0.35, 0.0, 0.0)
+            recommendation = SimpleNamespace(
+                stand_id=candidate.candidate_uid,
+                material_target=SimpleNamespace(
+                    face_id="qr_face",
+                    pose=target,
+                ),
+                face_candidates=(
+                    SimpleNamespace(
+                        face_id="qr_face",
+                        outward_normal_rad=math.pi,
+                    ),
+                ),
+                axis_confidence=0.95,
+                axis_sample_count=7,
+            )
+
+            with patch(
+                "scripts.aufgabe04.real_robot.candidate."
+                "approach.load_recommendation",
+                return_value=recommendation,
+            ):
+                result = validate_facing_pose(
+                    FacingValidationRequest(
+                        config=config,
+                        candidate=candidate,
+                        recommendation_path=root / "recommendation.json",
+                        current_pose=start,
+                        output_dir=root / "facing",
+                    )
+                )
+
+            clearance = result["active_stand_clearance"]
+            self.assertAlmostEqual(clearance["target_center_standoff_m"], 0.35)
+            self.assertEqual(clearance["minimum_active_standoff_m"], 0.33)
+            self.assertEqual(
+                clearance["minimum_collision_standoff_m"],
+                0.285,
+            )
+            self.assertGreaterEqual(
+                clearance["route_centerline_minimum_standoff_m"] + 1.0e-9,
+                0.285,
+            )
+            self.assertTrue(clearance["active_stand_in_planning_costmap"])
+            self.assertTrue(clearance["continuous_centerline_validated"])
+            self.assertTrue(Path(result["validation_route_csv"]).is_file())
+            diagnostics_path = Path(result["validation_diagnostics_json"])
+            diagnostics = json.loads(diagnostics_path.read_text())
+            self.assertEqual(
+                diagnostics["metadata"]["active_stand_clearance"],
+                clearance,
+            )
+
+    def test_facing_validation_rejects_route_crossing_active_stand(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            map_yaml = write_free_map(root)
+            _, map_bundle = load_occupancy_grid_with_bundle(
+                map_yaml,
+                semantic_map_id="arena",
+                planning_frame="map",
+            )
+            candidate = self._candidate("candidate_1", 0.0, 0.0)
+            config = self._config(root, (candidate,))
+            config = replace(
+                config,
+                map_yaml=map_yaml,
+                plan=replace(
+                    config.plan,
+                    map_bundle_sha256=map_bundle.bundle_sha256,
+                ),
+            )
+            start = Pose2D(-0.7, 0.0, 0.0)
+            target = Pose2D(0.40, 0.0, math.pi)
+            route = Route(
+                points=(
+                    RoutePoint(0, GridCell(3, 10), start),
+                    RoutePoint(
+                        1,
+                        GridCell(14, 10),
+                        target,
+                        segment_length_m=1.1,
+                        cumulative_length_m=1.1,
+                    ),
+                ),
+                requested_start=start,
+                requested_goal=target,
+                snapped_start=start,
+                snapped_goal=target,
+                length_m=1.1,
+            )
+            recommendation = SimpleNamespace(
+                stand_id=candidate.candidate_uid,
+                material_target=SimpleNamespace(
+                    face_id="qr_face",
+                    pose=target,
+                ),
+            )
+
+            def return_crossing_route(costmap, *_args, **_kwargs):
+                center_cell = costmap.world_to_grid(Pose2D(0.0, 0.0, 0.0))
+                self.assertFalse(costmap.is_traversable(center_cell))
+                return PlanRouteResult(
+                    route=route,
+                    diagnostics=PlanningDiagnostics(status="ok"),
+                )
+
+            with (
+                patch(
+                    "scripts.aufgabe04.real_robot.candidate."
+                    "approach.load_recommendation",
+                    return_value=recommendation,
+                ),
+                patch(
+                    "scripts.aufgabe04.real_robot.candidate."
+                    "approach.plan_route",
+                    side_effect=return_crossing_route,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "crosses the active-stand collision envelope",
+                ):
+                    validate_facing_pose(
+                        FacingValidationRequest(
+                            config=config,
+                            candidate=candidate,
+                            recommendation_path=root / "recommendation.json",
+                            current_pose=start,
+                            output_dir=root / "facing",
+                        )
+                    )
+
+            self.assertFalse((root / "facing").exists())
 
 
 if __name__ == "__main__":

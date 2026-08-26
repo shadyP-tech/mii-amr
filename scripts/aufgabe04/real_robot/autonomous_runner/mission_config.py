@@ -48,6 +48,7 @@ from scripts.aufgabe04.stations.candidate_snapshot import (
 )
 
 DEFAULT_LIDAR_CLEARANCE_MARGIN_M = 0.02
+DEFAULT_CANDIDATE_LIDAR_ENVELOPE_RADIUS_M = 0.06
 
 def _coverage_completion_policy(
     mode: AutonomousRunMode,
@@ -107,7 +108,7 @@ def _checkpoint_config_sha256(args) -> str:
     )
     return payload_sha256(
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "semantic_map_id": args.semantic_map_id,
             "expected_stand_count": args.expected_stand_count,
             "inspection_stop_spacing_m": args.inspection_stop_spacing_m,
@@ -161,18 +162,61 @@ def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
-def _physical_clearance(profile, *, approach_offset_m: float) -> dict[str, float]:
-    config = DynamicApproachConfig(
-        stand_radius_m=0.06,
-        stand_position_uncertainty_m=0.02,
-        robot_radius_m=profile.robot_radius_m,
-        collision_margin_m=DEFAULT_COLLISION_MARGIN_M,
-        tracking_margin_m=DEFAULT_TRACKING_TUBE_RADIUS_M,
-        standoff_distance_m=approach_offset_m,
-        lidar_stop_distance_m=DEFAULT_LIDAR_STOP_DISTANCE_M,
-        scan_origin_to_base_offset_m=profile.scan_origin_to_base_offset_m,
-        lidar_clearance_margin_m=DEFAULT_LIDAR_CLEARANCE_MARGIN_M,
-        minimum_non_target_keepout_radius_m=0.31,
+def _physical_clearance(
+    profile,
+    *,
+    approach_offset_m: float,
+    stand_model_profile=None,
+) -> dict[str, float | None]:
+    stand_collision_radius_m = DEFAULT_CANDIDATE_LIDAR_ENVELOPE_RADIUS_M
+    stand_base_circumscribed_radius_m = None
+    stand_model_tolerance_m = None
+    if stand_model_profile is not None:
+        navigation_radius = stand_model_profile.navigation_footprint_radius_m
+        if navigation_radius is None:
+            raise ValueError("stand model has no navigation footprint radius")
+        stand_collision_radius_m = navigation_radius
+        stand_base_circumscribed_radius_m = (
+            stand_model_profile.base_circumscribed_radius_m
+        )
+        stand_model_tolerance_m = stand_model_profile.tolerance_m
+    shared = {
+        "stand_position_uncertainty_m": 0.02,
+        "robot_radius_m": profile.robot_radius_m,
+        "collision_margin_m": DEFAULT_COLLISION_MARGIN_M,
+        "tracking_margin_m": DEFAULT_TRACKING_TUBE_RADIUS_M,
+        "standoff_distance_m": approach_offset_m,
+        "lidar_stop_distance_m": DEFAULT_LIDAR_STOP_DISTANCE_M,
+        "scan_origin_to_base_offset_m": profile.scan_origin_to_base_offset_m,
+        "lidar_clearance_margin_m": DEFAULT_LIDAR_CLEARANCE_MARGIN_M,
+        "minimum_non_target_keepout_radius_m": 0.31,
+    }
+    collision_config = DynamicApproachConfig(
+        stand_radius_m=stand_collision_radius_m,
+        **shared,
+    )
+    lidar_config = DynamicApproachConfig(
+        # This radius is the detector's cross-section at LiDAR height.  The
+        # larger floor-level base belongs only in collision clearance.
+        stand_radius_m=DEFAULT_CANDIDATE_LIDAR_ENVELOPE_RADIUS_M,
+        **shared,
+    )
+    minimum_collision_standoff_m = collision_config.stand_keepout_radius_m
+    # Candidate uncertainty shifts both the base collision envelope and the
+    # LiDAR-visible cross-section.  DynamicApproachConfig includes it in the
+    # former; add it exactly once to the latter here.
+    minimum_lidar_standoff_m = (
+        lidar_config.minimum_lidar_standoff_m
+        + float(shared["stand_position_uncertainty_m"])
+    )
+    minimum_active_standoff_m = max(
+        minimum_collision_standoff_m,
+        minimum_lidar_standoff_m,
+    )
+    minimum_candidate_transit_radius_m = max(
+        minimum_active_standoff_m,
+        float(shared["minimum_non_target_keepout_radius_m"])
+        + float(shared["tracking_margin_m"]),
     )
     return {
         "minimum_static_inflation_m": minimum_static_obstacle_inflation_m(
@@ -182,10 +226,16 @@ def _physical_clearance(profile, *, approach_offset_m: float) -> dict[str, float
             scan_origin_to_base_offset_m=profile.scan_origin_to_base_offset_m,
             lidar_clearance_margin_m=DEFAULT_LIDAR_CLEARANCE_MARGIN_M,
         ),
-        "minimum_active_standoff_m": config.minimum_lidar_standoff_m,
+        "minimum_active_standoff_m": minimum_active_standoff_m,
+        "minimum_collision_standoff_m": minimum_collision_standoff_m,
+        "minimum_lidar_standoff_m": minimum_lidar_standoff_m,
         "minimum_candidate_transit_radius_m": (
-            config.non_target_stand_keepout_radius_m
+            minimum_candidate_transit_radius_m
         ),
+        "stand_collision_radius_m": stand_collision_radius_m,
+        "stand_lidar_radius_m": DEFAULT_CANDIDATE_LIDAR_ENVELOPE_RADIUS_M,
+        "stand_base_circumscribed_radius_m": stand_base_circumscribed_radius_m,
+        "stand_model_tolerance_m": stand_model_tolerance_m,
     }
 
 def candidate_snapshot_from_registry(

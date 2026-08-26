@@ -15,9 +15,11 @@ except ImportError:  # pragma: no cover
 
 from scripts.aufgabe04.perception.stand_axis.model_profile import (
     ModelPoint3D,
+    STAND_MODEL_SCHEMA_VERSION,
     StandModelProfile,
     load_measured_physical_stand_model,
     load_stand_model,
+    resolve_head_center_height_m,
     stand_model_from_payload,
     write_stand_model,
 )
@@ -51,22 +53,29 @@ from scripts.aufgabe04.perception.debug.stand_axis_viewer import (
 )
 
 
-def profile_payload(*, status: str = "measured") -> dict[str, object]:
+def profile_payload(
+    *,
+    status: str = "measured",
+    schema_version: int = STAND_MODEL_SCHEMA_VERSION,
+) -> dict[str, object]:
     return {
-        "schema_version": 1,
-        "profile_id": "real_stand_test_v1",
+        "schema_version": schema_version,
+        "profile_id": f"real_stand_test_v{schema_version}",
         "environment": "physical",
         "measurement_status": status,
         "head_width_m": 0.078,
         "head_height_m": 0.078,
-        "head_depth_m": 0.007,
-        "qr_symbol_width_m": 0.060,
-        "qr_symbol_height_m": 0.060,
+        "head_depth_m": 0.006,
+        "qr_symbol_width_m": 0.062,
+        "qr_symbol_height_m": 0.062,
+        "qr_panel_width_m": 0.071,
+        "qr_panel_height_m": 0.071,
         "qr_center_x_m": 0.0,
         "qr_center_y_m": 0.0,
-        "stem_width_m": 0.010,
-        "stem_visible_height_m": 0.080,
-        "tolerance_m": 0.001,
+        "head_top_height_m": 0.210,
+        "base_width_m": 0.153,
+        "base_depth_m": 0.153,
+        "tolerance_m": 0.002,
         "source": "test measurements",
     }
 
@@ -107,10 +116,96 @@ class StandModelProfileTest(unittest.TestCase):
         self.assertEqual(loaded.head_corners[0], ModelPoint3D(-0.039, -0.039, 0.0))
         self.assertEqual(
             loaded.head_back_corners[0],
-            ModelPoint3D(-0.039, -0.039, 0.007),
+            ModelPoint3D(-0.039, -0.039, 0.006),
         )
-        self.assertIn("stem_junction_left", loaded.semantic_landmarks)
+        self.assertAlmostEqual(loaded.head_center_height_m, 0.171)
+        self.assertAlmostEqual(
+            loaded.base_circumscribed_radius_m,
+            math.hypot(0.153, 0.153) / 2.0,
+        )
+        self.assertAlmostEqual(
+            loaded.navigation_footprint_radius_m,
+            math.hypot(0.153, 0.153) / 2.0 + 0.002,
+        )
+        self.assertEqual(loaded.qr_panel_width_m, 0.071)
+        self.assertEqual(loaded.qr_panel_height_m, 0.071)
+        self.assertNotIn("stem_junction_left", loaded.semantic_landmarks)
         self.assertIn("head_back_top_left", loaded.semantic_landmarks)
+
+    def test_checked_in_legacy_v1_provisional_profile_remains_readable(self):
+        repository_root = Path(__file__).resolve().parents[2]
+        profile = load_stand_model(
+            repository_root
+            / "configs/aufgabe04/stand_models/physical_stand_assumptions_v1.json"
+        )
+
+        self.assertEqual(profile.schema_version, 1)
+        self.assertEqual(profile.measurement_status, "provisional")
+        self.assertIsNone(profile.head_center_height_m)
+        self.assertIsNone(profile.base_circumscribed_radius_m)
+        self.assertIsNone(profile.qr_panel_width_m)
+        self.assertIn("stem_junction_left", profile.semantic_landmarks)
+
+    def test_checked_in_measured_v2_profile_is_operational(self):
+        repository_root = Path(__file__).resolve().parents[2]
+        profile = load_measured_physical_stand_model(
+            repository_root
+            / "configs/aufgabe04/stand_models/physical_stand_measured_20260826_v2.json"
+        )
+
+        self.assertEqual(profile.schema_version, STAND_MODEL_SCHEMA_VERSION)
+        self.assertEqual(
+            profile.sha256,
+            "56fe19dcbfc8aa58682ea460e702a499c65cc719423940e6a892ca581e6d0b5f",
+        )
+        self.assertEqual(profile.qr_symbol_width_m, 0.062)
+        self.assertEqual(profile.qr_panel_width_m, 0.071)
+        self.assertAlmostEqual(profile.head_center_height_m, 0.171)
+
+    def test_v2_requires_complete_geometry(self):
+        payload = profile_payload()
+        del payload["qr_panel_width_m"]
+
+        with self.assertRaisesRegex(ValueError, "complete geometry"):
+            stand_model_from_payload(payload)
+
+    def test_head_center_height_defaults_to_exact_model_derivation(self):
+        profile = stand_model_from_payload(profile_payload())
+
+        self.assertAlmostEqual(resolve_head_center_height_m(profile, None), 0.171)
+        self.assertEqual(
+            resolve_head_center_height_m(profile, 0.172),
+            profile.head_center_height_m,
+        )
+        self.assertEqual(
+            resolve_head_center_height_m(profile, 0.173),
+            profile.head_center_height_m,
+        )
+
+    def test_head_center_height_rejects_invalid_or_mismatched_override(self):
+        profile = stand_model_from_payload(profile_payload())
+
+        for requested in (True, float("nan"), float("inf"), 0.0, -0.1):
+            with self.subTest(requested=requested):
+                with self.assertRaises(ValueError):
+                    resolve_head_center_height_m(profile, requested)
+        with self.assertRaisesRegex(ValueError, "more than tolerance"):
+            resolve_head_center_height_m(profile, 0.174)
+
+    def test_head_center_height_requires_complete_model_geometry(self):
+        payload = profile_payload(status="provisional", schema_version=1)
+        for field in (
+            "head_top_height_m",
+            "base_width_m",
+            "base_depth_m",
+            "qr_panel_width_m",
+            "qr_panel_height_m",
+        ):
+            del payload[field]
+        profile = stand_model_from_payload(payload)
+
+        with self.assertRaisesRegex(ValueError, "head_top_height_m"):
+            resolve_head_center_height_m(profile, None)
 
     def test_profile_rejects_qr_outside_head(self):
         payload = profile_payload()
@@ -148,6 +243,23 @@ class StandModelProfileTest(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "environment=physical"):
                 load_measured_physical_stand_model(simulation_path)
+
+            legacy_payload = profile_payload(schema_version=1)
+            for field in (
+                "head_top_height_m",
+                "base_width_m",
+                "base_depth_m",
+                "qr_panel_width_m",
+                "qr_panel_height_m",
+            ):
+                del legacy_payload[field]
+            legacy_path = root / "legacy.json"
+            write_stand_model(
+                legacy_path,
+                stand_model_from_payload(legacy_payload),
+            )
+            with self.assertRaisesRegex(ValueError, "schema_version=2"):
+                load_measured_physical_stand_model(legacy_path)
 
 
 @unittest.skipIf(cv2 is None or numpy is None, "OpenCV and numpy are required")
@@ -327,7 +439,7 @@ class StandMetricGeometryTest(unittest.TestCase):
         self.assertFalse(refined.accepted)
         self.assertIsNone(refined.corners)
 
-    def test_projected_depth_and_stem_landmarks_render_as_diagnostics(self):
+    def test_projected_depth_landmarks_render_as_diagnostics(self):
         projected = project_stand_model(
             cv2, self.profile, oblique_pose(), self.camera
         )
@@ -396,7 +508,7 @@ class StandMetricGeometryTest(unittest.TestCase):
         self.assertIsNotNone(measured_debug.model_corridor_half_width_px)
         self.assertEqual(measured_debug.model_pose_fit_source, "joint_qr_head")
         self.assertIn("head_back_top_left", measured_debug.projected_landmarks)
-        self.assertIn("stem_bottom_left", measured_debug.projected_landmarks)
+        self.assertNotIn("stem_bottom_left", measured_debug.projected_landmarks)
 
     def test_model_pipeline_recovers_oblique_current_frame_axis(self):
         pose = oblique_pose()

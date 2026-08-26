@@ -49,6 +49,7 @@ from scripts.aufgabe04.perception.stand_axis.real_camera_profile import (
 )
 from scripts.aufgabe04.perception.stand_axis.model_profile import (
     load_measured_physical_stand_model,
+    resolve_head_center_height_m,
 )
 from scripts.aufgabe04.perception.stand_axis.model_pipeline import (
     estimate_stand_axis_from_metric_model,
@@ -267,6 +268,10 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self.stand_axis_profile = _stand_axis_profile_from_args(args)
         self.stand_model_profile = load_measured_physical_stand_model(
             args.stand_model_profile
+        )
+        self.stand_head_center_height_m = resolve_head_center_height_m(
+            self.stand_model_profile,
+            args.stand_head_center_height_m,
         )
         self.model_pose_tracker = MetricPoseTracker(prediction_ttl_sec=0.25)
         self.profile = load_real_robot_profile(args.robot_profile)
@@ -745,7 +750,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 (
                     self.args.stand_x,
                     self.args.stand_y,
-                    self.args.stand_head_center_height_m,
+                    self.stand_head_center_height_m,
                 ),
                 translation_xyz=camera_translation,
                 rotation_xyzw=camera_rotation,
@@ -1424,7 +1429,15 @@ def build_parser() -> argparse.ArgumentParser:
             "observer has no legacy image-detector fallback."
         ),
     )
-    parser.add_argument("--stand-head-center-height-m", type=float, default=0.165)
+    parser.add_argument(
+        "--stand-head-center-height-m",
+        type=float,
+        default=None,
+        help=(
+            "Optional consistency assertion. Operational projection always "
+            "uses the head centre derived from --stand-model-profile."
+        ),
+    )
     parser.add_argument("--target-distance-m", type=float, default=0.33)
     parser.add_argument("--head-roi-padding-scale", type=float, default=1.8)
     parser.add_argument("--min-head-size-px", type=float, default=18.0)
@@ -1485,6 +1498,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _validate_args(parser: argparse.ArgumentParser, args) -> None:
+    try:
+        stand_model = load_measured_physical_stand_model(
+            args.stand_model_profile
+        )
+        args.stand_head_center_height_m = resolve_head_center_height_m(
+            stand_model,
+            args.stand_head_center_height_m,
+        )
+    except (OSError, ValueError) as exc:
+        parser.error(f"invalid stand model profile: {exc}")
     positive = {
         "--stand-radius-m": args.stand_radius_m,
         "--stand-head-center-height-m": args.stand_head_center_height_m,
@@ -1527,10 +1550,6 @@ def _validate_args(parser: argparse.ArgumentParser, args) -> None:
         _stand_axis_profile_from_args(args)
     except ValueError as exc:
         parser.error(str(exc))
-    try:
-        load_measured_physical_stand_model(args.stand_model_profile)
-    except (OSError, ValueError) as exc:
-        parser.error(f"invalid stand model profile: {exc}")
     if args.status_json.resolve() == args.recommended_pose_json.resolve():
         parser.error("status and recommendation outputs must be distinct")
     output_paths = [args.status_json.resolve(), args.recommended_pose_json.resolve()]

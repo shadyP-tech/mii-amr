@@ -403,20 +403,23 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             fixture_paths["stand_model.json"],
             stand_model_from_payload(
                 {
-                    "schema_version": 1,
-                    "profile_id": "physical_test_v1",
+                    "schema_version": 2,
+                    "profile_id": "physical_test_v2",
                     "environment": "physical",
                     "measurement_status": "measured",
                     "head_width_m": 0.078,
                     "head_height_m": 0.078,
-                    "head_depth_m": 0.007,
-                    "qr_symbol_width_m": 0.060,
-                    "qr_symbol_height_m": 0.060,
+                    "head_depth_m": 0.006,
+                    "qr_symbol_width_m": 0.062,
+                    "qr_symbol_height_m": 0.062,
+                    "qr_panel_width_m": 0.071,
+                    "qr_panel_height_m": 0.071,
                     "qr_center_x_m": 0.0,
                     "qr_center_y_m": 0.0,
-                    "stem_width_m": 0.010,
-                    "stem_visible_height_m": 0.080,
-                    "tolerance_m": 0.001,
+                    "head_top_height_m": 0.210,
+                    "base_width_m": 0.153,
+                    "base_depth_m": 0.153,
+                    "tolerance_m": 0.002,
                     "source": "direct test metrology",
                 }
             ),
@@ -1467,10 +1470,62 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 snapshot_id="autonomous_snapshot",
             )
             self.assertEqual(snapshot.candidate_uids, (candidate.candidate_uid,))
+            self.assertAlmostEqual(
+                snapshot.candidates[0].geometry.radius_m,
+                candidate.radius_m,
+            )
             self.assertEqual(
                 snapshot.candidates[0].source.observation_ids,
                 candidate.source_observation_ids,
             )
+
+    def test_physical_clearance_uses_measured_stand_base_radius(self):
+        stand_model = stand_model_from_payload(
+            {
+                "schema_version": 2,
+                "profile_id": "measured_test_stand_v2",
+                "environment": "physical",
+                "measurement_status": "measured",
+                "head_width_m": 0.078,
+                "head_height_m": 0.078,
+                "head_depth_m": 0.006,
+                "qr_symbol_width_m": 0.062,
+                "qr_symbol_height_m": 0.062,
+                "qr_panel_width_m": 0.071,
+                "qr_panel_height_m": 0.071,
+                "qr_center_x_m": 0.0,
+                "qr_center_y_m": 0.0,
+                "head_top_height_m": 0.210,
+                "base_width_m": 0.153,
+                "base_depth_m": 0.153,
+                "tolerance_m": 0.002,
+                "source": "test metrology",
+            }
+        )
+        profile = SimpleNamespace(
+            robot_radius_m=0.105,
+            scan_origin_to_base_offset_m=0.0,
+        )
+
+        clearance = autonomous_wrapper._physical_clearance(
+            profile,
+            approach_offset_m=0.70,
+            stand_model_profile=stand_model,
+        )
+
+        expected_radius = math.hypot(0.153, 0.153) / 2.0 + 0.002
+        self.assertAlmostEqual(
+            clearance["stand_collision_radius_m"],
+            expected_radius,
+        )
+        self.assertAlmostEqual(clearance["stand_lidar_radius_m"], 0.06)
+        self.assertAlmostEqual(clearance["minimum_lidar_standoff_m"], 0.33)
+        self.assertAlmostEqual(
+            clearance["minimum_collision_standoff_m"],
+            expected_radius + 0.02 + 0.105 + 0.02 + 0.03,
+        )
+        self.assertAlmostEqual(clearance["minimum_active_standoff_m"], 0.33)
+        self.assertLess(clearance["minimum_active_standoff_m"], 0.35)
 
     def test_candidate_phase_uses_public_fresh_amcl_pose2d_reader(self):
         profile = SimpleNamespace(

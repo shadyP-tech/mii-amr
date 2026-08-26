@@ -165,11 +165,26 @@ unique QR identity, clearance, or A* reachability cannot be established.
 Both `execute-exact-two-camera` and `execute-full` require
 `--stand-model-profile <measured_physical_stand_model.json>`. The profile must
 be content-hashed, declare `environment=physical`, and declare
-`measurement_status=measured`. Missing, provisional, or simulation geometry is
-rejected before the session directory, planning, typed `RUN`, or any coverage
-motion. The checked-in `physical_stand_assumptions_v1.json` is provisional and
-therefore cannot be used for an operational run; create a new profile from
-direct metrology instead of relabelling assumptions as measurements.
+`measurement_status=measured`, and use the complete schema-v2 geometry.
+Missing, legacy-v1, provisional, or simulation geometry is rejected before the
+session directory, planning, typed `RUN`, or any coverage motion. The checked-in
+operational profile is
+`configs/aufgabe04/stand_models/physical_stand_measured_20260826_v2.json`.
+It records the 78 mm square by 6 mm deep head, 210 mm floor-to-head-top
+(171 mm derived head centre), 153 mm square maximum base footprint, 71 mm
+paper panel, and a 62 mm photo-rectified QR symbol boundary with 2 mm model
+tolerance. The older `physical_stand_assumptions_v1.json` remains diagnostic
+and cannot authorize a real run.
+
+The base and LiDAR geometries are deliberately separate. The base contributes
+a conservative floor-level collision radius of about `0.110187 m`; the
+coverage/observer candidate radius remains the established `0.06 m` LiDAR
+envelope. Replacing the latter with the base radius would widen target
+association and break frozen-candidate binding. Candidate uncertainty is
+charged once to both clearance paths. With the current TurtleBot profile and
+runtime margins, the model-derived active minimum is `0.33 m`; the existing
+`0.35 m` final-facing offset remains admissible and is the minimum reviewed
+operational value for this profile.
 
 The entrypoint is only the live-edge adapter. Coverage route reconstruction is
 isolated in `coverage_leg/replanning.py`; the bounded per-leg state
@@ -576,7 +591,8 @@ python3 scripts/aufgabe04/real_robot/entrypoints/run_autonomous_stand_exploratio
   --map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
   --semantic-map-id arena_1p898x3p9_auto \
   --expected-stand-count 5 \
-  --stand-model-profile results/aufgabe04/real/profiles/<measured_physical_stand>.json \
+  --stand-model-profile configs/aufgabe04/stand_models/physical_stand_measured_20260826_v2.json \
+  --final-facing-offset-m 0.35 \
   --run-mode execute-full \
   --localization-branch-proof-id <known_start_or_asymmetric_landmark_id> \
   --session-id stand_explore_full_001
@@ -599,7 +615,7 @@ identity registry from the successful sealed workflow:
 python3 scripts/aufgabe04/real_robot/entrypoints/prepare_passive_survey.py \
   --robot-profile results/aufgabe04/real/profiles/robot1_unloaded_20260727.json \
   --camera-calibration results/aufgabe04/real/profiles/robot1_camera_20260727.json \
-  --stand-model-profile results/aufgabe04/real/profiles/measured_physical_stand.json \
+  --stand-model-profile configs/aufgabe04/stand_models/physical_stand_measured_20260826_v2.json \
   --physical-site docs/setups/aufgabe04_lab_v1.json \
   --map maps/aufgabe03/<real_map>.yaml \
   --semantic-map-id <real_map_id> \
@@ -619,6 +635,11 @@ The command prints the immutable plan path. For each `candidate_runs` entry:
 3. Inspect `observer_status.json` and the debug images.
 4. Run its `catalog_validation_command` only after the expected QR ID and
    consensus evidence were committed.
+
+The passive survey's `0.33 m` target is observation-only and has no motion
+authority. It must not be promoted directly to a robot route; any later motion
+must pass the autonomous model-derived active-stand clearance and facing-route
+validation against fresh localization and map evidence.
 
 The observer creates no ROS publisher. It rejects simulated time, stale or
 unsynchronized sensors, changed `CameraInfo`, changed camera extrinsics,

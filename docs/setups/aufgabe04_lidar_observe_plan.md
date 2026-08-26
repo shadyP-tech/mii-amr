@@ -87,8 +87,11 @@ Use the separate `execute-exact-two-camera` mode when the intended workflow is
 two LiDAR stops followed by camera validation of all expected candidates. It
 requires exactly two inspection points and exactly the physical-site stand
 count, plus a content-hashed stand model with `environment=physical` and
-`measurement_status=measured`. Missing or provisional geometry fails before
-coverage motion. It writes a content-hashed handoff that binds the terminal coverage
+`measurement_status=measured`. Operational runs require complete schema-v2
+geometry; use
+`configs/aufgabe04/stand_models/physical_stand_measured_20260826_v2.json` for
+the measured 2026-08-26 stands. Missing, legacy-v1, or provisional geometry
+fails before coverage motion. It writes a content-hashed handoff that binds the terminal coverage
 checkpoint, LiDAR admission, live registry, and frozen candidate snapshot.
 Multi-view `pending_camera` candidates and eligible single-view `provisional`
 candidates remain distinct in that evidence; a provisional candidate can be

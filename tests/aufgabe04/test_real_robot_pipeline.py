@@ -161,20 +161,23 @@ def write_test_stand_model(
         path,
         stand_model_from_payload(
             {
-                "schema_version": 1,
-                "profile_id": f"{environment}_test_v1",
+                "schema_version": 2,
+                "profile_id": f"{environment}_test_v2",
                 "environment": environment,
                 "measurement_status": measurement_status,
                 "head_width_m": 0.078,
                 "head_height_m": 0.078,
-                "head_depth_m": 0.007,
-                "qr_symbol_width_m": 0.060,
-                "qr_symbol_height_m": 0.060,
+                "head_depth_m": 0.006,
+                "qr_symbol_width_m": 0.062,
+                "qr_symbol_height_m": 0.062,
+                "qr_panel_width_m": 0.071,
+                "qr_panel_height_m": 0.071,
                 "qr_center_x_m": 0.0,
                 "qr_center_y_m": 0.0,
-                "stem_width_m": 0.010,
-                "stem_visible_height_m": 0.080,
-                "tolerance_m": 0.001,
+                "head_top_height_m": 0.210,
+                "base_width_m": 0.153,
+                "base_depth_m": 0.153,
+                "tolerance_m": 0.002,
                 "source": "direct test metrology",
             }
         ),
@@ -344,6 +347,7 @@ class PassiveObservationCoreTest(unittest.TestCase):
             self.assertEqual(default_profile.edge_preprocess, "channel_union")
             self.assertEqual(defaults.tf_timeout_sec, 0.15)
             self.assertEqual(defaults.tf_retry_rate_hz, 50.0)
+            self.assertAlmostEqual(defaults.stand_head_center_height_m, 0.171)
 
             override = parser.parse_args(
                 [
@@ -351,6 +355,7 @@ class PassiveObservationCoreTest(unittest.TestCase):
                     "--edge-preprocess", "gray",
                     "--canny-low", "12",
                     "--canny-high", "44",
+                    "--stand-head-center-height-m", "0.172",
                 ]
             )
             _validate_args(parser, override)
@@ -358,6 +363,16 @@ class PassiveObservationCoreTest(unittest.TestCase):
             self.assertEqual(override_profile.edge_preprocess, "gray")
             self.assertEqual(override_profile.canny_low, 12)
             self.assertEqual(override_profile.canny_high, 44)
+            self.assertAlmostEqual(override.stand_head_center_height_m, 0.171)
+
+            stale_height = parser.parse_args(
+                [
+                    *self.parser_args(model_path),
+                    "--stand-head-center-height-m", "0.165",
+                ]
+            )
+            with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+                _validate_args(parser, stale_height)
 
             with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
                 parser.parse_args(
@@ -786,11 +801,19 @@ class PreparePassiveSurveyTest(unittest.TestCase):
             survey_config["stand_model_profile_sha256"],
             stand_model_sha256,
         )
+        self.assertAlmostEqual(
+            survey_config["stand_head_center_height_m"],
+            0.171,
+        )
         observer = plan["candidate_runs"][0]["observer_command"]
         planner = plan["candidate_runs"][0]["catalog_validation_command"]
         self.assertIn("passive_viewpoint_node.py", observer[1])
         self.assertIn("--status-events-jsonl", observer)
         self.assertIn("--stand-model-profile", observer)
+        self.assertAlmostEqual(
+            float(observer[observer.index("--stand-head-center-height-m") + 1]),
+            0.171,
+        )
         self.assertNotIn("--stand-face-size-m", observer)
         self.assertNotIn("cmd_vel", " ".join(observer))
         self.assertNotIn("--allow-sim-time", planner)

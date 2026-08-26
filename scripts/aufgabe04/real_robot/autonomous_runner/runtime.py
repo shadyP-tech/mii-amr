@@ -1204,7 +1204,12 @@ def _capture_camera_recommendation(
         raise RuntimeError(
             "camera exploration requires a measured physical stand model"
         )
-    load_measured_physical_stand_model(args.stand_model_profile)
+    stand_model = load_measured_physical_stand_model(args.stand_model_profile)
+    stand_head_center_height_m = stand_model.head_center_height_m
+    if stand_head_center_height_m is None:
+        raise RuntimeError(
+            "camera exploration requires complete measured stand geometry"
+        )
     output_dir.mkdir(parents=True, exist_ok=False)
     status_path = output_dir / "observer_status.json"
     status_events_path = output_dir / "observer_events.jsonl"
@@ -1232,6 +1237,8 @@ def _capture_camera_recommendation(
         str(candidate.geometry.radius_m),
         "--stand-uncertainty-m",
         str(candidate.geometry.uncertainty_m),
+        "--stand-head-center-height-m",
+        str(stand_head_center_height_m),
         "--target-distance-m",
         str(args.final_facing_offset_m),
         "--consensus-frames",
@@ -1673,10 +1680,16 @@ def main(argv=None) -> int:
         args.physical_site = site_contract.physical_site_path
         args.map = site_contract.map_yaml_path
         _validate_inputs(parser, args, profile, calibration)
+        stand_model = (
+            None
+            if args.stand_model_profile is None
+            else load_measured_physical_stand_model(args.stand_model_profile)
+        )
         runtime = profile.resolved_runtime()
         clearance = _physical_clearance(
             profile,
             approach_offset_m=args.candidate_approach_offset_m,
+            stand_model_profile=stand_model,
         )
         if (
             args.candidate_approach_offset_m + 1.0e-9

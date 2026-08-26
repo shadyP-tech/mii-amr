@@ -25,6 +25,7 @@ from scripts.aufgabe04.artifacts.content_store import (
 from scripts.aufgabe04.navigation.planning.map_io import freeze_map_bundle
 from scripts.aufgabe04.perception.stand_axis.model_profile import (
     load_measured_physical_stand_model,
+    resolve_head_center_height_m,
 )
 from scripts.aufgabe04.real_robot.configuration.profile import (
     camera_calibration_sha256,
@@ -211,7 +212,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--survey-manifest", required=True, type=Path)
     parser.add_argument("--axis-sample-count", type=int, default=7)
     parser.add_argument("--target-distance-m", type=float, default=0.33)
-    parser.add_argument("--stand-head-center-height-m", type=float, default=0.165)
+    parser.add_argument(
+        "--stand-head-center-height-m",
+        type=float,
+        default=None,
+        help=(
+            "Optional consistency assertion; the measured stand profile is "
+            "the authoritative source."
+        ),
+    )
     parser.add_argument("--lidar-stop-distance-m", type=float, default=0.18)
     parser.add_argument("--lidar-clearance-margin-m", type=float, default=0.02)
     return parser
@@ -224,7 +233,6 @@ def main(argv=None) -> int:
         parser.error("--axis-sample-count must be at least seven")
     for name in (
         "target_distance_m",
-        "stand_head_center_height_m",
         "lidar_stop_distance_m",
         "lidar_clearance_margin_m",
     ):
@@ -235,6 +243,10 @@ def main(argv=None) -> int:
         calibration = load_camera_calibration(args.camera_calibration)
         stand_model = load_measured_physical_stand_model(
             args.stand_model_profile
+        )
+        args.stand_head_center_height_m = resolve_head_center_height_m(
+            stand_model,
+            args.stand_head_center_height_m,
         )
         calibration_sha256 = camera_calibration_sha256(calibration)
         if calibration_sha256 != profile.calibration_profile_sha256:

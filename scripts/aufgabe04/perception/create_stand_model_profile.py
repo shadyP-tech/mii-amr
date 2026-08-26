@@ -7,6 +7,7 @@ import argparse
 from pathlib import Path
 
 from scripts.aufgabe04.perception.stand_axis.model_profile import (
+    STAND_MODEL_SCHEMA_VERSION,
     stand_model_from_payload,
     write_stand_model,
 )
@@ -27,10 +28,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--head-depth-m", required=True, type=float)
     parser.add_argument("--qr-symbol-width-m", required=True, type=float)
     parser.add_argument("--qr-symbol-height-m", required=True, type=float)
+    parser.add_argument("--qr-panel-width-m", required=True, type=float)
+    parser.add_argument("--qr-panel-height-m", required=True, type=float)
     parser.add_argument("--qr-center-x-m", type=float, default=0.0)
     parser.add_argument("--qr-center-y-m", type=float, default=0.0)
     parser.add_argument("--stem-width-m", type=float)
     parser.add_argument("--stem-visible-height-m", type=float)
+    parser.add_argument("--head-top-height-m", required=True, type=float)
+    parser.add_argument("--base-width-m", required=True, type=float)
+    parser.add_argument("--base-depth-m", required=True, type=float)
     parser.add_argument("--tolerance-m", required=True, type=float)
     parser.add_argument("--source", required=True)
     return parser
@@ -38,25 +44,31 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    profile = stand_model_from_payload(
-        {
-            "schema_version": 1,
-            "profile_id": args.profile_id,
-            "environment": args.environment,
-            "measurement_status": args.measurement_status,
-            "head_width_m": args.head_width_m,
-            "head_height_m": args.head_height_m,
-            "head_depth_m": args.head_depth_m,
-            "qr_symbol_width_m": args.qr_symbol_width_m,
-            "qr_symbol_height_m": args.qr_symbol_height_m,
-            "qr_center_x_m": args.qr_center_x_m,
-            "qr_center_y_m": args.qr_center_y_m,
-            "stem_width_m": args.stem_width_m,
-            "stem_visible_height_m": args.stem_visible_height_m,
-            "tolerance_m": args.tolerance_m,
-            "source": args.source,
-        }
-    )
+    payload = {
+        "schema_version": STAND_MODEL_SCHEMA_VERSION,
+        "profile_id": args.profile_id,
+        "environment": args.environment,
+        "measurement_status": args.measurement_status,
+        "head_width_m": args.head_width_m,
+        "head_height_m": args.head_height_m,
+        "head_depth_m": args.head_depth_m,
+        "qr_symbol_width_m": args.qr_symbol_width_m,
+        "qr_symbol_height_m": args.qr_symbol_height_m,
+        "qr_panel_width_m": args.qr_panel_width_m,
+        "qr_panel_height_m": args.qr_panel_height_m,
+        "qr_center_x_m": args.qr_center_x_m,
+        "qr_center_y_m": args.qr_center_y_m,
+        "head_top_height_m": args.head_top_height_m,
+        "base_width_m": args.base_width_m,
+        "base_depth_m": args.base_depth_m,
+        "tolerance_m": args.tolerance_m,
+        "source": args.source,
+    }
+    if args.stem_width_m is not None:
+        payload["stem_width_m"] = args.stem_width_m
+    if args.stem_visible_height_m is not None:
+        payload["stem_visible_height_m"] = args.stem_visible_height_m
+    profile = stand_model_from_payload(payload)
     digest = write_stand_model(args.output, profile)
     print(f"wrote immutable stand model: {args.output} sha256={digest}")
     return 0

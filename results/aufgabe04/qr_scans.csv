@@ -1,1 +1,1 @@
-timestamp,run_id,robot_id,raw_text,station_ids,status,reason,artifact_path
+timestamp,run_id,robot_id,raw_text,qr_id,resolved_station_id,source,confidence,status,reason

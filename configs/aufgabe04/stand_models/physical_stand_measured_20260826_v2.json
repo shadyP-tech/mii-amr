@@ -1,0 +1,21 @@
+{
+  "base_depth_m": 0.153,
+  "base_width_m": 0.153,
+  "environment": "physical",
+  "head_depth_m": 0.006,
+  "head_height_m": 0.078,
+  "head_top_height_m": 0.21,
+  "head_width_m": 0.078,
+  "measurement_status": "measured",
+  "profile_id": "physical_stand_measured_20260826_v2",
+  "qr_center_x_m": 0.0,
+  "qr_center_y_m": 0.0,
+  "qr_panel_height_m": 0.071,
+  "qr_panel_width_m": 0.071,
+  "qr_symbol_height_m": 0.062,
+  "qr_symbol_width_m": 0.062,
+  "schema_version": 2,
+  "source": "Direct physical metrology supplied 2026-08-26: head frame 0.078 m x 0.078 m x 0.006 m, floor-to-head-top 0.210 m, foundation base 0.153 m x 0.153 m, and centered QR paper panel 0.071 m x 0.071 m. QR symbol boundary 0.062 m x 0.062 m estimated by perspective rectification of IMG_1268.JPG (SHA-256 cee6b4541d17954eaba9b5b5635258f688c07bcae12bea6e949cbb797cbe1821) against the measured 0.078 m head. Tolerance 0.002 m covers manual ruler placement and image-derived symbol-boundary uncertainty.",
+  "stand_model_sha256": "56fe19dcbfc8aa58682ea460e702a499c65cc719423940e6a892ca581e6d0b5f",
+  "tolerance_m": 0.002
+}

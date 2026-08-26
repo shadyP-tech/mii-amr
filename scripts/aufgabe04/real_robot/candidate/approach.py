@@ -46,8 +46,11 @@ from scripts.aufgabe04.navigation.approach.exact_two_camera_admission import (
 )
 from scripts.aufgabe04.navigation.planning.global_planner import plan_route
 from scripts.aufgabe04.navigation.planning.map_io import load_occupancy_grid_with_bundle
+from scripts.aufgabe04.navigation.execution.execution_route_certificate import (
+    point_to_segment_distance_m,
+)
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import MissionLegKind
-from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.foundation.models import Pose2D, Route
 from scripts.aufgabe04.navigation.approach.record_stand_candidate_decision import (
     main as record_stand_candidate_decision,
 )
@@ -486,6 +489,39 @@ def is_approach_feasibility_failure(exc: ValueError) -> bool:
     )
 
 
+def _required_positive_clearance(
+    physical_clearance: Mapping[str, float],
+    field: str,
+) -> float:
+    value = physical_clearance.get(field)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"physical_clearance.{field} must be numeric")
+    result = float(value)
+    if not math.isfinite(result) or result <= 0.0:
+        raise ValueError(
+            f"physical_clearance.{field} must be finite and positive"
+        )
+    return result
+
+
+def _continuous_route_clearance_m(
+    route: Route,
+    *,
+    start: Pose2D,
+    goal: Pose2D,
+    center: Pose2D,
+) -> float:
+    """Measure exact center-to-polyline clearance, including snap connectors."""
+
+    poses = (start, *(point.pose for point in route.points), goal)
+    if len(poses) < 2:
+        return math.hypot(start.x_m - center.x_m, start.y_m - center.y_m)
+    return min(
+        point_to_segment_distance_m(center, segment_start, segment_end)
+        for segment_start, segment_end in zip(poses, poses[1:])
+    )
+
+
 def validate_facing_pose(request: FacingValidationRequest) -> dict[str, object]:
     config = request.config
     candidate = request.candidate
@@ -502,6 +538,29 @@ def validate_facing_pose(request: FacingValidationRequest) -> dict[str, object]:
             f"got {recommendation.stand_id!r}"
         )
     target = recommendation.material_target.pose
+    minimum_active_standoff_m = _required_positive_clearance(
+        config.physical_clearance,
+        "minimum_active_standoff_m",
+    )
+    minimum_collision_standoff_m = _required_positive_clearance(
+        config.physical_clearance,
+        "minimum_collision_standoff_m",
+    )
+    if minimum_active_standoff_m + 1.0e-9 < minimum_collision_standoff_m:
+        raise ValueError(
+            "physical_clearance.minimum_active_standoff_m must not be below "
+            "minimum_collision_standoff_m"
+        )
+    target_center_standoff_m = math.hypot(
+        target.x_m - candidate.geometry.x_m,
+        target.y_m - candidate.geometry.y_m,
+    )
+    if target_center_standoff_m + 1.0e-9 < minimum_active_standoff_m:
+        raise ValueError(
+            "computed QR-facing pose violates the active-stand standoff: "
+            f"target={target_center_standoff_m:.3f} m, "
+            f"minimum={minimum_active_standoff_m:.3f} m"
+        )
     grid, map_bundle = load_occupancy_grid_with_bundle(
         config.map_yaml,
         semantic_map_id=config.semantic_map_id,
@@ -514,6 +573,12 @@ def validate_facing_pose(request: FacingValidationRequest) -> dict[str, object]:
         .with_arena_bounds(config.plan.arena_bounds)
         .with_inflation(config.inflation_radius_m)
     )
+    active_keepout = Station(
+        candidate.candidate_uid,
+        StationPose(candidate.geometry.x_m, candidate.geometry.y_m, 0.0),
+        0.0,
+        minimum_collision_standoff_m,
+    )
     other_keepouts = tuple(
         Station(
             item.candidate_uid,
@@ -524,8 +589,7 @@ def validate_facing_pose(request: FacingValidationRequest) -> dict[str, object]:
         for item in config.snapshot.candidates
         if item.candidate_uid != candidate.candidate_uid
     )
-    if other_keepouts:
-        costmap = costmap.with_station_keepouts(other_keepouts)
+    costmap = costmap.with_station_keepouts((active_keepout, *other_keepouts))
     route = plan_route(
         costmap,
         request.current_pose,
@@ -535,6 +599,37 @@ def validate_facing_pose(request: FacingValidationRequest) -> dict[str, object]:
     if route.route is None or route.failure is not None:
         reason = route.failure.reason if route.failure is not None else "no route"
         raise ValueError(f"computed QR-facing pose is not A*-reachable: {reason}")
+    stand_center = Pose2D(
+        candidate.geometry.x_m,
+        candidate.geometry.y_m,
+        0.0,
+    )
+    route_centerline_standoff_m = _continuous_route_clearance_m(
+        route.route,
+        start=request.current_pose,
+        goal=target,
+        center=stand_center,
+    )
+    if route_centerline_standoff_m + 1.0e-9 < minimum_collision_standoff_m:
+        raise ValueError(
+            "computed QR-facing route crosses the active-stand collision "
+            "envelope: "
+            f"clearance={route_centerline_standoff_m:.3f} m, "
+            f"minimum={minimum_collision_standoff_m:.3f} m"
+        )
+    clearance_evidence = {
+        "candidate_uid": candidate.candidate_uid,
+        "stand_center": {
+            "x_m": candidate.geometry.x_m,
+            "y_m": candidate.geometry.y_m,
+        },
+        "target_center_standoff_m": target_center_standoff_m,
+        "minimum_active_standoff_m": minimum_active_standoff_m,
+        "minimum_collision_standoff_m": minimum_collision_standoff_m,
+        "route_centerline_minimum_standoff_m": route_centerline_standoff_m,
+        "active_stand_in_planning_costmap": True,
+        "continuous_centerline_validated": True,
+    }
     request.output_dir.mkdir(parents=True, exist_ok=True)
     route_path = request.output_dir / "facing_pose_validation_route.csv"
     diagnostics_path = (
@@ -552,6 +647,7 @@ def validate_facing_pose(request: FacingValidationRequest) -> dict[str, object]:
             "arena_boundary_overlay": True,
             "arena_bounds": config.plan.arena_bounds.to_metadata(),
             "inflation_radius_m": config.inflation_radius_m,
+            "active_stand_clearance": clearance_evidence,
         },
     )
     qr_face = next(
@@ -582,6 +678,8 @@ def validate_facing_pose(request: FacingValidationRequest) -> dict[str, object]:
         "axis_sample_count": recommendation.axis_sample_count,
         "recommendation_json": str(request.recommendation_path),
         "validation_route_csv": str(route_path),
+        "validation_diagnostics_json": str(diagnostics_path),
+        "active_stand_clearance": clearance_evidence,
         "motion_to_facing_pose_authorized": False,
     }
 

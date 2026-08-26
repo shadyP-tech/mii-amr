@@ -280,14 +280,17 @@ sampling and the legacy global edge detector are skipped, and an unobservable
 model produces no stand axis. Use `--legacy-edge-fallback` only for an explicit
 diagnostic comparison.
 
-The checked-in profile is intentionally marked `provisional`: it captures the
-existing 78 mm head, 60 mm QR, and 7 mm depth assumptions so the viewer can be
-evaluated, but it cannot enter camera/LiDAR consensus or the passive observer.
-Replace it with a newly content-hashed `measurement_status=measured` profile
-after direct metrology. Use
+The checked-in `physical_stand_assumptions_v1.json` profile is intentionally
+marked `provisional`: it captures the old 78 mm head, 60 mm QR, and 7 mm depth
+assumptions so the viewer can be evaluated, but it cannot enter camera/LiDAR
+consensus or the passive observer. The operational measured profile is
+`physical_stand_measured_20260826_v2.json`: 78 x 78 x 6 mm head, 210 mm
+floor-to-head-top, 153 x 153 mm base footprint, centered 71 mm paper panel,
+62 mm photo-rectified QR symbol boundary, and 2 mm tolerance. It deliberately
+omits unmeasured stem dimensions. Use
 `python3 -m scripts.aufgabe04.perception.create_stand_model_profile --help`
-to publish that immutable profile; the QR dimensions must describe the
-detected symbol boundary rather than its quiet zone or white panel.
+to publish an immutable profile; QR symbol dimensions must describe the
+detected black boundary separately from the white paper-panel dimensions.
 
 ```bash
 scripts/aufgabe04/perception/debug/run_stand_axis_viewer.sh \

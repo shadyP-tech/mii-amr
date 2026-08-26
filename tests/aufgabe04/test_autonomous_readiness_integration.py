@@ -93,6 +93,16 @@ class AutonomousReadinessIntegrationTest(unittest.TestCase):
         stack.enter_context(
             patch.object(
                 runner,
+                "load_measured_physical_stand_model",
+                return_value=SimpleNamespace(
+                    navigation_footprint_radius_m=0.110,
+                    head_center_height_m=0.171,
+                ),
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                runner,
                 "_physical_clearance",
                 return_value={
                     "minimum_active_standoff_m": 0.20,
