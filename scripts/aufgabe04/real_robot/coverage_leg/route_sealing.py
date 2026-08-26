@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.aufgabe04.real_robot.autonomous_startup_reseal import (
+from scripts.aufgabe04.real_robot.readiness.startup_reseal import (
     StartupResealPermitContext,
     write_startup_reseal_permit_summary,
 )

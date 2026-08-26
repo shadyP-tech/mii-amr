@@ -8,10 +8,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
-from scripts.aufgabe04.real_robot import (
-    run_autonomous_stand_exploration as runner,
-)
-from scripts.aufgabe04.real_robot.autonomous_child_runner import MotionLegOutcome
+from scripts.aufgabe04.real_robot.autonomous_runner import runtime as runner
+from scripts.aufgabe04.real_robot.execution.child_runner import MotionLegOutcome
 
 
 class AutonomousDryReadinessTest(unittest.TestCase):

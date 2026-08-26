@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import tempfile
 import unittest
 
-from scripts.aufgabe04.real_robot.autonomous_initial_readiness import (
+from scripts.aufgabe04.real_robot.readiness.initial import (
     INITIAL_READINESS_PHASE,
     InitialReadinessContractError,
     InitialReadinessResult,

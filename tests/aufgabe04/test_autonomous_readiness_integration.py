@@ -9,9 +9,7 @@ from unittest.mock import patch
 
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import MissionLegKind
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
-from scripts.aufgabe04.real_robot import (
-    run_autonomous_stand_exploration as runner,
-)
+from scripts.aufgabe04.real_robot.autonomous_runner import runtime as runner
 
 
 class _AuthorizationBoundary(RuntimeError):

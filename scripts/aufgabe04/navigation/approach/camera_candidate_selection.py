@@ -8,10 +8,10 @@ motion dependencies: planning and execution remain separate safety gates.
 Selection first defers a route whose initial heading change crosses the
 configured large-turn threshold.  Large in-place turns are a distinct risk for
 localization continuity on the real robot, so this is a lexicographic tier and
-not an arbitrary conversion to metres or seconds.  Within a tier, candidates
-are ordered by estimated execution duration.  LiDAR evidence is only a stable
-tie-breaker; in particular, single-view candidates remain selectable and are
-not filtered out before camera validation.
+not an arbitrary conversion to metres or seconds.  Within the same safety tier,
+multi-view LiDAR support is preferred before estimated execution duration.
+Single-view candidates remain selectable and are never filtered out before
+camera validation.
 """
 
 from __future__ import annotations
@@ -26,7 +26,15 @@ from scripts.aufgabe04.navigation.approach.exact_two_camera_contract import (
 )
 
 
-CAMERA_CANDIDATE_SELECTION_SCHEMA_VERSION = 1
+CAMERA_CANDIDATE_SELECTION_SCHEMA_VERSION = 2
+CAMERA_CANDIDATE_RANKING_ORDER = (
+    "large_initial_turn_risk",
+    "lidar_support_class",
+    "estimated_execution_duration",
+    "confidence",
+    "hit_count",
+    "candidate_uid",
+)
 
 
 class CameraCandidateSelectionError(ValueError):
@@ -80,13 +88,14 @@ class CameraCandidateSelectionConfig:
                 "large_initial_turn_threshold_rad must not exceed pi",
             )
 
-    def to_dict(self) -> dict[str, float]:
+    def to_dict(self) -> dict[str, object]:
         return {
             "linear_speed_mps": self.linear_speed_mps,
             "angular_speed_radps": self.angular_speed_radps,
             "large_initial_turn_threshold_rad": (
                 self.large_initial_turn_threshold_rad
             ),
+            "ranking_order": list(CAMERA_CANDIDATE_RANKING_ORDER),
         }
 
 
@@ -408,8 +417,8 @@ def _score(
 def _rank_key(row: _ScoredOption) -> tuple[object, ...]:
     return (
         row.risk_tier,
-        row.estimated_duration_sec,
         -row.support_priority,
+        row.estimated_duration_sec,
         -row.option.confidence,
         -row.option.hit_count,
         row.option.candidate_uid,

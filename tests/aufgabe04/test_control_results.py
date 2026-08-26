@@ -3,16 +3,35 @@ from __future__ import annotations
 import unittest
 
 from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.control_results import (
+    acquisition_goal_stop_details,
+    certified_corner_stop_details,
+    certified_static_start_stop_details,
     clearance_motion_floor_stop_details,
     control_result,
     initial_runtime_input_stop_details,
+    intermediate_terminal_heading_stop_details,
+    noop_result,
     nonfinite_velocity_stop_details,
+    ros_shutdown_stop_details,
+    viewpoint_sampling_timeout_stop_details,
     waypoint_timeout_stop_details,
     with_controller_trace_failure,
+    with_route_check_error,
 )
 
 
 class ControlResultsTest(unittest.TestCase):
+    def test_noop_and_shutdown_results_have_explicit_contracts(self):
+        noop = noop_result("fewer than two waypoints")
+        shutdown = ros_shutdown_stop_details()
+
+        self.assertEqual(noop.status, "noop")
+        self.assertEqual(noop.duration_sec, 0.0)
+        self.assertFalse(noop.motion_published)
+        self.assertEqual(shutdown["reason"], "ROS shutdown")
+        self.assertEqual(shutdown["source"], "rclpy")
+        self.assertTrue(shutdown["fail_closed"])
+
     def test_control_result_uses_explicit_runtime_snapshot(self):
         details = {"reason": "blocked", "fail_closed": True}
 
@@ -124,6 +143,72 @@ class ControlResultsTest(unittest.TestCase):
         self.assertTrue(clearance["fail_closed"])
         self.assertEqual(nonfinite["fault_code"], "nonfinite_velocity_command")
         self.assertTrue(nonfinite["fail_closed"])
+
+    def test_sampling_start_and_goal_contracts(self):
+        sampling = viewpoint_sampling_timeout_stop_details(
+            reason="viewpoint_sampling_timeout",
+            route_kind="viewpoint_sampling",
+            phase_elapsed_sec=30.0,
+            target_elapsed_sec=4.0,
+            phase_timeout_sec=30.0,
+            target_timeout_sec=10.0,
+        )
+        startup = certified_static_start_stop_details(
+            {"pose_distance_to_segment_m": 0.04},
+            certificate_reason="pose left certified route tube",
+        )
+        goal = acquisition_goal_stop_details(
+            reason="axis_acquisition_timeout",
+            route_kind="axis_acquisition",
+            hold_elapsed_sec=12.0,
+            timeout_sec=12.0,
+        )
+
+        self.assertEqual(sampling["target_elapsed_sec"], 4.0)
+        self.assertEqual(startup["startup_target_candidates"], [0, 1])
+        self.assertEqual(
+            startup["certificate_reason"],
+            "pose left certified route tube",
+        )
+        self.assertEqual(goal["hold_elapsed_sec"], 12.0)
+        self.assertTrue(goal["fail_closed"])
+
+    def test_corner_terminal_heading_and_route_error_contracts(self):
+        corner = certified_corner_stop_details(
+            reason="certified corner hard tolerance exceeded",
+            route_kind="stand_discovery_corridor",
+            target_index=2,
+            pursuit_index=2,
+            distance_to_vertex_m=0.031,
+            release_tolerance_m=0.01,
+            hold_tolerance_m=0.025,
+            tracking_tube_radius_m=0.03,
+            reacquire_attempts=2,
+            max_reacquire_attempts=2,
+        )
+        terminal = intermediate_terminal_heading_stop_details(
+            reason="terminal_heading_hold_exceeded",
+            route_kind="viewpoint_sampling",
+            target_index=3,
+            distance_to_target_m=0.04,
+            entry_tolerance_m=0.03,
+            hold_tolerance_m=0.05,
+            distance_comparison_epsilon_m=1.0e-9,
+            hold_diagnostics={"observed_distance_m": 0.051},
+        )
+        route_error = with_route_check_error(
+            corner,
+            ValueError("malformed route check"),
+        )
+
+        self.assertEqual(corner["reacquire_attempts"], 2)
+        self.assertEqual(
+            terminal["effective_hold_limit_m"],
+            0.05 + 1.0e-9,
+        )
+        self.assertEqual(terminal["observed_distance_m"], 0.051)
+        self.assertEqual(route_error["reason"], corner["reason"])
+        self.assertEqual(route_error["route_check_error_type"], "ValueError")
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from scripts.aufgabe04.navigation.execution.execution_route_certificate import (
     ExecutionRouteCheck,
@@ -11,6 +11,28 @@ from scripts.aufgabe04.navigation.execution.execution_route_certificate import (
 )
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.navigation.waypoint_follower.config import FollowerConfig
+from scripts.aufgabe04.navigation.waypoint_follower.directives import (
+    StringDirective,
+)
+
+
+class StartupPoseAdmissionAction(StringDirective):
+    """Control-loop effect requested by startup pose admission."""
+
+    PROCEED = "proceed"
+    ZERO_HOLD = "zero_hold"
+    STOP = "stop"
+
+
+@dataclass(frozen=True)
+class StartupPoseAdmissionDecision:
+    """Typed result of the initial-pose and certified-startup gates."""
+
+    action: StartupPoseAdmissionAction
+    selected_target_index: int | None = None
+    static_start_consumed: bool = False
+    stop_reason: str = ""
+    stop_details: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)

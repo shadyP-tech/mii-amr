@@ -10,8 +10,8 @@ loaded logistics mission or a two-robot run; see
 
 | Module | Responsibility | Motion capability |
 | --- | --- | --- |
-| `real_robot/capture_camera_calibration.py` | Capture live `CameraInfo` and the measured `base <- camera_optical` TF | None |
-| `real_robot/create_hardware_profile.py` | Seal topics, namespace, frames, site, calibration, footprint, and speed limits | None |
+| `real_robot/entrypoints/capture_camera_calibration.py` | Capture live `CameraInfo` and the measured `base <- camera_optical` TF | None |
+| `real_robot/entrypoints/create_hardware_profile.py` | Seal topics, namespace, frames, site, calibration, footprint, and speed limits | None |
 | `perception/stand_axis_image.py` | Stable compatibility façade and estimator orchestration | None |
 | `perception/stand_axis/models.py` | Immutable estimator, point, support, and debug-artifact contracts | None |
 | `perception/stand_axis/preprocessing.py` | Color-agnostic raw Canny extraction and topology-only gap recovery | None |
@@ -30,23 +30,23 @@ loaded logistics mission or a two-robot run; see
 | `navigation/coverage_candidate_admission.py` | Fail closed between LiDAR coverage and candidate approaches unless coverage and multi-view candidate evidence are complete | None |
 | `navigation/coverage_candidate_lifecycle.py` | Classify LiDAR, multi-view, camera-queue, confirmed, and rejected evidence; evaluate exact-two LiDAR checkpoint completion without constructing a motion snapshot | None |
 | `navigation/exact_two_camera_admission.py` | Build and verify the content-hashed exact-two LiDAR-to-camera population handoff without promoting registry lifecycle state | None |
-| `real_robot/autonomous_modes.py` | Resolve one explicit workflow mode and authorization scope; reject contradictory legacy flags, unsafe session IDs, and misleading session labels | None |
-| `real_robot/autonomous_artifact_paths.py` | Canonicalize existing sealed child artifacts so dry evidence, permits, and live argv bind one filesystem identity | None |
-| `real_robot/autonomous_child_runner.py` | Build child-runner and bundle argv, and parse one unambiguous append-only terminal outcome | None |
-| `real_robot/autonomous_localization_readiness.py` | Classify the one bounded no-motion retryable uncertainty-admission failure without changing any limit | None |
-| `real_robot/autonomous_session_manifest.py` | Snapshot and content-hash resumable coverage checkpoints and terminal survey evidence; manifests explicitly authorize no motion | None |
-| `real_robot/autonomous_checkpoint_resume.py` | Re-hash, restore, and freshly replan one next coverage leg in a new session | None |
-| `real_robot/autonomous_coverage_replanning.py` | Rebuild a coverage leg from admitted startup/runtime-localization evidence while preserving bounded transient-overlay continuity | None; offline route/artifact reconstruction only |
-| `real_robot/autonomous_startup_reseal.py` | Adapt the startup-reseal safety contract to autonomous coverage execution | None; ROS-free permit construction only |
-| `real_robot/physical_site_contract.py` | Bind site, map bytes, robot profile, and canonical stand count before planning | None |
-| `real_robot/autonomous_coverage_execution.py` | Run the bounded per-leg coverage retry/reseal state machine behind injected ROS and child-process effects | None; delegates any authorized motion to the existing child runner |
-| `real_robot/autonomous_coverage_mission.py` | Commit each completed coverage leg as one ordered observe/fuse/checkpoint transaction and gate candidate materialization | None; cannot execute a leg itself |
-| `real_robot/autonomous_candidate_approach.py` | Order frozen candidates, orchestrate sealed pre-approach/opposite-face inspection, and publish validated identity/facing artifacts behind injected live effects | None; cannot sample ROS, prompt, launch a process, or publish motion itself |
-| `real_robot/passive_viewpoint_node.py` | Synchronize image, scan, and exact-time TF; rectify the image; validate LiDAR/QR/silhouette evidence | None |
-| `real_robot/run_autonomous_stand_exploration.py` | Wire CLI/profile/operator authorization to the focused coverage, child-runner, and inspection modules | Dry-run by default; explicit physical gate |
-| `real_robot/prepare_passive_survey.py` | Produce immutable per-candidate observer and catalog-validation commands | None |
-| `real_robot/finalize_passive_survey.py` | Freeze a complete real arrival catalog and write a real `SurveyManifest` | None |
-| `real_robot/run_unloaded_segment.py` | Bind one certified route leg to the sealed hardware/site profile and existing preflight runner | Dry-run by default; explicit physical gate |
+| `real_robot/mission/modes.py` | Resolve one explicit workflow mode and authorization scope; reject contradictory legacy flags, unsafe session IDs, and misleading session labels | None |
+| `real_robot/execution/artifact_paths.py` | Canonicalize existing sealed child artifacts so dry evidence, permits, and live argv bind one filesystem identity | None |
+| `real_robot/execution/child_runner.py` | Build child-runner and bundle argv, and parse one unambiguous append-only terminal outcome | None |
+| `real_robot/readiness/localization.py` | Classify the one bounded no-motion retryable uncertainty-admission failure without changing any limit | None |
+| `real_robot/mission/session_manifest.py` | Snapshot and content-hash resumable coverage checkpoints and terminal survey evidence; manifests explicitly authorize no motion | None |
+| `real_robot/mission/checkpoint_resume.py` | Re-hash, restore, and freshly replan one next coverage leg in a new session | None |
+| `real_robot/coverage_leg/replanning.py` | Rebuild a coverage leg from admitted startup/runtime-localization evidence while preserving bounded transient-overlay continuity | None; offline route/artifact reconstruction only |
+| `real_robot/readiness/startup_reseal.py` | Adapt the startup-reseal safety contract to autonomous coverage execution | None; ROS-free permit construction only |
+| `real_robot/configuration/site_contract.py` | Bind site, map bytes, robot profile, and canonical stand count before planning | None |
+| `real_robot/coverage_leg/execution.py` | Run the bounded per-leg coverage retry/reseal state machine behind injected ROS and child-process effects | None; delegates any authorized motion to the existing child runner |
+| `real_robot/mission/coverage.py` | Commit each completed coverage leg as one ordered observe/fuse/checkpoint transaction and gate candidate materialization | None; cannot execute a leg itself |
+| `real_robot/candidate/approach.py` | Order frozen candidates, orchestrate sealed pre-approach/opposite-face inspection, and publish validated identity/facing artifacts behind injected live effects | None; cannot sample ROS, prompt, launch a process, or publish motion itself |
+| `real_robot/observer/node.py` | Synchronize image, scan, and exact-time TF; rectify the image; validate LiDAR/QR/silhouette evidence | None |
+| `real_robot/entrypoints/run_autonomous_stand_exploration.py` | Wire CLI/profile/operator authorization to the focused coverage, child-runner, and inspection modules | Dry-run by default; explicit physical gate |
+| `real_robot/passive_survey/prepare.py` | Produce immutable per-candidate observer and catalog-validation commands | None |
+| `real_robot/passive_survey/finalize.py` | Freeze a complete real arrival catalog and write a real `SurveyManifest` | None |
+| `real_robot/entrypoints/run_unloaded_segment.py` | Bind one certified route leg to the sealed hardware/site profile and existing preflight runner | Dry-run by default; explicit physical gate |
 
 The shared `plan_synchronized_viewpoint.py` accepts
 `--environment real --workflow-mode survey-only`. In real mode it cannot watch
@@ -107,7 +107,7 @@ Capture the calibration that is currently published by the real camera. This
 is a capture step, not proof that the calibration itself is accurate:
 
 ```bash
-python3 scripts/aufgabe04/real_robot/capture_camera_calibration.py \
+python3 scripts/aufgabe04/real_robot/entrypoints/capture_camera_calibration.py \
   --namespace robot1 \
   --camera-info-topic camera/camera_info \
   --base-frame base_footprint \
@@ -121,7 +121,7 @@ Measure the physical robot radius, LiDAR-to-base radial offset, and conservative
 unloaded speed limits. Then seal them with the resolved runtime interface:
 
 ```bash
-python3 scripts/aufgabe04/real_robot/create_hardware_profile.py \
+python3 scripts/aufgabe04/real_robot/entrypoints/create_hardware_profile.py \
   --profile-id robot1_unloaded_20260727 \
   --robot-id robot1 \
   --namespace robot1 \
@@ -152,7 +152,7 @@ and physical-site hashes.
 
 ## 3. Autonomous Stand Discovery and Facing-Pose Survey
 
-`run_autonomous_stand_exploration.py` is the single-entry real-robot pipeline.
+`entrypoints/run_autonomous_stand_exploration.py` is the single-entry real-robot pipeline.
 It plans an A* route from the live AMCL pose to a sequence of stopped inspection
 poses on one center corridor, fuses LiDAR candidates across the complete
 corridor, visits each stable candidate at a 0.7 m pre-approach, and saves the
@@ -168,10 +168,10 @@ If a directly measured, content-hashed stand model is available, add
 are rejected for operational pose commitment.
 
 The entrypoint is only the live-edge adapter. Coverage route reconstruction is
-isolated in `autonomous_coverage_replanning.py`; the bounded per-leg state
-machine remains in `autonomous_coverage_execution.py`; and candidate ordering,
+isolated in `coverage_leg/replanning.py`; the bounded per-leg state
+machine remains in `coverage_leg/execution.py`; and candidate ordering,
 opposite-face fallback, facing validation, and identity/catalog publication are
-owned by `autonomous_candidate_approach.py`. The extracted modules cannot read
+owned by `candidate/approach.py`. The extracted modules cannot read
 ROS, prompt, launch subprocesses, or publish velocity. Fresh AMCL reads, passive
 camera capture, exact one-use mission-leg permits, and child motion remain
 explicit injected effects supplied by the entrypoint.
@@ -300,7 +300,7 @@ ros2 topic echo --once /robot1/scan
 ros2 topic echo --once /robot1/camera/camera_info
 ros2 topic info /robot1/cmd_vel -v
 
-python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
+python3 scripts/aufgabe04/real_robot/entrypoints/run_autonomous_stand_exploration.py \
   --robot-profile configs/aufgabe04/real_robot_profiles/turtlebot1_unloaded_20260817.json \
   --camera-calibration results/aufgabe04/real/profiles/<camera_calibration>.json \
   --physical-site docs/setups/aufgabe04_lab_20260817.json \
@@ -345,7 +345,7 @@ to publish one zero `Twist` to the profile's exact resolved command topic. Then
 authorize only one center-corridor leg:
 
 ```bash
-python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
+python3 scripts/aufgabe04/real_robot/entrypoints/run_autonomous_stand_exploration.py \
   --robot-profile configs/aufgabe04/real_robot_profiles/turtlebot1_unloaded_20260817.json \
   --camera-calibration results/aufgabe04/real/profiles/<camera_calibration>.json \
   --physical-site docs/setups/aufgabe04_lab_20260817.json \
@@ -510,7 +510,7 @@ use a new session ID and repeat every behavior-relevant option from the parent
 run:
 
 ```bash
-python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
+python3 scripts/aufgabe04/real_robot/entrypoints/run_autonomous_stand_exploration.py \
   --robot-profile configs/aufgabe04/real_robot_profiles/turtlebot1_unloaded_20260817.json \
   --camera-calibration results/aufgabe04/real/profiles/<camera_calibration>.json \
   --physical-site docs/setups/aufgabe04_lab_20260817.json \
@@ -540,7 +540,7 @@ Next validate the complete center-corridor discovery without approaching any
 candidate:
 
 ```bash
-python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
+python3 scripts/aufgabe04/real_robot/entrypoints/run_autonomous_stand_exploration.py \
   --robot-profile configs/aufgabe04/real_robot_profiles/turtlebot1_unloaded_20260817.json \
   --camera-calibration results/aufgabe04/real/profiles/<camera_calibration>.json \
   --physical-site docs/setups/aufgabe04_lab_20260817.json \
@@ -565,7 +565,7 @@ content-hashed `coverage_candidate_admission.json`, and a content-hashed
 running the complete mission with a fresh session ID:
 
 ```bash
-python3 scripts/aufgabe04/real_robot/run_autonomous_stand_exploration.py \
+python3 scripts/aufgabe04/real_robot/entrypoints/run_autonomous_stand_exploration.py \
   --robot-profile configs/aufgabe04/real_robot_profiles/turtlebot1_unloaded_20260817.json \
   --camera-calibration results/aufgabe04/real/profiles/<camera_calibration>.json \
   --physical-site docs/setups/aufgabe04_lab_20260817.json \
@@ -591,7 +591,7 @@ Use the frozen map, detector-produced candidate snapshot, and complete station
 identity registry from the successful sealed workflow:
 
 ```bash
-python3 scripts/aufgabe04/real_robot/prepare_passive_survey.py \
+python3 scripts/aufgabe04/real_robot/entrypoints/prepare_passive_survey.py \
   --robot-profile results/aufgabe04/real/profiles/robot1_unloaded_20260727.json \
   --camera-calibration results/aufgabe04/real/profiles/robot1_camera_20260727.json \
   --physical-site docs/setups/aufgabe04_lab_v1.json \
@@ -672,7 +672,7 @@ derives namespace, topics, frames, footprint, and speed limits only from the
 sealed profile. Its default is a dry run:
 
 ```bash
-python3 scripts/aufgabe04/real_robot/run_unloaded_segment.py \
+python3 scripts/aufgabe04/real_robot/entrypoints/run_unloaded_segment.py \
   --robot-profile <robot_profile.json> \
   --physical-site <physical_site.json> \
   --route-csv <route.csv> \

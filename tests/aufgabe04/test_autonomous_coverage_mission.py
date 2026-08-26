@@ -11,8 +11,8 @@ import unittest
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STATUS_PENDING_CAMERA,
 )
-from scripts.aufgabe04.real_robot import autonomous_coverage_mission as mission
-from scripts.aufgabe04.real_robot.autonomous_coverage_mission import (
+from scripts.aufgabe04.real_robot.mission import coverage as mission
+from scripts.aufgabe04.real_robot.mission.coverage import (
     CANDIDATE_SNAPSHOT_READY,
     LIDAR_CHECKPOINT_READY,
     RESUME_FROM_CHECKPOINT,
@@ -32,7 +32,7 @@ from scripts.aufgabe04.real_robot.autonomous_coverage_mission import (
     PublishedCoverageCheckpoint,
     execute_coverage_mission,
 )
-from scripts.aufgabe04.real_robot.autonomous_session_manifest import (
+from scripts.aufgabe04.real_robot.mission.session_manifest import (
     COVERAGE_SURVEY_TERMINAL_CHECKPOINT,
 )
 

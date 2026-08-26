@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from scripts.aufgabe04.real_robot.autonomous_child_runner import MotionLegOutcome
-from scripts.aufgabe04.real_robot.autonomous_localization_readiness import (
+from scripts.aufgabe04.real_robot.execution.child_runner import MotionLegOutcome
+from scripts.aufgabe04.real_robot.readiness.localization import (
     evaluate_localization_readiness_retry,
 )
 

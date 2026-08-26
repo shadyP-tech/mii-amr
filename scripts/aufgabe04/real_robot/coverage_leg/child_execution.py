@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import MissionLegKind
-from scripts.aufgabe04.real_robot.autonomous_child_runner import MotionLegOutcome
+from scripts.aufgabe04.real_robot.execution.child_runner import MotionLegOutcome
 
 from .models import MissionLegPermitContext
 

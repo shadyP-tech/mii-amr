@@ -12,6 +12,7 @@ from scripts.aufgabe04.navigation.execution.dynamic_route_handoff import (
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.navigation.waypoint_follower.runtime import (
     FollowerConfig,
+    RouteRefreshAction,
     SimpleWaypointFollowerNode,
     acquisition_goal_action,
     certified_startup_join_action,
@@ -29,6 +30,7 @@ from scripts.aufgabe04.navigation.coverage.transient_blockage_policy import (
 from scripts.aufgabe04.navigation.control.waypoint_controller import (
     CertifiedCornerTransitionLatch,
     ControllerConfig,
+    ControllerStep,
     VelocityCommand,
     compute_join_anchor_command,
     compute_start_egress_vertex_command,
@@ -172,6 +174,7 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         )
 
         self.assertEqual(result, "adopted")
+        self.assertIs(result, RouteRefreshAction.ADOPTED)
         self.assertEqual(node.current_route_kind, "stand_discovery_corridor")
         self.assertEqual(node.start_egress_lock_index, 1)
         self.assertTrue(node.start_egress_reverse)
@@ -448,6 +451,62 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
             "stuck no progress",
         )
 
+    def test_progress_watchdog_decision_owns_threshold_state_and_evidence(self):
+        node = bare_follower(RouteUpdate(kind=RouteUpdateKind.UNCHANGED), None)
+        node.current_route_kind = "stand_discovery_corridor"
+        node.latest_front_clearance_details = {
+            "source": "front_sector",
+            "nearest_valid_range_m": 0.24,
+        }
+        step = ControllerStep(
+            command=VelocityCommand(0.03, 0.0),
+            target_index=1,
+            reached_goal=False,
+            distance_to_target_m=0.20,
+            pursuit_index=1,
+            controlled_heading_error_rad=0.20,
+        )
+
+        initial = node._progress_watchdog_decision(
+            step,
+            now_monotonic=0.0,
+            front_clearance_scale=0.5,
+            effective_linear_x_mps=0.015,
+        )
+
+        self.assertEqual(initial.failure, "")
+        self.assertIsNone(initial.stop_details)
+        self.assertGreater(initial.distance_progress_epsilon_m, 0.0)
+        self.assertLessEqual(
+            initial.distance_progress_epsilon_m,
+            node.follower_config.stuck_progress_epsilon_m,
+        )
+
+        stopped = node._progress_watchdog_decision(
+            step,
+            now_monotonic=node.follower_config.stuck_timeout_sec + 0.1,
+            front_clearance_scale=0.5,
+            effective_linear_x_mps=0.015,
+        )
+
+        self.assertEqual(stopped.failure, "stuck no progress")
+        self.assertEqual(
+            stopped.distance_progress_epsilon_m,
+            initial.distance_progress_epsilon_m,
+        )
+        self.assertEqual(stopped.stop_details["source"], "progress_monitor")
+        self.assertEqual(stopped.stop_details["target_index"], 1)
+        self.assertEqual(stopped.stop_details["pursuit_index"], 1)
+        self.assertEqual(stopped.stop_details["front_clearance_scale"], 0.5)
+        self.assertEqual(
+            stopped.stop_details["front_clearance"],
+            node.latest_front_clearance_details,
+        )
+        self.assertAlmostEqual(
+            stopped.stop_details["elapsed_without_progress_sec"],
+            node.follower_config.stuck_timeout_sec + 0.1,
+        )
+
     def test_terminal_heading_handoff_resets_path_progress_baseline_once(self):
         node = bare_follower(RouteUpdate(kind=RouteUpdateKind.UNCHANGED), None)
 
@@ -691,6 +750,65 @@ class DynamicFollowerHandoffTest(unittest.TestCase):
         self.assertEqual(decision.reasons, (CLEARANCE_LIMITED_MOTION_FLOOR,))
         self.assertTrue(decision.stationary_confirmation_required)
         self.assertEqual(decision.output_linear_x_mps, 0.0)
+
+    def test_motion_command_admission_binds_floor_stop_to_clearance_evidence(self):
+        node = bare_follower(RouteUpdate(kind=RouteUpdateKind.UNCHANGED), None)
+        node.current_route_kind = "stand_discovery_corridor"
+        node.latest_front_clearance_details = {
+            "source": "front_sector",
+            "nearest_valid_range_m": 0.24,
+        }
+        node._motion_clearance_linear_scale = lambda _linear_x_mps: 0.1
+        step = ControllerStep(
+            command=VelocityCommand(0.04, 0.1),
+            target_index=1,
+            reached_goal=False,
+            distance_to_target_m=0.15,
+            pursuit_index=1,
+            controlled_heading_error_rad=0.0,
+        )
+
+        decision = node._motion_command_admission_decision(step)
+
+        self.assertEqual(decision.front_clearance_scale, 0.1)
+        self.assertAlmostEqual(
+            decision.command_admission.effective_command.linear_x_mps,
+            0.004,
+        )
+        self.assertTrue(
+            decision.command_admission.clearance_limited_below_floor
+        )
+        self.assertEqual(
+            decision.stop_details["reason"],
+            CLEARANCE_LIMITED_MOTION_FLOOR,
+        )
+        self.assertEqual(decision.stop_details["target_index"], 1)
+        self.assertEqual(
+            decision.stop_details["front_clearance"],
+            node.latest_front_clearance_details,
+        )
+
+    def test_motion_command_admission_preserves_nonphysical_floor_policy(self):
+        node = bare_follower(RouteUpdate(kind=RouteUpdateKind.UNCHANGED), None)
+        node.current_route_kind = "axis_acquisition"
+        node.latest_front_clearance_details = {"source": "front_sector"}
+        node._motion_clearance_linear_scale = lambda _linear_x_mps: 0.1
+        step = ControllerStep(
+            command=VelocityCommand(0.04, 0.0),
+            target_index=1,
+            reached_goal=False,
+            distance_to_target_m=0.15,
+            pursuit_index=1,
+            controlled_heading_error_rad=0.0,
+        )
+
+        decision = node._motion_command_admission_decision(step)
+
+        self.assertTrue(decision.command_admission.command_floor.zero_hold_required)
+        self.assertFalse(
+            decision.command_admission.clearance_limited_below_floor
+        )
+        self.assertIsNone(decision.stop_details)
 
     def test_heading_corridor_only_applies_to_physical_face_routes(self):
         configured = ControllerConfig(enforce_heading_corridor=True)

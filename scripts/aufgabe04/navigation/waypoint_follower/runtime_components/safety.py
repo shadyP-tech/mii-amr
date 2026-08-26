@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 import time
+from dataclasses import dataclass
+from typing import Mapping
 
 try:  # pragma: no cover - exercised on ROS hosts.
     import rclpy
@@ -22,8 +24,28 @@ from scripts.aufgabe04.navigation.control.follower_safety import (
     obstacle_decision,
     stuck_progress_failure,
 )
+from scripts.aufgabe04.navigation.control.driving_behavior import (
+    PHYSICAL_ROUTE_KINDS,
+)
+from scripts.aufgabe04.navigation.control.waypoint_controller import (
+    ControllerStep,
+)
+from scripts.aufgabe04.navigation.coverage.transient_blockage_policy import (
+    CLEARANCE_LIMITED_MOTION_FLOOR,
+)
+from scripts.aufgabe04.navigation.waypoint_follower.route_admission import (
+    stuck_progress_details,
+)
 from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.bindings import (
     RuntimeBindingProxy,
+)
+from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.command_admission import (
+    CommandAdmissionDecision,
+    command_admission_decision,
+    stuck_distance_progress_epsilon,
+)
+from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.control_results import (
+    clearance_motion_floor_stop_details,
 )
 from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.node_identity import (
     format_node_identity,
@@ -32,6 +54,24 @@ from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.node_iden
 
 rclpy = RuntimeBindingProxy("rclpy", rclpy)
 Time = RuntimeBindingProxy("Time", Time)
+
+
+@dataclass(frozen=True)
+class MotionCommandAdmissionDecision:
+    """Clearance-aware command admission and optional floor-stop evidence."""
+
+    command_admission: CommandAdmissionDecision
+    front_clearance_scale: float
+    stop_details: Mapping[str, object] | None = None
+
+
+@dataclass(frozen=True)
+class ProgressWatchdogDecision:
+    """Stateful progress evaluation returned to the control loop."""
+
+    failure: str
+    distance_progress_epsilon_m: float
+    stop_details: Mapping[str, object] | None = None
 
 
 class SafetyRuntimeMixin:
@@ -233,6 +273,115 @@ class SafetyRuntimeMixin:
             decision.nearest_valid_range_m,
             self.follower_config.min_obstacle_distance_m,
             self.follower_config.front_obstacle_slow_distance_m,
+        )
+
+    def _motion_command_admission_decision(
+        self,
+        step: ControllerStep,
+    ) -> MotionCommandAdmissionDecision:
+        """Apply live clearance scaling and bind floor evidence to admission."""
+
+        front_clearance_scale = self._motion_clearance_linear_scale(
+            step.command.linear_x_mps
+        )
+        command_admission = command_admission_decision(
+            step.command,
+            front_clearance_scale=front_clearance_scale,
+            linear_motion_floor_mps=(
+                self.follower_config.linear_motion_floor_mps
+            ),
+            physical_route=(self.current_route_kind in PHYSICAL_ROUTE_KINDS),
+        )
+        stop_details = None
+        if command_admission.clearance_limited_below_floor:
+            stop_details = clearance_motion_floor_stop_details(
+                reason=CLEARANCE_LIMITED_MOTION_FLOOR,
+                command_floor_details=(
+                    command_admission.command_floor.to_log_dict()
+                ),
+                front_clearance_scale=front_clearance_scale,
+                front_clearance_details=self.latest_front_clearance_details,
+                target_index=step.target_index,
+                pursuit_index=step.pursuit_index,
+                distance_to_target_m=step.distance_to_target_m,
+                progress_mode=step.progress_mode,
+            )
+        return MotionCommandAdmissionDecision(
+            command_admission=command_admission,
+            front_clearance_scale=front_clearance_scale,
+            stop_details=stop_details,
+        )
+
+    def _progress_watchdog_decision(
+        self,
+        step: ControllerStep,
+        *,
+        now_monotonic: float,
+        front_clearance_scale: float,
+        effective_linear_x_mps: float,
+    ) -> ProgressWatchdogDecision:
+        """Evaluate progress and assemble complete evidence for a failure."""
+
+        distance_progress_epsilon_m = stuck_distance_progress_epsilon(
+            self.follower_config.stuck_progress_epsilon_m,
+            physical_route=(self.current_route_kind in PHYSICAL_ROUTE_KINDS),
+            remaining_distance_m=step.distance_to_target_m,
+            waypoint_tolerance_m=(
+                self.follower_config.physical_waypoint_tolerance_m
+            ),
+            effective_linear_x_mps=effective_linear_x_mps,
+            stuck_timeout_sec=self.follower_config.stuck_timeout_sec,
+        )
+        failure = self._progress_failure(
+            step.distance_to_target_m,
+            step.controlled_heading_error_rad,
+            step.target_index,
+            step.pursuit_index,
+            now_monotonic,
+            (
+                abs(step.command.linear_x_mps) > 0.0
+                or abs(step.command.angular_z_radps) > 0.0
+            ),
+            step.progress_mode,
+            distance_progress_epsilon_m,
+        )
+        if not failure:
+            return ProgressWatchdogDecision(
+                failure="",
+                distance_progress_epsilon_m=distance_progress_epsilon_m,
+            )
+        return ProgressWatchdogDecision(
+            failure=failure,
+            distance_progress_epsilon_m=distance_progress_epsilon_m,
+            stop_details=stuck_progress_details(
+                target_index=self.target_index,
+                distance_to_target_m=step.distance_to_target_m,
+                last_progress_distance_m=self.last_progress_distance_m,
+                elapsed_without_progress_sec=(
+                    now_monotonic - self.last_progress_at
+                ),
+                max_without_progress_sec=(
+                    self.follower_config.stuck_timeout_sec
+                ),
+                progress_epsilon_m=distance_progress_epsilon_m,
+                commanded_linear_x_mps=step.command.linear_x_mps,
+                commanded_angular_z_radps=step.command.angular_z_radps,
+                front_clearance_scale=front_clearance_scale,
+                effective_linear_x_mps=effective_linear_x_mps,
+                front_clearance_details=self.latest_front_clearance_details,
+                pursuit_index=step.pursuit_index,
+                controlled_heading_error_rad=(
+                    step.controlled_heading_error_rad
+                ),
+                last_progress_heading_error_rad=(
+                    self.last_progress_heading_error_rad
+                ),
+                heading_progress_epsilon_rad=(
+                    self.follower_config.stuck_heading_progress_epsilon_rad
+                ),
+                last_progress_target_index=self.last_progress_target_index,
+                last_progress_pursuit_index=self.last_progress_pursuit_index,
+            ),
         )
 
     def _progress_failure(

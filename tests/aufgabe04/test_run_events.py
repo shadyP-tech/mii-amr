@@ -636,6 +636,108 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
             "--allow-legacy-simulation-route",
         ]
 
+    def test_default_console_is_compact_and_full_preflight_remains_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            output = StringIO()
+            with patch.object(
+                run_single_station_segment,
+                "run_ros_preflight",
+                return_value=passing_preflight(),
+            ), patch.object(
+                run_single_station_segment,
+                "run_simple_waypoint_follower",
+                return_value=FollowerResult("completed", "", 1.0, 0.2, True),
+            ), redirect_stdout(output):
+                status = run_single_station_segment.main(self.base_args(paths))
+
+            preflight = json.loads(paths["preflight"].read_text())
+
+        console = output.getvalue()
+        self.assertEqual(status, 0)
+        self.assertIn("Run setup: run-1 | leg=0", console)
+        self.assertIn("Preflight: PASS | observations=2 | failures=0", console)
+        self.assertIn(f"Full preflight JSON: {paths['preflight']}", console)
+        self.assertNotIn("Resolved runtime config:", console)
+        self.assertNotIn('"observations":', console)
+        self.assertEqual(len(preflight["observations"]), 2)
+        self.assertEqual(preflight["runtime_config"]["cmd_vel_topic"], "/cmd_vel")
+
+    def test_compact_console_derives_preflight_artifact_when_not_configured(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            args = self.base_args(paths)
+            preflight_flag_index = args.index("--preflight-json")
+            del args[preflight_flag_index : preflight_flag_index + 2]
+            expected_preflight = paths["events"].with_name("run-1_preflight.json")
+            output = StringIO()
+            with patch.object(
+                run_single_station_segment,
+                "run_ros_preflight",
+                return_value=passing_preflight(),
+            ), patch.object(
+                run_single_station_segment,
+                "run_simple_waypoint_follower",
+                return_value=FollowerResult("completed", "", 1.0, 0.2, True),
+            ), redirect_stdout(output):
+                status = run_single_station_segment.main(args)
+
+            preflight = json.loads(expected_preflight.read_text())
+
+        self.assertEqual(status, 0)
+        self.assertIn(
+            f"Full preflight JSON: {expected_preflight}",
+            output.getvalue(),
+        )
+        self.assertEqual(len(preflight["observations"]), 2)
+
+    def test_compact_console_keeps_every_preflight_failure_visible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            output = StringIO()
+            with patch.object(
+                run_single_station_segment,
+                "run_ros_preflight",
+                return_value=failing_preflight(),
+            ), patch.object(
+                run_single_station_segment,
+                "run_simple_waypoint_follower",
+            ) as follower, redirect_stdout(output):
+                status = run_single_station_segment.main(self.base_args(paths))
+
+        console = output.getvalue()
+        self.assertEqual(status, 1)
+        self.assertFalse(follower.called)
+        self.assertIn("Preflight: FAIL | observations=1 | failures=1", console)
+        self.assertIn(
+            "  - unapproved cmd_vel publishers: /teleop_keyboard",
+            console,
+        )
+        self.assertNotIn('"observations":', console)
+
+    def test_verbose_console_restores_full_runtime_and_preflight_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            output = StringIO()
+            with patch.object(
+                run_single_station_segment,
+                "run_ros_preflight",
+                return_value=passing_preflight(),
+            ), patch.object(
+                run_single_station_segment,
+                "run_simple_waypoint_follower",
+                return_value=FollowerResult("completed", "", 1.0, 0.2, True),
+            ), redirect_stdout(output):
+                status = run_single_station_segment.main(
+                    self.base_args(paths) + ["--verbose-console"]
+                )
+
+        console = output.getvalue()
+        self.assertEqual(status, 0)
+        self.assertIn("Resolved runtime config:", console)
+        self.assertIn('"observations":', console)
+        self.assertIn('"runtime_config":', console)
+
     def test_controller_event_reports_effective_sampling_tolerances(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = self.make_paths(Path(tmp))

@@ -5,8 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 import unittest
 
-from scripts.aufgabe04.real_robot import autonomous_coverage_mission as mission
-from scripts.aufgabe04.real_robot import autonomous_exact_two_completion as completion
+from scripts.aufgabe04.real_robot.mission import coverage as mission
+from scripts.aufgabe04.real_robot.mission import exact_two_completion as completion
 
 
 HASH_A = "a" * 64
@@ -142,7 +142,7 @@ class AutonomousExactTwoCompletionTests(unittest.TestCase):
             elif isinstance(node, ast.ImportFrom) and node.module:
                 imported_modules.add(node.module)
         self.assertNotIn(
-            "scripts.aufgabe04.real_robot.autonomous_coverage_mission",
+            "scripts.aufgabe04.real_robot.mission.coverage",
             imported_modules,
         )
         self.assertTrue(
@@ -164,7 +164,7 @@ class AutonomousExactTwoCompletionTests(unittest.TestCase):
             for node in ast.walk(parent_tree)
             if isinstance(node, ast.ImportFrom)
             and node.module
-            == "scripts.aufgabe04.real_robot.autonomous_exact_two_completion"
+            == "scripts.aufgabe04.real_robot.mission.exact_two_completion"
         ]
         self.assertEqual(len(imports), 1)
         self.assertFalse(

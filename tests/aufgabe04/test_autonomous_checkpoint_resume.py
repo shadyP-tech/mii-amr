@@ -22,11 +22,11 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     write_stand_survey_registry,
     write_survey_progress,
 )
-from scripts.aufgabe04.real_robot.autonomous_checkpoint_resume import (
+from scripts.aufgabe04.real_robot.mission.checkpoint_resume import (
     admit_coverage_resume,
     restore_and_replan_coverage_resume,
 )
-from scripts.aufgabe04.real_robot.autonomous_session_manifest import (
+from scripts.aufgabe04.real_robot.mission.session_manifest import (
     COVERAGE_SURVEY_TERMINAL_CHECKPOINT,
     AutonomousSessionManifestError,
     publish_coverage_checkpoint,

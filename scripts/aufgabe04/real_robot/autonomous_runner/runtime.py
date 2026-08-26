@@ -103,26 +103,33 @@ from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization 
 from scripts.aufgabe04.perception.stand_axis.model_profile import (
     load_stand_model,
 )
-from scripts.aufgabe04.real_robot.hardware_profile import (
+from scripts.aufgabe04.real_robot.configuration.profile import (
     camera_calibration_sha256,
     load_camera_calibration,
     load_real_robot_profile,
 )
-from scripts.aufgabe04.real_robot.physical_site_contract import (
+from scripts.aufgabe04.real_robot.configuration.site_contract import (
     validate_physical_site_contract,
 )
-from scripts.aufgabe04.real_robot.passive_observer_diagnostics import (
+from scripts.aufgabe04.real_robot.observer.diagnostics import (
     format_passive_observer_failure,
+    is_candidate_local_observer_timeout,
     load_passive_observer_status,
 )
-from scripts.aufgabe04.real_robot.passive_observer_process import (
+from scripts.aufgabe04.real_robot.observer.process import (
     monitor_passive_observer_process,
 )
-from scripts.aufgabe04.real_robot.autonomous_artifact_paths import (
+from scripts.aufgabe04.real_robot.candidate.observation_deferral import (
+    CandidateObservationUnavailableError,
+)
+from scripts.aufgabe04.real_robot.autonomous_runner.failure_reporting import (
+    build_failed_closed_mission_summary,
+)
+from scripts.aufgabe04.real_robot.execution.artifact_paths import (
     resolve_child_artifact_paths,
     resolve_normal_artifact_path,
 )
-from scripts.aufgabe04.real_robot.autonomous_child_runner import (
+from scripts.aufgabe04.real_robot.execution.child_runner import (
     DEFAULT_COLLISION_MARGIN_M,
     DEFAULT_LIDAR_STOP_DISTANCE_M,
     DEFAULT_TRACKING_TUBE_RADIUS_M,
@@ -134,21 +141,21 @@ from scripts.aufgabe04.real_robot.autonomous_child_runner import (
     parse_motion_leg_outcome as _motion_outcome_from_log,
     semantic_log_size as _semantic_log_size,
 )
-from scripts.aufgabe04.real_robot.autonomous_coverage_execution import (
+from scripts.aufgabe04.real_robot.coverage_leg.execution import (
     CoverageLegConfig,
     CoverageLegEffects,
     MissionLegPermitContext,
     execute_coverage_leg_with_replans as execute_coverage_leg_state_machine,
 )
-from scripts.aufgabe04.real_robot.runtime_localization_motion import (
+from scripts.aufgabe04.real_robot.execution.localization_recovery import (
     RuntimeLocalizationPermitContext,
     issue_runtime_localization_motion_permit,
     resolved_runtime_localization_semantic_map_id,
 )
-from scripts.aufgabe04.real_robot.autonomous_coverage_replanning import (
+from scripts.aufgabe04.real_robot.coverage_leg.replanning import (
     is_resealable_startup_mismatch,
 )
-from scripts.aufgabe04.real_robot.autonomous_coverage_mission import (
+from scripts.aufgabe04.real_robot.mission.coverage import (
     CompletedCoverageLeg,
     CoverageCheckpointComplete,
     CoverageCheckpointIdentity,
@@ -162,20 +169,20 @@ from scripts.aufgabe04.real_robot.autonomous_coverage_mission import (
     PublishedCoverageCheckpoint,
     execute_coverage_mission,
 )
-from scripts.aufgabe04.real_robot.autonomous_localization_readiness import (
+from scripts.aufgabe04.real_robot.readiness.localization import (
     evaluate_localization_readiness_retry,
 )
-from scripts.aufgabe04.real_robot.autonomous_preauthorization_readiness import (
+from scripts.aufgabe04.real_robot.readiness.preauthorization import (
     PreauthorizationReadinessConfig,
     PreauthorizationReadinessEffects,
     admit_preauthorization_readiness,
 )
-from scripts.aufgabe04.real_robot.autonomous_observation_tf_readiness import (
+from scripts.aufgabe04.real_robot.readiness.observation_tf_runtime import (
     ObservationTfReadinessConfig,
     ObservationTfReadinessError,
     observe_observation_tf_readiness,
 )
-from scripts.aufgabe04.real_robot.autonomous_candidate_approach import (
+from scripts.aufgabe04.real_robot.candidate.approach import (
     CandidateApproachConfig,
     CandidateApproachEffects,
     CandidateMotionLegRequest,
@@ -183,34 +190,34 @@ from scripts.aufgabe04.real_robot.autonomous_candidate_approach import (
     CandidateObservationRequest,
     execute_candidate_approach_phase,
 )
-from scripts.aufgabe04.real_robot.autonomous_candidate_startup_recovery import (
+from scripts.aufgabe04.real_robot.candidate.startup_recovery import (
     CandidateStartupRecoveryAttempt,
 )
-from scripts.aufgabe04.real_robot.autonomous_candidate_runtime_recovery import (
+from scripts.aufgabe04.real_robot.candidate.runtime_recovery import (
     CandidateRuntimeRecoveryAttempt,
 )
-from scripts.aufgabe04.real_robot.autonomous_checkpoint_resume import (
+from scripts.aufgabe04.real_robot.mission.checkpoint_resume import (
     admit_coverage_resume,
     restore_and_replan_coverage_resume,
 )
-from scripts.aufgabe04.real_robot.autonomous_modes import (
+from scripts.aufgabe04.real_robot.mission.modes import (
     AutonomousRunMode,
     resolve_autonomous_run_mode,
     validate_autonomous_viewpoint_scope,
     validate_session_id_mode_label,
 )
-from scripts.aufgabe04.real_robot.autonomous_mission_reporting import (
+from scripts.aufgabe04.real_robot.mission.reporting import (
     build_completed_camera_mission_summary as _completed_camera_mission_summary,
 )
-from scripts.aufgabe04.real_robot.autonomous_post_observation import (
+from scripts.aufgabe04.real_robot.readiness.post_observation import (
     PostObservationLocalizationConfig,
     PostObservationLocalizationEffects,
     admit_post_observation_localization,
 )
-from scripts.aufgabe04.real_robot.autonomous_session_manifest import (
+from scripts.aufgabe04.real_robot.mission.session_manifest import (
     publish_coverage_checkpoint,
 )
-from scripts.aufgabe04.real_robot.autonomous_startup_reseal import (
+from scripts.aufgabe04.real_robot.readiness.startup_reseal import (
     StartupResealPermitContext,
     issue_startup_reseal_motion_permit,
     write_startup_reseal_permit_summary,
@@ -1191,6 +1198,7 @@ def _capture_camera_recommendation(
     args,
     candidate,
     output_dir: Path,
+    observation_attempt_index: int = 0,
 ) -> tuple[Path | None, str | None, Path | None]:
     output_dir.mkdir(parents=True, exist_ok=False)
     status_path = output_dir / "observer_status.json"
@@ -1200,7 +1208,7 @@ def _capture_camera_recommendation(
     axis_observation_path = output_dir / "axis_observation.json"
     command = [
         sys.executable,
-        "scripts/aufgabe04/real_robot/passive_viewpoint_node.py",
+        "scripts/aufgabe04/real_robot/entrypoints/passive_viewpoint_node.py",
         "--robot-profile",
         str(args.robot_profile),
         "--camera-calibration",
@@ -1261,14 +1269,27 @@ def _capture_camera_recommendation(
         return None, None, axis_observation_path
     if process_evidence.artifact_kind != "recommendation":
         status_evidence = load_passive_observer_status(status_path)
-        raise RuntimeError(
-            format_passive_observer_failure(
-                candidate_uid=candidate.candidate_uid,
-                process=process_evidence,
-                status=status_evidence,
-                process_evidence_path=process_evidence_path,
-            )
+        reason = format_passive_observer_failure(
+            candidate_uid=candidate.candidate_uid,
+            process=process_evidence,
+            status=status_evidence,
+            process_evidence_path=process_evidence_path,
         )
+        if is_candidate_local_observer_timeout(
+            process=process_evidence,
+            status=status_evidence,
+        ):
+            raise CandidateObservationUnavailableError(
+                candidate_uid=candidate.candidate_uid,
+                observation_attempt_index=observation_attempt_index,
+                reason=reason,
+                process_evidence={
+                    **process_evidence.to_dict(),
+                    "evidence_path": str(process_evidence_path),
+                },
+                status_evidence=status_evidence.to_dict(),
+            )
+        raise RuntimeError(reason)
     try:
         status = json.loads(status_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -1499,6 +1520,7 @@ def _capture_candidate_observation(
             args=args,
             candidate=request.candidate,
             output_dir=request.output_dir,
+            observation_attempt_index=request.attempt_index,
         )
     )
     return CandidateObservation(
@@ -1532,6 +1554,10 @@ def _validate_inputs(parser, args, profile, calibration) -> None:
     if args.max_localization_readiness_retries_per_leg < 0:
         parser.error(
             "--max-localization-readiness-retries-per-leg must be non-negative"
+        )
+    if args.max_camera_observation_attempts_per_candidate < 1:
+        parser.error(
+            "--max-camera-observation-attempts-per-candidate must be positive"
         )
     if (
         not math.isfinite(args.uncertainty_sigma_multiplier)
@@ -2378,6 +2404,9 @@ def main(argv=None) -> int:
                 camera_selection_angular_speed_radps=(
                     profile.max_angular_speed_radps
                 ),
+                max_camera_observation_attempts_per_candidate=(
+                    args.max_camera_observation_attempts_per_candidate
+                ),
             ),
             CandidateApproachEffects(
                 read_current_pose=lambda: read_current_pose2d_from_amcl(
@@ -2482,29 +2511,12 @@ def main(argv=None) -> int:
         ValueError,
     ) as exc:
         if session_root.exists():
-            failure = {
-                "schema_version": 1,
-                "status": "failed_closed",
-                "run_mode": args.run_mode,
-                "reason": str(exc),
-                "motion_continues_authorized": False,
-            }
-            structured_fields = getattr(exc, "to_failure_fields", None)
-            if callable(structured_fields):
-                try:
-                    candidate_fields = structured_fields()
-                except Exception:
-                    candidate_fields = None
-                if isinstance(candidate_fields, dict):
-                    failure.update(candidate_fields)
-                    failure["schema_version"] = 1
-                    failure["status"] = "failed_closed"
-                    failure["run_mode"] = args.run_mode
-                    failure["reason"] = str(exc)
-                    failure["motion_continues_authorized"] = False
             _write_json(
                 session_root / "mission_failure.json",
-                failure,
+                build_failed_closed_mission_summary(
+                    run_mode=args.run_mode,
+                    error=exc,
+                ),
             )
         parser.exit(2, f"error: {exc}\n")
 

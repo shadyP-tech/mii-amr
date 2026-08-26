@@ -27,8 +27,18 @@ from scripts.aufgabe04.navigation.coverage.transient_blockage_policy import (
 )
 from scripts.aufgabe04.navigation.control.waypoint_controller import VelocityCommand
 from scripts.aufgabe04.navigation.waypoint_follower.pose_lookup import PoseLookupResult
+from scripts.aufgabe04.navigation.waypoint_follower.directives import (
+    BlockageRecoveryAction,
+    RouteRefreshAction,
+)
 from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.bindings import (
     RuntimeBindingProxy,
+)
+from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.recovery_dispatch import (
+    BlockageRecoveryDisposition,
+    BlockageRecoveryTrigger,
+    blockage_recovery_disposition,
+    blockage_recovery_eligible,
 )
 
 rclpy = RuntimeBindingProxy("rclpy", rclpy)
@@ -144,17 +154,63 @@ class BlockageRecoveryRuntimeMixin:
             monotonic=time.monotonic,
         )
 
+    def _blockage_recovery_outcome(
+        self,
+        *,
+        trigger: BlockageRecoveryTrigger,
+        pose: Pose2D | None,
+        stop_reason: str,
+        stop_details: Mapping[str, object] | None,
+        front_evidence: Mapping[str, object] | None,
+        nominal_linear_x_mps: float | None = None,
+    ) -> BlockageRecoveryDisposition:
+        """Attempt an admitted recovery and reduce it to one loop outcome."""
+
+        provider_available = self.blockage_recovery_provider is not None
+        if trigger == BlockageRecoveryTrigger.OBSTACLE_SAFETY_STOP:
+            # A front-sector safety stop occurs before this cycle computes a
+            # controller command. Its recovery admission therefore depends on
+            # validated front evidence, not a fabricated nominal velocity.
+            eligible = (
+                provider_available
+                and (front_evidence or {}).get("source") == "front_sector"
+            )
+        else:
+            eligible = (
+                nominal_linear_x_mps is not None
+                and blockage_recovery_eligible(
+                    provider_available=provider_available,
+                    nominal_linear_x_mps=nominal_linear_x_mps,
+                    front_evidence=front_evidence,
+                )
+            )
+        recovery = BlockageRecoveryAction.NOT_ATTEMPTED
+        if eligible and pose is not None:
+            recovery = self._attempt_blockage_recovery(
+                pose,
+                stop_reason,
+                stop_details or {},
+            )
+        return blockage_recovery_disposition(
+            trigger=trigger,
+            recovery_action=recovery,
+            fallback_reason=stop_reason,
+            latest_reason=(
+                (self.latest_stop_details or {}).get("reason", stop_reason)
+            ),
+        )
+
     def _attempt_blockage_recovery(
         self,
         pose: Pose2D,
         stop_reason: str,
         stop_details: Mapping[str, object],
-    ) -> str:
+    ) -> BlockageRecoveryAction:
         """Plan and atomically adopt one physical coverage route revision."""
 
         provider = self.blockage_recovery_provider
         if provider is None:
-            return ""
+            return BlockageRecoveryAction.NOT_ATTEMPTED
         # Motion must already be zero before synchronous planning, artifact
         # sealing, or event logging begins. Sensor callbacks continue on the
         # background executor while the planner runs.
@@ -169,7 +225,7 @@ class BlockageRecoveryRuntimeMixin:
                 "original_stop_reason": stop_reason,
                 "fail_closed": True,
             }
-            return "stopped"
+            return BlockageRecoveryAction.STOPPED
         confirmation = self._confirm_stationary_blockage()
         trace_failure = self._append_controller_trace(
             event=f"blockage_{confirmation.status}",
@@ -182,7 +238,7 @@ class BlockageRecoveryRuntimeMixin:
             front_cluster_summary=confirmation.evidence,
         )
         if trace_failure:
-            return "stopped"
+            return BlockageRecoveryAction.STOPPED
         if confirmation.status == "cleared":
             if stop_reason == "stuck no progress":
                 self.latest_stop_details = {
@@ -196,7 +252,7 @@ class BlockageRecoveryRuntimeMixin:
                     "original_stop_reason": stop_reason,
                     "fail_closed": True,
                 }
-                return "stopped"
+                return BlockageRecoveryAction.STOPPED
             self.latest_stop_details = {
                 **dict(stop_details),
                 **confirmation.evidence,
@@ -205,7 +261,7 @@ class BlockageRecoveryRuntimeMixin:
                 "fail_closed": False,
             }
             self._reset_progress_watchdog(time.monotonic())
-            return "cleared"
+            return BlockageRecoveryAction.CLEARED
         if confirmation.status != "confirmed" or confirmation.pose is None:
             self.latest_stop_details = {
                 **dict(stop_details),
@@ -215,7 +271,7 @@ class BlockageRecoveryRuntimeMixin:
                 "original_stop_reason": stop_reason,
                 "fail_closed": True,
             }
-            return "stopped"
+            return BlockageRecoveryAction.STOPPED
         confirmed_pose = confirmation.pose
         context = getattr(self, "odom_execution_context", None)
         runtime = getattr(self, "runtime_config", None)
@@ -251,9 +307,9 @@ class BlockageRecoveryRuntimeMixin:
                 "original_stop_reason": stop_reason,
                 "fail_closed": True,
             }
-            return "stopped"
+            return BlockageRecoveryAction.STOPPED
         if update is None:
-            return ""
+            return BlockageRecoveryAction.NOT_ATTEMPTED
         # Planning and artifact sealing are synchronous.  TF/AMCL and sensor
         # callbacks continue on the background executors while that work runs,
         # so the pose that triggered recovery is no longer authoritative for
@@ -269,7 +325,7 @@ class BlockageRecoveryRuntimeMixin:
                 "original_stop_reason": stop_reason,
                 "fail_closed": True,
             }
-            return "stopped"
+            return BlockageRecoveryAction.STOPPED
         fresh_pose = admission.pose
         fresh_planning_pose = (
             fresh_pose
@@ -313,7 +369,7 @@ class BlockageRecoveryRuntimeMixin:
         )
         self.queued_route_update = update
         refresh = self._refresh_dynamic_route(fresh_pose)
-        if refresh == "adopted":
+        if refresh == RouteRefreshAction.ADOPTED:
             trace_failure = self._append_controller_trace(
                 event="replacement_route_adopted",
                 pose=fresh_pose,
@@ -323,8 +379,8 @@ class BlockageRecoveryRuntimeMixin:
                 front_cluster_summary=confirmation.evidence,
             )
             if trace_failure:
-                return "stopped"
-        return refresh
+                return BlockageRecoveryAction.STOPPED
+        return BlockageRecoveryAction(str(refresh))
 
     def _post_replan_admission_pose(self) -> PoseLookupResult:
         """Return a fresh stopped pose after synchronous replacement planning.

@@ -12,8 +12,8 @@ from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization 
     STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH,
     STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY,
 )
-from scripts.aufgabe04.real_robot.autonomous_child_runner import MotionLegOutcome
-from scripts.aufgabe04.real_robot import autonomous_coverage_replanning as replanning
+from scripts.aufgabe04.real_robot.execution.child_runner import MotionLegOutcome
+from scripts.aufgabe04.real_robot.coverage_leg import replanning
 
 from .outcomes import (
     _claims_prestart_localization_phase,

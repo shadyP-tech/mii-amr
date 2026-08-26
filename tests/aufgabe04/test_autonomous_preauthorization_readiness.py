@@ -6,10 +6,10 @@ from types import SimpleNamespace
 import tempfile
 import unittest
 
-from scripts.aufgabe04.real_robot.autonomous_initial_readiness import (
+from scripts.aufgabe04.real_robot.readiness.initial import (
     InitialReadinessRejected,
 )
-from scripts.aufgabe04.real_robot.autonomous_preauthorization_readiness import (
+from scripts.aufgabe04.real_robot.readiness.preauthorization import (
     PreauthorizationReadinessConfig,
     PreauthorizationReadinessEffects,
     admit_preauthorization_readiness,
@@ -295,7 +295,7 @@ class AutonomousPreauthorizationReadinessTest(unittest.TestCase):
     def test_module_has_no_parent_runner_ros_subprocess_or_prompt_dependency(self):
         module_path = (
             Path(__file__).resolve().parents[2]
-            / "scripts/aufgabe04/real_robot/autonomous_preauthorization_readiness.py"
+            / "scripts/aufgabe04/real_robot/readiness/preauthorization.py"
         )
         tree = ast.parse(module_path.read_text(encoding="utf-8"))
         imported = set()
@@ -310,7 +310,7 @@ class AutonomousPreauthorizationReadinessTest(unittest.TestCase):
             )
         )
         self.assertNotIn(
-            "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration",
+            "scripts.aufgabe04.real_robot.autonomous_runner.runtime",
             imported,
         )
         self.assertFalse(

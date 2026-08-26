@@ -1,6 +1,6 @@
 import unittest
 
-from scripts.aufgabe04.real_robot.autonomous_localization_readiness import (
+from scripts.aufgabe04.real_robot.readiness.localization import (
     evaluate_localization_readiness_retry,
     localization_readiness_suffix,
 )

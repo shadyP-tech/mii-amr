@@ -56,7 +56,7 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     write_stand_survey_registry,
     write_survey_progress,
 )
-from scripts.aufgabe04.real_robot.autonomous_session_manifest import (
+from scripts.aufgabe04.real_robot.mission.session_manifest import (
     admit_autonomous_session_manifest,
     autonomous_session_manifest_sha256,
 )

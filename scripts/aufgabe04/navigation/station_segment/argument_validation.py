@@ -415,6 +415,9 @@ def prepare_runtime_arguments(parser, args):
         parser.error("--dynamic-route-terminal-lock-distance-m must be positive")
     args.run_id = args.run_id or f"aufgabe04-segment-{uuid.uuid4().hex[:8]}"
     args.semantic_log = args.semantic_log or DEFAULT_EVENT_LOG_DIR / f"{args.run_id}.jsonl"
+    args.preflight_json = args.preflight_json or args.semantic_log.with_name(
+        f"{args.run_id}_preflight.json"
+    )
     bundle_dir = os.environ.get("MII_AMR_RUN_BUNDLE_DIR", "").strip()
     if (
         args.controller_trace_jsonl is None

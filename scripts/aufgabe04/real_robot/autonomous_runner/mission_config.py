@@ -28,15 +28,15 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
 from scripts.aufgabe04.perception.lidar_stand_morphology import (
     stand_width_profile_from_radius,
 )
-from scripts.aufgabe04.real_robot.autonomous_child_runner import (
+from scripts.aufgabe04.real_robot.execution.child_runner import (
     DEFAULT_COLLISION_MARGIN_M,
     DEFAULT_LIDAR_STOP_DISTANCE_M,
     DEFAULT_TRACKING_TUBE_RADIUS_M,
 )
-from scripts.aufgabe04.real_robot.autonomous_coverage_mission import (
+from scripts.aufgabe04.real_robot.mission.coverage import (
     CoverageCompletionPolicy,
 )
-from scripts.aufgabe04.real_robot.autonomous_modes import AutonomousRunMode
+from scripts.aufgabe04.real_robot.mission.modes import AutonomousRunMode
 from scripts.aufgabe04.stations.candidate_snapshot import (
     CandidateGeometry,
     CandidateSource,

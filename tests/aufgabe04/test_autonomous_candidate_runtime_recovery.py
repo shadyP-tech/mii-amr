@@ -4,17 +4,17 @@ import tempfile
 import unittest
 
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
-from scripts.aufgabe04.real_robot.autonomous_candidate_runtime_recovery import (
+from scripts.aufgabe04.real_robot.candidate.runtime_recovery import (
     CandidateRuntimeRecoveryAttempt,
     CandidateRuntimeRecoveryConfig,
     CandidateRuntimeRecoveryEffects,
     CandidateRuntimeRecoveryError,
     execute_candidate_runtime_localization_recovery,
 )
-from scripts.aufgabe04.real_robot.autonomous_candidate_startup_recovery import (
+from scripts.aufgabe04.real_robot.candidate.startup_recovery import (
     CandidateRoutineIdentity,
 )
-from scripts.aufgabe04.real_robot.autonomous_child_runner import MotionLegOutcome
+from scripts.aufgabe04.real_robot.execution.child_runner import MotionLegOutcome
 
 
 @dataclass(frozen=True)

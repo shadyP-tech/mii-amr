@@ -19,6 +19,7 @@ from scripts.aufgabe04.navigation.control.driving_behavior import (
 from scripts.aufgabe04.navigation.execution.execution_route_certificate import (
     ExecutionRouteCheck,
 )
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.navigation.control.follower_models import FollowerResult
 from scripts.aufgabe04.navigation.control.follower_safety import (
     OBSTACLE_TOO_CLOSE,
@@ -32,35 +33,63 @@ from scripts.aufgabe04.navigation.approach.viewpoint_sampling_contract import (
     INTERMEDIATE_TERMINAL_HEADING_DISTANCE_COMPARISON_EPSILON_M,
 )
 from scripts.aufgabe04.navigation.control.waypoint_controller import (
+    ControllerStep,
     VelocityCommand,
     compute_join_anchor_command,
 )
 from scripts.aufgabe04.navigation.waypoint_follower.route_admission import (
+    ExecutionRouteAdmissionDecision,
+    ExecutionRouteAdmissionStatus,
     certified_startup_join_action,
-    stuck_progress_details,
+)
+from scripts.aufgabe04.navigation.waypoint_follower.directives import (
+    AcquisitionGoalAction,
+    RouteRefreshAction,
+    StartupJoinAction,
 )
 from scripts.aufgabe04.navigation.waypoint_follower.route_phases import (
-    acquisition_goal_action,
-    viewpoint_sampling_target_timeout_failure,
-    viewpoint_sampling_timeout_failure,
+    ControlStepAction,
+    ControlStepResolution,
+    ControlStepStopKind,
+    RouteCommandPhase,
+    WaypointLifecycleAction,
+    WaypointLifecycleDecision,
+    acquisition_goal_decision,
+    route_command_phase,
+    viewpoint_sampling_deadline_decision,
 )
 from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.bindings import (
     RuntimeBindingProxy,
 )
 from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.command_admission import (
-    command_admission_decision,
+    CommandAdmissionDecision,
+    PreparedCommandDecision,
     command_shape_interval_sec,
-    stuck_distance_progress_epsilon,
 )
 from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.control_results import (
-    clearance_motion_floor_stop_details,
+    CertifiedCornerStopEvidence,
+    acquisition_goal_stop_details,
+    certified_corner_stop_details,
+    certified_static_start_stop_details,
     control_result,
     initial_runtime_input_stop_details,
+    intermediate_terminal_heading_stop_details,
+    noop_result,
     nonfinite_velocity_stop_details,
+    ros_shutdown_stop_details,
+    viewpoint_sampling_timeout_stop_details,
     waypoint_timeout_stop_details,
     with_controller_trace_failure,
+    with_route_check_error,
+)
+from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.recovery_dispatch import (
+    BlockageRecoveryTrigger,
+    RecoveryLoopAction,
+    front_sector_recovery_evidence,
 )
 from scripts.aufgabe04.navigation.waypoint_follower.startup import (
+    StartupPoseAdmissionAction,
+    StartupPoseAdmissionDecision,
     certified_static_startup_decision,
 )
 from scripts.aufgabe04.navigation.waypoint_follower.terminal_heading import (
@@ -75,10 +104,534 @@ rclpy = RuntimeBindingProxy("rclpy", rclpy)
 class ControlLoopRuntimeMixin:
     """Control-loop behavior mixed into the sole follower node."""
 
+    def _startup_pose_admission_decision(
+        self,
+        pose: Pose2D,
+    ) -> StartupPoseAdmissionDecision:
+        """Apply startup gates without publishing or directing loop control."""
+
+        if self.target_index != 0:
+            return StartupPoseAdmissionDecision(
+                StartupPoseAdmissionAction.PROCEED,
+                selected_target_index=self.target_index,
+            )
+
+        initial_failure = initial_pose_failure(
+            pose,
+            self.waypoints[0],
+            self.follower_config.initial_distance_limit_m,
+        )
+        if initial_failure:
+            return StartupPoseAdmissionDecision(
+                StartupPoseAdmissionAction.STOP,
+                stop_reason=initial_failure,
+            )
+
+        if not self.certified_static_start_pending:
+            return StartupPoseAdmissionDecision(
+                StartupPoseAdmissionAction.PROCEED,
+                selected_target_index=0,
+            )
+
+        startup_decision = certified_static_startup_decision(
+            pose,
+            self.waypoints,
+            tracking_tube_radius_m=(
+                self.follower_config.certified_route_tube_radius_m
+            ),
+            chord_sample_spacing_m=(
+                self.follower_config.certified_route_chord_sample_spacing_m
+            ),
+        )
+        self.certified_static_start_pending = False
+        if not startup_decision.ok:
+            stop_details = certified_static_start_stop_details(
+                startup_decision.route_check.to_log_dict(),
+                certificate_reason=startup_decision.route_check.reason,
+            )
+            return StartupPoseAdmissionDecision(
+                StartupPoseAdmissionAction.STOP,
+                static_start_consumed=True,
+                stop_reason="pose outside certified startup segment",
+                stop_details=stop_details,
+            )
+
+        assert startup_decision.target_index is not None
+        selected_target_index = startup_decision.target_index
+        if selected_target_index == 1:
+            self.target_index = 1
+            self.target_started_at = time.monotonic()
+            self._reset_progress_watchdog(time.monotonic())
+            return StartupPoseAdmissionDecision(
+                StartupPoseAdmissionAction.ZERO_HOLD,
+                selected_target_index=1,
+                static_start_consumed=True,
+            )
+        return StartupPoseAdmissionDecision(
+            StartupPoseAdmissionAction.PROCEED,
+            selected_target_index=selected_target_index,
+            static_start_consumed=True,
+        )
+
+    def _prepare_certified_corner_stop_evidence(
+        self,
+        pose: Pose2D,
+        failed_step: ControllerStep,
+        reason: str,
+    ) -> CertifiedCornerStopEvidence:
+        """Build corner-stop evidence after motion has been revoked."""
+
+        stop_details = certified_corner_stop_details(
+            reason=reason,
+            route_kind=self.current_route_kind,
+            target_index=failed_step.target_index,
+            pursuit_index=failed_step.pursuit_index,
+            distance_to_vertex_m=failed_step.distance_to_target_m,
+            release_tolerance_m=(
+                self.follower_config.certified_corner_release_tolerance_m
+            ),
+            hold_tolerance_m=(
+                self.follower_config.certified_corner_hold_tolerance_m
+            ),
+            tracking_tube_radius_m=(
+                self.follower_config.certified_route_tube_radius_m
+            ),
+            reacquire_attempts=(
+                0
+                if self.certified_corner_latch is None
+                else self.certified_corner_latch.reacquire_attempts
+            ),
+            max_reacquire_attempts=(
+                self.follower_config.certified_corner_max_reacquire_attempts
+            ),
+        )
+        failure_route_check: ExecutionRouteCheck | None = None
+        if self.current_route_kind in PHYSICAL_ROUTE_KINDS:
+            try:
+                failure_route_check = self._execution_route_check(
+                    pose,
+                    failed_step,
+                )
+            except (ValueError, OverflowError) as exc:
+                stop_details = with_route_check_error(stop_details, exc)
+        return CertifiedCornerStopEvidence(
+            step=failed_step,
+            stop_details=stop_details,
+            route_check=failure_route_check,
+        )
+
+    def _execution_route_admission_decision(
+        self,
+        pose: Pose2D,
+        step: ControllerStep,
+    ) -> ExecutionRouteAdmissionDecision:
+        """Check the active route tube without applying stop effects."""
+
+        check_required = (
+            self.current_route_kind in PHYSICAL_ROUTE_KINDS
+            and (
+                not self.dynamic_join_pending
+                or (
+                    self.dynamic_join_limit_m is not None
+                    and self.dynamic_join_limit_m
+                    <= self.follower_config.certified_route_tube_radius_m
+                    + 1.0e-9
+                )
+            )
+        )
+        if not check_required:
+            return ExecutionRouteAdmissionDecision(
+                ExecutionRouteAdmissionStatus.SKIPPED
+            )
+
+        route_check = self._execution_route_check(pose, step)
+        if route_check.ok:
+            return ExecutionRouteAdmissionDecision(
+                ExecutionRouteAdmissionStatus.ADMITTED,
+                route_check=route_check,
+            )
+        return ExecutionRouteAdmissionDecision(
+            ExecutionRouteAdmissionStatus.STOP,
+            route_check=route_check,
+            stop_details=route_check.to_log_dict(),
+        )
+
+    def _resolve_control_step(
+        self,
+        pose: Pose2D,
+    ) -> ControlStepResolution:
+        """Resolve one controller step without publishing or loop control."""
+
+        command_phase = route_command_phase(
+            dynamic_join_pending=self.dynamic_join_pending,
+            start_egress_lock_index=self.start_egress_lock_index,
+            start_egress_forward_alignment_index=(
+                self.start_egress_forward_alignment_index
+            ),
+        )
+        if command_phase == RouteCommandPhase.DYNAMIC_JOIN:
+            join_action, join_failure = certified_startup_join_action(
+                pose,
+                self.waypoints[0],
+                self.dynamic_join_limit_m,
+                self.follower_config.dynamic_join_tolerance_m,
+            )
+            if join_action == StartupJoinAction.STOP:
+                assert join_failure is not None
+                return ControlStepResolution(
+                    ControlStepAction.STOP,
+                    command_phase,
+                    stop_kind=ControlStepStopKind.DYNAMIC_JOIN,
+                    stop_reason=str(join_failure["reason"]),
+                    stop_details=join_failure,
+                )
+            if join_action == StartupJoinAction.ZERO:
+                self.dynamic_join_pending = False
+                self.dynamic_join_limit_m = None
+                if self.target_index != 0:
+                    self._clear_intermediate_terminal_heading_latch(
+                        target_changed=True,
+                    )
+                self.target_index = 0
+                self.target_started_at = time.monotonic()
+                self._reset_progress_watchdog(time.monotonic())
+                return ControlStepResolution(
+                    ControlStepAction.ZERO_HOLD,
+                    command_phase,
+                )
+
+        route_controller_config = controller_config_for_route_kind(
+            self.follower_config.controller,
+            self.current_route_kind,
+            reverse_staging=self.reverse_staging,
+            viewpoint_sampling_goal_tolerance_m=(
+                self.follower_config.viewpoint_sampling_goal_tolerance_m
+            ),
+            viewpoint_sampling_heading_tolerance_rad=(
+                self.follower_config
+                .viewpoint_sampling_heading_tolerance_rad
+            ),
+            physical_goal_tolerance_m=(
+                self.follower_config.physical_goal_tolerance_m
+            ),
+            physical_waypoint_tolerance_m=(
+                self.follower_config.physical_waypoint_tolerance_m
+            ),
+        )
+        if command_phase == RouteCommandPhase.DYNAMIC_JOIN:
+            # During handoff, pursue only the collision-certified route start.
+            # Normal lookahead would form an unchecked chord to waypoint 1.
+            step = compute_join_anchor_command(
+                pose,
+                self.waypoints[0],
+                route_controller_config,
+                join_tolerance_m=(
+                    self.follower_config.dynamic_join_tolerance_m
+                ),
+            )
+            return ControlStepResolution(
+                ControlStepAction.PROCEED,
+                command_phase,
+                step=step,
+            )
+        if command_phase == RouteCommandPhase.START_EGRESS:
+            step = self._start_egress_command(
+                pose,
+                route_controller_config,
+            )
+            return ControlStepResolution(
+                (
+                    ControlStepAction.ZERO_HOLD
+                    if step is None
+                    else ControlStepAction.PROCEED
+                ),
+                command_phase,
+                step=step,
+            )
+        if command_phase == RouteCommandPhase.REVERSE_EGRESS_ALIGNMENT:
+            step = self._reverse_egress_forward_alignment_command(
+                pose,
+                route_controller_config,
+            )
+            return ControlStepResolution(
+                ControlStepAction.PROCEED,
+                command_phase,
+                step=step,
+            )
+
+        corner_decision = self._certified_corner_decision(
+            pose,
+            route_controller_config,
+        )
+        if corner_decision.failure:
+            failed_step = corner_decision.step
+            assert failed_step is not None
+            return ControlStepResolution(
+                ControlStepAction.STOP,
+                command_phase,
+                step=failed_step,
+                corner_step=failed_step,
+                stop_kind=ControlStepStopKind.CERTIFIED_CORNER,
+                stop_reason=corner_decision.failure,
+            )
+        if corner_decision.step is not None:
+            return ControlStepResolution(
+                ControlStepAction.PROCEED,
+                command_phase,
+                step=corner_decision.step,
+                corner_step=corner_decision.step,
+            )
+
+        terminal_heading_decision = (
+            compute_intermediate_terminal_heading_command(
+                pose,
+                self.waypoints,
+                self.target_index,
+                route_controller_config,
+                self.current_route_kind,
+                self.intermediate_terminal_heading_latch,
+                hold_tolerance_m=(
+                    self.follower_config
+                    .viewpoint_sampling_terminal_heading_hold_tolerance_m
+                ),
+                viewpoint_sampling_target_distance_m=(
+                    self.follower_config
+                    .viewpoint_sampling_target_distance_m
+                ),
+                viewpoint_sampling_target_envelope_radius_m=(
+                    self.follower_config
+                    .viewpoint_sampling_terminal_heading_target_envelope_radius_m
+                ),
+            )
+        )
+        self.intermediate_terminal_heading_latch = (
+            terminal_heading_decision.latch
+        )
+        step = terminal_heading_decision.step
+        if not terminal_heading_decision.failure:
+            return ControlStepResolution(
+                ControlStepAction.PROCEED,
+                command_phase,
+                step=step,
+            )
+
+        hold_diagnostics = (
+            intermediate_terminal_heading_hold_diagnostics(
+                pose,
+                terminal_heading_decision.latch,
+                hold_tolerance_m=(
+                    self.follower_config
+                    .viewpoint_sampling_terminal_heading_hold_tolerance_m
+                ),
+                viewpoint_sampling_target_distance_m=(
+                    self.follower_config
+                    .viewpoint_sampling_target_distance_m
+                ),
+                viewpoint_sampling_target_envelope_radius_m=(
+                    self.follower_config
+                    .viewpoint_sampling_terminal_heading_target_envelope_radius_m
+                ),
+            )
+            if terminal_heading_decision.latch is not None
+            else {}
+        )
+        stop_details = intermediate_terminal_heading_stop_details(
+            reason=terminal_heading_decision.failure,
+            route_kind=self.current_route_kind,
+            target_index=step.target_index,
+            distance_to_target_m=step.distance_to_target_m,
+            entry_tolerance_m=(
+                intermediate_terminal_heading_entry_tolerance_m(
+                    route_controller_config
+                )
+            ),
+            hold_tolerance_m=(
+                self.follower_config
+                .viewpoint_sampling_terminal_heading_hold_tolerance_m
+            ),
+            distance_comparison_epsilon_m=(
+                INTERMEDIATE_TERMINAL_HEADING_DISTANCE_COMPARISON_EPSILON_M
+            ),
+            hold_diagnostics=hold_diagnostics,
+        )
+        return ControlStepResolution(
+            ControlStepAction.STOP,
+            command_phase,
+            step=step,
+            stop_kind=(
+                ControlStepStopKind.INTERMEDIATE_TERMINAL_HEADING
+            ),
+            stop_reason=terminal_heading_decision.failure.replace("_", " "),
+            stop_details=stop_details,
+        )
+
+    def _prepare_command_for_publication(
+        self,
+        command_admission: CommandAdmissionDecision,
+        *,
+        now_monotonic: float,
+        loop_period_sec: float,
+    ) -> PreparedCommandDecision:
+        """Validate and shape one admitted command without publishing it."""
+
+        raw_effective_command = command_admission.effective_command
+        if not command_admission.finite:
+            return PreparedCommandDecision(
+                raw_effective_command=raw_effective_command,
+                shaped_command=None,
+                shape_dt_sec=None,
+                stop_details=nonfinite_velocity_stop_details(
+                    linear_x_mps=raw_effective_command.linear_x_mps,
+                    angular_z_radps=raw_effective_command.angular_z_radps,
+                ),
+            )
+
+        shape_dt_sec = command_shape_interval_sec(
+            loop_period_sec=loop_period_sec,
+            now_monotonic=now_monotonic,
+            last_shape_at=self.last_command_shape_at,
+        )
+        shaped_command = self.command_smoother.apply(
+            raw_effective_command,
+            dt_sec=shape_dt_sec,
+        )
+        self.last_command_shape_at = now_monotonic
+        return PreparedCommandDecision(
+            raw_effective_command=raw_effective_command,
+            shaped_command=shaped_command,
+            shape_dt_sec=shape_dt_sec,
+            trace_diagnostics={
+                "driving_behavior": {
+                    "command_smoothing_enabled": (
+                        self.follower_config.command_smoothing.enabled
+                    ),
+                    "unshaped_effective_command": {
+                        "linear_x_mps": raw_effective_command.linear_x_mps,
+                        "angular_z_radps": (
+                            raw_effective_command.angular_z_radps
+                        ),
+                    },
+                    "shape_dt_sec": shape_dt_sec,
+                }
+            },
+        )
+
+    def _waypoint_lifecycle_decision(
+        self,
+        step: ControllerStep,
+        pose: Pose2D,
+    ) -> WaypointLifecycleDecision:
+        """Apply waypoint state transitions and classify the next loop effect."""
+
+        if step.target_index != self.target_index:
+            self._clear_intermediate_terminal_heading_latch(
+                target_changed=True,
+            )
+            self.target_index = step.target_index
+            self.certified_corner_latch = None
+            self.target_started_at = time.monotonic()
+            self._reset_progress_watchdog(time.monotonic())
+        if step.reached_goal:
+            now_monotonic = time.monotonic()
+            goal_decision = acquisition_goal_decision(
+                route_kind=self.current_route_kind,
+                provider_available=self.waypoint_provider is not None,
+                hold_started_at=self.axis_acquisition_hold_started_at,
+                now_monotonic=now_monotonic,
+                timeout_sec=(
+                    self.follower_config.axis_acquisition_wait_timeout_sec
+                ),
+            )
+            self.axis_acquisition_hold_started_at = (
+                goal_decision.hold_started_at
+            )
+            goal_action = goal_decision.action
+            if goal_action == AcquisitionGoalAction.HOLD_FOR_PHYSICAL_FACE:
+                return WaypointLifecycleDecision(
+                    WaypointLifecycleAction.HOLD
+                )
+            if goal_action == AcquisitionGoalAction.COMPLETE:
+                return WaypointLifecycleDecision(
+                    WaypointLifecycleAction.COMPLETE
+                )
+            stop_details = acquisition_goal_stop_details(
+                reason=goal_action,
+                route_kind=self.current_route_kind,
+                hold_elapsed_sec=goal_decision.hold_elapsed_sec,
+                timeout_sec=(
+                    self.follower_config.axis_acquisition_wait_timeout_sec
+                ),
+            )
+            return WaypointLifecycleDecision(
+                WaypointLifecycleAction.STOP,
+                stop_reason=goal_action.replace("_", " "),
+                stop_details=stop_details,
+            )
+
+        timeout_now = time.monotonic()
+        timeout_elapsed = timeout_now - self.target_started_at
+        timeout_failure = waypoint_timeout_failure(
+            timeout_elapsed,
+            self.follower_config.waypoint_timeout_sec,
+        )
+        if not timeout_failure:
+            return WaypointLifecycleDecision(
+                WaypointLifecycleAction.PROCEED
+            )
+        stop_details = waypoint_timeout_stop_details(
+            reason=timeout_failure,
+            route_kind=self.current_route_kind,
+            elapsed_sec=timeout_elapsed,
+            timeout_sec=self.follower_config.waypoint_timeout_sec,
+            target_index=step.target_index,
+            pursuit_index=step.pursuit_index,
+            distance_to_target_m=step.distance_to_target_m,
+            progress_mode=step.progress_mode,
+            axis_acquisition_target_revision=(
+                self.axis_acquisition_target_revision
+            ),
+            viewpoint_sampling_target_revision=(
+                self.viewpoint_sampling_target_revision
+            ),
+            robot_x_m=pose.x_m,
+            robot_y_m=pose.y_m,
+            robot_yaw_rad=pose.yaw_rad,
+        )
+        return WaypointLifecycleDecision(
+            WaypointLifecycleAction.STOP,
+            stop_reason=timeout_failure,
+            stop_details=stop_details,
+            evaluated_at=timeout_now,
+        )
+
     def run(self) -> FollowerResult:
         if len(self.waypoints) < 2:
-            return FollowerResult("noop", "fewer than two waypoints", 0.0, 0.0, False)
+            return noop_result("fewer than two waypoints")
         started_at = time.monotonic()
+
+        def finish(
+            status: str,
+            stop_reason: str,
+            *,
+            stop_details: Mapping[str, object] | None = None,
+            now_monotonic: float | None = None,
+        ) -> FollowerResult:
+            """Snapshot mutable runtime counters into one result contract."""
+
+            return control_result(
+                status,
+                stop_reason,
+                started_at=started_at,
+                now_monotonic=(
+                    time.monotonic()
+                    if now_monotonic is None
+                    else now_monotonic
+                ),
+                distance_estimate_m=self.distance_estimate_m,
+                motion_published=self.motion_published,
+                stop_details=stop_details,
+            )
+
         if self.current_route_kind == "viewpoint_sampling":
             self.viewpoint_sampling_started_at = started_at
             self.viewpoint_sampling_target_started_at = started_at
@@ -113,13 +666,9 @@ class ControlLoopRuntimeMixin:
                     trace_failure,
                 )
             self.latest_stop_details = stop_details
-            return control_result(
+            return finish(
                 "stopped",
                 startup_failure,
-                started_at=started_at,
-                now_monotonic=time.monotonic(),
-                distance_estimate_m=self.distance_estimate_m,
-                motion_published=self.motion_published,
                 stop_details=stop_details,
             )
         loop_sleep_sec = 1.0 / max(self.follower_config.control_rate_hz, 1.0)
@@ -129,54 +678,48 @@ class ControlLoopRuntimeMixin:
                 self._drain_runtime_callbacks()
                 safety_failure = self._safety_failure()
                 if safety_failure:
+                    front_evidence = front_sector_recovery_evidence(
+                        self.latest_stop_details
+                    )
                     if (
                         safety_failure == OBSTACLE_TOO_CLOSE
                         and self.blockage_recovery_provider is not None
-                        and isinstance(
-                            (self.latest_stop_details or {}).get(
-                                "front_clearance"
-                            ),
-                            Mapping,
-                        )
-                        and (self.latest_stop_details or {})[
-                            "front_clearance"
-                        ].get("source")
-                        == "front_sector"
+                        and front_evidence is not None
                     ):
                         self.publish_repeated_zero()
                         recovery_pose = (
                             self._current_pose_lookup_with_stale_recovery().pose
                         )
-                        if recovery_pose is not None:
-                            recovery = self._attempt_blockage_recovery(
-                                recovery_pose,
-                                safety_failure,
-                                self.latest_stop_details or {},
-                            )
-                            if recovery == "adopted":
-                                self._hold_zero_control_period(loop_sleep_sec)
-                                continue
-                            if recovery == "cleared":
-                                # A separately confirmed clear front sector may
-                                # resume only on the next full safety cycle.
-                                self.publish_zero()
-                                self._hold_zero_control_period(loop_sleep_sec)
-                                continue
-                            if recovery == "stopped":
-                                safety_failure = str(
-                                    (self.latest_stop_details or {}).get(
-                                        "reason",
-                                        safety_failure,
-                                    )
-                                )
+                        recovery_disposition = self._blockage_recovery_outcome(
+                            trigger=(
+                                BlockageRecoveryTrigger.OBSTACLE_SAFETY_STOP
+                            ),
+                            pose=recovery_pose,
+                            stop_reason=safety_failure,
+                            stop_details=self.latest_stop_details,
+                            front_evidence=front_evidence,
+                        )
+                        if (
+                            recovery_disposition.action
+                            == RecoveryLoopAction.HOLD_AND_RETRY
+                        ):
+                            self._hold_zero_control_period(loop_sleep_sec)
+                            continue
+                        if (
+                            recovery_disposition.action
+                            == RecoveryLoopAction.ZERO_HOLD_AND_RETRY
+                        ):
+                            # A separately confirmed clear front sector may
+                            # resume only on the next full safety cycle.
+                            self.publish_zero()
+                            self._hold_zero_control_period(loop_sleep_sec)
+                            continue
+                        safety_failure = recovery_disposition.stop_reason
                     self.publish_repeated_zero()
-                    return FollowerResult(
+                    return finish(
                         "stopped",
                         safety_failure,
-                        time.monotonic() - started_at,
-                        self.distance_estimate_m,
-                        self.motion_published,
-                        self.latest_stop_details,
+                        stop_details=self.latest_stop_details,
                     )
                 localization_failure = (
                     self._global_consistency_monitor_failure()
@@ -187,13 +730,10 @@ class ControlLoopRuntimeMixin:
                     # evidence/logging and terminate this authorization; the
                     # monitor is not permitted to steer or mutate the route.
                     self.publish_repeated_zero()
-                    return FollowerResult(
+                    return finish(
                         "stopped",
                         localization_failure,
-                        time.monotonic() - started_at,
-                        self.distance_estimate_m,
-                        self.motion_published,
-                        self.latest_stop_details,
+                        stop_details=self.latest_stop_details,
                     )
                 # Endpoint graph discovery in _safety_failure can briefly
                 # delay TF listener callbacks.  Recover only that resulting
@@ -217,93 +757,80 @@ class ControlLoopRuntimeMixin:
                             diagnostics=stop_details,
                         )
                         if trace_failure:
-                            stop_details["controller_trace_error"] = (
-                                trace_failure
+                            stop_details = with_controller_trace_failure(
+                                stop_details,
+                                trace_failure,
                             )
-                            stop_details["controller_trace_fault_code"] = (
-                                "controller_trace_write_failed"
-                            )
-                    return FollowerResult(
+                    return finish(
                         "stopped",
                         stop_reason,
-                        time.monotonic() - started_at,
-                        self.distance_estimate_m,
-                        self.motion_published,
-                        stop_details,
+                        stop_details=stop_details,
                     )
                 route_refresh = self._refresh_dynamic_route(pose)
-                if route_refresh == "stopped":
+                if route_refresh == RouteRefreshAction.STOPPED:
                     self.publish_repeated_zero()
-                    return FollowerResult(
+                    return finish(
                         "stopped",
-                        str((self.latest_stop_details or {}).get("reason", "dynamic route withdrawn")),
-                        time.monotonic() - started_at,
-                        self.distance_estimate_m,
-                        self.motion_published,
-                        self.latest_stop_details,
+                        str(
+                            (self.latest_stop_details or {}).get(
+                                "reason",
+                                "dynamic route withdrawn",
+                            )
+                        ),
+                        stop_details=self.latest_stop_details,
                     )
-                if route_refresh == "completed":
+                if route_refresh == RouteRefreshAction.COMPLETED:
                     self.publish_repeated_zero()
-                    return FollowerResult(
+                    return finish(
                         "completed",
                         "",
-                        time.monotonic() - started_at,
-                        self.distance_estimate_m,
-                        self.motion_published,
-                        self.latest_stop_details,
+                        stop_details=self.latest_stop_details,
                     )
                 sampling_now = time.monotonic()
-                sampling_timeout = viewpoint_sampling_timeout_failure(
+                sampling_deadline = viewpoint_sampling_deadline_decision(
                     route_kind=self.current_route_kind,
                     phase_started_at=self.viewpoint_sampling_started_at,
+                    target_started_at=(
+                        self.viewpoint_sampling_target_started_at
+                    ),
                     now_monotonic=sampling_now,
-                    timeout_sec=self.follower_config.viewpoint_sampling_timeout_sec,
+                    phase_timeout_sec=(
+                        self.follower_config.viewpoint_sampling_timeout_sec
+                    ),
+                    target_timeout_sec=(
+                        self.follower_config
+                        .viewpoint_sampling_target_timeout_sec
+                    ),
                 )
-                if not sampling_timeout:
-                    sampling_timeout = viewpoint_sampling_target_timeout_failure(
-                        route_kind=self.current_route_kind,
-                        target_started_at=(
-                            self.viewpoint_sampling_target_started_at
-                        ),
-                        now_monotonic=sampling_now,
-                        timeout_sec=(
-                            self.follower_config.viewpoint_sampling_target_timeout_sec
-                        ),
+                if sampling_deadline.failure:
+                    self.latest_stop_details = (
+                        viewpoint_sampling_timeout_stop_details(
+                            reason=sampling_deadline.failure,
+                            route_kind=self.current_route_kind,
+                            phase_elapsed_sec=(
+                                sampling_deadline.phase_elapsed_sec
+                            ),
+                            target_elapsed_sec=(
+                                sampling_deadline.target_elapsed_sec
+                            ),
+                            phase_timeout_sec=(
+                                self.follower_config
+                                .viewpoint_sampling_timeout_sec
+                            ),
+                            target_timeout_sec=(
+                                self.follower_config
+                                .viewpoint_sampling_target_timeout_sec
+                            ),
+                        )
                     )
-                if sampling_timeout:
-                    self.latest_stop_details = {
-                        "reason": sampling_timeout,
-                        "route_kind": self.current_route_kind,
-                        "phase_elapsed_sec": (
-                            None
-                            if self.viewpoint_sampling_started_at is None
-                            else time.monotonic()
-                            - self.viewpoint_sampling_started_at
-                        ),
-                        "target_elapsed_sec": (
-                            None
-                            if self.viewpoint_sampling_target_started_at is None
-                            else time.monotonic()
-                            - self.viewpoint_sampling_target_started_at
-                        ),
-                        "phase_timeout_sec": (
-                            self.follower_config.viewpoint_sampling_timeout_sec
-                        ),
-                        "target_timeout_sec": (
-                            self.follower_config.viewpoint_sampling_target_timeout_sec
-                        ),
-                        "fail_closed": True,
-                    }
                     self.publish_repeated_zero()
-                    return FollowerResult(
+                    return finish(
                         "stopped",
-                        sampling_timeout.replace("_", " "),
-                        time.monotonic() - started_at,
-                        self.distance_estimate_m,
-                        self.motion_published,
-                        self.latest_stop_details,
+                        sampling_deadline.failure.replace("_", " "),
+                        now_monotonic=sampling_now,
+                        stop_details=self.latest_stop_details,
                     )
-                if route_refresh == "adopted":
+                if route_refresh == RouteRefreshAction.ADOPTED:
                     # A verified handoff still gets one complete zero-command
                     # control period before the new route may command motion.
                     self.publish_zero()
@@ -315,508 +842,169 @@ class ControlLoopRuntimeMixin:
                         pose.y_m - self.last_pose.y_m,
                     )
                 self.last_pose = pose
-                if self.target_index == 0:
-                    initial_failure = initial_pose_failure(
-                        pose,
-                        self.waypoints[0],
-                        self.follower_config.initial_distance_limit_m,
-                    )
-                    if initial_failure:
-                        self.publish_repeated_zero()
-                        return FollowerResult(
-                            "stopped",
-                            initial_failure,
-                            time.monotonic() - started_at,
-                            self.distance_estimate_m,
-                            self.motion_published,
-                        )
-                    if self.certified_static_start_pending:
-                        startup_decision = certified_static_startup_decision(
-                            pose,
-                            self.waypoints,
-                            tracking_tube_radius_m=(
-                                self.follower_config.certified_route_tube_radius_m
-                            ),
-                            chord_sample_spacing_m=(
-                                self.follower_config
-                                .certified_route_chord_sample_spacing_m
-                            ),
-                        )
-                        self.certified_static_start_pending = False
-                        if not startup_decision.ok:
-                            self.latest_stop_details = {
-                                **startup_decision.route_check.to_log_dict(),
-                                "reason": "pose outside certified startup segment",
-                                "certificate_reason": (
-                                    startup_decision.route_check.reason
-                                ),
-                                "startup_target_candidates": [0, 1],
-                                "source": "execution_route_certificate",
-                                "fail_closed": True,
-                            }
-                            self.publish_repeated_zero()
-                            return FollowerResult(
-                                "stopped",
-                                "pose outside certified startup segment",
-                                time.monotonic() - started_at,
-                                self.distance_estimate_m,
-                                self.motion_published,
-                                self.latest_stop_details,
-                            )
-                        if startup_decision.target_index == 1:
-                            self.target_index = 1
-                            self.target_started_at = time.monotonic()
-                            self._reset_progress_watchdog(time.monotonic())
-                            # Make the bounded startup handoff observable as a
-                            # complete zero-command control period.  No motion
-                            # is published until the next loop rechecks all
-                            # runtime safety inputs and the route tube.
-                            self.publish_zero()
-                            self._hold_zero_control_period(loop_sleep_sec)
-                            continue
-                if self.dynamic_join_pending:
-                    join_action, join_failure = certified_startup_join_action(
-                        pose,
-                        self.waypoints[0],
-                        self.dynamic_join_limit_m,
-                        self.follower_config.dynamic_join_tolerance_m,
-                    )
-                    if join_action == "stop":
-                        assert join_failure is not None
-                        self.latest_stop_details = join_failure
-                        self.publish_repeated_zero()
-                        return FollowerResult(
-                            "stopped",
-                            str(join_failure["reason"]),
-                            time.monotonic() - started_at,
-                            self.distance_estimate_m,
-                            self.motion_published,
-                            self.latest_stop_details,
-                        )
-                    if join_action == "zero":
-                        self.dynamic_join_pending = False
-                        self.dynamic_join_limit_m = None
-                        if self.target_index != 0:
-                            self._clear_intermediate_terminal_heading_latch(
-                                target_changed=True,
-                            )
-                        self.target_index = 0
-                        self.target_started_at = time.monotonic()
-                        self._reset_progress_watchdog(time.monotonic())
-                        self.publish_zero()
-                        self._hold_zero_control_period(loop_sleep_sec)
-                        continue
-                    # During handoff, pursue only the collision-certified route
-                    # start.  Normal progress advancement/lookahead would form
-                    # an unchecked chord from the live pose to waypoint 1.
-                    step = compute_join_anchor_command(
-                        pose,
-                        self.waypoints[0],
-                        controller_config_for_route_kind(
-                            self.follower_config.controller,
-                            self.current_route_kind,
-                            reverse_staging=self.reverse_staging,
-                            viewpoint_sampling_goal_tolerance_m=(
-                                self.follower_config.viewpoint_sampling_goal_tolerance_m
-                            ),
-                            viewpoint_sampling_heading_tolerance_rad=(
-                                self.follower_config.viewpoint_sampling_heading_tolerance_rad
-                            ),
-                            physical_goal_tolerance_m=(
-                                self.follower_config.physical_goal_tolerance_m
-                            ),
-                            physical_waypoint_tolerance_m=(
-                                self.follower_config.physical_waypoint_tolerance_m
-                            ),
-                        ),
-                        join_tolerance_m=self.follower_config.dynamic_join_tolerance_m,
-                    )
-                else:
-                    route_controller_config = controller_config_for_route_kind(
-                        self.follower_config.controller,
-                        self.current_route_kind,
-                        reverse_staging=self.reverse_staging,
-                        viewpoint_sampling_goal_tolerance_m=(
-                            self.follower_config.viewpoint_sampling_goal_tolerance_m
-                        ),
-                        viewpoint_sampling_heading_tolerance_rad=(
-                            self.follower_config.viewpoint_sampling_heading_tolerance_rad
-                        ),
-                        physical_goal_tolerance_m=(
-                            self.follower_config.physical_goal_tolerance_m
-                        ),
-                        physical_waypoint_tolerance_m=(
-                            self.follower_config.physical_waypoint_tolerance_m
-                        ),
-                    )
-                    if self.start_egress_lock_index is not None:
-                        step = self._start_egress_command(
-                            pose,
-                            route_controller_config,
-                        )
-                        if step is None:
-                            # Make the lock-to-normal transition explicit; the
-                            # next control tick may resume ordinary lookahead.
-                            self.publish_zero()
-                            self._hold_zero_control_period(loop_sleep_sec)
-                            continue
-                    elif self.start_egress_forward_alignment_index is not None:
-                        step = self._reverse_egress_forward_alignment_command(
-                            pose,
-                            route_controller_config,
-                        )
-                    else:
-                        corner_decision = self._certified_corner_decision(
-                            pose,
-                            route_controller_config,
-                        )
-                        if corner_decision.failure:
-                            # Revoke the preceding command before logging or
-                            # trace I/O can extend an in-progress rotation.
-                            self.publish_zero()
-                        self._log_certified_corner_phase(corner_decision.step)
-                        if corner_decision.failure:
-                            failed_step = corner_decision.step
-                            assert failed_step is not None
-                            self.latest_stop_details = {
-                                "reason": corner_decision.failure,
-                                "source": "execution_route_certificate",
-                                "route_kind": self.current_route_kind,
-                                "target_index": failed_step.target_index,
-                                "pursuit_index": failed_step.pursuit_index,
-                                "distance_to_vertex_m": (
-                                    failed_step.distance_to_target_m
-                                ),
-                                "release_tolerance_m": (
-                                    self.follower_config
-                                    .certified_corner_release_tolerance_m
-                                ),
-                                "hold_tolerance_m": (
-                                    self.follower_config
-                                    .certified_corner_hold_tolerance_m
-                                ),
-                                "tracking_tube_radius_m": (
-                                    self.follower_config
-                                    .certified_route_tube_radius_m
-                                ),
-                                "reacquire_attempts": (
-                                    0
-                                    if self.certified_corner_latch is None
-                                    else self.certified_corner_latch.reacquire_attempts
-                                ),
-                                "max_reacquire_attempts": (
-                                    self.follower_config
-                                    .certified_corner_max_reacquire_attempts
-                                ),
-                                "fail_closed": True,
-                            }
-                            failure_route_check: ExecutionRouteCheck | None = None
-                            if self.current_route_kind in PHYSICAL_ROUTE_KINDS:
-                                try:
-                                    failure_route_check = self._execution_route_check(
-                                        pose,
-                                        failed_step,
-                                    )
-                                except (ValueError, OverflowError) as exc:
-                                    self.latest_stop_details = {
-                                        **self.latest_stop_details,
-                                        "route_check_error": str(exc),
-                                        "route_check_error_type": (
-                                            exc.__class__.__name__
-                                        ),
-                                    }
-                            trace_failure = self._append_controller_trace(
-                                event="certified_corner_stop",
-                                pose=pose,
-                                step=failed_step,
-                                route_check=failure_route_check,
-                                nominal_command=failed_step.command,
-                                effective_command=VelocityCommand(0.0, 0.0),
-                                reason=corner_decision.failure,
-                                fail_closed=True,
-                            )
-                            if trace_failure:
-                                self.latest_stop_details = {
-                                    **self.latest_stop_details,
-                                    "controller_trace_error": trace_failure,
-                                    "controller_trace_fault_code": (
-                                        "controller_trace_write_failed"
-                                    ),
-                                }
-                            self.publish_repeated_zero()
-                            return FollowerResult(
-                                "stopped",
-                                corner_decision.failure,
-                                time.monotonic() - started_at,
-                                self.distance_estimate_m,
-                                self.motion_published,
-                                self.latest_stop_details,
-                            )
-                        if corner_decision.step is not None:
-                            step = corner_decision.step
-                        else:
-                            terminal_heading_decision = (
-                                compute_intermediate_terminal_heading_command(
-                                    pose,
-                                    self.waypoints,
-                                    self.target_index,
-                                    route_controller_config,
-                                    self.current_route_kind,
-                                    self.intermediate_terminal_heading_latch,
-                                    hold_tolerance_m=(
-                                        self.follower_config
-                                        .viewpoint_sampling_terminal_heading_hold_tolerance_m
-                                    ),
-                                    viewpoint_sampling_target_distance_m=(
-                                        self.follower_config
-                                        .viewpoint_sampling_target_distance_m
-                                    ),
-                                    viewpoint_sampling_target_envelope_radius_m=(
-                                        self.follower_config
-                                        .viewpoint_sampling_terminal_heading_target_envelope_radius_m
-                                    ),
-                                )
-                            )
-                            self.intermediate_terminal_heading_latch = (
-                                terminal_heading_decision.latch
-                            )
-                            step = terminal_heading_decision.step
-                        if (
-                            corner_decision.step is None
-                            and terminal_heading_decision.failure
-                        ):
-                            hold_diagnostics = (
-                                intermediate_terminal_heading_hold_diagnostics(
-                                    pose,
-                                    terminal_heading_decision.latch,
-                                    hold_tolerance_m=(
-                                        self.follower_config
-                                        .viewpoint_sampling_terminal_heading_hold_tolerance_m
-                                    ),
-                                    viewpoint_sampling_target_distance_m=(
-                                        self.follower_config
-                                        .viewpoint_sampling_target_distance_m
-                                    ),
-                                    viewpoint_sampling_target_envelope_radius_m=(
-                                        self.follower_config
-                                        .viewpoint_sampling_terminal_heading_target_envelope_radius_m
-                                    ),
-                                )
-                                if terminal_heading_decision.latch is not None
-                                else {}
-                            )
-                            self.latest_stop_details = {
-                                "reason": terminal_heading_decision.failure,
-                                "fault_code": terminal_heading_decision.failure,
-                                "route_kind": self.current_route_kind,
-                                "target_index": step.target_index,
-                                "distance_to_target_m": step.distance_to_target_m,
-                                "entry_tolerance_m": (
-                                    intermediate_terminal_heading_entry_tolerance_m(
-                                        route_controller_config
-                                    )
-                                ),
-                                "hold_tolerance_m": (
-                                    self.follower_config
-                                    .viewpoint_sampling_terminal_heading_hold_tolerance_m
-                                ),
-                                "distance_comparison_epsilon_m": (
-                                    INTERMEDIATE_TERMINAL_HEADING_DISTANCE_COMPARISON_EPSILON_M
-                                ),
-                                "effective_hold_limit_m": (
-                                    self.follower_config
-                                    .viewpoint_sampling_terminal_heading_hold_tolerance_m
-                                    + INTERMEDIATE_TERMINAL_HEADING_DISTANCE_COMPARISON_EPSILON_M
-                                ),
-                                **hold_diagnostics,
-                                "fail_closed": True,
-                            }
-                            self.publish_repeated_zero()
-                            return FollowerResult(
-                                "stopped",
-                                terminal_heading_decision.failure.replace("_", " "),
-                                time.monotonic() - started_at,
-                                self.distance_estimate_m,
-                                self.motion_published,
-                                self.latest_stop_details,
-                            )
-                route_check: ExecutionRouteCheck | None = None
+                startup_admission = (
+                    self._startup_pose_admission_decision(pose)
+                )
                 if (
-                    self.current_route_kind in PHYSICAL_ROUTE_KINDS
-                    and (
-                        not self.dynamic_join_pending
-                        or (
-                            self.dynamic_join_limit_m is not None
-                            and self.dynamic_join_limit_m
-                            <= self.follower_config.certified_route_tube_radius_m
-                            + 1.0e-9
-                        )
-                    )
+                    startup_admission.action
+                    == StartupPoseAdmissionAction.STOP
                 ):
-                    route_check = self._execution_route_check(pose, step)
-                    if not route_check.ok:
-                        route_stop_details = route_check.to_log_dict()
-                        self.latest_stop_details = route_stop_details
-                        # Revoke the preceding command before trace I/O.  A
-                        # slow or failing evidence sink must never extend the
-                        # lifetime of the last nonzero Twist after the live
-                        # pose has left the certified route tube.
-                        self.publish_repeated_zero()
+                    if startup_admission.stop_details is not None:
+                        self.latest_stop_details = (
+                            startup_admission.stop_details
+                        )
+                    self.publish_repeated_zero()
+                    return finish(
+                        "stopped",
+                        startup_admission.stop_reason,
+                        stop_details=startup_admission.stop_details,
+                    )
+                if (
+                    startup_admission.action
+                    == StartupPoseAdmissionAction.ZERO_HOLD
+                ):
+                    # Make the bounded startup handoff observable as a
+                    # complete zero-command control period.  No motion is
+                    # published until the next loop rechecks every runtime
+                    # safety input and the route tube.
+                    self.publish_zero()
+                    self._hold_zero_control_period(loop_sleep_sec)
+                    continue
+                step_resolution = self._resolve_control_step(pose)
+                if (
+                    step_resolution.stop_kind
+                    == ControlStepStopKind.CERTIFIED_CORNER
+                ):
+                    # Revoke the preceding command before logging, route-check
+                    # evidence, or trace I/O can extend an in-progress turn.
+                    self.publish_zero()
+                if (
+                    step_resolution.command_phase
+                    == RouteCommandPhase.CERTIFIED_ROUTE
+                ):
+                    self._log_certified_corner_phase(
+                        step_resolution.corner_step
+                    )
+                if step_resolution.action == ControlStepAction.ZERO_HOLD:
+                    self.publish_zero()
+                    self._hold_zero_control_period(loop_sleep_sec)
+                    continue
+                if step_resolution.action == ControlStepAction.STOP:
+                    self.latest_stop_details = step_resolution.stop_details
+                    if (
+                        step_resolution.stop_kind
+                        == ControlStepStopKind.CERTIFIED_CORNER
+                    ):
+                        failed_step = step_resolution.step
+                        assert failed_step is not None
+                        corner_stop_evidence = (
+                            self._prepare_certified_corner_stop_evidence(
+                                pose,
+                                failed_step,
+                                step_resolution.stop_reason,
+                            )
+                        )
+                        self.latest_stop_details = (
+                            corner_stop_evidence.stop_details
+                        )
                         trace_failure = self._append_controller_trace(
-                            event="route_tube_stop",
+                            event="certified_corner_stop",
                             pose=pose,
-                            step=step,
-                            route_check=route_check,
-                            nominal_command=step.command,
+                            step=corner_stop_evidence.step,
+                            route_check=corner_stop_evidence.route_check,
+                            nominal_command=corner_stop_evidence.step.command,
                             effective_command=VelocityCommand(0.0, 0.0),
-                            reason=route_check.reason,
+                            reason=step_resolution.stop_reason,
                             fail_closed=True,
                         )
                         if trace_failure:
-                            # Route departure remains the primary terminal
-                            # safety reason even if secondary evidence storage
-                            # also fails.
                             self.latest_stop_details = (
                                 with_controller_trace_failure(
-                                    route_stop_details,
+                                    self.latest_stop_details,
                                     trace_failure,
-                                    fail_closed=True,
                                 )
                             )
-                        return control_result(
-                            "stopped",
-                            route_check.reason,
-                            started_at=started_at,
-                            now_monotonic=time.monotonic(),
-                            distance_estimate_m=self.distance_estimate_m,
-                            motion_published=self.motion_published,
-                            stop_details=self.latest_stop_details,
-                        )
-                if step.target_index != self.target_index:
-                    self._clear_intermediate_terminal_heading_latch(
-                        target_changed=True,
-                    )
-                    self.target_index = step.target_index
-                    self.certified_corner_latch = None
-                    self.target_started_at = time.monotonic()
-                    self._reset_progress_watchdog(time.monotonic())
-                if step.reached_goal:
-                    now_monotonic = time.monotonic()
-                    if self.axis_acquisition_hold_started_at is None:
-                        self.axis_acquisition_hold_started_at = now_monotonic
-                    hold_elapsed = (
-                        now_monotonic - self.axis_acquisition_hold_started_at
-                    )
-                    goal_action = acquisition_goal_action(
-                        route_kind=self.current_route_kind,
-                        provider_available=self.waypoint_provider is not None,
-                        hold_elapsed_sec=hold_elapsed,
-                        timeout_sec=(
-                            self.follower_config.axis_acquisition_wait_timeout_sec
-                        ),
-                    )
-                    if goal_action == "hold_for_physical_face":
-                        # Remain stationary but keep spinning sensor callbacks
-                        # and polling the manifest. A physical-face revision
-                        # will be adopted at the top of a subsequent cycle.
-                        self.publish_zero()
-                        self._hold_zero_control_period(loop_sleep_sec)
-                        continue
-                    if goal_action != "complete":
-                        self.latest_stop_details = {
-                            "reason": goal_action,
-                            "route_kind": self.current_route_kind,
-                            "hold_elapsed_sec": hold_elapsed,
-                            "timeout_sec": (
-                                self.follower_config.axis_acquisition_wait_timeout_sec
-                            ),
-                            "fail_closed": True,
-                        }
-                        self.publish_repeated_zero()
-                        return FollowerResult(
-                            "stopped",
-                            goal_action.replace("_", " "),
-                            time.monotonic() - started_at,
-                            self.distance_estimate_m,
-                            self.motion_published,
-                            self.latest_stop_details,
-                        )
                     self.publish_repeated_zero()
-                    return FollowerResult(
-                        "completed",
-                        "",
-                        time.monotonic() - started_at,
-                        self.distance_estimate_m,
-                        self.motion_published,
-                    )
-                timeout_now = time.monotonic()
-                timeout_elapsed = timeout_now - self.target_started_at
-                timeout_failure = waypoint_timeout_failure(
-                    timeout_elapsed,
-                    self.follower_config.waypoint_timeout_sec,
-                )
-                if timeout_failure:
-                    self.latest_stop_details = waypoint_timeout_stop_details(
-                        reason=timeout_failure,
-                        route_kind=self.current_route_kind,
-                        elapsed_sec=timeout_elapsed,
-                        timeout_sec=self.follower_config.waypoint_timeout_sec,
-                        target_index=step.target_index,
-                        pursuit_index=step.pursuit_index,
-                        distance_to_target_m=step.distance_to_target_m,
-                        progress_mode=step.progress_mode,
-                        axis_acquisition_target_revision=(
-                            self.axis_acquisition_target_revision
-                        ),
-                        viewpoint_sampling_target_revision=(
-                            self.viewpoint_sampling_target_revision
-                        ),
-                        robot_x_m=pose.x_m,
-                        robot_y_m=pose.y_m,
-                        robot_yaw_rad=pose.yaw_rad,
-                    )
-                    self.publish_repeated_zero()
-                    return control_result(
+                    return finish(
                         "stopped",
-                        timeout_failure,
-                        started_at=started_at,
-                        now_monotonic=timeout_now,
-                        distance_estimate_m=self.distance_estimate_m,
-                        motion_published=self.motion_published,
+                        step_resolution.stop_reason,
                         stop_details=self.latest_stop_details,
                     )
+                step = step_resolution.step
+                assert step is not None
+                route_admission = (
+                    self._execution_route_admission_decision(pose, step)
+                )
+                route_check = route_admission.route_check
+                if (
+                    route_admission.status
+                    == ExecutionRouteAdmissionStatus.STOP
+                ):
+                    assert route_check is not None
+                    assert route_admission.stop_details is not None
+                    route_stop_details = route_admission.stop_details
+                    self.latest_stop_details = route_stop_details
+                    # Revoke the preceding command before trace I/O.  A slow
+                    # or failing evidence sink must never extend the lifetime
+                    # of the last nonzero Twist after route-tube departure.
+                    self.publish_repeated_zero()
+                    trace_failure = self._append_controller_trace(
+                        event="route_tube_stop",
+                        pose=pose,
+                        step=step,
+                        route_check=route_check,
+                        nominal_command=step.command,
+                        effective_command=VelocityCommand(0.0, 0.0),
+                        reason=route_check.reason,
+                        fail_closed=True,
+                    )
+                    if trace_failure:
+                        # Route departure remains the primary terminal reason
+                        # even if secondary evidence storage also fails.
+                        self.latest_stop_details = (
+                            with_controller_trace_failure(
+                                route_stop_details,
+                                trace_failure,
+                                fail_closed=True,
+                            )
+                        )
+                    return finish(
+                        "stopped",
+                        route_check.reason,
+                        stop_details=self.latest_stop_details,
+                    )
+                lifecycle = self._waypoint_lifecycle_decision(step, pose)
+                if lifecycle.action == WaypointLifecycleAction.HOLD:
+                    # Remain stationary but keep spinning sensor callbacks
+                    # and polling the manifest. A physical-face revision will
+                    # be adopted at the top of a subsequent cycle.
+                    self.publish_zero()
+                    self._hold_zero_control_period(loop_sleep_sec)
+                    continue
+                if lifecycle.action == WaypointLifecycleAction.COMPLETE:
+                    self.publish_repeated_zero()
+                    return finish(
+                        "completed",
+                        "",
+                    )
+                if lifecycle.action == WaypointLifecycleAction.STOP:
+                    self.latest_stop_details = lifecycle.stop_details
+                    self.publish_repeated_zero()
+                    return finish(
+                        "stopped",
+                        lifecycle.stop_reason,
+                        now_monotonic=lifecycle.evaluated_at,
+                        stop_details=lifecycle.stop_details,
+                    )
                 now_monotonic = time.monotonic()
-                front_clearance_scale = self._motion_clearance_linear_scale(
-                    step.command.linear_x_mps
-                )
-                command_admission = command_admission_decision(
-                    step.command,
-                    front_clearance_scale=front_clearance_scale,
-                    linear_motion_floor_mps=(
-                        self.follower_config.linear_motion_floor_mps
-                    ),
-                    physical_route=(
-                        self.current_route_kind in PHYSICAL_ROUTE_KINDS
-                    ),
-                )
+                motion_admission = self._motion_command_admission_decision(step)
+                command_admission = motion_admission.command_admission
+                front_clearance_scale = motion_admission.front_clearance_scale
                 effective_linear_x_mps = (
                     command_admission.effective_command.linear_x_mps
                 )
-                if command_admission.clearance_limited_below_floor:
-                    self.latest_stop_details = clearance_motion_floor_stop_details(
-                        reason=CLEARANCE_LIMITED_MOTION_FLOOR,
-                        command_floor_details=(
-                            command_admission.command_floor.to_log_dict()
-                        ),
-                        front_clearance_scale=front_clearance_scale,
-                        front_clearance_details=(
-                            self.latest_front_clearance_details
-                        ),
-                        target_index=step.target_index,
-                        pursuit_index=step.pursuit_index,
-                        distance_to_target_m=step.distance_to_target_m,
-                        progress_mode=step.progress_mode,
-                    )
+                if motion_admission.stop_details is not None:
+                    self.latest_stop_details = motion_admission.stop_details
                     self.publish_repeated_zero()
                     trace_failure = self._append_controller_trace(
                         event="motion_floor_zero_hold",
@@ -829,173 +1017,76 @@ class ControlLoopRuntimeMixin:
                         fail_closed=False,
                     )
                     if trace_failure:
-                        return control_result(
+                        return finish(
                             "stopped",
                             trace_failure,
-                            started_at=started_at,
-                            now_monotonic=time.monotonic(),
-                            distance_estimate_m=self.distance_estimate_m,
-                            motion_published=self.motion_published,
                             stop_details=self.latest_stop_details,
-                        )
+                    )
                     front_evidence = self.latest_front_clearance_details or {}
-                    recovery = ""
+                    recovery_disposition = self._blockage_recovery_outcome(
+                        trigger=BlockageRecoveryTrigger.CLEARANCE_FLOOR,
+                        pose=pose,
+                        stop_reason=CLEARANCE_LIMITED_MOTION_FLOOR,
+                        stop_details=self.latest_stop_details,
+                        front_evidence=front_evidence,
+                        nominal_linear_x_mps=step.command.linear_x_mps,
+                    )
                     if (
-                        self.blockage_recovery_provider is not None
-                        and step.command.linear_x_mps > 0.0
-                        and front_evidence.get("source") == "front_sector"
+                        recovery_disposition.action
+                        == RecoveryLoopAction.ZERO_HOLD_AND_RETRY
                     ):
-                        recovery = self._attempt_blockage_recovery(
-                            pose,
-                            CLEARANCE_LIMITED_MOTION_FLOOR,
-                            self.latest_stop_details,
-                        )
-                    if recovery in {"adopted", "cleared"}:
                         self.publish_zero()
                         self._hold_zero_control_period(loop_sleep_sec)
                         continue
-                    stop_reason = (
-                        str(
-                            (self.latest_stop_details or {}).get(
-                                "reason",
-                                CLEARANCE_LIMITED_MOTION_FLOOR,
-                            )
-                        )
-                        if recovery == "stopped"
-                        else CLEARANCE_LIMITED_MOTION_FLOOR
-                    )
-                    return control_result(
+                    return finish(
                         "stopped",
-                        stop_reason,
-                        started_at=started_at,
-                        now_monotonic=time.monotonic(),
-                        distance_estimate_m=self.distance_estimate_m,
-                        motion_published=self.motion_published,
+                        recovery_disposition.stop_reason,
                         stop_details=self.latest_stop_details,
                     )
-                distance_progress_epsilon_m = stuck_distance_progress_epsilon(
-                    self.follower_config.stuck_progress_epsilon_m,
-                    physical_route=(
-                        self.current_route_kind in PHYSICAL_ROUTE_KINDS
-                    ),
-                    remaining_distance_m=step.distance_to_target_m,
-                    waypoint_tolerance_m=(
-                        self.follower_config.physical_waypoint_tolerance_m
-                    ),
+                progress_decision = self._progress_watchdog_decision(
+                    step,
+                    now_monotonic=now_monotonic,
+                    front_clearance_scale=front_clearance_scale,
                     effective_linear_x_mps=effective_linear_x_mps,
-                    stuck_timeout_sec=self.follower_config.stuck_timeout_sec,
                 )
-                progress_failure = self._progress_failure(
-                    step.distance_to_target_m,
-                    step.controlled_heading_error_rad,
-                    step.target_index,
-                    step.pursuit_index,
-                    now_monotonic,
-                    (
-                        abs(step.command.linear_x_mps) > 0.0
-                        or abs(step.command.angular_z_radps) > 0.0
-                    ),
-                    step.progress_mode,
-                    distance_progress_epsilon_m,
-                )
-                if progress_failure:
-                    self.latest_stop_details = stuck_progress_details(
-                        target_index=self.target_index,
-                        distance_to_target_m=step.distance_to_target_m,
-                        last_progress_distance_m=self.last_progress_distance_m,
-                        elapsed_without_progress_sec=now_monotonic - self.last_progress_at,
-                        max_without_progress_sec=self.follower_config.stuck_timeout_sec,
-                        progress_epsilon_m=distance_progress_epsilon_m,
-                        commanded_linear_x_mps=step.command.linear_x_mps,
-                        commanded_angular_z_radps=step.command.angular_z_radps,
-                        front_clearance_scale=front_clearance_scale,
-                        effective_linear_x_mps=effective_linear_x_mps,
-                        front_clearance_details=self.latest_front_clearance_details,
-                        pursuit_index=step.pursuit_index,
-                        controlled_heading_error_rad=(
-                            step.controlled_heading_error_rad
-                        ),
-                        last_progress_heading_error_rad=(
-                            self.last_progress_heading_error_rad
-                        ),
-                        heading_progress_epsilon_rad=(
-                            self.follower_config.stuck_heading_progress_epsilon_rad
-                        ),
-                        last_progress_target_index=(
-                            self.last_progress_target_index
-                        ),
-                        last_progress_pursuit_index=(
-                            self.last_progress_pursuit_index
-                        ),
-                    )
+                if progress_decision.failure:
+                    self.latest_stop_details = progress_decision.stop_details
                     self.publish_repeated_zero()
                     front_evidence = self.latest_front_clearance_details or {}
-                    recovery = ""
+                    recovery_disposition = self._blockage_recovery_outcome(
+                        trigger=BlockageRecoveryTrigger.STUCK_WATCHDOG,
+                        pose=pose,
+                        stop_reason=progress_decision.failure,
+                        stop_details=self.latest_stop_details,
+                        front_evidence=front_evidence,
+                        nominal_linear_x_mps=step.command.linear_x_mps,
+                    )
                     if (
-                        self.blockage_recovery_provider is not None
-                        and step.command.linear_x_mps > 0.0
-                        and front_evidence.get("source") == "front_sector"
+                        recovery_disposition.action
+                        == RecoveryLoopAction.HOLD_AND_RETRY
                     ):
-                        recovery = self._attempt_blockage_recovery(
-                            pose,
-                            progress_failure,
-                            self.latest_stop_details,
-                        )
-                    if recovery == "adopted":
                         self._hold_zero_control_period(loop_sleep_sec)
                         continue
-                    if recovery == "stopped":
-                        progress_failure = str(
-                            (self.latest_stop_details or {}).get(
-                                "reason",
-                                progress_failure,
-                            )
-                        )
-                    if recovery == "cleared":
-                        # A stuck watchdog is not discharged by clear LiDAR;
-                        # _attempt_blockage_recovery converts that case into a
-                        # fail-closed controller/localization diagnosis.
-                        progress_failure = str(
-                            (self.latest_stop_details or {}).get(
-                                "reason",
-                                progress_failure,
-                            )
-                        )
-                    return control_result(
+                    return finish(
                         "stopped",
-                        progress_failure,
-                        started_at=started_at,
-                        now_monotonic=time.monotonic(),
-                        distance_estimate_m=self.distance_estimate_m,
-                        motion_published=self.motion_published,
+                        recovery_disposition.stop_reason,
                         stop_details=self.latest_stop_details,
                     )
-                if not command_admission.finite:
-                    self.publish_repeated_zero()
-                    self.latest_stop_details = nonfinite_velocity_stop_details(
-                        linear_x_mps=effective_linear_x_mps,
-                        angular_z_radps=step.command.angular_z_radps,
-                    )
-                    return control_result(
-                        "stopped",
-                        self.latest_stop_details["reason"],
-                        started_at=started_at,
-                        now_monotonic=time.monotonic(),
-                        distance_estimate_m=self.distance_estimate_m,
-                        motion_published=self.motion_published,
-                        stop_details=self.latest_stop_details,
-                    )
-                raw_effective_command = command_admission.effective_command
-                shape_dt_sec = command_shape_interval_sec(
-                    loop_period_sec=loop_sleep_sec,
+                prepared_command = self._prepare_command_for_publication(
+                    command_admission,
                     now_monotonic=now_monotonic,
-                    last_shape_at=self.last_command_shape_at,
+                    loop_period_sec=loop_sleep_sec,
                 )
-                shaped_command = self.command_smoother.apply(
-                    raw_effective_command,
-                    dt_sec=shape_dt_sec,
-                )
-                self.last_command_shape_at = now_monotonic
+                if prepared_command.stop_details is not None:
+                    self.latest_stop_details = prepared_command.stop_details
+                    self.publish_repeated_zero()
+                    return finish(
+                        "stopped",
+                        str(prepared_command.stop_details["reason"]),
+                        stop_details=prepared_command.stop_details,
+                    )
+                shaped_command = prepared_command.shaped_command
+                assert shaped_command is not None
                 trace_failure = self._append_controller_trace(
                     event="control_cycle",
                     pose=pose,
@@ -1003,31 +1094,14 @@ class ControlLoopRuntimeMixin:
                     route_check=route_check,
                     nominal_command=step.command,
                     effective_command=shaped_command,
-                    diagnostics={
-                        "driving_behavior": {
-                            "command_smoothing_enabled": (
-                                self.follower_config.command_smoothing.enabled
-                            ),
-                            "unshaped_effective_command": {
-                                "linear_x_mps": raw_effective_command.linear_x_mps,
-                                "angular_z_radps": (
-                                    raw_effective_command.angular_z_radps
-                                ),
-                            },
-                            "shape_dt_sec": shape_dt_sec,
-                        }
-                    },
+                    diagnostics=prepared_command.trace_diagnostics,
                     fail_closed=False,
                 )
                 if trace_failure:
                     self.publish_repeated_zero()
-                    return control_result(
+                    return finish(
                         "stopped",
                         trace_failure,
-                        started_at=started_at,
-                        now_monotonic=time.monotonic(),
-                        distance_estimate_m=self.distance_estimate_m,
-                        motion_published=self.motion_published,
                         stop_details=self.latest_stop_details,
                     )
                 self._publish_velocity_command(shaped_command)
@@ -1040,3 +1114,10 @@ class ControlLoopRuntimeMixin:
                 time.sleep(timing.sleep_sec)
         finally:
             self.publish_repeated_zero()
+        shutdown_details = ros_shutdown_stop_details()
+        self.latest_stop_details = shutdown_details
+        return finish(
+            "stopped",
+            "ROS shutdown",
+            stop_details=shutdown_details,
+        )

@@ -5,10 +5,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from scripts.aufgabe04.real_robot.autonomous_child_runner import (
+from scripts.aufgabe04.real_robot.execution.child_runner import (
     DEFAULT_UNCERTAINTY_SIGMA_MULTIPLIER,
 )
-from scripts.aufgabe04.real_robot.autonomous_modes import AutonomousRunMode
+from scripts.aufgabe04.real_robot.mission.modes import AutonomousRunMode
 
 DEFAULT_MAP = Path("maps/aufgabe03/arena_1p898x3p9_auto.yaml")
 DEFAULT_OUTPUT_ROOT = Path("results/aufgabe04/real/autonomous_exploration")
@@ -16,6 +16,8 @@ DEFAULT_MAX_BLOCKAGE_REPLANS_PER_LEG = 3
 DEFAULT_MAX_STARTUP_RESEALS_PER_LEG = 3
 DEFAULT_MAX_RUNTIME_LOCALIZATION_RESEALS_PER_LEG = 1
 DEFAULT_MAX_LOCALIZATION_READINESS_RETRIES_PER_LEG = 2
+DEFAULT_MAX_CAMERA_OBSERVATION_ATTEMPTS_PER_CANDIDATE = 2
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -76,6 +78,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--final-facing-offset-m", type=float, default=0.35)
     parser.add_argument("--axis-sample-count", type=int, default=7)
     parser.add_argument("--camera-timeout-sec", type=float, default=90.0)
+    parser.add_argument(
+        "--max-camera-observation-attempts-per-candidate",
+        type=int,
+        default=DEFAULT_MAX_CAMERA_OBSERVATION_ATTEMPTS_PER_CANDIDATE,
+        help=(
+            "Bound candidate-local passive-observer retries. A timed-out "
+            "candidate is deferred while other candidates run; every retry "
+            "still requires a fresh route and all live motion gates."
+        ),
+    )
     parser.add_argument(
         "--localization-branch-proof-id",
         default="",
@@ -179,4 +191,3 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     return parser
-

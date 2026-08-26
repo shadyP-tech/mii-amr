@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from scripts.aufgabe04.real_robot.autonomous_child_runner import MotionLegOutcome
+from scripts.aufgabe04.real_robot.execution.child_runner import MotionLegOutcome
 
 def _require_completed_motion(outcome: MotionLegOutcome) -> None:
     if outcome.status != "completed":

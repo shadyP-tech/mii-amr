@@ -24,7 +24,7 @@ from scripts.aufgabe04.perception.stand_axis.model_profile import (
     stand_model_from_payload,
     write_stand_model,
 )
-from scripts.aufgabe04.real_robot.camera_geometry import (
+from scripts.aufgabe04.real_robot.configuration.geometry import (
     CameraIntrinsics,
     project_optical_point,
     project_rectified_image_direction,
@@ -32,7 +32,7 @@ from scripts.aufgabe04.real_robot.camera_geometry import (
     rotate_vector,
     transform_point,
 )
-from scripts.aufgabe04.real_robot.hardware_profile import (
+from scripts.aufgabe04.real_robot.configuration.profile import (
     CAMERA_CALIBRATION_PROFILE_SCHEMA_VERSION,
     REAL_HARDWARE_PROFILE_SCHEMA_VERSION,
     CameraCalibrationProfile,
@@ -45,10 +45,10 @@ from scripts.aufgabe04.real_robot.hardware_profile import (
     write_camera_calibration,
     write_real_robot_profile,
 )
-from scripts.aufgabe04.real_robot.observer_contract import (
+from scripts.aufgabe04.real_robot.observer.contract import (
     PASSIVE_VIEWPOINT_OBSERVER_VERSION,
 )
-from scripts.aufgabe04.real_robot.passive_viewpoint_node import (
+from scripts.aufgabe04.real_robot.observer.node import (
     PassiveRealViewpointNode,
     _StampedMessage,
     _head_scale_gate,
@@ -59,14 +59,14 @@ from scripts.aufgabe04.real_robot.passive_viewpoint_node import (
     _validate_args,
     build_parser,
 )
-from scripts.aufgabe04.real_robot.prepare_passive_survey import (
+from scripts.aufgabe04.real_robot.passive_survey.prepare import (
     main as prepare_passive_survey,
 )
-from scripts.aufgabe04.real_robot.recommendation_builder import (
+from scripts.aufgabe04.real_robot.configuration.recommendation import (
     REAL_VIEWPOINT_SOURCE,
     build_real_viewpoint_recommendation,
 )
-from scripts.aufgabe04.real_robot.run_unloaded_segment import (
+from scripts.aufgabe04.real_robot.execution.run_unloaded_segment import (
     build_execution_command,
     build_runner_command,
     validate_profile_artifact_bindings,

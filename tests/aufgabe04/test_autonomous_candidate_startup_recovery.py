@@ -14,7 +14,7 @@ from scripts.aufgabe04.navigation.localization.odom_route_adapter import (
 from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization import (
     STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY,
 )
-from scripts.aufgabe04.real_robot.autonomous_candidate_startup_recovery import (
+from scripts.aufgabe04.real_robot.candidate.startup_recovery import (
     CandidateRoutineIdentity,
     CandidateStartupRecoveryAttempt,
     CandidateStartupRecoveryConfig,
@@ -22,7 +22,7 @@ from scripts.aufgabe04.real_robot.autonomous_candidate_startup_recovery import (
     CandidateStartupRecoveryError,
     execute_candidate_motion_with_startup_recovery,
 )
-from scripts.aufgabe04.real_robot.autonomous_child_runner import MotionLegOutcome
+from scripts.aufgabe04.real_robot.execution.child_runner import MotionLegOutcome
 
 
 @dataclass(frozen=True)

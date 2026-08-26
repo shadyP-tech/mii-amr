@@ -49,7 +49,7 @@ The implemented bindings are:
 - A survey manifest links the map bundle, candidate snapshot, environment
   descriptor, survey configuration, calibration profile, and completed arrival
   catalog. `run_arrival_pose_survey.py` emits the simulation form;
-  `finalize_passive_survey.py` emits the real form bound to a physical-site
+  `real_robot/entrypoints/finalize_passive_survey.py` emits the real form bound to a physical-site
   descriptor. The legacy candidate JSON escape hatch is not migration evidence.
 - A validated task snapshot binds the fresh status/plan timestamps, source
   plan hash, robot and mission IDs, and exact remaining server station order.
@@ -153,7 +153,7 @@ Do not enable real mission motion until every item in the current stage passes.
    implementing the lease contract. Process crash, lease loss, clock rollback,
    stale/future command, competing publisher, TF loss, and scan loss must all
    result in zero velocity independently of follower cleanup.
-4. **Unloaded single robot:** Use `run_unloaded_segment.py` so the same sealed
+4. **Unloaded single robot:** Use `real_robot/entrypoints/run_unloaded_segment.py` so the same sealed
    profile supplies namespace, frames, footprint, speed limits, and topics in
    dry run and motion. Validate the frozen map, route certificate, localization
    uncertainty, and route-tube margins before each leg.

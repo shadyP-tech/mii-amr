@@ -1,13 +1,13 @@
 from pathlib import Path
 import unittest
 
-from scripts.aufgabe04.real_robot.autonomous_candidate_recovery_failure import (
+from scripts.aufgabe04.real_robot.candidate.recovery_failure import (
     CandidateStartupRecoveryError,
     RejectedChildFailure,
     issued_motion_permit_evidence,
     issued_motion_permit_kinds,
 )
-from scripts.aufgabe04.real_robot.autonomous_child_runner import MotionLegOutcome
+from scripts.aufgabe04.real_robot.execution.child_runner import MotionLegOutcome
 
 
 def _stopped_outcome() -> MotionLegOutcome:

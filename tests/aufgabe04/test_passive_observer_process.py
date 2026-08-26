@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import unittest
 
-from scripts.aufgabe04.real_robot.passive_observer_process import (
+from scripts.aufgabe04.real_robot.observer.process import (
     PassiveObserverProcessEvidence,
     monitor_passive_observer_process,
 )

@@ -11,6 +11,7 @@ from scripts.aufgabe04.navigation.execution.dynamic_route_handoff import (
 )
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.navigation.waypoint_follower.runtime import (
+    BlockageRecoveryAction,
     FollowerConfig,
     PoseLookupResult,
     SimpleWaypointFollowerNode,
@@ -23,6 +24,11 @@ from scripts.aufgabe04.navigation.coverage.transient_blockage_policy import (
     StationaryFrontSectorSample,
 )
 from scripts.aufgabe04.navigation.control.waypoint_controller import ControllerConfig
+from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.recovery_dispatch import (
+    BlockageRecoveryDisposition,
+    BlockageRecoveryTrigger,
+    RecoveryLoopAction,
+)
 
 
 def _bare_node() -> SimpleWaypointFollowerNode:
@@ -52,6 +58,105 @@ def _bare_node() -> SimpleWaypointFollowerNode:
 
 
 class FollowerBlockageRecoveryTest(unittest.TestCase):
+    def test_recovery_outcome_composes_forward_admission_attempt_and_disposition(self):
+        node = _bare_node()
+        pose = Pose2D(0.0, 0.0, 0.0)
+        stop_details = {
+            "reason": "clearance-limited motion floor",
+            "front_clearance": {"source": "front_sector"},
+        }
+        node.latest_stop_details = stop_details
+        node.blockage_recovery_provider = object()
+        node._attempt_blockage_recovery = Mock(
+            return_value=BlockageRecoveryAction.CLEARED
+        )
+
+        outcome = node._blockage_recovery_outcome(
+            trigger=BlockageRecoveryTrigger.CLEARANCE_FLOOR,
+            pose=pose,
+            stop_reason="clearance-limited motion floor",
+            stop_details=stop_details,
+            front_evidence=stop_details["front_clearance"],
+            nominal_linear_x_mps=0.03,
+        )
+
+        self.assertEqual(
+            outcome,
+            BlockageRecoveryDisposition(
+                RecoveryLoopAction.ZERO_HOLD_AND_RETRY
+            ),
+        )
+        node._attempt_blockage_recovery.assert_called_once_with(
+            pose,
+            "clearance-limited motion floor",
+            stop_details,
+        )
+
+    def test_recovery_outcome_rejects_nonforward_command_before_attempt(self):
+        node = _bare_node()
+        node.blockage_recovery_provider = object()
+        node._attempt_blockage_recovery = Mock()
+
+        outcome = node._blockage_recovery_outcome(
+            trigger=BlockageRecoveryTrigger.STUCK_WATCHDOG,
+            pose=Pose2D(0.0, 0.0, 0.0),
+            stop_reason="stuck no progress",
+            stop_details={},
+            front_evidence={"source": "front_sector"},
+            nominal_linear_x_mps=0.0,
+        )
+
+        self.assertEqual(
+            outcome,
+            BlockageRecoveryDisposition(
+                RecoveryLoopAction.STOP,
+                "stuck no progress",
+            ),
+        )
+        node._attempt_blockage_recovery.assert_not_called()
+
+    def test_obstacle_recovery_outcome_requires_pose_but_not_nominal_command(self):
+        node = _bare_node()
+        node.blockage_recovery_provider = object()
+        node._attempt_blockage_recovery = Mock(
+            return_value=BlockageRecoveryAction.ADOPTED
+        )
+        front_evidence = {"source": "front_sector"}
+
+        missing_pose = node._blockage_recovery_outcome(
+            trigger=BlockageRecoveryTrigger.OBSTACLE_SAFETY_STOP,
+            pose=None,
+            stop_reason="obstacle too close",
+            stop_details={},
+            front_evidence=front_evidence,
+        )
+        self.assertEqual(
+            missing_pose,
+            BlockageRecoveryDisposition(
+                RecoveryLoopAction.STOP,
+                "obstacle too close",
+            ),
+        )
+        node._attempt_blockage_recovery.assert_not_called()
+
+        pose = Pose2D(0.0, 0.0, 0.0)
+        adopted = node._blockage_recovery_outcome(
+            trigger=BlockageRecoveryTrigger.OBSTACLE_SAFETY_STOP,
+            pose=pose,
+            stop_reason="obstacle too close",
+            stop_details={},
+            front_evidence=front_evidence,
+        )
+        self.assertEqual(
+            adopted,
+            BlockageRecoveryDisposition(RecoveryLoopAction.HOLD_AND_RETRY),
+        )
+        node._attempt_blockage_recovery.assert_called_once_with(
+            pose,
+            "obstacle too close",
+            {},
+        )
+
     def test_replan_uses_confirmed_stop_pose_and_fresh_post_plan_pose(self):
         node = _bare_node()
         trigger_pose = Pose2D(-0.86, -0.46, math.pi)
@@ -99,6 +204,7 @@ class FollowerBlockageRecoveryTest(unittest.TestCase):
         )
 
         self.assertEqual(result, "adopted")
+        self.assertIs(result, BlockageRecoveryAction.ADOPTED)
         self.assertEqual(provider.call_args.args[0], confirmed_pose)
         self.assertEqual(node._refresh_dynamic_route.call_args.args[0], post_plan_pose)
         update = node.queued_route_update

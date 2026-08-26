@@ -3,11 +3,12 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from scripts.aufgabe04.real_robot.passive_observer_diagnostics import (
+from scripts.aufgabe04.real_robot.observer.diagnostics import (
     format_passive_observer_failure,
+    is_candidate_local_observer_timeout,
     load_passive_observer_status,
 )
-from scripts.aufgabe04.real_robot.passive_observer_process import (
+from scripts.aufgabe04.real_robot.observer.process import (
     PassiveObserverProcessEvidence,
 )
 
@@ -104,6 +105,51 @@ class PassiveObserverDiagnosticsTests(unittest.TestCase):
         self.assertIn("tf_retry_count=8", message)
         self.assertIn("retry_exhausted=true", message)
         self.assertIn(str(process_path), message)
+
+    def test_only_candidate_local_reaped_deadline_is_deferrable(self) -> None:
+        process = PassiveObserverProcessEvidence(
+            completion_kind="deadline",
+            artifact_kind=None,
+            artifact_path=None,
+            deadline_expired=True,
+            returncode=130,
+            cleanup_actions=("send_sigint", "wait_after_sigint"),
+            signals_sent=("SIGINT",),
+        )
+        local_status = load_passive_observer_status(Path("missing-status.json"))
+        local_status = type(local_status)(
+            state="lidar_target_mismatch",
+            reason=None,
+            consensus_sample_count=0,
+            consensus_required_sample_count=7,
+            tf_retry_count=0,
+            tf_retry_elapsed_sec=None,
+            retry_exhausted=None,
+            load_error=None,
+        )
+        systemic_status = type(local_status)(
+            state="tf_retry_exhausted",
+            reason=None,
+            consensus_sample_count=0,
+            consensus_required_sample_count=7,
+            tf_retry_count=8,
+            tf_retry_elapsed_sec=0.16,
+            retry_exhausted=True,
+            load_error=None,
+        )
+
+        self.assertTrue(
+            is_candidate_local_observer_timeout(
+                process=process,
+                status=local_status,
+            )
+        )
+        self.assertFalse(
+            is_candidate_local_observer_timeout(
+                process=process,
+                status=systemic_status,
+            )
+        )
 
 
 if __name__ == "__main__":

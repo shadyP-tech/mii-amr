@@ -6,13 +6,13 @@ from dataclasses import replace
 from pathlib import Path
 
 from scripts.aufgabe04.navigation.planning.map_io import freeze_map_bundle
-from scripts.aufgabe04.real_robot.hardware_profile import (
+from scripts.aufgabe04.real_robot.configuration.profile import (
     REAL_HARDWARE_PROFILE_SCHEMA_VERSION,
     RealRobotProfile,
     load_real_robot_profile,
     real_robot_profile_sha256,
 )
-from scripts.aufgabe04.real_robot.physical_site_contract import (
+from scripts.aufgabe04.real_robot.configuration.site_contract import (
     PhysicalSiteContractError,
     load_physical_site,
     resolve_expected_stand_count,

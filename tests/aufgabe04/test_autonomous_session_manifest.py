@@ -5,7 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from scripts.aufgabe04.artifacts.content_store import payload_sha256
-from scripts.aufgabe04.real_robot.autonomous_session_manifest import (
+from scripts.aufgabe04.real_robot.mission.session_manifest import (
     AUTONOMOUS_SESSION_MANIFEST_KIND,
     AUTONOMOUS_SESSION_MANIFEST_SCHEMA_VERSION,
     COVERAGE_LEG_CHECKPOINT_COMPLETE,

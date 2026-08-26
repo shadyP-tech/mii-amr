@@ -5,7 +5,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from scripts.aufgabe04.real_robot.run_autonomous_stand_exploration import (
+from scripts.aufgabe04.real_robot.autonomous_runner.runtime import (
     MotionLegOutcome,
     _execute_coverage_leg_with_replans,
     _run_motion_leg,
@@ -75,11 +75,11 @@ class AutonomousLocalizationRetryIntegrationTest(unittest.TestCase):
                 "route_certificate_json": str(root / "certificate.json"),
             }
             with patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "seal_stand_discovery_route",
                 return_value=sealed,
             ) as seal, patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "_run_motion_leg",
                 side_effect=(rejected, completed),
             ) as run:
@@ -152,7 +152,7 @@ class AutonomousLocalizationRetryIntegrationTest(unittest.TestCase):
                 return SimpleNamespace(returncode=1)
 
             with patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "subprocess.run",
                 side_effect=reject_dry,
             ) as run:
@@ -204,11 +204,11 @@ class AutonomousLocalizationRetryIntegrationTest(unittest.TestCase):
                 "route_certificate_json": str(root / "certificate.json"),
             }
             with patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "seal_stand_discovery_route",
                 return_value=sealed,
             ), patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "_run_motion_leg",
                 side_effect=failures,
             ) as run, self.assertRaisesRegex(

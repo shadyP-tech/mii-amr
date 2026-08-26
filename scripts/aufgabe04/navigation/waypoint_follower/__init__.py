@@ -9,6 +9,12 @@ from scripts.aufgabe04.navigation.control.driving_behavior import (
     controller_config_for_route_kind,
 )
 from scripts.aufgabe04.navigation.control.follower_models import FollowerResult
+from scripts.aufgabe04.navigation.waypoint_follower.directives import (
+    AcquisitionGoalAction,
+    BlockageRecoveryAction,
+    RouteRefreshAction,
+    StartupJoinAction,
+)
 from scripts.aufgabe04.navigation.waypoint_follower.config import FollowerConfig
 from scripts.aufgabe04.navigation.waypoint_follower.pose_lookup import (
     PoseLookupResult,
@@ -20,8 +26,14 @@ from scripts.aufgabe04.navigation.waypoint_follower.route_admission import (
     stuck_progress_details,
 )
 from scripts.aufgabe04.navigation.waypoint_follower.route_phases import (
+    AcquisitionGoalDecision,
+    RouteCommandPhase,
+    ViewpointSamplingDeadlineDecision,
     acquisition_goal_action,
+    acquisition_goal_decision,
     dynamic_route_kind_transition_failure,
+    route_command_phase,
+    viewpoint_sampling_deadline_decision,
     viewpoint_sampling_target_timeout_failure,
     viewpoint_sampling_timeout_failure,
 )
@@ -78,6 +90,9 @@ def __dir__() -> list[str]:
 
 
 __all__ = [
+    "AcquisitionGoalAction",
+    "AcquisitionGoalDecision",
+    "BlockageRecoveryAction",
     "CALLBACK_SERVICE_BACKGROUND_EXECUTOR",
     "FOLLOWER_EXECUTOR_NUM_THREADS",
     "FollowerConfig",
@@ -92,13 +107,18 @@ __all__ = [
     "INTERMEDIATE_TERMINAL_HEADING_HOLD_EXCEEDED",
     "INTERMEDIATE_TERMINAL_HEADING_TARGET_ENVELOPE_RADIUS_M",
     "PoseLookupResult",
+    "RouteRefreshAction",
+    "RouteCommandPhase",
     "STALE_TF_RECOVERY_MAX_CALLBACKS",
     "STALE_TF_RECOVERY_MAX_DURATION_SEC",
     "STALE_TF_RECOVERY_SPIN_TIMEOUT_SEC",
     "STATIC_PHYSICAL_ROUTE_KINDS",
+    "StartupJoinAction",
     "SimpleWaypointFollowerNode",
     "TF_LISTENER_NODE_NAME",
+    "ViewpointSamplingDeadlineDecision",
     "acquisition_goal_action",
+    "acquisition_goal_decision",
     "certified_startup_join_action",
     "certified_startup_route_state",
     "certified_static_startup_decision",
@@ -109,9 +129,11 @@ __all__ = [
     "intermediate_terminal_heading_entry_tolerance_m",
     "intermediate_terminal_heading_hold_diagnostics",
     "reset_intermediate_terminal_heading_latch",
+    "route_command_phase",
     "run_simple_waypoint_follower",
     "stuck_progress_details",
     "tf_lookup_failure_details",
+    "viewpoint_sampling_deadline_decision",
     "viewpoint_sampling_target_timeout_failure",
     "viewpoint_sampling_timeout_failure",
 ]

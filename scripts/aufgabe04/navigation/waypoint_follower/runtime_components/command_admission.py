@@ -8,6 +8,7 @@ owner of when a decision is applied and when motion is revoked or emitted.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Mapping
 
 from scripts.aufgabe04.navigation.control.waypoint_controller import (
     VelocityCommand,
@@ -30,6 +31,17 @@ class CommandAdmissionDecision:
     command_floor: LinearCommandFloorDecision
     clearance_limited_below_floor: bool
     finite: bool
+
+
+@dataclass(frozen=True)
+class PreparedCommandDecision:
+    """Typed result of stateful preparation performed by the control loop."""
+
+    raw_effective_command: VelocityCommand
+    shaped_command: VelocityCommand | None
+    shape_dt_sec: float | None
+    stop_details: Mapping[str, object] | None = None
+    trace_diagnostics: Mapping[str, object] | None = None
 
 
 def command_admission_decision(

@@ -9,13 +9,14 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from scripts.aufgabe04.real_robot import (
-    run_autonomous_stand_exploration as autonomous_wrapper,
+from scripts.aufgabe04.real_robot.autonomous_runner import (
+    runtime as autonomous_wrapper,
 )
 from scripts.aufgabe04.navigation.missions.plan_stand_coverage_survey import (
     main as plan_coverage,
 )
-from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds
+from scripts.aufgabe04.navigation.foundation.models import GridCell, Pose2D
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     MISSION_LEG_RUN_CONFIRMATION,
@@ -45,7 +46,10 @@ from scripts.aufgabe04.navigation.waypoint_follower.runtime import (
 )
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STATUS_PENDING_CAMERA,
+    CoverageSurveyConfig,
+    CoverageSurveyPlan,
     SurveyCandidate,
+    SurveyViewpoint,
     load_coverage_survey_plan,
     load_stand_survey_registry,
     write_stand_survey_registry,
@@ -67,16 +71,17 @@ from scripts.aufgabe04.navigation.coverage.transient_overlay_resume_state import
     TransientOverlayResumeState,
 )
 from scripts.aufgabe04.navigation.planning.waypoint_csv import load_route_leg
-from scripts.aufgabe04.real_robot.passive_viewpoint_node import _resolved_qr_id
-from scripts.aufgabe04.real_robot import autonomous_coverage_replanning
-from scripts.aufgabe04.real_robot.autonomous_coverage_replanning import (
+from scripts.aufgabe04.real_robot.coverage_leg import (
+    replanning as autonomous_coverage_replanning,
+)
+from scripts.aufgabe04.real_robot.coverage_leg.replanning import (
     coverage_reseal_suffix,
     is_resealable_startup_mismatch,
     is_runtime_localization_reseal_required,
     replan_runtime_localization_source,
     replan_startup_source,
 )
-from scripts.aufgabe04.real_robot.run_autonomous_stand_exploration import (
+from scripts.aufgabe04.real_robot.autonomous_runner.runtime import (
     MotionLegOutcome,
     MissionLegPermitContext,
     RuntimeLocalizationPermitContext,
@@ -91,22 +96,35 @@ from scripts.aufgabe04.real_robot.run_autonomous_stand_exploration import (
     build_parser,
     candidate_snapshot_from_registry,
 )
-from scripts.aufgabe04.real_robot.autonomous_startup_reseal import (
+from scripts.aufgabe04.real_robot.readiness.startup_reseal import (
     write_startup_reseal_permit_summary,
 )
-from scripts.aufgabe04.real_robot.autonomous_candidate_approach import (
+from scripts.aufgabe04.real_robot.candidate import (
+    approach as autonomous_candidate_approach,
+)
+from scripts.aufgabe04.real_robot.candidate.approach import (
+    CandidateApproachEffects,
+    CandidateObservation,
+    CameraCandidateInitialSelection,
     CandidateMotionLegRequest,
     bounded_approach_offsets,
     opposite_face_normal,
     plan_candidate_preapproach,
 )
-from scripts.aufgabe04.real_robot.autonomous_candidate_runtime_recovery import (
+from scripts.aufgabe04.real_robot.candidate.observation_deferral import (
+    CandidateObservationUnavailableError,
+)
+from scripts.aufgabe04.real_robot.candidate.runtime_recovery import (
     CandidateRuntimeRecoveryAttempt,
 )
-from scripts.aufgabe04.real_robot.autonomous_candidate_startup_recovery import (
+from scripts.aufgabe04.real_robot.candidate.startup_recovery import (
     CandidateRoutineIdentity,
 )
 from scripts.aufgabe04.stations.candidate_snapshot import (
+    CandidateGeometry,
+    CandidateSource,
+    FrozenCandidate,
+    new_candidate_snapshot,
     write_candidate_snapshot,
 )
 
@@ -345,6 +363,407 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         )
         self.assertFalse(summary["camera_approach_authorized"])
         self.assertFalse(summary["motion_authorized"])
+
+    def _run_exact_two_camera_wrapper_retry_fixture(
+        self,
+        root: Path,
+        *,
+        max_attempts: int,
+        candidate_a_failures: int,
+    ) -> dict[str, object]:
+        """Run the real outer wrapper with ROS/motion replaced by typed effects."""
+
+        session_id = "stand_explore_exact2_camera_wrapper_retry"
+        output_root = root / "runs"
+        session_root = output_root / session_id
+        map_sha256 = "a" * 64
+        fixture_paths = {
+            name: root / name
+            for name in ("robot.json", "camera.json", "site.json", "map.yaml")
+        }
+        for path in fixture_paths.values():
+            path.write_text("{}\n", encoding="utf-8")
+
+        def candidate(uid: str, x_m: float) -> FrozenCandidate:
+            return FrozenCandidate(
+                candidate_uid=uid,
+                geometry=CandidateGeometry(
+                    x_m=x_m,
+                    y_m=0.0,
+                    radius_m=0.06,
+                    uncertainty_m=0.02,
+                    keepout_radius_m=0.31,
+                ),
+                source=CandidateSource(
+                    source_kind="lidar/stand_coverage_survey",
+                    source_artifact_sha256="b" * 64,
+                    detector_config_sha256="c" * 64,
+                    observation_ids=(f"observation_{uid}",),
+                ),
+                confidence=0.9,
+                hit_count=4,
+                first_seen_sec=1.0,
+                last_seen_sec=2.0,
+            )
+
+        candidates = (
+            candidate("candidate_a", 0.2),
+            candidate("candidate_b", 0.4),
+            candidate("candidate_c", 0.6),
+        )
+        snapshot = new_candidate_snapshot(
+            snapshot_id="exact_two_wrapper_snapshot",
+            created_unix_sec=3.0,
+            planning_frame="map",
+            map_bundle_sha256=map_sha256,
+            candidates=candidates,
+        )
+        snapshot_path = root / "candidate_snapshot.json"
+        snapshot_sha256 = write_candidate_snapshot(snapshot_path, snapshot)
+        first_cell = GridCell(0, 0)
+        second_cell = GridCell(1, 0)
+        plan = CoverageSurveyPlan(
+            schema_version=1,
+            survey_id=session_id,
+            planning_frame="map",
+            map_bundle_sha256=map_sha256,
+            arena_bounds=ArenaBounds(),
+            config=CoverageSurveyConfig(
+                lane_count=1,
+                expected_stand_count=len(candidates),
+                exact_inspection_point_count=2,
+            ),
+            viewpoints=(
+                SurveyViewpoint(
+                    viewpoint_id="survey_vp_001",
+                    pose=Pose2D(0.0, 0.0, 0.0),
+                    cell=first_cell,
+                    visible_cells=(first_cell, second_cell),
+                ),
+                SurveyViewpoint(
+                    viewpoint_id="survey_vp_002",
+                    pose=Pose2D(1.0, 0.0, math.pi),
+                    cell=second_cell,
+                    visible_cells=(first_cell, second_cell),
+                ),
+            ),
+            surveyable_cells=(first_cell, second_cell),
+            planned_covered_cells=(first_cell, second_cell),
+            planned_coverage_ratio=1.0,
+        )
+        candidate_uids = list(snapshot.candidate_uids)
+
+        class FakeExactTwoCameraReady:
+            def __init__(self):
+                self.candidate_snapshot = snapshot
+                self.candidate_snapshot_path = snapshot_path
+                self.candidate_snapshot_sha256 = snapshot_sha256
+                self.camera_validation_admission_path = (
+                    root / "camera_validation_admission.json"
+                )
+                self.camera_validation_admission_sha256 = "d" * 64
+                self.camera_handoff_path = root / "camera_handoff.json"
+                self.camera_handoff_sha256 = "e" * 64
+
+            def to_mission_summary(self):
+                return {
+                    "lidar_checkpoint_admission": str(
+                        root / "lidar_checkpoint_admission.json"
+                    ),
+                    "lidar_checkpoint_admission_sha256": "f" * 64,
+                    "camera_validation_admission": str(
+                        self.camera_validation_admission_path
+                    ),
+                    "camera_validation_admission_sha256": (
+                        self.camera_validation_admission_sha256
+                    ),
+                    "camera_validation_candidate_uids": candidate_uids,
+                    "active_lidar_registry_candidate_count": 3,
+                    "lidar_static_map_admitted_candidate_count": 3,
+                    "lidar_boundary_provisional_candidate_count": 0,
+                    "lidar_population_retained_candidate_count": 3,
+                    "camera_seed_candidate_count": 3,
+                    "camera_seed_selection_mode": "strict_exact",
+                    "camera_seed_candidate_uids": candidate_uids,
+                    "camera_seed_boundary_fill_candidate_uids": [],
+                    "camera_seed_boundary_audit_only_candidate_uids": [],
+                    "camera_seed_excluded_candidate_uids": [],
+                    "multi_view_candidate_uids": candidate_uids[:2],
+                    "single_view_requires_camera_validation_candidate_uids": (
+                        candidate_uids[2:]
+                    ),
+                }
+
+        coverage_phase = FakeExactTwoCameraReady()
+        profile = SimpleNamespace(
+            robot_id="turtlebot1",
+            namespace="",
+            amcl_topic="amcl_pose",
+            map_frame="map",
+            scan_origin_to_base_offset_m=0.05,
+            max_linear_speed_mps=0.055,
+            max_angular_speed_radps=0.18,
+            resolved_runtime=lambda: SimpleNamespace(
+                namespace="",
+                cmd_vel_topic="/cmd_vel",
+            ),
+        )
+        initial_admission = SimpleNamespace(
+            result=SimpleNamespace(attempts=(object(),)),
+            evidence_path=root / "initial_readiness.json",
+            evidence_sha256="1" * 64,
+        )
+        capture_count = {uid: 0 for uid in candidate_uids}
+        capture_order: list[str] = []
+        motion_targets: list[str] = []
+
+        def capture_observation(*, profile, args, request):
+            del profile, args
+            uid = request.candidate.candidate_uid
+            capture_count[uid] += 1
+            capture_order.append(uid)
+            if uid == "candidate_a" and capture_count[uid] <= candidate_a_failures:
+                raise CandidateObservationUnavailableError(
+                    candidate_uid=uid,
+                    observation_attempt_index=request.attempt_index,
+                    reason="candidate-local LiDAR association deadline",
+                    process_evidence={"completion_kind": "deadline"},
+                    status_evidence={"state": "lidar_target_mismatch"},
+                )
+            request.output_dir.mkdir(parents=True, exist_ok=True)
+            recommendation = request.output_dir / "recommendation.json"
+            recommendation.write_text("{}\n", encoding="utf-8")
+            return CandidateObservation(recommendation, f"QR_{uid}", None)
+
+        def run_candidate_motion(*, profile, request):
+            del profile
+            motion_targets.append(request.target_id)
+            return MotionLegOutcome(
+                run_id=request.run_id,
+                status="completed",
+                stop_reason="",
+                stop_details={},
+                motion_published=True,
+                returncode=0,
+                semantic_log_path=root / f"{request.run_id}.jsonl",
+            )
+
+        def candidate_effects_factory(**effects):
+            def select(request):
+                uid = sorted(request.unresolved)[0]
+                return CameraCandidateInitialSelection(
+                    candidate_uid=uid,
+                    prepared_plan=None,
+                    evidence={
+                        "selected_candidate_uid": uid,
+                        "motion_authorized": False,
+                    },
+                )
+
+            return CandidateApproachEffects(
+                read_current_pose=effects["read_current_pose"],
+                run_motion_leg=effects["run_motion_leg"],
+                capture_observation=effects["capture_observation"],
+                plan_preapproach=lambda _request: {"route_csv": "route.csv"},
+                select_initial_preapproach=select,
+                validate_facing=lambda request: {
+                    "candidate_uid": request.candidate.candidate_uid
+                },
+                commit_decision=lambda _request: None,
+                event_sink=effects["event_sink"],
+                clock=lambda: 10.0,
+            )
+
+        with (
+            patch.multiple(
+                autonomous_wrapper,
+                load_real_robot_profile=lambda *_args, **_kwargs: profile,
+                load_camera_calibration=lambda *_args, **_kwargs: SimpleNamespace(),
+                validate_physical_site_contract=lambda *_args, **_kwargs: (
+                    SimpleNamespace(
+                        expected_stand_count=len(candidates),
+                        physical_site_path=fixture_paths["site.json"],
+                        map_yaml_path=fixture_paths["map.yaml"],
+                        map_bundle=SimpleNamespace(bundle_sha256=map_sha256),
+                    )
+                ),
+                _validate_inputs=lambda *_args, **_kwargs: None,
+                _physical_clearance=lambda *_args, **_kwargs: {
+                    "minimum_active_standoff_m": 0.20,
+                    "minimum_static_inflation_m": 0.25,
+                    "minimum_candidate_transit_radius_m": 0.31,
+                },
+                _admit_observation_tf_readiness=(
+                    lambda _profile, evidence_path, **_kwargs: (
+                        Path(evidence_path),
+                        "2" * 64,
+                    )
+                ),
+                _admit_preplanning_localization=lambda *_args, **_kwargs: Pose2D(
+                    0.0, 0.0, 0.0
+                ),
+                plan_stand_coverage_survey=lambda *_args, **_kwargs: 0,
+                load_coverage_survey_plan=lambda *_args, **_kwargs: plan,
+                admit_preauthorization_readiness=(
+                    lambda *_args, **_kwargs: initial_admission
+                ),
+                write_mission_leg_motion_authorization=(
+                    lambda *_args, **_kwargs: "3" * 64
+                ),
+                write_mission_motion_authorization=(
+                    lambda *_args, **_kwargs: "4" * 64
+                ),
+                write_startup_reseal_motion_authorization=(
+                    lambda *_args, **_kwargs: "5" * 64
+                ),
+                execute_coverage_mission=lambda *_args, **_kwargs: coverage_phase,
+                CoverageExactTwoCameraReady=FakeExactTwoCameraReady,
+                CandidateApproachEffects=candidate_effects_factory,
+                read_current_pose2d_from_amcl=lambda *_args, **_kwargs: Pose2D(
+                    0.0, 0.0, 0.0
+                ),
+                _run_candidate_motion_leg=run_candidate_motion,
+                _capture_candidate_observation=capture_observation,
+            ),
+            patch.object(
+                autonomous_candidate_approach,
+                "validate_candidate_approach_handoff",
+                return_value={uid: "coverage_admitted" for uid in candidate_uids},
+            ),
+            patch("builtins.input", return_value="RUN") as run_prompt,
+            redirect_stdout(StringIO()),
+            redirect_stderr(StringIO()),
+        ):
+            try:
+                exit_code = autonomous_wrapper.main(
+                    [
+                        "--robot-profile",
+                        str(fixture_paths["robot.json"]),
+                        "--camera-calibration",
+                        str(fixture_paths["camera.json"]),
+                        "--physical-site",
+                        str(fixture_paths["site.json"]),
+                        "--map",
+                        str(fixture_paths["map.yaml"]),
+                        "--session-id",
+                        session_id,
+                        "--output-root",
+                        str(output_root),
+                        "--expected-stand-count",
+                        str(len(candidates)),
+                        "--coverage-leg-limit",
+                        "2",
+                        "--exact-inspection-point-count",
+                        "2",
+                        "--max-runtime-localization-reseals-per-leg",
+                        "0",
+                        "--max-camera-observation-attempts-per-candidate",
+                        str(max_attempts),
+                        "--localization-branch-proof-id",
+                        "known_start",
+                        "--run-mode",
+                        "execute-exact-two-camera",
+                    ]
+                )
+            except SystemExit as exc:
+                exit_code = exc.code
+
+        return {
+            "exit_code": exit_code,
+            "session_root": session_root,
+            "capture_order": capture_order,
+            "motion_targets": motion_targets,
+            "run_prompt_count": run_prompt.call_count,
+            "failure": (
+                json.loads(
+                    (session_root / "mission_failure.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                if (session_root / "mission_failure.json").is_file()
+                else None
+            ),
+        }
+
+    def test_exact_two_wrapper_defers_local_timeout_and_completes_after_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._run_exact_two_camera_wrapper_retry_fixture(
+                Path(tmp),
+                max_attempts=2,
+                candidate_a_failures=1,
+            )
+            session_root = result["session_root"]
+            self.assertEqual(result["exit_code"], 0, result["failure"])
+            self.assertEqual(
+                result["capture_order"],
+                ["candidate_a", "candidate_b", "candidate_c", "candidate_a"],
+            )
+            self.assertEqual(result["motion_targets"], result["capture_order"])
+            self.assertEqual(result["run_prompt_count"], 1)
+            events = [
+                json.loads(line)
+                for line in (session_root / "candidate_selection.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertTrue(
+                any(
+                    event.get("event")
+                    == "camera_candidate_observation_deferred"
+                    for event in events
+                )
+            )
+            self.assertTrue(
+                any(
+                    event.get("event")
+                    == "camera_candidate_observation_retry_pass"
+                    for event in events
+                )
+            )
+            summary = json.loads(
+                (session_root / "mission_summary.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(summary["status"], "complete")
+            self.assertEqual(summary["stand_count"], 3)
+            self.assertTrue(summary["camera_validation_complete"])
+            self.assertTrue(summary["exploration_complete"])
+            self.assertFalse(summary["motion_authorized"])
+
+    def test_exact_two_wrapper_fails_only_after_remaining_candidates_and_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._run_exact_two_camera_wrapper_retry_fixture(
+                Path(tmp),
+                max_attempts=1,
+                candidate_a_failures=99,
+            )
+            session_root = result["session_root"]
+            self.assertEqual(result["exit_code"], 2)
+            self.assertEqual(
+                result["capture_order"],
+                ["candidate_a", "candidate_b", "candidate_c"],
+            )
+            self.assertEqual(result["motion_targets"], result["capture_order"])
+            failure = json.loads(
+                (session_root / "mission_failure.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(failure["status"], "failed_closed")
+            self.assertEqual(
+                failure["failure_phase"], "candidate_approach_incomplete"
+            )
+            self.assertEqual(
+                failure["resolved_candidate_uids"],
+                ["candidate_b", "candidate_c"],
+            )
+            self.assertEqual(
+                failure["unresolved_candidate_uids"], ["candidate_a"]
+            )
+            self.assertEqual(failure["max_candidate_observation_attempts"], 1)
+            self.assertFalse(failure["motion_continues_authorized"])
+            self.assertFalse((session_root / "mission_summary.json").exists())
 
     def test_exact_two_final_summary_rejects_camera_seed_uid_mismatch(self):
         exact_summary = {
@@ -590,7 +1009,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 "route_certificate_json": str(root / "certificate.json"),
             }
             with patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "subprocess.run"
             ) as run, self.assertRaisesRegex(
                 RuntimeError,
@@ -667,7 +1086,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             },
         )
         with tempfile.TemporaryDirectory() as tmp, patch(
-            "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+            "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
             "run_ros_preflight",
             return_value=preflight,
         ) as run_preflight:
@@ -708,7 +1127,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             route_pose=None,
         )
         with tempfile.TemporaryDirectory() as tmp, patch(
-            "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+            "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
             "run_ros_preflight",
             return_value=preflight,
         ):
@@ -1010,13 +1429,6 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 snapshot.candidates[0].source.observation_ids,
                 candidate.source_observation_ids,
             )
-
-    def test_auto_qr_requires_exactly_one_identity(self):
-        self.assertEqual(_resolved_qr_id("auto", ("A",)), "A")
-        self.assertIsNone(_resolved_qr_id("auto", ()))
-        self.assertIsNone(_resolved_qr_id("auto", ("A", "B")))
-        self.assertEqual(_resolved_qr_id("A", ("A",)), "A")
-        self.assertIsNone(_resolved_qr_id("A", ("B",)))
 
     def test_candidate_phase_uses_public_fresh_amcl_pose2d_reader(self):
         profile = SimpleNamespace(
@@ -1789,7 +2201,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
 
             with patch(
                 "scripts.aufgabe04.real_robot."
-                "run_autonomous_stand_exploration.subprocess.run",
+                "autonomous_runner.runtime.subprocess.run",
                 side_effect=write_summary,
             ) as run:
                 summary = _capture_lidar_epoch(
@@ -1854,15 +2266,15 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 "route_certificate_json": str(root / "certificate.json"),
             }
             with patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "seal_stand_discovery_route",
                 return_value=sealed,
             ) as seal, patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "_run_motion_leg",
                 return_value=completed,
             ) as run, patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "_capture_lidar_epoch",
             ) as observe:
                 _execute_coverage_leg_with_replans(
@@ -1938,11 +2350,11 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 "route_certificate_json": str(root / "certificate.json"),
             }
             with patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "seal_stand_discovery_route",
                 return_value=sealed,
             ) as seal, patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "_run_motion_leg",
                 side_effect=(rejected, completed),
             ) as run, patch.object(
@@ -1954,11 +2366,11 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                     "summary_json": str(root / "reseal_summary.json"),
                 },
             ) as replan, patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "_admit_preplanning_localization",
                 return_value=admitted_pose,
             ) as admit, patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "_capture_lidar_epoch"
             ) as observe:
                 _execute_coverage_leg_with_replans(
@@ -2062,15 +2474,15 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             }
             admitted_pose = Pose2D(-0.31, -0.47, 0.12)
             with patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "seal_stand_discovery_route",
                 return_value=sealed,
             ) as seal, patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "_run_motion_leg",
                 side_effect=(stopped, completed),
             ) as run, patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "_admit_preplanning_localization",
                 return_value=admitted_pose,
             ) as admit, patch.object(
@@ -2206,15 +2618,15 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 "route_certificate_json": str(root / "certificate.json"),
             }
             with patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "seal_stand_discovery_route",
                 return_value=sealed,
             ), patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "_run_motion_leg",
                 return_value=stopped,
             ) as run, patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "_admit_preplanning_localization",
                 side_effect=RuntimeError("stationary AMCL did not converge"),
             ), patch.object(
@@ -2294,15 +2706,15 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 "route_certificate_json": str(root / "certificate.json"),
             }
             with patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "seal_stand_discovery_route",
                 return_value=sealed,
             ), patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "_run_motion_leg",
                 return_value=stopped,
             ), patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "_admit_preplanning_localization",
             ) as admit:
                 with self.assertRaisesRegex(
@@ -2400,15 +2812,15 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 "summary_json": str(replacement_summary),
             }
             with patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "seal_stand_discovery_route",
                 return_value=sealed,
             ) as seal, patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "_run_motion_leg",
                 side_effect=(stopped, completed),
             ) as run, patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "_admit_preplanning_localization",
                 return_value=admitted_pose,
             ) as admit, patch.object(
@@ -2554,11 +2966,11 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 "route_certificate_json": str(root / "certificate.json"),
             }
             with patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "seal_stand_discovery_route",
                 return_value=sealed,
             ) as seal, patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "_run_motion_leg",
                 return_value=blocked,
             ) as run:
@@ -2616,7 +3028,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 return SimpleNamespace(returncode=1)
 
             with patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "subprocess.run",
                 side_effect=reject_dry,
             ) as run:
@@ -2648,7 +3060,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 return SimpleNamespace(returncode=0)
 
             with patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "subprocess.run",
                 side_effect=run_dry,
             ) as run, patch(
@@ -2717,7 +3129,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 return SimpleNamespace(returncode=0)
 
             with patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "subprocess.run",
                 side_effect=run_process,
             ) as run:
@@ -2817,7 +3229,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
 
             with patch(
                 "scripts.aufgabe04.real_robot."
-                "run_autonomous_stand_exploration.subprocess.run",
+                "autonomous_runner.runtime.subprocess.run",
                 side_effect=run_process,
             ) as run, patch(
                 "builtins.input",
@@ -3108,7 +3520,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 return SimpleNamespace(returncode=0)
 
             with patch(
-                "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration."
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
                 "subprocess.run",
                 side_effect=run_process,
             ) as run, patch(
@@ -3352,7 +3764,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
 
             with patch(
                 "scripts.aufgabe04.real_robot."
-                "run_autonomous_stand_exploration.subprocess.run",
+                "autonomous_runner.runtime.subprocess.run",
                 side_effect=run_process,
             ) as run, patch(
                 "builtins.input",

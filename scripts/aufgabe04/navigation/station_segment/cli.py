@@ -608,6 +608,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--preflight-json", type=Path, default=None)
     parser.add_argument("--semantic-log", type=Path, default=None)
     parser.add_argument(
+        "--verbose-console",
+        action="store_true",
+        help=(
+            "Print full resolved-runtime and ROS preflight JSON to the terminal. "
+            "By default the terminal shows a compact summary while artifacts "
+            "retain full evidence."
+        ),
+    )
+    parser.add_argument(
         "--controller-trace-jsonl",
         type=Path,
         default=None,

@@ -93,7 +93,7 @@ ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist '{}'
 Use `/robot1/cmd_vel` instead when the dry-run output resolves the robot's
 velocity topic under a namespace.
 
-7. The dedicated `real_robot/run_unloaded_segment.py` adapter retains every
+7. The dedicated `real_robot/entrypoints/run_unloaded_segment.py` adapter retains every
    sealed mission-chain input and is dry-run by default. Its `--execute` path is
    only for a separately authorized, unloaded single-leg validation after the
    staged gate and physical precautions pass. It does not clear real logistics

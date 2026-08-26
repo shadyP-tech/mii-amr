@@ -196,6 +196,10 @@ from .reporting import (
     _observation_log_rows,
     record_unexpected_follower_exception,
 )
+from .console_reporting import (
+    compact_preflight_summary,
+    compact_runtime_summary,
+)
 
 
 DEFAULT_RUN_LOG = Path("results/aufgabe04/station_segment_runs.csv")
@@ -784,15 +788,23 @@ def main(argv: list[str] | None = None) -> int:
         event_logger=event_logger,
         require_motion=require_motion,
     )
-    print("Resolved runtime config:")
-    print(json.dumps(resolved.as_log_dict(), indent=2, sort_keys=True))
-    print(f"Semantic log: {args.semantic_log}")
-    print(f"Results CSV: {args.results_csv}")
+    resolved_log = resolved.as_log_dict()
     print(
-        "Route leg: "
-        f"raw={len(leg.raw_waypoints)} executable={len(leg.executable_waypoints)} "
-        f"length={leg.route_length_m:.3f}m"
+        compact_runtime_summary(
+            run_id=args.run_id,
+            leg_index=leg.leg_index,
+            runtime_config=resolved_log,
+            raw_waypoint_count=len(leg.raw_waypoints),
+            executable_waypoint_count=len(leg.executable_waypoints),
+            route_length_m=leg.route_length_m,
+            semantic_log_path=args.semantic_log,
+            results_csv_path=args.results_csv,
+            preflight_json_path=args.preflight_json,
+        )
     )
+    if args.verbose_console:
+        print("Resolved runtime config:")
+        print(json.dumps(resolved_log, indent=2, sort_keys=True))
     if args.allow_noop and leg.route_length_m <= 0.0:
         result = FollowerResult("noop", "zero-length leg", 0.0, 0.0, False)
         _append_result(args, resolved, leg, preflight_ok=False, result=result)
@@ -906,7 +918,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.preflight_json is not None:
         args.preflight_json.parent.mkdir(parents=True, exist_ok=True)
         args.preflight_json.write_text(preflight_text + "\n")
-    print(preflight_text)
+    if args.verbose_console:
+        print(preflight_text)
+    else:
+        print(
+            compact_preflight_summary(
+                ok=preflight.ok,
+                failures=preflight.failures,
+                observation_count=len(preflight.observations),
+                preflight_json_path=args.preflight_json,
+            )
+        )
     if not preflight.ok:
         emit_event(
             event_logger,

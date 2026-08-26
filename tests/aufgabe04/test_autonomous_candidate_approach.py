@@ -34,7 +34,7 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     CoverageSurveyPlan,
     SurveyViewpoint,
 )
-from scripts.aufgabe04.real_robot.autonomous_candidate_approach import (
+from scripts.aufgabe04.real_robot.candidate.approach import (
     CandidateApproachConfig,
     CandidateApproachEffects,
     CandidateApproachPoseError,
@@ -47,7 +47,11 @@ from scripts.aufgabe04.real_robot.autonomous_candidate_approach import (
     plan_candidate_preapproach,
     validate_facing_pose,
 )
-from scripts.aufgabe04.real_robot.autonomous_child_runner import MotionLegOutcome
+from scripts.aufgabe04.real_robot.execution.child_runner import MotionLegOutcome
+from scripts.aufgabe04.real_robot.candidate.observation_deferral import (
+    CandidateApproachIncompleteError,
+    CandidateObservationUnavailableError,
+)
 from scripts.aufgabe04.stations.candidate_snapshot import (
     CandidateGeometry,
     CandidateSource,
@@ -200,6 +204,161 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
 
             self.assertIsNotNone(selected)
             self.assertEqual(selected.candidate_uid, "candidate_a")
+
+    def test_typed_observer_timeout_defers_then_retries_after_other_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = self._config(
+                root,
+                (
+                    self._candidate("candidate_a", 0.2, 0.0),
+                    self._candidate("candidate_b", 0.4, 0.0),
+                ),
+            )
+            poses = iter(Pose2D(0.0, 0.0, 0.0) for _ in range(5))
+            capture_count = {"candidate_a": 0, "candidate_b": 0}
+            capture_roots = []
+            motion_targets = []
+            events = []
+
+            def select(request):
+                uid = sorted(request.unresolved)[0]
+                return CameraCandidateInitialSelection(
+                    candidate_uid=uid,
+                    prepared_plan=None,
+                    evidence={
+                        "selected_candidate_uid": uid,
+                        "motion_authorized": False,
+                    },
+                )
+
+            def capture(request):
+                uid = request.candidate.candidate_uid
+                capture_count[uid] += 1
+                capture_roots.append(request.output_dir.parent.name)
+                if uid == "candidate_a" and capture_count[uid] == 1:
+                    raise CandidateObservationUnavailableError(
+                        candidate_uid=uid,
+                        observation_attempt_index=request.attempt_index,
+                        reason="candidate-local LiDAR association deadline",
+                        process_evidence={"completion_kind": "deadline"},
+                        status_evidence={"state": "lidar_target_mismatch"},
+                    )
+                return CandidateObservation(
+                    request.output_dir / "recommendation.json",
+                    f"QR_{uid}",
+                    None,
+                )
+
+            def run_motion(request):
+                motion_targets.append(request.target_id)
+                return self._completed(request)
+
+            outcome = execute_candidate_approach_phase(
+                config,
+                CandidateApproachEffects(
+                    select_initial_preapproach=select,
+                    read_current_pose=lambda: next(poses),
+                    run_motion_leg=run_motion,
+                    capture_observation=capture,
+                    plan_preapproach=lambda _request: {"route_csv": "route.csv"},
+                    validate_facing=lambda request: {
+                        "candidate_uid": request.candidate.candidate_uid
+                    },
+                    commit_decision=lambda _request: None,
+                    event_sink=lambda _path, payload: events.append(payload),
+                    clock=lambda: 10.0,
+                ),
+            )
+
+            self.assertEqual(motion_targets, ["candidate_a", "candidate_b", "candidate_a"])
+            self.assertEqual(outcome.visit_order, ("candidate_b", "candidate_a"))
+            self.assertEqual(
+                capture_roots,
+                ["000_candidate_a", "001_candidate_b", "002_candidate_a"],
+            )
+            self.assertEqual(capture_count, {"candidate_a": 2, "candidate_b": 1})
+            self.assertTrue(
+                any(
+                    event.get("event")
+                    == "camera_candidate_observation_deferred"
+                    for event in events
+                )
+            )
+            self.assertTrue(
+                any(
+                    event.get("event")
+                    == "camera_candidate_observation_retry_pass"
+                    for event in events
+                )
+            )
+
+    def test_exhausted_typed_observer_timeout_fails_without_final_catalog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = replace(
+                self._config(
+                    root,
+                    (
+                        self._candidate("candidate_a", 0.2, 0.0),
+                        self._candidate("candidate_b", 0.4, 0.0),
+                    ),
+                ),
+                max_camera_observation_attempts_per_candidate=1,
+            )
+            poses = iter(Pose2D(0.0, 0.0, 0.0) for _ in range(3))
+
+            def select(request):
+                uid = sorted(request.unresolved)[0]
+                return CameraCandidateInitialSelection(
+                    candidate_uid=uid,
+                    prepared_plan=None,
+                    evidence={"selected_candidate_uid": uid},
+                )
+
+            def capture(request):
+                uid = request.candidate.candidate_uid
+                if uid == "candidate_a":
+                    raise CandidateObservationUnavailableError(
+                        candidate_uid=uid,
+                        observation_attempt_index=0,
+                        reason="candidate-local timeout",
+                        process_evidence={"completion_kind": "deadline"},
+                        status_evidence={"state": "lidar_target_mismatch"},
+                    )
+                return CandidateObservation(
+                    request.output_dir / "recommendation.json",
+                    "QR_B",
+                    None,
+                )
+
+            with self.assertRaises(CandidateApproachIncompleteError) as raised:
+                execute_candidate_approach_phase(
+                    config,
+                    CandidateApproachEffects(
+                        select_initial_preapproach=select,
+                        read_current_pose=lambda: next(poses),
+                        run_motion_leg=self._completed,
+                        capture_observation=capture,
+                        plan_preapproach=lambda _request: {
+                            "route_csv": "route.csv"
+                        },
+                        validate_facing=lambda request: {
+                            "candidate_uid": request.candidate.candidate_uid
+                        },
+                        commit_decision=lambda _request: None,
+                    ),
+                )
+
+            fields = raised.exception.to_failure_fields()
+            self.assertEqual(fields["resolved_candidate_uids"], ["candidate_b"])
+            self.assertEqual(fields["unresolved_candidate_uids"], ["candidate_a"])
+            self.assertFalse(
+                (config.session_root / "station_identity_registry.json").exists()
+            )
+            self.assertFalse(
+                (config.session_root / "stand_facing_catalog.json").exists()
+            )
 
     def test_route_preview_selection_avoids_inside_standoff_large_turn(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1325,8 +1484,8 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             recommendation_path = root / "recommendation.json"
 
             with patch(
-                "scripts.aufgabe04.real_robot."
-                "autonomous_candidate_approach.load_recommendation",
+                "scripts.aufgabe04.real_robot.candidate."
+                "approach.load_recommendation",
                 return_value=SimpleNamespace(stand_id="candidate_2"),
             ):
                 with self.assertRaisesRegex(ValueError, "stand_id mismatch"):

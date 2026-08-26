@@ -21,15 +21,15 @@ from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization 
     STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH,
     STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY,
 )
-from scripts.aufgabe04.real_robot.autonomous_child_runner import MotionLegOutcome
-from scripts.aufgabe04.real_robot.autonomous_coverage_execution import (
+from scripts.aufgabe04.real_robot.execution.child_runner import MotionLegOutcome
+from scripts.aufgabe04.real_robot.coverage_leg.execution import (
     CoverageLegConfig,
     CoverageLegEffects,
     MissionLegPermitContext,
     RuntimeLocalizationPermitContext,
     execute_coverage_leg_with_replans,
 )
-from scripts.aufgabe04.real_robot.autonomous_startup_reseal import (
+from scripts.aufgabe04.real_robot.readiness.startup_reseal import (
     StartupResealPermitContext,
 )
 
@@ -240,7 +240,7 @@ class AutonomousCoverageExecutionTest(unittest.TestCase):
         return {name: str(path) for name, path in paths.items()}
 
     def test_module_has_no_parent_ros_process_or_prompt_import(self):
-        import scripts.aufgabe04.real_robot.autonomous_coverage_execution as module
+        import scripts.aufgabe04.real_robot.coverage_leg.execution as module
 
         source = Path(module.__file__).read_text()
         tree = ast.parse(source)

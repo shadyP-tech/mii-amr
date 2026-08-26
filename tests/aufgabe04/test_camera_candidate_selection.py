@@ -106,7 +106,7 @@ class CameraCandidateSelectionTest(unittest.TestCase):
         self.assertTrue(selection.ranked_candidates[1].large_initial_turn)
         self.assertEqual(selection.ranked_candidates[1].risk_tier, 1)
 
-    def test_single_view_candidate_remains_admitted_for_camera_validation(self):
+    def test_multi_view_precedes_single_view_within_same_safety_tier(self):
         provisional = _option(
             "stand-single",
             route_length_m=0.30,
@@ -126,11 +126,44 @@ class CameraCandidateSelectionTest(unittest.TestCase):
             (supported_but_slower, provisional), self.config
         )
 
-        self.assertEqual(selection.selected_candidate_uid, "stand-single")
+        self.assertEqual(selection.selected_candidate_uid, "stand-multi")
         self.assertEqual(
-            selection.ranked_candidates[0].option.support_class, SINGLE_VIEW
+            selection.ranked_candidates[0].option.support_class, MULTI_VIEW
         )
         self.assertFalse(selection.to_evidence()["motion_authorized"])
+
+    def test_safer_single_view_precedes_large_turn_multi_view(self):
+        safer_single = _option(
+            "stand-single",
+            route_length_m=0.60,
+            initial_turn_rad=0.10,
+            support_class=SINGLE_VIEW,
+        )
+        large_turn_multi = _option(
+            "stand-multi",
+            route_length_m=0.05,
+            turn_burden_rad=math.pi,
+            initial_turn_rad=math.pi,
+            support_class=MULTI_VIEW,
+        )
+
+        selection = select_camera_candidate(
+            (large_turn_multi, safer_single), self.config
+        )
+
+        self.assertEqual(selection.selected_candidate_uid, "stand-single")
+        self.assertEqual(selection.ranked_candidates[0].risk_tier, 0)
+
+    def test_single_view_remains_selectable_when_only_feasible_option(self):
+        selection = select_camera_candidate(
+            (
+                _blocked("stand-multi"),
+                _option("stand-single", support_class=SINGLE_VIEW),
+            ),
+            self.config,
+        )
+
+        self.assertEqual(selection.selected_candidate_uid, "stand-single")
 
     def test_large_initial_turn_risk_tier_is_lexicographic(self):
         fast_but_large_turn = _option(
@@ -206,11 +239,19 @@ class CameraCandidateSelectionTest(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             selection.selected_candidate_uid = "stand-a"  # type: ignore[misc]
         payload = selection.to_dict()
-        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["schema_version"], 2)
         self.assertEqual(payload["selected_candidate_uid"], "stand-b")
         self.assertEqual(payload["ranked_candidates"][0]["rank"], 1)
         self.assertEqual(
             payload["selection_policy"]["linear_speed_mps"], 0.10
+        )
+        self.assertEqual(
+            payload["selection_policy"]["ranking_order"][:3],
+            [
+                "large_initial_turn_risk",
+                "lidar_support_class",
+                "estimated_execution_duration",
+            ],
         )
 
     def test_invalid_config_and_options_fail_validation(self):

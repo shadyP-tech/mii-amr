@@ -42,14 +42,14 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
 from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import (
     recommendation_to_payload,
 )
-from scripts.aufgabe04.real_robot.autonomous_candidate_approach import (
+from scripts.aufgabe04.real_robot.candidate.approach import (
     CandidateApproachConfig,
     CandidateApproachEffects,
     build_camera_candidate_decision_receipt,
     execute_candidate_approach_phase,
     validate_candidate_approach_handoff,
 )
-from scripts.aufgabe04.real_robot.recommendation_builder import (
+from scripts.aufgabe04.real_robot.configuration.recommendation import (
     build_real_viewpoint_recommendation,
 )
 from scripts.aufgabe04.stations.candidate_snapshot import (

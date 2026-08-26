@@ -87,25 +87,141 @@ class OrchestrationModuleBoundaryTest(unittest.TestCase):
 
         self.assertIs(legacy, runtime)
 
-    def test_autonomous_runner_legacy_path_aliases_canonical_runtime(self):
-        legacy = importlib.import_module(
-            "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration"
+    def test_autonomous_runner_entrypoint_aliases_canonical_runtime(self):
+        entrypoint = importlib.import_module(
+            "scripts.aufgabe04.real_robot.entrypoints."
+            "run_autonomous_stand_exploration"
         )
         runtime = importlib.import_module(
             "scripts.aufgabe04.real_robot.autonomous_runner.runtime"
         )
 
-        self.assertIs(legacy, runtime)
+        self.assertIs(entrypoint, runtime)
 
-    def test_coverage_execution_legacy_path_aliases_public_execution_api(self):
-        legacy = importlib.import_module(
-            "scripts.aufgabe04.real_robot.autonomous_coverage_execution"
-        )
-        execution = importlib.import_module(
-            "scripts.aufgabe04.real_robot.coverage_leg.execution"
+    def test_real_robot_root_contains_only_package_metadata(self):
+        package = ROOT / "scripts/aufgabe04/real_robot"
+
+        self.assertEqual(
+            {path.name for path in package.glob("*.py")},
+            {"__init__.py"},
         )
 
-        self.assertIs(legacy, execution)
+    def test_real_robot_imports_use_responsibility_packages(self):
+        prefix = "scripts.aufgabe04.real_robot"
+        allowed_packages = {
+            "autonomous_runner",
+            "candidate",
+            "configuration",
+            "coverage_leg",
+            "entrypoints",
+            "execution",
+            "mission",
+            "observer",
+            "passive_survey",
+            "readiness",
+        }
+        roots = (
+            ROOT / "scripts/aufgabe04",
+            ROOT / "tests/aufgabe04",
+        )
+        offenders = []
+
+        for source_root in roots:
+            for path in source_root.rglob("*.py"):
+                tree = ast.parse(path.read_text(), filename=str(path))
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        modules = (alias.name for alias in node.names)
+                    elif isinstance(node, ast.ImportFrom):
+                        modules = (node.module or "",)
+                    else:
+                        continue
+                    for module in modules:
+                        if module == prefix:
+                            offenders.append((path.relative_to(ROOT), module))
+                        elif module.startswith(prefix + "."):
+                            package = module[len(prefix) + 1 :].split(".", 1)[0]
+                            if package not in allowed_packages:
+                                offenders.append((path.relative_to(ROOT), module))
+
+        self.assertEqual(offenders, [])
+
+    def test_real_robot_responsibilities_have_dedicated_packages(self):
+        package = ROOT / "scripts/aufgabe04/real_robot"
+        expected = {
+            "configuration": {
+                "capture_calibration.py",
+                "create_profile.py",
+                "geometry.py",
+                "profile.py",
+                "recommendation.py",
+                "site_contract.py",
+            },
+            "observer": {
+                "contract.py",
+                "diagnostics.py",
+                "evidence.py",
+                "node.py",
+                "process.py",
+                "tf_retry.py",
+            },
+            "passive_survey": {"prepare.py", "finalize.py"},
+            "candidate": {
+                "approach.py",
+                "observation_deferral.py",
+                "recovery_failure.py",
+                "runtime_recovery.py",
+                "startup_recovery.py",
+            },
+            "readiness": {
+                "initial.py",
+                "localization.py",
+                "observation_tf_contract.py",
+                "observation_tf_runtime.py",
+                "post_observation.py",
+                "preauthorization.py",
+                "startup_reseal.py",
+            },
+            "mission": {
+                "checkpoint_resume.py",
+                "coverage.py",
+                "exact_two_completion.py",
+                "modes.py",
+                "reporting.py",
+                "session_manifest.py",
+            },
+            "execution": {
+                "artifact_paths.py",
+                "child_runner.py",
+                "localization_recovery.py",
+                "run_unloaded_segment.py",
+            },
+            "entrypoints": {
+                "capture_camera_calibration.py",
+                "create_hardware_profile.py",
+                "finalize_passive_survey.py",
+                "passive_viewpoint_node.py",
+                "prepare_passive_survey.py",
+                "run_autonomous_stand_exploration.py",
+                "run_unloaded_segment.py",
+            },
+        }
+
+        for name, modules in expected.items():
+            responsibility_package = package / name
+            self.assertTrue(
+                (responsibility_package / "__init__.py").is_file(),
+                name,
+            )
+            self.assertEqual(
+                {
+                    path.name
+                    for path in responsibility_package.glob("*.py")
+                    if path.name != "__init__.py"
+                },
+                modules,
+                name,
+            )
 
     def test_station_segment_responsibilities_have_dedicated_modules(self):
         package = ROOT / "scripts/aufgabe04/navigation/station_segment"
@@ -166,6 +282,14 @@ class OrchestrationModuleBoundaryTest(unittest.TestCase):
             ROOT / "scripts/aufgabe04/navigation/station_segment",
             ROOT / "scripts/aufgabe04/real_robot/autonomous_runner",
             ROOT / "scripts/aufgabe04/real_robot/coverage_leg",
+            ROOT / "scripts/aufgabe04/real_robot/configuration",
+            ROOT / "scripts/aufgabe04/real_robot/observer",
+            ROOT / "scripts/aufgabe04/real_robot/passive_survey",
+            ROOT / "scripts/aufgabe04/real_robot/candidate",
+            ROOT / "scripts/aufgabe04/real_robot/readiness",
+            ROOT / "scripts/aufgabe04/real_robot/mission",
+            ROOT / "scripts/aufgabe04/real_robot/execution",
+            ROOT / "scripts/aufgabe04/real_robot/entrypoints",
         )
 
         for package in roots:

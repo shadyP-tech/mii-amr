@@ -2,9 +2,35 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import math
+from typing import Mapping
 
+from scripts.aufgabe04.navigation.execution.execution_route_certificate import (
+    ExecutionRouteCheck,
+)
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.waypoint_follower.directives import (
+    StartupJoinAction,
+    StringDirective,
+)
+
+
+class ExecutionRouteAdmissionStatus(StringDirective):
+    """Whether route-tube checking was skipped, passed, or stopped."""
+
+    SKIPPED = "skipped"
+    ADMITTED = "admitted"
+    STOP = "stop"
+
+
+@dataclass(frozen=True)
+class ExecutionRouteAdmissionDecision:
+    """Typed route-tube result without runtime effects or trace I/O."""
+
+    status: ExecutionRouteAdmissionStatus
+    route_check: ExecutionRouteCheck | None = None
+    stop_details: Mapping[str, object] | None = None
 
 
 def dynamic_join_envelope_failure(
@@ -54,7 +80,7 @@ def certified_startup_join_action(
     anchor: Pose2D,
     effective_join_limit_m: float | None,
     join_tolerance_m: float,
-) -> tuple[str, dict[str, object] | None]:
+) -> tuple[StartupJoinAction, dict[str, object] | None]:
     """Select only stop, anchor pursuit, or the anchor-complete zero cycle."""
 
     failure = dynamic_join_envelope_failure(
@@ -63,15 +89,19 @@ def certified_startup_join_action(
         effective_join_limit_m,
     )
     if failure is not None:
-        return "stop", failure
+        return StartupJoinAction.STOP, failure
     if not math.isfinite(join_tolerance_m) or join_tolerance_m <= 0.0:
-        return "stop", {
+        return StartupJoinAction.STOP, {
             "reason": "dynamic-route join tolerance is invalid",
             "fault_code": "invalid_route_update",
             "fail_closed": True,
         }
     distance_m = math.hypot(pose.x_m - anchor.x_m, pose.y_m - anchor.y_m)
-    return ("zero", None) if distance_m <= join_tolerance_m else ("anchor", None)
+    return (
+        (StartupJoinAction.ZERO, None)
+        if distance_m <= join_tolerance_m
+        else (StartupJoinAction.ANCHOR, None)
+    )
 
 
 def stuck_progress_details(

@@ -29,7 +29,7 @@ from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization 
     write_startup_reseal_motion_authorization,
     write_startup_reseal_motion_permit,
 )
-from scripts.aufgabe04.real_robot.autonomous_startup_reseal import (
+from scripts.aufgabe04.real_robot.readiness.startup_reseal import (
     StartupResealPermitContext,
     write_startup_reseal_permit_summary,
 )

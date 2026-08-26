@@ -7,7 +7,7 @@ import unittest
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     MissionLegKind,
 )
-from scripts.aufgabe04.real_robot.autonomous_child_runner import (
+from scripts.aufgabe04.real_robot.execution.child_runner import (
     build_child_runner_command,
     parse_dry_run_outcome,
     parse_motion_leg_outcome,

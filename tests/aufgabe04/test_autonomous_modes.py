@@ -1,6 +1,6 @@
 import unittest
 
-from scripts.aufgabe04.real_robot.autonomous_modes import (
+from scripts.aufgabe04.real_robot.mission.modes import (
     AutonomousAuthorizationScope,
     AutonomousRunMode,
     resolve_autonomous_run_mode,

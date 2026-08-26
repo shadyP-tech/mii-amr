@@ -6,9 +6,13 @@ import math
 from pathlib import Path
 import unittest
 
-from scripts.aufgabe04.real_robot import autonomous_observation_tf_contract
-from scripts.aufgabe04.real_robot import autonomous_observation_tf_readiness
-from scripts.aufgabe04.real_robot.autonomous_observation_tf_readiness import (
+from scripts.aufgabe04.real_robot.readiness import (
+    observation_tf_contract as autonomous_observation_tf_contract,
+)
+from scripts.aufgabe04.real_robot.readiness import (
+    observation_tf_runtime as autonomous_observation_tf_readiness,
+)
+from scripts.aufgabe04.real_robot.readiness.observation_tf_runtime import (
     FAILURE_OBSERVATION_EFFECT,
     FAILURE_OBSERVER_CLOCK,
     FAILURE_SCAN_FRAME_EMPTY,
@@ -94,7 +98,7 @@ class ObservationTfReadinessTest(unittest.TestCase):
             & {name.split(".", 1)[0] for name in contract_imports}
         )
         self.assertNotIn(
-            "scripts.aufgabe04.real_robot.autonomous_observation_tf_readiness",
+            "scripts.aufgabe04.real_robot.readiness.observation_tf_runtime",
             contract_imports,
         )
         self.assertFalse(
@@ -112,7 +116,7 @@ class ObservationTfReadinessTest(unittest.TestCase):
             if isinstance(node, ast.ImportFrom) and node.module is not None
         }
         self.assertIn(
-            "scripts.aufgabe04.real_robot.autonomous_observation_tf_contract",
+            "scripts.aufgabe04.real_robot.readiness.observation_tf_contract",
             facade_imports,
         )
         for public_name in autonomous_observation_tf_contract.__all__:

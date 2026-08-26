@@ -47,19 +47,27 @@ class WaypointFollowerModuleBoundaryTest(unittest.TestCase):
             "scripts.aufgabe04.navigation.waypoint_follower.runtime"
         )
         supported_symbols = (
+            "AcquisitionGoalAction",
+            "AcquisitionGoalDecision",
+            "BlockageRecoveryAction",
             "CALLBACK_SERVICE_BACKGROUND_EXECUTOR",
             "FOLLOWER_EXECUTOR_NUM_THREADS",
             "FollowerConfig",
             "FollowerResult",
             "INTERMEDIATE_TERMINAL_HEADING_HOLD_EXCEEDED",
             "PoseLookupResult",
+            "RouteRefreshAction",
+            "RouteCommandPhase",
             "STALE_TF_RECOVERY_MAX_CALLBACKS",
             "STALE_TF_RECOVERY_MAX_DURATION_SEC",
             "STALE_TF_RECOVERY_SPIN_TIMEOUT_SEC",
             "STATIC_PHYSICAL_ROUTE_KINDS",
+            "StartupJoinAction",
             "SimpleWaypointFollowerNode",
             "TF_LISTENER_NODE_NAME",
+            "ViewpointSamplingDeadlineDecision",
             "acquisition_goal_action",
+            "acquisition_goal_decision",
             "certified_startup_join_action",
             "certified_startup_route_state",
             "certified_static_startup_decision",
@@ -70,9 +78,11 @@ class WaypointFollowerModuleBoundaryTest(unittest.TestCase):
             "intermediate_terminal_heading_entry_tolerance_m",
             "intermediate_terminal_heading_hold_diagnostics",
             "reset_intermediate_terminal_heading_latch",
+            "route_command_phase",
             "run_simple_waypoint_follower",
             "stuck_progress_details",
             "tf_lookup_failure_details",
+            "viewpoint_sampling_deadline_decision",
             "viewpoint_sampling_target_timeout_failure",
             "viewpoint_sampling_timeout_failure",
         )
@@ -85,6 +95,7 @@ class WaypointFollowerModuleBoundaryTest(unittest.TestCase):
     def test_pure_modules_have_no_ros_imports(self):
         pure_modules = (
             "config.py",
+            "directives.py",
             "pose_lookup.py",
             "route_admission.py",
             "route_phases.py",
@@ -134,6 +145,7 @@ class WaypointFollowerModuleBoundaryTest(unittest.TestCase):
         helper_modules = (
             "command_admission.py",
             "control_results.py",
+            "recovery_dispatch.py",
         )
         forbidden_import_roots = {
             "geometry_msgs",
@@ -204,12 +216,370 @@ class WaypointFollowerModuleBoundaryTest(unittest.TestCase):
         control_loop_source = (
             RUNTIME_COMPONENT_ROOT / "control_loop.py"
         ).read_text()
+        safety_source = (RUNTIME_COMPONENT_ROOT / "safety.py").read_text()
 
         self.assertIn("class SimpleWaypointFollowerNode(", runtime_source)
         self.assertIn("def _publish_velocity_command(", runtime_source)
         self.assertIn("def run_simple_waypoint_follower(", runtime_source)
         self.assertNotIn("def run(self) -> FollowerResult:", runtime_source)
         self.assertIn("def run(self) -> FollowerResult:", control_loop_source)
+        self.assertNotIn("return FollowerResult(", control_loop_source)
+        self.assertNotIn("latest_stop_details = {", control_loop_source)
+        self.assertIn("return control_result(", control_loop_source)
+        self.assertIn("ros_shutdown_stop_details()", control_loop_source)
+        self.assertIn("command_phase = route_command_phase(", control_loop_source)
+        self.assertIn(
+            "sampling_deadline = viewpoint_sampling_deadline_decision(",
+            control_loop_source,
+        )
+        self.assertIn(
+            "goal_decision = acquisition_goal_decision(",
+            control_loop_source,
+        )
+        control_loop_tree = ast.parse(control_loop_source)
+        control_loop_class = next(
+            node
+            for node in control_loop_tree.body
+            if isinstance(node, ast.ClassDef)
+            and node.name == "ControlLoopRuntimeMixin"
+        )
+        run_node = next(
+            node
+            for node in control_loop_class.body
+            if isinstance(node, ast.FunctionDef) and node.name == "run"
+        )
+        run_source = ast.get_source_segment(control_loop_source, run_node)
+        lifecycle_node = next(
+            node
+            for node in control_loop_class.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_waypoint_lifecycle_decision"
+        )
+        lifecycle_source = ast.get_source_segment(
+            control_loop_source,
+            lifecycle_node,
+        )
+        prepare_node = next(
+            node
+            for node in control_loop_class.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_prepare_command_for_publication"
+        )
+        prepare_source = ast.get_source_segment(
+            control_loop_source,
+            prepare_node,
+        )
+        resolve_step_node = next(
+            node
+            for node in control_loop_class.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_resolve_control_step"
+        )
+        resolve_step_source = ast.get_source_segment(
+            control_loop_source,
+            resolve_step_node,
+        )
+        route_admission_node = next(
+            node
+            for node in control_loop_class.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_execution_route_admission_decision"
+        )
+        route_admission_source = ast.get_source_segment(
+            control_loop_source,
+            route_admission_node,
+        )
+        corner_evidence_node = next(
+            node
+            for node in control_loop_class.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_prepare_certified_corner_stop_evidence"
+        )
+        corner_evidence_source = ast.get_source_segment(
+            control_loop_source,
+            corner_evidence_node,
+        )
+        startup_admission_node = next(
+            node
+            for node in control_loop_class.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_startup_pose_admission_decision"
+        )
+        startup_admission_source = ast.get_source_segment(
+            control_loop_source,
+            startup_admission_node,
+        )
+        self.assertIn(
+            "lifecycle = self._waypoint_lifecycle_decision(step, pose)",
+            run_source,
+        )
+        self.assertNotIn("if step.reached_goal:", run_source)
+        self.assertNotIn("waypoint_timeout_failure(", run_source)
+        for effect in (
+            "publish_zero",
+            "publish_repeated_zero",
+            "_hold_zero_control_period",
+            "_append_controller_trace",
+            "_publish_velocity_command",
+        ):
+            self.assertNotIn(effect, lifecycle_source)
+        self.assertIn(
+            "prepared_command = self._prepare_command_for_publication(",
+            run_source,
+        )
+        self.assertLess(
+            run_source.index(
+                "progress_decision = self._progress_watchdog_decision("
+            ),
+            run_source.index(
+                "prepared_command = self._prepare_command_for_publication("
+            ),
+        )
+        self.assertNotIn("if not command_admission.finite:", run_source)
+        self.assertNotIn("command_smoother.apply(", run_source)
+        self.assertNotIn("command_shape_interval_sec(", run_source)
+        for effect in (
+            "publish_zero",
+            "publish_repeated_zero",
+            "_hold_zero_control_period",
+            "_append_controller_trace",
+            "_blockage_recovery_outcome",
+            "_publish_velocity_command",
+            "next_control_loop_timing",
+            "time.sleep",
+        ):
+            self.assertNotIn(effect, prepare_source)
+        self.assertIn("self._append_controller_trace(", run_source)
+        self.assertIn("self._publish_velocity_command(", run_source)
+        self.assertIn(
+            "step_resolution = self._resolve_control_step(pose)",
+            run_source,
+        )
+        self.assertIn(
+            "self._startup_pose_admission_decision(pose)",
+            run_source,
+        )
+        self.assertNotIn("if self.target_index == 0:", run_source)
+        self.assertNotIn("initial_pose_failure(", run_source)
+        self.assertNotIn("certified_static_startup_decision(", run_source)
+        self.assertIn("initial_pose_failure(", startup_admission_source)
+        self.assertIn(
+            "certified_static_startup_decision(",
+            startup_admission_source,
+        )
+        for effect in (
+            "publish_zero",
+            "publish_repeated_zero",
+            "_hold_zero_control_period",
+            "_append_controller_trace",
+            "_publish_velocity_command",
+            "next_control_loop_timing",
+            "time.sleep",
+            "finish(",
+        ):
+            self.assertNotIn(effect, startup_admission_source)
+        startup_effects_start = run_source.index(
+            "startup_admission = ("
+        )
+        self.assertLess(
+            startup_effects_start,
+            run_source.index(
+                "step_resolution = self._resolve_control_step(pose)"
+            ),
+        )
+        startup_effects_source = run_source[startup_effects_start:]
+        self.assertIn("StartupPoseAdmissionAction.ZERO_HOLD", run_source)
+        self.assertLess(
+            startup_effects_source.index("self.publish_zero()"),
+            startup_effects_source.index(
+                "self._hold_zero_control_period(loop_sleep_sec)"
+            ),
+        )
+        self.assertNotIn(
+            "command_phase = route_command_phase(",
+            run_source,
+        )
+        for operation in (
+            "certified_startup_join_action(",
+            "controller_config_for_route_kind(",
+            "compute_join_anchor_command(",
+            "compute_intermediate_terminal_heading_command(",
+        ):
+            self.assertNotIn(operation, run_source)
+            self.assertIn(operation, resolve_step_source)
+        for effect in (
+            "publish_zero",
+            "publish_repeated_zero",
+            "_hold_zero_control_period",
+            "_log_certified_corner_phase",
+            "_execution_route_check",
+            "_append_controller_trace",
+            "_publish_velocity_command",
+            "next_control_loop_timing",
+            "time.sleep",
+            "finish(",
+        ):
+            self.assertNotIn(effect, resolve_step_source)
+        step_effects_start = run_source.index(
+            "step_resolution = self._resolve_control_step(pose)"
+        )
+        step_effects_source = run_source[step_effects_start:]
+        self.assertLess(
+            step_effects_source.index("self.publish_zero()"),
+            step_effects_source.index(
+                "self._log_certified_corner_phase("
+            ),
+        )
+        self.assertIn(
+            "self._prepare_certified_corner_stop_evidence(",
+            run_source,
+        )
+        self.assertNotIn("certified_corner_stop_details(", run_source)
+        self.assertIn(
+            "stop_details = certified_corner_stop_details(",
+            corner_evidence_source,
+        )
+        for effect in (
+            "publish_zero",
+            "publish_repeated_zero",
+            "_hold_zero_control_period",
+            "_log_certified_corner_phase",
+            "_append_controller_trace",
+            "_publish_velocity_command",
+            "next_control_loop_timing",
+            "time.sleep",
+            "finish(",
+            "latest_stop_details",
+        ):
+            self.assertNotIn(effect, corner_evidence_source)
+        self.assertLess(
+            step_effects_source.index("self.publish_zero()"),
+            step_effects_source.index(
+                "self._prepare_certified_corner_stop_evidence("
+            ),
+        )
+        self.assertLess(
+            step_effects_source.index(
+                "self._prepare_certified_corner_stop_evidence("
+            ),
+            step_effects_source.index('event="certified_corner_stop"'),
+        )
+        self.assertIn(
+            "self._execution_route_admission_decision(pose, step)",
+            run_source,
+        )
+        self.assertNotIn(
+            "route_check = self._execution_route_check(pose, step)",
+            run_source,
+        )
+        self.assertIn(
+            "route_check = self._execution_route_check(pose, step)",
+            route_admission_source,
+        )
+        self.assertIn(
+            "stop_details=route_check.to_log_dict()",
+            route_admission_source,
+        )
+        for effect in (
+            "publish_zero",
+            "publish_repeated_zero",
+            "_hold_zero_control_period",
+            "_append_controller_trace",
+            "_publish_velocity_command",
+            "next_control_loop_timing",
+            "time.sleep",
+            "finish(",
+        ):
+            self.assertNotIn(effect, route_admission_source)
+        route_admission_effects_start = run_source.index(
+            "route_admission = ("
+        )
+        route_admission_effects = run_source[route_admission_effects_start:]
+        self.assertLess(
+            route_admission_effects.index(
+                "self.publish_repeated_zero()"
+            ),
+            route_admission_effects.index(
+                'event="route_tube_stop"'
+            ),
+        )
+        safety_tree = ast.parse(safety_source)
+        safety_class = next(
+            node
+            for node in safety_tree.body
+            if isinstance(node, ast.ClassDef)
+            and node.name == "SafetyRuntimeMixin"
+        )
+        motion_admission_node = next(
+            node
+            for node in safety_class.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_motion_command_admission_decision"
+        )
+        motion_admission_source = ast.get_source_segment(
+            safety_source,
+            motion_admission_node,
+        )
+        self.assertIn(
+            "motion_admission = self._motion_command_admission_decision(",
+            run_source,
+        )
+        self.assertNotIn(
+            "command_admission = command_admission_decision(",
+            run_source,
+        )
+        self.assertNotIn("clearance_motion_floor_stop_details(", run_source)
+        for effect in (
+            "publish_zero",
+            "publish_repeated_zero",
+            "_hold_zero_control_period",
+            "_append_controller_trace",
+            "_blockage_recovery_outcome",
+            "_publish_velocity_command",
+        ):
+            self.assertNotIn(effect, motion_admission_source)
+        self.assertIn(
+            "progress_decision = self._progress_watchdog_decision(",
+            control_loop_source,
+        )
+        self.assertNotIn(
+            "progress_failure = self._progress_failure(",
+            control_loop_source,
+        )
+        self.assertNotIn(
+            "self.latest_stop_details = stuck_progress_details(",
+            control_loop_source,
+        )
+        self.assertEqual(
+            control_loop_source.count("self._blockage_recovery_outcome("),
+            3,
+        )
+        self.assertNotIn("blockage_recovery_eligible(", control_loop_source)
+        self.assertNotIn(
+            "blockage_recovery_disposition(",
+            control_loop_source,
+        )
+        self.assertIn(
+            "front_evidence = front_sector_recovery_evidence(",
+            control_loop_source,
+        )
+        self.assertNotIn(
+            'front_evidence.get("source") == "front_sector"',
+            control_loop_source,
+        )
+        self.assertNotIn(
+            "sampling_timeout = viewpoint_sampling_timeout_failure(",
+            control_loop_source,
+        )
+        self.assertNotIn(
+            "goal_action = acquisition_goal_action(",
+            control_loop_source,
+        )
+        self.assertNotIn("if self.dynamic_join_pending:", control_loop_source)
+        self.assertNotIn(
+            "if self.start_egress_lock_index is not None:",
+            control_loop_source,
+        )
         self.assertNotIn("cmd_vel_pub.publish", control_loop_source)
         self.assertNotIn("def _refresh_dynamic_route(", runtime_source)
         self.assertNotIn("def _current_pose_lookup(", runtime_source)

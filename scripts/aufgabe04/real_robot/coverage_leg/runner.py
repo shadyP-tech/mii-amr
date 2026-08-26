@@ -38,16 +38,16 @@ from scripts.aufgabe04.navigation.coverage.stand_discovery_route import (
 from scripts.aufgabe04.navigation.coverage.transient_overlay_resume_state import (
     TransientOverlayResumeState,
 )
-from scripts.aufgabe04.real_robot.autonomous_child_runner import (
+from scripts.aufgabe04.real_robot.execution.child_runner import (
     DEFAULT_UNCERTAINTY_SIGMA_MULTIPLIER,
     MotionLegOutcome,
 )
-from scripts.aufgabe04.real_robot import autonomous_coverage_replanning as replanning
-from scripts.aufgabe04.real_robot.autonomous_localization_readiness import (
+from scripts.aufgabe04.real_robot.coverage_leg import replanning
+from scripts.aufgabe04.real_robot.readiness.localization import (
     evaluate_localization_readiness_retry,
     localization_readiness_suffix,
 )
-from scripts.aufgabe04.real_robot.autonomous_startup_reseal import (
+from scripts.aufgabe04.real_robot.readiness.startup_reseal import (
     StartupResealPermitContext,
     write_startup_reseal_permit_summary,
 )

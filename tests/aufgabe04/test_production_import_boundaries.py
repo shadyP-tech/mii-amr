@@ -388,7 +388,8 @@ class ProductionImportBoundaryTest(unittest.TestCase):
             / "scripts"
             / "aufgabe04"
             / "real_robot"
-            / "passive_viewpoint_node.py"
+            / "observer"
+            / "node.py"
         )
         source = module_path.read_text()
         tree = ast.parse(source, filename=str(module_path))
@@ -450,9 +451,9 @@ class ProductionImportBoundaryTest(unittest.TestCase):
         )
         tree = ast.parse(parent_path.read_text(), filename=str(parent_path))
         extracted_modules = {
-            "scripts.aufgabe04.real_robot.autonomous_coverage_execution",
-            "scripts.aufgabe04.real_robot.autonomous_coverage_replanning",
-            "scripts.aufgabe04.real_robot.autonomous_candidate_approach",
+            "scripts.aufgabe04.real_robot.coverage_leg.execution",
+            "scripts.aufgabe04.real_robot.coverage_leg.replanning",
+            "scripts.aufgabe04.real_robot.candidate.approach",
         }
         offenders = []
         for node in ast.walk(tree):
@@ -471,14 +472,14 @@ class ProductionImportBoundaryTest(unittest.TestCase):
     def test_autonomous_parent_only_imports_declared_phase_apis(self):
         real_robot_root = ROOT / "scripts" / "aufgabe04" / "real_robot"
         module_paths = {
-            "scripts.aufgabe04.real_robot.autonomous_coverage_execution": (
-                real_robot_root / "autonomous_coverage_execution.py"
+            "scripts.aufgabe04.real_robot.coverage_leg.execution": (
+                real_robot_root / "coverage_leg" / "execution.py"
             ),
-            "scripts.aufgabe04.real_robot.autonomous_coverage_replanning": (
-                real_robot_root / "autonomous_coverage_replanning.py"
+            "scripts.aufgabe04.real_robot.coverage_leg.replanning": (
+                real_robot_root / "coverage_leg" / "replanning.py"
             ),
-            "scripts.aufgabe04.real_robot.autonomous_candidate_approach": (
-                real_robot_root / "autonomous_candidate_approach.py"
+            "scripts.aufgabe04.real_robot.candidate.approach": (
+                real_robot_root / "candidate" / "approach.py"
             ),
         }
         declared_exports = {}
@@ -522,9 +523,11 @@ class ProductionImportBoundaryTest(unittest.TestCase):
         self.assertEqual(offenders, [])
 
     def test_extracted_autonomous_phases_do_not_own_live_edges(self):
-        module_names = (
-            "autonomous_coverage_replanning.py",
-            "autonomous_candidate_approach.py",
+        module_paths = (
+            ROOT
+            / "scripts/aufgabe04/real_robot/coverage_leg/replanning.py",
+            ROOT
+            / "scripts/aufgabe04/real_robot/candidate/approach.py",
         )
         forbidden_imports = (
             "rclpy",
@@ -533,7 +536,7 @@ class ProductionImportBoundaryTest(unittest.TestCase):
             "nav_msgs",
             "nav2_msgs",
             "subprocess",
-            "scripts.aufgabe04.real_robot.run_autonomous_stand_exploration",
+            "scripts.aufgabe04.real_robot.autonomous_runner.runtime",
         )
         forbidden_source = (
             "create_publisher",
@@ -541,11 +544,9 @@ class ProductionImportBoundaryTest(unittest.TestCase):
             "input(",
         )
         offenders = []
-        for module_name in module_names:
-            module_path = (
-                ROOT / "scripts" / "aufgabe04" / "real_robot" / module_name
-            )
+        for module_path in module_paths:
             self.assertTrue(module_path.is_file(), module_path)
+            module_name = str(module_path.relative_to(ROOT))
             source = module_path.read_text()
             tree = ast.parse(source, filename=str(module_path))
             for node in ast.walk(tree):

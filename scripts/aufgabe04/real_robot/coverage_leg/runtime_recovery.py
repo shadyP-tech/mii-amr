@@ -8,7 +8,7 @@ from scripts.aufgabe04.navigation.localization.runtime_localization_reseal impor
     evaluate_runtime_localization_reseal,
     evaluate_runtime_localization_reseal_budget,
 )
-from scripts.aufgabe04.real_robot.autonomous_child_runner import MotionLegOutcome
+from scripts.aufgabe04.real_robot.execution.child_runner import MotionLegOutcome
 
 from .models import RuntimeLocalizationPermitContext
 

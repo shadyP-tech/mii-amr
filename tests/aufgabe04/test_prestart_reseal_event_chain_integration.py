@@ -28,7 +28,7 @@ from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization 
     write_startup_reseal_motion_authorization,
 )
 from scripts.aufgabe04.navigation.planning.waypoint_csv import load_route_leg
-from scripts.aufgabe04.real_robot.autonomous_startup_reseal import (
+from scripts.aufgabe04.real_robot.readiness.startup_reseal import (
     StartupResealPermitContext,
     issue_startup_reseal_motion_permit,
     write_startup_reseal_permit_summary,

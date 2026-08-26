@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from scripts.aufgabe04.real_robot.autonomous_artifact_paths import (
+from scripts.aufgabe04.real_robot.execution.artifact_paths import (
     AutonomousArtifactPathError,
     CanonicalChildArtifactPaths,
     resolve_child_artifact_paths,

@@ -7,9 +7,37 @@ consistent contract without gaining access to the follower node.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Mapping
 
 from scripts.aufgabe04.navigation.control.follower_models import FollowerResult
+from scripts.aufgabe04.navigation.control.waypoint_controller import (
+    ControllerStep,
+)
+from scripts.aufgabe04.navigation.execution.execution_route_certificate import (
+    ExecutionRouteCheck,
+)
+
+
+@dataclass(frozen=True)
+class CertifiedCornerStopEvidence:
+    """Prepared corner-stop evidence without runtime side effects."""
+
+    step: ControllerStep
+    stop_details: Mapping[str, object]
+    route_check: ExecutionRouteCheck | None = None
+
+
+def noop_result(reason: str) -> FollowerResult:
+    """Build the zero-duration result for a route with no motion segment."""
+
+    return FollowerResult(
+        status="noop",
+        stop_reason=reason,
+        duration_sec=0.0,
+        distance_estimate_m=0.0,
+        motion_published=False,
+    )
 
 
 def control_result(
@@ -55,6 +83,17 @@ def initial_runtime_input_stop_details(
     return details
 
 
+def ros_shutdown_stop_details() -> dict[str, object]:
+    """Build the explicit result contract for a stopped ROS context."""
+
+    return {
+        "reason": "ROS shutdown",
+        "source": "rclpy",
+        "phase": "control_loop",
+        "fail_closed": True,
+    }
+
+
 def with_controller_trace_failure(
     primary_details: Mapping[str, object],
     trace_failure: str,
@@ -71,6 +110,137 @@ def with_controller_trace_failure(
     if fail_closed is not None:
         details["fail_closed"] = fail_closed
     return details
+
+
+def with_route_check_error(
+    primary_details: Mapping[str, object],
+    error: BaseException,
+) -> dict[str, object]:
+    """Attach a secondary route-certificate diagnostic exception."""
+
+    return {
+        **dict(primary_details),
+        "route_check_error": str(error),
+        "route_check_error_type": error.__class__.__name__,
+    }
+
+
+def viewpoint_sampling_timeout_stop_details(
+    *,
+    reason: str,
+    route_kind: str,
+    phase_elapsed_sec: float | None,
+    target_elapsed_sec: float | None,
+    phase_timeout_sec: float,
+    target_timeout_sec: float,
+) -> dict[str, object]:
+    """Build evidence for total or per-target viewpoint-sampling timeout."""
+
+    return {
+        "reason": reason,
+        "route_kind": route_kind,
+        "phase_elapsed_sec": phase_elapsed_sec,
+        "target_elapsed_sec": target_elapsed_sec,
+        "phase_timeout_sec": phase_timeout_sec,
+        "target_timeout_sec": target_timeout_sec,
+        "fail_closed": True,
+    }
+
+
+def certified_static_start_stop_details(
+    route_check_details: Mapping[str, object],
+    *,
+    certificate_reason: str,
+) -> dict[str, object]:
+    """Build evidence when the live pose misses the certified start segment."""
+
+    return {
+        **dict(route_check_details),
+        "reason": "pose outside certified startup segment",
+        "certificate_reason": certificate_reason,
+        "startup_target_candidates": [0, 1],
+        "source": "execution_route_certificate",
+        "fail_closed": True,
+    }
+
+
+def certified_corner_stop_details(
+    *,
+    reason: str,
+    route_kind: str,
+    target_index: int,
+    pursuit_index: int,
+    distance_to_vertex_m: float,
+    release_tolerance_m: float,
+    hold_tolerance_m: float,
+    tracking_tube_radius_m: float,
+    reacquire_attempts: int,
+    max_reacquire_attempts: int,
+) -> dict[str, object]:
+    """Build the certified-corner fail-closed evidence contract."""
+
+    return {
+        "reason": reason,
+        "source": "execution_route_certificate",
+        "route_kind": route_kind,
+        "target_index": target_index,
+        "pursuit_index": pursuit_index,
+        "distance_to_vertex_m": distance_to_vertex_m,
+        "release_tolerance_m": release_tolerance_m,
+        "hold_tolerance_m": hold_tolerance_m,
+        "tracking_tube_radius_m": tracking_tube_radius_m,
+        "reacquire_attempts": reacquire_attempts,
+        "max_reacquire_attempts": max_reacquire_attempts,
+        "fail_closed": True,
+    }
+
+
+def intermediate_terminal_heading_stop_details(
+    *,
+    reason: str,
+    route_kind: str,
+    target_index: int,
+    distance_to_target_m: float,
+    entry_tolerance_m: float,
+    hold_tolerance_m: float,
+    distance_comparison_epsilon_m: float,
+    hold_diagnostics: Mapping[str, object],
+) -> dict[str, object]:
+    """Build evidence for an intermediate terminal-heading hold failure."""
+
+    return {
+        "reason": reason,
+        "fault_code": reason,
+        "route_kind": route_kind,
+        "target_index": target_index,
+        "distance_to_target_m": distance_to_target_m,
+        "entry_tolerance_m": entry_tolerance_m,
+        "hold_tolerance_m": hold_tolerance_m,
+        "distance_comparison_epsilon_m": distance_comparison_epsilon_m,
+        "effective_hold_limit_m": (
+            hold_tolerance_m + distance_comparison_epsilon_m
+        ),
+        **dict(hold_diagnostics),
+        "fail_closed": True,
+    }
+
+
+def acquisition_goal_stop_details(
+    *,
+    reason: str,
+    route_kind: str,
+    hold_elapsed_sec: float,
+    timeout_sec: float,
+) -> dict[str, object]:
+    """Build evidence when acquisition cannot transition to completion."""
+
+    return {
+        "reason": reason,
+        "route_kind": route_kind,
+        "hold_elapsed_sec": hold_elapsed_sec,
+        "timeout_sec": timeout_sec,
+        "fail_closed": True,
+    }
 
 
 def waypoint_timeout_stop_details(

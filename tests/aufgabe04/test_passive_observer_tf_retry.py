@@ -1,7 +1,7 @@
 import dataclasses
 import unittest
 
-from scripts.aufgabe04.real_robot.passive_observer_tf_retry import (
+from scripts.aufgabe04.real_robot.observer.tf_retry import (
     PassiveObserverTfRetryError,
     PassiveObserverTfRetryScheduler,
 )

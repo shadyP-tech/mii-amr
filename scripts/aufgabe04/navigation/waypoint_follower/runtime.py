@@ -35,6 +35,12 @@ from scripts.aufgabe04.navigation.waypoint_follower.pose_lookup import (
     tf_lookup_failure_details,
 )
 from scripts.aufgabe04.navigation.control.follower_models import FollowerResult
+from scripts.aufgabe04.navigation.waypoint_follower.directives import (
+    AcquisitionGoalAction,
+    BlockageRecoveryAction,
+    RouteRefreshAction,
+    StartupJoinAction,
+)
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.navigation.foundation.ros_runtime_config import (
     ResolvedRuntimeConfig,
@@ -65,8 +71,14 @@ from scripts.aufgabe04.navigation.waypoint_follower.route_admission import (
     stuck_progress_details,
 )
 from scripts.aufgabe04.navigation.waypoint_follower.route_phases import (
+    AcquisitionGoalDecision,
+    RouteCommandPhase,
+    ViewpointSamplingDeadlineDecision,
     acquisition_goal_action,
+    acquisition_goal_decision,
     dynamic_route_kind_transition_failure,
+    route_command_phase,
+    viewpoint_sampling_deadline_decision,
     viewpoint_sampling_target_timeout_failure,
     viewpoint_sampling_timeout_failure,
 )

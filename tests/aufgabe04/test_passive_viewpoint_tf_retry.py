@@ -13,10 +13,10 @@ from scripts.aufgabe04.perception.stand_axis.real_camera_profile import (
 from scripts.aufgabe04.perception.stand_axis_consensus import (
     AxisConsensusAccumulator,
 )
-from scripts.aufgabe04.real_robot.passive_observer_tf_retry import (
+from scripts.aufgabe04.real_robot.observer.tf_retry import (
     PassiveObserverTfRetryScheduler,
 )
-from scripts.aufgabe04.real_robot.passive_viewpoint_node import (
+from scripts.aufgabe04.real_robot.observer.node import (
     PassiveRealViewpointNode,
     _StampedMessage,
     _SynchronizedSensorTuple,
@@ -103,7 +103,7 @@ class PassiveViewpointTfRetryIntegrationTests(unittest.TestCase):
         )
 
         with patch(
-            "scripts.aufgabe04.real_robot.passive_viewpoint_node.time.time",
+            "scripts.aufgabe04.real_robot.observer.node.time.time",
             return_value=1787663986.457761,
         ):
             adapter._defer_for_exact_tf(
@@ -137,7 +137,7 @@ class PassiveViewpointTfRetryIntegrationTests(unittest.TestCase):
         )
 
         with patch(
-            "scripts.aufgabe04.real_robot.passive_viewpoint_node.time.time",
+            "scripts.aufgabe04.real_robot.observer.node.time.time",
             side_effect=(100.0, 100.05, 100.16),
         ):
             adapter._defer_for_exact_tf(sensor_tuple, reason="first lag")

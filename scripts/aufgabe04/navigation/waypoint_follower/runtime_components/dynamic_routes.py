@@ -21,6 +21,9 @@ from scripts.aufgabe04.navigation.control.waypoint_controller import (
 from scripts.aufgabe04.navigation.waypoint_follower.route_admission import (
     dynamic_join_envelope_failure,
 )
+from scripts.aufgabe04.navigation.waypoint_follower.directives import (
+    RouteRefreshAction,
+)
 from scripts.aufgabe04.navigation.waypoint_follower.route_phases import (
     dynamic_route_kind_transition_failure,
 )
@@ -29,10 +32,10 @@ from scripts.aufgabe04.navigation.waypoint_follower.route_phases import (
 class DynamicRouteRuntimeMixin:
     """Dynamic-route behavior mixed into the sole follower node."""
 
-    def _refresh_dynamic_route(self, pose: Pose2D) -> str:
+    def _refresh_dynamic_route(self, pose: Pose2D) -> RouteRefreshAction:
         queued_update = getattr(self, "queued_route_update", None)
         if queued_update is None and self.waypoint_provider is None:
-            return ""
+            return RouteRefreshAction.CONTINUE
         now = time.monotonic()
         initial_refresh = self.initial_route_refresh_pending
         if (
@@ -40,14 +43,14 @@ class DynamicRouteRuntimeMixin:
             and not initial_refresh
             and self.follower_config.dynamic_route_refresh_sec <= 0.0
         ):
-            return ""
+            return RouteRefreshAction.CONTINUE
         if (
             queued_update is None
             and not initial_refresh
             and now - self.last_route_refresh_at
             < self.follower_config.dynamic_route_refresh_sec
         ):
-            return ""
+            return RouteRefreshAction.CONTINUE
         self.initial_route_refresh_pending = False
         self.last_route_refresh_at = now
         if queued_update is not None:
@@ -63,45 +66,45 @@ class DynamicRouteRuntimeMixin:
                     "fault_code": "route_provider_exception",
                     "fail_closed": True,
                 }
-                return "stopped"
+                return RouteRefreshAction.STOPPED
         if update is None:
-            return ""
+            return RouteRefreshAction.CONTINUE
         if update.kind is RouteUpdateKind.UNCHANGED:
-            return ""
+            return RouteRefreshAction.CONTINUE
         if update.kind is RouteUpdateKind.REJECT:
             self.publish_zero()
             if not self._emit_route_update(update):
-                return "stopped"
+                return RouteRefreshAction.STOPPED
             self.latest_stop_details = {
                 **dict(update.event_fields),
                 "reason": update.reason or "dynamic route update rejected",
                 "fail_closed": True,
             }
-            return "stopped"
+            return RouteRefreshAction.STOPPED
         if update.kind is RouteUpdateKind.STOP:
             # Zero first: semantic logging is synchronous and must never leave
             # the previous nonzero Twist active if it blocks or raises.
             self.publish_zero()
             if not self._emit_route_update(update):
-                return "stopped"
+                return RouteRefreshAction.STOPPED
             self.latest_stop_details = {
                 **dict(update.event_fields),
                 "reason": update.reason or "dynamic route withdrawn",
             }
-            return "stopped"
+            return RouteRefreshAction.STOPPED
         if update.kind is RouteUpdateKind.COMPLETE:
             # A committed arrival estimate is the successful terminal event
             # for a survey leg.  Stop before logging so a slow callback can
             # never leave a previous non-zero Twist active.
             self.publish_zero()
             if not self._emit_route_update(update):
-                return "stopped"
+                return RouteRefreshAction.STOPPED
             self.latest_stop_details = {
                 **dict(update.event_fields),
                 "reason": update.reason or "survey completed",
                 "fail_closed": False,
             }
-            return "completed"
+            return RouteRefreshAction.COMPLETED
         replacement = tuple(update.waypoints)
         if update.kind is not RouteUpdateKind.ADOPT or len(replacement) < 2:
             self.publish_zero()
@@ -110,7 +113,7 @@ class DynamicRouteRuntimeMixin:
                 "fault_code": "invalid_route_update",
                 "fail_closed": True,
             }
-            return "stopped"
+            return RouteRefreshAction.STOPPED
         if update.target_index is None or not 0 <= update.target_index < len(replacement):
             self.publish_zero()
             self.latest_stop_details = {
@@ -118,7 +121,7 @@ class DynamicRouteRuntimeMixin:
                 "fault_code": "invalid_route_update",
                 "fail_closed": True,
             }
-            return "stopped"
+            return RouteRefreshAction.STOPPED
         try:
             join_limit = float(update.event_fields["effective_join_limit_m"])
         except (KeyError, TypeError, ValueError) as exc:
@@ -128,7 +131,7 @@ class DynamicRouteRuntimeMixin:
                 "fault_code": "invalid_route_update",
                 "fail_closed": True,
             }
-            return "stopped"
+            return RouteRefreshAction.STOPPED
         if not math.isfinite(join_limit) or join_limit <= 0.0:
             self.publish_zero()
             self.latest_stop_details = {
@@ -136,7 +139,7 @@ class DynamicRouteRuntimeMixin:
                 "fault_code": "invalid_route_update",
                 "fail_closed": True,
             }
-            return "stopped"
+            return RouteRefreshAction.STOPPED
         join_failure = dynamic_join_envelope_failure(
             pose,
             replacement[0],
@@ -151,7 +154,7 @@ class DynamicRouteRuntimeMixin:
                 "source": "dynamic_route_admission",
                 "fail_closed": True,
             }
-            return "stopped"
+            return RouteRefreshAction.STOPPED
         next_route_kind = str(update.event_fields.get("route_kind", ""))
         phase_failure = dynamic_route_kind_transition_failure(
             self.current_route_kind, next_route_kind
@@ -165,7 +168,7 @@ class DynamicRouteRuntimeMixin:
                 "next_route_kind": next_route_kind,
                 "fail_closed": True,
             }
-            return "stopped"
+            return RouteRefreshAction.STOPPED
         if (
             next_route_kind in PHYSICAL_ROUTE_KINDS
             and join_limit
@@ -195,7 +198,7 @@ class DynamicRouteRuntimeMixin:
                     "source": "dynamic_route_admission",
                     "fail_closed": True,
                 }
-                return "stopped"
+                return RouteRefreshAction.STOPPED
         raw_egress_lock = update.event_fields.get(
             "start_egress_vertex_lock",
             False,
@@ -207,7 +210,7 @@ class DynamicRouteRuntimeMixin:
                 "fault_code": "invalid_route_update",
                 "fail_closed": True,
             }
-            return "stopped"
+            return RouteRefreshAction.STOPPED
         next_egress_lock_index = None
         next_egress_reverse = False
         next_reverse_until_index = None
@@ -232,7 +235,7 @@ class DynamicRouteRuntimeMixin:
                     "fault_code": "invalid_route_update",
                     "fail_closed": True,
                 }
-                return "stopped"
+                return RouteRefreshAction.STOPPED
             next_egress_lock_index = raw_lock_index
             raw_egress_motion = update.event_fields.get(
                 "start_egress_motion",
@@ -245,7 +248,7 @@ class DynamicRouteRuntimeMixin:
                     "fault_code": "invalid_route_update",
                     "fail_closed": True,
                 }
-                return "stopped"
+                return RouteRefreshAction.STOPPED
             next_egress_reverse = raw_egress_motion == "reverse"
             if next_egress_reverse:
                 raw_reverse_until_index = update.event_fields.get(
@@ -274,7 +277,7 @@ class DynamicRouteRuntimeMixin:
                         "fault_code": "invalid_route_update",
                         "fail_closed": True,
                     }
-                    return "stopped"
+                    return RouteRefreshAction.STOPPED
                 next_reverse_until_index = raw_reverse_until_index
                 next_forward_alignment_index = raw_forward_alignment_index
         previous_route_kind = self.current_route_kind
@@ -380,8 +383,8 @@ class DynamicRouteRuntimeMixin:
         self.dynamic_join_pending = True
         self.dynamic_join_limit_m = join_limit
         if not self._emit_route_update(update):
-            return "stopped"
-        return "adopted"
+            return RouteRefreshAction.STOPPED
+        return RouteRefreshAction.ADOPTED
 
     def _emit_route_update(self, update: RouteUpdate) -> bool:
         if update.event_name is None or self.route_update_callback is None:
