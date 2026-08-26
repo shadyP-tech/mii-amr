@@ -27,7 +27,6 @@ from scripts.aufgabe04.perception.stand_axis.model_profile import (
 from scripts.aufgabe04.real_robot.configuration.geometry import (
     CameraIntrinsics,
     project_optical_point,
-    project_rectified_image_direction,
     roi_from_projection,
     rotate_vector,
     transform_point,
@@ -48,6 +47,7 @@ from scripts.aufgabe04.real_robot.configuration.profile import (
 from scripts.aufgabe04.real_robot.observer.contract import (
     PASSIVE_VIEWPOINT_OBSERVER_VERSION,
 )
+from scripts.aufgabe04.real_robot.observer import node as observer_node
 from scripts.aufgabe04.real_robot.observer.node import (
     PassiveRealViewpointNode,
     _StampedMessage,
@@ -61,6 +61,9 @@ from scripts.aufgabe04.real_robot.observer.node import (
 )
 from scripts.aufgabe04.real_robot.passive_survey.prepare import (
     main as prepare_passive_survey,
+)
+from scripts.aufgabe04.real_robot.passive_survey.finalize import (
+    _validate_metric_model_binding,
 )
 from scripts.aufgabe04.real_robot.configuration.recommendation import (
     REAL_VIEWPOINT_SOURCE,
@@ -148,6 +151,36 @@ def robot_profile(calibration_sha256: str, physical_site_sha256: str) -> RealRob
     )
 
 
+def write_test_stand_model(
+    path: Path,
+    *,
+    environment: str = "physical",
+    measurement_status: str = "measured",
+) -> str:
+    return write_stand_model(
+        path,
+        stand_model_from_payload(
+            {
+                "schema_version": 1,
+                "profile_id": f"{environment}_test_v1",
+                "environment": environment,
+                "measurement_status": measurement_status,
+                "head_width_m": 0.078,
+                "head_height_m": 0.078,
+                "head_depth_m": 0.007,
+                "qr_symbol_width_m": 0.060,
+                "qr_symbol_height_m": 0.060,
+                "qr_center_x_m": 0.0,
+                "qr_center_y_m": 0.0,
+                "stem_width_m": 0.010,
+                "stem_visible_height_m": 0.080,
+                "tolerance_m": 0.001,
+                "source": "direct test metrology",
+            }
+        ),
+    )
+
+
 class RealHardwareProfileTest(unittest.TestCase):
     def test_profiles_round_trip_and_resolve_namespaced_topics(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -228,51 +261,17 @@ class RealCameraGeometryTest(unittest.TestCase):
         self.assertAlmostEqual(transformed[0], 2.0)
         self.assertAlmostEqual(transformed[1], 4.0)
 
-    def test_rectified_world_vertical_direction_accounts_for_camera_roll(self):
-        intrinsics = CameraIntrinsics(640, 480, 400.0, 400.0, 320.0, 240.0)
-        roll_rad = math.radians(30.0)
-        roll = (0.0, 0.0, math.sin(roll_rad / 2.0), math.cos(roll_rad / 2.0))
-        top_camera = rotate_vector((0.0, -0.10, 1.0), roll)
-        bottom_camera = rotate_vector((0.0, 0.10, 1.0), roll)
-
-        direction = project_rectified_image_direction(
-            top_camera,
-            bottom_camera,
-            intrinsics,
-        )
-
-        self.assertAlmostEqual(direction[0], -0.5, places=7)
-        self.assertAlmostEqual(direction[1], math.sqrt(3.0) / 2.0, places=7)
-        with self.assertRaisesRegex(ValueError, "front"):
-            project_rectified_image_direction(
-                (0.0, -0.1, -1.0),
-                (0.0, 0.1, -1.0),
-                intrinsics,
-            )
-
-
 class RealCameraStandAxisProfileTest(unittest.TestCase):
-    def test_default_profile_resolves_bounded_expected_head_size_gates(self):
+    def test_default_profile_resolves_model_refinement_edge_height(self):
         profile = RealCameraStandAxisProfile()
         small = profile.resolve(16.0)
         medium = profile.resolve(100.0)
         large = profile.resolve(300.0)
 
         self.assertEqual(profile.edge_preprocess, "channel_union")
-        self.assertEqual(small.min_area_px, 40.0)
         self.assertEqual(small.min_edge_height_px, 5.0)
-        self.assertEqual(small.close_kernel, 3)
-        self.assertEqual(medium.min_area_px, 1000.0)
         self.assertEqual(medium.min_edge_height_px, 14.0)
-        self.assertEqual(medium.close_kernel, 5)
         self.assertEqual(large.min_edge_height_px, 14.0)
-        self.assertEqual(large.close_kernel, 7)
-        self.assertEqual(
-            medium.estimator_kwargs()["edge_preprocess"],
-            "channel_union",
-        )
-        self.assertEqual(medium.min_aspect_ratio, 0.45)
-        self.assertEqual(medium.max_aspect_ratio, 1.80)
 
     def test_profile_rejects_invalid_modes_thresholds_and_head_sizes(self):
         with self.assertRaisesRegex(ValueError, "edge_preprocess"):
@@ -281,11 +280,6 @@ class RealCameraStandAxisProfileTest(unittest.TestCase):
             RealCameraStandAxisProfile(canny_low=60, canny_high=20)
         with self.assertRaisesRegex(ValueError, "Canny"):
             RealCameraStandAxisProfile(canny_low=-1, canny_high=20)
-        with self.assertRaisesRegex(ValueError, "aspect"):
-            RealCameraStandAxisProfile(
-                min_aspect_ratio=1.1,
-                max_aspect_ratio=1.8,
-            )
         profile = RealCameraStandAxisProfile()
         for invalid in (0.0, -1.0, math.nan, math.inf):
             with self.subTest(invalid=invalid):
@@ -314,12 +308,14 @@ class RealCameraStandAxisProfileTest(unittest.TestCase):
 
 class PassiveObservationCoreTest(unittest.TestCase):
     @staticmethod
-    def parser_args() -> list[str]:
+    def parser_args(model_path: Path) -> list[str]:
         return [
             "--robot-profile",
             "robot.json",
             "--camera-calibration",
             "camera.json",
+            "--stand-model-profile",
+            str(model_path),
             "--stream-id",
             "stream",
             "--stand-id",
@@ -337,102 +333,110 @@ class PassiveObservationCoreTest(unittest.TestCase):
         ]
 
     def test_parser_defaults_to_channel_union_and_wires_valid_override(self):
-        parser = build_parser()
-        defaults = parser.parse_args(self.parser_args())
-        _validate_args(parser, defaults)
-        default_profile = _stand_axis_profile_from_args(defaults)
-        self.assertEqual(defaults.edge_preprocess, "channel-union")
-        self.assertEqual(default_profile.edge_preprocess, "channel_union")
-        self.assertEqual(defaults.tf_timeout_sec, 0.15)
-        self.assertEqual(defaults.tf_retry_rate_hz, 50.0)
-
-        override = parser.parse_args(
-            [
-                *self.parser_args(),
-                "--edge-preprocess",
-                "gray",
-                "--canny-low",
-                "12",
-                "--canny-high",
-                "44",
-            ]
-        )
-        _validate_args(parser, override)
-        override_profile = _stand_axis_profile_from_args(override)
-        self.assertEqual(override_profile.edge_preprocess, "gray")
-        self.assertEqual(override_profile.canny_low, 12)
-        self.assertEqual(override_profile.canny_high, 44)
-
-        with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
-            parser.parse_args(
-                [
-                    *self.parser_args(),
-                    "--edge-preprocess",
-                    "outer-border",
-                ]
-            )
-        invalid_canny = parser.parse_args(
-            [
-                *self.parser_args(),
-                "--canny-low",
-                "60",
-                "--canny-high",
-                "20",
-            ]
-        )
-        with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
-            _validate_args(parser, invalid_canny)
-
-    def test_passive_observer_requires_measured_model_profile(self):
-        base_payload = {
-            "schema_version": 1,
-            "profile_id": "physical_test_v1",
-            "environment": "physical",
-            "measurement_status": "measured",
-            "head_width_m": 0.078,
-            "head_height_m": 0.078,
-            "head_depth_m": 0.007,
-            "qr_symbol_width_m": 0.060,
-            "qr_symbol_height_m": 0.060,
-            "qr_center_x_m": 0.0,
-            "qr_center_y_m": 0.0,
-            "stem_width_m": 0.010,
-            "stem_visible_height_m": 0.080,
-            "tolerance_m": 0.001,
-            "source": "direct test metrology",
-        }
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            measured_path = root / "measured.json"
-            write_stand_model(
-                measured_path,
-                stand_model_from_payload(base_payload),
-            )
-            measured = build_parser().parse_args(
+            model_path = Path(temporary) / "measured.json"
+            write_test_stand_model(model_path)
+            parser = build_parser()
+            defaults = parser.parse_args(self.parser_args(model_path))
+            _validate_args(parser, defaults)
+            default_profile = _stand_axis_profile_from_args(defaults)
+            self.assertEqual(defaults.edge_preprocess, "channel-union")
+            self.assertEqual(default_profile.edge_preprocess, "channel_union")
+            self.assertEqual(defaults.tf_timeout_sec, 0.15)
+            self.assertEqual(defaults.tf_retry_rate_hz, 50.0)
+
+            override = parser.parse_args(
                 [
-                    *self.parser_args(),
-                    "--stand-model-profile",
-                    str(measured_path),
+                    *self.parser_args(model_path),
+                    "--edge-preprocess", "gray",
+                    "--canny-low", "12",
+                    "--canny-high", "44",
                 ]
             )
-            _validate_args(build_parser(), measured)
+            _validate_args(parser, override)
+            override_profile = _stand_axis_profile_from_args(override)
+            self.assertEqual(override_profile.edge_preprocess, "gray")
+            self.assertEqual(override_profile.canny_low, 12)
+            self.assertEqual(override_profile.canny_high, 44)
 
-            provisional_payload = dict(base_payload)
-            provisional_payload["measurement_status"] = "provisional"
-            provisional_path = root / "provisional.json"
-            write_stand_model(
-                provisional_path,
-                stand_model_from_payload(provisional_payload),
-            )
-            provisional = build_parser().parse_args(
+            with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+                parser.parse_args(
+                    [
+                        *self.parser_args(model_path),
+                        "--edge-preprocess",
+                        "outer-border",
+                    ]
+                )
+            invalid_canny = parser.parse_args(
                 [
-                    *self.parser_args(),
-                    "--stand-model-profile",
-                    str(provisional_path),
+                    *self.parser_args(model_path),
+                    "--canny-low", "60",
+                    "--canny-high", "20",
                 ]
             )
             with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+                _validate_args(parser, invalid_canny)
+
+    def test_parser_rejects_missing_stand_model_before_runtime(self):
+        args = self.parser_args(Path("unused-model.json"))
+        without_model = args[:4] + args[6:]
+        with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+            build_parser().parse_args(without_model)
+
+    def test_real_robot_package_has_no_legacy_detector_dependency(self):
+        real_robot_root = Path(observer_node.__file__).parents[1]
+        forbidden = (
+            "estimate_stand_axis_from_edges",
+            "estimate_stand_axis_from_mask",
+            "stand_axis_image",
+            "silhouette_only",
+        )
+        offenders = []
+        for path in sorted(real_robot_root.rglob("*.py")):
+            source = path.read_text(encoding="utf-8")
+            offenders.extend(
+                (str(path.relative_to(real_robot_root)), token)
+                for token in forbidden
+                if token in source
+            )
+
+        observer_source = Path(observer_node.__file__).read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "estimate_stand_axis_from_metric_model",
+            observer_source,
+        )
+        self.assertEqual(offenders, [])
+
+    def test_passive_observer_requires_measured_model_profile(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            measured_path = root / "measured.json"
+            write_test_stand_model(measured_path)
+            measured = build_parser().parse_args(
+                self.parser_args(measured_path)
+            )
+            _validate_args(build_parser(), measured)
+
+            provisional_path = root / "provisional.json"
+            write_test_stand_model(
+                provisional_path,
+                measurement_status="provisional",
+            )
+            provisional = build_parser().parse_args(
+                self.parser_args(provisional_path)
+            )
+            with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
                 _validate_args(build_parser(), provisional)
+
+            simulation_path = root / "simulation.json"
+            write_test_stand_model(simulation_path, environment="simulation")
+            simulation = build_parser().parse_args(
+                self.parser_args(simulation_path)
+            )
+            with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+                _validate_args(build_parser(), simulation)
 
     def test_raw_image_is_rectified_into_camera_info_projection_geometry(self):
         import cv2
@@ -503,18 +507,17 @@ class PassiveObservationCoreTest(unittest.TestCase):
                 face_mask=mono,
                 rectangle_mask=mono,
                 rectangle_overlay=overlay,
-                structure_evidence=SimpleNamespace(reason="accepted"),
             )
             metadata = {
+                "mode": "metric_model_only",
                 "profile": {
                     "edge_preprocess": "channel_union",
                     "canny_low": 20,
                     "canny_high": 60,
                 },
-                "parallel_side_direction": [-0.5, 0.866],
                 "estimator_usable": True,
                 "estimator_reason": "ok",
-                "estimator_source": "edge_plain_face_stem_anchor",
+                "estimator_source": "metric_stand_model",
             }
 
             adapter._write_debug(
@@ -548,8 +551,8 @@ class PassiveObservationCoreTest(unittest.TestCase):
                 "channel_union",
             )
             self.assertEqual(
-                written_metadata["structure_evidence_reason"],
-                "accepted",
+                written_metadata["stand_axis"]["mode"],
+                "metric_model_only",
             )
 
             adapter._write_debug(
@@ -561,7 +564,6 @@ class PassiveObservationCoreTest(unittest.TestCase):
                     face_mask=None,
                     rectangle_mask=None,
                     rectangle_overlay=None,
-                    structure_evidence=None,
                 ),
                 metadata=metadata,
             )
@@ -640,6 +642,31 @@ def recommendation_input():
 
 
 class PreparePassiveSurveyTest(unittest.TestCase):
+    def test_finalization_rejects_legacy_or_unbound_survey_config(self):
+        digest = "a" * 64
+        config = {
+            "observer_version": PASSIVE_VIEWPOINT_OBSERVER_VERSION,
+            "stand_model_profile_sha256": digest,
+            "stand_model_environment": "physical",
+            "stand_model_measurement_status": "measured",
+        }
+        binding = {"stand_model_profile_sha256": digest}
+        self.assertEqual(
+            _validate_metric_model_binding(config, binding),
+            digest,
+        )
+
+        with self.assertRaisesRegex(ValueError, "metric-model-only"):
+            _validate_metric_model_binding(
+                {**config, "observer_version": "legacy-observer"},
+                binding,
+            )
+        with self.assertRaisesRegex(ValueError, "differs"):
+            _validate_metric_model_binding(
+                config,
+                {"stand_model_profile_sha256": "b" * 64},
+            )
+
     def test_prepared_commands_are_real_time_and_observe_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -704,6 +731,8 @@ class PreparePassiveSurveyTest(unittest.TestCase):
                 robot_path,
                 robot_profile(calibration_sha256, site_sha256),
             )
+            stand_model_path = root / "measured_stand.json"
+            stand_model_sha256 = write_test_stand_model(stand_model_path)
             output_dir = root / "survey"
             stdout = StringIO()
             with redirect_stdout(stdout):
@@ -713,6 +742,8 @@ class PreparePassiveSurveyTest(unittest.TestCase):
                         str(robot_path),
                         "--camera-calibration",
                         str(calibration_path),
+                        "--stand-model-profile",
+                        str(stand_model_path),
                         "--physical-site",
                         str(site),
                         "--map",
@@ -751,10 +782,16 @@ class PreparePassiveSurveyTest(unittest.TestCase):
             survey_config["observer_version"],
             PASSIVE_VIEWPOINT_OBSERVER_VERSION,
         )
+        self.assertEqual(
+            survey_config["stand_model_profile_sha256"],
+            stand_model_sha256,
+        )
         observer = plan["candidate_runs"][0]["observer_command"]
         planner = plan["candidate_runs"][0]["catalog_validation_command"]
         self.assertIn("passive_viewpoint_node.py", observer[1])
         self.assertIn("--status-events-jsonl", observer)
+        self.assertIn("--stand-model-profile", observer)
+        self.assertNotIn("--stand-face-size-m", observer)
         self.assertNotIn("cmd_vel", " ".join(observer))
         self.assertNotIn("--allow-sim-time", planner)
         self.assertEqual(planner[planner.index("--environment") + 1], "real")

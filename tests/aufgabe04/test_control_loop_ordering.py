@@ -13,6 +13,9 @@ from scripts.aufgabe04.navigation.control.waypoint_controller import (
     ControllerStep,
     VelocityCommand,
 )
+from scripts.aufgabe04.navigation.coverage.transient_blockage_policy import (
+    CLEARANCE_LIMITED_MOTION_FLOOR,
+)
 from scripts.aufgabe04.navigation.execution.dynamic_route_handoff import (
     RouteUpdate,
     RouteUpdateKind,
@@ -23,6 +26,7 @@ from scripts.aufgabe04.navigation.execution.execution_route_certificate import (
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.navigation.waypoint_follower.config import FollowerConfig
 from scripts.aufgabe04.navigation.waypoint_follower.directives import (
+    RouteRefreshAction,
     StartupJoinAction,
 )
 from scripts.aufgabe04.navigation.waypoint_follower.route_admission import (
@@ -30,6 +34,26 @@ from scripts.aufgabe04.navigation.waypoint_follower.route_admission import (
 )
 from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.command_admission import (
     command_admission_decision,
+)
+from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.cycle_guard import (
+    ControlCycleGuardAction,
+)
+from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.motion_cycle_guard import (
+    MotionCycleGuardAction,
+)
+from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.recovery_dispatch import (
+    BlockageRecoveryDisposition,
+    RecoveryLoopAction,
+)
+from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.route_cycle_guard import (
+    RouteCycleGuardAction,
+)
+from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.safety import (
+    MotionCommandAdmissionDecision,
+    ProgressWatchdogDecision,
+)
+from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.step_cycle_guard import (
+    StepCycleGuardAction,
 )
 from scripts.aufgabe04.navigation.waypoint_follower.runtime import (
     BlockageRecoveryAction,
@@ -126,7 +150,354 @@ def _startup_route_check(*, ok: bool, target_index: int) -> ExecutionRouteCheck:
     )
 
 
+def _forward_step() -> ControllerStep:
+    return ControllerStep(
+        command=VelocityCommand(0.03, 0.0),
+        target_index=1,
+        reached_goal=False,
+        distance_to_target_m=0.15,
+        pursuit_index=1,
+        controlled_heading_error_rad=0.0,
+    )
+
+
+def _motion_admission(
+    step: ControllerStep,
+    *,
+    clearance_stop: bool,
+) -> MotionCommandAdmissionDecision:
+    front_clearance_scale = 0.1 if clearance_stop else 1.0
+    admission = command_admission_decision(
+        step.command,
+        front_clearance_scale=front_clearance_scale,
+        linear_motion_floor_mps=0.02,
+        physical_route=True,
+    )
+    return MotionCommandAdmissionDecision(
+        command_admission=admission,
+        front_clearance_scale=front_clearance_scale,
+        stop_details=(
+            {
+                "reason": CLEARANCE_LIMITED_MOTION_FLOOR,
+                "source": "front_clearance",
+            }
+            if clearance_stop
+            else None
+        ),
+    )
+
+
 class ControlLoopOrderingTest(unittest.TestCase):
+    def test_motion_guard_clearance_zeroes_then_traces_then_recovers(self):
+        events: list[str] = []
+        node = _route_tube_stop_node(events)
+        step = _forward_step()
+        node.latest_front_clearance_details = {"source": "front_sector"}
+        node._motion_command_admission_decision = Mock(
+            return_value=_motion_admission(step, clearance_stop=True)
+        )
+        node._progress_watchdog_decision = Mock(
+            side_effect=AssertionError(
+                "clearance stop must not reach the progress watchdog"
+            )
+        )
+        node._blockage_recovery_outcome = (
+            lambda **_kwargs: events.append("recovery")
+            or BlockageRecoveryDisposition(
+                RecoveryLoopAction.STOP,
+                "clearance recovery unavailable",
+            )
+        )
+
+        decision = node._motion_cycle_guard_decision(
+            Pose2D(0.05, 0.04, 0.0),
+            step,
+            None,
+            0.1,
+        )
+
+        self.assertIs(decision.action, MotionCycleGuardAction.STOP)
+        self.assertEqual(
+            decision.stop_reason,
+            "clearance recovery unavailable",
+        )
+        self.assertEqual(events, ["repeated_zero", "trace", "recovery"])
+        node._progress_watchdog_decision.assert_not_called()
+
+    def test_motion_guard_clearance_trace_failure_stops_before_recovery(self):
+        events: list[str] = []
+        node = _route_tube_stop_node(events)
+        step = _forward_step()
+        node._motion_command_admission_decision = Mock(
+            return_value=_motion_admission(step, clearance_stop=True)
+        )
+        node._append_controller_trace = (
+            lambda **_kwargs: events.append("trace")
+            or "controller trace write failed"
+        )
+        node._blockage_recovery_outcome = Mock()
+
+        decision = node._motion_cycle_guard_decision(
+            Pose2D(0.05, 0.04, 0.0),
+            step,
+            None,
+            0.1,
+        )
+
+        self.assertIs(decision.action, MotionCycleGuardAction.STOP)
+        self.assertEqual(
+            decision.stop_reason,
+            "controller trace write failed",
+        )
+        self.assertEqual(events, ["repeated_zero", "trace"])
+        node._blockage_recovery_outcome.assert_not_called()
+
+    def test_motion_guard_clearance_retry_consumes_zero_hold_period(self):
+        events: list[str] = []
+        node = _route_tube_stop_node(events)
+        step = _forward_step()
+        node.latest_front_clearance_details = {"source": "front_sector"}
+        node._motion_command_admission_decision = Mock(
+            return_value=_motion_admission(step, clearance_stop=True)
+        )
+        node._blockage_recovery_outcome = (
+            lambda **_kwargs: events.append("recovery")
+            or BlockageRecoveryDisposition(
+                RecoveryLoopAction.ZERO_HOLD_AND_RETRY
+            )
+        )
+        node._hold_zero_control_period = (
+            lambda _period: events.append("hold")
+        )
+
+        decision = node._motion_cycle_guard_decision(
+            Pose2D(0.05, 0.04, 0.0),
+            step,
+            None,
+            0.1,
+        )
+
+        self.assertIs(decision.action, MotionCycleGuardAction.RETRY)
+        self.assertEqual(
+            events,
+            ["repeated_zero", "trace", "recovery", "zero", "hold"],
+        )
+
+    def test_motion_guard_stuck_zeroes_then_recovers_and_holds(self):
+        events: list[str] = []
+        node = _route_tube_stop_node(events)
+        step = _forward_step()
+        node.latest_front_clearance_details = {"source": "front_sector"}
+        node._motion_command_admission_decision = Mock(
+            return_value=_motion_admission(step, clearance_stop=False)
+        )
+        node._progress_watchdog_decision = Mock(
+            return_value=ProgressWatchdogDecision(
+                failure="stuck progress",
+                distance_progress_epsilon_m=0.01,
+                stop_details={
+                    "reason": "stuck progress",
+                    "source": "progress_watchdog",
+                },
+            )
+        )
+        node._blockage_recovery_outcome = (
+            lambda **_kwargs: events.append("recovery")
+            or BlockageRecoveryDisposition(
+                RecoveryLoopAction.HOLD_AND_RETRY
+            )
+        )
+        node._hold_zero_control_period = (
+            lambda _period: events.append("hold")
+        )
+
+        decision = node._motion_cycle_guard_decision(
+            Pose2D(0.05, 0.04, 0.0),
+            step,
+            None,
+            0.1,
+        )
+
+        self.assertIs(decision.action, MotionCycleGuardAction.RETRY)
+        self.assertEqual(events, ["repeated_zero", "recovery", "hold"])
+
+    def test_motion_guard_proceed_preserves_admission_timestamp(self):
+        events: list[str] = []
+        node = _route_tube_stop_node(events)
+        step = _forward_step()
+        motion_admission = _motion_admission(step, clearance_stop=False)
+        node._motion_command_admission_decision = Mock(
+            return_value=motion_admission
+        )
+        node._progress_watchdog_decision = Mock(
+            return_value=ProgressWatchdogDecision(
+                failure="",
+                distance_progress_epsilon_m=0.01,
+            )
+        )
+
+        with patch(
+            "scripts.aufgabe04.navigation.waypoint_follower."
+            "runtime_components.control_loop.time.monotonic",
+            return_value=12.5,
+        ):
+            decision = node._motion_cycle_guard_decision(
+                Pose2D(0.05, 0.04, 0.0),
+                step,
+                None,
+                0.1,
+            )
+
+        self.assertIs(decision.action, MotionCycleGuardAction.PROCEED)
+        self.assertIs(
+            decision.command_admission,
+            motion_admission.command_admission,
+        )
+        self.assertEqual(decision.evaluated_at, 12.5)
+        node._progress_watchdog_decision.assert_called_once_with(
+            step,
+            now_monotonic=12.5,
+            front_clearance_scale=motion_admission.front_clearance_scale,
+            effective_linear_x_mps=(
+                motion_admission.command_admission
+                .effective_command.linear_x_mps
+            ),
+        )
+        self.assertEqual(events, [])
+
+    def test_step_cycle_guard_route_tube_stop_zeroes_before_trace(self):
+        events: list[str] = []
+        node = _route_tube_stop_node(events)
+
+        decision = node._step_cycle_guard_decision(
+            Pose2D(0.05, 0.04, 0.0),
+            0.1,
+        )
+
+        self.assertIs(decision.action, StepCycleGuardAction.STOP)
+        self.assertEqual(
+            decision.stop_reason,
+            "pose left certified route tube",
+        )
+        self.assertEqual(events, ["repeated_zero", "trace"])
+
+    def test_step_cycle_guard_corner_stop_orders_zero_evidence_and_trace(self):
+        events: list[str] = []
+        node = _route_tube_stop_node(events)
+        pose = Pose2D(0.05, 0.04, 0.0)
+        failed_step = ControllerStep(
+            command=VelocityCommand(0.0, 0.2),
+            target_index=1,
+            reached_goal=False,
+            distance_to_target_m=0.04,
+            pursuit_index=1,
+            controlled_heading_error_rad=0.3,
+        )
+        node._certified_corner_decision = Mock(
+            return_value=SimpleNamespace(
+                failure="certified corner hard tolerance exceeded",
+                step=failed_step,
+            )
+        )
+        node._log_certified_corner_phase = (
+            lambda _step: events.append("corner_phase")
+        )
+        prepare_evidence = node._prepare_certified_corner_stop_evidence
+
+        def record_evidence(*args):
+            events.append("evidence")
+            return prepare_evidence(*args)
+
+        node._prepare_certified_corner_stop_evidence = record_evidence
+
+        decision = node._step_cycle_guard_decision(pose, 0.1)
+
+        self.assertIs(decision.action, StepCycleGuardAction.STOP)
+        self.assertEqual(
+            decision.stop_reason,
+            "certified corner hard tolerance exceeded",
+        )
+        self.assertEqual(
+            events,
+            [
+                "zero",
+                "corner_phase",
+                "evidence",
+                "trace",
+                "repeated_zero",
+            ],
+        )
+
+    def test_route_cycle_guard_adoption_consumes_zero_handoff_period(self):
+        events: list[str] = []
+        node = _route_tube_stop_node(events)
+        node._refresh_dynamic_route = Mock(
+            return_value=RouteRefreshAction.ADOPTED
+        )
+        node._hold_zero_control_period = (
+            lambda _period: events.append("hold")
+        )
+
+        decision = node._route_cycle_guard_decision(
+            Pose2D(0.05, 0.04, 0.0),
+            0.1,
+        )
+
+        self.assertIs(decision.action, RouteCycleGuardAction.RETRY)
+        self.assertEqual(events, ["zero", "hold"])
+
+    def test_cycle_guard_proceeds_only_after_ordered_runtime_gates(self):
+        events: list[str] = []
+        node = _route_tube_stop_node(events)
+        pose = Pose2D(0.05, 0.04, 0.0)
+        node._drain_runtime_callbacks = lambda: events.append("callbacks")
+        node._safety_failure = lambda: events.append("safety") or ""
+        node._global_consistency_monitor_failure = (
+            lambda: events.append("localization") or ""
+        )
+        node._current_pose_lookup_with_stale_recovery = (
+            lambda: events.append("pose") or SimpleNamespace(pose=pose)
+        )
+
+        decision = node._control_cycle_guard_decision(0.1)
+
+        self.assertIs(decision.action, ControlCycleGuardAction.PROCEED)
+        self.assertIs(decision.pose, pose)
+        self.assertEqual(
+            events,
+            ["callbacks", "safety", "localization", "pose"],
+        )
+
+    def test_cycle_guard_safety_stop_revokes_motion_and_returns_evidence(self):
+        events: list[str] = []
+        node = _route_tube_stop_node(events)
+        node.latest_stop_details = {"source": "scan", "fail_closed": True}
+        node._safety_failure = lambda: "scan stale"
+
+        decision = node._control_cycle_guard_decision(0.1)
+
+        self.assertIs(decision.action, ControlCycleGuardAction.STOP)
+        self.assertEqual(decision.stop_reason, "scan stale")
+        self.assertIs(decision.stop_details, node.latest_stop_details)
+        self.assertEqual(events, ["repeated_zero"])
+
+    def test_cycle_guard_pose_stop_zeroes_before_trace(self):
+        events: list[str] = []
+        node = _route_tube_stop_node(events)
+        node._current_pose_lookup_with_stale_recovery = lambda: SimpleNamespace(
+            pose=None,
+            details={"stop_reason": "map-to-base transform unavailable"},
+        )
+
+        decision = node._control_cycle_guard_decision(0.1)
+
+        self.assertIs(decision.action, ControlCycleGuardAction.STOP)
+        self.assertEqual(
+            decision.stop_reason,
+            "map-to-base transform unavailable",
+        )
+        self.assertEqual(events, ["repeated_zero", "trace"])
+
     def test_startup_pose_admission_skips_after_initial_target(self):
         node = _route_tube_stop_node([])
         node.certified_static_start_pending = True

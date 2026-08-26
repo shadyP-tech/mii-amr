@@ -6,7 +6,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.perception.stand_axis_image import ImagePoint, StandAxisImageEstimate  # noqa: E402
+from scripts.aufgabe04.perception.stand_axis.models import (  # noqa: E402
+    ImagePoint,
+    StandAxisImageEstimate,
+)
 from scripts.aufgabe04.perception.stand_side_classification import (  # noqa: E402
     classify_stand_side,
     classify_stand_side_from_frame,

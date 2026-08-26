@@ -182,7 +182,7 @@ CANDIDATE_LOCAL_OBSERVER_TIMEOUT_STATES = frozenset(
         "evidence_not_committable",
         "head_size_projection_mismatch",
         "lidar_target_mismatch",
-        "silhouette_unavailable",
+        "metric_model_measurement_unavailable",
         "target_outside_camera_gate",
     }
 )

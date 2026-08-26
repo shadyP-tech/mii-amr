@@ -142,41 +142,6 @@ def project_optical_point(
     )
 
 
-def project_rectified_image_direction(
-    top_camera_xyz: Sequence[float],
-    bottom_camera_xyz: Sequence[float],
-    intrinsics: CameraIntrinsics,
-) -> tuple[float, float]:
-    """Project a camera-frame 3D line into normalized rectified-image direction.
-
-    Points use REP-103 optical coordinates and the projection matrix already
-    represented by ``CameraIntrinsics``. The returned direction runs from the
-    projected top point toward the projected bottom point, matching the
-    top-to-bottom ordering of the head's left and right image sides.
-    """
-
-    validate_intrinsics(intrinsics)
-    if len(top_camera_xyz) != 3 or len(bottom_camera_xyz) != 3:
-        raise ValueError("camera line endpoints must each contain three values")
-    top = tuple(float(value) for value in top_camera_xyz)
-    bottom = tuple(float(value) for value in bottom_camera_xyz)
-    if not all(math.isfinite(value) for value in (*top, *bottom)):
-        raise ValueError("camera line endpoints must be finite")
-    if top[2] <= 0.0 or bottom[2] <= 0.0:
-        raise ValueError("camera line endpoints must be in front of the camera")
-
-    top_u = intrinsics.cx_px + intrinsics.fx_px * top[0] / top[2]
-    top_v = intrinsics.cy_px + intrinsics.fy_px * top[1] / top[2]
-    bottom_u = intrinsics.cx_px + intrinsics.fx_px * bottom[0] / bottom[2]
-    bottom_v = intrinsics.cy_px + intrinsics.fy_px * bottom[1] / bottom[2]
-    delta_u = bottom_u - top_u
-    delta_v = bottom_v - top_v
-    norm = math.hypot(delta_u, delta_v)
-    if not math.isfinite(norm) or norm <= 1.0e-9:
-        raise ValueError("projected camera line has no stable image direction")
-    return delta_u / norm, delta_v / norm
-
-
 def roi_from_projection(
     projection: OpticalProjection,
     intrinsics: CameraIntrinsics,

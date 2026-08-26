@@ -20,6 +20,8 @@ def build_completed_camera_mission_summary(
     snapshot_path: Path,
     snapshot_sha256: str,
     survey_root: Path,
+    stand_model_profile: Path,
+    stand_model_profile_sha256: str,
     candidate_population_admission_path: Path,
     candidate_population_admission_sha256: str,
     candidate_phase_fields: dict[str, object],
@@ -59,6 +61,9 @@ def build_completed_camera_mission_summary(
         "candidate_snapshot_sha256": snapshot_sha256,
         "candidate_snapshot_ready": True,
         "survey_root": str(survey_root),
+        "camera_estimator_mode": "metric_model_only",
+        "stand_model_profile": str(stand_model_profile),
+        "stand_model_profile_sha256": stand_model_profile_sha256,
         "candidate_population_admission": str(
             candidate_population_admission_path
         ),

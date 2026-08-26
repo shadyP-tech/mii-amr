@@ -1,5 +1,6 @@
-"""Internal building blocks for stand-axis image estimation.
+"""Stand-axis geometry, model projection, and diagnostic image utilities.
 
-Production and debug callers should keep importing the compatibility facade
-at :mod:`scripts.aufgabe04.perception.stand_axis_image`.
+Operational real-camera code imports the measured metric-model modules here
+directly.  The historical :mod:`scripts.aufgabe04.perception.stand_axis_image`
+surface remains only for simulation and explicit offline/debug comparisons.
 """

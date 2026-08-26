@@ -239,6 +239,12 @@ class PassiveViewpointTfRetryIntegrationTests(unittest.TestCase):
             canny_low=20,
             canny_high=60,
         )
+        adapter.stand_model_profile = SimpleNamespace(
+            profile_id="measured_physical_test",
+            sha256="a" * 64,
+            environment="physical",
+            measurement_status="measured",
+        )
         adapter._write_status = PassiveRealViewpointNode._write_status.__get__(
             adapter,
             PassiveRealViewpointNode,
@@ -259,6 +265,8 @@ class PassiveViewpointTfRetryIntegrationTests(unittest.TestCase):
 
         self.assertEqual(status["schema_version"], 2)
         self.assertEqual(status["state"], "tf_pending_exact_time")
+        self.assertEqual(status["stand_model"]["mode"], "metric_model_only")
+        self.assertEqual(status["stand_model"]["profile_sha256"], "a" * 64)
         self.assertEqual(status["axis_consensus"]["sample_count"], 1)
         self.assertEqual(status["axis_consensus"]["required_sample_count"], 3)
         self.assertEqual(len(events), 2)

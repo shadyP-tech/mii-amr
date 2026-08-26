@@ -35,9 +35,6 @@ class StandAxisFacadeTest(unittest.TestCase):
             "estimate_stand_axis_from_corners": (
                 geometry.estimate_stand_axis_from_corners
             ),
-            "estimate_stand_axis_from_metric_model": (
-                model_pipeline.estimate_stand_axis_from_metric_model
-            ),
             "order_corners": geometry.order_corners,
             "quadrilateral_aspect_ratio": geometry.quadrilateral_aspect_ratio,
             "wide_row_band": geometry.wide_row_band,
@@ -113,7 +110,6 @@ class StandAxisFacadeTest(unittest.TestCase):
             "estimate_stand_axis_from_corners",
             "estimate_stand_axis_from_edges",
             "estimate_stand_axis_from_mask",
-            "estimate_stand_axis_from_metric_model",
             "order_corners",
             "quadrilateral_aspect_ratio",
             "wide_row_band",
@@ -125,6 +121,11 @@ class StandAxisFacadeTest(unittest.TestCase):
             if not hasattr(stand_axis_image, name)
         )
         self.assertEqual(missing, [])
+
+    def test_metric_model_is_not_exported_through_legacy_detector_facade(self):
+        self.assertFalse(
+            hasattr(stand_axis_image, "estimate_stand_axis_from_metric_model")
+        )
 
     def test_parallel_side_direction_is_keyword_only_with_legacy_default(self):
         parameter = inspect.signature(

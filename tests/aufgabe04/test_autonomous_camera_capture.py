@@ -6,6 +6,10 @@ import unittest
 from unittest.mock import patch
 
 from scripts.aufgabe04.artifacts.content_store import load_content_hashed_json
+from scripts.aufgabe04.perception.stand_axis.model_profile import (
+    stand_model_from_payload,
+    write_stand_model,
+)
 from scripts.aufgabe04.real_robot.autonomous_runner import runtime
 from scripts.aufgabe04.real_robot.candidate.observation_deferral import (
     CandidateObservationUnavailableError,
@@ -15,14 +19,41 @@ from scripts.aufgabe04.real_robot.observer.process import (
 )
 
 
-def _args() -> SimpleNamespace:
+def _write_measured_model(root: Path) -> Path:
+    path = root / "measured_physical_stand.json"
+    write_stand_model(
+        path,
+        stand_model_from_payload(
+            {
+                "schema_version": 1,
+                "profile_id": "physical_test_v1",
+                "environment": "physical",
+                "measurement_status": "measured",
+                "head_width_m": 0.078,
+                "head_height_m": 0.078,
+                "head_depth_m": 0.007,
+                "qr_symbol_width_m": 0.060,
+                "qr_symbol_height_m": 0.060,
+                "qr_center_x_m": 0.0,
+                "qr_center_y_m": 0.0,
+                "stem_width_m": 0.010,
+                "stem_visible_height_m": 0.080,
+                "tolerance_m": 0.001,
+                "source": "direct test metrology",
+            }
+        ),
+    )
+    return path
+
+
+def _args(model_path: Path) -> SimpleNamespace:
     return SimpleNamespace(
         robot_profile=Path("robot.json"),
         camera_calibration=Path("camera.json"),
         session_id="session_001",
         final_facing_offset_m=0.35,
         axis_sample_count=7,
-        stand_model_profile=None,
+        stand_model_profile=model_path,
         camera_timeout_sec=90.0,
     )
 
@@ -41,6 +72,30 @@ def _candidate() -> SimpleNamespace:
 
 class AutonomousCameraCaptureTests(unittest.TestCase):
     @patch.object(runtime.subprocess, "Popen")
+    def test_missing_model_fails_before_attempt_artifacts_or_process(
+        self,
+        popen,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "attempt"
+            args = _args(Path("unused-model.json"))
+            args.stand_model_profile = None
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "requires a measured physical stand model",
+            ):
+                runtime._capture_camera_recommendation(
+                    profile=object(),
+                    args=args,
+                    candidate=_candidate(),
+                    output_dir=output_dir,
+                )
+
+            self.assertFalse(output_dir.exists())
+            popen.assert_not_called()
+
+    @patch.object(runtime.subprocess, "Popen")
     @patch.object(runtime, "monitor_passive_observer_process")
     def test_reaped_candidate_local_deadline_becomes_typed_deferral(
         self,
@@ -48,7 +103,8 @@ class AutonomousCameraCaptureTests(unittest.TestCase):
         _popen,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            output_dir = Path(tmp) / "attempt"
+            root = Path(tmp)
+            output_dir = root / "attempt"
 
             def expire(**kwargs):
                 status_path = kwargs["recommendation_path"].parent / (
@@ -84,7 +140,7 @@ class AutonomousCameraCaptureTests(unittest.TestCase):
             with self.assertRaises(CandidateObservationUnavailableError) as caught:
                 runtime._capture_camera_recommendation(
                     profile=object(),
-                    args=_args(),
+                    args=_args(_write_measured_model(root)),
                     candidate=_candidate(),
                     output_dir=output_dir,
                     observation_attempt_index=1,
@@ -106,7 +162,8 @@ class AutonomousCameraCaptureTests(unittest.TestCase):
         popen,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            output_dir = Path(tmp) / "attempt"
+            root = Path(tmp)
+            output_dir = root / "attempt"
             axis_path = output_dir / "axis_observation.json"
 
             def complete_with_axis(**kwargs):
@@ -126,7 +183,7 @@ class AutonomousCameraCaptureTests(unittest.TestCase):
             monitor.side_effect = complete_with_axis
             result = runtime._capture_camera_recommendation(
                 profile=object(),
-                args=_args(),
+                args=_args(_write_measured_model(root)),
                 candidate=_candidate(),
                 output_dir=output_dir,
             )
@@ -139,6 +196,8 @@ class AutonomousCameraCaptureTests(unittest.TestCase):
         self.assertEqual(result, (None, None, axis_path))
         command = popen.call_args.args[0]
         self.assertIn("--status-events-jsonl", command)
+        self.assertIn("--stand-model-profile", command)
+        self.assertNotIn("--stand-face-size-m", command)
         self.assertEqual(
             command[command.index("--status-events-jsonl") + 1],
             str(output_dir / "observer_events.jsonl"),
@@ -154,7 +213,8 @@ class AutonomousCameraCaptureTests(unittest.TestCase):
         _popen,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            output_dir = Path(tmp) / "attempt"
+            root = Path(tmp)
+            output_dir = root / "attempt"
 
             def complete_with_recommendation(**kwargs):
                 recommendation_path = kwargs["recommendation_path"]
@@ -181,7 +241,7 @@ class AutonomousCameraCaptureTests(unittest.TestCase):
             monitor.side_effect = complete_with_recommendation
             result = runtime._capture_camera_recommendation(
                 profile=object(),
-                args=_args(),
+                args=_args(_write_measured_model(root)),
                 candidate=_candidate(),
                 output_dir=output_dir,
             )
@@ -199,7 +259,8 @@ class AutonomousCameraCaptureTests(unittest.TestCase):
         _popen,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            output_dir = Path(tmp) / "attempt"
+            root = Path(tmp)
+            output_dir = root / "attempt"
 
             def expire(**kwargs):
                 status_path = kwargs["recommendation_path"].parent / (
@@ -235,7 +296,7 @@ class AutonomousCameraCaptureTests(unittest.TestCase):
             with self.assertRaises(RuntimeError) as caught:
                 runtime._capture_camera_recommendation(
                     profile=object(),
-                    args=_args(),
+                    args=_args(_write_measured_model(root)),
                     candidate=_candidate(),
                     output_dir=output_dir,
                 )

@@ -12,13 +12,12 @@ loaded logistics mission or a two-robot run; see
 | --- | --- | --- |
 | `real_robot/entrypoints/capture_camera_calibration.py` | Capture live `CameraInfo` and the measured `base <- camera_optical` TF | None |
 | `real_robot/entrypoints/create_hardware_profile.py` | Seal topics, namespace, frames, site, calibration, footprint, and speed limits | None |
-| `perception/stand_axis_image.py` | Stable compatibility façade and estimator orchestration | None |
-| `perception/stand_axis/models.py` | Immutable estimator, point, support, and debug-artifact contracts | None |
-| `perception/stand_axis/preprocessing.py` | Color-agnostic raw Canny extraction and topology-only gap recovery | None |
-| `perception/stand_axis/stem_candidates.py` | Stem-anchored head localization and candidate construction | None |
-| `perception/stand_axis/raw_support.py` | Four-side raw-edge support, common-side direction, and trapezoid refit | None |
-| `perception/stand_axis/geometry.py` | Quadrilateral geometry, square-head pose estimation, and debug rendering | None |
-| `perception/stand_axis/real_camera_profile.py` | Validate and resolve the offline-candidate real-camera edge recipe | None |
+| `perception/stand_axis/model_profile.py` | Load content-hashed geometry and enforce the measured-physical operational contract | None |
+| `perception/stand_axis/model_pipeline.py` | Acquire/track the stand pose, project the model, and require current-frame rail refinement | None |
+| `perception/stand_axis/model_projection.py` | Project measured head, QR, depth, and stem landmarks into the rectified image | None |
+| `perception/stand_axis/model_refinement.py` | Validate current-frame Canny support inside narrow model-projected corridors | None |
+| `perception/stand_axis/pose_tracking.py` | Retain a short-lived, same-model/same-camera pose hint between frames | None |
+| `perception/stand_axis/real_camera_profile.py` | Validate and resolve the operational model-refinement edge recipe | None |
 | `navigation/runtime_localization_reseal.py` | Classify the exact global-consistency zero/reseal contract and enforce its retry budget | None |
 | `navigation/runtime_motion_authorization.py` | Bind the mission-level `RUN` to one exact, same-target runtime-localization recovery child and its fresh artifacts | None |
 | `navigation/runtime_motion_consumption.py` | Atomically consume that exact child permit once and reject replay before follower motion | None |
@@ -42,7 +41,7 @@ loaded logistics mission or a two-robot run; see
 | `real_robot/coverage_leg/execution.py` | Run the bounded per-leg coverage retry/reseal state machine behind injected ROS and child-process effects | None; delegates any authorized motion to the existing child runner |
 | `real_robot/mission/coverage.py` | Commit each completed coverage leg as one ordered observe/fuse/checkpoint transaction and gate candidate materialization | None; cannot execute a leg itself |
 | `real_robot/candidate/approach.py` | Order frozen candidates, orchestrate sealed pre-approach/opposite-face inspection, and publish validated identity/facing artifacts behind injected live effects | None; cannot sample ROS, prompt, launch a process, or publish motion itself |
-| `real_robot/observer/node.py` | Synchronize image, scan, and exact-time TF; rectify the image; validate LiDAR/QR/silhouette evidence | None |
+| `real_robot/observer/node.py` | Synchronize image, scan, and exact-time TF; rectify the image; validate measured-model, LiDAR, and QR evidence | None |
 | `real_robot/entrypoints/run_autonomous_stand_exploration.py` | Wire CLI/profile/operator authorization to the focused coverage, child-runner, and inspection modules | Dry-run by default; explicit physical gate |
 | `real_robot/passive_survey/prepare.py` | Produce immutable per-candidate observer and catalog-validation commands | None |
 | `real_robot/passive_survey/finalize.py` | Freeze a complete real arrival catalog and write a real `SurveyManifest` | None |
@@ -163,9 +162,14 @@ inflated map blocks that exact pose may it step inward in 0.05 m increments,
 never below the profile-derived physical minimum. It fails closed if the
 expected candidate count, stand axis,
 unique QR identity, clearance, or A* reachability cannot be established.
-If a directly measured, content-hashed stand model is available, add
-`--stand-model-profile <measured_stand_model.json>`; provisional CAD dimensions
-are rejected for operational pose commitment.
+Both `execute-exact-two-camera` and `execute-full` require
+`--stand-model-profile <measured_physical_stand_model.json>`. The profile must
+be content-hashed, declare `environment=physical`, and declare
+`measurement_status=measured`. Missing, provisional, or simulation geometry is
+rejected before the session directory, planning, typed `RUN`, or any coverage
+motion. The checked-in `physical_stand_assumptions_v1.json` is provisional and
+therefore cannot be used for an operational run; create a new profile from
+direct metrology instead of relabelling assumptions as measurements.
 
 The entrypoint is only the live-edge adapter. Coverage route reconstruction is
 isolated in `coverage_leg/replanning.py`; the bounded per-leg state
@@ -572,6 +576,7 @@ python3 scripts/aufgabe04/real_robot/entrypoints/run_autonomous_stand_exploratio
   --map maps/aufgabe03/arena_1p898x3p9_auto.yaml \
   --semantic-map-id arena_1p898x3p9_auto \
   --expected-stand-count 5 \
+  --stand-model-profile results/aufgabe04/real/profiles/<measured_physical_stand>.json \
   --run-mode execute-full \
   --localization-branch-proof-id <known_start_or_asymmetric_landmark_id> \
   --session-id stand_explore_full_001
@@ -594,6 +599,7 @@ identity registry from the successful sealed workflow:
 python3 scripts/aufgabe04/real_robot/entrypoints/prepare_passive_survey.py \
   --robot-profile results/aufgabe04/real/profiles/robot1_unloaded_20260727.json \
   --camera-calibration results/aufgabe04/real/profiles/robot1_camera_20260727.json \
+  --stand-model-profile results/aufgabe04/real/profiles/measured_physical_stand.json \
   --physical-site docs/setups/aufgabe04_lab_v1.json \
   --map maps/aufgabe03/<real_map>.yaml \
   --semantic-map-id <real_map_id> \
@@ -617,48 +623,46 @@ The command prints the immutable plan path. For each `candidate_runs` entry:
 The observer creates no ROS publisher. It rejects simulated time, stale or
 unsynchronized sensors, changed `CameraInfo`, changed camera extrinsics,
 non-stationary poses, missing exact-time TF, projected-target/LiDAR
-disagreement, weak silhouette consensus, and incorrect QR identity. A raw
+disagreement, weak model-refinement consensus, and incorrect QR identity. A raw
 compressed image is rectified into the sealed `CameraInfo.p` geometry before
 the projected ROI is evaluated.
 
-The real-camera stand-axis settings are an **offline candidate profile**, not a
-hardware-validated detector profile. Its default preprocessing is
+The real-camera stand-axis settings control **model-refinement edge evidence**,
+not a free-form silhouette detector. The default preprocessing is
 `--edge-preprocess channel-union`, which preserves color-channel boundaries
 that can disappear in grayscale. `--edge-preprocess gray` remains available
-for a controlled comparison, and the existing `--canny-low`/`--canny-high`
-overrides remain bounded to `0 <= low < high <= 255`. The projected head size
-resolves the minimum contour area, minimum side height, and conservative
-odd-valued close kernel; the current broad square-face aspect gate remains
-`0.45..1.80`.
+for a controlled comparison, and `--canny-low`/`--canny-high` remain bounded
+to `0 <= low < high <= 255`. Those edges can support only narrow corridors
+projected from the measured stand model; they cannot propose an unrelated
+stand shape.
 
-At each image timestamp, the exact `camera_optical <- map` TF transforms the
-known world-vertical top and bottom of the stand head. Live `CameraInfo.p`
-projects that 3D line into the rectified image, including camera roll, and the
-resulting direction is passed into the same silhouette estimator used by the
-existing façade. There is no additional temporal smoother: only the current
-raw usable estimate may enter `AxisConsensusAccumulator`.
+At each image timestamp, the exact `camera_optical <- map` TF and live
+`CameraInfo.p` project a conservative target ROI from the mapped stand center.
+Inside that ROI, QR geometry or a short-lived same-profile pose hint seeds the
+measured model projection. A frame contributes to consensus only when the
+projected head rails are supported and re-fitted by the current frame. The
+operational observer never calls the historical free-form silhouette detector
+and never commits a predicted-only model pose.
 
 When `perception_debug/` is enabled, the observer refreshes:
 
 - `latest_frame.png` and `latest_head_roi.png`
-- `latest_edges.png` (topology edges)
-- `latest_raw_edges.png` (untouched measurement edges, when available)
-- `latest_side_evidence.png` (selected raw side support, when available)
+- `latest_edges.png` and `latest_raw_edges.png` (current-frame model-refinement edges)
+- `latest_side_evidence.png` (current-frame support inside projected corridors)
 - `latest_rectangle_mask.png` and `latest_rectangle_overlay.png` (when
   available)
-- `latest_metadata.json` with the resolved profile, projected side direction,
-  estimator status, and the exact artifact list
+- `latest_metadata.json` with `estimator_mode=metric_model_only`, measured-model
+  ID/hash/status, refinement state, estimator status, and the exact artifact list
 
 Unavailable optional images are removed instead of leaving stale
 `latest_*.png` evidence from an older frame.
 
-Before describing this profile as real-camera validated, collect representative
-hardware captures across stand colors, QR texture, lighting, distance, camera
-pitch/roll, and background clutter. Compare the default and grayscale modes on
-those frozen captures, record false positives and unavailable estimates, and
-measure rectification plus estimator latency and dropped/stale-frame behavior
-at the intended onboard processing rate. Those capture and latency results are
-required evidence; passing the offline tests below is not a hardware claim.
+Before describing a measured profile as real-camera validated, collect
+representative hardware captures across stand colors, QR texture, lighting,
+distance, camera pitch/roll, and background clutter. Record model acquisition,
+current-frame refinement, ambiguity, false positives, unavailable estimates,
+and per-stage latency at the intended processing rate. Passing offline tests
+alone is not a hardware claim.
 
 After all expected candidates are resolved, run the plan's
 `finalize_command`. Finalization refuses incomplete catalogs or provenance that

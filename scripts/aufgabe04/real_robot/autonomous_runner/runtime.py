@@ -101,7 +101,7 @@ from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization 
     write_startup_reseal_motion_authorization,
 )
 from scripts.aufgabe04.perception.stand_axis.model_profile import (
-    load_stand_model,
+    load_measured_physical_stand_model,
 )
 from scripts.aufgabe04.real_robot.configuration.profile import (
     camera_calibration_sha256,
@@ -1200,6 +1200,11 @@ def _capture_camera_recommendation(
     output_dir: Path,
     observation_attempt_index: int = 0,
 ) -> tuple[Path | None, str | None, Path | None]:
+    if args.stand_model_profile is None:
+        raise RuntimeError(
+            "camera exploration requires a measured physical stand model"
+        )
+    load_measured_physical_stand_model(args.stand_model_profile)
     output_dir.mkdir(parents=True, exist_ok=False)
     status_path = output_dir / "observer_status.json"
     status_events_path = output_dir / "observer_events.jsonl"
@@ -1243,16 +1248,12 @@ def _capture_camera_recommendation(
         str(output_dir / "perception_debug"),
         "--once",
     ]
-    if args.stand_model_profile is not None:
-        stand_model = load_stand_model(args.stand_model_profile)
-        command.extend(
-            [
-                "--stand-model-profile",
-                str(args.stand_model_profile),
-                "--stand-face-size-m",
-                str(stand_model.head_width_m),
-            ]
-        )
+    command.extend(
+        [
+            "--stand-model-profile",
+            str(args.stand_model_profile),
+        ]
+    )
     process = subprocess.Popen(command)
     process_evidence = monitor_passive_observer_process(
         process=process,
@@ -1599,13 +1600,9 @@ def _validate_inputs(parser, args, profile, calibration) -> None:
         parser.error("autonomous real exploration requires AMCL localization")
     if args.stand_model_profile is not None:
         try:
-            stand_model = load_stand_model(args.stand_model_profile)
+            load_measured_physical_stand_model(args.stand_model_profile)
         except (OSError, ValueError) as exc:
             parser.error(f"invalid stand model profile: {exc}")
-        if not stand_model.committable:
-            parser.error(
-                "--stand-model-profile must have measurement_status=measured"
-            )
 
 
 def main(argv=None) -> int:
@@ -1631,6 +1628,14 @@ def main(argv=None) -> int:
         )
     except ValueError as exc:
         parser.error(str(exc))
+    if (
+        resolved_run_mode.camera_phase_enabled
+        and args.stand_model_profile is None
+    ):
+        parser.error(
+            f"--run-mode {resolved_run_mode.mode.value} requires "
+            "--stand-model-profile with measured physical geometry"
+        )
     resume_mode = (
         resolved_run_mode.mode
         is AutonomousRunMode.RESUME_NEXT_COVERAGE_LEG
@@ -2477,12 +2482,17 @@ def main(argv=None) -> int:
                 ),
             ),
         )
+        completed_stand_model = load_measured_physical_stand_model(
+            args.stand_model_profile
+        )
         result = _completed_camera_mission_summary(
             run_mode=args.run_mode,
             session_id=args.session_id,
             snapshot_path=snapshot_path,
             snapshot_sha256=snapshot_sha256,
             survey_root=survey_root,
+            stand_model_profile=args.stand_model_profile,
+            stand_model_profile_sha256=completed_stand_model.sha256,
             candidate_population_admission_path=(
                 coverage_candidate_admission_path
             ),

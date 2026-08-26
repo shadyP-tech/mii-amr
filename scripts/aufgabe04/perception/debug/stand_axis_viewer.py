@@ -81,6 +81,8 @@ from scripts.aufgabe04.perception.stand_axis_image import (
     StandAxisImageEstimate,
     estimate_stand_axis_from_edges,
     estimate_stand_axis_from_mask,
+)
+from scripts.aufgabe04.perception.stand_axis.model_pipeline import (
     estimate_stand_axis_from_metric_model,
 )
 from scripts.aufgabe04.perception.stand_axis.model_profile import (

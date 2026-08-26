@@ -17,42 +17,21 @@ class ResolvedRealCameraStandAxisProfile:
     canny_low: int
     canny_high: int
     expected_head_size_px: float
-    min_area_px: float
     min_edge_height_px: float
-    close_kernel: int
-    min_aspect_ratio: float
-    max_aspect_ratio: float
-
-    def estimator_kwargs(self) -> dict[str, object]:
-        """Return only the profile-owned façade estimator arguments."""
-
-        return {
-            "edge_preprocess": self.edge_preprocess,
-            "canny_low": self.canny_low,
-            "canny_high": self.canny_high,
-            "min_area_px": self.min_area_px,
-            "min_edge_height_px": self.min_edge_height_px,
-            "close_kernel": self.close_kernel,
-            "min_aspect_ratio": self.min_aspect_ratio,
-            "max_aspect_ratio": self.max_aspect_ratio,
-        }
 
 
 @dataclass(frozen=True)
 class RealCameraStandAxisProfile:
     """Validated offline-candidate settings for rectified real-camera crops.
 
-    The profile deliberately exposes only the preprocessing choice and the
-    bounded Canny pair as runtime choices. Geometry gates remain one fixed
-    recipe and are resolved from the projected head size so a CLI cannot
-    silently create a different detector.
+    The measured model owns geometry. This profile exposes only the
+    preprocessing choice and bounded Canny pair, plus a scale-derived minimum
+    rail height for current-frame model refinement.
     """
 
     edge_preprocess: str = "channel_union"
     canny_low: int = 20
     canny_high: int = 60
-    min_aspect_ratio: float = 0.45
-    max_aspect_ratio: float = 1.80
 
     def __post_init__(self) -> None:
         if self.edge_preprocess not in _EDGE_PREPROCESS_MODES:
@@ -68,16 +47,6 @@ class RealCameraStandAxisProfile:
             raise ValueError(
                 "Canny thresholds must be integers satisfying "
                 "0 <= low < high <= 255"
-            )
-        aspect_values = (self.min_aspect_ratio, self.max_aspect_ratio)
-        if not all(math.isfinite(value) for value in aspect_values):
-            raise ValueError("aspect-ratio gates must be finite")
-        if not (
-            0.0 < self.min_aspect_ratio <= 1.0 <= self.max_aspect_ratio
-            and self.min_aspect_ratio < self.max_aspect_ratio
-        ):
-            raise ValueError(
-                "aspect-ratio gates must straddle one and be strictly ordered"
             )
 
     @classmethod
@@ -106,17 +75,11 @@ class RealCameraStandAxisProfile:
         if not math.isfinite(expected) or expected <= 0.0:
             raise ValueError("expected_head_size_px must be finite and positive")
 
-        min_area_px = max(40.0, 0.10 * expected**2)
         min_edge_height_px = max(5.0, min(14.0, 0.18 * expected))
-        close_kernel = min(7, max(3, int(round(0.05 * expected)) | 1))
         return ResolvedRealCameraStandAxisProfile(
             edge_preprocess=self.edge_preprocess,
             canny_low=self.canny_low,
             canny_high=self.canny_high,
             expected_head_size_px=expected,
-            min_area_px=min_area_px,
             min_edge_height_px=min_edge_height_px,
-            close_kernel=close_kernel,
-            min_aspect_ratio=self.min_aspect_ratio,
-            max_aspect_ratio=self.max_aspect_ratio,
         )

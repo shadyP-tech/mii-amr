@@ -71,6 +71,10 @@ from scripts.aufgabe04.navigation.coverage.transient_overlay_resume_state import
     TransientOverlayResumeState,
 )
 from scripts.aufgabe04.navigation.planning.waypoint_csv import load_route_leg
+from scripts.aufgabe04.perception.stand_axis.model_profile import (
+    stand_model_from_payload,
+    write_stand_model,
+)
 from scripts.aufgabe04.real_robot.coverage_leg import (
     replanning as autonomous_coverage_replanning,
 )
@@ -287,6 +291,8 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             snapshot_path=Path("session/candidate_snapshot.json"),
             snapshot_sha256="a" * 64,
             survey_root=Path("session/coverage"),
+            stand_model_profile=Path("profiles/measured_stand.json"),
+            stand_model_profile_sha256="9" * 64,
             candidate_population_admission_path=Path(
                 "session/coverage_exact_two_camera_admission.json"
             ),
@@ -347,6 +353,8 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         self.assertTrue(summary["camera_validation_complete"])
         self.assertTrue(summary["camera_exploration_complete"])
         self.assertTrue(summary["exploration_complete"])
+        self.assertEqual(summary["camera_estimator_mode"], "metric_model_only")
+        self.assertEqual(summary["stand_model_profile_sha256"], "9" * 64)
         self.assertEqual(summary["camera_seed_candidate_count"], 5)
         self.assertEqual(summary["active_lidar_registry_candidate_count"], 6)
         self.assertEqual(
@@ -379,10 +387,40 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         map_sha256 = "a" * 64
         fixture_paths = {
             name: root / name
-            for name in ("robot.json", "camera.json", "site.json", "map.yaml")
+            for name in (
+                "robot.json",
+                "camera.json",
+                "site.json",
+                "map.yaml",
+                "stand_model.json",
+            )
         }
-        for path in fixture_paths.values():
+        for name, path in fixture_paths.items():
+            if name == "stand_model.json":
+                continue
             path.write_text("{}\n", encoding="utf-8")
+        write_stand_model(
+            fixture_paths["stand_model.json"],
+            stand_model_from_payload(
+                {
+                    "schema_version": 1,
+                    "profile_id": "physical_test_v1",
+                    "environment": "physical",
+                    "measurement_status": "measured",
+                    "head_width_m": 0.078,
+                    "head_height_m": 0.078,
+                    "head_depth_m": 0.007,
+                    "qr_symbol_width_m": 0.060,
+                    "qr_symbol_height_m": 0.060,
+                    "qr_center_x_m": 0.0,
+                    "qr_center_y_m": 0.0,
+                    "stem_width_m": 0.010,
+                    "stem_visible_height_m": 0.080,
+                    "tolerance_m": 0.001,
+                    "source": "direct test metrology",
+                }
+            ),
+        )
 
         def candidate(uid: str, x_m: float) -> FrozenCandidate:
             return FrozenCandidate(
@@ -641,6 +679,8 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                         str(fixture_paths["robot.json"]),
                         "--camera-calibration",
                         str(fixture_paths["camera.json"]),
+                        "--stand-model-profile",
+                        str(fixture_paths["stand_model.json"]),
                         "--physical-site",
                         str(fixture_paths["site.json"]),
                         "--map",
@@ -795,6 +835,8 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 snapshot_path=Path("session/candidate_snapshot.json"),
                 snapshot_sha256="a" * 64,
                 survey_root=Path("session/coverage"),
+                stand_model_profile=Path("profiles/measured_stand.json"),
+                stand_model_profile_sha256="9" * 64,
                 candidate_population_admission_path=Path(
                     "session/camera_admission.json"
                 ),
@@ -1556,6 +1598,47 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         self.assertTrue(resolved.execute)
         self.assertFalse(resolved.stop_after_coverage)
 
+    def test_camera_modes_require_stand_model_before_loading_runtime_artifacts(self):
+        cases = (
+            (
+                "execute-exact-two-camera",
+                ["--exact-inspection-point-count", "2"],
+            ),
+            ("execute-full", []),
+        )
+        for run_mode, mode_args in cases:
+            with (
+                self.subTest(run_mode=run_mode),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                root = Path(tmp)
+                output_root = root / "runs"
+                with (
+                    patch.object(
+                        autonomous_wrapper,
+                        "load_real_robot_profile",
+                    ) as load_profile,
+                    patch("builtins.input") as run_prompt,
+                    redirect_stderr(StringIO()),
+                    self.assertRaises(SystemExit) as raised,
+                ):
+                    autonomous_wrapper.main(
+                        [
+                            "--robot-profile", str(root / "robot.json"),
+                            "--camera-calibration", str(root / "camera.json"),
+                            "--physical-site", str(root / "site.json"),
+                            "--output-root", str(output_root),
+                            "--session-id", f"model_required_{run_mode}",
+                            "--run-mode", run_mode,
+                            *mode_args,
+                        ]
+                    )
+
+                self.assertEqual(raised.exception.code, 2)
+                load_profile.assert_not_called()
+                run_prompt.assert_not_called()
+                self.assertFalse(output_root.exists())
+
     def test_site_count_mismatch_fails_before_session_and_run_prompt(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1589,6 +1672,8 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                         str(root / "robot.json"),
                         "--camera-calibration",
                         str(root / "camera.json"),
+                        "--stand-model-profile",
+                        str(root / "stand_model.json"),
                         "--physical-site",
                         str(root / "site.json"),
                         "--output-root",

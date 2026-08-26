@@ -40,7 +40,8 @@ def build_real_viewpoint_recommendation(
     """Create one committed, robot-facing real arrival recommendation.
 
     A hard QR match binds the currently visible physical face.  Without that
-    match the 180-degree silhouette ambiguity is intentionally not committed.
+    match the 180-degree planar head-axis ambiguity is intentionally not
+    committed.
     """
 
     if expected_qr_id not in observed_qr_ids:

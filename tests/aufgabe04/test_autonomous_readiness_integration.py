@@ -38,6 +38,8 @@ class AutonomousReadinessIntegrationTest(unittest.TestCase):
             str(root / "robot.json"),
             "--camera-calibration",
             str(root / "camera.json"),
+            "--stand-model-profile",
+            str(root / "stand_model.json"),
             "--physical-site",
             str(root / "site.json"),
             "--map",

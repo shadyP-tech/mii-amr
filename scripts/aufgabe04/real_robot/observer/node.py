@@ -2,10 +2,11 @@
 """Passive real-robot camera/LiDAR viewpoint observer.
 
 This node never creates a publisher and never commands motion.  It requires a
-sealed real-robot profile, measured camera calibration, live ``CameraInfo``,
-compressed onboard images, a synchronized LaserScan, and exact-time TF.  Once
-stationary silhouette and QR evidence reach consensus it writes the same
-environment-tagged recommendation contract used by the shared survey planner.
+sealed real-robot profile, measured camera calibration, a measured physical
+stand model, live ``CameraInfo``, compressed onboard images, a synchronized
+LaserScan, and exact-time TF.  Once current-frame model refinement, QR, and
+LiDAR evidence reach consensus it writes the same environment-tagged
+recommendation contract used by the shared survey planner.
 """
 
 from __future__ import annotations
@@ -47,14 +48,13 @@ from scripts.aufgabe04.perception.stand_axis.real_camera_profile import (
     RealCameraStandAxisProfile,
 )
 from scripts.aufgabe04.perception.stand_axis.model_profile import (
-    load_stand_model,
+    load_measured_physical_stand_model,
+)
+from scripts.aufgabe04.perception.stand_axis.model_pipeline import (
+    estimate_stand_axis_from_metric_model,
 )
 from scripts.aufgabe04.perception.stand_axis.pose_tracking import (
     MetricPoseTracker,
-)
-from scripts.aufgabe04.perception.stand_axis_image import (
-    estimate_stand_axis_from_edges,
-    estimate_stand_axis_from_metric_model,
 )
 from scripts.aufgabe04.perception.stand_axis_lidar_roi import PlainLaserScan
 from scripts.aufgabe04.perception.stand_axis_handoff import (
@@ -67,7 +67,6 @@ from scripts.aufgabe04.real_robot.configuration.geometry import (
     optical_heading_from_transform,
     pose2d_from_transform,
     project_optical_point,
-    project_rectified_image_direction,
     roi_from_projection,
     transform_point,
 )
@@ -266,23 +265,10 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self.Time = Time
         self.TransformException = TransformException
         self.stand_axis_profile = _stand_axis_profile_from_args(args)
-        self.stand_model_profile = (
-            None
-            if args.stand_model_profile is None
-            else load_stand_model(args.stand_model_profile)
+        self.stand_model_profile = load_measured_physical_stand_model(
+            args.stand_model_profile
         )
-        if (
-            self.stand_model_profile is not None
-            and not self.stand_model_profile.committable
-        ):
-            raise ValueError(
-                "passive observation requires a measured stand model profile"
-            )
-        self.model_pose_tracker = (
-            None
-            if self.stand_model_profile is None
-            else MetricPoseTracker(prediction_ttl_sec=0.25)
-        )
+        self.model_pose_tracker = MetricPoseTracker(prediction_ttl_sec=0.25)
         self.profile = load_real_robot_profile(args.robot_profile)
         self.calibration = load_camera_calibration(args.camera_calibration)
         if camera_calibration_sha256(self.calibration) != (
@@ -744,8 +730,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 stamp_sec=image.stamp_sec,
                 pose=robot_pose,
             )
-            if self.model_pose_tracker is not None:
-                self.model_pose_tracker.reset()
+            self.model_pose_tracker.reset()
             self.last_pose = robot_pose
             self._write_status(
                 "robot_not_stationary",
@@ -755,7 +740,6 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self.last_pose = robot_pose
         intrinsics = intrinsics_from_camera_info(camera_info.value)
         camera_translation, camera_rotation = _transform_values(camera_from_map)
-        head_half_height_m = 0.5 * self.args.stand_face_size_m
         try:
             camera_point = transform_point(
                 (
@@ -766,51 +750,40 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 translation_xyz=camera_translation,
                 rotation_xyzw=camera_rotation,
             )
-            camera_top_point = transform_point(
-                (
-                    self.args.stand_x,
-                    self.args.stand_y,
-                    self.args.stand_head_center_height_m + head_half_height_m,
-                ),
-                translation_xyz=camera_translation,
-                rotation_xyzw=camera_rotation,
-            )
-            camera_bottom_point = transform_point(
-                (
-                    self.args.stand_x,
-                    self.args.stand_y,
-                    self.args.stand_head_center_height_m - head_half_height_m,
-                ),
-                translation_xyz=camera_translation,
-                rotation_xyzw=camera_rotation,
-            )
-            parallel_side_direction = project_rectified_image_direction(
-                camera_top_point,
-                camera_bottom_point,
-                intrinsics,
-            )
         except ValueError as exc:
             self._note_observation_soft_miss(
-                "world_vertical_projection_failed",
+                "stand_head_projection_failed",
                 stamp_sec=image.stamp_sec,
                 pose=robot_pose,
             )
             self._write_status(
-                "world_vertical_projection_failed",
+                "stand_head_projection_failed",
                 reason=str(exc),
             )
             return
         projection = project_optical_point(
             camera_point,
             intrinsics,
-            physical_size_m=self.args.stand_face_size_m,
+            physical_size_m=max(
+                self.stand_model_profile.head_width_m,
+                self.stand_model_profile.head_height_m,
+            ),
+        )
+        expected_head_height_px = (
+            0.0
+            if projection.depth_m <= 0.0
+            else (
+                intrinsics.fy_px
+                * self.stand_model_profile.head_height_m
+                / projection.depth_m
+            )
         )
         roi = roi_from_projection(
             projection,
             intrinsics,
             padding_scale=self.args.head_roi_padding_scale,
         )
-        if roi is None or projection.expected_size_px < self.args.min_head_size_px:
+        if roi is None or expected_head_height_px < self.args.min_head_size_px:
             self._note_observation_soft_miss(
                 "target_outside_camera_gate",
                 stamp_sec=image.stamp_sec,
@@ -819,10 +792,11 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             self._write_status(
                 "target_outside_camera_gate",
                 projection=asdict(projection),
+                expected_head_height_px=expected_head_height_px,
             )
             return
         resolved_stand_axis_profile = self.stand_axis_profile.resolve(
-            projection.expected_size_px
+            expected_head_height_px
         )
         scan_translation, scan_rotation = _transform_values(scan_from_map)
         scan_point = transform_point(
@@ -893,90 +867,61 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             self._write_status("image_rectification_failed", reason=str(exc))
             return
         roi_frame = frame[roi.y0 : roi.y1, roi.x0 : roi.x1]
-        fallback_estimate, fallback_debug = estimate_stand_axis_from_edges(
+        camera_signature = (
+            intrinsics.fx_px,
+            intrinsics.fy_px,
+            intrinsics.cx_px - roi.x0,
+            intrinsics.cy_px - roi.y0,
+        )
+        prediction = self.model_pose_tracker.prediction(
+            now_sec=image.stamp_sec,
+            profile_sha256=self.stand_model_profile.sha256,
+            camera_signature=camera_signature,
+        )
+        estimate, debug = estimate_stand_axis_from_metric_model(
             self.cv2,
             roi_frame,
-            edge_preprocess=resolved_stand_axis_profile.edge_preprocess,
-            canny_low=resolved_stand_axis_profile.canny_low,
-            canny_high=resolved_stand_axis_profile.canny_high,
-            silhouette_only=True,
-            parallel_side_direction=parallel_side_direction,
-            min_area_px=resolved_stand_axis_profile.min_area_px,
-            min_face_area_fraction=0.0,
-            min_edge_height_px=resolved_stand_axis_profile.min_edge_height_px,
-            close_kernel=resolved_stand_axis_profile.close_kernel,
-            min_aspect_ratio=resolved_stand_axis_profile.min_aspect_ratio,
-            max_aspect_ratio=resolved_stand_axis_profile.max_aspect_ratio,
-            stand_width_m=self.args.stand_face_size_m,
-            stand_distance_m=projection.depth_m,
+            model_profile=self.stand_model_profile,
             camera_fx_px=intrinsics.fx_px,
             camera_fy_px=intrinsics.fy_px,
             camera_cx_px=intrinsics.cx_px - roi.x0,
             camera_cy_px=intrinsics.cy_px - roi.y0,
+            pose_hint=prediction.pose,
+            edge_preprocess=resolved_stand_axis_profile.edge_preprocess,
+            canny_low=resolved_stand_axis_profile.canny_low,
+            canny_high=resolved_stand_axis_profile.canny_high,
+            min_edge_height_px=resolved_stand_axis_profile.min_edge_height_px,
         )
-        estimate, debug = fallback_estimate, fallback_debug
-        model_metadata = None
-        if self.stand_model_profile is not None:
-            camera_signature = (
-                intrinsics.fx_px,
-                intrinsics.fy_px,
-                intrinsics.cx_px - roi.x0,
-                intrinsics.cy_px - roi.y0,
+        if (
+            debug.model_pose is not None
+            and (
+                estimate.evidence_state == "fresh_refined"
+                or debug.qr_detected
             )
-            prediction = self.model_pose_tracker.prediction(
+        ):
+            self.model_pose_tracker.accept(
+                debug.model_pose,
                 now_sec=image.stamp_sec,
                 profile_sha256=self.stand_model_profile.sha256,
                 camera_signature=camera_signature,
             )
-            model_estimate, model_debug = estimate_stand_axis_from_metric_model(
-                self.cv2,
-                roi_frame,
-                model_profile=self.stand_model_profile,
-                camera_fx_px=intrinsics.fx_px,
-                camera_fy_px=intrinsics.fy_px,
-                camera_cx_px=intrinsics.cx_px - roi.x0,
-                camera_cy_px=intrinsics.cy_px - roi.y0,
-                pose_hint=prediction.pose,
-                edge_preprocess=resolved_stand_axis_profile.edge_preprocess,
-                canny_low=resolved_stand_axis_profile.canny_low,
-                canny_high=resolved_stand_axis_profile.canny_high,
-                min_edge_height_px=resolved_stand_axis_profile.min_edge_height_px,
-            )
-            if (
-                model_debug.model_pose is not None
-                and (
-                    model_estimate.evidence_state == "fresh_refined"
-                    or model_debug.qr_detected
-                )
-            ):
-                self.model_pose_tracker.accept(
-                    model_debug.model_pose,
-                    now_sec=image.stamp_sec,
-                    profile_sha256=self.stand_model_profile.sha256,
-                    camera_signature=camera_signature,
-                )
-            if (
-                model_estimate.usable
-                or model_estimate.evidence_state
-                in ("predicted_only", "ambiguous")
-            ):
-                estimate, debug = model_estimate, model_debug
-            model_metadata = {
-                "profile_id": self.stand_model_profile.profile_id,
-                "profile_sha256": self.stand_model_profile.sha256,
-                "measurement_status": self.stand_model_profile.measurement_status,
-                "evidence_state": model_estimate.evidence_state,
-                "qr_detected": model_debug.qr_detected,
-                "pose_reprojection_rmse_px": (
-                    model_estimate.pose_reprojection_rmse_px
-                ),
-                "pose_ambiguity_gap_px": model_estimate.pose_ambiguity_gap_px,
-                "refinement_support_mean": model_debug.refinement_support_mean,
-            }
+        model_metadata = {
+            "mode": "metric_model_only",
+            "profile_id": self.stand_model_profile.profile_id,
+            "profile_sha256": self.stand_model_profile.sha256,
+            "environment": self.stand_model_profile.environment,
+            "measurement_status": self.stand_model_profile.measurement_status,
+            "evidence_state": estimate.evidence_state,
+            "qr_detected": debug.qr_detected,
+            "pose_reprojection_rmse_px": (
+                estimate.pose_reprojection_rmse_px
+            ),
+            "pose_ambiguity_gap_px": estimate.pose_ambiguity_gap_px,
+            "refinement_support_mean": debug.refinement_support_mean,
+        }
         axis_metadata = {
             "profile": asdict(resolved_stand_axis_profile),
-            "parallel_side_direction": list(parallel_side_direction),
-            "direction_source": "observer_rectified_tf_camera_info",
+            "estimator_mode": "metric_model_only",
             "estimator_usable": estimate.usable,
             "estimator_reason": estimate.reason,
             "estimator_source": estimate.source,
@@ -988,11 +933,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         qr_texts = tuple(
             sorted(set(detect_qr_texts_bgr(roi_frame, self.cv2)))
         )
-        if (
-            self.stand_model_profile is not None
-            and estimate.model_profile_sha256
-            != self.stand_model_profile.sha256
-        ):
+        if estimate.model_profile_sha256 != self.stand_model_profile.sha256:
             self._reset_observation_evidence()
             self._write_debug(
                 frame,
@@ -1040,7 +981,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 metadata=axis_metadata,
             )
             self._write_status(
-                "silhouette_unavailable",
+                "metric_model_measurement_unavailable",
                 estimator_reason=estimate.reason,
                 estimator_source=estimate.source,
                 qr_texts=list(qr_texts),
@@ -1049,7 +990,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             )
             return
         scale_gate = _head_scale_gate(
-            expected_size_px=projection.expected_size_px,
+            expected_size_px=expected_head_height_px,
             left_height_px=estimate.left_height_px,
             right_height_px=estimate.right_height_px,
         )
@@ -1374,7 +1315,6 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 written.append(filename)
             else:
                 artifact_path.unlink(missing_ok=True)
-        structure = debug.structure_evidence
         _atomic_json(
             self.args.debug_dir / "latest_metadata.json",
             {
@@ -1382,14 +1322,12 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 "observed_unix_sec": time.time(),
                 "artifacts": written,
                 "stand_axis": metadata,
-                "structure_evidence_reason": (
-                    structure.reason if structure is not None else None
-                ),
             },
         )
 
     def _write_status(self, state: str, **details) -> None:
         observation_evidence = getattr(self, "observation_evidence", None)
+        stand_model = getattr(self, "stand_model_profile", None)
         if observation_evidence is not None:
             evidence_snapshot = observation_evidence.snapshot()
             consensus_status = {
@@ -1407,13 +1345,17 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             }
             observation_status = evidence_snapshot.as_dict()
         else:
-            legacy_consensus = getattr(self, "consensus", None)
-            legacy_sample_count = getattr(legacy_consensus, "sample_count", 0)
+            compatibility_consensus = getattr(self, "consensus", None)
+            compatibility_sample_count = getattr(
+                compatibility_consensus,
+                "sample_count",
+                0,
+            )
             consensus_status = {
-                "sample_count": legacy_sample_count,
-                "peak_sample_count": legacy_sample_count,
+                "sample_count": compatibility_sample_count,
+                "peak_sample_count": compatibility_sample_count,
                 "required_sample_count": getattr(
-                    legacy_consensus,
+                    compatibility_consensus,
                     "required_samples",
                     getattr(self.args, "consensus_frames", 0),
                 ),
@@ -1426,6 +1368,17 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             "motion_capability": "none",
             "observed_unix_sec": time.time(),
             "stand_axis_profile": asdict(self.stand_axis_profile),
+            "stand_model": (
+                None
+                if stand_model is None
+                else {
+                    "mode": "metric_model_only",
+                    "profile_id": stand_model.profile_id,
+                    "profile_sha256": stand_model.sha256,
+                    "environment": stand_model.environment,
+                    "measurement_status": stand_model.measurement_status,
+                }
+            ),
             "axis_consensus": consensus_status,
             "observation_evidence": observation_status,
             "tf_retry": asdict(self.tf_retry_scheduler.evidence),
@@ -1462,14 +1415,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stand-y", required=True, type=float)
     parser.add_argument("--stand-radius-m", type=float, default=0.06)
     parser.add_argument("--stand-uncertainty-m", type=float, default=0.02)
-    parser.add_argument("--stand-face-size-m", type=float, default=0.078)
     parser.add_argument(
         "--stand-model-profile",
+        required=True,
         type=Path,
-        default=None,
         help=(
-            "Optional content-hashed measured stand model. Provisional models "
-            "are rejected by this operational observer."
+            "Content-hashed measured physical stand model. The operational "
+            "observer has no legacy image-detector fallback."
         ),
     )
     parser.add_argument("--stand-head-center-height-m", type=float, default=0.165)
@@ -1535,7 +1487,6 @@ def build_parser() -> argparse.ArgumentParser:
 def _validate_args(parser: argparse.ArgumentParser, args) -> None:
     positive = {
         "--stand-radius-m": args.stand_radius_m,
-        "--stand-face-size-m": args.stand_face_size_m,
         "--stand-head-center-height-m": args.stand_head_center_height_m,
         "--target-distance-m": args.target_distance_m,
         "--head-roi-padding-scale": args.head_roi_padding_scale,
@@ -1576,22 +1527,10 @@ def _validate_args(parser: argparse.ArgumentParser, args) -> None:
         _stand_axis_profile_from_args(args)
     except ValueError as exc:
         parser.error(str(exc))
-    if args.stand_model_profile is not None:
-        try:
-            stand_model = load_stand_model(args.stand_model_profile)
-        except ValueError as exc:
-            parser.error(f"invalid stand model profile: {exc}")
-        if not stand_model.committable:
-            parser.error(
-                "--stand-model-profile must have measurement_status=measured"
-            )
-        if (
-            abs(args.stand_face_size_m - stand_model.head_width_m)
-            > max(stand_model.tolerance_m, 1.0e-6)
-        ):
-            parser.error(
-                "--stand-face-size-m disagrees with the stand model profile"
-            )
+    try:
+        load_measured_physical_stand_model(args.stand_model_profile)
+    except (OSError, ValueError) as exc:
+        parser.error(f"invalid stand model profile: {exc}")
     if args.status_json.resolve() == args.recommended_pose_json.resolve():
         parser.error("status and recommendation outputs must be distinct")
     output_paths = [args.status_json.resolve(), args.recommended_pose_json.resolve()]

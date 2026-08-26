@@ -86,7 +86,9 @@ be resumed as a motion checkpoint.
 Use the separate `execute-exact-two-camera` mode when the intended workflow is
 two LiDAR stops followed by camera validation of all expected candidates. It
 requires exactly two inspection points and exactly the physical-site stand
-count. It writes a content-hashed handoff that binds the terminal coverage
+count, plus a content-hashed stand model with `environment=physical` and
+`measurement_status=measured`. Missing or provisional geometry fails before
+coverage motion. It writes a content-hashed handoff that binds the terminal coverage
 checkpoint, LiDAR admission, live registry, and frozen candidate snapshot.
 Multi-view `pending_camera` candidates and eligible single-view `provisional`
 candidates remain distinct in that evidence; a provisional candidate can be

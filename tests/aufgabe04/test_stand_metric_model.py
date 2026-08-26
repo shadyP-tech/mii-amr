@@ -16,12 +16,16 @@ except ImportError:  # pragma: no cover
 from scripts.aufgabe04.perception.stand_axis.model_profile import (
     ModelPoint3D,
     StandModelProfile,
+    load_measured_physical_stand_model,
     load_stand_model,
     stand_model_from_payload,
     write_stand_model,
 )
 from scripts.aufgabe04.perception.stand_axis.model_projection import (
     project_stand_model,
+)
+from scripts.aufgabe04.perception.stand_axis.model_pipeline import (
+    estimate_stand_axis_from_metric_model,
 )
 from scripts.aufgabe04.perception.stand_axis.model_refinement import (
     model_corridor_half_width_px,
@@ -39,9 +43,8 @@ from scripts.aufgabe04.perception.stand_axis.qr_pose_seed import (
     estimate_planar_pose_ippe,
     select_temporally_consistent_pose,
 )
-from scripts.aufgabe04.perception.stand_axis_image import (
+from scripts.aufgabe04.perception.stand_axis.models import (
     ImagePoint,
-    estimate_stand_axis_from_metric_model,
 )
 from scripts.aufgabe04.perception.debug.stand_axis_viewer import (
     annotate_projected_model_landmarks,
@@ -114,6 +117,37 @@ class StandModelProfileTest(unittest.TestCase):
         payload["qr_center_x_m"] = 0.020
         with self.assertRaisesRegex(ValueError, "exceeds"):
             stand_model_from_payload(payload)
+
+    def test_operational_loader_requires_measured_physical_geometry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            measured_path = root / "measured.json"
+            write_stand_model(
+                measured_path,
+                stand_model_from_payload(profile_payload()),
+            )
+            self.assertEqual(
+                load_measured_physical_stand_model(measured_path).environment,
+                "physical",
+            )
+
+            provisional_path = root / "provisional.json"
+            write_stand_model(
+                provisional_path,
+                stand_model_from_payload(profile_payload(status="provisional")),
+            )
+            with self.assertRaisesRegex(ValueError, "measurement_status=measured"):
+                load_measured_physical_stand_model(provisional_path)
+
+            simulation_payload = profile_payload()
+            simulation_payload["environment"] = "simulation"
+            simulation_path = root / "simulation.json"
+            write_stand_model(
+                simulation_path,
+                stand_model_from_payload(simulation_payload),
+            )
+            with self.assertRaisesRegex(ValueError, "environment=physical"):
+                load_measured_physical_stand_model(simulation_path)
 
 
 @unittest.skipIf(cv2 is None or numpy is None, "OpenCV and numpy are required")

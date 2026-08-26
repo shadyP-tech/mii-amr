@@ -58,7 +58,7 @@ class StandEstimate:
 
 @dataclass(frozen=True)
 class AxisEstimate:
-    """A 180-degree-symmetric head-silhouette axis estimate."""
+    """A 180-degree-symmetric geometric stand-head axis estimate."""
 
     axis_rad: float
     confidence: float

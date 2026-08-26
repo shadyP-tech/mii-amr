@@ -2,5 +2,5 @@
 
 
 PASSIVE_VIEWPOINT_OBSERVER_VERSION = (
-    "aufgabe04-real-passive-viewpoint-v4-target-associated-bounded-evidence"
+    "aufgabe04-real-passive-viewpoint-v5-measured-metric-model-only"
 )

@@ -3,7 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
-from scripts.aufgabe04.perception.stand_axis_image import ImagePoint, StandAxisImageEstimate, order_corners
+from scripts.aufgabe04.perception.stand_axis.geometry import order_corners
+from scripts.aufgabe04.perception.stand_axis.models import (
+    ImagePoint,
+    StandAxisImageEstimate,
+)
 
 
 @dataclass(frozen=True)

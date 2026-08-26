@@ -658,7 +658,7 @@ def _record_survey_arrival(
         estimator=(
             "simulation/silhouette_head_rectangle"
             if args.environment == "simulation"
-            else "real/silhouette_head_rectangle_camera_info_tf"
+            else "real/measured_metric_model_current_frame_refined"
         ),
         source=(
             "simulation/synchronized_viewpoint"

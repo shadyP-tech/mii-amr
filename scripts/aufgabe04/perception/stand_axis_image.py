@@ -1,3 +1,9 @@
+"""Historical free-form stand detector for simulation and offline diagnostics.
+
+The operational real-camera observer deliberately does not import this module;
+it requires the measured metric-model pipeline instead.
+"""
+
 from __future__ import annotations
 
 import math
@@ -95,11 +101,6 @@ from scripts.aufgabe04.perception.stand_axis.stem_candidates import (
     _stem_owned_head_from_line_segments,
     _stem_top_from_row_width_transition,
 )
-from scripts.aufgabe04.perception.stand_axis.model_pipeline import (
-    estimate_stand_axis_from_metric_model,
-)
-
-
 def estimate_stand_axis_from_mask(
     cv2,
     mask,

@@ -29,6 +29,9 @@ from scripts.aufgabe04.real_robot.configuration.profile import (
     load_camera_calibration,
     load_real_robot_profile,
 )
+from scripts.aufgabe04.real_robot.observer.contract import (
+    PASSIVE_VIEWPOINT_OBSERVER_VERSION,
+)
 from scripts.aufgabe04.stations.arrival_pose_catalog import (
     arrival_pose_catalog_sha256,
     freeze_arrival_pose_catalog,
@@ -52,6 +55,37 @@ def _file_sha256(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _validate_metric_model_binding(
+    survey_config: dict[str, object],
+    binding: dict[str, object],
+) -> str:
+    """Require a survey configuration bound to the model-only observer."""
+
+    model_sha256 = survey_config.get("stand_model_profile_sha256")
+    if (
+        not isinstance(model_sha256, str)
+        or len(model_sha256) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in model_sha256
+        )
+    ):
+        raise ValueError(
+            "survey config has no valid measured stand-model hash"
+        )
+    if survey_config.get("stand_model_environment") != "physical":
+        raise ValueError("survey stand model is not physical")
+    if survey_config.get("stand_model_measurement_status") != "measured":
+        raise ValueError("survey stand model is not measured")
+    if survey_config.get("observer_version") != (
+        PASSIVE_VIEWPOINT_OBSERVER_VERSION
+    ):
+        raise ValueError("survey observer is not the metric-model-only version")
+    if binding.get("stand_model_profile_sha256") != model_sha256:
+        raise ValueError("survey input binding differs from stand model")
+    return model_sha256
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -109,6 +143,7 @@ def main(argv=None) -> int:
             hash_field="survey_input_binding_sha256",
         )
         binding_sha256 = payload_sha256(binding)
+        _validate_metric_model_binding(survey_config, binding)
         provenance = {
             "planning_frame": profile.map_frame,
             "map_yaml_sha256": map_bundle.yaml_sha256,

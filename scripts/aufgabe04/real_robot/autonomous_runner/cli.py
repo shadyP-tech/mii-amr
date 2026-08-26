@@ -102,7 +102,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--stand-model-profile",
         type=Path,
         default=None,
-        help="Optional content-hashed measured physical stand model.",
+        help=(
+            "Content-hashed measured physical stand model. Required by "
+            "execute-exact-two-camera and execute-full; those workflows "
+            "have no legacy image-detector fallback."
+        ),
     )
     parser.add_argument(
         "--coverage-leg-limit",

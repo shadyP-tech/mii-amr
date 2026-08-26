@@ -28,6 +28,9 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
 from scripts.aufgabe04.perception.lidar_stand_morphology import (
     stand_width_profile_from_radius,
 )
+from scripts.aufgabe04.perception.stand_axis.model_profile import (
+    load_measured_physical_stand_model,
+)
 from scripts.aufgabe04.real_robot.execution.child_runner import (
     DEFAULT_COLLISION_MARGIN_M,
     DEFAULT_LIDAR_STOP_DISTANCE_M,
@@ -95,7 +98,9 @@ def _checkpoint_config_sha256(args) -> str:
     stand_model_sha256 = (
         None
         if args.stand_model_profile is None
-        else _file_sha256(args.stand_model_profile)
+        else load_measured_physical_stand_model(
+            args.stand_model_profile
+        ).sha256
     )
     morphology_profile = stand_width_profile_from_radius(
         CoverageSurveyConfig().candidate_radius_m
@@ -114,7 +119,7 @@ def _checkpoint_config_sha256(args) -> str:
             "final_facing_offset_m": args.final_facing_offset_m,
             "axis_sample_count": args.axis_sample_count,
             "camera_timeout_sec": args.camera_timeout_sec,
-            "stand_model_profile_sha256": stand_model_sha256,
+            "stand_model_sha256": stand_model_sha256,
             "lidar_track_morphology_profile": (
                 morphology_profile.to_evidence_dict()
             ),
@@ -251,4 +256,3 @@ def candidate_snapshot_from_registry(
             for candidate in pending
         ),
     )
-

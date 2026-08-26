@@ -213,6 +213,28 @@ def load_stand_model(path: Path) -> StandModelProfile:
     return stand_model_from_payload(payload, sha256=payload_sha256(payload))
 
 
+def load_measured_physical_stand_model(path: Path) -> StandModelProfile:
+    """Load geometry that is admissible for operational real-camera use.
+
+    A measured simulation profile is valid model data, but it must never be
+    accepted as physical metrology merely because both profiles share the
+    same schema.  Keeping this check beside the content-hash loader gives the
+    autonomous runner, passive-survey preparation, and observer one identical
+    fail-closed contract.
+    """
+
+    profile = load_stand_model(path)
+    if profile.environment != "physical":
+        raise ValueError(
+            "operational stand model must have environment=physical"
+        )
+    if not profile.committable:
+        raise ValueError(
+            "operational stand model must have measurement_status=measured"
+        )
+    return profile
+
+
 def write_stand_model(path: Path, profile: StandModelProfile) -> str:
     payload = {
         "schema_version": profile.schema_version,

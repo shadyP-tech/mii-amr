@@ -23,6 +23,9 @@ from scripts.aufgabe04.artifacts.content_store import (
     write_content_hashed_json,
 )
 from scripts.aufgabe04.navigation.planning.map_io import freeze_map_bundle
+from scripts.aufgabe04.perception.stand_axis.model_profile import (
+    load_measured_physical_stand_model,
+)
 from scripts.aufgabe04.real_robot.configuration.profile import (
     camera_calibration_sha256,
     load_camera_calibration,
@@ -50,7 +53,7 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _observer_command(args, profile, calibration, candidate, identity, output):
+def _observer_command(args, candidate, identity, output):
     geometry = candidate.geometry
     return [
         sys.executable,
@@ -59,6 +62,8 @@ def _observer_command(args, profile, calibration, candidate, identity, output):
         str(args.robot_profile),
         "--camera-calibration",
         str(args.camera_calibration),
+        "--stand-model-profile",
+        str(args.stand_model_profile),
         "--stream-id",
         f"{args.session_id}_{candidate.candidate_uid}",
         "--stand-id",
@@ -75,8 +80,6 @@ def _observer_command(args, profile, calibration, candidate, identity, output):
         str(geometry.uncertainty_m),
         "--target-distance-m",
         str(args.target_distance_m),
-        "--stand-face-size-m",
-        str(args.stand_face_size_m),
         "--stand-head-center-height-m",
         str(args.stand_head_center_height_m),
         "--consensus-frames",
@@ -190,6 +193,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--robot-profile", required=True, type=Path)
     parser.add_argument("--camera-calibration", required=True, type=Path)
+    parser.add_argument(
+        "--stand-model-profile",
+        required=True,
+        type=Path,
+        help="Content-hashed measured physical stand geometry.",
+    )
     parser.add_argument("--physical-site", required=True, type=Path)
     parser.add_argument("--map", required=True, type=Path)
     parser.add_argument("--semantic-map-id", required=True)
@@ -202,7 +211,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--survey-manifest", required=True, type=Path)
     parser.add_argument("--axis-sample-count", type=int, default=7)
     parser.add_argument("--target-distance-m", type=float, default=0.33)
-    parser.add_argument("--stand-face-size-m", type=float, default=0.078)
     parser.add_argument("--stand-head-center-height-m", type=float, default=0.165)
     parser.add_argument("--lidar-stop-distance-m", type=float, default=0.18)
     parser.add_argument("--lidar-clearance-margin-m", type=float, default=0.02)
@@ -216,7 +224,6 @@ def main(argv=None) -> int:
         parser.error("--axis-sample-count must be at least seven")
     for name in (
         "target_distance_m",
-        "stand_face_size_m",
         "stand_head_center_height_m",
         "lidar_stop_distance_m",
         "lidar_clearance_margin_m",
@@ -226,6 +233,9 @@ def main(argv=None) -> int:
     try:
         profile = load_real_robot_profile(args.robot_profile)
         calibration = load_camera_calibration(args.camera_calibration)
+        stand_model = load_measured_physical_stand_model(
+            args.stand_model_profile
+        )
         calibration_sha256 = camera_calibration_sha256(calibration)
         if calibration_sha256 != profile.calibration_profile_sha256:
             raise ValueError("robot profile and camera calibration differ")
@@ -260,7 +270,14 @@ def main(argv=None) -> int:
             "planning_frame": profile.map_frame,
             "axis_sample_count": args.axis_sample_count,
             "target_distance_m": args.target_distance_m,
-            "stand_face_size_m": args.stand_face_size_m,
+            "stand_model_profile_id": stand_model.profile_id,
+            "stand_model_profile_sha256": stand_model.sha256,
+            "stand_model_environment": stand_model.environment,
+            "stand_model_measurement_status": (
+                stand_model.measurement_status
+            ),
+            "stand_head_width_m": stand_model.head_width_m,
+            "stand_head_height_m": stand_model.head_height_m,
             "stand_head_center_height_m": args.stand_head_center_height_m,
             "lidar_stop_distance_m": args.lidar_stop_distance_m,
             "lidar_clearance_margin_m": args.lidar_clearance_margin_m,
@@ -289,6 +306,7 @@ def main(argv=None) -> int:
             "physical_site_sha256": profile.physical_site_sha256,
             "survey_config_sha256": survey_config_sha256,
             "calibration_profile_sha256": calibration_sha256,
+            "stand_model_profile_sha256": stand_model.sha256,
         }
         binding_sha256 = payload_sha256(survey_binding)
         binding_path = args.output_dir / f"survey_inputs_{binding_sha256}.json"
@@ -316,8 +334,6 @@ def main(argv=None) -> int:
                     ),
                     "observer_command": _observer_command(
                         args,
-                        profile,
-                        calibration,
                         candidate,
                         identity,
                         output,
@@ -370,6 +386,8 @@ def main(argv=None) -> int:
             "motion_capability": "none",
             "robot_profile": str(args.robot_profile),
             "robot_profile_sha256": real_robot_profile_sha256(profile),
+            "stand_model_profile": str(args.stand_model_profile),
+            "stand_model_profile_sha256": stand_model.sha256,
             "survey_config": str(survey_config_path),
             "survey_config_sha256": survey_config_sha256,
             "survey_input_binding": str(binding_path),
