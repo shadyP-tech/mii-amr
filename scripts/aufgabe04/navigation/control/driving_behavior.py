@@ -44,6 +44,10 @@ HEADING_CORRIDOR_ROUTE_KINDS = (
 DYNAMIC_VIEWPOINT_ROUTE_KINDS = (
     INTERMEDIATE_ROUTE_KINDS | DYNAMIC_PHYSICAL_ROUTE_KINDS
 )
+# The camera observer associates a stand only within a three-degree optical-axis
+# cone.  A detected-stand approach therefore must finish no looser than that
+# association contract, while retaining terminal-heading-only control.
+DETECTED_STAND_CAMERA_HEADING_TOLERANCE_RAD = math.radians(3.0)
 
 
 def controller_config_for_route_kind(
@@ -99,6 +103,11 @@ def controller_config_for_route_kind(
         heading_tolerance = min(
             heading_tolerance,
             viewpoint_sampling_heading_tolerance_rad,
+        )
+    if route_kind == "detected_stand_preapproach":
+        heading_tolerance = min(
+            heading_tolerance,
+            DETECTED_STAND_CAMERA_HEADING_TOLERANCE_RAD,
         )
     return replace(
         config,

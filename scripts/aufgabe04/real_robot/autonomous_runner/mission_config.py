@@ -24,6 +24,7 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     CoverageSurveyPlan,
     StandSurveyRegistry,
     coverage_survey_plan_sha256,
+    stand_survey_registry_sha256,
 )
 from scripts.aufgabe04.perception.lidar_stand_morphology import (
     stand_width_profile_from_radius,
@@ -86,12 +87,14 @@ def _plan_exact_inspection_point_count(
         raise ValueError("frozen plan has an invalid exact inspection-point count")
     return value
 
+
 def _file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with Path(path).open("rb") as handle:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
 
 def _checkpoint_config_sha256(args) -> str:
     """Bind checkpoint continuation to all behavior-relevant run settings."""
@@ -294,7 +297,9 @@ def candidate_snapshot_from_registry(
                 ),
                 source=CandidateSource(
                     source_kind="lidar/stand_coverage_survey",
-                    source_artifact_sha256=_file_sha256(registry_path),
+                    source_artifact_sha256=(
+                        stand_survey_registry_sha256(registry)
+                    ),
                     detector_config_sha256=detector_config_sha256,
                     observation_ids=candidate.source_observation_ids,
                 ),

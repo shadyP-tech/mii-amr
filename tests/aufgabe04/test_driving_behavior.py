@@ -3,6 +3,7 @@ import unittest
 from scripts.aufgabe04.navigation.control.driving_behavior import (
     CommandSmoother,
     CommandSmoothingConfig,
+    DETECTED_STAND_CAMERA_HEADING_TOLERANCE_RAD,
     controller_config_for_route_kind,
     next_control_loop_timing,
     shape_velocity_command,
@@ -15,12 +16,39 @@ from scripts.aufgabe04.navigation.control.waypoint_controller import VelocityCom
 class DrivingBehaviorTest(unittest.TestCase):
     def test_detected_stand_preapproach_uses_terminal_heading_only(self):
         configured = controller_config_for_route_kind(
-            ControllerConfig(enforce_heading_corridor=True),
+            ControllerConfig(
+                enforce_heading_corridor=True,
+                heading_tolerance_rad=0.25,
+            ),
             "detected_stand_preapproach",
         )
 
         self.assertFalse(configured.enforce_heading_corridor)
         self.assertTrue(configured.exact_vertex_pursuit)
+        self.assertAlmostEqual(
+            configured.heading_tolerance_rad,
+            DETECTED_STAND_CAMERA_HEADING_TOLERANCE_RAD,
+        )
+
+    def test_detected_stand_preapproach_preserves_tighter_heading_tolerance(self):
+        configured = controller_config_for_route_kind(
+            ControllerConfig(heading_tolerance_rad=0.02),
+            "detected_stand_preapproach",
+        )
+
+        self.assertAlmostEqual(configured.heading_tolerance_rad, 0.02)
+
+    def test_discovery_and_ordinary_routes_do_not_inherit_camera_heading_cap(self):
+        config = ControllerConfig(heading_tolerance_rad=0.25)
+
+        discovery = controller_config_for_route_kind(
+            config,
+            "stand_discovery_corridor",
+        )
+        ordinary = controller_config_for_route_kind(config, "ordinary_waypoint")
+
+        self.assertAlmostEqual(discovery.heading_tolerance_rad, 0.25)
+        self.assertIs(ordinary, config)
 
     def test_command_smoother_ramps_from_zero_after_reset(self):
         smoother = CommandSmoother(

@@ -42,6 +42,9 @@ from scripts.aufgabe04.navigation.approach.dynamic_approach_planner import (
     DynamicApproachConfig,
     minimum_static_obstacle_inflation_m,
 )
+from scripts.aufgabe04.navigation.approach.candidate_frame_projection import (
+    CandidatePlanningFrame,
+)
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     MISSION_LEG_RUN_CONFIRMATION,
@@ -60,6 +63,9 @@ from scripts.aufgabe04.navigation.missions.plan_stand_coverage_survey import (
 )
 from scripts.aufgabe04.navigation.localization.read_current_amcl_pose import (
     read_current_pose2d_from_amcl,
+)
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
+    PlanarTransform2D,
 )
 from scripts.aufgabe04.navigation.localization.ros_preflight import run_ros_preflight
 from scripts.aufgabe04.navigation.foundation.ros_runtime_config import resolve_topic
@@ -310,6 +316,70 @@ def _admit_preplanning_localization(
 ) -> Pose2D:
     """Bind route planning to one strictly admitted stationary map pose."""
 
+    preflight = _run_preplanning_localization_preflight(
+        runtime,
+        session_root,
+        evidence_path=evidence_path,
+    )
+    return _pose_from_preplanning_preflight(preflight)
+
+
+def _admit_candidate_planning_frame(
+    runtime,
+    session_root: Path,
+    *,
+    evidence_path: Path | None = None,
+) -> CandidatePlanningFrame:
+    """Admit one simultaneous stationary pose and ``map <- odom`` value."""
+
+    preflight = _run_preplanning_localization_preflight(
+        runtime,
+        session_root,
+        evidence_path=evidence_path,
+    )
+    pose = _pose_from_preplanning_preflight(preflight)
+    map_from_odom = preflight.map_from_odom
+    if map_from_odom is None:
+        raise RuntimeError(
+            "preplanning localization admission returned no map<-odom transform"
+        )
+    expected_map_frame = str(runtime.map_frame).strip("/")
+    expected_odom_frame = str(runtime.odom_frame).strip("/")
+    if (
+        str(map_from_odom.get("target_frame", "")).strip("/")
+        != expected_map_frame
+        or str(map_from_odom.get("source_frame", "")).strip("/")
+        != expected_odom_frame
+    ):
+        raise RuntimeError(
+            "preplanning localization map<-odom frame identity mismatch"
+        )
+    try:
+        transform = PlanarTransform2D(
+            float(map_from_odom["x_m"]),
+            float(map_from_odom["y_m"]),
+            float(map_from_odom["yaw_rad"]),
+        )
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError(
+            f"preplanning localization frame is invalid: {exc}"
+        ) from exc
+    return CandidatePlanningFrame(
+        current_pose=pose,
+        map_from_odom=transform,
+        map_frame=expected_map_frame,
+        odom_frame=expected_odom_frame,
+    )
+
+
+def _run_preplanning_localization_preflight(
+    runtime,
+    session_root: Path,
+    *,
+    evidence_path: Path | None,
+):
+    """Run and persist the shared stopped localization admission."""
+
     preflight = run_ros_preflight(
         runtime,
         max_localization_tf_future_sec=1.1,
@@ -339,6 +409,12 @@ def _admit_preplanning_localization(
             "preplanning localization admission failed: "
             + "; ".join(preflight.failures)
         )
+    return preflight
+
+
+def _pose_from_preplanning_preflight(preflight) -> Pose2D:
+    """Extract the finite admitted route pose from a successful preflight."""
+
     route_pose = preflight.route_pose
     if route_pose is None:
         raise RuntimeError(
@@ -354,6 +430,8 @@ def _admit_preplanning_localization(
         raise RuntimeError(
             f"preplanning localization route pose is invalid: {exc}"
         ) from exc
+
+
 def _issue_mission_leg_motion_permit(
     *,
     context: MissionLegPermitContext,
@@ -2433,6 +2511,13 @@ def main(argv=None) -> int:
                     map_frame=profile.map_frame,
                     timeout_sec=STATIONARY_AMCL_TIMEOUT_SEC,
                     max_age_sec=2.0,
+                ),
+                admit_planning_frame=lambda evidence_path: (
+                    _admit_candidate_planning_frame(
+                        runtime,
+                        session_root,
+                        evidence_path=evidence_path,
+                    )
                 ),
                 run_motion_leg=lambda request: _run_candidate_motion_leg(
                     profile=profile,

@@ -14,6 +14,15 @@ from pathlib import Path
 from typing import Iterable, Mapping
 
 from scripts.aufgabe04.artifacts.content_store import payload_sha256
+from scripts.aufgabe04.navigation.approach.candidate_frame_reprojection import (
+    CandidateFrameProvenance,
+    candidate_frame_provenance_from_mapping,
+)
+from scripts.aufgabe04.navigation.coverage.candidate_frame_registry import (
+    candidate_spatial_match_points,
+    frame_provenance_from_confirmed_stand,
+    merge_candidate_frame_provenance,
+)
 from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds
 from scripts.aufgabe04.navigation.planning.certified_exact_start_route import (
     certify_and_smooth_exact_start_route,
@@ -44,7 +53,8 @@ from scripts.aufgabe04.stations.models import Station, StationPose
 SURVEY_PLAN_SCHEMA_VERSION = 1
 SURVEY_PROGRESS_SCHEMA_VERSION = 1
 LEGACY_STAND_SURVEY_REGISTRY_SCHEMA_VERSION = 1
-STAND_SURVEY_REGISTRY_SCHEMA_VERSION = 2
+STATIC_MAP_STAND_SURVEY_REGISTRY_SCHEMA_VERSION = 2
+STAND_SURVEY_REGISTRY_SCHEMA_VERSION = 3
 
 STATUS_PROVISIONAL = "provisional"
 STATUS_PENDING_CAMERA = "pending_camera"
@@ -212,6 +222,7 @@ class SurveyCandidate:
     viewpoint_ids: tuple[str, ...]
     status: str
     static_map_disposition: str = STATIC_MAP_DISPOSITION_ADMITTED
+    frame_provenance: CandidateFrameProvenance | None = None
 
 
 @dataclass(frozen=True)
@@ -432,6 +443,14 @@ def fuse_confirmed_stands(
     )
     for stand in ordered_stands:
         _validate_confirmed_stand(stand)
+    stand_frame_provenance = tuple(
+        frame_provenance_from_confirmed_stand(
+            stand,
+            expected_map_frame=registry.planning_frame,
+            expected_map_bundle_sha256=registry.map_bundle_sha256,
+        )
+        for stand in ordered_stands
+    )
     requested_disposition_by_stand_id = (
         _validated_static_map_disposition_by_stand_id(
             static_map_disposition_by_stand_id,
@@ -443,6 +462,7 @@ def fuse_confirmed_stands(
         candidates,
         ordered_stands,
         selected_config.candidate_merge_distance_m,
+        stand_frame_provenance=stand_frame_provenance,
     )
     for stand_index, stand in enumerate(ordered_stands):
         if stand_index in replayed_stand_indices:
@@ -452,6 +472,7 @@ def fuse_confirmed_stands(
             STATIC_MAP_DISPOSITION_ADMITTED,
         )
         match_index = matches.get(stand_index)
+        incoming_frame_provenance = stand_frame_provenance[stand_index]
         if match_index is None:
             candidate = SurveyCandidate(
                 candidate_uid=_next_candidate_uid(candidates),
@@ -470,6 +491,7 @@ def fuse_confirmed_stands(
                 viewpoint_ids=(viewpoint_id,),
                 status=STATUS_PROVISIONAL,
                 static_map_disposition=incoming_disposition,
+                frame_provenance=incoming_frame_provenance,
             )
             candidates.append(
                 _advance_candidate_status(candidate, selected_config)
@@ -481,6 +503,7 @@ def fuse_confirmed_stands(
             viewpoint_id=viewpoint_id,
             config=selected_config,
             incoming_static_map_disposition=incoming_disposition,
+            incoming_frame_provenance=incoming_frame_provenance,
         )
     updated = replace(
         registry,
@@ -912,7 +935,7 @@ def stand_survey_registry_payload(
 
 
 def stand_survey_registry_sha256(registry: StandSurveyRegistry) -> str:
-    """Hash the canonical registry payload including map disposition."""
+    """Hash canonical geometry, disposition, and observation-frame provenance."""
 
     return payload_sha256(stand_survey_registry_payload(registry))
 
@@ -925,6 +948,7 @@ def load_stand_survey_registry(
     source_schema_version = int(payload["schema_version"])
     if source_schema_version not in {
         LEGACY_STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
+        STATIC_MAP_STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
         STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
     }:
         raise ValueError(
@@ -932,9 +956,9 @@ def load_stand_survey_registry(
             f"{source_schema_version!r}"
         )
     registry = StandSurveyRegistry(
-        # Schema v1 registries predate boundary retention; every candidate in
-        # them necessarily passed the strict static-map gate.  Upgrade that
-        # lineage explicitly in memory before any canonical v2 hash is made.
+        # Schema v1 predates boundary retention and v1/v2 both predate frozen
+        # observation-frame provenance. Upgrade those lineages explicitly in
+        # memory before any canonical v3 hash is made.
         schema_version=STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
         survey_id=str(payload["survey_id"]),
         planning_frame=str(payload["planning_frame"]),
@@ -1134,6 +1158,8 @@ def _candidate_matches_for_epoch(
     candidates: list[SurveyCandidate],
     stands: tuple[ConfirmedStand, ...],
     match_radius_m: float,
+    *,
+    stand_frame_provenance: tuple[CandidateFrameProvenance | None, ...],
 ) -> tuple[dict[int, int], frozenset[int]]:
     """Match a stopped epoch without order-dependent nearest-neighbor claims.
 
@@ -1186,7 +1212,7 @@ def _candidate_matches_for_epoch(
         for index in range(len(stands))
         if index not in matches and index not in replayed_stand_indices
     )
-    spatial_matches = assign_spatial_points(
+    candidate_points, stand_points = candidate_spatial_match_points(
         tuple(
             (candidates[index].x_m, candidates[index].y_m)
             for index in available_candidate_indices
@@ -1195,6 +1221,18 @@ def _candidate_matches_for_epoch(
             (stands[index].x_m, stands[index].y_m)
             for index in available_stand_indices
         ),
+        candidate_frames=tuple(
+            candidates[index].frame_provenance
+            for index in available_candidate_indices
+        ),
+        stand_frames=tuple(
+            stand_frame_provenance[index]
+            for index in available_stand_indices
+        ),
+    )
+    spatial_matches = assign_spatial_points(
+        candidate_points,
+        stand_points,
         maximum_distance_m=match_radius_m,
     )
     for assignment in spatial_matches:
@@ -1211,6 +1249,7 @@ def _merge_candidate(
     viewpoint_id: str,
     config: CoverageSurveyConfig,
     incoming_static_map_disposition: str = STATIC_MAP_DISPOSITION_ADMITTED,
+    incoming_frame_provenance: CandidateFrameProvenance | None = None,
 ) -> SurveyCandidate:
     existing_observations = set(candidate.source_observation_ids)
     new_observation_ids = tuple(
@@ -1222,16 +1261,31 @@ def _merge_candidate(
         return candidate
     incoming_weight = max(stand.hit_count, len(new_observation_ids))
     total_hits = candidate.hit_count + incoming_weight
+    merged_frame_provenance = merge_candidate_frame_provenance(
+        candidate.frame_provenance,
+        incoming_frame_provenance,
+        existing_weight=candidate.hit_count,
+        incoming_weight=incoming_weight,
+    )
+    if merged_frame_provenance is None:
+        merged_x_m = (
+            candidate.x_m * candidate.hit_count + stand.x_m * incoming_weight
+        ) / total_hits
+        merged_y_m = (
+            candidate.y_m * candidate.hit_count + stand.y_m * incoming_weight
+        ) / total_hits
+    else:
+        current_reference = merged_frame_provenance.frozen_map_point
+        if current_reference is None:
+            raise ValueError(
+                "merged candidate frame provenance lacks its map reference"
+            )
+        merged_x_m = current_reference.x_m
+        merged_y_m = current_reference.y_m
     merged = replace(
         candidate,
-        x_m=(
-            candidate.x_m * candidate.hit_count + stand.x_m * incoming_weight
-        )
-        / total_hits,
-        y_m=(
-            candidate.y_m * candidate.hit_count + stand.y_m * incoming_weight
-        )
-        / total_hits,
+        x_m=merged_x_m,
+        y_m=merged_y_m,
         confidence=(
             candidate.confidence * candidate.hit_count
             + stand.confidence * incoming_weight
@@ -1248,6 +1302,7 @@ def _merge_candidate(
             candidate.static_map_disposition,
             incoming_static_map_disposition,
         ),
+        frame_provenance=merged_frame_provenance,
     )
     return _advance_candidate_status(merged, config)
 
@@ -1331,6 +1386,16 @@ def _validate_survey_candidate(candidate: SurveyCandidate) -> None:
     validate_retained_static_map_disposition(
         candidate.static_map_disposition
     )
+    if candidate.frame_provenance is not None:
+        if not isinstance(candidate.frame_provenance, CandidateFrameProvenance):
+            raise ValueError(
+                "candidate frame_provenance must be CandidateFrameProvenance"
+            )
+        # Reconstructing through the strict mapping path validates both the
+        # canonical odom point and any retained frozen transform reference.
+        candidate_frame_provenance_from_mapping(
+            candidate.frame_provenance.to_mapping()
+        )
     if not candidate.source_observation_ids:
         raise ValueError("candidate must retain source observations")
     if not candidate.viewpoint_ids:
@@ -1500,6 +1565,11 @@ def survey_candidate_payload(candidate: SurveyCandidate) -> dict[str, object]:
         "viewpoint_ids": list(candidate.viewpoint_ids),
         "status": candidate.status,
         "static_map_disposition": candidate.static_map_disposition,
+        "frame_provenance": (
+            None
+            if candidate.frame_provenance is None
+            else candidate.frame_provenance.to_mapping()
+        ),
     }
 
 
@@ -1516,13 +1586,41 @@ def _candidate_from_payload(
                 "contains static_map_disposition"
             )
         static_map_disposition = STATIC_MAP_DISPOSITION_ADMITTED
-    elif source_registry_schema_version == STAND_SURVEY_REGISTRY_SCHEMA_VERSION:
+        frame_provenance = None
+    elif source_registry_schema_version == STATIC_MAP_STAND_SURVEY_REGISTRY_SCHEMA_VERSION:
         if "static_map_disposition" not in item:
             raise ValueError(
                 "stand survey registry schema 2 candidate is missing "
                 "static_map_disposition"
             )
         static_map_disposition = str(item["static_map_disposition"])
+        if "frame_provenance" in item:
+            raise ValueError(
+                "stand survey registry schema 2 candidate unexpectedly "
+                "contains frame_provenance"
+            )
+        frame_provenance = None
+    elif source_registry_schema_version == STAND_SURVEY_REGISTRY_SCHEMA_VERSION:
+        if "static_map_disposition" not in item:
+            raise ValueError(
+                "stand survey registry schema 3 candidate is missing "
+                "static_map_disposition"
+            )
+        if "frame_provenance" not in item:
+            raise ValueError(
+                "stand survey registry schema 3 candidate is missing "
+                "frame_provenance"
+            )
+        static_map_disposition = str(item["static_map_disposition"])
+        raw_frame_provenance = item["frame_provenance"]
+        if raw_frame_provenance is None:
+            frame_provenance = None
+        elif isinstance(raw_frame_provenance, Mapping):
+            frame_provenance = candidate_frame_provenance_from_mapping(
+                raw_frame_provenance
+            )
+        else:
+            raise ValueError("candidate frame_provenance must be an object or null")
     else:
         raise ValueError(
             "unsupported stand survey registry schema "
@@ -1547,6 +1645,7 @@ def _candidate_from_payload(
         ),
         status=str(item["status"]),
         static_map_disposition=static_map_disposition,
+        frame_provenance=frame_provenance,
     )
 
 

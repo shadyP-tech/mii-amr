@@ -36,10 +36,26 @@ from scripts.aufgabe04.navigation.approach.candidate_preapproach_selection impor
 from scripts.aufgabe04.navigation.approach.candidate_preapproach_planning import (
     CandidatePreapproachUnreachableError,
 )
+from scripts.aufgabe04.navigation.approach.candidate_frame_projection import (
+    CandidatePlanningFrame,
+)
+from scripts.aufgabe04.navigation.approach.candidate_frame_reprojection import (
+    CandidateFrameProvenance,
+    CandidatePoint2D,
+)
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
+    STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
+    STATUS_PENDING_CAMERA,
     CoverageSurveyConfig,
     CoverageSurveyPlan,
+    StandSurveyRegistry,
+    SurveyCandidate,
     SurveyViewpoint,
+    stand_survey_registry_sha256,
+    write_stand_survey_registry,
+)
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
+    PlanarTransform2D,
 )
 from scripts.aufgabe04.real_robot.candidate.approach import (
     CandidateApproachConfig,
@@ -147,6 +163,72 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             ),
         )
 
+    def _write_frame_registry(
+        self,
+        config: CandidateApproachConfig,
+        *,
+        frozen_map_from_odom: PlanarTransform2D,
+    ) -> CandidateApproachConfig:
+        frozen_candidates = []
+        for candidate in config.snapshot.candidates:
+            frozen_candidates.append(
+                SurveyCandidate(
+                    candidate_uid=candidate.candidate_uid,
+                    x_m=candidate.geometry.x_m,
+                    y_m=candidate.geometry.y_m,
+                    radius_m=candidate.geometry.radius_m,
+                    uncertainty_m=candidate.geometry.uncertainty_m,
+                    keepout_radius_m=candidate.geometry.keepout_radius_m,
+                    confidence=candidate.confidence,
+                    hit_count=candidate.hit_count,
+                    first_seen_sec=candidate.first_seen_sec,
+                    last_seen_sec=candidate.last_seen_sec,
+                    source_observation_ids=candidate.source.observation_ids,
+                    viewpoint_ids=("survey_vp_001",),
+                    status=STATUS_PENDING_CAMERA,
+                    frame_provenance=(
+                        CandidateFrameProvenance.from_frozen_map_observation(
+                            map_frame="map",
+                            odom_frame="odom",
+                            frozen_map_point=CandidatePoint2D(
+                                candidate.geometry.x_m,
+                                candidate.geometry.y_m,
+                            ),
+                            frozen_map_from_odom=frozen_map_from_odom,
+                            source_evidence_id="frame_evidence",
+                        )
+                    ),
+                )
+            )
+        registry = StandSurveyRegistry(
+            schema_version=STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
+            survey_id=config.plan.survey_id,
+            planning_frame=config.planning_frame,
+            map_bundle_sha256=config.plan.map_bundle_sha256,
+            candidates=tuple(frozen_candidates),
+        )
+        write_stand_survey_registry(
+            config.survey_root / "stand_registry.json",
+            registry,
+            config.plan,
+        )
+        registry_sha256 = stand_survey_registry_sha256(registry)
+        snapshot = replace(
+            config.snapshot,
+            candidates=tuple(
+                replace(
+                    candidate,
+                    source=replace(
+                        candidate.source,
+                        source_artifact_sha256=registry_sha256,
+                    ),
+                )
+                for candidate in config.snapshot.candidates
+            ),
+        )
+        write_candidate_snapshot(config.snapshot_path, snapshot)
+        return replace(config, snapshot=snapshot)
+
     @staticmethod
     def _nearest_selection(
         request: CameraCandidateSelectionRequest,
@@ -212,6 +294,245 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
 
             self.assertIsNotNone(selected)
             self.assertEqual(selected.candidate_uid, "candidate_a")
+
+    def test_frame_bound_path_selects_and_observes_reprojected_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = self._config(
+                root,
+                (self._candidate("candidate_a", 2.0, 0.0),),
+            )
+            config = self._write_frame_registry(
+                config,
+                frozen_map_from_odom=PlanarTransform2D(1.0, 0.0, 0.0),
+            )
+            planning_frames = iter(
+                (
+                    CandidatePlanningFrame(
+                        Pose2D(0.0, 0.0, 0.0),
+                        PlanarTransform2D(0.0, 0.0, 0.0),
+                    ),
+                    CandidatePlanningFrame(
+                        Pose2D(0.30, 0.0, 0.0),
+                        PlanarTransform2D(0.0, 0.0, 0.0),
+                    ),
+                )
+            )
+            selected_geometry = []
+            planned_geometry = []
+            captured_geometry = []
+
+            def select(request):
+                selected_geometry.append(
+                    request.config.snapshot.candidates[0].geometry.x_m
+                )
+                return self._nearest_selection(request)
+
+            def plan(request):
+                planned_geometry.append(
+                    request.snapshot.candidates[0].geometry.x_m
+                )
+                self.assertIn(
+                    "candidate_frame_projections",
+                    str(request.snapshot_path),
+                )
+                return {"route_csv": "route.csv"}
+
+            def capture(request):
+                captured_geometry.append(request.candidate.geometry.x_m)
+                return CandidateObservation(
+                    request.output_dir / "recommendation.json",
+                    "QR_A",
+                    None,
+                )
+
+            outcome = execute_candidate_approach_phase(
+                config,
+                CandidateApproachEffects(
+                    read_current_pose=lambda: Pose2D(0.30, 0.0, 0.0),
+                    admit_planning_frame=lambda _path: next(planning_frames),
+                    select_initial_preapproach=select,
+                    plan_preapproach=plan,
+                    run_motion_leg=self._completed,
+                    capture_observation=capture,
+                    validate_facing=lambda request: {
+                        "candidate_uid": request.candidate.candidate_uid
+                    },
+                    commit_decision=lambda _request: None,
+                    clock=lambda: 10.0,
+                ),
+            )
+
+            self.assertEqual(outcome.visit_order, ("candidate_a",))
+            self.assertEqual(selected_geometry, [1.0])
+            self.assertEqual(planned_geometry, [1.0])
+            self.assertEqual(captured_geometry, [1.0])
+            self.assertTrue(
+                (
+                    config.session_root
+                    / "candidates"
+                    / "000_candidate_a"
+                    / "candidate_arrival_admission.json"
+                ).is_file()
+            )
+
+    def test_arrival_bearing_miss_rejects_before_camera_process(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = replace(
+                self._config(
+                    root,
+                    (self._candidate("candidate_a", 2.0, 0.0),),
+                ),
+                max_camera_observation_attempts_per_candidate=1,
+            )
+            config = self._write_frame_registry(
+                config,
+                frozen_map_from_odom=PlanarTransform2D(1.0, 0.0, 0.0),
+            )
+            planning_frames = iter(
+                (
+                    CandidatePlanningFrame(
+                        Pose2D(0.0, 0.0, 0.0),
+                        PlanarTransform2D(0.0, 0.0, 0.0),
+                    ),
+                    CandidatePlanningFrame(
+                        Pose2D(0.30, 0.0, math.radians(30.0)),
+                        PlanarTransform2D(0.0, 0.0, 0.0),
+                    ),
+                )
+            )
+            capture = Mock()
+
+            with self.assertRaises(CandidateApproachIncompleteError):
+                execute_candidate_approach_phase(
+                    config,
+                    CandidateApproachEffects(
+                        read_current_pose=lambda: Pose2D(0.30, 0.0, 0.0),
+                        admit_planning_frame=lambda _path: next(
+                            planning_frames
+                        ),
+                        select_initial_preapproach=self._nearest_selection,
+                        plan_preapproach=lambda _request: {
+                            "route_csv": "route.csv"
+                        },
+                        run_motion_leg=self._completed,
+                        capture_observation=capture,
+                        commit_decision=lambda _request: None,
+                        clock=lambda: 10.0,
+                    ),
+                )
+
+            capture.assert_not_called()
+            admission_path = (
+                config.session_root
+                / "candidates"
+                / "000_candidate_a"
+                / "candidate_arrival_admission.json"
+            )
+            payload = json.loads(admission_path.read_text())
+            self.assertFalse(payload["accepted"])
+            self.assertIn(
+                "bearing_error_above_maximum",
+                payload["reasons"],
+            )
+            self.assertFalse(payload["motion_authorized"])
+
+    def test_opposite_face_bearing_miss_rejects_second_camera_process(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = replace(
+                self._config(
+                    root,
+                    (self._candidate("candidate_a", 2.0, 0.0),),
+                ),
+                max_camera_observation_attempts_per_candidate=1,
+            )
+            config = self._write_frame_registry(
+                config,
+                frozen_map_from_odom=PlanarTransform2D(1.0, 0.0, 0.0),
+            )
+            axis_path = root / "axis.json"
+            axis_path.write_text(
+                json.dumps(
+                    {
+                        "observation_kind": "real_stand_axis_without_qr",
+                        "stand_axis_rad": 0.0,
+                        "stand_center": {"x_m": 1.0, "y_m": 0.0},
+                        "robot_pose": {"x_m": 1.0, "y_m": 0.7},
+                    }
+                )
+            )
+            planning_frames = iter(
+                (
+                    CandidatePlanningFrame(
+                        Pose2D(0.0, 0.0, 0.0),
+                        PlanarTransform2D(0.0, 0.0, 0.0),
+                    ),
+                    CandidatePlanningFrame(
+                        Pose2D(0.30, 0.0, 0.0),
+                        PlanarTransform2D(0.0, 0.0, 0.0),
+                    ),
+                    CandidatePlanningFrame(
+                        Pose2D(0.30, 0.20, 0.0),
+                        PlanarTransform2D(0.0, 0.20, 0.0),
+                    ),
+                    CandidatePlanningFrame(
+                        Pose2D(
+                            1.0,
+                            -0.50,
+                            math.pi / 2.0 + math.radians(30.0),
+                        ),
+                        PlanarTransform2D(0.0, 0.20, 0.0),
+                    ),
+                )
+            )
+            capture_attempts = []
+            planned_candidate_y_m = []
+
+            def capture(request):
+                capture_attempts.append(request.attempt_index)
+                if request.attempt_index == 0:
+                    return CandidateObservation(None, None, axis_path)
+                self.fail("second camera process started before arrival admission")
+
+            def plan(request):
+                planned_candidate_y_m.append(
+                    request.snapshot.candidates[0].geometry.y_m
+                )
+                return {"route_csv": "route.csv"}
+
+            with self.assertRaises(CandidateApproachIncompleteError):
+                execute_candidate_approach_phase(
+                    config,
+                    CandidateApproachEffects(
+                        read_current_pose=lambda: Pose2D(0.30, 0.0, 0.0),
+                        admit_planning_frame=lambda _path: next(
+                            planning_frames
+                        ),
+                        select_initial_preapproach=self._nearest_selection,
+                        plan_preapproach=plan,
+                        run_motion_leg=self._completed,
+                        capture_observation=capture,
+                        commit_decision=lambda _request: None,
+                        clock=lambda: 10.0,
+                    ),
+                )
+
+            self.assertEqual(capture_attempts, [0])
+            self.assertEqual(planned_candidate_y_m, [0.0, 0.20])
+            admission_path = (
+                config.session_root
+                / "candidates"
+                / "000_candidate_a"
+                / "camera_attempt_01_arrival"
+                / "admission.json"
+            )
+            payload = json.loads(admission_path.read_text())
+            self.assertEqual(payload["observation_attempt_index"], 1)
+            self.assertFalse(payload["accepted"])
+            self.assertIn("bearing_error_above_maximum", payload["reasons"])
+            self.assertFalse(payload["motion_authorized"])
 
     def test_typed_observer_timeout_defers_then_retries_after_other_candidate(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1197,6 +1518,115 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             self.assertEqual(attempt.reseal_index, 1)
             self.assertTrue(replacement_request.run_id.endswith("startup_reseal_001"))
             capture.assert_called_once()
+
+    def test_frame_bound_startup_reseal_reprojects_candidate_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate = self._candidate("candidate_1", 2.0, 0.0)
+            config = replace(
+                self._config(root, (candidate,)),
+                max_startup_reseals_per_leg=1,
+                startup_reseal_motion_authorization_json=(
+                    root / "startup_authorization.json"
+                ),
+            )
+            config = self._write_frame_registry(
+                config,
+                frozen_map_from_odom=PlanarTransform2D(1.0, 0.0, 0.0),
+            )
+            planning_frames = iter(
+                (
+                    CandidatePlanningFrame(
+                        Pose2D(0.0, 0.0, 0.0),
+                        PlanarTransform2D(0.0, 0.0, 0.0),
+                    ),
+                    CandidatePlanningFrame(
+                        Pose2D(0.0332, 0.20, 0.0),
+                        PlanarTransform2D(0.0, 0.20, 0.0),
+                    ),
+                    CandidatePlanningFrame(
+                        Pose2D(0.30, 0.20, 0.0),
+                        PlanarTransform2D(0.0, 0.20, 0.0),
+                    ),
+                )
+            )
+            plan_requests = []
+            replacement_requests = []
+
+            def plan(request):
+                request.output_dir.mkdir(parents=True, exist_ok=True)
+                plan_requests.append(request)
+                return {"route_csv": str(request.output_dir / "route.csv")}
+
+            def initial_motion(request):
+                return MotionLegOutcome(
+                    run_id=request.run_id,
+                    status="stopped",
+                    stop_reason="pose outside certified startup segment",
+                    stop_details={
+                        "source": "execution_route_certificate",
+                        "phase": "before_motion_confirmation",
+                        "reason": "pose outside certified startup segment",
+                        "fail_closed": True,
+                        "route_pose": {
+                            "x_m": 0.0332,
+                            "y_m": 0.20,
+                            "yaw_rad": 0.0,
+                        },
+                    },
+                    motion_published=False,
+                    returncode=1,
+                    semantic_log_path=root / "initial_events.jsonl",
+                )
+
+            def replacement_motion(request, _attempt):
+                replacement_requests.append(request)
+                return self._completed(request)
+
+            def admit_planning_frame(evidence_path):
+                evidence_path.parent.mkdir(parents=True, exist_ok=True)
+                evidence_path.write_text("{}\n", encoding="utf-8")
+                return next(planning_frames)
+
+            outcome = execute_candidate_approach_phase(
+                config,
+                CandidateApproachEffects(
+                    read_current_pose=lambda: Pose2D(0.30, 0.20, 0.0),
+                    admit_planning_frame=admit_planning_frame,
+                    select_initial_preapproach=self._nearest_selection,
+                    plan_preapproach=plan,
+                    run_motion_leg=initial_motion,
+                    run_startup_reseal_motion_leg=replacement_motion,
+                    capture_observation=lambda request: CandidateObservation(
+                        request.output_dir / "recommendation.json",
+                        "QR_1",
+                        None,
+                    ),
+                    validate_facing=lambda request: {
+                        "candidate_uid": request.candidate.candidate_uid
+                    },
+                    commit_decision=lambda _request: None,
+                    clock=lambda: 10.0,
+                ),
+            )
+
+            self.assertEqual(outcome.visit_order, (candidate.candidate_uid,))
+            self.assertEqual(
+                [
+                    request.snapshot.candidates[0].geometry.y_m
+                    for request in plan_requests
+                ],
+                [0.0, 0.20],
+            )
+            self.assertEqual(len(replacement_requests), 1)
+            self.assertIn(
+                "candidate_frame_projection",
+                str(plan_requests[1].snapshot_path),
+            )
+            self.assertIn(
+                "/route/",
+                str(replacement_requests[0].candidate_snapshot_path),
+            )
 
     def test_startup_replacement_runtime_reseal_continues_to_camera(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -33,6 +33,15 @@ from scripts.aufgabe04.navigation.approach.candidate_preapproach_selection impor
 from scripts.aufgabe04.navigation.approach.camera_axis_binding import (
     load_opposite_face_normal,
 )
+from scripts.aufgabe04.navigation.approach.candidate_arrival_admission import (
+    CandidateArrivalAdmissionConfig,
+    evaluate_candidate_arrival_admission,
+)
+from scripts.aufgabe04.navigation.approach.candidate_frame_projection import (
+    CandidatePlanningFrame,
+    CandidateSnapshotFrameProjection,
+    project_candidate_snapshot_to_planning_frame,
+)
 from scripts.aufgabe04.navigation.approach.camera_candidate_selection import (
     CameraCandidateSelectionConfig,
     NoFeasibleCameraCandidateError,
@@ -56,6 +65,7 @@ from scripts.aufgabe04.navigation.approach.record_stand_candidate_decision impor
 )
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     CoverageSurveyPlan,
+    StandSurveyRegistry,
     coverage_survey_plan_sha256,
     load_stand_survey_registry,
 )
@@ -87,6 +97,7 @@ from scripts.aufgabe04.stations.candidate_snapshot import (
     FrozenCandidate,
     candidate_snapshot_sha256,
     load_candidate_snapshot,
+    write_candidate_snapshot,
 )
 from scripts.aufgabe04.stations.create_station_identity_registry import (
     create_registry,
@@ -165,6 +176,8 @@ class CandidateApproachConfig:
     camera_selection_linear_speed_mps: float = 0.055
     camera_selection_angular_speed_radps: float = 0.18
     max_camera_observation_attempts_per_candidate: int = 2
+    camera_arrival_max_bearing_error_rad: float = math.radians(3.0)
+    camera_arrival_range_slack_m: float = 0.20
 
 
 @dataclass(frozen=True)
@@ -814,6 +827,7 @@ class CandidateApproachEffects:
     commit_decision: Callable[
         [CandidateDecisionRequest], None
     ] = commit_candidate_decision
+    admit_planning_frame: Callable[[Path], CandidatePlanningFrame] | None = None
     admit_startup_localization: Callable[[Path], Pose2D] | None = None
     run_startup_reseal_motion_leg: Callable[
         [CandidateMotionLegRequest, CandidateStartupRecoveryAttempt],
@@ -859,6 +873,226 @@ def _read_finite_pose2d(
             reason="pose coordinates are not finite",
         )
     return Pose2D(*values)
+
+
+def _run_planning_frame_admission(
+    effects: CandidateApproachEffects,
+    evidence_path: Path,
+) -> CandidatePlanningFrame:
+    admit_planning_frame = effects.admit_planning_frame
+    if admit_planning_frame is None:
+        raise RuntimeError("candidate planning-frame admission is unavailable")
+    planning_frame = admit_planning_frame(evidence_path)
+    if not isinstance(planning_frame, CandidatePlanningFrame):
+        raise TypeError(
+            "planning-frame admission effect must return CandidatePlanningFrame"
+        )
+    return planning_frame
+
+
+@dataclass(frozen=True)
+class _CandidateFrameProjectionArtifacts:
+    config: CandidateApproachConfig
+    projection: CandidateSnapshotFrameProjection
+    snapshot_path: Path
+    snapshot_sha256: str
+    evidence_path: Path
+    evidence_sha256: str
+
+
+def _materialize_candidate_frame_projection(
+    *,
+    source_config: CandidateApproachConfig,
+    source_registry: StandSurveyRegistry,
+    planning_frame: CandidatePlanningFrame,
+    output_root: Path,
+) -> _CandidateFrameProjectionArtifacts:
+    """Write a derived snapshot and its transform evidence before planning."""
+
+    projection = project_candidate_snapshot_to_planning_frame(
+        source_config.snapshot,
+        source_registry,
+        planning_frame,
+    )
+    output_root = Path(output_root)
+    output_root.mkdir(parents=True, exist_ok=False)
+    snapshot_path = output_root / "candidate_snapshot.json"
+    snapshot_sha256 = write_candidate_snapshot(
+        snapshot_path,
+        projection.projected_snapshot,
+    )
+    expected_snapshot_sha256 = candidate_snapshot_sha256(
+        projection.projected_snapshot
+    )
+    if snapshot_sha256 != expected_snapshot_sha256:
+        raise RuntimeError("projected candidate snapshot write hash mismatch")
+    evidence_path = output_root / "candidate_frame_projection.json"
+    evidence_sha256 = write_content_hashed_json(
+        evidence_path,
+        {
+            **projection.to_evidence(),
+            "source_candidate_snapshot_path": str(source_config.snapshot_path),
+            "projected_candidate_snapshot_path": str(snapshot_path),
+        },
+        hash_field="candidate_frame_projection_sha256",
+    )
+    return _CandidateFrameProjectionArtifacts(
+        config=replace(
+            source_config,
+            snapshot=projection.projected_snapshot,
+            snapshot_path=snapshot_path,
+        ),
+        projection=projection,
+        snapshot_path=snapshot_path,
+        snapshot_sha256=snapshot_sha256,
+        evidence_path=evidence_path,
+        evidence_sha256=evidence_sha256,
+    )
+
+
+def _admit_camera_arrival_geometry(
+    *,
+    source_config: CandidateApproachConfig,
+    effects: CandidateApproachEffects,
+    source_registry: StandSurveyRegistry | None,
+    candidate_uid: str,
+    candidate_root: Path,
+    observation_attempt_index: int,
+) -> tuple[
+    CandidateApproachConfig,
+    FrozenCandidate,
+    CandidatePlanningFrame | None,
+]:
+    """Reproject once more while stopped and gate camera startup geometry."""
+
+    admit_planning_frame = effects.admit_planning_frame
+    if admit_planning_frame is None:
+        candidate = source_config.snapshot.candidate_for(candidate_uid)
+        if candidate is None:
+            raise RuntimeError("arrival candidate disappeared from snapshot")
+        return source_config, candidate, None
+    if source_registry is None:
+        raise RuntimeError("candidate arrival frame registry is unavailable")
+    if observation_attempt_index == 0:
+        preflight_path = candidate_root / "candidate_arrival_localization.json"
+        projection_root = candidate_root / "arrival_frame_projection"
+        arrival_path = candidate_root / "candidate_arrival_admission.json"
+    else:
+        admission_root = (
+            candidate_root
+            / f"camera_attempt_{observation_attempt_index:02d}_arrival"
+        )
+        admission_root.mkdir(parents=True, exist_ok=False)
+        preflight_path = admission_root / "localization.json"
+        projection_root = admission_root / "frame_projection"
+        arrival_path = admission_root / "admission.json"
+    planning_frame = _run_planning_frame_admission(effects, preflight_path)
+    artifacts = _materialize_candidate_frame_projection(
+        source_config=source_config,
+        source_registry=source_registry,
+        planning_frame=planning_frame,
+        output_root=projection_root,
+    )
+    candidate = artifacts.config.snapshot.candidate_for(candidate_uid)
+    if candidate is None:
+        raise RuntimeError("arrival candidate disappeared from projected snapshot")
+    minimum_range_m = _required_positive_clearance(
+        source_config.physical_clearance,
+        "minimum_active_standoff_m",
+    )
+    decision = evaluate_candidate_arrival_admission(
+        planning_frame.current_pose,
+        target_x_m=candidate.geometry.x_m,
+        target_y_m=candidate.geometry.y_m,
+        config=CandidateArrivalAdmissionConfig(
+            min_range_m=minimum_range_m,
+            max_range_m=(
+                source_config.approach_offset_m
+                + source_config.camera_arrival_range_slack_m
+            ),
+            max_bearing_error_rad=(
+                source_config.camera_arrival_max_bearing_error_rad
+            ),
+        ),
+    )
+    arrival_evidence = {
+        **decision.to_evidence_dict(),
+        "candidate_uid": candidate_uid,
+        "observation_attempt_index": observation_attempt_index,
+        "candidate_frame_projection_path": str(artifacts.evidence_path),
+        "candidate_frame_projection_sha256": artifacts.evidence_sha256,
+        "projected_candidate_snapshot_path": str(artifacts.snapshot_path),
+        "projected_candidate_snapshot_sha256": artifacts.snapshot_sha256,
+        "localization_evidence_path": str(preflight_path),
+        "motion_authorized": False,
+    }
+    arrival_sha256 = write_content_hashed_json(
+        arrival_path,
+        arrival_evidence,
+        hash_field="candidate_arrival_admission_sha256",
+    )
+    if not decision.accepted:
+        raise CandidateObservationUnavailableError(
+            candidate_uid=candidate_uid,
+            observation_attempt_index=observation_attempt_index,
+            reason="candidate_arrival_geometry_rejected",
+            process_evidence={
+                "candidate_arrival_admission_path": str(arrival_path),
+                "candidate_arrival_admission_sha256": arrival_sha256,
+                "observer_started": False,
+                "motion_authorized": False,
+            },
+            status_evidence=arrival_evidence,
+        )
+    return artifacts.config, candidate, planning_frame
+
+
+def _admit_opposite_face_planning_geometry(
+    *,
+    source_config: CandidateApproachConfig,
+    effects: CandidateApproachEffects,
+    source_registry: StandSurveyRegistry | None,
+    candidate_uid: str,
+    candidate_root: Path,
+) -> tuple[
+    CandidateApproachConfig,
+    FrozenCandidate,
+    Pose2D,
+    CandidatePlanningFrame | None,
+]:
+    """Bind opposite-face planning to one fresh stopped execution frame."""
+
+    admit_planning_frame = effects.admit_planning_frame
+    if admit_planning_frame is None:
+        candidate = source_config.snapshot.candidate_for(candidate_uid)
+        if candidate is None:
+            raise RuntimeError("opposite-face candidate disappeared from snapshot")
+        return (
+            source_config,
+            candidate,
+            _read_finite_pose2d(
+                effects,
+                context="opposite_face_preapproach",
+                candidate_uid=candidate_uid,
+            ),
+            None,
+        )
+    if source_registry is None:
+        raise RuntimeError("opposite-face frame registry is unavailable")
+    evidence_path = candidate_root / "opposite_face_planning_localization.json"
+    planning_frame = _run_planning_frame_admission(effects, evidence_path)
+    artifacts = _materialize_candidate_frame_projection(
+        source_config=source_config,
+        source_registry=source_registry,
+        planning_frame=planning_frame,
+        output_root=candidate_root / "opposite_face_planning_frame",
+    )
+    candidate = artifacts.config.snapshot.candidate_for(candidate_uid)
+    if candidate is None:
+        raise RuntimeError(
+            "opposite-face candidate disappeared from projected snapshot"
+        )
+    return artifacts.config, candidate, planning_frame.current_pose, planning_frame
 
 
 def _motion_request(
@@ -920,6 +1154,9 @@ def _execute_candidate_motion(
     leg_kind: MissionLegKind,
     candidate_index: int,
     target_id: str,
+    frame_source_config: CandidateApproachConfig | None = None,
+    source_registry: StandSurveyRegistry | None = None,
+    plan_planning_frame: CandidatePlanningFrame | None = None,
 ) -> MotionLegOutcome:
     """Run one candidate routine with bounded startup and runtime recovery."""
 
@@ -962,7 +1199,17 @@ def _execute_candidate_motion(
         target_id=target_id,
     )
 
+    startup_planning_frame: CandidatePlanningFrame | None = None
+    runtime_planning_frame: CandidatePlanningFrame | None = None
+
     def admit_localization(evidence_path: Path) -> Pose2D:
+        nonlocal startup_planning_frame
+        if effects.admit_planning_frame is not None:
+            startup_planning_frame = _run_planning_frame_admission(
+                effects,
+                evidence_path,
+            )
+            return startup_planning_frame.current_pose
         if effects.admit_startup_localization is None:
             raise RuntimeError(
                 "candidate startup recovery has no stationary localization "
@@ -970,23 +1217,64 @@ def _execute_candidate_motion(
             )
         return effects.admit_startup_localization(evidence_path)
 
-    def replan_same_routine(
-        attempt: CandidateStartupRecoveryAttempt,
-    ) -> CandidateMotionLegRequest:
-        replacement_plan = replace(
+    def frame_bound_replacement(
+        *,
+        source_root: Path,
+        fresh_start_pose: Pose2D,
+        fresh_planning_frame: CandidatePlanningFrame | None,
+    ) -> tuple[CandidateApproachConfig, CandidatePreapproachRequest]:
+        replacement_config = config
+        replacement_output_dir = source_root
+        replacement_snapshot = plan_request.snapshot
+        replacement_snapshot_path = plan_request.snapshot_path
+        approach_normal_rad = plan_request.approach_normal_rad
+        if fresh_planning_frame is not None:
+            if frame_source_config is None or source_registry is None:
+                raise RuntimeError(
+                    "frame-aware candidate recovery lacks source provenance"
+                )
+            artifacts = _materialize_candidate_frame_projection(
+                source_config=frame_source_config,
+                source_registry=source_registry,
+                planning_frame=fresh_planning_frame,
+                output_root=source_root / "candidate_frame_projection",
+            )
+            replacement_config = artifacts.config
+            replacement_output_dir = source_root / "route"
+            replacement_snapshot = artifacts.config.snapshot
+            replacement_snapshot_path = artifacts.config.snapshot_path
+            if approach_normal_rad is not None and plan_planning_frame is not None:
+                approach_normal_rad = normalize_angle(
+                    approach_normal_rad
+                    + fresh_planning_frame.map_from_odom.yaw_rad
+                    - plan_planning_frame.map_from_odom.yaw_rad
+                )
+        return replacement_config, replace(
             plan_request,
-            start=attempt.fresh_start_pose,
-            output_dir=attempt.source_root,
+            start=fresh_start_pose,
+            output_dir=replacement_output_dir,
+            snapshot=replacement_snapshot,
+            snapshot_path=replacement_snapshot_path,
+            approach_normal_rad=approach_normal_rad,
             prepared_plan=None,
             selection_evidence=None,
         )
+
+    def replan_same_routine(
+        attempt: CandidateStartupRecoveryAttempt,
+    ) -> CandidateMotionLegRequest:
+        replacement_config, replacement_plan = frame_bound_replacement(
+            source_root=attempt.source_root,
+            fresh_start_pose=attempt.fresh_start_pose,
+            fresh_planning_frame=startup_planning_frame,
+        )
         replacement_sealed = effects.plan_preapproach(replacement_plan)
         return _motion_request(
-            config=config,
+            config=replacement_config,
             sealed=replacement_sealed,
             run_id=attempt.identity.run_id,
             candidate_snapshot_path=(
-                attempt.source_root / "candidate_snapshot.json"
+                replacement_plan.output_dir / "candidate_snapshot.json"
             ),
             leg_kind=leg_kind,
             candidate_index=candidate_index,
@@ -1004,6 +1292,13 @@ def _execute_candidate_motion(
         return effects.run_startup_reseal_motion_leg(request, attempt)
 
     def admit_runtime_localization(evidence_path: Path) -> Pose2D:
+        nonlocal runtime_planning_frame
+        if effects.admit_planning_frame is not None:
+            runtime_planning_frame = _run_planning_frame_admission(
+                effects,
+                evidence_path,
+            )
+            return runtime_planning_frame.current_pose
         if effects.admit_runtime_localization is None:
             raise RuntimeError(
                 "candidate runtime recovery has no stationary localization "
@@ -1014,20 +1309,18 @@ def _execute_candidate_motion(
     def replan_runtime_same_routine(
         attempt: CandidateRuntimeRecoveryAttempt,
     ) -> CandidateMotionLegRequest:
-        replacement_plan = replace(
-            plan_request,
-            start=attempt.fresh_start_pose,
-            output_dir=attempt.source_root,
-            prepared_plan=None,
-            selection_evidence=None,
+        replacement_config, replacement_plan = frame_bound_replacement(
+            source_root=attempt.source_root,
+            fresh_start_pose=attempt.fresh_start_pose,
+            fresh_planning_frame=runtime_planning_frame,
         )
         replacement_sealed = effects.plan_preapproach(replacement_plan)
         return _motion_request(
-            config=config,
+            config=replacement_config,
             sealed=replacement_sealed,
             run_id=attempt.identity.run_id,
             candidate_snapshot_path=(
-                attempt.source_root / "candidate_snapshot.json"
+                replacement_plan.output_dir / "candidate_snapshot.json"
             ),
             leg_kind=leg_kind,
             candidate_index=candidate_index,
@@ -1093,12 +1386,15 @@ def _execute_candidate_motion(
 def _capture_candidate_camera_result(
     *,
     config: CandidateApproachConfig,
+    source_config: CandidateApproachConfig,
     effects: CandidateApproachEffects,
+    source_registry: StandSurveyRegistry | None,
     candidate: FrozenCandidate,
     candidate_root: Path,
     candidate_run_id: str,
     candidate_index: int,
-) -> CandidateObservation:
+    observation_planning_frame: CandidatePlanningFrame | None,
+) -> tuple[CandidateObservation, CandidateApproachConfig, FrozenCandidate]:
     """Resolve one candidate behind the bounded direct/opposite-face policy.
 
     Observation availability failures stay typed so the parent state machine
@@ -1115,38 +1411,57 @@ def _capture_candidate_camera_result(
         )
     )
     if observation.recommendation_path is not None:
-        return observation
+        return observation, config, candidate
     if observation.axis_observation_path is None:
         raise RuntimeError("observer returned neither QR recommendation nor axis")
 
     opposite_normal = opposite_face_normal(observation.axis_observation_path)
-    opposite_start = _read_finite_pose2d(
-        effects,
-        context="opposite_face_preapproach",
-        candidate_uid=candidate.candidate_uid,
+    opposite_config, candidate, opposite_start, opposite_planning_frame = (
+        _admit_opposite_face_planning_geometry(
+            source_config=source_config,
+            effects=effects,
+            source_registry=source_registry,
+            candidate_uid=candidate.candidate_uid,
+            candidate_root=candidate_root,
+        )
     )
+    if (
+        observation_planning_frame is not None
+        and opposite_planning_frame is not None
+    ):
+        frame_yaw_delta = normalize_angle(
+            opposite_planning_frame.map_from_odom.yaw_rad
+            - observation_planning_frame.map_from_odom.yaw_rad
+        )
+        opposite_normal = normalize_angle(opposite_normal + frame_yaw_delta)
     opposite_source = candidate_root / "opposite_face_source"
     opposite_sealed = None
     opposite_plan_request = None
     feasibility_failures = []
     for inspection_offset_m in bounded_approach_offsets(
-        config.approach_offset_m,
-        float(config.physical_clearance["minimum_active_standoff_m"]),
+        opposite_config.approach_offset_m,
+        float(
+            opposite_config.physical_clearance[
+                "minimum_active_standoff_m"
+            ]
+        ),
     ):
         try:
             opposite_plan_request = CandidatePreapproachRequest(
-                map_yaml=config.map_yaml,
-                semantic_map_id=config.semantic_map_id,
-                plan=config.plan,
-                snapshot=config.snapshot,
-                snapshot_path=config.snapshot_path,
+                map_yaml=opposite_config.map_yaml,
+                semantic_map_id=opposite_config.semantic_map_id,
+                plan=opposite_config.plan,
+                snapshot=opposite_config.snapshot,
+                snapshot_path=opposite_config.snapshot_path,
                 candidate_uid=candidate.candidate_uid,
                 start=opposite_start,
                 output_dir=opposite_source,
                 approach_offset_m=inspection_offset_m,
-                inflation_radius_m=config.inflation_radius_m,
-                candidate_transit_radius_m=config.candidate_transit_radius_m,
-                physical_clearance=config.physical_clearance,
+                inflation_radius_m=opposite_config.inflation_radius_m,
+                candidate_transit_radius_m=(
+                    opposite_config.candidate_transit_radius_m
+                ),
+                physical_clearance=opposite_config.physical_clearance,
                 approach_normal_rad=opposite_normal,
                 axis_observation_path=observation.axis_observation_path,
             )
@@ -1162,7 +1477,7 @@ def _capture_candidate_camera_result(
             + "; ".join(feasibility_failures)
         )
     _execute_candidate_motion(
-        config=config,
+        config=opposite_config,
         effects=effects,
         candidate_root=candidate_root,
         plan_request=opposite_plan_request,
@@ -1171,6 +1486,19 @@ def _capture_candidate_camera_result(
         leg_kind=MissionLegKind.OPPOSITE_FACE,
         candidate_index=candidate_index,
         target_id=candidate.candidate_uid,
+        frame_source_config=source_config,
+        source_registry=source_registry,
+        plan_planning_frame=opposite_planning_frame,
+    )
+    opposite_config, candidate, _opposite_arrival_frame = (
+        _admit_camera_arrival_geometry(
+            source_config=source_config,
+            effects=effects,
+            source_registry=source_registry,
+            candidate_uid=candidate.candidate_uid,
+            candidate_root=candidate_root,
+            observation_attempt_index=1,
+        )
     )
     observation = effects.capture_observation(
         CandidateObservationRequest(
@@ -1184,7 +1512,7 @@ def _capture_candidate_camera_result(
             "QR side remained unresolved after opposite-face inspection for "
             f"{candidate.candidate_uid}"
         )
-    return observation
+    return observation, opposite_config, candidate
 
 
 def execute_candidate_approach_phase(
@@ -1194,6 +1522,14 @@ def execute_candidate_approach_phase(
     """Execute the post-coverage candidate state machine behind live effects."""
 
     exact_two_support_by_uid = validate_candidate_approach_handoff(config)
+    source_registry = (
+        None
+        if effects.admit_planning_frame is None
+        else load_stand_survey_registry(
+            config.survey_root / "stand_registry.json",
+            config.plan,
+        )
+    )
     unresolved = set(config.snapshot.candidate_uids)
     facing_records: list[Mapping[str, object]] = []
     identities: list[StationIdentity] = []
@@ -1225,14 +1561,42 @@ def execute_candidate_approach_phase(
                 continue
             raise observation_ledger.incomplete_error()
         eligible = set(observation_state.eligible_candidate_uids)
-        current = _read_finite_pose2d(
-            effects,
-            context="initial_candidate_selection",
-        )
+        planning_config = config
+        frame_projection_artifacts = None
+        selection_planning_frame = None
+        if effects.admit_planning_frame is None:
+            current = _read_finite_pose2d(
+                effects,
+                context="initial_candidate_selection",
+            )
+        else:
+            assert source_registry is not None
+            planning_frame_evidence_path = (
+                config.session_root
+                / "preflight"
+                / f"candidate_selection_{candidate_index:03d}_localization.json"
+            )
+            planning_frame = _run_planning_frame_admission(
+                effects,
+                planning_frame_evidence_path
+            )
+            selection_planning_frame = planning_frame
+            frame_projection_artifacts = _materialize_candidate_frame_projection(
+                source_config=config,
+                source_registry=source_registry,
+                planning_frame=planning_frame,
+                output_root=(
+                    config.session_root
+                    / "candidate_frame_projections"
+                    / f"selection_{candidate_index:03d}"
+                ),
+            )
+            planning_config = frame_projection_artifacts.config
+            current = planning_frame.current_pose
         try:
             selection = effects.select_initial_preapproach(
                 CameraCandidateSelectionRequest(
-                    config=config,
+                    config=planning_config,
                     current_pose=current,
                     unresolved=frozenset(eligible),
                     support_class_by_uid=exact_two_support_by_uid,
@@ -1249,11 +1613,33 @@ def execute_candidate_approach_phase(
                 },
             )
             raise
+        if frame_projection_artifacts is not None:
+            selection = replace(
+                selection,
+                evidence={
+                    **dict(selection.evidence),
+                    "candidate_frame_projection_path": str(
+                        frame_projection_artifacts.evidence_path
+                    ),
+                    "candidate_frame_projection_sha256": (
+                        frame_projection_artifacts.evidence_sha256
+                    ),
+                    "source_candidate_snapshot_sha256": (
+                        candidate_snapshot_sha256(config.snapshot)
+                    ),
+                    "projected_candidate_snapshot_sha256": (
+                        frame_projection_artifacts.snapshot_sha256
+                    ),
+                    "motion_authorized": False,
+                },
+            )
         _validate_initial_selection(selection, unresolved=eligible)
         observation_selection = observation_ledger.select(
             selection.candidate_uid
         )
-        candidate = config.snapshot.candidate_for(selection.candidate_uid)
+        candidate = planning_config.snapshot.candidate_for(
+            selection.candidate_uid
+        )
         if candidate is None:
             raise RuntimeError("selected candidate disappeared from snapshot")
         candidate_root = (
@@ -1263,18 +1649,20 @@ def execute_candidate_approach_phase(
         )
         source_root = candidate_root / "preapproach_source"
         preapproach_plan_request = CandidatePreapproachRequest(
-            map_yaml=config.map_yaml,
-            semantic_map_id=config.semantic_map_id,
-            plan=config.plan,
-            snapshot=config.snapshot,
-            snapshot_path=config.snapshot_path,
+            map_yaml=planning_config.map_yaml,
+            semantic_map_id=planning_config.semantic_map_id,
+            plan=planning_config.plan,
+            snapshot=planning_config.snapshot,
+            snapshot_path=planning_config.snapshot_path,
             candidate_uid=candidate.candidate_uid,
             start=current,
             output_dir=source_root,
-            approach_offset_m=config.approach_offset_m,
-            inflation_radius_m=config.inflation_radius_m,
-            candidate_transit_radius_m=config.candidate_transit_radius_m,
-            physical_clearance=config.physical_clearance,
+            approach_offset_m=planning_config.approach_offset_m,
+            inflation_radius_m=planning_config.inflation_radius_m,
+            candidate_transit_radius_m=(
+                planning_config.candidate_transit_radius_m
+            ),
+            physical_clearance=planning_config.physical_clearance,
             prepared_plan=selection.prepared_plan,
             selection_evidence=selection.evidence,
         )
@@ -1327,7 +1715,7 @@ def execute_candidate_approach_phase(
             f"{config.session_id}_candidate_{candidate_index:03d}"
         )
         outcome = _execute_candidate_motion(
-            config=config,
+            config=planning_config,
             effects=effects,
             candidate_root=candidate_root,
             plan_request=preapproach_plan_request,
@@ -1336,15 +1724,33 @@ def execute_candidate_approach_phase(
             leg_kind=MissionLegKind.CANDIDATE_PREAPPROACH,
             candidate_index=candidate_index,
             target_id=candidate.candidate_uid,
+            frame_source_config=config,
+            source_registry=source_registry,
+            plan_planning_frame=selection_planning_frame,
         )
         try:
-            observation = _capture_candidate_camera_result(
-                config=config,
-                effects=effects,
-                candidate=candidate,
-                candidate_root=candidate_root,
-                candidate_run_id=candidate_run_id,
-                candidate_index=candidate_index,
+            arrival_config, candidate, arrival_planning_frame = (
+                _admit_camera_arrival_geometry(
+                    source_config=config,
+                    effects=effects,
+                    source_registry=source_registry,
+                    candidate_uid=candidate.candidate_uid,
+                    candidate_root=candidate_root,
+                    observation_attempt_index=0,
+                )
+            )
+            observation, arrival_config, candidate = (
+                _capture_candidate_camera_result(
+                    config=arrival_config,
+                    source_config=config,
+                    effects=effects,
+                    source_registry=source_registry,
+                    candidate=candidate,
+                    candidate_root=candidate_root,
+                    candidate_run_id=candidate_run_id,
+                    candidate_index=candidate_index,
+                    observation_planning_frame=arrival_planning_frame,
+                )
             )
         except CandidateObservationUnavailableError as exc:
             attempt = observation_ledger.mark_unavailable(exc)
@@ -1376,7 +1782,7 @@ def execute_candidate_approach_phase(
         facing = dict(
             effects.validate_facing(
                 FacingValidationRequest(
-                    config=config,
+                    config=arrival_config,
                     candidate=candidate,
                     recommendation_path=observation.recommendation_path,
                     current_pose=stopped_pose,

@@ -52,6 +52,7 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     SurveyViewpoint,
     load_coverage_survey_plan,
     load_stand_survey_registry,
+    stand_survey_registry_sha256,
     write_stand_survey_registry,
 )
 from scripts.aufgabe04.navigation.coverage.stand_discovery_route import (
@@ -90,6 +91,7 @@ from scripts.aufgabe04.real_robot.autonomous_runner.runtime import (
     MissionLegPermitContext,
     RuntimeLocalizationPermitContext,
     StartupResealPermitContext,
+    _admit_candidate_planning_frame,
     _admit_preplanning_localization,
     _capture_lidar_epoch,
     _execute_coverage_leg_with_replans,
@@ -1162,6 +1164,48 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             1.1,
         )
 
+    def test_candidate_planning_frame_binds_pose_and_map_from_odom(self):
+        runtime = SimpleNamespace(
+            namespace="",
+            map_frame="map",
+            odom_frame="odom",
+        )
+        preflight = RosPreflightResult(
+            ok=True,
+            failures=[],
+            observations=[],
+            runtime_config={"localization_source": "amcl"},
+            route_pose={
+                "frame_id": "map",
+                "child_frame_id": "base_footprint",
+                "x_m": 1.2,
+                "y_m": 0.3,
+                "yaw_rad": 0.7,
+            },
+            map_from_odom={
+                "target_frame": "map",
+                "source_frame": "odom",
+                "x_m": -1.638358757,
+                "y_m": -0.437467937,
+                "yaw_rad": -0.108542892,
+            },
+        )
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
+            "run_ros_preflight",
+            return_value=preflight,
+        ):
+            admitted = _admit_candidate_planning_frame(
+                runtime,
+                Path(tmp),
+            )
+
+        self.assertEqual(admitted.current_pose, Pose2D(1.2, 0.3, 0.7))
+        self.assertEqual(admitted.map_frame, "map")
+        self.assertEqual(admitted.odom_frame, "odom")
+        self.assertAlmostEqual(admitted.map_from_odom.x_m, -1.638358757)
+        self.assertAlmostEqual(admitted.map_from_odom.yaw_rad, -0.108542892)
+
     def test_preplanning_localization_fails_before_route_planning(self):
         runtime = SimpleNamespace(namespace="")
         preflight = RosPreflightResult(
@@ -1477,6 +1521,10 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             self.assertEqual(
                 snapshot.candidates[0].source.observation_ids,
                 candidate.source_observation_ids,
+            )
+            self.assertEqual(
+                snapshot.candidates[0].source.source_artifact_sha256,
+                stand_survey_registry_sha256(registry),
             )
 
     def test_physical_clearance_uses_measured_stand_base_radius(self):
