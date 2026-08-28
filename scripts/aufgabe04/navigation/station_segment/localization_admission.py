@@ -122,7 +122,7 @@ def _preflight_stationary_map_from_odom_window(
     map_frame: str,
     odom_frame: str,
 ) -> tuple[tuple[PlanarTransform2D, ...], tuple[dict[str, object], ...]]:
-    """Validate ordered direct-TF samples paired with stationary AMCL."""
+    """Validate ordered direct-TF samples from the stationary AMCL epoch."""
 
     raw_samples = preflight.stationary_map_from_odom_samples
     if not isinstance(raw_samples, list) or len(raw_samples) < 2:
@@ -841,4 +841,3 @@ class _OdomBlockageRecoveryAdapter:
         if update is None:
             return None
         return self._uncertainty_gate.adapt(update, self._context)
-

@@ -3,8 +3,10 @@
 The candidate route is planned in ``map`` while the frozen LiDAR candidates
 must be reprojected through a current ``map <- odom`` transform.  This module
 keeps that special evidence contract out of the autonomous runner: it declares
-the extra no-motion preflight requirement and validates the returned paired
-window plus final fresh transform before constructing the planning frame.
+the extra no-motion preflight requirement and validates the returned
+same-stationary-epoch direct-TF window plus final fresh transform before
+constructing the planning frame.  AMCL and TF callbacks are sampled
+independently inside that epoch.
 """
 
 from __future__ import annotations

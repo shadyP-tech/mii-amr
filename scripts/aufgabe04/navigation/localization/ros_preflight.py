@@ -25,6 +25,12 @@ from scripts.aufgabe04.navigation.localization.localization_preflight_evidence i
 from scripts.aufgabe04.navigation.localization.odom_route_adapter import (
     STATIONARY_STABILITY_MINIMUM_SAMPLE_COUNT,
 )
+from scripts.aufgabe04.navigation.localization.stationary_map_odom_capture import (
+    StationaryMapOdomEpochBaseline,
+    StationaryMapOdomEpochCapture,
+    evaluate_stationary_map_odom_amcl_window_binding,
+    evaluate_stationary_map_odom_candidate,
+)
 from scripts.aufgabe04.navigation.foundation.ros_runtime_config import (
     ResolvedRuntimeConfig,
     RuntimeConfig,
@@ -40,7 +46,12 @@ try:  # pragma: no cover - exercised on ROS hosts.
     from rclpy.duration import Duration
     from rclpy.node import Node
     from rclpy.parameter import Parameter
-    from rclpy.qos import qos_profile_sensor_data
+    from rclpy.qos import (
+        DurabilityPolicy,
+        HistoryPolicy,
+        QoSProfile,
+        qos_profile_sensor_data,
+    )
     from rclpy.time import Time
     from sensor_msgs.msg import LaserScan
     from std_srvs.srv import Empty
@@ -57,6 +68,9 @@ except ImportError:  # pragma: no cover - keeps offline tests ROS-free.
     Duration = None
     Node = object
     Parameter = None
+    DurabilityPolicy = None
+    HistoryPolicy = None
+    QoSProfile = None
     qos_profile_sensor_data = None
     Time = None
     Buffer = None
@@ -65,6 +79,7 @@ except ImportError:  # pragma: no cover - keeps offline tests ROS-free.
 
 
 ACTIVE_GOAL_STATUS = {1, 2, 3, 4}
+DIRECT_DYNAMIC_TF_QOS_DEPTH = 100
 
 
 def _node_identity(endpoint) -> str:
@@ -93,16 +108,19 @@ class StationaryAmclPoseSample:
     y_m: float
     yaw_rad: float
     covariance: Tuple[float, ...] = ()
+    receipt_time_nanoseconds: int | None = None
 
 
 @dataclass(frozen=True)
 class RosPreflightRequirements:
     """Optional evidence requirements independent of motion-frame ownership.
 
-    Odom-owned execution still implies a paired stationary ``map <- odom``
-    window.  Callers that plan in ``map`` but also need a frozen transform can
-    request the same evidence explicitly without falsely claiming that odom
-    owns their eventual motion pose.
+    Odom-owned execution still implies stationary AMCL and direct
+    ``map <- odom`` windows from one continuous capture epoch.  ``pairing`` is
+    retained in the public field name for compatibility; it does not require
+    or infer DDS callback arrival order.  Callers that plan in ``map`` but also
+    need a frozen transform can request the same evidence explicitly without
+    falsely claiming that odom owns their eventual motion pose.
     """
 
     require_stationary_map_from_odom_pairing: bool = False
@@ -587,83 +605,32 @@ def _stationary_map_from_odom_pairing_failure(
     *,
     baseline_identity: Tuple[int, int] | None,
     previous_sample: Dict[str, object] | None,
-    paired_amcl_receipt_nanoseconds: int | None = None,
 ) -> str:
-    """Require a new, strictly ordered direct TF for each AMCL pair."""
+    """Validate one same-epoch direct TF without callback-order coupling.
+
+    This compatibility wrapper keeps the historic helper seam while the pure
+    policy lives in :mod:`stationary_map_odom_capture`.
+    """
 
     try:
-        stamp_nanoseconds = _nonnegative_nanoseconds(
-            sample["stamp_nanoseconds"],
-            name="stamp_nanoseconds",
+        baseline = StationaryMapOdomEpochBaseline(
+            stamp_nanoseconds=(
+                0 if baseline_identity is None else baseline_identity[0]
+            ),
+            receipt_time_nanoseconds=(
+                0 if baseline_identity is None else baseline_identity[1]
+            ),
         )
-        receipt_nanoseconds = _nonnegative_nanoseconds(
-            sample["receipt_time_nanoseconds"],
-            name="receipt_time_nanoseconds",
-        )
-        capture_nanoseconds = _nonnegative_nanoseconds(
-            sample["capture_time_nanoseconds"],
-            name="capture_time_nanoseconds",
-        )
-    except (KeyError, TypeError, ValueError, OverflowError) as exc:
-        return f"map<-odom pairing metadata is malformed: {exc}"
-    if paired_amcl_receipt_nanoseconds is not None:
-        try:
-            paired_amcl_receipt_nanoseconds = _nonnegative_nanoseconds(
-                paired_amcl_receipt_nanoseconds,
-                name="paired_amcl_receipt_nanoseconds",
-            )
-        except ValueError as exc:
-            return f"paired AMCL receipt metadata is malformed: {exc}"
-        if receipt_nanoseconds <= paired_amcl_receipt_nanoseconds:
-            return (
-                "direct map<-odom receipt did not follow paired AMCL "
-                "publication"
-            )
-    if baseline_identity is not None:
-        try:
-            baseline_stamp = _nonnegative_nanoseconds(
-                baseline_identity[0],
-                name="baseline stamp_nanoseconds",
-            )
-            baseline_receipt = _nonnegative_nanoseconds(
-                baseline_identity[1],
-                name="baseline receipt_time_nanoseconds",
-            )
-        except (IndexError, TypeError, ValueError) as exc:
-            return f"baseline map<-odom pairing metadata is malformed: {exc}"
-        if stamp_nanoseconds <= baseline_stamp:
-            return (
-                "direct map<-odom stamp did not advance after no-motion "
-                "request"
-            )
-        if receipt_nanoseconds <= baseline_receipt:
-            return (
-                "direct map<-odom receipt did not advance after no-motion "
-                "request"
-            )
-    if previous_sample is not None:
-        try:
-            previous_stamp = _nonnegative_nanoseconds(
-                previous_sample["stamp_nanoseconds"],
-                name="prior stamp_nanoseconds",
-            )
-            previous_receipt = _nonnegative_nanoseconds(
-                previous_sample["receipt_time_nanoseconds"],
-                name="prior receipt_time_nanoseconds",
-            )
-            previous_capture = _nonnegative_nanoseconds(
-                previous_sample["capture_time_nanoseconds"],
-                name="prior capture_time_nanoseconds",
-            )
-        except (KeyError, TypeError, ValueError, OverflowError) as exc:
-            return f"prior map<-odom pairing metadata is malformed: {exc}"
-        if stamp_nanoseconds <= previous_stamp:
-            return "direct map<-odom stamps are not strictly increasing"
-        if receipt_nanoseconds <= previous_receipt:
-            return "direct map<-odom receipts are not strictly increasing"
-        if capture_nanoseconds <= previous_capture:
-            return "direct map<-odom capture times are not strictly increasing"
-    return ""
+    except (IndexError, TypeError, ValueError) as exc:
+        return f"baseline map<-odom capture metadata is malformed: {exc}"
+    decision = evaluate_stationary_map_odom_candidate(
+        sample,
+        epoch_start_baseline=baseline,
+        accepted_head=previous_sample,
+    )
+    if decision.accepted:
+        return ""
+    return f"direct map<-odom stationary-epoch rejection: {decision.reason}"
 
 
 class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
@@ -755,6 +722,16 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         self.latest_dynamic_map_to_odom = None
         self.latest_dynamic_map_to_odom_receipt = None
         self.dynamic_map_to_odom_message_count = 0
+        self.dynamic_map_to_odom_rejection_history: List[
+            Dict[str, object]
+        ] = []
+        self.stationary_map_from_odom_epoch_capture = None
+        self.stationary_map_from_odom_epoch_baseline = None
+        self.stationary_map_from_odom_retained_sample_count = 0
+        self.stationary_map_from_odom_candidate_rejections: List[
+            Dict[str, object]
+        ] = []
+        self.stationary_map_from_odom_amcl_window_binding = None
         self.stationary_map_from_odom_capture_failure_history: List[
             Dict[str, object]
         ] = []
@@ -767,8 +744,18 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.dynamic_tf_topics = self._dynamic_tf_topic_candidates()
+        dynamic_tf_qos = QoSProfile(
+            depth=DIRECT_DYNAMIC_TF_QOS_DEPTH,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+        )
         for topic in self.dynamic_tf_topics:
-            self.create_subscription(TFMessage, topic, self._dynamic_tf_callback, 10)
+            self.create_subscription(
+                TFMessage,
+                topic,
+                self._dynamic_tf_callback,
+                dynamic_tf_qos,
+            )
         self.create_subscription(
             LaserScan,
             config.scan_topic,
@@ -801,12 +788,99 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
     def _nav2_status_callback(self, msg) -> None:
         self.latest_nav2_status = msg
 
+    def _record_dynamic_map_to_odom_rejection(
+        self,
+        *,
+        reason: str,
+        sample: Dict[str, object] | None = None,
+    ) -> None:
+        history = getattr(
+            self,
+            "dynamic_map_to_odom_rejection_history",
+            None,
+        )
+        if history is None:
+            history = []
+            self.dynamic_map_to_odom_rejection_history = history
+        history.append(
+            {
+                "reason": str(reason),
+                "timing": (
+                    {}
+                    if sample is None
+                    else {
+                        key: sample.get(key)
+                        for key in (
+                            "stamp_nanoseconds",
+                            "receipt_time_nanoseconds",
+                            "capture_time_nanoseconds",
+                        )
+                    }
+                ),
+            }
+        )
+
     def _dynamic_tf_callback(self, msg) -> None:
         for transform in msg.transforms:
-            if self._is_configured_map_to_odom(transform):
-                self.latest_dynamic_map_to_odom = transform
-                self.latest_dynamic_map_to_odom_receipt = self.get_clock().now()
-                self.dynamic_map_to_odom_message_count += 1
+            if not self._is_configured_map_to_odom(transform):
+                continue
+            receipt = self.get_clock().now()
+            try:
+                receipt_nanoseconds = _nonnegative_nanoseconds(
+                    receipt.nanoseconds,
+                    name="receipt_time_nanoseconds",
+                )
+            except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+                self._record_dynamic_map_to_odom_rejection(
+                    reason=f"malformed direct map<-odom receipt time: {exc}",
+                )
+                continue
+            candidate, failure = build_stationary_map_from_odom_sample(
+                transform,
+                expected_map_frame=self.config.map_frame,
+                expected_odom_frame=self.config.odom_frame,
+                receipt_time_nanoseconds=receipt_nanoseconds,
+                capture_time_nanoseconds=receipt_nanoseconds,
+                max_age_sec=self.max_tf_age_sec,
+                max_future_sec=self.max_localization_tf_future_sec,
+                amcl_sample_index=0,
+            )
+            if candidate is None:
+                self._record_dynamic_map_to_odom_rejection(reason=failure)
+                continue
+
+            current_identity, current_failure = (
+                self._latest_dynamic_map_from_odom_identity()
+            )
+            if current_failure:
+                self._record_dynamic_map_to_odom_rejection(
+                    reason=current_failure,
+                    sample=candidate,
+                )
+                continue
+            if current_identity is not None:
+                failure = _stationary_map_from_odom_pairing_failure(
+                    candidate,
+                    baseline_identity=current_identity,
+                    previous_sample=None,
+                )
+                if failure:
+                    self._record_dynamic_map_to_odom_rejection(
+                        reason=failure,
+                        sample=candidate,
+                    )
+                    continue
+
+            self.latest_dynamic_map_to_odom = transform
+            self.latest_dynamic_map_to_odom_receipt = receipt
+            self.dynamic_map_to_odom_message_count += 1
+            epoch_capture = getattr(
+                self,
+                "stationary_map_from_odom_epoch_capture",
+                None,
+            )
+            if epoch_capture is not None:
+                epoch_capture.consider(candidate)
 
     def _is_configured_map_to_odom(self, transform) -> bool:
         return (
@@ -972,6 +1046,9 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                     "y_m": sample.y_m,
                     "yaw_rad": sample.yaw_rad,
                     "covariance": list(sample.covariance),
+                    "receipt_time_nanoseconds": (
+                        sample.receipt_time_nanoseconds
+                    ),
                 }
                 for sample in self.stationary_amcl_samples
             ],
@@ -1048,7 +1125,15 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
 
     def _stationary_amcl_sample(self) -> StationaryAmclPoseSample | None:
         msg = self.latest_amcl
-        if msg is None:
+        receipt = self.latest_amcl_receipt
+        if msg is None or receipt is None:
+            return None
+        try:
+            receipt_time_nanoseconds = _nonnegative_nanoseconds(
+                receipt.nanoseconds,
+                name="amcl receipt_time_nanoseconds",
+            )
+        except (AttributeError, TypeError, ValueError, OverflowError):
             return None
         pose = msg.pose.pose
         orientation = pose.orientation
@@ -1070,6 +1155,7 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             y_m=float(pose.position.y),
             yaw_rad=yaw_rad,
             covariance=tuple(float(value) for value in msg.pose.covariance),
+            receipt_time_nanoseconds=receipt_time_nanoseconds,
         )
 
     def _stationary_map_from_odom_sample(
@@ -1124,6 +1210,107 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         except (AttributeError, TypeError, ValueError, OverflowError) as exc:
             return None, f"cached direct map<-odom identity is malformed: {exc}"
         return (stamp_nanoseconds, receipt_nanoseconds), ""
+
+    def _begin_stationary_map_from_odom_capture_epoch(self) -> str:
+        """Start one continuous direct-TF epoch before no-motion sampling."""
+
+        baseline_identity, failure = (
+            self._latest_dynamic_map_from_odom_identity()
+        )
+        if failure:
+            self.stationary_map_from_odom_epoch_capture = None
+            self.stationary_map_from_odom_epoch_baseline = None
+            return failure
+        if baseline_identity is None:
+            baseline_identity = (0, 0)
+        try:
+            baseline = StationaryMapOdomEpochBaseline(
+                stamp_nanoseconds=baseline_identity[0],
+                receipt_time_nanoseconds=baseline_identity[1],
+            )
+            self.stationary_map_from_odom_epoch_capture = (
+                StationaryMapOdomEpochCapture(
+                    epoch_start_baseline=baseline,
+                    required_count=self.stationary_amcl_sample_count,
+                )
+            )
+            self.stationary_map_from_odom_epoch_baseline = (
+                baseline.to_log_dict()
+            )
+        except (TypeError, ValueError) as exc:
+            self.stationary_map_from_odom_epoch_capture = None
+            self.stationary_map_from_odom_epoch_baseline = None
+            return f"stationary map<-odom capture epoch is invalid: {exc}"
+        return ""
+
+    def _finish_stationary_map_from_odom_capture_epoch(
+        self,
+        *,
+        start_failure: str,
+        amcl_window_receipt_nanoseconds: Sequence[int],
+    ) -> Tuple[
+        List[Dict[str, object]],
+        List[Dict[str, object]],
+        List[Dict[str, object]],
+        Dict[str, object] | None,
+    ]:
+        """Close the capture epoch and expose only a complete newest window."""
+
+        capture = self.stationary_map_from_odom_epoch_capture
+        self.stationary_map_from_odom_epoch_capture = None
+        if capture is None:
+            samples: List[Dict[str, object]] = []
+            rejections: List[Dict[str, object]] = []
+            retained_count = 0
+        else:
+            result = capture.window_result()
+            samples = [dict(sample) for sample in result.samples]
+            rejections = [
+                rejection.to_log_dict() for rejection in result.rejections
+            ]
+            retained_count = result.retained_sample_count
+        self.stationary_map_from_odom_retained_sample_count = retained_count
+        self.stationary_map_from_odom_candidate_rejections = list(rejections)
+
+        failures: List[Dict[str, object]] = []
+        amcl_binding: Dict[str, object] | None = None
+        if len(samples) == self.stationary_amcl_sample_count:
+            binding = evaluate_stationary_map_odom_amcl_window_binding(
+                samples,
+                amcl_receipt_nanoseconds=amcl_window_receipt_nanoseconds,
+            )
+            amcl_binding = binding.to_log_dict()
+            if not binding.accepted:
+                failures = [
+                    {
+                        "amcl_sample_index": index,
+                        "stationary_epoch_sample_index": index,
+                        "reason": (
+                            "stationary map<-odom window is not bound to "
+                            f"the accepted AMCL window: {binding.reason}"
+                        ),
+                    }
+                    for index in range(self.stationary_amcl_sample_count)
+                ]
+                samples = []
+        if not failures and len(samples) != self.stationary_amcl_sample_count:
+            reason = start_failure or (
+                "incomplete independent same-stationary-epoch direct "
+                f"map<-odom window: retained={retained_count}/"
+                f"{self.stationary_amcl_sample_count}"
+            )
+            for index in range(
+                retained_count,
+                self.stationary_amcl_sample_count,
+            ):
+                failures.append(
+                    {
+                        "amcl_sample_index": index,
+                        "stationary_epoch_sample_index": index,
+                        "reason": reason,
+                    }
+                )
+        return samples, failures, rejections, amcl_binding
 
     def _observe_stationary_map_from_odom_samples(self) -> RosObservation:
         sample_count = len(self.stationary_map_from_odom_samples)
@@ -1185,10 +1372,32 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                 "paired_amcl_sample_count": paired_amcl_sample_count,
                 "complete_amcl_window": complete_amcl_window,
                 "complete_transform_window": complete_transform_window,
+                "retained_transform_sample_count": getattr(
+                    self,
+                    "stationary_map_from_odom_retained_sample_count",
+                    sample_count,
+                ),
                 "sample_order": "oldest_to_newest",
                 "direct_dynamic_tf_required": True,
-                "new_direct_tf_after_each_nomotion_amcl_required": True,
+                "capture_mode": "independent_same_stationary_epoch",
+                "new_direct_tf_after_each_nomotion_amcl_required": False,
+                "same_stationary_epoch_amcl_and_direct_tf_windows_required": (
+                    True
+                ),
+                "direct_tf_callback_order_coupling_required": False,
+                "direct_tf_qos_depth": DIRECT_DYNAMIC_TF_QOS_DEPTH,
+                "epoch_start_baseline": getattr(
+                    self,
+                    "stationary_map_from_odom_epoch_baseline",
+                    None,
+                ),
+                "amcl_window_binding": getattr(
+                    self,
+                    "stationary_map_from_odom_amcl_window_binding",
+                    None,
+                ),
                 "strictly_increasing_stamp_receipt_required": True,
+                "strictly_increasing_capture_time_required": True,
                 "ordering_failure": ordering_failure,
                 "capture_failures": list(
                     self.stationary_map_from_odom_capture_failures
@@ -1200,19 +1409,31 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                         [],
                     )
                 ),
+                "candidate_rejections": list(
+                    getattr(
+                        self,
+                        "stationary_map_from_odom_candidate_rejections",
+                        [],
+                    )
+                ),
             },
         )
 
     def _observe_stationary_amcl_stability(self) -> RosObservation:
         deadline = time.monotonic() + self.nomotion_update_timeout_sec
         samples: List[StationaryAmclPoseSample] = []
-        map_from_odom_samples_by_amcl: List[
-            Dict[str, object] | None
-        ] = []
-        map_from_odom_failures_by_amcl: List[str | None] = []
-        map_from_odom_candidate_rejections: List[Dict[str, object]] = []
         service_failures: List[str] = []
         service_request_count = 0
+        capture_epoch_started = False
+        capture_epoch_start_failure = ""
+        direct_tf_rejection_start_index = len(
+            getattr(self, "dynamic_map_to_odom_rejection_history", [])
+        )
+        self.stationary_map_from_odom_epoch_capture = None
+        self.stationary_map_from_odom_epoch_baseline = None
+        self.stationary_map_from_odom_retained_sample_count = 0
+        self.stationary_map_from_odom_candidate_rejections = []
+        self.stationary_map_from_odom_amcl_window_binding = None
         observation = evaluate_latest_stationary_amcl_window(
             samples,
             required_sample_count=self.stationary_amcl_sample_count,
@@ -1224,28 +1445,17 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             max_yaw_std_rad=self.max_stationary_amcl_yaw_std_rad,
         )
 
-        def latest_map_from_odom_window_complete() -> bool:
-            window_start = max(
-                0,
-                len(map_from_odom_samples_by_amcl)
-                - self.stationary_amcl_sample_count,
-            )
-            sample_window = map_from_odom_samples_by_amcl[window_start:]
-            failure_window = map_from_odom_failures_by_amcl[window_start:]
+        def direct_transform_window_complete() -> bool:
+            if not self.stationary_map_from_odom_pairing_required:
+                return True
+            capture = self.stationary_map_from_odom_epoch_capture
             return (
-                len(sample_window) == self.stationary_amcl_sample_count
-                and len(failure_window) == self.stationary_amcl_sample_count
-                and all(sample is not None for sample in sample_window)
-                and all(failure is None for failure in failure_window)
+                capture is not None
+                and capture.window_result().complete
             )
 
         def collection_complete() -> bool:
-            if not observation.ok:
-                return False
-            return (
-                not self.stationary_map_from_odom_pairing_required
-                or latest_map_from_odom_window_complete()
-            )
+            return observation.ok and direct_transform_window_complete()
 
         while (
             rclpy.ok()
@@ -1260,27 +1470,24 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                 rclpy.spin_once(self, timeout_sec=0.05)
             if not self.nomotion_client.service_is_ready():
                 break
+            if (
+                self.stationary_map_from_odom_pairing_required
+                and not capture_epoch_started
+            ):
+                capture_epoch_start_failure = (
+                    self._begin_stationary_map_from_odom_capture_epoch()
+                )
+                capture_epoch_started = True
+                if capture_epoch_start_failure:
+                    break
             baseline_receipt_ns = (
                 None
                 if self.latest_amcl_receipt is None
                 else self.latest_amcl_receipt.nanoseconds
             )
-            baseline_map_from_odom_message_count = (
-                self.dynamic_map_to_odom_message_count
-            )
-            (
-                baseline_map_from_odom_identity,
-                baseline_map_from_odom_failure,
-            ) = self._latest_dynamic_map_from_odom_identity()
             future = self.nomotion_client.call_async(Empty.Request())
             service_request_count += 1
             sample = None
-            sample_receipt_nanoseconds = None
-            map_from_odom_sample = None
-            map_from_odom_failure = ""
-            evaluated_map_from_odom_message_count = (
-                baseline_map_from_odom_message_count
-            )
             sample_deadline = min(
                 deadline,
                 time.monotonic()
@@ -1307,78 +1514,7 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                     and fresh
                     and self._route_transform_available()
                 ):
-                    if sample is None:
-                        sample = self._stationary_amcl_sample()
-                        try:
-                            sample_receipt_nanoseconds = (
-                                _nonnegative_nanoseconds(
-                                    receipt_ns,
-                                    name="paired_amcl_receipt_nanoseconds",
-                                )
-                            )
-                        except ValueError as exc:
-                            map_from_odom_failure = str(exc)
-                            break
-                    if not self.stationary_map_from_odom_pairing_required:
-                        break
-                    if baseline_map_from_odom_failure:
-                        map_from_odom_failure = (
-                            baseline_map_from_odom_failure
-                        )
-                        break
-                    if (
-                        self.dynamic_map_to_odom_message_count
-                        <= evaluated_map_from_odom_message_count
-                    ):
-                        continue
-                    evaluated_map_from_odom_message_count = (
-                        self.dynamic_map_to_odom_message_count
-                    )
-                    candidate, candidate_failure = (
-                        self._stationary_map_from_odom_sample(
-                            amcl_sample_index=len(samples),
-                        )
-                    )
-                    if candidate is not None:
-                        previous_sample = next(
-                            (
-                                prior
-                                for prior in reversed(
-                                    map_from_odom_samples_by_amcl
-                                )
-                                if prior is not None
-                            ),
-                            None,
-                        )
-                        candidate_failure = (
-                            _stationary_map_from_odom_pairing_failure(
-                                candidate,
-                                baseline_identity=(
-                                    baseline_map_from_odom_identity
-                                ),
-                                previous_sample=previous_sample,
-                                paired_amcl_receipt_nanoseconds=(
-                                    sample_receipt_nanoseconds
-                                ),
-                            )
-                        )
-                    if candidate_failure:
-                        map_from_odom_failure = candidate_failure
-                        map_from_odom_candidate_rejections.append(
-                            {
-                                "service_request_index": (
-                                    service_request_count - 1
-                                ),
-                                "amcl_sample_index": len(samples),
-                                "direct_tf_message_count": (
-                                    evaluated_map_from_odom_message_count
-                                ),
-                                "reason": candidate_failure,
-                            }
-                        )
-                        continue
-                    map_from_odom_sample = candidate
-                    map_from_odom_failure = ""
+                    sample = self._stationary_amcl_sample()
                     break
             if sample is None:
                 service_failures.append(
@@ -1386,31 +1522,6 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                 )
             else:
                 samples.append(sample)
-                if self.stationary_map_from_odom_pairing_required:
-                    if map_from_odom_sample is None:
-                        if not map_from_odom_failure:
-                            map_from_odom_failure = (
-                                "no new direct map<-odom transform followed "
-                                "paired no-motion AMCL publication"
-                            )
-                        map_from_odom_candidate_rejections.append(
-                            {
-                                "service_request_index": (
-                                    service_request_count - 1
-                                ),
-                                "amcl_sample_index": len(samples) - 1,
-                                "direct_tf_message_count": (
-                                    self.dynamic_map_to_odom_message_count
-                                ),
-                                "reason": map_from_odom_failure,
-                            }
-                        )
-                    map_from_odom_samples_by_amcl.append(
-                        map_from_odom_sample
-                    )
-                    map_from_odom_failures_by_amcl.append(
-                        map_from_odom_failure or None
-                    )
                 observation = evaluate_latest_stationary_amcl_window(
                     samples,
                     required_sample_count=self.stationary_amcl_sample_count,
@@ -1437,24 +1548,44 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         self.stationary_amcl_samples = list(
             samples[-self.stationary_amcl_sample_count :]
         )
-        (
-            self.stationary_map_from_odom_samples,
-            self.stationary_map_from_odom_capture_failures,
-        ) = _latest_stationary_map_from_odom_capture_window(
-            map_from_odom_samples_by_amcl,
-            map_from_odom_failures_by_amcl,
-            amcl_window_size=self.stationary_amcl_sample_count,
-        )
-        self.stationary_map_from_odom_capture_failure_history = [
-            {
-                "amcl_sample_index": index,
-                "reason": failure,
-            }
-            for index, failure in enumerate(
-                map_from_odom_failures_by_amcl
+        stationary_epoch_candidate_rejections: List[
+            Dict[str, object]
+        ] = []
+        if self.stationary_map_from_odom_pairing_required:
+            if not capture_epoch_started and not capture_epoch_start_failure:
+                capture_epoch_start_failure = (
+                    "stationary map<-odom capture epoch did not start before "
+                    "the no-motion readiness deadline"
+                )
+            (
+                self.stationary_map_from_odom_samples,
+                self.stationary_map_from_odom_capture_failures,
+                stationary_epoch_candidate_rejections,
+                self.stationary_map_from_odom_amcl_window_binding,
+            ) = self._finish_stationary_map_from_odom_capture_epoch(
+                start_failure=capture_epoch_start_failure,
+                amcl_window_receipt_nanoseconds=[
+                    sample.receipt_time_nanoseconds
+                    for sample in self.stationary_amcl_samples
+                    if sample.receipt_time_nanoseconds is not None
+                ],
             )
-            if failure
-        ]
+        else:
+            self.stationary_map_from_odom_samples = []
+            self.stationary_map_from_odom_capture_failures = []
+            self.stationary_map_from_odom_epoch_capture = None
+            self.stationary_map_from_odom_epoch_baseline = None
+            self.stationary_map_from_odom_retained_sample_count = 0
+            self.stationary_map_from_odom_candidate_rejections = []
+            self.stationary_map_from_odom_amcl_window_binding = None
+        self.stationary_map_from_odom_capture_failure_history = list(
+            self.stationary_map_from_odom_capture_failures
+        )
+        direct_tf_cache_rejections = list(
+            getattr(self, "dynamic_map_to_odom_rejection_history", [])[
+                direct_tf_rejection_start_index:
+            ]
+        )
         return RosObservation(
             observation.name,
             observation.ok,
@@ -1473,8 +1604,18 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                 "map_from_odom_pairing_failure_history": list(
                     self.stationary_map_from_odom_capture_failure_history
                 ),
-                "map_from_odom_candidate_rejections": (
-                    map_from_odom_candidate_rejections
+                "map_from_odom_candidate_rejections": list(
+                    stationary_epoch_candidate_rejections
+                ),
+                "direct_tf_cache_rejections": direct_tf_cache_rejections,
+                "direct_tf_capture_mode": (
+                    "independent_same_stationary_epoch"
+                ),
+                "direct_tf_callback_order_coupling_required": False,
+                "map_from_odom_amcl_window_binding": getattr(
+                    self,
+                    "stationary_map_from_odom_amcl_window_binding",
+                    None,
                 ),
             },
         )
