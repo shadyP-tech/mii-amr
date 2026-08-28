@@ -99,6 +99,25 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--prompt-for-initialpose",
+        action="store_true",
+        help=(
+            "Pause before each preauthorization first-route readiness attempt "
+            "so the operator can click RViz 2D Pose Estimate while the robot "
+            "is stopped. This is not motion authorization."
+        ),
+    )
+    parser.add_argument(
+        "--initialpose-prompt-window-sec",
+        type=float,
+        default=2.0,
+        help=(
+            "Human-facing time window printed by --prompt-for-initialpose. "
+            "It documents when the RViz click must happen; it does not widen "
+            "the ROS preflight or route-clearance gates."
+        ),
+    )
+    parser.add_argument(
         "--stand-model-profile",
         type=Path,
         default=None,

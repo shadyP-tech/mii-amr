@@ -121,6 +121,7 @@ class AutonomousPreauthorizationReadinessTest(unittest.TestCase):
         persisted=None,
         published=None,
         order=None,
+        prepare=None,
     ):
         seals = [] if seals is None else seals
         persisted = [] if persisted is None else persisted
@@ -144,6 +145,7 @@ class AutonomousPreauthorizationReadinessTest(unittest.TestCase):
             publish_hashed_json=publish,
             wall_clock=lambda: next(ticks),
             notify=lambda _message: None,
+            prepare_localization_attempt=prepare,
         )
 
     def test_pass_seals_once_persists_event_then_hash_bound_evidence(self):
@@ -225,6 +227,39 @@ class AutonomousPreauthorizationReadinessTest(unittest.TestCase):
         self.assertEqual(
             [payload["timestamp"] for _path, payload in persisted],
             [10.0, 11.0],
+        )
+
+    def test_prepare_localization_attempt_runs_before_each_dry_attempt(self):
+        order = []
+
+        def dry_runner(request):
+            order.append(("dry", request.attempt_index))
+            if request.attempt_index == 0:
+                return _outcome(
+                    request,
+                    status="preflight_failed",
+                    reason=_retryable_reason(),
+                    details=_retryable_details(),
+                )
+            return _outcome(request)
+
+        def prepare(request):
+            order.append(("prepare", request.attempt_index))
+
+        outcome = admit_preauthorization_readiness(
+            self.config,
+            self._effects(dry_runner, prepare=prepare),
+        )
+
+        self.assertTrue(outcome.result.ready)
+        self.assertEqual(
+            order,
+            [
+                ("prepare", 0),
+                ("dry", 0),
+                ("prepare", 1),
+                ("dry", 1),
+            ],
         )
 
     def test_rejection_is_structured_only_after_event_and_evidence_persist(self):

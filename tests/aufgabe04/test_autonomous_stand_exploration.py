@@ -1758,8 +1758,32 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         self.assertEqual(args.max_runtime_localization_reseals_per_leg, 1)
         self.assertEqual(args.max_localization_readiness_retries_per_leg, 2)
         self.assertEqual(args.uncertainty_sigma_multiplier, 2.0)
+        self.assertFalse(args.prompt_for_initialpose)
+        self.assertEqual(args.initialpose_prompt_window_sec, 2.0)
         self.assertFalse(resolved.stop_after_coverage)
         self.assertTrue(resolved.execute)
+
+    def test_initialpose_prompt_option_is_explicit_and_non_authorizing(self):
+        args = build_parser().parse_args(
+            [
+                "--robot-profile",
+                "robot.json",
+                "--camera-calibration",
+                "camera.json",
+                "--physical-site",
+                "site.json",
+                "--exact-inspection-point-count",
+                "2",
+                "--run-mode",
+                "execute-exact-two-camera",
+                "--prompt-for-initialpose",
+                "--initialpose-prompt-window-sec",
+                "3.0",
+            ]
+        )
+
+        self.assertTrue(args.prompt_for_initialpose)
+        self.assertEqual(args.initialpose_prompt_window_sec, 3.0)
 
     def test_exact_two_camera_options_enable_camera_phase(self):
         args = build_parser().parse_args(

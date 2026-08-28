@@ -186,6 +186,10 @@ from scripts.aufgabe04.real_robot.mission.coverage import (
 from scripts.aufgabe04.real_robot.readiness.localization import (
     evaluate_localization_readiness_retry,
 )
+from scripts.aufgabe04.real_robot.readiness.initialpose_prompt import (
+    InitialPosePromptConfig,
+    prompt_for_initialpose_attempt,
+)
 from scripts.aufgabe04.real_robot.readiness.preauthorization import (
     PreauthorizationReadinessConfig,
     PreauthorizationReadinessEffects,
@@ -1634,6 +1638,11 @@ def _validate_inputs(parser, args, profile, calibration) -> None:
         parser.error(
             "--max-localization-readiness-retries-per-leg must be non-negative"
         )
+    if (
+        not math.isfinite(args.initialpose_prompt_window_sec)
+        or args.initialpose_prompt_window_sec <= 0.0
+    ):
+        parser.error("--initialpose-prompt-window-sec must be finite and positive")
     if args.max_camera_observation_attempts_per_candidate < 1:
         parser.error(
             "--max-camera-observation-attempts-per-candidate must be positive"
@@ -1897,6 +1906,20 @@ def main(argv=None) -> int:
                 ),
             )
 
+        initialpose_prompt_config = InitialPosePromptConfig(
+            amcl_topic=getattr(profile, "amcl_topic", "amcl_pose"),
+            observation_window_sec=args.initialpose_prompt_window_sec,
+            maximum_retry_count=args.max_localization_readiness_retries_per_leg,
+        )
+
+        def prepare_initial_readiness_localization(request):
+            if not args.prompt_for_initialpose:
+                return
+            prompt_for_initialpose_attempt(
+                config=initialpose_prompt_config,
+                attempt_index=request.attempt_index,
+            )
+
         initial_admission = admit_preauthorization_readiness(
             PreauthorizationReadinessConfig(
                 session_root=session_root,
@@ -1921,6 +1944,7 @@ def main(argv=None) -> int:
                 publish_hashed_json=write_content_hashed_json,
                 wall_clock=time.time,
                 notify=print,
+                prepare_localization_attempt=prepare_initial_readiness_localization,
             ),
         )
         initial_readiness = initial_admission.result

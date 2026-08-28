@@ -240,6 +240,9 @@ class PreauthorizationReadinessEffects:
     publish_hashed_json: Callable[..., str]
     wall_clock: Callable[[], float]
     notify: Callable[[str], None]
+    prepare_localization_attempt: (
+        Callable[[InitialReadinessDryRequest], None] | None
+    ) = None
 
     def __post_init__(self) -> None:
         for field in (
@@ -252,6 +255,10 @@ class PreauthorizationReadinessEffects:
         ):
             if not callable(getattr(self, field)):
                 raise ValueError(f"{field} must be callable")
+        if self.prepare_localization_attempt is not None and not callable(
+            self.prepare_localization_attempt
+        ):
+            raise ValueError("prepare_localization_attempt must be callable or None")
 
 
 @dataclass(frozen=True)
@@ -371,6 +378,15 @@ def admit_preauthorization_readiness(
                 f"no-motion admission is retrying ({request.attempt_index}/"
                 f"{config.maximum_localization_readiness_retries})."
             )
+        if effects.prepare_localization_attempt is not None:
+            try:
+                effects.prepare_localization_attempt(request)
+            except Exception as exc:
+                raise _contract_error(
+                    "localization_attempt_preparation_failed",
+                    paths,
+                    exc,
+                ) from exc
         outcome = effects.run_dry_motion_leg(request)
         if getattr(outcome, "status", None) != "dry_run_ok":
             reason = getattr(outcome, "stop_reason", "unparseable dry outcome")
