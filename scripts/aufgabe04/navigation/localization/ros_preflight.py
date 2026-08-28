@@ -95,6 +95,54 @@ class StationaryAmclPoseSample:
     covariance: Tuple[float, ...] = ()
 
 
+@dataclass(frozen=True)
+class RosPreflightRequirements:
+    """Optional evidence requirements independent of motion-frame ownership.
+
+    Odom-owned execution still implies a paired stationary ``map <- odom``
+    window.  Callers that plan in ``map`` but also need a frozen transform can
+    request the same evidence explicitly without falsely claiming that odom
+    owns their eventual motion pose.
+    """
+
+    require_stationary_map_from_odom_pairing: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(
+            self.require_stationary_map_from_odom_pairing,
+            bool,
+        ):
+            raise TypeError(
+                "require_stationary_map_from_odom_pairing must be a bool"
+            )
+
+    def stationary_map_from_odom_pairing_required(
+        self,
+        *,
+        execution_pose_owner: str,
+    ) -> bool:
+        return (
+            self.require_stationary_map_from_odom_pairing
+            or str(execution_pose_owner).strip() == "odom"
+        )
+
+    def to_evidence(
+        self,
+        *,
+        execution_pose_owner: str,
+    ) -> Dict[str, object]:
+        return {
+            "stationary_map_from_odom_pairing_requested": (
+                self.require_stationary_map_from_odom_pairing
+            ),
+            "stationary_map_from_odom_pairing_required": (
+                self.stationary_map_from_odom_pairing_required(
+                    execution_pose_owner=execution_pose_owner,
+                )
+            ),
+        }
+
+
 def _angular_distance_rad(first: float, second: float) -> float:
     return abs((first - second + math.pi) % (2.0 * math.pi) - math.pi)
 
@@ -303,6 +351,7 @@ class RosPreflightResult:
     stationary_map_from_odom_samples: List[Dict[str, object]] = field(
         default_factory=list
     )
+    preflight_requirements: Dict[str, object] = field(default_factory=dict)
 
     def to_json_dict(self) -> Dict[str, object]:
         return {
@@ -310,6 +359,7 @@ class RosPreflightResult:
             "failures": self.failures,
             "observations": [asdict(observation) for observation in self.observations],
             "runtime_config": self.runtime_config,
+            "preflight_requirements": self.preflight_requirements,
             "route_pose": self.route_pose,
             "odom_pose": self.odom_pose,
             "map_from_odom": self.map_from_odom,
@@ -640,6 +690,7 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         max_stationary_amcl_yaw_spread_rad: float,
         max_stationary_amcl_position_std_m: float,
         max_stationary_amcl_yaw_std_rad: float,
+        preflight_requirements: RosPreflightRequirements,
         execution_pose_owner: str,
         global_consistency_monitor: str,
         frozen_map_transform_certified: bool,
@@ -676,7 +727,13 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         self.max_stationary_amcl_yaw_std_rad = (
             max_stationary_amcl_yaw_std_rad
         )
+        self.preflight_requirements = preflight_requirements
         self.execution_pose_owner = str(execution_pose_owner).strip()
+        self.stationary_map_from_odom_pairing_required = (
+            preflight_requirements.stationary_map_from_odom_pairing_required(
+                execution_pose_owner=self.execution_pose_owner,
+            )
+        )
         self.global_consistency_monitor = str(
             global_consistency_monitor
         ).strip()
@@ -788,7 +845,7 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                 failures.append(
                     f"stationary AMCL stability: {stability.detail}"
                 )
-        if self.execution_pose_owner == "odom":
+        if self.stationary_map_from_odom_pairing_required:
             transform_window = (
                 self._observe_stationary_map_from_odom_samples()
             )
@@ -854,7 +911,7 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         )
         map_to_odom_ok = False
         map_to_odom_transform_data: Dict[str, object] = {}
-        if self.execution_pose_owner == "odom":
+        if self.stationary_map_from_odom_pairing_required:
             map_to_odom_ok, map_to_odom_transform_data = self._observe_tf(
                 observations,
                 failures,
@@ -903,6 +960,9 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             failures=failures,
             observations=observations,
             runtime_config=self.config.as_log_dict(),
+            preflight_requirements=self.preflight_requirements.to_evidence(
+                execution_pose_owner=self.execution_pose_owner,
+            ),
             route_pose=route_pose,
             odom_pose=odom_pose,
             map_from_odom=map_from_odom,
@@ -1183,7 +1243,7 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             if not observation.ok:
                 return False
             return (
-                self.execution_pose_owner != "odom"
+                not self.stationary_map_from_odom_pairing_required
                 or latest_map_from_odom_window_complete()
             )
 
@@ -1259,7 +1319,7 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                         except ValueError as exc:
                             map_from_odom_failure = str(exc)
                             break
-                    if self.execution_pose_owner != "odom":
+                    if not self.stationary_map_from_odom_pairing_required:
                         break
                     if baseline_map_from_odom_failure:
                         map_from_odom_failure = (
@@ -1326,7 +1386,7 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                 )
             else:
                 samples.append(sample)
-                if self.execution_pose_owner == "odom":
+                if self.stationary_map_from_odom_pairing_required:
                     if map_from_odom_sample is None:
                         if not map_from_odom_failure:
                             map_from_odom_failure = (
@@ -1408,7 +1468,7 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                     self.stationary_amcl_sample_interval_sec
                 ),
                 "map_from_odom_pairing_required": (
-                    self.execution_pose_owner == "odom"
+                    self.stationary_map_from_odom_pairing_required
                 ),
                 "map_from_odom_pairing_failure_history": list(
                     self.stationary_map_from_odom_capture_failure_history
@@ -1770,6 +1830,7 @@ def run_ros_preflight(
     max_stationary_amcl_yaw_spread_rad: float = 0.03,
     max_stationary_amcl_position_std_m: float = 0.015,
     max_stationary_amcl_yaw_std_rad: float = 0.03,
+    preflight_requirements: RosPreflightRequirements | None = None,
     execution_pose_owner: str = "",
     global_consistency_monitor: str = "",
     frozen_map_transform_certified: bool = False,
@@ -1821,6 +1882,15 @@ def run_ros_preflight(
     }.items():
         if not math.isfinite(value) or value <= 0.0:
             raise ValueError(f"{name} must be finite and positive")
+    requirements = (
+        RosPreflightRequirements()
+        if preflight_requirements is None
+        else preflight_requirements
+    )
+    if not isinstance(requirements, RosPreflightRequirements):
+        raise TypeError(
+            "preflight_requirements must be a RosPreflightRequirements"
+        )
     _require_ros()
     rclpy.init(args=None)
     node = RosPreflightNode(
@@ -1852,6 +1922,7 @@ def run_ros_preflight(
             max_stationary_amcl_position_std_m
         ),
         max_stationary_amcl_yaw_std_rad=max_stationary_amcl_yaw_std_rad,
+        preflight_requirements=requirements,
         execution_pose_owner=execution_pose_owner,
         global_consistency_monitor=global_consistency_monitor,
         frozen_map_transform_certified=frozen_map_transform_certified,

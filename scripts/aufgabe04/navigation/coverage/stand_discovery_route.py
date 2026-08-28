@@ -21,6 +21,7 @@ from scripts.aufgabe04.navigation.execution.exact_start_route_binding import (
 )
 from scripts.aufgabe04.navigation.control.safety_checks import PreflightStatus
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
+    CoverageSurveyPlan,
     coverage_survey_plan_sha256,
     load_coverage_survey_plan,
 )
@@ -30,8 +31,34 @@ from scripts.aufgabe04.navigation.planning.waypoint_csv import SelectedRouteLeg,
 STAND_DISCOVERY_ROUTE_KIND = "stand_discovery_corridor"
 STAND_DISCOVERY_ROUTE_PURPOSE = "stand_discovery"
 STAND_DISCOVERY_ROUTE_SOURCE = "map_based_center_corridor_exploration"
+LONGITUDINALLY_DIVERSE_STAND_DISCOVERY_ROUTE_SOURCE = (
+    "map_based_center_corridor_longitudinal_exact_two_exploration"
+)
 DEFAULT_TRACKING_TUBE_RADIUS_M = 0.03
 DEFAULT_COMMAND_OWNER = "/aufgabe04_simple_waypoint_follower"
+
+
+def _route_source_for_plan(plan: CoverageSurveyPlan) -> str:
+    """Bind physical route semantics to the persisted viewpoint geometry."""
+
+    config = plan.config.validated()
+    if config.lane_count != 1:
+        raise ValueError("real stand discovery requires a single center lane")
+    if (
+        config.exact_inspection_point_count == 2
+        and config.exact_two_candidate_spacing_m is not None
+        and config.minimum_exact_two_viewpoint_baseline_m is not None
+    ):
+        return LONGITUDINALLY_DIVERSE_STAND_DISCOVERY_ROUTE_SOURCE
+    if (
+        config.exact_two_candidate_spacing_m is None
+        and config.minimum_exact_two_viewpoint_baseline_m is None
+    ):
+        return STAND_DISCOVERY_ROUTE_SOURCE
+    raise ValueError(
+        "real stand discovery requires either a legacy center-lane plan or "
+        "a longitudinal exact-two plan with persisted selection geometry"
+    )
 
 
 def _load_json(path: Path) -> dict[str, object]:
@@ -136,7 +163,7 @@ def validate_stand_discovery_route_binding(
     diagnostics_payload: Mapping[str, object] | None = None,
     endpoint_tolerance_m: float = 0.08,
 ) -> PreflightStatus:
-    """Validate the map, centerline plan, route bytes, and stopped endpoint."""
+    """Validate the map, center-corridor plan, route bytes, and endpoint."""
 
     failures: list[str] = []
     if leg.route_kind != STAND_DISCOVERY_ROUTE_KIND:
@@ -177,7 +204,10 @@ def validate_stand_discovery_route_binding(
         failures.append("stand discovery route kind does not match diagnostics")
     if metadata.get("route_purpose") != STAND_DISCOVERY_ROUTE_PURPOSE:
         failures.append("stand discovery route_purpose must be stand_discovery")
-    if metadata.get("source") != STAND_DISCOVERY_ROUTE_SOURCE:
+    if metadata.get("source") not in {
+        STAND_DISCOVERY_ROUTE_SOURCE,
+        LONGITUDINALLY_DIVERSE_STAND_DISCOVERY_ROUTE_SOURCE,
+    }:
         failures.append("stand discovery diagnostics have an unexpected source")
     if metadata.get("motion_authorized") is not True:
         failures.append("stand discovery route was not explicitly sealed for motion")
@@ -208,8 +238,16 @@ def validate_stand_discovery_route_binding(
     except (OSError, ValueError) as exc:
         failures.append(f"coverage plan validation failed: {exc}")
         return PreflightStatus(ok=False, failures=failures)
-    if plan.config.lane_count != 1:
-        failures.append("stand discovery physical route requires one center lane")
+    try:
+        expected_route_source = _route_source_for_plan(plan)
+    except ValueError as exc:
+        failures.append(str(exc))
+    else:
+        if metadata.get("source") != expected_route_source:
+            failures.append(
+                "stand discovery route source does not match persisted "
+                "viewpoint geometry"
+            )
     if metadata.get("survey_id") != plan.survey_id:
         failures.append("stand discovery survey ID differs from coverage plan")
     if metadata.get("plan_sha256") != coverage_survey_plan_sha256(plan):
@@ -270,8 +308,7 @@ def seal_stand_discovery_route(
         raise ValueError("source survey leg must be explicitly motion-free")
 
     plan = load_coverage_survey_plan(coverage_plan_path)
-    if plan.config.lane_count != 1:
-        raise ValueError("real stand discovery requires a single center lane")
+    route_source = _route_source_for_plan(plan)
     if source_metadata.get("plan_sha256") != coverage_survey_plan_sha256(plan):
         raise ValueError("source survey leg belongs to another coverage plan")
     if source_metadata.get("map_bundle_sha256") != plan.map_bundle_sha256:
@@ -330,7 +367,7 @@ def seal_stand_discovery_route(
         {
             "route_kind": STAND_DISCOVERY_ROUTE_KIND,
             "route_purpose": STAND_DISCOVERY_ROUTE_PURPOSE,
-            "source": STAND_DISCOVERY_ROUTE_SOURCE,
+            "source": route_source,
             "planning_frame": plan.planning_frame,
             "motion_authorized": True,
             "physical_clearance_enforced": True,

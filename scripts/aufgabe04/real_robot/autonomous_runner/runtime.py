@@ -64,10 +64,10 @@ from scripts.aufgabe04.navigation.missions.plan_stand_coverage_survey import (
 from scripts.aufgabe04.navigation.localization.read_current_amcl_pose import (
     read_current_pose2d_from_amcl,
 )
-from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
-    PlanarTransform2D,
+from scripts.aufgabe04.navigation.localization.ros_preflight import (
+    RosPreflightRequirements,
+    run_ros_preflight,
 )
-from scripts.aufgabe04.navigation.localization.ros_preflight import run_ros_preflight
 from scripts.aufgabe04.navigation.foundation.ros_runtime_config import resolve_topic
 from scripts.aufgabe04.navigation.execution.runtime_motion_authorization import (
     MISSION_MOTION_AUTHORIZATION_SCOPE,
@@ -80,6 +80,10 @@ from scripts.aufgabe04.navigation.execution.runtime_motion_authorization import 
 from scripts.aufgabe04.navigation.coverage.record_stand_coverage_stop import (
     commit_stand_coverage_stop,
     plan_next_stand_coverage_leg,
+)
+from scripts.aufgabe04.navigation.coverage.exact_two_viewpoint_selection import (
+    DEFAULT_EXACT_TWO_CANDIDATE_SPACING_M,
+    DEFAULT_MINIMUM_EXACT_TWO_VIEWPOINT_BASELINE_M,
 )
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STATUS_PENDING_CAMERA,
@@ -116,6 +120,10 @@ from scripts.aufgabe04.real_robot.configuration.profile import (
 )
 from scripts.aufgabe04.real_robot.configuration.site_contract import (
     validate_physical_site_contract,
+)
+from scripts.aufgabe04.real_robot.readiness.candidate_planning_frame import (
+    CANDIDATE_PLANNING_FRAME_PREFLIGHT_REQUIREMENTS,
+    build_candidate_planning_frame,
 )
 from scripts.aufgabe04.real_robot.observer.diagnostics import (
     format_passive_observer_failure,
@@ -332,43 +340,25 @@ def _admit_candidate_planning_frame(
 ) -> CandidatePlanningFrame:
     """Admit one simultaneous stationary pose and ``map <- odom`` value."""
 
+    candidate_evidence_path = (
+        session_root / "preflight/candidate_planning_frame.json"
+        if evidence_path is None
+        else evidence_path
+    )
     preflight = _run_preplanning_localization_preflight(
         runtime,
         session_root,
-        evidence_path=evidence_path,
+        evidence_path=candidate_evidence_path,
+        preflight_requirements=(
+            CANDIDATE_PLANNING_FRAME_PREFLIGHT_REQUIREMENTS
+        ),
     )
     pose = _pose_from_preplanning_preflight(preflight)
-    map_from_odom = preflight.map_from_odom
-    if map_from_odom is None:
-        raise RuntimeError(
-            "preplanning localization admission returned no map<-odom transform"
-        )
-    expected_map_frame = str(runtime.map_frame).strip("/")
-    expected_odom_frame = str(runtime.odom_frame).strip("/")
-    if (
-        str(map_from_odom.get("target_frame", "")).strip("/")
-        != expected_map_frame
-        or str(map_from_odom.get("source_frame", "")).strip("/")
-        != expected_odom_frame
-    ):
-        raise RuntimeError(
-            "preplanning localization map<-odom frame identity mismatch"
-        )
-    try:
-        transform = PlanarTransform2D(
-            float(map_from_odom["x_m"]),
-            float(map_from_odom["y_m"]),
-            float(map_from_odom["yaw_rad"]),
-        )
-    except (KeyError, TypeError, ValueError, OverflowError) as exc:
-        raise RuntimeError(
-            f"preplanning localization frame is invalid: {exc}"
-        ) from exc
-    return CandidatePlanningFrame(
+    return build_candidate_planning_frame(
+        preflight,
         current_pose=pose,
-        map_from_odom=transform,
-        map_frame=expected_map_frame,
-        odom_frame=expected_odom_frame,
+        map_frame=runtime.map_frame,
+        odom_frame=runtime.odom_frame,
     )
 
 
@@ -377,27 +367,30 @@ def _run_preplanning_localization_preflight(
     session_root: Path,
     *,
     evidence_path: Path | None,
+    preflight_requirements: RosPreflightRequirements | None = None,
 ):
     """Run and persist the shared stopped localization admission."""
 
-    preflight = run_ros_preflight(
-        runtime,
-        max_localization_tf_future_sec=1.1,
-        request_nomotion_update=True,
-        nomotion_update_service=resolve_topic(
+    preflight_kwargs = {
+        "max_localization_tf_future_sec": 1.1,
+        "request_nomotion_update": True,
+        "nomotion_update_service": resolve_topic(
             "request_nomotion_update",
             runtime.namespace,
         ),
-        nomotion_update_timeout_sec=STATIONARY_AMCL_TIMEOUT_SEC,
-        max_stationary_amcl_position_spread_m=(
+        "nomotion_update_timeout_sec": STATIONARY_AMCL_TIMEOUT_SEC,
+        "max_stationary_amcl_position_spread_m": (
             0.5 * DEFAULT_TRACKING_TUBE_RADIUS_M
         ),
-        max_stationary_amcl_yaw_spread_rad=0.03,
-        max_stationary_amcl_position_std_m=(
+        "max_stationary_amcl_yaw_spread_rad": 0.03,
+        "max_stationary_amcl_position_std_m": (
             0.30
         ),
-        max_stationary_amcl_yaw_std_rad=0.35,
-    )
+        "max_stationary_amcl_yaw_std_rad": 0.35,
+    }
+    if preflight_requirements is not None:
+        preflight_kwargs["preflight_requirements"] = preflight_requirements
+    preflight = run_ros_preflight(runtime, **preflight_kwargs)
     evidence_path = (
         session_root / "preflight/preplanning_localization.json"
         if evidence_path is None
@@ -1868,6 +1861,10 @@ def main(argv=None) -> int:
                     [
                         "--exact-inspection-point-count",
                         str(args.exact_inspection_point_count),
+                        "--exact-two-candidate-spacing-m",
+                        str(DEFAULT_EXACT_TWO_CANDIDATE_SPACING_M),
+                        "--minimum-exact-two-viewpoint-baseline-m",
+                        str(DEFAULT_MINIMUM_EXACT_TWO_VIEWPOINT_BASELINE_M),
                     ]
                 )
             planning_status = plan_stand_coverage_survey(planning_command)

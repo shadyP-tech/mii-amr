@@ -24,6 +24,10 @@ from scripts.aufgabe04.navigation.foundation.artifacts import (
 )
 from scripts.aufgabe04.navigation.planning.map_io import load_occupancy_grid_with_bundle
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.coverage.exact_two_viewpoint_selection import (
+    DEFAULT_EXACT_TWO_CANDIDATE_SPACING_M,
+    DEFAULT_MINIMUM_EXACT_TWO_VIEWPOINT_BASELINE_M,
+)
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     CoverageSurveyConfig,
     build_coverage_survey_plan,
@@ -57,8 +61,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--exact-inspection-point-count",
         type=int,
         help=(
-            "select exactly two complementary centerline inspection points; "
-            "requires --lane-count 1"
+            "select exactly two longitudinally diverse center-corridor "
+            "inspection points; requires --lane-count 1"
+        ),
+    )
+    parser.add_argument(
+        "--exact-two-candidate-spacing-m",
+        type=float,
+        default=DEFAULT_EXACT_TWO_CANDIDATE_SPACING_M,
+        help=(
+            "dense center-corridor sampling spacing used only while selecting "
+            "an exact-two pair (default: 0.40 m)"
+        ),
+    )
+    parser.add_argument(
+        "--minimum-exact-two-viewpoint-baseline-m",
+        type=float,
+        default=DEFAULT_MINIMUM_EXACT_TWO_VIEWPOINT_BASELINE_M,
+        help=(
+            "required world-space distance between exact-two viewpoints "
+            "(default: 1.00 m)"
         ),
     )
     parser.add_argument("--visibility-radius-m", type=float, default=1.35)
@@ -141,6 +163,16 @@ def main(argv: list[str] | None = None) -> int:
             lane_count=args.lane_count,
             stop_spacing_m=args.stop_spacing_m,
             exact_inspection_point_count=args.exact_inspection_point_count,
+            exact_two_candidate_spacing_m=(
+                args.exact_two_candidate_spacing_m
+                if args.exact_inspection_point_count is not None
+                else None
+            ),
+            minimum_exact_two_viewpoint_baseline_m=(
+                args.minimum_exact_two_viewpoint_baseline_m
+                if args.exact_inspection_point_count is not None
+                else None
+            ),
             visibility_radius_m=args.visibility_radius_m,
             inflation_radius_m=args.inflation_radius_m,
             snap_radius_m=args.snap_radius_m,

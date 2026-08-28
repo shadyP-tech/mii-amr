@@ -395,7 +395,10 @@ five active static-map-admitted LiDAR candidates passed the frozen count and
 basic evidence gate. The result is a terminal, non-resumable checkpoint with
 `camera_approach_authorized=false`; it does not promote single-view candidates
 to `pending_camera`, create a candidate snapshot, or continue into camera
-approach motion.
+approach motion. Exact-two planning samples longitudinal center-corridor
+candidates at the reviewed `0.40 m` density and requires a persisted `1.00 m`
+world-space baseline, while retaining the `95%` coverage and shared-visibility
+gates.
 
 For the explicit two-stop-to-camera workflow, use
 `--run-mode execute-exact-two-camera` with
@@ -407,6 +410,10 @@ which are single-view `provisional`; only its bound camera decision path may
 resolve the latter. It continues in the same process under the initial `RUN`,
 while every candidate and opposite-face motion still requires its own sealed
 route, dry-run, live gates, and atomically consumed one-use permit.
+Before each candidate route is planned, a stopped AMCL sample window must be
+paired with direct dynamic `map <- odom` samples and followed by a fresh,
+consistent transform lookup; missing or drifting evidence stops before route
+planning.
 
 If one of those camera routines stops after motion with the exact global
 localization-consistency `FORCE_ZERO_RESEAL` contract, the parent may use the

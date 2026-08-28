@@ -26,7 +26,10 @@ from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     load_mission_leg_motion_permit,
     write_mission_leg_motion_authorization,
 )
-from scripts.aufgabe04.navigation.localization.ros_preflight import RosPreflightResult
+from scripts.aufgabe04.navigation.localization.ros_preflight import (
+    RosObservation,
+    RosPreflightResult,
+)
 from scripts.aufgabe04.navigation.localization.runtime_localization_reseal import (
     evaluate_runtime_localization_reseal,
 )
@@ -559,6 +562,11 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         capture_count = {uid: 0 for uid in candidate_uids}
         capture_order: list[str] = []
         motion_targets: list[str] = []
+        planning_commands: list[tuple[str, ...]] = []
+
+        def record_planning_command(command):
+            planning_commands.append(tuple(command))
+            return 0
 
         def capture_observation(*, profile, args, request):
             del profile, args
@@ -645,7 +653,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 _admit_preplanning_localization=lambda *_args, **_kwargs: Pose2D(
                     0.0, 0.0, 0.0
                 ),
-                plan_stand_coverage_survey=lambda *_args, **_kwargs: 0,
+                plan_stand_coverage_survey=record_planning_command,
                 load_coverage_survey_plan=lambda *_args, **_kwargs: plan,
                 admit_preauthorization_readiness=(
                     lambda *_args, **_kwargs: initial_admission
@@ -718,6 +726,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             "session_root": session_root,
             "capture_order": capture_order,
             "motion_targets": motion_targets,
+            "planning_command": planning_commands[0],
             "run_prompt_count": run_prompt.call_count,
             "failure": (
                 json.loads(
@@ -744,6 +753,26 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 ["candidate_a", "candidate_b", "candidate_c", "candidate_a"],
             )
             self.assertEqual(result["motion_targets"], result["capture_order"])
+            planning_command = result["planning_command"]
+            self.assertEqual(
+                planning_command[planning_command.index("--lane-count") + 1],
+                "1",
+            )
+            self.assertEqual(
+                planning_command[
+                    planning_command.index("--exact-two-candidate-spacing-m") + 1
+                ],
+                "0.4",
+            )
+            self.assertEqual(
+                planning_command[
+                    planning_command.index(
+                        "--minimum-exact-two-viewpoint-baseline-m"
+                    )
+                    + 1
+                ],
+                "1.0",
+            )
             self.assertEqual(result["run_prompt_count"], 1)
             events = [
                 json.loads(line)
@@ -1163,6 +1192,14 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             ],
             1.1,
         )
+        self.assertNotIn(
+            "preflight_requirements",
+            run_preflight.call_args.kwargs,
+        )
+        self.assertNotIn(
+            "execution_pose_owner",
+            run_preflight.call_args.kwargs,
+        )
 
     def test_candidate_planning_frame_binds_pose_and_map_from_odom(self):
         runtime = SimpleNamespace(
@@ -1173,8 +1210,25 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         preflight = RosPreflightResult(
             ok=True,
             failures=[],
-            observations=[],
+            observations=[
+                RosObservation(
+                    "stationary map<-odom transform samples",
+                    True,
+                    "paired_samples=2/2",
+                    {"required_pair_count": 2},
+                ),
+                RosObservation(
+                    "tf map->odom",
+                    True,
+                    "age=0.010s",
+                    {"target_frame": "map", "source_frame": "odom"},
+                ),
+            ],
             runtime_config={"localization_source": "amcl"},
+            preflight_requirements={
+                "stationary_map_from_odom_pairing_requested": True,
+                "stationary_map_from_odom_pairing_required": True,
+            },
             route_pose={
                 "frame_id": "map",
                 "child_frame_id": "base_footprint",
@@ -1185,26 +1239,65 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             map_from_odom={
                 "target_frame": "map",
                 "source_frame": "odom",
+                "stamp_sec": 1.2e-8,
                 "x_m": -1.638358757,
                 "y_m": -0.437467937,
                 "yaw_rad": -0.108542892,
             },
+            stationary_map_from_odom_samples=[
+                {
+                    "source": "direct_dynamic_tf",
+                    "target_frame": "map",
+                    "source_frame": "odom",
+                    "amcl_sample_index": 0,
+                    "stamp_nanoseconds": 10,
+                    "receipt_time_nanoseconds": 20,
+                    "x_m": -1.638358757,
+                    "y_m": -0.437467937,
+                    "yaw_rad": -0.108542892,
+                },
+                {
+                    "source": "direct_dynamic_tf",
+                    "target_frame": "map",
+                    "source_frame": "odom",
+                    "amcl_sample_index": 1,
+                    "stamp_nanoseconds": 11,
+                    "receipt_time_nanoseconds": 21,
+                    "x_m": -1.638358757,
+                    "y_m": -0.437467937,
+                    "yaw_rad": -0.108542892,
+                },
+            ],
         )
         with tempfile.TemporaryDirectory() as tmp, patch(
             "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
             "run_ros_preflight",
             return_value=preflight,
-        ):
+        ) as run_preflight:
             admitted = _admit_candidate_planning_frame(
                 runtime,
                 Path(tmp),
             )
+            candidate_evidence_written = (
+                Path(tmp) / "preflight/candidate_planning_frame.json"
+            ).is_file()
 
         self.assertEqual(admitted.current_pose, Pose2D(1.2, 0.3, 0.7))
         self.assertEqual(admitted.map_frame, "map")
         self.assertEqual(admitted.odom_frame, "odom")
         self.assertAlmostEqual(admitted.map_from_odom.x_m, -1.638358757)
         self.assertAlmostEqual(admitted.map_from_odom.yaw_rad, -0.108542892)
+        self.assertTrue(candidate_evidence_written)
+        requirements = run_preflight.call_args.kwargs[
+            "preflight_requirements"
+        ]
+        self.assertTrue(
+            requirements.require_stationary_map_from_odom_pairing
+        )
+        self.assertNotIn(
+            "execution_pose_owner",
+            run_preflight.call_args.kwargs,
+        )
 
     def test_preplanning_localization_fails_before_route_planning(self):
         runtime = SimpleNamespace(namespace="")

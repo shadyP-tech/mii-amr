@@ -23,6 +23,10 @@ from scripts.aufgabe04.navigation.coverage.candidate_frame_registry import (
     frame_provenance_from_confirmed_stand,
     merge_candidate_frame_provenance,
 )
+from scripts.aufgabe04.navigation.coverage.exact_two_viewpoint_selection import (
+    ExactTwoViewpointCandidate,
+    select_exact_two_viewpoint_cells,
+)
 from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds
 from scripts.aufgabe04.navigation.planning.certified_exact_start_route import (
     certify_and_smooth_exact_start_route,
@@ -91,6 +95,8 @@ class CoverageSurveyConfig:
     candidate_keepout_radius_m: float = 0.31
     expected_stand_count: int | None = None
     exact_inspection_point_count: int | None = None
+    exact_two_candidate_spacing_m: float | None = None
+    minimum_exact_two_viewpoint_baseline_m: float | None = None
 
     def validated(self) -> "CoverageSurveyConfig":
         positive = {
@@ -126,8 +132,39 @@ class CoverageSurveyConfig:
             if self.lane_count != 1:
                 raise ValueError(
                     "exact_inspection_point_count requires lane_count=1 "
-                    "for centerline inspection"
+                    "for center-corridor inspection"
                 )
+            if (self.exact_two_candidate_spacing_m is None) != (
+                self.minimum_exact_two_viewpoint_baseline_m is None
+            ):
+                raise ValueError(
+                    "new exact-two geometry fields must either both be set "
+                    "or both be absent for a legacy plan"
+                )
+        elif (
+            self.exact_two_candidate_spacing_m is not None
+            or self.minimum_exact_two_viewpoint_baseline_m is not None
+        ):
+            raise ValueError(
+                "exact-two geometry fields require "
+                "exact_inspection_point_count=2"
+            )
+        for name, value in (
+            ("exact_two_candidate_spacing_m", self.exact_two_candidate_spacing_m),
+            (
+                "minimum_exact_two_viewpoint_baseline_m",
+                self.minimum_exact_two_viewpoint_baseline_m,
+            ),
+        ):
+            if value is None:
+                continue
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value <= 0.0
+            ):
+                raise ValueError(f"{name} must be finite and positive")
         if (
             type(self.minimum_distinct_viewpoints) is not int
             or self.minimum_distinct_viewpoints < 1
@@ -266,6 +303,18 @@ def build_coverage_survey_plan(
     """Generate a map-snapped boustrophedon survey with visibility evidence."""
 
     selected_config = (config or CoverageSurveyConfig()).validated()
+    if (
+        selected_config.exact_inspection_point_count == 2
+        and (
+            selected_config.exact_two_candidate_spacing_m is None
+            or selected_config.minimum_exact_two_viewpoint_baseline_m is None
+        )
+    ):
+        raise ValueError(
+            "legacy lane_count=1 exact-two plans may be loaded or resumed, "
+            "but new exact-two planning requires explicit dense candidate "
+            "spacing and a minimum world-space viewpoint baseline"
+        )
     selected_arena = arena_bounds or ArenaBounds()
     selected_arena.validate()
     _validate_nonempty_id(survey_id, "survey_id")
@@ -279,9 +328,18 @@ def build_coverage_survey_plan(
     planning_costmap = visibility_costmap.with_inflation(
         selected_config.inflation_radius_m
     )
+    sequence_config = selected_config
+    if selected_config.exact_inspection_point_count == 2:
+        candidate_spacing_m = selected_config.exact_two_candidate_spacing_m
+        if candidate_spacing_m is None:  # defensive; rejected above
+            raise ValueError("new exact-two planning requires candidate spacing")
+        sequence_config = replace(
+            selected_config,
+            stop_spacing_m=candidate_spacing_m,
+        )
     requested_sequences = _requested_boustrophedon_sequences(
         selected_arena,
-        selected_config,
+        sequence_config,
     )
     snapped_sequences = tuple(
         _snap_sequence(planning_costmap, sequence, selected_config.snap_radius_m)
@@ -324,7 +382,36 @@ def build_coverage_survey_plan(
         for cell in cells
     }
     if selected_config.exact_inspection_point_count == 2:
-        cells = _select_exact_two_inspection_cells(cells, visible_by_cell)
+        minimum_viewpoint_baseline_m = (
+            selected_config.minimum_exact_two_viewpoint_baseline_m
+        )
+        if minimum_viewpoint_baseline_m is None:  # defensive; rejected above
+            raise ValueError(
+                "new exact-two planning requires a minimum viewpoint baseline"
+            )
+        surveyable_world_xy = {
+            cell: (
+                visibility_costmap.grid_to_world(cell).x_m,
+                visibility_costmap.grid_to_world(cell).y_m,
+            )
+            for cell in surveyable_cells
+        }
+        cells = select_exact_two_viewpoint_cells(
+            tuple(
+                ExactTwoViewpointCandidate(
+                    cell=cell,
+                    x_m=planning_costmap.grid_to_world(cell).x_m,
+                    y_m=planning_costmap.grid_to_world(cell).y_m,
+                    visible_cells=visible_by_cell[cell],
+                )
+                for cell in cells
+            ),
+            surveyable_world_xy=surveyable_world_xy,
+            coverage_threshold=selected_config.coverage_threshold,
+            minimum_viewpoint_baseline_m=minimum_viewpoint_baseline_m,
+            start_x_m=start.x_m,
+            start_y_m=start.y_m,
+        )
     viewpoints = []
     for index, cell in enumerate(cells):
         if index + 1 < len(cells):
@@ -745,6 +832,24 @@ def validate_coverage_survey_plan(plan: CoverageSurveyPlan) -> None:
             raise ValueError(
                 "exact-two survey viewpoints must have shared visibility"
             )
+        minimum_viewpoint_baseline_m = (
+            plan.config.minimum_exact_two_viewpoint_baseline_m
+        )
+        if minimum_viewpoint_baseline_m is not None:
+            actual_baseline_m = math.hypot(
+                plan.viewpoints[1].pose.x_m - plan.viewpoints[0].pose.x_m,
+                plan.viewpoints[1].pose.y_m - plan.viewpoints[0].pose.y_m,
+            )
+            if (
+                actual_baseline_m + 1.0e-12
+                < minimum_viewpoint_baseline_m
+            ):
+                raise ValueError(
+                    "exact-two survey viewpoints violate the persisted "
+                    "minimum world-space viewpoint baseline: "
+                    f"{actual_baseline_m:.3f} < "
+                    f"{minimum_viewpoint_baseline_m:.3f} m"
+                )
 
 
 def validate_survey_progress(
@@ -1063,47 +1168,6 @@ def _nearest_traversable_cell(
             if costmap.is_traversable(cell):
                 options.append((dx * dx + dy * dy, cell))
     return min(options)[1] if options else None
-
-
-def _select_exact_two_inspection_cells(
-    dense_cells: tuple[GridCell, ...],
-    visible_by_cell: Mapping[GridCell, tuple[GridCell, ...]],
-) -> tuple[GridCell, GridCell]:
-    """Choose an ordered dense-sequence pair with complementary visibility.
-
-    A valid pair uses two distinct snapped centerline cells and retains at
-    least one commonly visible surveyable cell.  Among valid pairs, planned
-    union coverage is maximized first, then shared visibility.  Dense-sequence
-    indices provide a stable final tie-break and preserve travel order.
-    """
-
-    best: tuple[tuple[int, int, int, int], tuple[GridCell, GridCell]] | None = None
-    visibility_sets = {
-        cell: frozenset(visible_by_cell[cell]) for cell in dense_cells
-    }
-    for first_index, first in enumerate(dense_cells):
-        for second_index in range(first_index + 1, len(dense_cells)):
-            second = dense_cells[second_index]
-            if first == second:
-                continue
-            shared_count = len(
-                visibility_sets[first].intersection(visibility_sets[second])
-            )
-            if shared_count == 0:
-                continue
-            union_count = len(
-                visibility_sets[first].union(visibility_sets[second])
-            )
-            score = (-union_count, -shared_count, first_index, second_index)
-            candidate = (score, (first, second))
-            if best is None or candidate[0] < best[0]:
-                best = candidate
-    if best is None:
-        raise ValueError(
-            "no valid exact-two inspection-point pair with distinct snapped "
-            "cells and shared visibility"
-        )
-    return best[1]
 
 
 def _cell_distance_m(costmap: Costmap, pose: Pose2D, cell: GridCell) -> float:
@@ -1466,6 +1530,14 @@ def _config_payload(config: CoverageSurveyConfig) -> dict[str, object]:
         payload["exact_inspection_point_count"] = (
             config.exact_inspection_point_count
         )
+    if config.exact_two_candidate_spacing_m is not None:
+        payload["exact_two_candidate_spacing_m"] = (
+            config.exact_two_candidate_spacing_m
+        )
+    if config.minimum_exact_two_viewpoint_baseline_m is not None:
+        payload["minimum_exact_two_viewpoint_baseline_m"] = (
+            config.minimum_exact_two_viewpoint_baseline_m
+        )
     return payload
 
 
@@ -1475,6 +1547,10 @@ def _config_from_payload(payload: object) -> CoverageSurveyConfig:
         lane_count=int(item["lane_count"]),
         stop_spacing_m=float(item["stop_spacing_m"]),
         exact_inspection_point_count=item.get("exact_inspection_point_count"),
+        exact_two_candidate_spacing_m=item.get("exact_two_candidate_spacing_m"),
+        minimum_exact_two_viewpoint_baseline_m=item.get(
+            "minimum_exact_two_viewpoint_baseline_m"
+        ),
         visibility_radius_m=float(item["visibility_radius_m"]),
         inflation_radius_m=float(item["inflation_radius_m"]),
         snap_radius_m=float(item["snap_radius_m"]),

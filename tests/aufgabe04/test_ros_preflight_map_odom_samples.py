@@ -293,6 +293,10 @@ class RosPreflightMapFromOdomSamplesTest(unittest.TestCase):
             [],
         )
         self.assertEqual(
+            legacy_constructor.to_json_dict()["preflight_requirements"],
+            {},
+        )
+        self.assertEqual(
             with_samples.to_json_dict()[
                 "stationary_map_from_odom_samples"
             ],

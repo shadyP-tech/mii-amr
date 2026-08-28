@@ -69,12 +69,20 @@ python3 scripts/aufgabe04/navigation/entrypoints/plan_stand_coverage_survey.py \
   --lane-count 1 \
   --stop-spacing-m 0.70 \
   --exact-inspection-point-count 2 \
+  --exact-two-candidate-spacing-m 0.40 \
+  --minimum-exact-two-viewpoint-baseline-m 1.00 \
   --expected-stand-count 5
 ```
 
-The exact-two selector chooses two distinct centerline cells from the normal
-dense plan by maximum union coverage and shared visibility. It still rejects
-the plan unless the unchanged `95%` map-coverage gate passes. In
+The exact-two selector samples longitudinal candidates every `0.40 m` on the
+single certified center corridor while persisting `--stop-spacing-m`
+separately instead of overloading it as selector density. It admits only
+distinct cells with
+shared visibility, at least `95%` union map coverage, and a `1.00 m` minimum
+world-space baseline. Among admitted pairs it maximizes the change in target
+bearing first, so thin stand heads are not viewed from nearly the same
+incidence at both stops. Route certificates, candidate keepout, and the
+`0.03 m` tracking tube remain independent hard gates. In
 `execute-coverage-checkpoint` mode, the two-stop survey may finish as a
 LiDAR-only checkpoint when exactly the expected number of non-rejected,
 static-map-admitted candidates have valid confidence, hit, and at least one
@@ -91,12 +99,20 @@ count, plus a content-hashed stand model with `environment=physical` and
 geometry; use
 `configs/aufgabe04/stand_models/physical_stand_measured_20260826_v2.json` for
 the measured 2026-08-26 stands. Missing, legacy-v1, or provisional geometry
-fails before coverage motion. It writes a content-hashed handoff that binds the terminal coverage
-checkpoint, LiDAR admission, live registry, and frozen candidate snapshot.
+fails before coverage motion. It writes a content-hashed handoff that binds
+the terminal coverage checkpoint, LiDAR admission, live registry, and frozen
+candidate snapshot.
 Multi-view `pending_camera` candidates and eligible single-view `provisional`
 candidates remain distinct in that evidence; a provisional candidate can be
 resolved only by the bound camera phase. The generic `execute-full` admission
 is unchanged and still accepts only its multi-view `pending_camera` queue.
+
+Before each camera-candidate route is planned, the autonomous runner now
+requires a stopped AMCL window paired sample-for-sample with direct dynamic
+`map <- odom` transforms, followed by a fresh transform lookup consistent with
+the last paired sample. Missing, stale, frame-mismatched, or drifting transform
+evidence fails before route planning; requesting this evidence does not claim
+that odometry owns the map-frame planning pose.
 
 The generated leg is deliberately marked `motion_authorized: false`. Do not
 feed it directly to the real-robot segment runner. Real survey execution still

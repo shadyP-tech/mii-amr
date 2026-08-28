@@ -174,6 +174,7 @@ class OrchestrationModuleBoundaryTest(unittest.TestCase):
                 "startup_recovery.py",
             },
             "readiness": {
+                "candidate_planning_frame.py",
                 "initial.py",
                 "localization.py",
                 "observation_tf_contract.py",
