@@ -11,6 +11,10 @@ import tempfile
 import unittest
 from unittest.mock import Mock
 
+from scripts.aufgabe04.artifacts.content_store import (
+    payload_sha256,
+    write_content_hashed_json,
+)
 from scripts.aufgabe04.navigation.approach.exact_two_camera_admission import (
     SUPPORT_CLASS_SINGLE_VIEW_REQUIRES_CAMERA_VALIDATION,
     build_exact_two_camera_candidate_snapshot,
@@ -20,6 +24,17 @@ from scripts.aufgabe04.navigation.approach.exact_two_camera_admission import (
     require_handoff_candidate_support,
     write_exact_two_camera_admission,
     write_exact_two_camera_handoff,
+)
+from scripts.aufgabe04.navigation.approach.candidate_frame_projection import (
+    CandidatePlanningFrame,
+    project_candidate_snapshot_to_planning_frame,
+)
+from scripts.aufgabe04.navigation.approach.candidate_frame_reprojection import (
+    CandidateFrameProvenance,
+    CandidatePoint2D,
+)
+from scripts.aufgabe04.navigation.approach.camera_decision_geometry_binding import (
+    CameraCandidateFrameBinding,
 )
 from scripts.aufgabe04.navigation.coverage.coverage_candidate_lifecycle import (
     evaluate_exact_two_lidar_checkpoint,
@@ -34,7 +49,9 @@ from scripts.aufgabe04.navigation.approach.record_stand_candidate_decision impor
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STATUS_CONFIRMED,
     STATUS_PROVISIONAL,
+    decide_candidate,
     load_stand_survey_registry,
+    stand_survey_registry_sha256,
     write_coverage_survey_plan,
     write_stand_survey_registry,
     write_survey_progress,
@@ -42,12 +59,20 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
 from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import (
     recommendation_to_payload,
 )
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
+    PlanarTransform2D,
+)
 from scripts.aufgabe04.real_robot.candidate.approach import (
     CandidateApproachConfig,
     CandidateApproachEffects,
+    CandidateObservation,
+    CameraCandidateInitialSelection,
     build_camera_candidate_decision_receipt,
     execute_candidate_approach_phase,
     validate_candidate_approach_handoff,
+)
+from scripts.aufgabe04.real_robot.execution.child_runner import (
+    MotionLegOutcome,
 )
 from scripts.aufgabe04.real_robot.configuration.recommendation import (
     build_real_viewpoint_recommendation,
@@ -104,8 +129,41 @@ def _write_recommendation(
     )
 
 
-def _fixture(root: Path, *, boundary_uid: str | None = None):
+def _fixture(
+    root: Path,
+    *,
+    boundary_uid: str | None = None,
+    with_frame_provenance: bool = False,
+):
     plan, progress, registry, _, admission = _ready_inputs()
+    if with_frame_provenance:
+        registry = replace(
+            registry,
+            candidates=tuple(
+                replace(
+                    candidate,
+                    frame_provenance=CandidateFrameProvenance(
+                        map_frame="map",
+                        odom_frame="odom",
+                        canonical_odom_point=CandidatePoint2D(
+                            candidate.x_m,
+                            candidate.y_m,
+                        ),
+                        source_evidence_id=(
+                            f"frame_evidence_{candidate.candidate_uid}"
+                        ),
+                    ),
+                )
+                for candidate in registry.candidates
+            ),
+        )
+        lidar = evaluate_exact_two_lidar_checkpoint(plan, progress, registry)
+        admission = evaluate_exact_two_camera_admission(
+            plan,
+            progress,
+            registry,
+            lidar,
+        )
     if boundary_uid is not None:
         if registry.candidate_for(boundary_uid) is None:
             raise ValueError(f"unknown boundary fixture UID: {boundary_uid}")
@@ -211,6 +269,52 @@ def _fixture(root: Path, *, boundary_uid: str | None = None):
     )
 
 
+def _camera_frame_projection(
+    fixture,
+    root: Path,
+    *,
+    translation_x_m: float = 0.012902,
+    translation_y_m: float = -0.047650,
+):
+    projection = project_candidate_snapshot_to_planning_frame(
+        fixture.snapshot,
+        fixture.registry,
+        CandidatePlanningFrame(
+            current_pose=Pose2D(-0.5, -0.7, 0.0),
+            map_from_odom=PlanarTransform2D(
+                translation_x_m,
+                translation_y_m,
+                0.0,
+            ),
+        ),
+    )
+    projection_root = root / "camera_frame_projection"
+    projected_snapshot_path = projection_root / "candidate_snapshot.json"
+    projected_snapshot_sha256 = write_candidate_snapshot(
+        projected_snapshot_path,
+        projection.projected_snapshot,
+    )
+    evidence_path = projection_root / "candidate_frame_projection.json"
+    evidence_sha256 = write_content_hashed_json(
+        evidence_path,
+        {
+            **projection.to_evidence(),
+            "source_candidate_snapshot_path": str(fixture.snapshot_path),
+            "projected_candidate_snapshot_path": str(
+                projected_snapshot_path
+            ),
+        },
+        hash_field="candidate_frame_projection_sha256",
+    )
+    return SimpleNamespace(
+        projection=projection,
+        projected_snapshot_path=projected_snapshot_path,
+        projected_snapshot_sha256=projected_snapshot_sha256,
+        evidence_path=evidence_path,
+        evidence_sha256=evidence_sha256,
+    )
+
+
 def _write_exact_two_receipt(
     fixture,
     root: Path,
@@ -242,19 +346,100 @@ def _write_exact_two_receipt(
     return receipt_path
 
 
-def _record(fixture, receipt_path: Path) -> int:
-    return record_candidate_decision(
-        [
-            "--survey-root",
-            str(fixture.survey_root),
-            "--decision-receipt-json",
-            str(receipt_path),
-            "--exact-two-camera-handoff-json",
-            str(fixture.handoff_path),
-            "--candidate-snapshot-json",
-            str(fixture.snapshot_path),
-        ]
+def _write_projected_exact_two_receipt(
+    fixture,
+    root: Path,
+    candidate_uid: str,
+    *,
+    recommendation_uses_canonical_geometry: bool = False,
+):
+    frame_binding = _camera_frame_projection(fixture, root)
+    camera_candidate = frame_binding.projection.projected_snapshot.candidate_for(
+        candidate_uid
     )
+    canonical_candidate = fixture.snapshot.candidate_for(candidate_uid)
+    assert camera_candidate is not None
+    assert canonical_candidate is not None
+    recommendation_candidate = (
+        canonical_candidate
+        if recommendation_uses_canonical_geometry
+        else camera_candidate
+    )
+    recommendation_path = root / f"{candidate_uid}_recommendation.json"
+    _write_recommendation(recommendation_path, recommendation_candidate)
+    evidence = require_handoff_candidate_support(
+        fixture.handoff,
+        candidate_uid,
+    )
+    assert evidence.support_class is not None
+    payload = build_camera_candidate_decision_receipt(
+        config=fixture.config,
+        candidate=camera_candidate,
+        recommendation_path=recommendation_path,
+        exact_two_support_by_uid={candidate_uid: evidence.support_class},
+        camera_frame_binding=CameraCandidateFrameBinding(
+            camera_snapshot_path=frame_binding.projected_snapshot_path,
+            camera_snapshot_sha256=(
+                frame_binding.projected_snapshot_sha256
+            ),
+            projection_path=frame_binding.evidence_path,
+            projection_sha256=frame_binding.evidence_sha256,
+        ),
+    )
+    receipt_path = root / f"{candidate_uid}_projected_decision.json"
+    receipt_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return SimpleNamespace(
+        receipt_path=receipt_path,
+        recommendation_path=recommendation_path,
+        frame_binding=frame_binding,
+        canonical_candidate=canonical_candidate,
+        camera_candidate=camera_candidate,
+    )
+
+
+def _rewrite_projection_evidence(
+    binding,
+    receipt_path: Path,
+    mutate,
+) -> None:
+    hash_field = "candidate_frame_projection_sha256"
+    evidence = json.loads(binding.evidence_path.read_text())
+    evidence.pop(hash_field)
+    mutate(evidence)
+    evidence_sha256 = payload_sha256(evidence)
+    evidence[hash_field] = evidence_sha256
+    binding.evidence_path.write_text(
+        json.dumps(evidence, indent=2, sort_keys=True) + "\n"
+    )
+    receipt = json.loads(receipt_path.read_text())
+    receipt[hash_field] = evidence_sha256
+    receipt_path.write_text(
+        json.dumps(receipt, indent=2, sort_keys=True) + "\n"
+    )
+
+
+def _record(fixture, receipt_path: Path) -> int:
+    receipt = json.loads(receipt_path.read_text())
+    argv = [
+        "--survey-root",
+        str(fixture.survey_root),
+        "--decision-receipt-json",
+        str(receipt_path),
+        "--exact-two-camera-handoff-json",
+        str(fixture.handoff_path),
+        "--candidate-snapshot-json",
+        str(fixture.snapshot_path),
+    ]
+    if receipt["schema_version"] == 3:
+        argv.extend(
+            [
+                "--camera-candidate-snapshot-json",
+                str(receipt["camera_candidate_snapshot_path"]),
+                "--candidate-frame-projection-json",
+                str(receipt["candidate_frame_projection_path"]),
+            ]
+        )
+    return record_candidate_decision(argv)
 
 
 class ExactTwoCameraDecisionTest(unittest.TestCase):
@@ -292,6 +477,476 @@ class ExactTwoCameraDecisionTest(unittest.TestCase):
             self.assertEqual(
                 stored["camera_recommendation_sha256"],
                 _sha256(Path(stored["camera_evidence_path"])),
+            )
+
+    def test_schema_v3_accepts_authenticated_arrival_projected_geometry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = _fixture(root, with_frame_provenance=True)
+            uid = "survey_candidate_0003"
+            decision = _write_projected_exact_two_receipt(
+                fixture,
+                root,
+                uid,
+            )
+
+            displacement_m = (
+                (
+                    decision.camera_candidate.geometry.x_m
+                    - decision.canonical_candidate.geometry.x_m
+                )
+                ** 2
+                + (
+                    decision.camera_candidate.geometry.y_m
+                    - decision.canonical_candidate.geometry.y_m
+                )
+                ** 2
+            ) ** 0.5
+            self.assertGreater(displacement_m, 0.049)
+            with redirect_stdout(StringIO()):
+                result = _record(fixture, decision.receipt_path)
+
+            registry = load_stand_survey_registry(
+                fixture.survey_root / "stand_registry.json",
+                fixture.plan,
+            )
+            stored = json.loads(
+                (fixture.survey_root / "decisions" / f"{uid}.json").read_text()
+            )
+            self.assertEqual(result, 0)
+            self.assertEqual(registry.candidate_for(uid).status, STATUS_CONFIRMED)
+            self.assertEqual(stored["schema_version"], 3)
+            self.assertEqual(
+                stored["candidate_snapshot_sha256"],
+                fixture.handoff.candidate_snapshot_sha256,
+            )
+            self.assertEqual(
+                stored["camera_candidate_snapshot_sha256"],
+                decision.frame_binding.projected_snapshot_sha256,
+            )
+            self.assertEqual(
+                stored["candidate_frame_projection_sha256"],
+                decision.frame_binding.evidence_sha256,
+            )
+            projection_evidence = json.loads(
+                decision.frame_binding.evidence_path.read_text()
+            )
+            self.assertEqual(
+                projection_evidence["source_registry_sha256"],
+                stand_survey_registry_sha256(fixture.registry),
+            )
+
+    def test_schema_v3_accepts_after_another_candidate_status_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = _fixture(root, with_frame_provenance=True)
+            projected_uid = "survey_candidate_0003"
+            previously_decided_uid = "survey_candidate_0001"
+            decision = _write_projected_exact_two_receipt(
+                fixture,
+                root,
+                projected_uid,
+            )
+            proof = json.loads(
+                decision.frame_binding.evidence_path.read_text()
+            )
+
+            changed_registry = decide_candidate(
+                fixture.registry,
+                previously_decided_uid,
+                status=STATUS_CONFIRMED,
+            )
+            original_other = fixture.registry.candidate_for(
+                previously_decided_uid
+            )
+            changed_other = changed_registry.candidate_for(
+                previously_decided_uid
+            )
+            assert original_other is not None
+            assert changed_other is not None
+            self.assertEqual(
+                replace(changed_other, status=original_other.status),
+                original_other,
+            )
+            self.assertNotEqual(
+                stand_survey_registry_sha256(changed_registry),
+                proof["source_registry_sha256"],
+            )
+            self.assertEqual(
+                proof["source_registry_sha256"],
+                fixture.handoff.source_registry_sha256,
+            )
+            write_stand_survey_registry(
+                fixture.survey_root / "stand_registry.json",
+                changed_registry,
+                fixture.plan,
+            )
+
+            with redirect_stdout(StringIO()):
+                result = _record(fixture, decision.receipt_path)
+
+            registry = load_stand_survey_registry(
+                fixture.survey_root / "stand_registry.json",
+                fixture.plan,
+            )
+            self.assertEqual(result, 0)
+            self.assertEqual(
+                registry.candidate_for(previously_decided_uid).status,
+                STATUS_CONFIRMED,
+            )
+            self.assertEqual(
+                registry.candidate_for(projected_uid).status,
+                STATUS_CONFIRMED,
+            )
+
+    def test_exact_two_runtime_emits_arrival_projection_bound_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = _fixture(root, with_frame_provenance=True)
+            uid = "survey_candidate_0003"
+            translation_x_m = 0.012902
+            translation_y_m = -0.047650
+            canonical = fixture.snapshot.candidate_for(uid)
+            assert canonical is not None
+            arrived_x_m = canonical.geometry.x_m + translation_x_m
+            arrived_y_m = canonical.geometry.y_m + translation_y_m
+            robot_pose = Pose2D(arrived_x_m - 0.70, arrived_y_m, 0.0)
+            planning_frames = iter(
+                (
+                    CandidatePlanningFrame(
+                        current_pose=robot_pose,
+                        map_from_odom=PlanarTransform2D(0.0, 0.0, 0.0),
+                    ),
+                    CandidatePlanningFrame(
+                        current_pose=robot_pose,
+                        map_from_odom=PlanarTransform2D(
+                            translation_x_m,
+                            translation_y_m,
+                            0.0,
+                        ),
+                    ),
+                )
+            )
+            committed = []
+
+            def select(_request):
+                return CameraCandidateInitialSelection(
+                    candidate_uid=uid,
+                    prepared_plan=None,
+                    evidence={
+                        "schema_version": 1,
+                        "selected_candidate_uid": uid,
+                        "motion_authorized": False,
+                    },
+                )
+
+            def completed(request):
+                return MotionLegOutcome(
+                    run_id=request.run_id,
+                    status="completed",
+                    stop_reason="",
+                    stop_details={},
+                    motion_published=True,
+                    returncode=0,
+                    semantic_log_path=(
+                        request.session_root / f"{request.run_id}.jsonl"
+                    ),
+                )
+
+            def capture(request):
+                recommendation_path = (
+                    request.output_dir / "recommendation.json"
+                )
+                _write_recommendation(
+                    recommendation_path,
+                    request.candidate,
+                )
+                return CandidateObservation(
+                    recommendation_path=recommendation_path,
+                    qr_id="QR_01",
+                    axis_observation_path=None,
+                )
+
+            def commit(request):
+                committed.append(request)
+                raise RuntimeError("stop after projection-bound commit")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "stop after projection-bound commit",
+            ):
+                execute_candidate_approach_phase(
+                    fixture.config,
+                    CandidateApproachEffects(
+                        read_current_pose=lambda: robot_pose,
+                        admit_planning_frame=lambda _path: next(
+                            planning_frames
+                        ),
+                        select_initial_preapproach=select,
+                        plan_preapproach=lambda _request: {
+                            "route_csv": "route.csv"
+                        },
+                        run_motion_leg=completed,
+                        capture_observation=capture,
+                        validate_facing=lambda request: {
+                            "candidate_uid": request.candidate.candidate_uid
+                        },
+                        commit_decision=commit,
+                        clock=lambda: 40.0,
+                    ),
+                )
+
+            self.assertEqual(len(committed), 1)
+            request = committed[0]
+            receipt = json.loads(request.receipt_path.read_text())
+            self.assertEqual(receipt["schema_version"], 3)
+            self.assertEqual(
+                Path(receipt["candidate_snapshot_path"]),
+                fixture.snapshot_path,
+            )
+            self.assertEqual(
+                Path(receipt["camera_candidate_snapshot_path"]),
+                request.camera_candidate_snapshot_path,
+            )
+            self.assertEqual(
+                Path(receipt["candidate_frame_projection_path"]),
+                request.candidate_frame_projection_path,
+            )
+            self.assertIn(
+                "arrival_frame_projection",
+                str(request.camera_candidate_snapshot_path),
+            )
+            self.assertNotEqual(
+                receipt["candidate_snapshot_sha256"],
+                receipt["camera_candidate_snapshot_sha256"],
+            )
+
+    def test_schema_v3_rejects_recommendation_using_canonical_geometry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = _fixture(root, with_frame_provenance=True)
+            uid = "survey_candidate_0003"
+            decision = _write_projected_exact_two_receipt(
+                fixture,
+                root,
+                uid,
+                recommendation_uses_canonical_geometry=True,
+            )
+
+            with redirect_stderr(StringIO()):
+                with self.assertRaises(SystemExit):
+                    _record(fixture, decision.receipt_path)
+
+            registry = load_stand_survey_registry(
+                fixture.survey_root / "stand_registry.json",
+                fixture.plan,
+            )
+            self.assertEqual(
+                registry.candidate_for(uid).status,
+                STATUS_PROVISIONAL,
+            )
+
+    def test_schema_v3_projection_proof_tampering_fails_closed(self):
+        def replace_candidate_point(evidence):
+            point = evidence["candidate_reprojections"][
+                "survey_candidate_0003"
+            ]["current_map_point"]
+            point["x_m"] += 0.01
+
+        def substitute_cross_candidate_reprojection(evidence):
+            evidence["candidate_reprojections"][
+                "survey_candidate_0003"
+            ] = evidence["candidate_reprojections"][
+                "survey_candidate_0004"
+            ]
+
+        mutations = {
+            "canonical_snapshot_hash": lambda evidence: evidence.__setitem__(
+                "source_candidate_snapshot_sha256", "d" * 64
+            ),
+            "projected_snapshot_hash": lambda evidence: evidence.__setitem__(
+                "projected_candidate_snapshot_sha256", "e" * 64
+            ),
+            "registry_hash": lambda evidence: evidence.__setitem__(
+                "source_registry_sha256", "f" * 64
+            ),
+            "motion_authorized": lambda evidence: evidence.__setitem__(
+                "motion_authorized", True
+            ),
+            "candidate_reprojection": replace_candidate_point,
+            "cross_candidate_reprojection": (
+                substitute_cross_candidate_reprojection
+            ),
+        }
+        for failure, mutate in mutations.items():
+            with self.subTest(failure=failure):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    fixture = _fixture(root, with_frame_provenance=True)
+                    uid = "survey_candidate_0003"
+                    decision = _write_projected_exact_two_receipt(
+                        fixture,
+                        root,
+                        uid,
+                    )
+                    _rewrite_projection_evidence(
+                        decision.frame_binding,
+                        decision.receipt_path,
+                        mutate,
+                    )
+
+                    with redirect_stderr(StringIO()):
+                        with self.assertRaises(SystemExit):
+                            _record(fixture, decision.receipt_path)
+
+                    registry = load_stand_survey_registry(
+                        fixture.survey_root / "stand_registry.json",
+                        fixture.plan,
+                    )
+                    self.assertEqual(
+                        registry.candidate_for(uid).status,
+                        STATUS_PROVISIONAL,
+                    )
+
+    def test_schema_v3_receipt_path_and_hash_mismatches_fail_closed(self):
+        mutations = {
+            "camera_snapshot_path": lambda receipt, root: receipt.__setitem__(
+                "camera_candidate_snapshot_path",
+                str(root / "unbound_candidate_snapshot.json"),
+            ),
+            "camera_snapshot_hash": lambda receipt, _root: receipt.__setitem__(
+                "camera_candidate_snapshot_sha256",
+                "d" * 64,
+            ),
+            "projection_path": lambda receipt, root: receipt.__setitem__(
+                "candidate_frame_projection_path",
+                str(root / "unbound_candidate_frame_projection.json"),
+            ),
+            "projection_hash": lambda receipt, _root: receipt.__setitem__(
+                "candidate_frame_projection_sha256",
+                "e" * 64,
+            ),
+        }
+        for failure, mutate in mutations.items():
+            with self.subTest(failure=failure):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    fixture = _fixture(root, with_frame_provenance=True)
+                    uid = "survey_candidate_0003"
+                    decision = _write_projected_exact_two_receipt(
+                        fixture,
+                        root,
+                        uid,
+                    )
+                    receipt = json.loads(decision.receipt_path.read_text())
+                    mutate(receipt, root)
+                    decision.receipt_path.write_text(
+                        json.dumps(receipt, indent=2, sort_keys=True) + "\n"
+                    )
+
+                    with redirect_stderr(StringIO()):
+                        with self.assertRaises(SystemExit):
+                            _record(fixture, decision.receipt_path)
+
+                    registry = load_stand_survey_registry(
+                        fixture.survey_root / "stand_registry.json",
+                        fixture.plan,
+                    )
+                    self.assertEqual(
+                        registry.candidate_for(uid).status,
+                        STATUS_PROVISIONAL,
+                    )
+
+    def test_schema_v3_rejects_camera_snapshot_not_bound_by_projection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = _fixture(root, with_frame_provenance=True)
+            uid = "survey_candidate_0003"
+            decision = _write_projected_exact_two_receipt(
+                fixture,
+                root,
+                uid,
+            )
+            original = decision.camera_candidate
+            substituted = replace(
+                decision.frame_binding.projection.projected_snapshot,
+                candidates=tuple(
+                    replace(
+                        candidate,
+                        geometry=replace(
+                            candidate.geometry,
+                            x_m=candidate.geometry.x_m + 0.01,
+                        ),
+                    )
+                    if candidate.candidate_uid == uid
+                    else candidate
+                    for candidate in (
+                        decision.frame_binding.projection.projected_snapshot.candidates
+                    )
+                ),
+            )
+            unbound_path = root / "unbound_camera_candidate_snapshot.json"
+            unbound_sha256 = write_candidate_snapshot(unbound_path, substituted)
+            receipt = json.loads(decision.receipt_path.read_text())
+            receipt["camera_candidate_snapshot_path"] = str(unbound_path)
+            receipt["camera_candidate_snapshot_sha256"] = unbound_sha256
+            decision.receipt_path.write_text(
+                json.dumps(receipt, indent=2, sort_keys=True) + "\n"
+            )
+            self.assertNotEqual(
+                substituted.candidate_for(uid).geometry,
+                original.geometry,
+            )
+
+            with redirect_stderr(StringIO()):
+                with self.assertRaises(SystemExit):
+                    _record(fixture, decision.receipt_path)
+
+            registry = load_stand_survey_registry(
+                fixture.survey_root / "stand_registry.json",
+                fixture.plan,
+            )
+            self.assertEqual(
+                registry.candidate_for(uid).status,
+                STATUS_PROVISIONAL,
+            )
+
+    def test_schema_v2_projected_recommendation_without_proof_still_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = _fixture(root, with_frame_provenance=True)
+            uid = "survey_candidate_0003"
+            frame_binding = _camera_frame_projection(fixture, root)
+            camera_candidate = (
+                frame_binding.projection.projected_snapshot.candidate_for(uid)
+            )
+            assert camera_candidate is not None
+            recommendation_path = root / "unbound_projected_recommendation.json"
+            _write_recommendation(recommendation_path, camera_candidate)
+            evidence = require_handoff_candidate_support(fixture.handoff, uid)
+            assert evidence.support_class is not None
+            payload = build_camera_candidate_decision_receipt(
+                config=fixture.config,
+                candidate=camera_candidate,
+                recommendation_path=recommendation_path,
+                exact_two_support_by_uid={uid: evidence.support_class},
+            )
+            receipt_path = root / "unbound_projected_decision.json"
+            receipt_path.write_text(
+                json.dumps(payload, indent=2, sort_keys=True) + "\n"
+            )
+
+            with redirect_stderr(StringIO()):
+                with self.assertRaises(SystemExit):
+                    _record(fixture, receipt_path)
+
+            registry = load_stand_survey_registry(
+                fixture.survey_root / "stand_registry.json",
+                fixture.plan,
+            )
+            self.assertEqual(
+                registry.candidate_for(uid).status,
+                STATUS_PROVISIONAL,
             )
 
     def test_missing_or_tampered_handoff_fails_before_registry_mutation(self):

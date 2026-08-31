@@ -7,7 +7,6 @@ camera, route planner, or any motion publisher.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 from pathlib import Path
@@ -40,9 +39,11 @@ from scripts.aufgabe04.navigation.approach.exact_two_camera_admission import (
     require_handoff_candidate_support,
     validate_live_candidate_snapshot_binding,
 )
-from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import (
-    REAL_VIEWPOINT_SOURCE,
-    load_recommendation,
+from scripts.aufgabe04.navigation.approach.camera_decision_geometry_binding import (
+    CAMERA_DECISION_PROJECTED_RECEIPT_SCHEMA_VERSION,
+    CAMERA_FRAME_BINDING_RECEIPT_FIELDS,
+    require_camera_recommendation_binding,
+    require_projected_camera_candidate_binding,
 )
 from scripts.aufgabe04.stations.candidate_snapshot import (
     CandidateSnapshot,
@@ -61,6 +62,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--decision-receipt-json", required=True, type=Path)
     parser.add_argument("--exact-two-camera-handoff-json", type=Path)
     parser.add_argument("--candidate-snapshot-json", type=Path)
+    parser.add_argument("--camera-candidate-snapshot-json", type=Path)
+    parser.add_argument("--candidate-frame-projection-json", type=Path)
     return parser
 
 
@@ -72,9 +75,9 @@ def _load_receipt(path: Path, *, survey_id: str) -> dict[str, object]:
     schema_version = (
         payload.get("schema_version") if isinstance(payload, dict) else None
     )
-    if type(schema_version) is not int or schema_version not in {1, 2}:
+    if type(schema_version) is not int or schema_version not in {1, 2, 3}:
         raise ValueError(
-            "candidate decision receipt must use schema_version 1 or 2"
+            "candidate decision receipt must use schema_version 1, 2, or 3"
         )
     if payload.get("survey_id") != survey_id:
         raise ValueError("candidate decision receipt belongs to another survey")
@@ -100,7 +103,10 @@ def _load_receipt(path: Path, *, survey_id: str) -> dict[str, object]:
         raise ValueError(
             "decision_source must be operator or camera_evidence"
         )
-    if payload["schema_version"] == 2:
+    if payload["schema_version"] in {
+        2,
+        CAMERA_DECISION_PROJECTED_RECEIPT_SCHEMA_VERSION,
+    }:
         expected_fields = {
             "schema_version",
             "survey_id",
@@ -115,41 +121,56 @@ def _load_receipt(path: Path, *, survey_id: str) -> dict[str, object]:
             "candidate_support_class",
             "camera_recommendation_sha256",
         }
+        if (
+            payload["schema_version"]
+            == CAMERA_DECISION_PROJECTED_RECEIPT_SCHEMA_VERSION
+        ):
+            expected_fields.update(CAMERA_FRAME_BINDING_RECEIPT_FIELDS)
         if set(payload) != expected_fields:
             raise ValueError(
-                "schema_version 2 candidate decision receipt fields mismatch"
+                "exact-two candidate decision receipt fields mismatch"
             )
         if source != "camera_evidence":
             raise ValueError(
-                "schema_version 2 requires camera_evidence decision_source"
+                "exact-two receipt requires camera_evidence decision_source"
             )
-        for name in (
+        path_fields = [
             "exact_two_camera_handoff_path",
             "candidate_snapshot_path",
             "candidate_support_class",
-        ):
-            value = payload.get(name)
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(f"schema_version 2 receipt requires {name}")
-        for name in (
+        ]
+        hash_fields = [
             "exact_two_camera_handoff_sha256",
             "candidate_snapshot_sha256",
             "camera_recommendation_sha256",
+        ]
+        if (
+            payload["schema_version"]
+            == CAMERA_DECISION_PROJECTED_RECEIPT_SCHEMA_VERSION
         ):
+            path_fields.extend(
+                (
+                    "camera_candidate_snapshot_path",
+                    "candidate_frame_projection_path",
+                )
+            )
+            hash_fields.extend(
+                (
+                    "camera_candidate_snapshot_sha256",
+                    "candidate_frame_projection_sha256",
+                )
+            )
+        for name in path_fields:
+            value = payload.get(name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"exact-two receipt requires {name}")
+        for name in hash_fields:
             value = payload.get(name)
             if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
                 raise ValueError(
-                    f"schema_version 2 receipt requires lowercase {name}"
+                    f"exact-two receipt requires lowercase {name}"
                 )
     return payload
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _paths_match(receipt_value: object, live_path: Path) -> bool:
@@ -232,51 +253,13 @@ def _require_live_snapshot_registry_geometry(
             )
 
 
-def _require_recommendation_binding(
-    receipt: dict[str, object],
-    *,
-    candidate: FrozenCandidate,
-    planning_frame: str,
-) -> None:
-    recommendation_path = Path(str(receipt["camera_evidence_path"]))
-    if _file_sha256(recommendation_path) != receipt[
-        "camera_recommendation_sha256"
-    ]:
-        raise ValueError("camera recommendation SHA-256 mismatch")
-    recommendation = load_recommendation(
-        recommendation_path,
-        expected_frame=planning_frame,
-        expected_source=REAL_VIEWPOINT_SOURCE,
-        expected_simulation_only=False,
-    )
-    if recommendation.stand_id != candidate.candidate_uid:
-        raise ValueError(
-            "camera recommendation candidate UID mismatch: "
-            f"expected {candidate.candidate_uid!r}, "
-            f"got {recommendation.stand_id!r}"
-        )
-    expected = candidate.geometry
-    observed = recommendation.stand
-    geometry_pairs = (
-        (observed.center.x_m, expected.x_m),
-        (observed.center.y_m, expected.y_m),
-        (observed.radius_m, expected.radius_m),
-        (observed.uncertainty_m, expected.uncertainty_m),
-    )
-    if any(
-        not math.isclose(first, second, rel_tol=0.0, abs_tol=1.0e-6)
-        for first, second in geometry_pairs
-    ):
-        raise ValueError(
-            "camera recommendation geometry differs from candidate snapshot"
-        )
-
-
 def _validate_exact_two_decision_contract(
     receipt: dict[str, object],
     *,
     handoff_path: Path,
     snapshot_path: Path,
+    camera_snapshot_path: Path | None,
+    projection_path: Path | None,
     plan: CoverageSurveyPlan,
     registry: StandSurveyRegistry,
 ) -> FrozenCandidate:
@@ -335,9 +318,34 @@ def _validate_exact_two_decision_contract(
         raise ValueError(
             "candidate snapshot source is outside the exact-two camera contract"
         )
-    _require_recommendation_binding(
+    recommendation_candidate = candidate
+    if (
+        receipt["schema_version"]
+        == CAMERA_DECISION_PROJECTED_RECEIPT_SCHEMA_VERSION
+    ):
+        if camera_snapshot_path is None or projection_path is None:
+            raise ValueError(
+                "schema_version 3 requires camera snapshot and projection"
+            )
+        recommendation_candidate = (
+            require_projected_camera_candidate_binding(
+                receipt,
+                canonical_snapshot_path=snapshot_path,
+                canonical_snapshot=snapshot,
+                registry=registry,
+                source_registry_sha256=handoff.source_registry_sha256,
+                camera_snapshot_path=camera_snapshot_path,
+                projection_path=projection_path,
+                candidate_uid=candidate_uid,
+            )
+        )
+    elif camera_snapshot_path is not None or projection_path is not None:
+        raise ValueError(
+            "schema_version 2 cannot use camera frame projection arguments"
+        )
+    require_camera_recommendation_binding(
         receipt,
-        candidate=candidate,
+        candidate=recommendation_candidate,
         planning_frame=plan.planning_frame,
     )
     return candidate
@@ -366,8 +374,15 @@ def main(argv: list[str] | None = None) -> int:
             args.exact_two_camera_handoff_json,
             args.candidate_snapshot_json,
         )
+        camera_frame_arguments = (
+            args.camera_candidate_snapshot_json,
+            args.candidate_frame_projection_json,
+        )
         if receipt["schema_version"] == 1:
-            if any(value is not None for value in exact_two_arguments):
+            if any(
+                value is not None
+                for value in (*exact_two_arguments, *camera_frame_arguments)
+            ):
                 raise ValueError(
                     "schema_version 1 decisions cannot use exact-two handoff "
                     "arguments"
@@ -383,8 +398,26 @@ def main(argv: list[str] | None = None) -> int:
         else:
             if any(value is None for value in exact_two_arguments):
                 raise ValueError(
-                    "schema_version 2 decisions require exact-two camera "
+                    "exact-two decisions require exact-two camera "
                     "handoff and candidate snapshot arguments"
+                )
+            projected_schema = (
+                receipt["schema_version"]
+                == CAMERA_DECISION_PROJECTED_RECEIPT_SCHEMA_VERSION
+            )
+            if projected_schema and any(
+                value is None for value in camera_frame_arguments
+            ):
+                raise ValueError(
+                    "schema_version 3 decisions require camera candidate "
+                    "snapshot and frame projection arguments"
+                )
+            if not projected_schema and any(
+                value is not None for value in camera_frame_arguments
+            ):
+                raise ValueError(
+                    "schema_version 2 decisions cannot use camera frame "
+                    "projection arguments"
                 )
             handoff_json = args.exact_two_camera_handoff_json
             snapshot_json = args.candidate_snapshot_json
@@ -396,6 +429,8 @@ def main(argv: list[str] | None = None) -> int:
                 receipt,
                 handoff_path=handoff_json,
                 snapshot_path=snapshot_json,
+                camera_snapshot_path=args.camera_candidate_snapshot_json,
+                projection_path=args.candidate_frame_projection_json,
                 plan=plan,
                 registry=registry,
             )

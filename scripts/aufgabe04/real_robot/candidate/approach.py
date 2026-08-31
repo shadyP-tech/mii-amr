@@ -37,6 +37,10 @@ from scripts.aufgabe04.navigation.approach.candidate_arrival_admission import (
     CandidateArrivalAdmissionConfig,
     evaluate_candidate_arrival_admission,
 )
+from scripts.aufgabe04.navigation.approach.camera_decision_geometry_binding import (
+    CAMERA_DECISION_PROJECTED_RECEIPT_SCHEMA_VERSION,
+    CameraCandidateFrameBinding,
+)
 from scripts.aufgabe04.navigation.approach.candidate_frame_projection import (
     CandidatePlanningFrame,
     CandidateSnapshotFrameProjection,
@@ -263,6 +267,18 @@ class CandidateDecisionRequest:
     receipt_path: Path
     exact_two_camera_handoff_path: Path | None = None
     candidate_snapshot_path: Path | None = None
+    camera_candidate_snapshot_path: Path | None = None
+    candidate_frame_projection_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class _CandidateObservationFrame:
+    """Keep camera geometry and its immutable proof in one typed value."""
+
+    config: CandidateApproachConfig
+    candidate: FrozenCandidate
+    planning_frame: CandidatePlanningFrame | None
+    decision_binding: CameraCandidateFrameBinding | None
 
 
 @dataclass(frozen=True)
@@ -390,6 +406,7 @@ def build_camera_candidate_decision_receipt(
     candidate: FrozenCandidate,
     recommendation_path: Path,
     exact_two_support_by_uid: Mapping[str, str] | None,
+    camera_frame_binding: CameraCandidateFrameBinding | None = None,
 ) -> dict[str, object]:
     """Build the mode-scoped receipt consumed by the stopped state writer."""
 
@@ -402,6 +419,10 @@ def build_camera_candidate_decision_receipt(
         "camera_evidence_path": str(recommendation_path),
     }
     if exact_two_support_by_uid is None:
+        if camera_frame_binding is not None:
+            raise RuntimeError(
+                "camera frame binding requires an exact-two camera handoff"
+            )
         return payload
     support_class = exact_two_support_by_uid.get(candidate.candidate_uid)
     if support_class is None:
@@ -428,6 +449,15 @@ def build_camera_candidate_decision_receipt(
             ),
         }
     )
+    if camera_frame_binding is not None:
+        payload.update(
+            {
+                "schema_version": (
+                    CAMERA_DECISION_PROJECTED_RECEIPT_SCHEMA_VERSION
+                ),
+                **camera_frame_binding.to_receipt_fields(),
+            }
+        )
     return payload
 
 
@@ -721,6 +751,28 @@ def commit_candidate_decision(request: CandidateDecisionRequest) -> None:
         raise RuntimeError(
             "candidate snapshot decision argument requires exact-two handoff"
         )
+    camera_frame_paths = (
+        request.camera_candidate_snapshot_path,
+        request.candidate_frame_projection_path,
+    )
+    if any(path is not None for path in camera_frame_paths):
+        if any(path is None for path in camera_frame_paths):
+            raise RuntimeError(
+                "camera candidate snapshot and frame projection paths must "
+                "be provided together"
+            )
+        if request.exact_two_camera_handoff_path is None:
+            raise RuntimeError(
+                "camera frame projection decision requires exact-two handoff"
+            )
+        argv.extend(
+            [
+                "--camera-candidate-snapshot-json",
+                str(request.camera_candidate_snapshot_path),
+                "--candidate-frame-projection-json",
+                str(request.candidate_frame_projection_path),
+            ]
+        )
     try:
         returncode = record_stand_candidate_decision(argv)
     except SystemExit as exc:
@@ -899,6 +951,14 @@ class _CandidateFrameProjectionArtifacts:
     evidence_path: Path
     evidence_sha256: str
 
+    def camera_decision_binding(self) -> CameraCandidateFrameBinding:
+        return CameraCandidateFrameBinding(
+            camera_snapshot_path=self.snapshot_path,
+            camera_snapshot_sha256=self.snapshot_sha256,
+            projection_path=self.evidence_path,
+            projection_sha256=self.evidence_sha256,
+        )
+
 
 def _materialize_candidate_frame_projection(
     *,
@@ -958,11 +1018,7 @@ def _admit_camera_arrival_geometry(
     candidate_uid: str,
     candidate_root: Path,
     observation_attempt_index: int,
-) -> tuple[
-    CandidateApproachConfig,
-    FrozenCandidate,
-    CandidatePlanningFrame | None,
-]:
+) -> _CandidateObservationFrame:
     """Reproject once more while stopped and gate camera startup geometry."""
 
     admit_planning_frame = effects.admit_planning_frame
@@ -970,7 +1026,12 @@ def _admit_camera_arrival_geometry(
         candidate = source_config.snapshot.candidate_for(candidate_uid)
         if candidate is None:
             raise RuntimeError("arrival candidate disappeared from snapshot")
-        return source_config, candidate, None
+        return _CandidateObservationFrame(
+            config=source_config,
+            candidate=candidate,
+            planning_frame=None,
+            decision_binding=None,
+        )
     if source_registry is None:
         raise RuntimeError("candidate arrival frame registry is unavailable")
     if observation_attempt_index == 0:
@@ -1044,7 +1105,12 @@ def _admit_camera_arrival_geometry(
             },
             status_evidence=arrival_evidence,
         )
-    return artifacts.config, candidate, planning_frame
+    return _CandidateObservationFrame(
+        config=artifacts.config,
+        candidate=candidate,
+        planning_frame=planning_frame,
+        decision_binding=artifacts.camera_decision_binding(),
+    )
 
 
 def _admit_opposite_face_planning_geometry(
@@ -1385,16 +1451,14 @@ def _execute_candidate_motion(
 
 def _capture_candidate_camera_result(
     *,
-    config: CandidateApproachConfig,
+    observation_frame: _CandidateObservationFrame,
     source_config: CandidateApproachConfig,
     effects: CandidateApproachEffects,
     source_registry: StandSurveyRegistry | None,
-    candidate: FrozenCandidate,
     candidate_root: Path,
     candidate_run_id: str,
     candidate_index: int,
-    observation_planning_frame: CandidatePlanningFrame | None,
-) -> tuple[CandidateObservation, CandidateApproachConfig, FrozenCandidate]:
+) -> tuple[CandidateObservation, _CandidateObservationFrame]:
     """Resolve one candidate behind the bounded direct/opposite-face policy.
 
     Observation availability failures stay typed so the parent state machine
@@ -1405,13 +1469,13 @@ def _capture_candidate_camera_result(
 
     observation = effects.capture_observation(
         CandidateObservationRequest(
-            candidate=candidate,
+            candidate=observation_frame.candidate,
             output_dir=candidate_root / "camera_lidar_attempt_00",
             attempt_index=0,
         )
     )
     if observation.recommendation_path is not None:
-        return observation, config, candidate
+        return observation, observation_frame
     if observation.axis_observation_path is None:
         raise RuntimeError("observer returned neither QR recommendation nor axis")
 
@@ -1421,17 +1485,17 @@ def _capture_candidate_camera_result(
             source_config=source_config,
             effects=effects,
             source_registry=source_registry,
-            candidate_uid=candidate.candidate_uid,
+            candidate_uid=observation_frame.candidate.candidate_uid,
             candidate_root=candidate_root,
         )
     )
     if (
-        observation_planning_frame is not None
+        observation_frame.planning_frame is not None
         and opposite_planning_frame is not None
     ):
         frame_yaw_delta = normalize_angle(
             opposite_planning_frame.map_from_odom.yaw_rad
-            - observation_planning_frame.map_from_odom.yaw_rad
+            - observation_frame.planning_frame.map_from_odom.yaw_rad
         )
         opposite_normal = normalize_angle(opposite_normal + frame_yaw_delta)
     opposite_source = candidate_root / "opposite_face_source"
@@ -1490,19 +1554,17 @@ def _capture_candidate_camera_result(
         source_registry=source_registry,
         plan_planning_frame=opposite_planning_frame,
     )
-    opposite_config, candidate, _opposite_arrival_frame = (
-        _admit_camera_arrival_geometry(
-            source_config=source_config,
-            effects=effects,
-            source_registry=source_registry,
-            candidate_uid=candidate.candidate_uid,
-            candidate_root=candidate_root,
-            observation_attempt_index=1,
-        )
+    opposite_arrival_frame = _admit_camera_arrival_geometry(
+        source_config=source_config,
+        effects=effects,
+        source_registry=source_registry,
+        candidate_uid=candidate.candidate_uid,
+        candidate_root=candidate_root,
+        observation_attempt_index=1,
     )
     observation = effects.capture_observation(
         CandidateObservationRequest(
-            candidate=candidate,
+            candidate=opposite_arrival_frame.candidate,
             output_dir=candidate_root / "camera_lidar_attempt_01",
             attempt_index=1,
         )
@@ -1512,7 +1574,7 @@ def _capture_candidate_camera_result(
             "QR side remained unresolved after opposite-face inspection for "
             f"{candidate.candidate_uid}"
         )
-    return observation, opposite_config, candidate
+    return observation, opposite_arrival_frame
 
 
 def execute_candidate_approach_phase(
@@ -1729,27 +1791,23 @@ def execute_candidate_approach_phase(
             plan_planning_frame=selection_planning_frame,
         )
         try:
-            arrival_config, candidate, arrival_planning_frame = (
-                _admit_camera_arrival_geometry(
-                    source_config=config,
-                    effects=effects,
-                    source_registry=source_registry,
-                    candidate_uid=candidate.candidate_uid,
-                    candidate_root=candidate_root,
-                    observation_attempt_index=0,
-                )
+            observation_frame = _admit_camera_arrival_geometry(
+                source_config=config,
+                effects=effects,
+                source_registry=source_registry,
+                candidate_uid=candidate.candidate_uid,
+                candidate_root=candidate_root,
+                observation_attempt_index=0,
             )
-            observation, arrival_config, candidate = (
+            observation, observation_frame = (
                 _capture_candidate_camera_result(
-                    config=arrival_config,
+                    observation_frame=observation_frame,
                     source_config=config,
                     effects=effects,
                     source_registry=source_registry,
-                    candidate=candidate,
                     candidate_root=candidate_root,
                     candidate_run_id=candidate_run_id,
                     candidate_index=candidate_index,
-                    observation_planning_frame=arrival_planning_frame,
                 )
             )
         except CandidateObservationUnavailableError as exc:
@@ -1772,6 +1830,8 @@ def execute_candidate_approach_phase(
             candidate_index += 1
             continue
 
+        arrival_config = observation_frame.config
+        candidate = observation_frame.candidate
         if observation.qr_id is None:
             raise RuntimeError("camera recommendation has no QR identity")
         stopped_pose = _read_finite_pose2d(
@@ -1797,6 +1857,11 @@ def execute_candidate_approach_phase(
             candidate=candidate,
             recommendation_path=observation.recommendation_path,
             exact_two_support_by_uid=exact_two_support_by_uid,
+            camera_frame_binding=(
+                observation_frame.decision_binding
+                if exact_two_support_by_uid is not None
+                else None
+            ),
         )
         _write_json(receipt, receipt_payload)
         effects.commit_decision(
@@ -1810,6 +1875,18 @@ def execute_candidate_approach_phase(
                     config.snapshot_path
                     if exact_two_support_by_uid is not None
                     else None
+                ),
+                camera_candidate_snapshot_path=(
+                    None
+                    if exact_two_support_by_uid is None
+                    or observation_frame.decision_binding is None
+                    else observation_frame.decision_binding.camera_snapshot_path
+                ),
+                candidate_frame_projection_path=(
+                    None
+                    if exact_two_support_by_uid is None
+                    or observation_frame.decision_binding is None
+                    else observation_frame.decision_binding.projection_path
                 ),
             )
         )
