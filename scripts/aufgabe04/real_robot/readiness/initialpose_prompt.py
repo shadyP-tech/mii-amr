@@ -1,8 +1,8 @@
 """Operator prompt for manual AMCL initial-pose seeding.
 
 This module does not publish ROS messages or authorize motion. It only owns
-the terminal wording and input validation for a stopped, preauthorization
-initial-pose refresh.
+the terminal wording and input validation for a stopped, preplanning
+initial-pose bootstrap.
 """
 
 from __future__ import annotations
@@ -42,10 +42,14 @@ def prompt_for_initialpose_attempt(
     input_fn: Callable[[str], str] = input,
     output_fn: Callable[[str], None] = print,
 ) -> None:
-    """Pause so the operator can seed AMCL immediately before dry admission."""
+    """Pause once so the operator can seed AMCL before route planning."""
 
     if type(attempt_index) is not int or attempt_index < 0:
         raise ValueError("attempt_index must be a non-negative integer")
+    if attempt_index != 0:
+        raise ValueError(
+            "manual initial-pose prompting is supported only before preplanning"
+        )
     if attempt_index > config.maximum_retry_count:
         raise ValueError("attempt_index must not exceed maximum_retry_count")
     if not callable(input_fn):
@@ -53,14 +57,9 @@ def prompt_for_initialpose_attempt(
     if not callable(output_fn):
         raise ValueError("output_fn must be callable")
 
-    if attempt_index == 0:
-        output_fn("\nInitial-pose refresh required before first-route readiness.")
-    else:
-        output_fn("\nInitial-pose refresh required before readiness retry.")
-        output_fn(
-            "Previous no-motion admission did not leave enough localization "
-            "clearance for the first route."
-        )
+    output_fn(
+        "\nInitial-pose bootstrap required before preplanning localization."
+    )
     output_fn("AMCL often publishes only once after RViz 2D Pose Estimate.")
     output_fn("Do not move the robot. Do not send a Nav2 goal.")
     output_fn(f"AMCL topic: {config.amcl_topic}")
@@ -71,7 +70,36 @@ def prompt_for_initialpose_attempt(
     input_fn("Press Enter, then click 2D Pose Estimate immediately: ")
 
 
+def prepare_preplanning_initialpose(
+    *,
+    enabled: bool,
+    config: InitialPosePromptConfig,
+    input_fn: Callable[[str], str] = input,
+    output_fn: Callable[[str], None] = print,
+) -> bool:
+    """Optionally collect the operator's AMCL seed before route planning."""
+
+    if type(enabled) is not bool:
+        raise ValueError("enabled must be a boolean")
+    if not isinstance(config, InitialPosePromptConfig):
+        raise ValueError("config must be InitialPosePromptConfig")
+    if not enabled:
+        return False
+    if config.maximum_retry_count != 0:
+        raise ValueError(
+            "preplanning initial-pose bootstrap must disable prompt retries"
+        )
+    prompt_for_initialpose_attempt(
+        config=config,
+        attempt_index=0,
+        input_fn=input_fn,
+        output_fn=output_fn,
+    )
+    return True
+
+
 __all__ = [
     "InitialPosePromptConfig",
+    "prepare_preplanning_initialpose",
     "prompt_for_initialpose_attempt",
 ]

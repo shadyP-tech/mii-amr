@@ -102,9 +102,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--prompt-for-initialpose",
         action="store_true",
         help=(
-            "Pause before each preauthorization first-route readiness attempt "
-            "so the operator can click RViz 2D Pose Estimate while the robot "
-            "is stopped. This is not motion authorization."
+            "Pause once before preplanning localization admission so the "
+            "operator can click RViz 2D Pose Estimate while the robot is "
+            "stopped. The first route is planned from the post-click AMCL "
+            "pose. This is not motion authorization."
         ),
     )
     parser.add_argument(

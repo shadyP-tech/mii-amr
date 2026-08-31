@@ -185,7 +185,7 @@ from scripts.aufgabe04.real_robot.readiness.localization import (
 )
 from scripts.aufgabe04.real_robot.readiness.initialpose_prompt import (
     InitialPosePromptConfig,
-    prompt_for_initialpose_attempt,
+    prepare_preplanning_initialpose,
 )
 from scripts.aufgabe04.real_robot.readiness.preauthorization import (
     PreauthorizationReadinessConfig,
@@ -269,14 +269,18 @@ from .mission_config import (
 )
 
 
+def _prompt_for_preplanning_initialpose_if_requested(args, profile) -> bool:
+    """Run the optional operator initial-pose prompt before route admission."""
 
-
-
-
-
-
-
-
+    initialpose_prompt_config = InitialPosePromptConfig(
+        amcl_topic=getattr(profile, "amcl_topic", "amcl_pose"),
+        observation_window_sec=args.initialpose_prompt_window_sec,
+        maximum_retry_count=0,
+    )
+    return prepare_preplanning_initialpose(
+        enabled=args.prompt_for_initialpose,
+        config=initialpose_prompt_config,
+    )
 
 
 def _admit_observation_tf_readiness(
@@ -1813,6 +1817,7 @@ def main(argv=None) -> int:
             phase="preauthorization_observation_tf_readiness",
             typed_run_already_issued=False,
         )
+        _prompt_for_preplanning_initialpose_if_requested(args, profile)
         start = _admit_preplanning_localization(
             runtime,
             session_root,
@@ -1903,20 +1908,6 @@ def main(argv=None) -> int:
                 ),
             )
 
-        initialpose_prompt_config = InitialPosePromptConfig(
-            amcl_topic=getattr(profile, "amcl_topic", "amcl_pose"),
-            observation_window_sec=args.initialpose_prompt_window_sec,
-            maximum_retry_count=args.max_localization_readiness_retries_per_leg,
-        )
-
-        def prepare_initial_readiness_localization(request):
-            if not args.prompt_for_initialpose:
-                return
-            prompt_for_initialpose_attempt(
-                config=initialpose_prompt_config,
-                attempt_index=request.attempt_index,
-            )
-
         initial_admission = admit_preauthorization_readiness(
             PreauthorizationReadinessConfig(
                 session_root=session_root,
@@ -1941,7 +1932,6 @@ def main(argv=None) -> int:
                 publish_hashed_json=write_content_hashed_json,
                 wall_clock=time.time,
                 notify=print,
-                prepare_localization_attempt=prepare_initial_readiness_localization,
             ),
         )
         initial_readiness = initial_admission.result

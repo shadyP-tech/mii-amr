@@ -417,6 +417,8 @@ class AutonomousReadinessIntegrationTest(unittest.TestCase):
             call_order: list[str] = []
 
             def pass_readiness(*_args, **_kwargs):
+                effects = _args[1]
+                self.assertIsNone(effects.prepare_localization_attempt)
                 call_order.append("readiness")
                 return SimpleNamespace(
                     result=SimpleNamespace(attempts=(object(),)),
@@ -469,6 +471,138 @@ class AutonomousReadinessIntegrationTest(unittest.TestCase):
             run_prompt.assert_called_once()
             mission_leg_writer.assert_called_once()
             self.assertEqual(call_order, ["readiness", "RUN", "authorization"])
+
+    def test_initialpose_bootstrap_precedes_planning_and_is_not_owned_by_retries(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            call_order: list[str] = []
+            readiness_effects = []
+
+            def bootstrap_initialpose(**kwargs):
+                self.assertTrue(kwargs["enabled"])
+                self.assertEqual(kwargs["config"].maximum_retry_count, 0)
+                call_order.append("initialpose")
+                return True
+
+            def admit_localization(*_args, **_kwargs):
+                call_order.append("localization")
+                return Pose2D(0.12, -0.34, 0.56)
+
+            def plan_coverage(argv):
+                call_order.append("planning")
+                self.assertEqual(argv[argv.index("--start-x") + 1], "0.12")
+                self.assertEqual(argv[argv.index("--start-y") + 1], "-0.34")
+                self.assertEqual(argv[argv.index("--start-yaw") + 1], "0.56")
+                return 0
+
+            def pass_readiness(_config, effects):
+                call_order.append("readiness")
+                readiness_effects.append(effects)
+                return SimpleNamespace(
+                    result=SimpleNamespace(attempts=(object(), object())),
+                    evidence_path=root / "initial_readiness.json",
+                    evidence_sha256="e" * 64,
+                )
+
+            def confirm_run(_prompt):
+                call_order.append("RUN")
+                return "RUN"
+
+            def stop_at_authorization(*_args, **_kwargs):
+                call_order.append("authorization")
+                raise _AuthorizationBoundary("authorization boundary reached")
+
+            with ExitStack() as stack:
+                self._patch_main_before_authorization(
+                    stack,
+                    root,
+                    initial_readiness=pass_readiness,
+                )
+                bootstrap = stack.enter_context(
+                    patch.object(
+                        runner,
+                        "prepare_preplanning_initialpose",
+                        side_effect=bootstrap_initialpose,
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        runner,
+                        "_admit_preplanning_localization",
+                        side_effect=admit_localization,
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        runner,
+                        "plan_stand_coverage_survey",
+                        side_effect=plan_coverage,
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        runner,
+                        "admit_preauthorization_readiness",
+                        side_effect=pass_readiness,
+                    )
+                )
+                run_prompt = stack.enter_context(
+                    patch("builtins.input", side_effect=confirm_run)
+                )
+                stack.enter_context(
+                    patch.object(runner, "_file_sha256", return_value="a" * 64)
+                )
+                stack.enter_context(
+                    patch.object(
+                        runner,
+                        "_checkpoint_config_sha256",
+                        return_value="b" * 64,
+                    )
+                )
+                mission_leg_writer = stack.enter_context(
+                    patch.object(
+                        runner,
+                        "write_mission_leg_motion_authorization",
+                        side_effect=stop_at_authorization,
+                    )
+                )
+                coverage = stack.enter_context(
+                    patch.object(runner, "execute_coverage_mission")
+                )
+                stack.enter_context(redirect_stdout(StringIO()))
+                stack.enter_context(redirect_stderr(StringIO()))
+
+                with self.assertRaises(SystemExit) as raised:
+                    runner.main(
+                        [
+                            *self._main_argv(root),
+                            "--prompt-for-initialpose",
+                        ]
+                    )
+
+            self.assertEqual(raised.exception.code, 2)
+            bootstrap.assert_called_once()
+            self.assertEqual(len(readiness_effects), 1)
+            self.assertIsNone(
+                readiness_effects[0].prepare_localization_attempt,
+                "preauthorization retries must not request another pose click",
+            )
+            run_prompt.assert_called_once()
+            mission_leg_writer.assert_called_once()
+            coverage.assert_not_called()
+            self.assertEqual(
+                call_order,
+                [
+                    "initialpose",
+                    "localization",
+                    "planning",
+                    "readiness",
+                    "RUN",
+                    "authorization",
+                ],
+            )
 
 
 if __name__ == "__main__":

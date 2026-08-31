@@ -240,6 +240,8 @@ class PreauthorizationReadinessEffects:
     publish_hashed_json: Callable[..., str]
     wall_clock: Callable[[], float]
     notify: Callable[[str], None]
+    # Compatibility hook for non-interactive no-motion refresh plumbing only.
+    # Operator prompts must happen before route planning, outside this module.
     prepare_localization_attempt: (
         Callable[[InitialReadinessDryRequest], None] | None
     ) = None
@@ -373,9 +375,10 @@ def admit_preauthorization_readiness(
     def dry_runner(request: InitialReadinessDryRequest) -> object:
         if request.attempt_index > 0:
             effects.notify(
-                "First-route AMCL uncertainty is not ready. Correct the "
-                "RViz 2D Pose Estimate at the known physical start; the "
-                f"no-motion admission is retrying ({request.attempt_index}/"
+                "First-route AMCL uncertainty is not ready. Keep the robot "
+                "stopped and do not click RViz 2D Pose Estimate during this "
+                "sealed-route retry; the no-motion AMCL admission is retrying "
+                f"({request.attempt_index}/"
                 f"{config.maximum_localization_readiness_retries})."
             )
         if effects.prepare_localization_attempt is not None:

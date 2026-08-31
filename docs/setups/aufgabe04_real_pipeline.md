@@ -338,14 +338,18 @@ preflight without publishing velocity. Require
 route diagnostics, and preflight JSON before proceeding.
 
 All autonomous execute modes now perform the same first-route readiness phase
-before displaying the typed `RUN` prompt. The phase passively proves that one
-fresh `LaserScan` has an exact-time `odom <- base_scan` transform, then seals a
-separate nonauthorizing copy of the first route and runs its dry uncertainty
-admission. If the AMCL uncertainty budget is temporarily exhausted, the script
-prints a no-motion retry message. Correct the RViz **2D Pose Estimate** at the
-known physical start while those bounded attempts run; do not compensate by
-raising the uncertainty limit, shrinking the sigma multiplier, or widening the
-certified route tube. A rejection writes
+before displaying the typed `RUN` prompt. With `--prompt-for-initialpose`, the
+script first passively proves that one fresh `LaserScan` has an exact-time
+`odom <- base_scan` transform, then pauses once before preplanning localization
+admission. Click RViz **2D Pose Estimate** only at that prompt while the robot
+is stopped. The phase admits the post-click AMCL pose, creates the
+center-corridor coverage plan from that pose, seals a separate nonauthorizing
+copy of the first route, and runs its dry uncertainty admission. If the AMCL
+uncertainty budget is temporarily exhausted after the route is sealed, the
+script prints a no-motion retry message and repeats AMCL admission without
+another RViz click. Do not compensate by raising the uncertainty limit,
+shrinking the sigma multiplier, or widening the certified route tube. A
+rejection writes
 `preflight/lidar_scan_tf_before_authorization.json` and
 `authorization_readiness/coverage_leg_<index>/readiness.json`, exits without
 requesting `RUN`, and issues no motion authorization or permit. If the bounded

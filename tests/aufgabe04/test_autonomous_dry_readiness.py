@@ -17,6 +17,7 @@ class AutonomousDryReadinessTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
             output_root = root / "runs"
+            prompt_calls: list[str] = []
             reason = (
                 "odom execution admission failed: route uncertainty budget "
                 "exhausted: limiting_segment=0 remaining_margin=-0.01 m"
@@ -113,6 +114,14 @@ class AutonomousDryReadinessTest(unittest.TestCase):
                 scan_origin_to_base_offset_m=0.05,
                 resolved_runtime=lambda: SimpleNamespace(namespace=""),
             )
+
+            def prepare_initialpose(**kwargs):
+                self.assertTrue(kwargs["enabled"])
+                self.assertEqual(kwargs["config"].maximum_retry_count, 0)
+                prompt_calls.append("initialpose")
+                return True
+
+            real_admit_readiness = runner.admit_preauthorization_readiness
             with (
                 patch.object(runner, "load_real_robot_profile", return_value=profile),
                 patch.object(
@@ -145,6 +154,11 @@ class AutonomousDryReadinessTest(unittest.TestCase):
                     "_admit_preplanning_localization",
                     return_value=Pose2D(0.0, 0.0, 0.0),
                 ),
+                patch.object(
+                    runner,
+                    "prepare_preplanning_initialpose",
+                    side_effect=prepare_initialpose,
+                ) as initialpose,
                 patch.object(
                     runner,
                     "_admit_observation_tf_readiness",
@@ -181,6 +195,11 @@ class AutonomousDryReadinessTest(unittest.TestCase):
                     "_run_motion_leg",
                     side_effect=run_motion_leg,
                 ) as run_leg,
+                patch.object(
+                    runner,
+                    "admit_preauthorization_readiness",
+                    wraps=real_admit_readiness,
+                ) as readiness,
                 redirect_stdout(StringIO()),
             ):
                 status = runner.main(
@@ -197,6 +216,7 @@ class AutonomousDryReadinessTest(unittest.TestCase):
                         "dry_session",
                         "--run-mode",
                         "dry-first-leg",
+                        "--prompt-for-initialpose",
                     ]
                 )
 
@@ -209,6 +229,14 @@ class AutonomousDryReadinessTest(unittest.TestCase):
                 None,
             )
             self.assertEqual(run_leg.call_count, 2)
+            initialpose.assert_called_once()
+            self.assertEqual(prompt_calls, ["initialpose"])
+            readiness.assert_called_once()
+            self.assertIsNone(
+                readiness.call_args.args[1].prepare_localization_attempt,
+                "uncertainty retries must reuse the admitted pose without "
+                "requesting another click",
+            )
             self.assertEqual(
                 run_leg.call_args_list[1].kwargs["run_id"],
                 "dry_session_preauthorization_coverage_000_001",

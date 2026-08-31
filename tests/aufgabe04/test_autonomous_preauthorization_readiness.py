@@ -122,6 +122,7 @@ class AutonomousPreauthorizationReadinessTest(unittest.TestCase):
         published=None,
         order=None,
         prepare=None,
+        notify=None,
     ):
         seals = [] if seals is None else seals
         persisted = [] if persisted is None else persisted
@@ -144,7 +145,7 @@ class AutonomousPreauthorizationReadinessTest(unittest.TestCase):
             append_event=append,
             publish_hashed_json=publish,
             wall_clock=lambda: next(ticks),
-            notify=lambda _message: None,
+            notify=(notify or (lambda _message: None)),
             prepare_localization_attempt=prepare,
         )
 
@@ -228,6 +229,29 @@ class AutonomousPreauthorizationReadinessTest(unittest.TestCase):
             [payload["timestamp"] for _path, payload in persisted],
             [10.0, 11.0],
         )
+
+    def test_readiness_retry_does_not_instruct_post_seal_initialpose_click(self):
+        notices: list[str] = []
+
+        def dry_runner(request):
+            if request.attempt_index == 0:
+                return _outcome(
+                    request,
+                    status="preflight_failed",
+                    reason=_retryable_reason(),
+                    details=_retryable_details(),
+                )
+            return _outcome(request)
+
+        outcome = admit_preauthorization_readiness(
+            self.config,
+            self._effects(dry_runner, notify=notices.append),
+        )
+
+        self.assertTrue(outcome.result.ready)
+        retry_notice = "\n".join(notices)
+        self.assertIn("do not click RViz 2D Pose Estimate", retry_notice)
+        self.assertIn("sealed-route retry", retry_notice)
 
     def test_prepare_localization_attempt_runs_before_each_dry_attempt(self):
         order = []
