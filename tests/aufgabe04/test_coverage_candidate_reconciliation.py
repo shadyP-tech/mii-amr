@@ -180,6 +180,95 @@ class CoverageCandidateReconciliationTest(unittest.TestCase):
         self.assertFalse(evidence["expected_stand_count_used"])
         self.assertEqual(len(decision.decision_sha256), 64)
 
+    def test_limited_invalid_rays_do_not_veto_clear_majority(self):
+        receipts = (
+            _receipt("receipt_01", 1.00, 1.50),
+            _receipt("receipt_02", 1.10, math.inf),
+            _receipt("receipt_03", 1.20, 1.55),
+            _receipt("receipt_04", 1.30, 1.60),
+        )
+
+        decision = _decision(receipts=receipts)
+
+        self.assertTrue(decision.reject_provisional)
+        self.assertEqual(decision.action, ACTION_REJECT_PROVISIONAL)
+        self.assertEqual(decision.reasons, ())
+        self.assertEqual(
+            [item.classification for item in decision.ray_evidence],
+            ["clear", "invalid", "clear", "clear"],
+        )
+        self.assertEqual(
+            decision.distinct_clear_scan_stamps_sec,
+            (1.0, 1.2, 1.3),
+        )
+
+    def test_real_run_shape_sixty_four_clear_sixteen_invalid_rejects(self):
+        receipts = tuple(
+            _receipt(
+                f"receipt_{index:03d}",
+                float(index) * 0.10,
+                1.50 if index <= 64 else math.inf,
+            )
+            for index in range(1, 81)
+        )
+
+        decision = _decision(receipts=receipts)
+
+        self.assertTrue(decision.reject_provisional)
+        policy = decision.ray_policy_decision
+        self.assertEqual(policy.clear_ray_count, 64)
+        self.assertEqual(policy.invalid_selected_ray_count, 16)
+        self.assertAlmostEqual(policy.clear_ray_fraction, 0.8)
+        self.assertAlmostEqual(policy.invalid_selected_ray_fraction, 0.2)
+        self.assertTrue(policy.rejection_supported)
+
+    def test_single_matching_return_vetoes_clear_majority(self):
+        receipts = tuple(
+            _receipt(
+                f"receipt_{index:03d}",
+                float(index) * 0.10,
+                0.80 if index == 80 else 1.50,
+            )
+            for index in range(1, 81)
+        )
+
+        decision = _decision(receipts=receipts)
+
+        self.assertFalse(decision.reject_provisional)
+        self.assertIn("matching_return_supports_candidate", decision.reasons)
+
+    def test_fraction_policy_rejects_bool_and_out_of_range_values(self):
+        for overrides in (
+            {"minimum_clear_ray_fraction": True},
+            {"minimum_clear_ray_fraction": 1.01},
+            {"maximum_invalid_selected_ray_fraction": -0.01},
+        ):
+            with self.subTest(overrides=overrides):
+                config = CoverageCandidateReconciliationConfig(
+                    observer_config_sha256=CONFIG_SHA256,
+                    **overrides,
+                )
+                with self.assertRaisesRegex(ValueError, "finite number"):
+                    config.validated()
+
+    def test_invalid_ray_fraction_limit_retains_candidate(self):
+        receipts = (
+            _receipt("receipt_01", 1.00, 1.50),
+            _receipt("receipt_02", 1.10, math.inf),
+            _receipt("receipt_03", 1.20, 1.55),
+            _receipt("receipt_04", 1.30, math.inf),
+            _receipt("receipt_05", 1.40, 1.60),
+        )
+
+        decision = _decision(receipts=receipts)
+
+        self.assertFalse(decision.reject_provisional)
+        self.assertIn("insufficient_clear_ray_fraction", decision.reasons)
+        self.assertIn(
+            "selected_scan_ray_invalid_fraction_exceeds_limit",
+            decision.reasons,
+        )
+
     def test_repeated_scan_timestamps_are_insufficient(self):
         receipts = (
             _receipt("receipt_01", 1.0, 1.50),

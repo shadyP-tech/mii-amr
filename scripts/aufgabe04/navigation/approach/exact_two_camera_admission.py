@@ -15,8 +15,8 @@ from scripts.aufgabe04.navigation.coverage.coverage_candidate_lifecycle import (
     evaluate_exact_two_lidar_checkpoint,
     exact_two_lidar_checkpoint_evidence_sha256,
 )
-from scripts.aufgabe04.navigation.coverage.coverage_candidate_reconciliation_report import (
-    evidence_only_reconciliation_policy_contract,
+from scripts.aufgabe04.navigation.coverage.coverage_candidate_reconciliation_application import (
+    bounded_negative_visibility_reconciliation_policy_contract,
 )
 from scripts.aufgabe04.navigation.approach.exact_two_camera_artifacts import (
     ADMISSION_HASH_FIELD,
@@ -298,7 +298,7 @@ def exact_two_detector_config_sha256(plan: CoverageSurveyPlan) -> str:
                     ).to_evidence_dict()
                 ),
                 "lidar_visibility_reconciliation": (
-                    evidence_only_reconciliation_policy_contract()
+                    bounded_negative_visibility_reconciliation_policy_contract()
                 ),
             },
         }

@@ -291,16 +291,24 @@ def _prepare_stand_coverage_stop(
             perception_admission.registry_static_map_dispositions
         ),
     )
+    completed_progress = mark_viewpoint_visited(
+        plan,
+        progress,
+        viewpoint.viewpoint_id,
+    )
     visibility_reconciliation = prepare_coverage_visibility_reconciliation(
         survey_root=survey_root,
         plan=plan,
-        progress=progress,
+        prior_progress=progress,
+        completed_progress=completed_progress,
         current_viewpoint_id=viewpoint.viewpoint_id,
         current_evidence=perception_admission.visibility_evidence,
         registry=registry,
         occupancy_grid=grid,
     )
-    progress = mark_viewpoint_visited(plan, progress, viewpoint.viewpoint_id)
+    if visibility_reconciliation is not None:
+        registry = visibility_reconciliation.updated_registry
+    progress = completed_progress
 
     # Prove that the enlarged keepout registry still admits a next leg before
     # committing the mutable epoch/progress artifacts.

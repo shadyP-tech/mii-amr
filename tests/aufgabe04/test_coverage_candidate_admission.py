@@ -17,6 +17,7 @@ from scripts.aufgabe04.navigation.coverage.stand_candidate_population_retention 
 )
 from scripts.aufgabe04.navigation.foundation.models import GridCell, Pose2D
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
+    REJECTION_BASIS_CAMERA,
     STATUS_CONFIRMED,
     STATUS_PENDING_CAMERA,
     STATUS_PROVISIONAL,
@@ -96,6 +97,9 @@ def candidate(
     ),
     static_map_disposition: str = STATIC_MAP_DISPOSITION_ADMITTED,
 ) -> SurveyCandidate:
+    rejection_basis = (
+        REJECTION_BASIS_CAMERA if status == STATUS_REJECTED else None
+    )
     return SurveyCandidate(
         candidate_uid=f"survey_candidate_{index:04d}",
         x_m=0.25 * index,
@@ -111,6 +115,7 @@ def candidate(
         viewpoint_ids=viewpoint_ids,
         status=status,
         static_map_disposition=static_map_disposition,
+        rejection_basis=rejection_basis,
     )
 
 

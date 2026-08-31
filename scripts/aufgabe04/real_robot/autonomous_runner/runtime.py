@@ -35,9 +35,6 @@ from scripts.aufgabe04.navigation.coverage.coverage_candidate_admission import (
     coverage_candidate_admission_evidence,
     evaluate_coverage_candidate_admission,
 )
-from scripts.aufgabe04.navigation.coverage.coverage_candidate_reconciliation_report import (
-    evidence_only_reconciliation_policy_contract,
-)
 from scripts.aufgabe04.navigation.approach.dynamic_approach_planner import (
     DynamicApproachConfig,
     minimum_static_obstacle_inflation_m,

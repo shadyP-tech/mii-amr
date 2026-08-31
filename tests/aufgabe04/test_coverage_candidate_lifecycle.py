@@ -23,6 +23,8 @@ from scripts.aufgabe04.navigation.coverage.stand_candidate_population_retention 
     STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL,
 )
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
+    REJECTION_BASIS_CAMERA,
+    REJECTION_BASIS_NEGATIVE_VISIBILITY,
     STATUS_CONFIRMED,
     STATUS_PENDING_CAMERA,
     STATUS_PROVISIONAL,
@@ -100,7 +102,10 @@ def candidate(
     hit_count: int = 7,
     viewpoint_ids: tuple[str, ...] = ("survey_vp_001",),
     static_map_disposition: str = "static_map_admitted",
+    rejection_basis: str | None = None,
 ) -> SurveyCandidate:
+    if status == STATUS_REJECTED and rejection_basis is None:
+        rejection_basis = REJECTION_BASIS_CAMERA
     return SurveyCandidate(
         candidate_uid=f"survey_candidate_{index:04d}",
         x_m=0.25 * index,
@@ -116,6 +121,7 @@ def candidate(
         viewpoint_ids=viewpoint_ids,
         status=status,
         static_map_disposition=static_map_disposition,
+        rejection_basis=rejection_basis,
     )
 
 
@@ -409,6 +415,29 @@ class CoverageCandidateLifecycleTest(unittest.TestCase):
         )
         self.assertFalse(classified.candidates[0].multi_view_supported)
         self.assertFalse(rejected.active_lidar)
+
+    def test_negative_visibility_rejection_is_not_a_camera_rejection(self):
+        classified = classify_coverage_candidates(
+            self.plan,
+            registry(
+                self.plan,
+                candidate(
+                    6,
+                    status=STATUS_REJECTED,
+                    rejection_basis=REJECTION_BASIS_NEGATIVE_VISIBILITY,
+                ),
+            ),
+        )
+
+        self.assertEqual(classified.camera_rejected_candidate_uids, ())
+        self.assertEqual(
+            classified.negative_visibility_rejected_candidate_uids,
+            ("survey_candidate_0006",),
+        )
+        self.assertEqual(
+            classified.rejected_candidate_uids,
+            ("survey_candidate_0006",),
+        )
 
     def test_weak_active_candidate_fails_checkpoint_with_stable_uid(self):
         weak = replace(

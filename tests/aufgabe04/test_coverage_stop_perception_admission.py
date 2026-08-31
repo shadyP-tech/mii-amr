@@ -70,6 +70,8 @@ class CoverageStopPerceptionAdmissionBoundaryTest(unittest.TestCase):
         )
         prohibited_direct_imports = {
             "scripts.aufgabe04.navigation.coverage.coverage_candidate_reconciliation",
+            "scripts.aufgabe04.navigation.coverage.coverage_candidate_reconciliation_application",
+            "scripts.aufgabe04.navigation.coverage.coverage_candidate_reconciliation_policy",
             "scripts.aufgabe04.navigation.coverage.coverage_candidate_reconciliation_report",
             "scripts.aufgabe04.navigation.coverage.coverage_visibility_reporting",
             "scripts.aufgabe04.navigation.coverage.stand_candidate_static_map_admission",

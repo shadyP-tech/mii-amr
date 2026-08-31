@@ -27,6 +27,8 @@ from scripts.aufgabe04.navigation.coverage.exact_two_camera_seed_selection impor
     select_exact_two_camera_seed_candidates,
 )
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
+    REJECTION_BASIS_CAMERA,
+    REJECTION_BASIS_NEGATIVE_VISIBILITY,
     STATUS_CONFIRMED,
     STATUS_PENDING_CAMERA,
     STATUS_REJECTED,
@@ -42,8 +44,8 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
 )
 
 
-COVERAGE_CANDIDATE_LIFECYCLE_SCHEMA_VERSION = 2
-EXACT_TWO_LIDAR_CHECKPOINT_SCHEMA_VERSION = 3
+COVERAGE_CANDIDATE_LIFECYCLE_SCHEMA_VERSION = 3
+EXACT_TWO_LIDAR_CHECKPOINT_SCHEMA_VERSION = 4
 STATIC_MAP_ADMISSION_BASIS = "validated_survey_registry_membership"
 BOUNDARY_PROVISIONAL_STATIC_MAP_BASIS = "boundary_provisional_static_map_shortfall"
 _COVERAGE_COMPARISON_EPSILON = 1.0e-12
@@ -55,6 +57,7 @@ class CoverageCandidateLifecycleEvidence:
 
     candidate_uid: str
     registry_status: str
+    rejection_basis: str | None
     static_map_admission_basis: str
     static_map_disposition: str
     lidar_static_map_admitted: bool
@@ -79,12 +82,15 @@ class CoverageCandidateLifecycleEvidence:
     camera_validation_queued: bool
     camera_confirmed: bool
     camera_rejected: bool
+    negative_visibility_rejected: bool
+    registry_rejected: bool
     support_reasons: tuple[str, ...]
 
     def to_evidence_dict(self) -> dict[str, object]:
         return {
             "candidate_uid": self.candidate_uid,
             "registry_status": self.registry_status,
+            "rejection_basis": self.rejection_basis,
             "static_map_admission": {
                 "admitted": self.lidar_static_map_admitted,
                 "disposition": self.static_map_disposition,
@@ -97,6 +103,10 @@ class CoverageCandidateLifecycleEvidence:
                 "camera_validation_queued": self.camera_validation_queued,
                 "camera_confirmed": self.camera_confirmed,
                 "camera_rejected": self.camera_rejected,
+                "negative_visibility_rejected": (
+                    self.negative_visibility_rejected
+                ),
+                "registry_rejected": self.registry_rejected,
             },
             "basic_lidar_support": {
                 "met": self.basic_lidar_support,
@@ -152,6 +162,8 @@ class CoverageCandidatePopulation:
     multi_view_supported_candidate_uids: tuple[str, ...]
     camera_queue_candidate_uids: tuple[str, ...]
     camera_confirmed_candidate_uids: tuple[str, ...]
+    camera_rejected_candidate_uids: tuple[str, ...]
+    negative_visibility_rejected_candidate_uids: tuple[str, ...]
     rejected_candidate_uids: tuple[str, ...]
 
     def to_evidence_dict(self) -> dict[str, object]:
@@ -186,6 +198,12 @@ class CoverageCandidatePopulation:
                 ),
                 "camera_confirmed": list(
                     self.camera_confirmed_candidate_uids
+                ),
+                "camera_rejected": list(
+                    self.camera_rejected_candidate_uids
+                ),
+                "negative_visibility_rejected": list(
+                    self.negative_visibility_rejected_candidate_uids
                 ),
                 "rejected": list(self.rejected_candidate_uids),
             },
@@ -394,7 +412,15 @@ def classify_coverage_candidates(
             evidence,
             "camera_confirmed",
         ),
-        rejected_candidate_uids=_selected_uids(evidence, "camera_rejected"),
+        camera_rejected_candidate_uids=_selected_uids(
+            evidence,
+            "camera_rejected",
+        ),
+        negative_visibility_rejected_candidate_uids=_selected_uids(
+            evidence,
+            "negative_visibility_rejected",
+        ),
+        rejected_candidate_uids=_selected_uids(evidence, "registry_rejected"),
     )
 
 
@@ -639,6 +665,7 @@ def _classify_candidate(
     return CoverageCandidateLifecycleEvidence(
         candidate_uid=candidate.candidate_uid,
         registry_status=candidate.status,
+        rejection_basis=candidate.rejection_basis,
         static_map_admission_basis=(
             BOUNDARY_PROVISIONAL_STATIC_MAP_BASIS
             if (
@@ -679,7 +706,16 @@ def _classify_candidate(
             candidate.status == STATUS_PENDING_CAMERA
         ),
         camera_confirmed=(candidate.status == STATUS_CONFIRMED),
-        camera_rejected=(candidate.status == STATUS_REJECTED),
+        camera_rejected=(
+            candidate.status == STATUS_REJECTED
+            and candidate.rejection_basis == REJECTION_BASIS_CAMERA
+        ),
+        negative_visibility_rejected=(
+            candidate.status == STATUS_REJECTED
+            and candidate.rejection_basis
+            == REJECTION_BASIS_NEGATIVE_VISIBILITY
+        ),
+        registry_rejected=(candidate.status == STATUS_REJECTED),
         support_reasons=tuple(support_reasons),
     )
 

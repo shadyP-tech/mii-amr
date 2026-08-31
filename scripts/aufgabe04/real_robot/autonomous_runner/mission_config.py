@@ -11,8 +11,8 @@ from scripts.aufgabe04.artifacts.content_store import (
     payload_sha256,
     write_content_hashed_json,
 )
-from scripts.aufgabe04.navigation.coverage.coverage_candidate_reconciliation_report import (
-    evidence_only_reconciliation_policy_contract,
+from scripts.aufgabe04.navigation.coverage.coverage_candidate_reconciliation_application import (
+    bounded_negative_visibility_reconciliation_policy_contract,
 )
 from scripts.aufgabe04.navigation.approach.dynamic_approach_planner import (
     DynamicApproachConfig,
@@ -132,7 +132,7 @@ def _checkpoint_config_sha256(args) -> str:
                 "maximum": 0.45,
             },
             "lidar_visibility_reconciliation": (
-                evidence_only_reconciliation_policy_contract()
+                bounded_negative_visibility_reconciliation_policy_contract()
             ),
             "max_blockage_replans_per_leg": (
                 args.max_blockage_replans_per_leg

@@ -4,9 +4,9 @@ The record command owns file-system transaction ordering, survey progress, and
 route planning.  This module owns the independent perception gates that feed
 that transaction: producer morphology-contract validation, track morphology,
 static-map plausibility, validated scan-visibility receipts, and an
-evidence-only cross-viewpoint reconciliation report.  It never publishes
-motion, changes survey progress, mutates a registry, or uses the expected
-stand count to rank candidates.
+evidence-only cross-viewpoint reconciliation report plus its bounded
+registry application.  It never publishes motion, changes survey progress,
+or uses the expected stand count to rank candidates.
 """
 
 from __future__ import annotations
@@ -21,6 +21,10 @@ from scripts.aufgabe04.navigation.foundation.content_hashed_evidence import payl
 from scripts.aufgabe04.navigation.planning.costmap import Costmap
 from scripts.aufgabe04.navigation.coverage.coverage_candidate_reconciliation import (
     CoverageCandidateReconciliationConfig,
+)
+from scripts.aufgabe04.navigation.coverage.coverage_candidate_reconciliation_application import (
+    CoverageCandidateReconciliationApplication,
+    apply_negative_visibility_reconciliation_report,
 )
 from scripts.aufgabe04.navigation.coverage.coverage_candidate_reconciliation_report import (
     CoverageCandidateReconciliationReport,
@@ -133,15 +137,18 @@ class CoverageEpochPerceptionAdmission:
 
 @dataclass(frozen=True)
 class CoverageVisibilityReconciliationAdmission:
-    """Evidence-only reconciliation report and its immutable artifact."""
+    """Reconciliation report, registry application, and immutable artifacts."""
 
     report: CoverageCandidateReconciliationReport
+    application: CoverageCandidateReconciliationApplication
+    updated_registry: StandSurveyRegistry
     included_viewpoint_ids: tuple[str, ...]
     artifact: ContentHashedAdmissionArtifact
+    application_artifact: ContentHashedAdmissionArtifact
 
     @property
     def evidence_artifacts(self) -> tuple[ContentHashedAdmissionArtifact, ...]:
-        return (self.artifact,)
+        return (self.artifact, self.application_artifact)
 
 
 def load_stopped_observer_summary(path: Path) -> dict[str, object]:
@@ -389,20 +396,21 @@ def prepare_coverage_visibility_reconciliation(
     *,
     survey_root: Path,
     plan: CoverageSurveyPlan,
-    progress: CoverageSurveyProgress,
+    prior_progress: CoverageSurveyProgress,
+    completed_progress: CoverageSurveyProgress,
     current_viewpoint_id: str,
     current_evidence: CoverageVisibilityEvidence | None,
     registry: StandSurveyRegistry,
     occupancy_grid: OccupancyGrid,
 ) -> CoverageVisibilityReconciliationAdmission | None:
-    """Revalidate all epoch receipts and build a non-mutating report."""
+    """Build a report and apply it only at terminal exact-two coverage."""
 
     if current_evidence is None:
         return None
     visibility_epochs = _load_validated_visibility_epochs(
         survey_root=Path(survey_root),
         plan=plan,
-        progress=progress,
+        progress=prior_progress,
         current_viewpoint_id=current_viewpoint_id,
         current_evidence=current_evidence,
     )
@@ -429,6 +437,15 @@ def prepare_coverage_visibility_reconciliation(
     included_viewpoint_ids = tuple(
         evidence.viewpoint_id for evidence in visibility_epochs
     )
+    updated_registry, application = (
+        apply_negative_visibility_reconciliation_report(
+            plan=plan,
+            progress=completed_progress,
+            registry=registry,
+            report=report,
+            included_viewpoint_ids=included_viewpoint_ids,
+        )
+    )
     payload = {
         **report.to_evidence_dict(),
         "recorded_viewpoint_id": current_viewpoint_id,
@@ -442,10 +459,27 @@ def prepare_coverage_visibility_reconciliation(
         payload=payload,
         hash_field="lidar_visibility_reconciliation_sha256",
     )
+    application_payload = {
+        **application.to_evidence_dict(),
+        "recorded_viewpoint_id": current_viewpoint_id,
+        "included_viewpoint_ids": list(included_viewpoint_ids),
+        "lidar_visibility_reconciliation_sha256": artifact.sha256,
+    }
+    application_artifact = _content_hashed_artifact(
+        kind="lidar_visibility_reconciliation_application",
+        survey_root=Path(survey_root),
+        viewpoint_id=current_viewpoint_id,
+        filename_label="lidar_visibility_reconciliation_application",
+        payload=application_payload,
+        hash_field="lidar_visibility_reconciliation_application_sha256",
+    )
     return CoverageVisibilityReconciliationAdmission(
         report=report,
+        application=application,
+        updated_registry=updated_registry,
         included_viewpoint_ids=included_viewpoint_ids,
         artifact=artifact,
+        application_artifact=application_artifact,
     )
 
 
@@ -478,9 +512,15 @@ def coverage_stop_perception_summary_fields(
             "lidar_visibility_reconciliation_sha256": None,
             "lidar_visibility_reconciliation_policy_mode": None,
             "lidar_visibility_registry_mutation_applied": False,
+            "lidar_visibility_reconciliation_application_json": None,
+            "lidar_visibility_reconciliation_application_sha256": None,
+            "lidar_visibility_terminal_application_eligible": False,
+            "lidar_visibility_application_reasons": [],
             "lidar_visibility_recommended_rejection_candidate_uids": [],
+            "lidar_visibility_rejected_candidate_uids": [],
         }
     report = reconciliation.report
+    application = reconciliation.application
     return {
         **fields,
         "lidar_visibility_reconciliation_available": True,
@@ -488,15 +528,30 @@ def coverage_stop_perception_summary_fields(
             reconciliation.artifact.path
         ),
         "lidar_visibility_reconciliation_sha256": reconciliation.artifact.sha256,
-        "lidar_visibility_reconciliation_policy_mode": report.policy_mode,
+        "lidar_visibility_reconciliation_policy_mode": application.policy_mode,
         "lidar_visibility_registry_mutation_applied": (
-            report.registry_mutation_applied
+            application.registry_mutation_applied
+        ),
+        "lidar_visibility_reconciliation_application_json": str(
+            reconciliation.application_artifact.path
+        ),
+        "lidar_visibility_reconciliation_application_sha256": (
+            reconciliation.application_artifact.sha256
+        ),
+        "lidar_visibility_terminal_application_eligible": (
+            application.terminal_application_eligible
+        ),
+        "lidar_visibility_application_reasons": list(
+            application.application_reasons
         ),
         "lidar_visibility_recommended_rejection_candidate_uids": list(
             report.recommended_negative_visibility_candidate_uids
         ),
+        "lidar_visibility_rejected_candidate_uids": list(
+            application.rejected_candidate_uids
+        ),
         "lidar_visibility_retained_provisional_candidate_uids": list(
-            report.retained_provisional_candidate_uids
+            application.retained_provisional_candidate_uids
         ),
     }
 

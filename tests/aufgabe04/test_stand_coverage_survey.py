@@ -460,6 +460,36 @@ class StandSurveyRegistryTest(unittest.TestCase):
             STATIC_MAP_DISPOSITION_ADMITTED,
         )
 
+    def test_schema_three_registry_migrates_rejection_provenance(self):
+        survey = plan()
+        observed = stand(
+            stand_id="schema_three",
+            x_m=0.5,
+            y_m=0.1,
+            observation_prefix="schema_three",
+            timestamp=10.0,
+        )
+        registry = fuse_confirmed_stands(
+            new_stand_survey_registry(survey),
+            (observed,),
+            viewpoint_id="survey_vp_001",
+            config=survey.config,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry_path = Path(tmpdir) / "registry.json"
+            write_stand_survey_registry(registry_path, registry, survey)
+            schema_three_payload = json.loads(registry_path.read_text())
+            schema_three_payload["schema_version"] = 3
+            del schema_three_payload["candidates"][0]["rejection_basis"]
+            registry_path.write_text(json.dumps(schema_three_payload))
+            loaded = load_stand_survey_registry(registry_path, survey)
+
+        self.assertEqual(
+            loaded.schema_version,
+            STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
+        )
+        self.assertIsNone(loaded.candidates[0].rejection_basis)
+
     def test_boundary_disposition_round_trips_and_later_strict_view_upgrades(self):
         survey = plan()
         first = stand(

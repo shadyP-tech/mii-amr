@@ -39,6 +39,11 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     coverage_survey_plan_sha256,
     validate_stand_survey_registry,
 )
+from scripts.aufgabe04.navigation.coverage.coverage_candidate_reconciliation_policy import (
+    NegativeVisibilityRayPolicy,
+    NegativeVisibilityRayPolicyDecision,
+    evaluate_negative_visibility_ray_policy,
+)
 from scripts.aufgabe04.perception.lidar_visibility_evidence import (
     LidarVisibilityReceipt,
     validate_lidar_visibility_receipt,
@@ -46,7 +51,7 @@ from scripts.aufgabe04.perception.lidar_visibility_evidence import (
 )
 
 
-COVERAGE_CANDIDATE_RECONCILIATION_SCHEMA_VERSION = 1
+COVERAGE_CANDIDATE_RECONCILIATION_SCHEMA_VERSION = 2
 ACTION_RETAIN = "retain"
 ACTION_REJECT_PROVISIONAL = "reject_provisional"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -60,8 +65,22 @@ class CoverageCandidateReconciliationConfig:
     observer_config_sha256: str
     minimum_distinct_clear_scan_count: int = 3
     minimum_clear_scan_separation_sec: float = 0.05
+    minimum_clear_ray_fraction: float = 0.75
+    maximum_invalid_selected_ray_fraction: float = 0.25
     far_edge_clearance_margin_m: float = 0.03
     matching_range_tolerance_m: float = 0.02
+
+    @property
+    def ray_policy(self) -> NegativeVisibilityRayPolicy:
+        return NegativeVisibilityRayPolicy(
+            minimum_distinct_clear_scan_count=(
+                self.minimum_distinct_clear_scan_count
+            ),
+            minimum_clear_ray_fraction=self.minimum_clear_ray_fraction,
+            maximum_invalid_selected_ray_fraction=(
+                self.maximum_invalid_selected_ray_fraction
+            ),
+        )
 
     def validated(self) -> "CoverageCandidateReconciliationConfig":
         if (
@@ -71,13 +90,7 @@ class CoverageCandidateReconciliationConfig:
             raise ValueError(
                 "observer_config_sha256 must be a lowercase SHA-256"
             )
-        if (
-            type(self.minimum_distinct_clear_scan_count) is not int
-            or self.minimum_distinct_clear_scan_count < 2
-        ):
-            raise ValueError(
-                "minimum_distinct_clear_scan_count must be an integer >= 2"
-            )
+        self.ray_policy.validated()
         _finite_nonnegative(
             self.minimum_clear_scan_separation_sec,
             "minimum_clear_scan_separation_sec",
@@ -101,6 +114,10 @@ class CoverageCandidateReconciliationConfig:
             ),
             "minimum_clear_scan_separation_sec": (
                 self.minimum_clear_scan_separation_sec
+            ),
+            "minimum_clear_ray_fraction": self.minimum_clear_ray_fraction,
+            "maximum_invalid_selected_ray_fraction": (
+                self.maximum_invalid_selected_ray_fraction
             ),
             "far_edge_clearance_margin_m": (
                 self.far_edge_clearance_margin_m
@@ -175,6 +192,7 @@ class CoverageCandidateReconciliationDecision:
     eligible_planned_viewpoint_ids: tuple[str, ...]
     receipt_viewpoint_ids: tuple[str, ...]
     distinct_clear_scan_stamps_sec: tuple[float, ...]
+    ray_policy_decision: NegativeVisibilityRayPolicyDecision
     ray_evidence: tuple[CandidateVisibilityRayEvidence, ...]
 
     @property
@@ -211,6 +229,7 @@ class CoverageCandidateReconciliationDecision:
             "distinct_clear_scan_stamps_sec": list(
                 self.distinct_clear_scan_stamps_sec
             ),
+            "ray_policy_decision": self.ray_policy_decision.to_evidence_dict(),
             "ray_evidence": [
                 item.to_evidence_dict() for item in self.ray_evidence
             ],
@@ -308,6 +327,11 @@ def reconcile_provisional_candidate_visibility(
         ray_evidence,
         minimum_separation_sec=config.minimum_clear_scan_separation_sec,
     )
+    ray_policy_decision = evaluate_negative_visibility_ray_policy(
+        (item.classification for item in ray_evidence),
+        distinct_clear_scan_count=len(clear_stamps),
+        policy=config.ray_policy,
+    )
 
     reasons: list[str] = []
     if candidate.status != STATUS_PROVISIONAL:
@@ -326,21 +350,7 @@ def reconcile_provisional_candidate_visibility(
         reasons.append("no_other_planned_visible_viewpoint")
     if missing_viewpoint_receipts:
         reasons.append("planned_visible_viewpoint_receipts_missing")
-    for reason in (
-        "actual_static_line_of_sight_blocked",
-        "candidate_envelope_outside_conservative_range",
-        "no_scan_ray_intersects_candidate_envelope",
-        "selected_scan_ray_invalid",
-        "nearer_return_occludes_candidate",
-        "matching_return_supports_candidate",
-    ):
-        if any(item.reason == reason for item in ray_evidence):
-            reasons.append(reason)
-    if (
-        len(clear_stamps)
-        < config.minimum_distinct_clear_scan_count
-    ):
-        reasons.append("insufficient_distinct_clear_scan_times")
+    reasons.extend(ray_policy_decision.reasons)
 
     reject = not reasons
     return CoverageCandidateReconciliationDecision(
@@ -361,6 +371,7 @@ def reconcile_provisional_candidate_visibility(
         eligible_planned_viewpoint_ids=eligible_viewpoint_ids,
         receipt_viewpoint_ids=receipt_viewpoint_ids,
         distinct_clear_scan_stamps_sec=clear_stamps,
+        ray_policy_decision=ray_policy_decision,
         ray_evidence=ray_evidence,
     )
 

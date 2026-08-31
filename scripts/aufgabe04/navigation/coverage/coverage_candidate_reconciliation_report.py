@@ -33,9 +33,9 @@ from scripts.aufgabe04.perception.lidar_visibility_evidence import (
 )
 
 
-COVERAGE_CANDIDATE_RECONCILIATION_REPORT_SCHEMA_VERSION = 1
+COVERAGE_CANDIDATE_RECONCILIATION_REPORT_SCHEMA_VERSION = 2
 POLICY_MODE_EVIDENCE_ONLY = (
-    "evidence_only_pending_calibrated_negative_detection"
+    "evidence_only_bounded_negative_visibility_recommendation"
 )
 
 
@@ -70,6 +70,7 @@ class CoverageCandidateReconciliationReport:
     reconciliation_config_sha256: str
     receipt_set_sha256: str
     receipt_count: int
+    receipt_viewpoint_ids: tuple[str, ...]
     decisions: tuple[CoverageCandidateReconciliationDecision, ...]
     recommended_negative_visibility_candidate_uids: tuple[str, ...]
     retained_provisional_candidate_uids: tuple[str, ...]
@@ -107,6 +108,7 @@ class CoverageCandidateReconciliationReport:
             "input_receipts": {
                 "receipt_set_sha256": self.receipt_set_sha256,
                 "receipt_count": self.receipt_count,
+                "viewpoint_ids": list(self.receipt_viewpoint_ids),
             },
             "decisions": [
                 decision.to_evidence_dict() for decision in self.decisions
@@ -223,6 +225,14 @@ def build_coverage_candidate_reconciliation_report(
         reconciliation_config_sha256=payload_sha256(config_payload),
         receipt_set_sha256=visibility_receipts_sha256(ordered_receipts),
         receipt_count=len(ordered_receipts),
+        receipt_viewpoint_ids=tuple(
+            viewpoint.viewpoint_id
+            for viewpoint in plan.viewpoints
+            if any(
+                receipt.viewpoint_id == viewpoint.viewpoint_id
+                for receipt in ordered_receipts
+            )
+        ),
         decisions=decisions,
         recommended_negative_visibility_candidate_uids=recommended_uids,
         retained_provisional_candidate_uids=retained_uids,

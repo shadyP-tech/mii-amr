@@ -1,8 +1,11 @@
 import json
 import math
+import hashlib
+import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds
 from scripts.aufgabe04.navigation.coverage.coverage_candidate_reconciliation import (
@@ -14,20 +17,64 @@ from scripts.aufgabe04.navigation.coverage.coverage_candidate_reconciliation_rep
     POLICY_MODE_EVIDENCE_ONLY,
     build_coverage_candidate_reconciliation_report,
 )
+from scripts.aufgabe04.navigation.coverage.coverage_candidate_reconciliation_application import (
+    POLICY_MODE_BOUNDED_NEGATIVE_VISIBILITY_REGISTRY_REJECTION,
+    apply_negative_visibility_reconciliation_report,
+)
+from scripts.aufgabe04.navigation.coverage.coverage_candidate_lifecycle import (
+    evaluate_exact_two_lidar_checkpoint,
+)
+from scripts.aufgabe04.navigation.approach.exact_two_camera_admission import (
+    build_exact_two_camera_candidate_snapshot,
+    evaluate_exact_two_camera_admission,
+    exact_two_camera_admission_sha256,
+    new_exact_two_camera_handoff,
+    validate_live_registry_binding,
+)
+from scripts.aufgabe04.navigation.foundation.content_hashed_evidence import (
+    write_content_hashed_json,
+)
+from scripts.aufgabe04.artifacts.content_store import (
+    load_content_hashed_json,
+)
+from scripts.aufgabe04.navigation.coverage.coverage_stop_perception_admission import (
+    prepare_coverage_visibility_reconciliation,
+)
+from scripts.aufgabe04.navigation.coverage.coverage_visibility_reporting import (
+    CoverageVisibilityEvidence,
+)
 from scripts.aufgabe04.navigation.planning.map_io import MapMetadata, OccupancyGrid
 from scripts.aufgabe04.navigation.foundation.models import GridCell, Pose2D
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
+    REJECTION_BASIS_NEGATIVE_VISIBILITY,
+    STATUS_PENDING_CAMERA,
     STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
     STATUS_PROVISIONAL,
+    STATUS_REJECTED,
     SURVEY_PLAN_SCHEMA_VERSION,
     CoverageSurveyConfig,
     CoverageSurveyPlan,
     StandSurveyRegistry,
     SurveyCandidate,
     SurveyViewpoint,
+    mark_viewpoint_visited,
+    load_coverage_survey_plan,
+    load_survey_progress,
+    load_stand_survey_registry,
+    new_survey_progress,
+    stand_survey_registry_sha256,
+    write_coverage_survey_plan,
+    write_stand_survey_registry,
+    write_survey_progress,
 )
 from scripts.aufgabe04.perception.lidar_visibility_evidence import (
     lidar_visibility_receipt_from_scan,
+    visibility_receipts_sha256,
+)
+from scripts.aufgabe04.real_robot.mission.session_manifest import (
+    COVERAGE_SURVEY_TERMINAL_CHECKPOINT,
+    admit_autonomous_session_manifest,
+    publish_coverage_checkpoint,
 )
 
 
@@ -75,7 +122,11 @@ def _plan(*, expected_count: int = 5) -> CoverageSurveyPlan:
         planning_frame="map",
         map_bundle_sha256=MAP_SHA256,
         arena_bounds=ArenaBounds(),
-        config=CoverageSurveyConfig(expected_stand_count=expected_count),
+        config=CoverageSurveyConfig(
+            lane_count=1,
+            expected_stand_count=expected_count,
+            exact_inspection_point_count=2,
+        ),
         viewpoints=(
             SurveyViewpoint(
                 viewpoint_id=SOURCE_VIEWPOINT,
@@ -100,6 +151,7 @@ def _candidate(
     candidate_uid: str = "survey_candidate_0001",
     *,
     viewpoint_ids: tuple[str, ...] = (SOURCE_VIEWPOINT,),
+    status: str = STATUS_PROVISIONAL,
 ) -> SurveyCandidate:
     suffix = candidate_uid.rsplit("_", 1)[-1]
     return SurveyCandidate(
@@ -115,7 +167,7 @@ def _candidate(
         last_seen_sec=2.0,
         source_observation_ids=(f"observation_{suffix}",),
         viewpoint_ids=viewpoint_ids,
-        status=STATUS_PROVISIONAL,
+        status=status,
     )
 
 
@@ -129,6 +181,13 @@ def _registry(
         map_bundle_sha256=MAP_SHA256,
         candidates=candidates or (_candidate(),),
     )
+
+
+def _complete_progress(plan: CoverageSurveyPlan):
+    progress = new_survey_progress(plan)
+    for viewpoint_id in plan.viewpoint_ids:
+        progress = mark_viewpoint_visited(plan, progress, viewpoint_id)
+    return progress
 
 
 def _ranges(target_range: float) -> list[float]:
@@ -167,9 +226,41 @@ def _receipt(
 
 
 def _clear_receipts():
-    return tuple(
-        _receipt(f"receipt_{index}", float(index), 1.50)
-        for index in range(1, 4)
+    return (
+        *tuple(
+            _receipt(
+                f"source_receipt_{index}",
+                float(index),
+                1.50,
+                viewpoint_id=SOURCE_VIEWPOINT,
+            )
+            for index in range(1, 4)
+        ),
+        *tuple(
+            _receipt(f"check_receipt_{index}", float(index), 1.50)
+            for index in range(1, 4)
+        ),
+    )
+
+
+def _visibility_evidence(
+    *,
+    viewpoint_id: str,
+    receipts: tuple,
+    root: Path,
+) -> CoverageVisibilityEvidence:
+    return CoverageVisibilityEvidence(
+        survey_id=SURVEY_ID,
+        viewpoint_id=viewpoint_id,
+        planning_frame="map",
+        map_bundle_sha256=MAP_SHA256,
+        receipts_jsonl=root / f"{viewpoint_id}_receipts.jsonl",
+        receipt_count=len(receipts),
+        receipts_file_sha256="d" * 64,
+        receipt_set_sha256=visibility_receipts_sha256(receipts),
+        observer_config={},
+        observer_config_sha256=CONFIG_SHA256,
+        receipts=receipts,
     )
 
 
@@ -211,6 +302,492 @@ class CoverageCandidateReconciliationReportTest(unittest.TestCase):
         self.assertFalse(evidence["motion_authorized"])
         self.assertEqual(len(report.report_sha256), 64)
         json.dumps(evidence, allow_nan=False)
+
+    def test_bounded_application_rejects_recommended_provisional_candidate(self):
+        registry = _registry()
+        report = _report(registry=registry)
+
+        updated, application = apply_negative_visibility_reconciliation_report(
+            plan=(plan := _plan()),
+            progress=_complete_progress(plan),
+            registry=registry,
+            report=report,
+            included_viewpoint_ids=plan.viewpoint_ids,
+        )
+
+        self.assertEqual(registry.candidates[0].status, STATUS_PROVISIONAL)
+        self.assertEqual(updated.candidates[0].status, STATUS_REJECTED)
+        self.assertEqual(
+            updated.candidates[0].rejection_basis,
+            REJECTION_BASIS_NEGATIVE_VISIBILITY,
+        )
+        self.assertEqual(
+            application.policy_mode,
+            POLICY_MODE_BOUNDED_NEGATIVE_VISIBILITY_REGISTRY_REJECTION,
+        )
+        self.assertTrue(application.registry_mutation_applied)
+        self.assertFalse(application.motion_authorized)
+        self.assertEqual(
+            application.rejected_candidate_uids,
+            ("survey_candidate_0001",),
+        )
+        self.assertEqual(
+            application.source_registry_snapshot_sha256,
+            stand_survey_registry_sha256(registry),
+        )
+        self.assertEqual(
+            application.updated_registry_snapshot_sha256,
+            stand_survey_registry_sha256(updated),
+        )
+        self.assertEqual(len(application.application_sha256), 64)
+        json.dumps(application.to_evidence_dict(), allow_nan=False)
+
+    def test_application_rejects_registry_snapshot_mismatch(self):
+        report = _report()
+        changed_registry = _registry(
+            (
+                _candidate(),
+                _candidate("survey_candidate_0002"),
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "registry snapshot mismatch"):
+            apply_negative_visibility_reconciliation_report(
+                plan=(plan := _plan()),
+                progress=_complete_progress(plan),
+                registry=changed_registry,
+                report=report,
+                included_viewpoint_ids=plan.viewpoint_ids,
+            )
+
+    def test_application_is_noop_before_terminal_full_receipt_set(self):
+        plan = _plan()
+        registry = _registry()
+        report = _report(
+            plan=plan,
+            registry=registry,
+            receipts=tuple(
+                _receipt(
+                    f"source_receipt_{index}",
+                    float(index),
+                    1.50,
+                    viewpoint_id=SOURCE_VIEWPOINT,
+                )
+                for index in range(1, 4)
+            ),
+        )
+        progress = mark_viewpoint_visited(
+            plan,
+            new_survey_progress(plan),
+            SOURCE_VIEWPOINT,
+        )
+
+        updated, application = apply_negative_visibility_reconciliation_report(
+            plan=plan,
+            progress=progress,
+            registry=registry,
+            report=report,
+            included_viewpoint_ids=(SOURCE_VIEWPOINT,),
+        )
+
+        self.assertEqual(updated, registry)
+        self.assertFalse(application.terminal_application_eligible)
+        self.assertFalse(application.registry_mutation_applied)
+        self.assertEqual(
+            application.unapplied_recommended_candidate_uids,
+            (),
+        )
+        self.assertIn(
+            "planned_viewpoints_incomplete",
+            application.application_reasons,
+        )
+
+    def test_application_rejects_noncanonical_permissive_config(self):
+        plan = _plan()
+        registry = _registry()
+        report = build_coverage_candidate_reconciliation_report(
+            plan=plan,
+            registry=registry,
+            occupancy_grid=_grid(),
+            receipts=_clear_receipts(),
+            config=CoverageCandidateReconciliationConfig(
+                observer_config_sha256=CONFIG_SHA256,
+                minimum_distinct_clear_scan_count=2,
+                minimum_clear_ray_fraction=0.0,
+                maximum_invalid_selected_ray_fraction=1.0,
+            ),
+        )
+
+        with self.assertRaisesRegex(ValueError, "non-canonical policy"):
+            apply_negative_visibility_reconciliation_report(
+                plan=plan,
+                progress=_complete_progress(plan),
+                registry=registry,
+                report=report,
+                included_viewpoint_ids=plan.viewpoint_ids,
+            )
+
+    def test_application_rejects_tampered_decision_bindings(self):
+        plan = _plan()
+        registry = _registry()
+        report = _report(plan=plan, registry=registry)
+        decision = report.decisions[0]
+        cases = (
+            (
+                replace(
+                    decision,
+                    input_receipt_set_sha256="f" * 64,
+                ),
+                "receipt-set hash mismatch",
+            ),
+            (
+                replace(
+                    decision,
+                    source_viewpoint_ids=(CHECK_VIEWPOINT,),
+                ),
+                "source viewpoint mismatch",
+            ),
+            (
+                replace(decision, action=ACTION_RETAIN),
+                "action is inconsistent",
+            ),
+            (
+                replace(
+                    decision,
+                    ray_policy_decision=replace(
+                        decision.ray_policy_decision,
+                        rejection_supported=False,
+                    ),
+                ),
+                "ray-policy evidence mismatch",
+            ),
+        )
+        for tampered_decision, message in cases:
+            with self.subTest(message=message):
+                tampered_report = replace(
+                    report,
+                    decisions=(tampered_decision,),
+                )
+                with self.assertRaisesRegex(ValueError, message):
+                    apply_negative_visibility_reconciliation_report(
+                        plan=plan,
+                        progress=_complete_progress(plan),
+                        registry=registry,
+                        report=tampered_report,
+                        included_viewpoint_ids=plan.viewpoint_ids,
+                    )
+
+    def test_six_to_five_projection_is_consistent_through_camera_snapshot(self):
+        plan = _plan(expected_count=5)
+        registry = _registry(
+            (
+                _candidate("survey_candidate_0001"),
+                *tuple(
+                    _candidate(
+                        f"survey_candidate_{index:04d}",
+                        viewpoint_ids=(SOURCE_VIEWPOINT, CHECK_VIEWPOINT),
+                        status=STATUS_PENDING_CAMERA,
+                    )
+                    for index in range(2, 7)
+                ),
+            )
+        )
+        progress = _complete_progress(plan)
+        report = _report(plan=plan, registry=registry)
+        before = evaluate_exact_two_lidar_checkpoint(plan, progress, registry)
+
+        updated, application = apply_negative_visibility_reconciliation_report(
+            plan=plan,
+            progress=progress,
+            registry=registry,
+            report=report,
+            included_viewpoint_ids=plan.viewpoint_ids,
+        )
+        lidar = evaluate_exact_two_lidar_checkpoint(plan, progress, updated)
+        camera = evaluate_exact_two_camera_admission(
+            plan,
+            progress,
+            updated,
+            lidar,
+        )
+        snapshot = build_exact_two_camera_candidate_snapshot(
+            plan,
+            updated,
+            camera,
+            snapshot_id="reconciled_candidates",
+        )
+
+        self.assertFalse(before.ready)
+        self.assertIn(
+            "strict_candidate_count_exceeds_expected",
+            before.reasons,
+        )
+        self.assertEqual(
+            application.rejected_candidate_uids,
+            ("survey_candidate_0001",),
+        )
+        self.assertTrue(lidar.ready)
+        self.assertTrue(camera.ready)
+        self.assertEqual(len(snapshot.candidates), 5)
+        self.assertEqual(
+            camera.source_registry_sha256,
+            stand_survey_registry_sha256(updated),
+        )
+
+    def test_terminal_checkpoint_and_camera_handoff_bind_updated_registry(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve(strict=True)
+            survey_root = root / "coverage"
+            plan = _plan(expected_count=5)
+            registry = _registry(
+                (
+                    _candidate("survey_candidate_0001"),
+                    *tuple(
+                        _candidate(
+                            f"survey_candidate_{index:04d}",
+                            viewpoint_ids=(SOURCE_VIEWPOINT, CHECK_VIEWPOINT),
+                            status=STATUS_PENDING_CAMERA,
+                        )
+                        for index in range(2, 7)
+                    ),
+                )
+            )
+            prior_progress = mark_viewpoint_visited(
+                plan,
+                new_survey_progress(plan),
+                SOURCE_VIEWPOINT,
+            )
+            completed_progress = mark_viewpoint_visited(
+                plan,
+                prior_progress,
+                CHECK_VIEWPOINT,
+            )
+            receipts = _clear_receipts()
+            source_evidence = _visibility_evidence(
+                viewpoint_id=SOURCE_VIEWPOINT,
+                receipts=tuple(
+                    receipt
+                    for receipt in receipts
+                    if receipt.viewpoint_id == SOURCE_VIEWPOINT
+                ),
+                root=root,
+            )
+            current_evidence = _visibility_evidence(
+                viewpoint_id=CHECK_VIEWPOINT,
+                receipts=tuple(
+                    receipt
+                    for receipt in receipts
+                    if receipt.viewpoint_id == CHECK_VIEWPOINT
+                ),
+                root=root,
+            )
+
+            with patch(
+                "scripts.aufgabe04.navigation.coverage."
+                "coverage_stop_perception_admission."
+                "_load_validated_visibility_epochs",
+                return_value=(source_evidence, current_evidence),
+            ):
+                reconciliation = prepare_coverage_visibility_reconciliation(
+                    survey_root=survey_root,
+                    plan=plan,
+                    prior_progress=prior_progress,
+                    completed_progress=completed_progress,
+                    current_viewpoint_id=CHECK_VIEWPOINT,
+                    current_evidence=current_evidence,
+                    registry=registry,
+                    occupancy_grid=_grid(),
+                )
+
+            self.assertIsNotNone(reconciliation)
+            assert reconciliation is not None
+            self.assertEqual(
+                reconciliation.application.rejected_candidate_uids,
+                ("survey_candidate_0001",),
+            )
+            for artifact in reconciliation.evidence_artifacts:
+                artifact.path.parent.mkdir(parents=True, exist_ok=True)
+                self.assertEqual(
+                    write_content_hashed_json(
+                        artifact.path,
+                        artifact.payload,
+                        hash_field=artifact.hash_field,
+                    ),
+                    artifact.sha256,
+                )
+
+            plan_path = survey_root / "coverage_plan.json"
+            progress_path = survey_root / "coverage_progress.json"
+            registry_path = survey_root / "stand_registry.json"
+            summary_path = survey_root / "survey_summary.json"
+            observer_path = root / "lidar_observer_summary.json"
+            write_coverage_survey_plan(plan_path, plan)
+            write_survey_progress(progress_path, completed_progress, plan)
+            write_stand_survey_registry(
+                registry_path,
+                reconciliation.updated_registry,
+                plan,
+            )
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "motion_authorized": False,
+                        "lidar_visibility_reconciliation_sha256": (
+                            reconciliation.artifact.sha256
+                        ),
+                        "lidar_visibility_reconciliation_json": str(
+                            reconciliation.artifact.path
+                        ),
+                        "lidar_visibility_reconciliation_application_sha256": (
+                            reconciliation.application_artifact.sha256
+                        ),
+                        "lidar_visibility_reconciliation_application_json": str(
+                            reconciliation.application_artifact.path
+                        ),
+                        "stand_registry_sha256": stand_survey_registry_sha256(
+                            reconciliation.updated_registry
+                        ),
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+            observer_path.write_text('{"motion_published": false}\n')
+            session_root = root / "session"
+            session_root.mkdir()
+            published = publish_coverage_checkpoint(
+                session_root=session_root,
+                session_id="terminal_reconciliation",
+                run_mode="execute-exact-two-camera",
+                robot_id="tb3_1",
+                robot_profile_sha256="a" * 64,
+                calibration_profile_sha256="b" * 64,
+                physical_site_sha256="c" * 64,
+                map_bundle_sha256=plan.map_bundle_sha256,
+                config_sha256="e" * 64,
+                completed_coverage_legs=2,
+                next_viewpoint_id=None,
+                coverage_plan_path=plan_path,
+                coverage_progress_path=progress_path,
+                survey_summary_path=summary_path,
+                stand_registry_path=registry_path,
+                lidar_observer_summary_path=observer_path,
+                status=COVERAGE_SURVEY_TERMINAL_CHECKPOINT,
+            )
+
+            admitted_manifest = admit_autonomous_session_manifest(
+                published.manifest_path
+            )
+            checkpoint_plan = load_coverage_survey_plan(
+                Path(admitted_manifest.coverage_plan.path)
+            )
+            checkpoint_progress = load_survey_progress(
+                Path(admitted_manifest.coverage_progress.path),
+                checkpoint_plan,
+            )
+            checkpoint_registry_path = Path(admitted_manifest.stand_registry.path)
+            self.assertEqual(
+                hashlib.sha256(checkpoint_registry_path.read_bytes()).hexdigest(),
+                admitted_manifest.stand_registry.sha256,
+            )
+            checkpoint_registry = load_stand_survey_registry(
+                checkpoint_registry_path,
+                checkpoint_plan,
+            )
+            checkpoint_summary = json.loads(
+                Path(admitted_manifest.survey_summary.path).read_text()
+            )
+            report_artifact = load_content_hashed_json(
+                Path(checkpoint_summary["lidar_visibility_reconciliation_json"]),
+                hash_field="lidar_visibility_reconciliation_sha256",
+            )
+            application_artifact = load_content_hashed_json(
+                Path(
+                    checkpoint_summary[
+                        "lidar_visibility_reconciliation_application_json"
+                    ]
+                ),
+                hash_field=(
+                    "lidar_visibility_reconciliation_application_sha256"
+                ),
+            )
+            rejected = checkpoint_registry.candidates[0]
+            self.assertEqual(
+                checkpoint_registry.schema_version,
+                STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
+            )
+            self.assertEqual(rejected.status, STATUS_REJECTED)
+            self.assertEqual(
+                rejected.rejection_basis,
+                REJECTION_BASIS_NEGATIVE_VISIBILITY,
+            )
+            self.assertEqual(
+                stand_survey_registry_sha256(checkpoint_registry),
+                reconciliation.application.updated_registry_snapshot_sha256,
+            )
+            self.assertEqual(
+                report_artifact,
+                reconciliation.artifact.payload,
+            )
+            self.assertEqual(
+                checkpoint_summary["lidar_visibility_reconciliation_sha256"],
+                reconciliation.artifact.sha256,
+            )
+            self.assertEqual(
+                application_artifact,
+                reconciliation.application_artifact.payload,
+            )
+            self.assertEqual(
+                checkpoint_summary[
+                    "lidar_visibility_reconciliation_application_sha256"
+                ],
+                reconciliation.application_artifact.sha256,
+            )
+
+            lidar = evaluate_exact_two_lidar_checkpoint(
+                checkpoint_plan,
+                checkpoint_progress,
+                checkpoint_registry,
+            )
+            camera = evaluate_exact_two_camera_admission(
+                checkpoint_plan,
+                checkpoint_progress,
+                checkpoint_registry,
+                lidar,
+            )
+            snapshot = build_exact_two_camera_candidate_snapshot(
+                checkpoint_plan,
+                checkpoint_registry,
+                camera,
+                snapshot_id="terminal_reconciled_candidates",
+            )
+            handoff = new_exact_two_camera_handoff(
+                handoff_id="terminal_reconciliation_handoff",
+                created_unix_sec=10.0,
+                admission=camera,
+                terminal_checkpoint_path=published.manifest_path,
+                terminal_checkpoint_sha256=published.manifest_sha256,
+                lidar_admission_path=root / "lidar_admission.json",
+                lidar_admission_sha256=camera.lidar_checkpoint_sha256,
+                camera_admission_path=root / "camera_admission.json",
+                camera_admission_sha256=exact_two_camera_admission_sha256(
+                    camera
+                ),
+                candidate_snapshot_path=root / "candidate_snapshot.json",
+                candidate_snapshot=snapshot,
+            )
+            validate_live_registry_binding(handoff, checkpoint_registry)
+            with self.assertRaisesRegex(ValueError, "live stand registry"):
+                validate_live_registry_binding(handoff, registry)
+
+            self.assertTrue(lidar.ready)
+            self.assertTrue(camera.ready)
+            self.assertEqual(len(snapshot.candidates), 5)
+            self.assertEqual(
+                camera.source_registry_sha256,
+                stand_survey_registry_sha256(checkpoint_registry),
+            )
 
     def test_missing_or_invalid_receipts_retain_provisional_candidate(self):
         missing = _report(receipts=())

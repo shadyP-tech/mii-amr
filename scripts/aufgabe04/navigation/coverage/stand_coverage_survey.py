@@ -58,12 +58,18 @@ SURVEY_PLAN_SCHEMA_VERSION = 1
 SURVEY_PROGRESS_SCHEMA_VERSION = 1
 LEGACY_STAND_SURVEY_REGISTRY_SCHEMA_VERSION = 1
 STATIC_MAP_STAND_SURVEY_REGISTRY_SCHEMA_VERSION = 2
-STAND_SURVEY_REGISTRY_SCHEMA_VERSION = 3
+FRAME_PROVENANCE_STAND_SURVEY_REGISTRY_SCHEMA_VERSION = 3
+STAND_SURVEY_REGISTRY_SCHEMA_VERSION = 4
 
 STATUS_PROVISIONAL = "provisional"
 STATUS_PENDING_CAMERA = "pending_camera"
 STATUS_CONFIRMED = "confirmed"
 STATUS_REJECTED = "rejected"
+REJECTION_BASIS_CAMERA = "camera_observation"
+REJECTION_BASIS_NEGATIVE_VISIBILITY = "lidar_negative_visibility"
+VALID_REJECTION_BASES = frozenset(
+    {REJECTION_BASIS_CAMERA, REJECTION_BASIS_NEGATIVE_VISIBILITY}
+)
 VALID_CANDIDATE_STATUSES = frozenset(
     {
         STATUS_PROVISIONAL,
@@ -260,6 +266,7 @@ class SurveyCandidate:
     status: str
     static_map_disposition: str = STATIC_MAP_DISPOSITION_ADMITTED
     frame_provenance: CandidateFrameProvenance | None = None
+    rejection_basis: str | None = None
 
 
 @dataclass(frozen=True)
@@ -616,7 +623,17 @@ def decide_candidate(
     for candidate in registry.candidates:
         if candidate.candidate_uid == candidate_uid:
             found = True
-            candidates.append(replace(candidate, status=status))
+            candidates.append(
+                replace(
+                    candidate,
+                    status=status,
+                    rejection_basis=(
+                        REJECTION_BASIS_CAMERA
+                        if status == STATUS_REJECTED
+                        else None
+                    ),
+                )
+            )
         else:
             candidates.append(candidate)
     if not found:
@@ -1054,6 +1071,7 @@ def load_stand_survey_registry(
     if source_schema_version not in {
         LEGACY_STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
         STATIC_MAP_STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
+        FRAME_PROVENANCE_STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
         STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
     }:
         raise ValueError(
@@ -1061,9 +1079,9 @@ def load_stand_survey_registry(
             f"{source_schema_version!r}"
         )
     registry = StandSurveyRegistry(
-        # Schema v1 predates boundary retention and v1/v2 both predate frozen
-        # observation-frame provenance. Upgrade those lineages explicitly in
-        # memory before any canonical v3 hash is made.
+        # Schema v1 predates boundary retention, v1/v2 predate frozen
+        # observation-frame provenance, and v1-v3 predate explicit rejection
+        # provenance. Upgrade those lineages before any canonical v4 hash.
         schema_version=STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
         survey_id=str(payload["survey_id"]),
         planning_frame=str(payload["planning_frame"]),
@@ -1447,6 +1465,22 @@ def _validate_survey_candidate(candidate: SurveyCandidate) -> None:
         raise ValueError("candidate last_seen_sec precedes first_seen_sec")
     if candidate.status not in VALID_CANDIDATE_STATUSES:
         raise ValueError(f"invalid candidate status {candidate.status!r}")
+    if (
+        candidate.rejection_basis is not None
+        and candidate.rejection_basis not in VALID_REJECTION_BASES
+    ):
+        raise ValueError(
+            f"invalid candidate rejection basis {candidate.rejection_basis!r}"
+        )
+    if (
+        candidate.rejection_basis is not None
+        and candidate.status != STATUS_REJECTED
+    ):
+        raise ValueError(
+            "candidate rejection basis requires rejected lifecycle status"
+        )
+    if candidate.status == STATUS_REJECTED and candidate.rejection_basis is None:
+        raise ValueError("rejected candidate must record its rejection basis")
     validate_retained_static_map_disposition(
         candidate.static_map_disposition
     )
@@ -1646,6 +1680,7 @@ def survey_candidate_payload(candidate: SurveyCandidate) -> dict[str, object]:
             if candidate.frame_provenance is None
             else candidate.frame_provenance.to_mapping()
         ),
+        "rejection_basis": candidate.rejection_basis,
     }
 
 
@@ -1655,6 +1690,7 @@ def _candidate_from_payload(
     source_registry_schema_version: int,
 ) -> SurveyCandidate:
     item = _mapping(payload)
+    status = str(item["status"])
     if source_registry_schema_version == LEGACY_STAND_SURVEY_REGISTRY_SCHEMA_VERSION:
         if "static_map_disposition" in item:
             raise ValueError(
@@ -1663,6 +1699,9 @@ def _candidate_from_payload(
             )
         static_map_disposition = STATIC_MAP_DISPOSITION_ADMITTED
         frame_provenance = None
+        rejection_basis = (
+            REJECTION_BASIS_CAMERA if status == STATUS_REJECTED else None
+        )
     elif source_registry_schema_version == STATIC_MAP_STAND_SURVEY_REGISTRY_SCHEMA_VERSION:
         if "static_map_disposition" not in item:
             raise ValueError(
@@ -1676,15 +1715,21 @@ def _candidate_from_payload(
                 "contains frame_provenance"
             )
         frame_provenance = None
-    elif source_registry_schema_version == STAND_SURVEY_REGISTRY_SCHEMA_VERSION:
+        rejection_basis = (
+            REJECTION_BASIS_CAMERA if status == STATUS_REJECTED else None
+        )
+    elif source_registry_schema_version in {
+        FRAME_PROVENANCE_STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
+        STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
+    }:
         if "static_map_disposition" not in item:
             raise ValueError(
-                "stand survey registry schema 3 candidate is missing "
+                "stand survey registry candidate is missing "
                 "static_map_disposition"
             )
         if "frame_provenance" not in item:
             raise ValueError(
-                "stand survey registry schema 3 candidate is missing "
+                "stand survey registry candidate is missing "
                 "frame_provenance"
             )
         static_map_disposition = str(item["static_map_disposition"])
@@ -1697,6 +1742,30 @@ def _candidate_from_payload(
             )
         else:
             raise ValueError("candidate frame_provenance must be an object or null")
+        if (
+            source_registry_schema_version
+            == FRAME_PROVENANCE_STAND_SURVEY_REGISTRY_SCHEMA_VERSION
+        ):
+            if "rejection_basis" in item:
+                raise ValueError(
+                    "stand survey registry schema 3 candidate unexpectedly "
+                    "contains rejection_basis"
+                )
+            rejection_basis = (
+                REJECTION_BASIS_CAMERA if status == STATUS_REJECTED else None
+            )
+        else:
+            if "rejection_basis" not in item:
+                raise ValueError(
+                    "stand survey registry schema 4 candidate is missing "
+                    "rejection_basis"
+                )
+            raw_rejection_basis = item["rejection_basis"]
+            rejection_basis = (
+                None
+                if raw_rejection_basis is None
+                else str(raw_rejection_basis)
+            )
     else:
         raise ValueError(
             "unsupported stand survey registry schema "
@@ -1719,9 +1788,10 @@ def _candidate_from_payload(
         viewpoint_ids=tuple(
             str(value) for value in _list(item["viewpoint_ids"])
         ),
-        status=str(item["status"]),
+        status=status,
         static_map_disposition=static_map_disposition,
         frame_provenance=frame_provenance,
+        rejection_basis=rejection_basis,
     )
 
 
