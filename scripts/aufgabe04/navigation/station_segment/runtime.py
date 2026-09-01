@@ -116,14 +116,6 @@ from scripts.aufgabe04.navigation.localization.odom_route_adapter import (
     adapt_map_route_update_to_odom,
     evaluate_map_odom_stationary_stability,
 )
-from scripts.aufgabe04.navigation.execution.route_uncertainty_admission import (
-    RouteUncertaintyAdmissionConfig,
-    evaluate_route_uncertainty_admission,
-    route_uncertainty_admission_evidence_sha256,
-)
-from scripts.aufgabe04.navigation.execution.route_uncertainty_budget import (
-    PlanarCovariance,
-)
 from scripts.aufgabe04.navigation.execution.runtime_motion_authorization import (
     RuntimeLocalizationMotionPermit,
     runtime_localization_motion_permit_sha256,
@@ -195,6 +187,7 @@ from .reporting import (
     _append_status_result,
     _observation_log_rows,
     record_unexpected_follower_exception,
+    build_odom_execution_admission_stop_details,
 )
 from .console_reporting import (
     compact_preflight_summary,
@@ -1030,15 +1023,8 @@ def main(argv: list[str] | None = None) -> int:
                 diagnostics_snapshot=diagnostics_snapshot,
             )
         except (OSError, ValueError) as exc:
-            stop_reason = f"odom execution admission failed: {exc}"
-            stop_details = {
-                "reason": stop_reason,
-                "fault_code": "odom_execution_admission_failed",
-                "execution_pose_owner": "odom",
-                "global_consistency_monitor": "amcl",
-                "motion_published": False,
-                "fail_closed": True,
-            }
+            stop_details = build_odom_execution_admission_stop_details(exc)
+            stop_reason = str(stop_details["reason"])
             result = FollowerResult(
                 "preflight_failed",
                 stop_reason,

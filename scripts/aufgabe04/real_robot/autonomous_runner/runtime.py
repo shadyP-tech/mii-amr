@@ -152,6 +152,11 @@ from scripts.aufgabe04.real_robot.execution.child_runner import (
     parse_motion_leg_outcome as _motion_outcome_from_log,
     semantic_log_size as _semantic_log_size,
 )
+from scripts.aufgabe04.navigation.execution.route_uncertainty_defaults import (
+    DEFAULT_UNCERTAINTY_BRAKING_LATENCY_DISTANCE_M,
+    DEFAULT_UNCERTAINTY_CLEARANCE_SAMPLE_SPACING_M,
+    DEFAULT_UNCERTAINTY_ODOM_DRIFT_BOUND_M,
+)
 from scripts.aufgabe04.real_robot.coverage_leg.execution import (
     CoverageLegConfig,
     CoverageLegEffects,
@@ -1876,6 +1881,30 @@ def main(argv=None) -> int:
                         str(DEFAULT_EXACT_TWO_CANDIDATE_SPACING_M),
                         "--minimum-exact-two-viewpoint-baseline-m",
                         str(DEFAULT_MINIMUM_EXACT_TWO_VIEWPOINT_BASELINE_M),
+                        "--startup-route-selection-preflight-json",
+                        str(
+                            session_root
+                            / "preflight"
+                            / "preplanning_localization.json"
+                        ),
+                        "--startup-route-selection-robot-radius-m",
+                        str(profile.robot_radius_m),
+                        "--startup-route-selection-collision-margin-m",
+                        str(DEFAULT_COLLISION_MARGIN_M),
+                        "--startup-route-selection-tracking-tube-radius-m",
+                        str(DEFAULT_TRACKING_TUBE_RADIUS_M),
+                        "--startup-route-selection-odom-drift-bound-m",
+                        str(DEFAULT_UNCERTAINTY_ODOM_DRIFT_BOUND_M),
+                        "--startup-route-selection-braking-latency-distance-m",
+                        str(
+                            DEFAULT_UNCERTAINTY_BRAKING_LATENCY_DISTANCE_M
+                        ),
+                        "--startup-route-selection-sigma-multiplier",
+                        str(args.uncertainty_sigma_multiplier),
+                        "--startup-route-selection-clearance-sample-spacing-m",
+                        str(
+                            DEFAULT_UNCERTAINTY_CLEARANCE_SAMPLE_SPACING_M
+                        ),
                     ]
                 )
             planning_status = plan_stand_coverage_survey(planning_command)

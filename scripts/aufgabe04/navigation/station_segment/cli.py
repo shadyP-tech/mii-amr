@@ -7,6 +7,13 @@ import math
 from pathlib import Path
 
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import MissionLegKind
+from scripts.aufgabe04.navigation.execution.route_uncertainty_defaults import (
+    DEFAULT_COLLISION_MARGIN_M,
+    DEFAULT_TRACKING_TUBE_RADIUS_M,
+    DEFAULT_UNCERTAINTY_BRAKING_LATENCY_DISTANCE_M,
+    DEFAULT_UNCERTAINTY_CLEARANCE_SAMPLE_SPACING_M,
+    DEFAULT_UNCERTAINTY_ODOM_DRIFT_BOUND_M,
+)
 from scripts.aufgabe04.navigation.coverage.transient_blockage_policy import (
     DEFAULT_LINEAR_MOTION_FLOOR_MPS,
 )
@@ -186,15 +193,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--uncertainty-robot-radius-m", type=float)
     parser.add_argument(
-        "--uncertainty-collision-margin-m", type=float, default=0.02
+        "--uncertainty-collision-margin-m",
+        type=float,
+        default=DEFAULT_COLLISION_MARGIN_M,
     )
     parser.add_argument(
-        "--uncertainty-odom-drift-bound-m", type=float, default=0.02
+        "--uncertainty-odom-drift-bound-m",
+        type=float,
+        default=DEFAULT_UNCERTAINTY_ODOM_DRIFT_BOUND_M,
     )
     parser.add_argument(
         "--uncertainty-braking-latency-distance-m",
         type=float,
-        default=0.015,
+        default=DEFAULT_UNCERTAINTY_BRAKING_LATENCY_DISTANCE_M,
     )
     parser.add_argument(
         "--uncertainty-sigma-multiplier", type=float, default=1.0
@@ -205,7 +216,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--uncertainty-clearance-sample-spacing-m",
         type=float,
-        default=0.005,
+        default=DEFAULT_UNCERTAINTY_CLEARANCE_SAMPLE_SPACING_M,
     )
     parser.add_argument(
         "--max-map-odom-yaw-drift-rad", type=float, default=0.10
@@ -305,7 +316,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--certified-route-tube-radius-m",
         type=float,
-        default=0.03,
+        default=DEFAULT_TRACKING_TUBE_RADIUS_M,
         help=(
             "Maximum live base/pursuit deviation from the active certified "
             "polyline segment on physical stand approaches."

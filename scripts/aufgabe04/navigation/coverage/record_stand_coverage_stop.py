@@ -52,6 +52,7 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     load_survey_progress,
     mark_viewpoint_visited,
     plan_next_survey_leg,
+    plan_survey_leg_to_viewpoint,
     survey_status,
     write_stand_survey_registry,
     write_survey_progress,
@@ -682,20 +683,14 @@ def plan_next_stand_coverage_leg(
     )
     if map_bundle.bundle_sha256 != plan.map_bundle_sha256:
         raise ValueError("runtime map bundle differs from coverage plan")
-    next_leg = plan_next_survey_leg(
+    next_leg = plan_survey_leg_to_viewpoint(
         grid,
         plan=plan,
         progress=progress,
         registry=registry,
         current_pose=current_pose,
+        target_viewpoint_id=expected_next_viewpoint_id,
     )
-    if next_leg is None:
-        raise ValueError("committed survey has no next viewpoint to plan")
-    if next_leg.viewpoint.viewpoint_id != expected_next_viewpoint_id:
-        raise ValueError(
-            "fresh localization changed the next coverage target: "
-            f"{next_leg.viewpoint.viewpoint_id!r} != {expected_next_viewpoint_id!r}"
-        )
     route_path, diagnostics_path = _next_leg_artifact_paths(survey_root, progress)
     _validate_next_leg_artifacts_absent(route_path, diagnostics_path)
     prepared = PreparedCoverageStop(

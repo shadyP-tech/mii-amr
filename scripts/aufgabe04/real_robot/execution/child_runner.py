@@ -16,21 +16,17 @@ from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     ROUTINE_MISSION_LEG_KINDS,
     MissionLegKind,
 )
+from scripts.aufgabe04.navigation.execution.route_uncertainty_defaults import (
+    DEFAULT_COLLISION_MARGIN_M,
+    DEFAULT_TRACKING_TUBE_RADIUS_M,
+    DEFAULT_UNCERTAINTY_SIGMA_MULTIPLIER,
+)
 from scripts.aufgabe04.navigation.coverage.transient_overlay_resume_state import (
     load_jsonl_event_objects,
 )
 
 
-# These values are the shared autonomous parent/child argv contract.  Exporting
-# them keeps route admission and child construction on one source of truth.
-DEFAULT_TRACKING_TUBE_RADIUS_M = 0.03
-DEFAULT_COLLISION_MARGIN_M = 0.02
 DEFAULT_LIDAR_STOP_DISTANCE_M = 0.20
-# Charge a two-sigma AMCL envelope to static-route clearance.  The child still
-# clamps continuity at its hard translation/yaw caps, and route admission
-# fails closed whenever the map does not have enough clearance for this
-# larger, explicitly persisted allowance.
-DEFAULT_UNCERTAINTY_SIGMA_MULTIPLIER = 2.0
 
 
 @dataclass(frozen=True)

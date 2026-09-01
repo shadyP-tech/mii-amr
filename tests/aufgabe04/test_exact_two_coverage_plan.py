@@ -10,7 +10,10 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from scripts.aufgabe04.artifacts.content_store import payload_sha256
+from scripts.aufgabe04.artifacts.content_store import (
+    load_content_hashed_json,
+    payload_sha256,
+)
 from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds
 from scripts.aufgabe04.navigation.planning.map_io import (
     CELL_FREE,
@@ -27,6 +30,9 @@ from scripts.aufgabe04.navigation.coverage.exact_two_viewpoint_selection import 
 )
 from scripts.aufgabe04.navigation.missions.plan_stand_coverage_survey import (
     main as plan_coverage_main,
+)
+from scripts.aufgabe04.navigation.missions.startup_route_uncertainty_selection import (
+    STARTUP_ROUTE_UNCERTAINTY_SELECTION_HASH_FIELD,
 )
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     CoverageSurveyConfig,
@@ -499,6 +505,102 @@ class ExactTwoCoveragePlanTest(unittest.TestCase):
             1.0,
         )
         self.assertEqual(len(loaded.viewpoints), 2)
+
+    def test_cli_persists_precheckpoint_exact_uncertainty_route_selection(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            map_path = write_free_map(root)
+            output_dir = root / "survey"
+            preflight_path = root / "preplanning_localization.json"
+            covariance = [0.0] * 36
+            preflight_path.write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "failures": [],
+                        "route_pose": {
+                            "frame_id": "map",
+                            "child_frame_id": "base_footprint",
+                            "x_m": START.x_m,
+                            "y_m": START.y_m,
+                            "yaw_rad": START.yaw_rad,
+                        },
+                        "stationary_amcl_samples": [
+                            {"covariance": list(covariance)}
+                            for _ in range(5)
+                        ],
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+            with redirect_stdout(StringIO()):
+                status = plan_coverage_main(
+                    [
+                        "--map",
+                        str(map_path),
+                        "--start-x",
+                        str(START.x_m),
+                        "--start-y",
+                        str(START.y_m),
+                        "--survey-id",
+                        "exact_two_uncertainty_selection",
+                        "--output-dir",
+                        str(output_dir),
+                        "--lane-count",
+                        "1",
+                        "--exact-inspection-point-count",
+                        "2",
+                        "--arena-length-m",
+                        str(ARENA.length_m),
+                        "--arena-width-m",
+                        str(ARENA.width_m),
+                        "--startup-route-selection-preflight-json",
+                        str(preflight_path),
+                        "--startup-route-selection-robot-radius-m",
+                        "0.105",
+                        "--startup-route-selection-collision-margin-m",
+                        "0.02",
+                        "--startup-route-selection-tracking-tube-radius-m",
+                        "0.03",
+                        "--startup-route-selection-odom-drift-bound-m",
+                        "0.02",
+                        "--startup-route-selection-braking-latency-distance-m",
+                        "0.015",
+                        "--startup-route-selection-sigma-multiplier",
+                        "2.0",
+                        "--startup-route-selection-clearance-sample-spacing-m",
+                        "0.005",
+                    ]
+                )
+            selection_path = (
+                output_dir / "startup_route_uncertainty_selection.json"
+            )
+            selection = load_content_hashed_json(
+                selection_path,
+                hash_field=STARTUP_ROUTE_UNCERTAINTY_SELECTION_HASH_FIELD,
+            )
+            diagnostics = json.loads(
+                (output_dir / "legs/leg_000_diagnostics.json").read_text()
+            )
+
+        self.assertEqual(status, 0)
+        self.assertTrue(selection["selection"]["decision"]["ready"])
+        self.assertEqual(len(selection["selection"]["options"]), 2)
+        selected_id = selection["selection"]["decision"][
+            "selected_option_id"
+        ]
+        self.assertEqual(
+            diagnostics["metadata"]["target_viewpoint_id"],
+            selected_id,
+        )
+        self.assertEqual(
+            diagnostics["metadata"][
+                "startup_route_uncertainty_selection"
+            ]["selected_viewpoint_id"],
+            selected_id,
+        )
+        self.assertFalse(selection["motion_authorized"])
 
     def test_longitudinal_plan_uses_bound_physical_route_source(self):
         with tempfile.TemporaryDirectory() as tmpdir:

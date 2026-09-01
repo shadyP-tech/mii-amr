@@ -27,7 +27,7 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     load_coverage_survey_plan,
     load_stand_survey_registry,
     load_survey_progress,
-    plan_next_survey_leg,
+    plan_survey_leg_to_viewpoint,
 )
 from scripts.aufgabe04.real_robot.mission.session_manifest import (
     COVERAGE_LEG_CHECKPOINT_COMPLETE,
@@ -184,20 +184,14 @@ def restore_and_replan_coverage_resume(
             "provenance_mismatch",
             "resume map bundle differs from checkpoint plan",
         )
-    next_leg = plan_next_survey_leg(
+    next_leg = plan_survey_leg_to_viewpoint(
         grid,
         plan=plan,
         progress=progress,
         registry=registry,
         current_pose=current_pose,
+        target_viewpoint_id=manifest.next_viewpoint_id,
     )
-    if next_leg is None or (
-        next_leg.viewpoint.viewpoint_id != manifest.next_viewpoint_id
-    ):
-        raise AutonomousSessionManifestError(
-            "invalid_cursor",
-            "fresh planner did not preserve the checkpoint next viewpoint",
-        )
 
     leg_index = manifest.completed_coverage_legs
     legs_root = destination / "legs"

@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 import json
 import math
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Callable, Iterable, Mapping
 
 from scripts.aufgabe04.artifacts.content_store import payload_sha256
 from scripts.aufgabe04.navigation.approach.candidate_frame_reprojection import (
@@ -295,6 +295,13 @@ class NextSurveyLeg:
     unreachable_viewpoint_ids: tuple[str, ...]
     exact_start_connector: ExactStartConnectorEvidence
     route_smoothing: RouteSmoothingSummary
+    route_selection_evidence: Mapping[str, object] | None = None
+
+
+SurveyRouteSelector = Callable[
+    [Costmap, tuple[NextSurveyLeg, ...]],
+    tuple[str, Mapping[str, object]],
+]
 
 
 def build_coverage_survey_plan(
@@ -722,16 +729,145 @@ def plan_next_survey_leg(
     progress: CoverageSurveyProgress,
     registry: StandSurveyRegistry,
     current_pose: Pose2D,
+    route_selector: SurveyRouteSelector | None = None,
 ) -> NextSurveyLeg | None:
-    """Replan to the next reachable unvisited viewpoint with live keepouts."""
+    """Replan to an unvisited viewpoint with live keepouts.
+
+    Without ``route_selector`` this preserves the legacy first-reachable
+    behavior and returns as soon as one route is certified.  An injected
+    selector is evaluated only after every currently reachable alternative
+    has been planned and exact-start certified.  This seam is intentionally
+    policy-free so execution/reseal paths cannot acquire implicit retargeting.
+    """
 
     validate_survey_progress(progress, plan)
     validate_stand_survey_registry(registry, plan)
     _validate_pose(current_pose, "current_pose")
+    base_costmap, costmap = _survey_costmaps(
+        occupancy_grid,
+        plan=plan,
+        registry=registry,
+    )
+
+    unreachable: list[str] = []
+    reachable: list[NextSurveyLeg] = []
+    for viewpoint in plan.viewpoints:
+        if viewpoint.viewpoint_id in progress.visited_viewpoint_ids:
+            continue
+        leg = _plan_survey_leg_to_viewpoint(
+            base_costmap=base_costmap,
+            planning_costmap=costmap,
+            plan=plan,
+            current_pose=current_pose,
+            viewpoint=viewpoint,
+            unreachable_viewpoint_ids=tuple(unreachable),
+        )
+        if leg is not None:
+            if route_selector is None:
+                return leg
+            reachable.append(leg)
+            continue
+        unreachable.append(viewpoint.viewpoint_id)
+    if reachable:
+        assert route_selector is not None
+        selected_viewpoint_id, selection_evidence = route_selector(
+            base_costmap,
+            tuple(reachable),
+        )
+        if not isinstance(selected_viewpoint_id, str) or not (
+            selected_viewpoint_id.strip()
+        ):
+            raise ValueError(
+                "survey route selector returned an invalid viewpoint ID"
+            )
+        if not isinstance(selection_evidence, Mapping):
+            raise ValueError(
+                "survey route selector returned invalid selection evidence"
+            )
+        selected = tuple(
+            leg
+            for leg in reachable
+            if leg.viewpoint.viewpoint_id == selected_viewpoint_id
+        )
+        if len(selected) != 1:
+            raise ValueError(
+                "survey route selector did not select exactly one reachable "
+                f"viewpoint: {selected_viewpoint_id!r}"
+            )
+        return replace(
+            selected[0],
+            route_selection_evidence=dict(selection_evidence),
+        )
+    if unreachable:
+        raise ValueError(
+            "no unvisited survey viewpoint is reachable with current keepouts: "
+            + ", ".join(unreachable)
+        )
+    return None
+
+
+def plan_survey_leg_to_viewpoint(
+    occupancy_grid: OccupancyGrid,
+    *,
+    plan: CoverageSurveyPlan,
+    progress: CoverageSurveyProgress,
+    registry: StandSurveyRegistry,
+    current_pose: Pose2D,
+    target_viewpoint_id: str,
+) -> NextSurveyLeg:
+    """Plan exactly one already committed, still-unvisited survey target.
+
+    This function never falls back to another viewpoint.  Recovery and resume
+    paths use it to preserve target identity after a route has been selected
+    and checkpointed.
+    """
+
+    validate_survey_progress(progress, plan)
+    validate_stand_survey_registry(registry, plan)
+    _validate_pose(current_pose, "current_pose")
+    _validate_nonempty_id(target_viewpoint_id, "target_viewpoint_id")
+    viewpoint = plan.viewpoint_for(target_viewpoint_id)
+    if viewpoint is None:
+        raise ValueError(
+            f"unknown survey target viewpoint {target_viewpoint_id!r}"
+        )
+    if target_viewpoint_id in progress.visited_viewpoint_ids:
+        raise ValueError(
+            f"survey target viewpoint is already visited: {target_viewpoint_id}"
+        )
+    base_costmap, costmap = _survey_costmaps(
+        occupancy_grid,
+        plan=plan,
+        registry=registry,
+    )
+    leg = _plan_survey_leg_to_viewpoint(
+        base_costmap=base_costmap,
+        planning_costmap=costmap,
+        plan=plan,
+        current_pose=current_pose,
+        viewpoint=viewpoint,
+        unreachable_viewpoint_ids=(),
+    )
+    if leg is None:
+        raise ValueError(
+            "committed survey target is not reachable with current keepouts: "
+            f"{target_viewpoint_id}"
+        )
+    return leg
+
+
+def _survey_costmaps(
+    occupancy_grid: OccupancyGrid,
+    *,
+    plan: CoverageSurveyPlan,
+    registry: StandSurveyRegistry,
+) -> tuple[Costmap, Costmap]:
     base_costmap = Costmap.from_occupancy_grid(
         occupancy_grid
     ).with_arena_bounds(plan.arena_bounds)
-    costmap = base_costmap.with_inflation(plan.config.inflation_radius_m)
+    planning_costmap = base_costmap.with_inflation(
+        plan.config.inflation_radius_m
+    )
     keepouts = tuple(
         Station(
             station_id=candidate.candidate_uid,
@@ -743,42 +879,43 @@ def plan_next_survey_leg(
         if candidate.status != STATUS_REJECTED
     )
     if keepouts:
-        costmap = costmap.with_station_keepouts(keepouts)
+        planning_costmap = planning_costmap.with_station_keepouts(keepouts)
+    return base_costmap, planning_costmap
 
-    unreachable = []
-    for viewpoint in plan.viewpoints:
-        if viewpoint.viewpoint_id in progress.visited_viewpoint_ids:
-            continue
-        result = plan_route(
-            costmap,
-            current_pose,
-            viewpoint.pose,
-            snap_radius_m=plan.config.snap_radius_m,
+
+def _plan_survey_leg_to_viewpoint(
+    *,
+    base_costmap: Costmap,
+    planning_costmap: Costmap,
+    plan: CoverageSurveyPlan,
+    current_pose: Pose2D,
+    viewpoint: SurveyViewpoint,
+    unreachable_viewpoint_ids: tuple[str, ...],
+) -> NextSurveyLeg | None:
+    result = plan_route(
+        planning_costmap,
+        current_pose,
+        viewpoint.pose,
+        snap_radius_m=plan.config.snap_radius_m,
+    )
+    if result.route is None:
+        return None
+    route_result, connector, smoothing_summary = (
+        certify_and_smooth_exact_start_route(
+            result,
+            base_costmap=base_costmap,
+            planning_costmap=planning_costmap,
+            exact_start=current_pose,
+            required_clearance_m=plan.config.inflation_radius_m,
         )
-        if result.route is not None:
-            route_result, connector, smoothing_summary = (
-                certify_and_smooth_exact_start_route(
-                    result,
-                    base_costmap=base_costmap,
-                    planning_costmap=costmap,
-                    exact_start=current_pose,
-                    required_clearance_m=plan.config.inflation_radius_m,
-                )
-            )
-            return NextSurveyLeg(
-                viewpoint=viewpoint,
-                route_result=route_result,
-                unreachable_viewpoint_ids=tuple(unreachable),
-                exact_start_connector=connector,
-                route_smoothing=smoothing_summary,
-            )
-        unreachable.append(viewpoint.viewpoint_id)
-    if unreachable:
-        raise ValueError(
-            "no unvisited survey viewpoint is reachable with current keepouts: "
-            + ", ".join(unreachable)
-        )
-    return None
+    )
+    return NextSurveyLeg(
+        viewpoint=viewpoint,
+        route_result=route_result,
+        unreachable_viewpoint_ids=unreachable_viewpoint_ids,
+        exact_start_connector=connector,
+        route_smoothing=smoothing_summary,
+    )
 
 
 def validate_coverage_survey_plan(plan: CoverageSurveyPlan) -> None:

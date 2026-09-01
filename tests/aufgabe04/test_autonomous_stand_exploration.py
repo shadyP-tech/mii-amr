@@ -543,6 +543,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         coverage_phase = FakeExactTwoCameraReady()
         profile = SimpleNamespace(
             robot_id="turtlebot1",
+            robot_radius_m=0.105,
             namespace="",
             amcl_topic="amcl_pose",
             map_frame="map",
@@ -772,6 +773,33 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                     + 1
                 ],
                 "1.0",
+            )
+            self.assertEqual(
+                planning_command[
+                    planning_command.index(
+                        "--startup-route-selection-robot-radius-m"
+                    )
+                    + 1
+                ],
+                "0.105",
+            )
+            self.assertEqual(
+                planning_command[
+                    planning_command.index(
+                        "--startup-route-selection-tracking-tube-radius-m"
+                    )
+                    + 1
+                ],
+                "0.03",
+            )
+            self.assertEqual(
+                planning_command[
+                    planning_command.index(
+                        "--startup-route-selection-sigma-multiplier"
+                    )
+                    + 1
+                ],
+                "2.0",
             )
             self.assertEqual(result["run_prompt_count"], 1)
             events = [
@@ -1995,6 +2023,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             (root / fixture_name).write_text("{}\n")
         profile = SimpleNamespace(
             robot_id="turtlebot1",
+            robot_radius_m=0.105,
             map_frame="map",
             scan_origin_to_base_offset_m=0.05,
             resolved_runtime=lambda: SimpleNamespace(
@@ -2174,6 +2203,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 (root / fixture_name).write_text("{}\n")
             profile = SimpleNamespace(
                 robot_id="turtlebot1",
+                robot_radius_m=0.105,
                 map_frame="map",
                 scan_origin_to_base_offset_m=0.05,
                 resolved_runtime=lambda: SimpleNamespace(

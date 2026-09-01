@@ -29,7 +29,7 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     load_coverage_survey_plan,
     load_stand_survey_registry,
     load_survey_progress,
-    plan_next_survey_leg,
+    plan_survey_leg_to_viewpoint,
 )
 from scripts.aufgabe04.navigation.coverage.transient_overlay_resume_state import (
     TransientOverlayResumeState,
@@ -242,21 +242,14 @@ def _replan_coverage_source_from_pose(
     )
     if map_bundle.bundle_sha256 != plan.map_bundle_sha256:
         raise ValueError(f"{reseal_kind} reseal map differs from coverage plan")
-    next_leg = plan_next_survey_leg(
+    next_leg = plan_survey_leg_to_viewpoint(
         grid,
         plan=plan,
         progress=progress,
         registry=registry,
         current_pose=current_pose,
+        target_viewpoint_id=expected_target_viewpoint_id,
     )
-    if next_leg is None:
-        raise ValueError(f"{reseal_kind} reseal found no remaining coverage leg")
-    if next_leg.viewpoint.viewpoint_id != expected_target_viewpoint_id:
-        raise ValueError(
-            f"{reseal_kind} reseal changed the committed coverage target: "
-            f"expected={expected_target_viewpoint_id} "
-            f"selected={next_leg.viewpoint.viewpoint_id}"
-        )
 
     output_dir.mkdir(parents=True, exist_ok=False)
     route_path = output_dir / "route.csv"

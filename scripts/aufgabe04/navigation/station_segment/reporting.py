@@ -10,6 +10,29 @@ from typing import Dict, Mapping
 from scripts.aufgabe04.navigation.control.follower_models import FollowerResult
 from scripts.aufgabe04.navigation.foundation.run_events import emit_event
 from scripts.aufgabe04.navigation.foundation.segment_run_logger import append_segment_run
+from scripts.aufgabe04.navigation.execution.route_uncertainty_evidence import (
+    RouteUncertaintyAdmissionRejected,
+)
+
+
+def build_odom_execution_admission_stop_details(
+    failure: OSError | ValueError,
+) -> dict[str, object]:
+    """Return stable fail-closed details, including typed evidence when present."""
+
+    stop_reason = f"odom execution admission failed: {failure}"
+    details: dict[str, object] = {
+        "reason": stop_reason,
+        "fault_code": "odom_execution_admission_failed",
+        "execution_pose_owner": "odom",
+        "global_consistency_monitor": "amcl",
+        "motion_published": False,
+        "fail_closed": True,
+    }
+    if isinstance(failure, RouteUncertaintyAdmissionRejected):
+        details.update(failure.to_stop_details())
+    return details
+
 
 def _append_jsonl(path: Path, payload: Mapping[str, object]) -> None:
     """Append one post-adoption mission event or fail the zero-held handoff."""

@@ -20,9 +20,6 @@ from typing import Mapping, Sequence
 
 from scripts.aufgabe04.artifacts.content_store import payload_sha256
 from scripts.aufgabe04.navigation.planning.costmap import Costmap
-from scripts.aufgabe04.navigation.approach.dynamic_approach_planner import (
-    point_clearance_to_blocked_m,
-)
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.navigation.execution.route_uncertainty_budget import (
     PlanarCovariance,
@@ -31,10 +28,14 @@ from scripts.aufgabe04.navigation.execution.route_uncertainty_budget import (
     evaluate_route_uncertainty_budget,
     uncertainty_budget_evidence_sha256,
 )
+from scripts.aufgabe04.navigation.execution.route_uncertainty_sampling import (
+    RouteUncertaintySamplingProfile,
+    SampledRouteSegment,
+    sample_route_for_uncertainty_admission,
+)
 
 
-ROUTE_UNCERTAINTY_ADMISSION_SCHEMA_VERSION = 1
-_MAX_SAMPLE_INTERVALS_PER_SEGMENT = 1_000_000
+ROUTE_UNCERTAINTY_ADMISSION_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -160,22 +161,6 @@ class RouteUncertaintyAdmissionResult:
         return dict(self.evidence)
 
 
-@dataclass(frozen=True)
-class _SampledRouteSegment:
-    route_index: int
-    start: Pose2D
-    end: Pose2D
-    length_m: float
-    normal_x: float
-    normal_y: float
-    interval_count: int
-    actual_spacing_m: float
-    samples: tuple[tuple[float, float, float], ...]
-    minimum_sampled_clearance_m: float
-    lipschitz_deduction_m: float
-    clearance_lower_bound_m: float
-
-
 def evaluate_route_uncertainty_admission(
     costmap: Costmap,
     map_route: Sequence[Pose2D],
@@ -204,15 +189,18 @@ def evaluate_route_uncertainty_admission(
         validation_errors.append("planar_covariance_missing_or_ambiguous")
 
     poses = _route_poses_or_empty(map_route, validation_errors)
-    sampled_segments: list[_SampledRouteSegment] = []
+    sampling_profile: RouteUncertaintySamplingProfile | None = None
+    sampled_segments: tuple[SampledRouteSegment, ...] = ()
     if not validation_errors:
         assert isinstance(costmap, Costmap)
         assert isinstance(config, RouteUncertaintyAdmissionConfig)
-        sampled_segments, sampling_error = _sample_route_segments(
+        sampling_profile, sampling_error = sample_route_for_uncertainty_admission(
             costmap, poses, config.sampling_spacing_m
         )
         if sampling_error is not None:
             validation_errors.append(sampling_error)
+        elif sampling_profile is not None:
+            sampled_segments = sampling_profile.segments
 
     if validation_errors:
         segments: tuple[RouteClearanceSegment, ...] = ()
@@ -229,6 +217,7 @@ def evaluate_route_uncertainty_admission(
         config=(
             config if isinstance(config, RouteUncertaintyAdmissionConfig) else None
         ),
+        sampling_profile=sampling_profile,
         sampled_segments=sampled_segments,
         segments=segments,
         decision=decision,
@@ -306,71 +295,8 @@ def _validate_costmap_geometry(costmap: Costmap) -> tuple[str, ...]:
     return tuple(errors)
 
 
-def _sample_route_segments(
-    costmap: Costmap,
-    poses: tuple[Pose2D, ...],
-    maximum_spacing_m: float,
-) -> tuple[list[_SampledRouteSegment], str | None]:
-    result: list[_SampledRouteSegment] = []
-    for index, (start, end) in enumerate(zip(poses, poses[1:])):
-        dx = end.x_m - start.x_m
-        dy = end.y_m - start.y_m
-        length_m = math.hypot(dx, dy)
-        if not math.isfinite(length_m):
-            return [], f"map_route_segment_{index}_length_nonfinite"
-        if length_m <= 0.0:
-            return [], f"map_route_segment_{index}_zero_length_ambiguous"
-
-        ratio = length_m / maximum_spacing_m
-        if not math.isfinite(ratio):
-            return [], f"map_route_segment_{index}_sample_count_nonfinite"
-        interval_count = max(1, int(math.ceil(ratio)))
-        if interval_count > _MAX_SAMPLE_INTERVALS_PER_SEGMENT:
-            return [], f"map_route_segment_{index}_sample_count_excessive"
-        actual_spacing_m = length_m / interval_count
-        samples: list[tuple[float, float, float]] = []
-        try:
-            for sample_index in range(interval_count + 1):
-                fraction = sample_index / interval_count
-                x_m = start.x_m + fraction * dx
-                y_m = start.y_m + fraction * dy
-                clearance_m = point_clearance_to_blocked_m(
-                    costmap, Pose2D(x_m=x_m, y_m=y_m)
-                )
-                if not math.isfinite(clearance_m) or clearance_m < 0.0:
-                    return [], (
-                        f"map_route_segment_{index}_sample_clearance_invalid"
-                    )
-                samples.append((x_m, y_m, clearance_m))
-        except (TypeError, ValueError, OverflowError):
-            return [], f"map_route_segment_{index}_sampling_failed"
-
-        minimum_sampled = min(item[2] for item in samples)
-        lipschitz_deduction = actual_spacing_m / 2.0
-        clearance_lower_bound = max(
-            0.0, minimum_sampled - lipschitz_deduction
-        )
-        result.append(
-            _SampledRouteSegment(
-                route_index=index,
-                start=start,
-                end=end,
-                length_m=length_m,
-                normal_x=-dy / length_m,
-                normal_y=dx / length_m,
-                interval_count=interval_count,
-                actual_spacing_m=actual_spacing_m,
-                samples=tuple(samples),
-                minimum_sampled_clearance_m=minimum_sampled,
-                lipschitz_deduction_m=lipschitz_deduction,
-                clearance_lower_bound_m=clearance_lower_bound,
-            )
-        )
-    return result, None
-
-
 def _budget_segments(
-    sampled: Sequence[_SampledRouteSegment],
+    sampled: Sequence[SampledRouteSegment],
     covariance: PlanarCovariance,
     config: RouteUncertaintyAdmissionConfig,
 ) -> tuple[RouteClearanceSegment, ...]:
@@ -382,7 +308,10 @@ def _budget_segments(
         )
         result.append(
             _budget_segment(
-                segment_id=f"segment:{item.route_index:04d}",
+                segment_id=(
+                    f"segment:{item.canonical_index:04d}:"
+                    f"{item.subsegment_index:04d}"
+                ),
                 raw_clearance_m=item.clearance_lower_bound_m,
                 normal_x=item.normal_x,
                 normal_y=item.normal_y,
@@ -392,11 +321,11 @@ def _budget_segments(
                 heading_contribution_m=segment_heading_contribution_m,
             )
         )
-        if index + 1 < len(sampled):
+        if item.ends_at_route_corner and index + 1 < len(sampled):
             following = sampled[index + 1]
             result.append(
                 _budget_segment(
-                    segment_id=f"corner:{index + 1:04d}",
+                    segment_id=f"corner:{item.canonical_index + 1:04d}",
                     raw_clearance_m=min(
                         item.clearance_lower_bound_m,
                         following.clearance_lower_bound_m,
@@ -483,7 +412,8 @@ def _admission_evidence(
     poses: Sequence[Pose2D],
     covariance: PlanarCovariance | None,
     config: RouteUncertaintyAdmissionConfig | None,
-    sampled_segments: Sequence[_SampledRouteSegment],
+    sampling_profile: RouteUncertaintySamplingProfile | None,
+    sampled_segments: Sequence[SampledRouteSegment],
     segments: Sequence[RouteClearanceSegment],
     decision: RouteUncertaintyBudgetDecision,
     validation_errors: Sequence[str],
@@ -494,6 +424,17 @@ def _admission_evidence(
             _route_pose_evidence(pose)
             for pose in poses
         ],
+    }
+    canonical_route_payload = {
+        "frame": "map",
+        "poses": (
+            []
+            if sampling_profile is None
+            else [
+                _route_pose_evidence(pose)
+                for pose in sampling_profile.canonical_poses
+            ]
+        ),
     }
     return {
         "schema_version": ROUTE_UNCERTAINTY_ADMISSION_SCHEMA_VERSION,
@@ -518,7 +459,21 @@ def _admission_evidence(
         ),
         "config": config.to_evidence_dict() if config is not None else None,
         "sampling": {
-            "method": "endpoint_inclusive_equal_spacing",
+            "method": "canonical_polyline_endpoint_pair_subsegments",
+            "source_pose_count": len(poses),
+            "canonical_pose_count": (
+                None
+                if sampling_profile is None
+                else len(sampling_profile.canonical_poses)
+            ),
+            "canonical_poses": (
+                canonical_route_payload["poses"]
+            ),
+            "canonical_route_sha256": (
+                None
+                if sampling_profile is None
+                else payload_sha256(canonical_route_payload)
+            ),
             "clearance_lower_bound": (
                 "minimum_sampled_clearance_m - actual_spacing_m / 2"
             ),
@@ -574,16 +529,20 @@ def _costmap_evidence(costmap: Costmap | None) -> dict[str, object] | None:
     }
 
 
-def _sampled_segment_evidence(item: _SampledRouteSegment) -> dict[str, object]:
+def _sampled_segment_evidence(item: SampledRouteSegment) -> dict[str, object]:
     return {
-        "route_index": item.route_index,
+        "route_index": item.canonical_index,
+        "canonical_index": item.canonical_index,
+        "subsegment_index": item.subsegment_index,
         "start": {"x_m": item.start.x_m, "y_m": item.start.y_m},
         "end": {"x_m": item.end.x_m, "y_m": item.end.y_m},
         "length_m": item.length_m,
         "segment_normal": {"x": item.normal_x, "y": item.normal_y},
-        "interval_count": item.interval_count,
+        "interval_count": 1,
+        "parent_interval_count": item.parent_interval_count,
         "sample_count": len(item.samples),
         "actual_spacing_m": item.actual_spacing_m,
+        "ends_at_route_corner": item.ends_at_route_corner,
         "samples": [
             {"x_m": x_m, "y_m": y_m, "clearance_m": clearance_m}
             for x_m, y_m, clearance_m in item.samples

@@ -10,9 +10,11 @@ from scripts.aufgabe04.navigation.planning.map_io import (
     CELL_OCCUPIED,
     MapMetadata,
     OccupancyGrid,
+    load_occupancy_grid,
 )
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.navigation.execution.route_uncertainty_admission import (
+    ROUTE_UNCERTAINTY_ADMISSION_SCHEMA_VERSION,
     RouteUncertaintyAdmissionConfig,
     evaluate_route_uncertainty_admission,
     route_uncertainty_admission_evidence_sha256,
@@ -97,12 +99,15 @@ class RouteUncertaintyAdmissionTest(unittest.TestCase):
             config(sampling_spacing_m=1.0),
         )
 
-        sampled = result.evidence["sampling"]["segments"][0]
-        self.assertEqual(sampled["interval_count"], 3)
-        self.assertEqual(sampled["sample_count"], 4)
+        sampled_segments = result.evidence["sampling"]["segments"]
+        self.assertEqual(len(sampled_segments), 3)
+        sampled = sampled_segments[0]
+        self.assertEqual(sampled["interval_count"], 1)
+        self.assertEqual(sampled["parent_interval_count"], 3)
+        self.assertEqual(sampled["sample_count"], 2)
         self.assertLessEqual(sampled["actual_spacing_m"], 1.0)
         self.assertEqual(sampled["samples"][0]["x_m"], 5.0)
-        self.assertEqual(sampled["samples"][-1]["x_m"], 7.5)
+        self.assertEqual(sampled_segments[-1]["samples"][-1]["x_m"], 7.5)
         self.assertAlmostEqual(
             sampled["lipschitz_deduction_m"],
             sampled["actual_spacing_m"] / 2.0,
@@ -124,14 +129,23 @@ class RouteUncertaintyAdmissionTest(unittest.TestCase):
             config(),
         )
 
-        segment = result.segments[0]
-        sampled = result.evidence["sampling"]["segments"][0]
+        segment = min(
+            result.segments,
+            key=lambda item: item.raw_centerline_clearance_m,
+        )
+        sampled = min(
+            result.evidence["sampling"]["segments"],
+            key=lambda item: item["clearance_lower_bound_m"],
+        )
         # The nearest sampled point is 1 m from the occupied cell square.
         # point_clearance_to_blocked_m contributes its strict 1e-6 interior
         # epsilon, followed by this module's 0.5 m sample-gap deduction.
         self.assertAlmostEqual(sampled["minimum_sampled_clearance_m"], 0.999999)
         self.assertAlmostEqual(segment.raw_centerline_clearance_m, 0.499999)
-        decision = result.decision.segment_decisions[0]
+        decision = min(
+            result.decision.segment_decisions,
+            key=lambda item: item.remaining_margin_m,
+        )
         required = decision.evidence["budget_m"]["required_clearance_m"]
         # radius + margin + tracking + drift + braking + 2*position sigma
         # + 2*heading sigma*lever arm.
@@ -159,12 +173,19 @@ class RouteUncertaintyAdmissionTest(unittest.TestCase):
             ),
         )
 
+        corner_segments = [
+            segment for segment in result.segments if segment.is_corner
+        ]
         self.assertEqual(
-            [segment.segment_id for segment in result.segments],
-            ["segment:0000", "corner:0001", "segment:0001"],
+            [segment.segment_id for segment in corner_segments],
+            ["corner:0001"],
         )
-        corner_segment = result.segments[1]
-        corner_decision = result.decision.segment_decisions[1]
+        corner_segment = corner_segments[0]
+        corner_decision = next(
+            decision
+            for decision in result.decision.segment_decisions
+            if decision.segment_id == "corner:0001"
+        )
         self.assertTrue(corner_segment.is_corner)
         self.assertEqual(
             corner_decision.evidence["geometry"]["projection_mode"],
@@ -176,8 +197,9 @@ class RouteUncertaintyAdmissionTest(unittest.TestCase):
         self.assertEqual(
             corner_segment.raw_centerline_clearance_m,
             min(
-                result.segments[0].raw_centerline_clearance_m,
-                result.segments[2].raw_centerline_clearance_m,
+                segment.raw_centerline_clearance_m
+                for segment in result.segments
+                if not segment.is_corner
             ),
         )
 
@@ -187,7 +209,7 @@ class RouteUncertaintyAdmissionTest(unittest.TestCase):
             (
                 Pose2D(5.0, 5.0),
                 Pose2D(5.1, 5.0),
-                Pose2D(15.0, 5.0),
+                Pose2D(15.0, 5.1),
             ),
             PlanarCovariance(0.0, 0.0, 0.0),
             config(
@@ -199,10 +221,21 @@ class RouteUncertaintyAdmissionTest(unittest.TestCase):
             ),
         )
 
-        first = result.segments[0]
-        second = result.segments[2]
+        first = next(
+            segment
+            for segment in result.segments
+            if segment.segment_id == "segment:0000:0000"
+        )
+        second = next(
+            segment
+            for segment in reversed(result.segments)
+            if segment.segment_id.startswith("segment:0001:")
+        )
         self.assertAlmostEqual(first.heading_contribution_m, 0.04)
-        self.assertAlmostEqual(second.heading_contribution_m, 2.02)
+        self.assertAlmostEqual(
+            second.heading_contribution_m,
+            2.0 * 0.1 * (math.hypot(10.0, 0.1) + 0.1),
+        )
         self.assertLess(
             first.heading_contribution_m,
             second.heading_contribution_m,
@@ -260,6 +293,29 @@ class RouteUncertaintyAdmissionTest(unittest.TestCase):
             zero_length.evidence["validation"]["errors"],
         )
 
+        for route, failing_index in (
+            (
+                (Pose2D(1.0, 1.0), Pose2D(1.0, 1.0), Pose2D(2.0, 1.0)),
+                0,
+            ),
+            (
+                (Pose2D(1.0, 1.0), Pose2D(2.0, 1.0), Pose2D(2.0, 1.0)),
+                1,
+            ),
+        ):
+            with self.subTest(route=route):
+                result = evaluate_route_uncertainty_admission(
+                    open_costmap(),
+                    route,
+                    PlanarCovariance(0.0, 0.0, 0.0),
+                    config(),
+                )
+                self.assertFalse(result.decision.accepted)
+                self.assertIn(
+                    f"map_route_segment_{failing_index}_zero_length_ambiguous",
+                    result.evidence["validation"]["errors"],
+                )
+
     def test_exhausted_clearance_rejects(self):
         result = evaluate_route_uncertainty_admission(
             open_costmap(width=4, height=4),
@@ -271,6 +327,153 @@ class RouteUncertaintyAdmissionTest(unittest.TestCase):
         self.assertFalse(result.decision.accepted)
         self.assertEqual(result.decision.reason, UNCERTAINTY_BUDGET_EXHAUSTED)
         self.assertLessEqual(result.decision.remaining_margin_m, 0.0)
+
+    def test_collinear_route_vertices_do_not_change_uncertainty_admission(self):
+        costmap = open_costmap(width=40, height=20)
+        covariance = PlanarCovariance(0.0001, 0.0, 0.0001)
+        admission_config = config(
+            sampling_spacing_m=0.25,
+            heading_reference_x_m=5.0,
+            heading_reference_y_m=10.0,
+        )
+        direct = evaluate_route_uncertainty_admission(
+            costmap,
+            (Pose2D(5.0, 10.0), Pose2D(15.0, 10.0)),
+            covariance,
+            admission_config,
+        )
+        subdivided = evaluate_route_uncertainty_admission(
+            costmap,
+            (
+                Pose2D(5.0, 10.0),
+                Pose2D(7.5, 10.0),
+                Pose2D(10.0, 10.0),
+                Pose2D(15.0, 10.0),
+            ),
+            covariance,
+            admission_config,
+        )
+
+        self.assertEqual(direct.decision.accepted, subdivided.decision.accepted)
+        self.assertAlmostEqual(
+            direct.decision.remaining_margin_m,
+            subdivided.decision.remaining_margin_m,
+        )
+        self.assertEqual(direct.evidence["sampling"]["canonical_pose_count"], 2)
+        self.assertEqual(
+            subdivided.evidence["sampling"]["canonical_pose_count"],
+            2,
+        )
+        self.assertEqual(
+            direct.evidence["budget_profile"],
+            subdivided.evidence["budget_profile"],
+        )
+        self.assertEqual(
+            direct.evidence["sampling"]["canonical_route_sha256"],
+            subdivided.evidence["sampling"]["canonical_route_sha256"],
+        )
+        self.assertNotEqual(
+            direct.evidence["route"]["route_sha256"],
+            subdivided.evidence["route"]["route_sha256"],
+        )
+        self.assertNotEqual(
+            route_uncertainty_admission_evidence_sha256(direct),
+            route_uncertainty_admission_evidence_sha256(subdivided),
+        )
+
+    def test_backtracking_collinear_vertex_remains_a_real_corner(self):
+        result = evaluate_route_uncertainty_admission(
+            open_costmap(),
+            (
+                Pose2D(5.0, 10.0),
+                Pose2D(8.0, 10.0),
+                Pose2D(6.0, 10.0),
+            ),
+            PlanarCovariance(0.0001, 0.0, 0.0001),
+            config(sampling_spacing_m=0.5),
+        )
+
+        self.assertTrue(result.evidence["validation"]["ok"])
+        self.assertEqual(result.evidence["sampling"]["canonical_pose_count"], 3)
+        self.assertEqual(
+            [item.segment_id for item in result.segments if item.is_corner],
+            ["corner:0001"],
+        )
+
+    def test_latest_physical_route_regression_uses_local_pointwise_budget(self):
+        start = Pose2D(
+            -1.6024095590304832,
+            -0.5493968110584171,
+        )
+        route = (start, Pose2D(-0.795, -0.015))
+        position_std_m = 0.044624460027228086
+        result = evaluate_route_uncertainty_admission(
+            Costmap.from_occupancy_grid(
+                load_occupancy_grid(
+                    Path("maps/aufgabe03/arena_1p898x3p9_auto.yaml")
+                )
+            ),
+            route,
+            PlanarCovariance(
+                position_std_m**2,
+                0.0,
+                position_std_m**2,
+            ),
+            config(
+                robot_radius_m=0.105,
+                collision_margin_m=0.02,
+                fixed_odom_tracking_bound_m=0.03,
+                empirical_odom_drift_bound_m=0.02,
+                braking_latency_distance_m=0.015,
+                heading_sigma_rad=0.04117601656933296,
+                heading_lever_arm_m=0.105,
+                sampling_spacing_m=0.005,
+                heading_reference_x_m=start.x_m,
+                heading_reference_y_m=start.y_m,
+            ),
+        )
+
+        self.assertTrue(result.decision.accepted)
+        self.assertAlmostEqual(
+            result.decision.remaining_margin_m,
+            0.07678707821567893,
+        )
+        self.assertEqual(len(result.evidence["sampling"]["segments"]), 194)
+
+    def test_certified_nominal_start_still_rejects_with_latest_covariance(self):
+        start = Pose2D(-1.644, -0.670)
+        position_std_m = 0.044624460027228086
+        result = evaluate_route_uncertainty_admission(
+            Costmap.from_occupancy_grid(
+                load_occupancy_grid(
+                    Path("maps/aufgabe03/arena_1p898x3p9_auto.yaml")
+                )
+            ),
+            (start, Pose2D(-0.795, -0.015)),
+            PlanarCovariance(
+                position_std_m**2,
+                0.0,
+                position_std_m**2,
+            ),
+            config(
+                robot_radius_m=0.105,
+                collision_margin_m=0.02,
+                fixed_odom_tracking_bound_m=0.03,
+                empirical_odom_drift_bound_m=0.02,
+                braking_latency_distance_m=0.015,
+                heading_sigma_rad=0.04117601656933296,
+                heading_lever_arm_m=0.105,
+                sampling_spacing_m=0.005,
+                heading_reference_x_m=start.x_m,
+                heading_reference_y_m=start.y_m,
+            ),
+        )
+
+        self.assertFalse(result.decision.accepted)
+        self.assertAlmostEqual(
+            result.decision.remaining_margin_m,
+            -0.020801328812357966,
+        )
 
     def test_complete_evidence_and_hash_are_deterministic_and_map_bound(self):
         arguments = (
@@ -289,7 +492,13 @@ class RouteUncertaintyAdmissionTest(unittest.TestCase):
             allow_nan=False,
         )
         self.assertIn('"probability_guarantee":false', encoded)
+        self.assertEqual(ROUTE_UNCERTAINTY_ADMISSION_SCHEMA_VERSION, 2)
+        self.assertEqual(first.evidence["schema_version"], 2)
         self.assertIn('"distance_property":"1_lipschitz"', encoded)
+        self.assertIn(
+            '"method":"canonical_polyline_endpoint_pair_subsegments"',
+            encoded,
+        )
         self.assertEqual(
             route_uncertainty_admission_evidence_sha256(first),
             route_uncertainty_admission_evidence_sha256(second.evidence),

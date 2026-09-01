@@ -47,6 +47,7 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     new_stand_survey_registry,
     new_survey_progress,
     plan_next_survey_leg,
+    plan_survey_leg_to_viewpoint,
     survey_status,
     visited_coverage_ratio,
     write_coverage_survey_plan,
@@ -279,6 +280,127 @@ class CoverageSurveyPlanTest(unittest.TestCase):
         )
         self.assertTrue(startup.ok)
         self.assertEqual(startup.target_index, 1)
+
+    def test_route_selector_is_opt_in_and_receives_all_reachable_legs(self):
+        survey = plan(CoverageSurveyConfig(lane_count=1))
+        progress = new_survey_progress(survey)
+        registry = new_stand_survey_registry(survey)
+        start = Pose2D(-1.5, 0.0, 0.0)
+
+        legacy = plan_next_survey_leg(
+            free_grid(),
+            plan=survey,
+            progress=progress,
+            registry=registry,
+            current_pose=start,
+        )
+        captured: dict[str, object] = {}
+
+        def select_last(base_costmap, legs):
+            captured["costmap"] = base_costmap
+            captured["viewpoint_ids"] = tuple(
+                leg.viewpoint.viewpoint_id for leg in legs
+            )
+            return (
+                legs[-1].viewpoint.viewpoint_id,
+                {
+                    "policy": "test_select_last",
+                    "evaluated_count": len(legs),
+                },
+            )
+
+        selected = plan_next_survey_leg(
+            free_grid(),
+            plan=survey,
+            progress=progress,
+            registry=registry,
+            current_pose=start,
+            route_selector=select_last,
+        )
+
+        self.assertIsNotNone(legacy)
+        self.assertIsNotNone(selected)
+        assert legacy is not None and selected is not None
+        self.assertGreater(len(captured["viewpoint_ids"]), 1)
+        self.assertEqual(
+            legacy.viewpoint.viewpoint_id,
+            captured["viewpoint_ids"][0],
+        )
+        self.assertEqual(
+            selected.viewpoint.viewpoint_id,
+            captured["viewpoint_ids"][-1],
+        )
+        self.assertEqual(
+            selected.route_selection_evidence,
+            {
+                "policy": "test_select_last",
+                "evaluated_count": len(captured["viewpoint_ids"]),
+            },
+        )
+        self.assertIsInstance(captured["costmap"], Costmap)
+
+    def test_route_selector_cannot_name_an_unreachable_or_unknown_target(self):
+        survey = plan(CoverageSurveyConfig(lane_count=1))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "did not select exactly one reachable viewpoint",
+        ):
+            plan_next_survey_leg(
+                free_grid(),
+                plan=survey,
+                progress=new_survey_progress(survey),
+                registry=new_stand_survey_registry(survey),
+                current_pose=Pose2D(-1.5, 0.0, 0.0),
+                route_selector=lambda _costmap, _legs: (
+                    "not-a-viewpoint",
+                    {"policy": "invalid"},
+                ),
+            )
+
+    def test_exact_target_planner_preserves_a_nonfirst_committed_viewpoint(self):
+        survey = plan(CoverageSurveyConfig(lane_count=1))
+        target = survey.viewpoints[-1]
+        legacy = plan_next_survey_leg(
+            free_grid(),
+            plan=survey,
+            progress=new_survey_progress(survey),
+            registry=new_stand_survey_registry(survey),
+            current_pose=Pose2D(-1.5, 0.0, 0.0),
+        )
+
+        exact = plan_survey_leg_to_viewpoint(
+            free_grid(),
+            plan=survey,
+            progress=new_survey_progress(survey),
+            registry=new_stand_survey_registry(survey),
+            current_pose=Pose2D(-1.5, 0.0, 0.0),
+            target_viewpoint_id=target.viewpoint_id,
+        )
+
+        self.assertIsNotNone(legacy)
+        assert legacy is not None
+        self.assertNotEqual(
+            legacy.viewpoint.viewpoint_id,
+            target.viewpoint_id,
+        )
+        self.assertEqual(exact.viewpoint.viewpoint_id, target.viewpoint_id)
+        self.assertIsNone(exact.route_selection_evidence)
+
+        visited = mark_viewpoint_visited(
+            survey,
+            new_survey_progress(survey),
+            target.viewpoint_id,
+        )
+        with self.assertRaisesRegex(ValueError, "already visited"):
+            plan_survey_leg_to_viewpoint(
+                free_grid(),
+                plan=survey,
+                progress=visited,
+                registry=new_stand_survey_registry(survey),
+                current_pose=Pose2D(-1.5, 0.0, 0.0),
+                target_viewpoint_id=target.viewpoint_id,
+            )
 
     def test_exact_start_connector_fails_closed_near_arena_wall(self):
         base = Costmap.from_occupancy_grid(free_grid()).with_arena_bounds(

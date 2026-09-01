@@ -36,12 +36,19 @@ from scripts.aufgabe04.navigation.localization.odom_route_adapter import (
     evaluate_map_odom_stationary_stability,
 )
 from scripts.aufgabe04.navigation.localization.ros_preflight import RosPreflightResult
+from scripts.aufgabe04.navigation.localization.amcl_covariance_envelope import (
+    conservative_amcl_covariance_envelope,
+)
 from scripts.aufgabe04.navigation.execution.route_uncertainty_admission import (
     RouteUncertaintyAdmissionConfig,
+    RouteUncertaintyAdmissionResult,
     evaluate_route_uncertainty_admission,
     route_uncertainty_admission_evidence_sha256,
 )
 from scripts.aufgabe04.navigation.execution.route_uncertainty_budget import PlanarCovariance
+from scripts.aufgabe04.navigation.execution.route_uncertainty_evidence import (
+    publish_route_uncertainty_budget,
+)
 from scripts.aufgabe04.navigation.planning.waypoint_csv import (
     SelectedRouteLeg,
     poses_from_waypoints,
@@ -55,6 +62,7 @@ from .route_bundle import (
     _resolved_map_execution_certificate,
     _runtime_command_owner,
 )
+
 
 def _preflight_pose(
     raw: object,
@@ -247,93 +255,10 @@ def _preflight_stationary_map_from_odom_window(
 def _conservative_preflight_covariance(
     preflight: RosPreflightResult,
 ) -> tuple[PlanarCovariance, float, dict[str, object]]:
-    if not preflight.stationary_amcl_samples:
-        raise ValueError("preflight has no accepted stationary AMCL samples")
-    maximum_position_variance_m2 = 0.0
-    maximum_yaw_variance_rad2 = 0.0
-    sample_evidence = []
-    for index, sample in enumerate(preflight.stationary_amcl_samples):
-        raw_covariance = sample.get("covariance")
-        if not isinstance(raw_covariance, list) or len(raw_covariance) != 36:
-            raise ValueError(
-                f"preflight AMCL sample {index} covariance is incomplete"
-            )
-        try:
-            values = [float(value) for value in raw_covariance]
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise ValueError(
-                f"preflight AMCL sample {index} covariance is malformed"
-            ) from exc
-        if not all(math.isfinite(value) for value in values):
-            raise ValueError(
-                f"preflight AMCL sample {index} covariance is non-finite"
-            )
-        xx_m2 = values[0]
-        xy_m2 = values[1]
-        yx_m2 = values[6]
-        yy_m2 = values[7]
-        yaw_variance_rad2 = values[35]
-        symmetry_tolerance = max(
-            1.0e-12,
-            1.0e-6 * max(abs(xy_m2), abs(yx_m2)),
-        )
-        if abs(xy_m2 - yx_m2) > symmetry_tolerance:
-            raise ValueError(
-                f"preflight AMCL sample {index} covariance is asymmetric"
-            )
-        covariance = PlanarCovariance(
-            xx_m2,
-            0.5 * (xy_m2 + yx_m2),
-            yy_m2,
-        )
-        largest_position_variance_m2 = 0.5 * (
-            covariance.xx_m2
-            + covariance.yy_m2
-            + math.hypot(
-                covariance.xx_m2 - covariance.yy_m2,
-                2.0 * covariance.xy_m2,
-            )
-        )
-        if yaw_variance_rad2 < 0.0:
-            raise ValueError(
-                f"preflight AMCL sample {index} yaw covariance is negative"
-            )
-        maximum_position_variance_m2 = max(
-            maximum_position_variance_m2,
-            largest_position_variance_m2,
-        )
-        maximum_yaw_variance_rad2 = max(
-            maximum_yaw_variance_rad2,
-            yaw_variance_rad2,
-        )
-        sample_evidence.append(
-            {
-                "sample_index": index,
-                "xx_m2": covariance.xx_m2,
-                "xy_m2": covariance.xy_m2,
-                "yy_m2": covariance.yy_m2,
-                "yaw_variance_rad2": yaw_variance_rad2,
-                "largest_position_variance_m2": (
-                    largest_position_variance_m2
-                ),
-            }
-        )
-    # An isotropic envelope at the largest observed eigenvalue dominates each
-    # accepted sample in every route-normal direction. This is conservative;
-    # it does not turn a five-sample spread into an accuracy claim.
-    covariance_envelope = PlanarCovariance(
-        maximum_position_variance_m2,
-        0.0,
-        maximum_position_variance_m2,
-    )
-    return (
-        covariance_envelope,
-        math.sqrt(maximum_yaw_variance_rad2),
-        {
-            "envelope_kind": "isotropic_maximum_eigenvalue",
-            "sample_count": len(sample_evidence),
-            "samples": sample_evidence,
-        },
+    """Compatibility wrapper around the shared ROS-free envelope builder."""
+
+    return conservative_amcl_covariance_envelope(
+        preflight.stationary_amcl_samples
     )
 
 def _angle_distance_rad(first: float, second: float) -> float:
@@ -558,15 +483,6 @@ def _build_odom_execution_admission(
         covariance,
         admission_config,
     )
-    if not admission.decision.accepted:
-        limiting = admission.decision.limiting_segment_id or "unknown"
-        margin = admission.decision.remaining_margin_m
-        margin_text = "unknown" if margin is None else f"{margin:.6f} m"
-        raise ValueError(
-            "route uncertainty budget exhausted: "
-            f"limiting_segment={limiting} remaining_margin={margin_text}"
-        )
-
     map_certificate, map_certificate_sha256 = (
         _resolved_map_execution_certificate(args, diagnostics_snapshot)
     )
@@ -585,43 +501,25 @@ def _build_odom_execution_admission(
         ),
     }
     ambiguity_evidence_sha256 = payload_sha256(branch_evidence)
-    budget_payload = {
-        "schema_version": 1,
-        "source": "route_uncertainty_admission",
-        "admission": admission.to_evidence_dict(),
-        "covariance_envelope": covariance_evidence,
-        "runtime_map_odom_continuity_allocation": {
-            "position_covariance_allocation_m": (
-                allocated_translation_drift_m
-            ),
-            "yaw_covariance_allocation_rad": allocated_yaw_drift_rad,
-            "translation_hard_cap_m": (
-                args.max_map_odom_translation_drift_m
-            ),
-            "yaw_hard_cap_rad": args.max_map_odom_yaw_drift_rad,
-            "effective_translation_limit_m": (
-                continuity_translation_limit_m
-            ),
-            "effective_yaw_limit_rad": continuity_yaw_limit_rad,
-            "route_yaw_lever_arm_m": route_yaw_lever_arm_m,
-            "threshold_contract": (
-                "live correction must remain within the same covariance "
-                "allowance already reserved in route clearance"
-            ),
-        },
-        "stationary_map_from_odom_stability": (
-            stationary_stability_evidence
-        ),
-        "localization_branch_evidence": branch_evidence,
-        "preflight_composition": {
-            "position_error_m": composition_position_error_m,
-            "yaw_error_rad": composition_yaw_error_rad,
-        },
-    }
-    uncertainty_budget_sha256 = write_content_hashed_json(
+    budget_payload = _route_uncertainty_budget_payload(
+        admission=admission,
+        covariance_evidence=covariance_evidence,
+        allocated_translation_drift_m=allocated_translation_drift_m,
+        allocated_yaw_drift_rad=allocated_yaw_drift_rad,
+        translation_hard_cap_m=args.max_map_odom_translation_drift_m,
+        yaw_hard_cap_rad=args.max_map_odom_yaw_drift_rad,
+        continuity_translation_limit_m=continuity_translation_limit_m,
+        continuity_yaw_limit_rad=continuity_yaw_limit_rad,
+        route_yaw_lever_arm_m=route_yaw_lever_arm_m,
+        stationary_stability_evidence=stationary_stability_evidence,
+        branch_evidence=branch_evidence,
+        composition_position_error_m=composition_position_error_m,
+        composition_yaw_error_rad=composition_yaw_error_rad,
+    )
+    uncertainty_budget_sha256 = publish_route_uncertainty_budget(
         args.uncertainty_budget_json,
-        budget_payload,
-        hash_field="route_uncertainty_artifact_sha256",
+        payload=budget_payload,
+        admission=admission,
     )
 
     odom_certificate = OdomExecutionCertificate(
@@ -712,6 +610,52 @@ def _build_odom_execution_admission(
         },
         replacement_route_gate,
     )
+
+
+def _route_uncertainty_budget_payload(
+    *,
+    admission: RouteUncertaintyAdmissionResult,
+    covariance_evidence: Mapping[str, object],
+    allocated_translation_drift_m: float,
+    allocated_yaw_drift_rad: float,
+    translation_hard_cap_m: float,
+    yaw_hard_cap_rad: float,
+    continuity_translation_limit_m: float,
+    continuity_yaw_limit_rad: float,
+    route_yaw_lever_arm_m: float,
+    stationary_stability_evidence: Mapping[str, object],
+    branch_evidence: Mapping[str, object],
+    composition_position_error_m: float,
+    composition_yaw_error_rad: float,
+) -> dict[str, object]:
+    """Build the persisted admission payload for both pass and reject cases."""
+
+    return {
+        "schema_version": 1,
+        "source": "route_uncertainty_admission",
+        "admission": admission.to_evidence_dict(),
+        "covariance_envelope": dict(covariance_evidence),
+        "runtime_map_odom_continuity_allocation": {
+            "position_covariance_allocation_m": allocated_translation_drift_m,
+            "yaw_covariance_allocation_rad": allocated_yaw_drift_rad,
+            "translation_hard_cap_m": translation_hard_cap_m,
+            "yaw_hard_cap_rad": yaw_hard_cap_rad,
+            "effective_translation_limit_m": continuity_translation_limit_m,
+            "effective_yaw_limit_rad": continuity_yaw_limit_rad,
+            "route_yaw_lever_arm_m": route_yaw_lever_arm_m,
+            "threshold_contract": (
+                "live correction must remain within the same covariance "
+                "allowance already reserved in route clearance"
+            ),
+        },
+        "stationary_map_from_odom_stability": dict(stationary_stability_evidence),
+        "localization_branch_evidence": dict(branch_evidence),
+        "preflight_composition": {
+            "position_error_m": composition_position_error_m,
+            "yaw_error_rad": composition_yaw_error_rad,
+        },
+    }
+
 
 class _OdomRouteUncertaintyGate:
     """Re-admit each replacement map route before odom transformation."""

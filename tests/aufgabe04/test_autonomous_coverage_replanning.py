@@ -1,6 +1,7 @@
 import ast
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -346,6 +347,66 @@ class AutonomousCoverageReplanningTest(unittest.TestCase):
             self.assertEqual(
                 common.call_args_list[1].kwargs["status"],
                 "runtime_localization_route_replanned",
+            )
+
+    def test_reseal_replans_the_committed_nonfirst_target_exactly(self):
+        class PlanningBoundary(RuntimeError):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exact_target = Mock(side_effect=PlanningBoundary("planned"))
+            with (
+                patch.object(
+                    replanning,
+                    "load_coverage_survey_plan",
+                    return_value=SimpleNamespace(
+                        map_bundle_sha256="a" * 64,
+                        planning_frame="map",
+                    ),
+                ),
+                patch.object(
+                    replanning,
+                    "load_survey_progress",
+                    return_value=SimpleNamespace(),
+                ),
+                patch.object(
+                    replanning,
+                    "load_stand_survey_registry",
+                    return_value=SimpleNamespace(),
+                ),
+                patch.object(
+                    replanning,
+                    "load_occupancy_grid_with_bundle",
+                    return_value=(
+                        SimpleNamespace(),
+                        SimpleNamespace(bundle_sha256="a" * 64),
+                    ),
+                ),
+                patch.object(
+                    replanning,
+                    "plan_survey_leg_to_viewpoint",
+                    exact_target,
+                ),
+            ):
+                with self.assertRaises(PlanningBoundary):
+                    replanning._replan_coverage_source_from_pose(
+                        map_yaml=root / "map.yaml",
+                        semantic_map_id="arena",
+                        survey_root=root / "survey",
+                        plan_path=root / "plan.json",
+                        expected_target_viewpoint_id="survey_vp_002",
+                        current_pose=Pose2D(0.0, 0.0, 0.0),
+                        rejected_outcome=_outcome(root),
+                        reseal_index=1,
+                        output_dir=root / "output",
+                        reseal_kind="startup",
+                        status="startup_route_replanned",
+                    )
+
+            self.assertEqual(
+                exact_target.call_args.kwargs["target_viewpoint_id"],
+                "survey_vp_002",
             )
 
     def test_coverage_effect_defaults_resolve_public_replanner_late(self):

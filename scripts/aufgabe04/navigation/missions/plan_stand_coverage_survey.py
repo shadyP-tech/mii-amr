@@ -40,6 +40,9 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     write_stand_survey_registry,
     write_survey_progress,
 )
+from scripts.aufgabe04.navigation.missions.startup_route_uncertainty_selection import (
+    load_startup_route_uncertainty_selector,
+)
 
 
 DEFAULT_MAP = Path("maps/aufgabe03/arena_1p898x3p9_auto.yaml")
@@ -53,6 +56,35 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-x", type=float, required=True)
     parser.add_argument("--start-y", type=float, required=True)
     parser.add_argument("--start-yaw", type=float, default=0.0)
+    parser.add_argument(
+        "--startup-route-selection-preflight-json",
+        type=Path,
+        help=(
+            "successful stopped preplanning-localization receipt used only "
+            "to rank initial routes before target commitment"
+        ),
+    )
+    parser.add_argument(
+        "--startup-route-selection-robot-radius-m", type=float
+    )
+    parser.add_argument(
+        "--startup-route-selection-collision-margin-m", type=float
+    )
+    parser.add_argument(
+        "--startup-route-selection-tracking-tube-radius-m", type=float
+    )
+    parser.add_argument(
+        "--startup-route-selection-odom-drift-bound-m", type=float
+    )
+    parser.add_argument(
+        "--startup-route-selection-braking-latency-distance-m", type=float
+    )
+    parser.add_argument(
+        "--startup-route-selection-sigma-multiplier", type=float
+    )
+    parser.add_argument(
+        "--startup-route-selection-clearance-sample-spacing-m", type=float
+    )
     parser.add_argument("--survey-id", default="")
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--lane-count", type=int, default=2)
@@ -138,6 +170,46 @@ def _require_new_paths(paths: dict[str, Path]) -> None:
         )
 
 
+def _startup_route_selection_values(args) -> dict[str, float] | None:
+    """Require one complete, explicit execution-equivalent policy bundle."""
+
+    names = {
+        "robot_radius_m": "startup_route_selection_robot_radius_m",
+        "collision_margin_m": (
+            "startup_route_selection_collision_margin_m"
+        ),
+        "tracking_tube_radius_m": (
+            "startup_route_selection_tracking_tube_radius_m"
+        ),
+        "odom_drift_bound_m": (
+            "startup_route_selection_odom_drift_bound_m"
+        ),
+        "braking_latency_distance_m": (
+            "startup_route_selection_braking_latency_distance_m"
+        ),
+        "sigma_multiplier": (
+            "startup_route_selection_sigma_multiplier"
+        ),
+        "clearance_sample_spacing_m": (
+            "startup_route_selection_clearance_sample_spacing_m"
+        ),
+    }
+    supplied = {
+        output_name: getattr(args, argument_name)
+        for output_name, argument_name in names.items()
+    }
+    preflight_supplied = args.startup_route_selection_preflight_json is not None
+    any_values = any(value is not None for value in supplied.values())
+    if not preflight_supplied and not any_values:
+        return None
+    if not preflight_supplied or any(value is None for value in supplied.values()):
+        raise ValueError(
+            "startup route selection requires the preflight path and every "
+            "execution-equivalent uncertainty parameter"
+        )
+    return {name: float(value) for name, value in supplied.items()}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -151,6 +223,18 @@ def main(argv: list[str] | None = None) -> int:
         ):
             raise ValueError("start pose must be finite")
         _require_new_paths(paths)
+        startup_selection_values = _startup_route_selection_values(args)
+        startup_selection_path = (
+            output_dir / "startup_route_uncertainty_selection.json"
+        )
+        if (
+            startup_selection_values is not None
+            and startup_selection_path.exists()
+        ):
+            raise ValueError(
+                "refusing to overwrite existing survey artifact: "
+                f"{startup_selection_path}"
+            )
         arena = ArenaBounds(
             length_m=args.arena_length_m,
             width_m=args.arena_width_m,
@@ -195,6 +279,18 @@ def main(argv: list[str] | None = None) -> int:
             planning_frame=args.planning_frame,
         )
         start = Pose2D(args.start_x, args.start_y, args.start_yaw)
+        route_selector = None
+        if startup_selection_values is not None:
+            assert args.startup_route_selection_preflight_json is not None
+            route_selector = load_startup_route_uncertainty_selector(
+                preflight_json=(
+                    args.startup_route_selection_preflight_json
+                ),
+                evidence_json=startup_selection_path,
+                expected_start=start,
+                planning_frame=args.planning_frame,
+                **startup_selection_values,
+            )
         plan = build_coverage_survey_plan(
             grid,
             map_bundle_sha256=map_bundle.bundle_sha256,
@@ -212,6 +308,7 @@ def main(argv: list[str] | None = None) -> int:
             progress=progress,
             registry=registry,
             current_pose=start,
+            route_selector=route_selector,
         )
         if next_leg is None:
             raise ValueError("coverage plan unexpectedly has no first viewpoint")
@@ -251,6 +348,15 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 "arena_boundary_overlay": True,
                 "arena_bounds": plan.arena_bounds.to_metadata(),
+                **(
+                    {}
+                    if next_leg.route_selection_evidence is None
+                    else {
+                        "startup_route_uncertainty_selection": dict(
+                            next_leg.route_selection_evidence
+                        )
+                    }
+                ),
             },
         )
         summary = {
@@ -260,7 +366,27 @@ def main(argv: list[str] | None = None) -> int:
             **survey_status(plan, progress, registry),
             "next_viewpoint_id": next_leg.viewpoint.viewpoint_id,
             "next_route_length_m": next_leg.route_result.route.length_m,
-            "artifacts": {name: str(path) for name, path in paths.items()},
+            "artifacts": {
+                **{name: str(path) for name, path in paths.items()},
+                **(
+                    {}
+                    if next_leg.route_selection_evidence is None
+                    else {
+                        "startup_route_uncertainty_selection": str(
+                            startup_selection_path
+                        )
+                    }
+                ),
+            },
+            **(
+                {}
+                if next_leg.route_selection_evidence is None
+                else {
+                    "startup_route_uncertainty_selection": dict(
+                        next_leg.route_selection_evidence
+                    )
+                }
+            ),
         }
         paths["summary"].write_text(
             json.dumps(summary, indent=2, sort_keys=True) + "\n"
