@@ -196,6 +196,11 @@ from scripts.aufgabe04.real_robot.readiness.observation_tf_runtime import (
     ObservationTfReadinessError,
     observe_observation_tf_readiness,
 )
+from scripts.aufgabe04.real_robot.readiness.sensor_timing_runtime import (
+    SensorTimingReadinessConfig,
+    SensorTimingReadinessError,
+    observe_sensor_timing_readiness,
+)
 from scripts.aufgabe04.real_robot.candidate.approach import (
     CandidateApproachConfig,
     CandidateApproachEffects,
@@ -254,6 +259,9 @@ DEFAULT_MAX_BLOCKAGE_REPLANS_PER_LEG = 3
 DEFAULT_MAX_STARTUP_RESEALS_PER_LEG = 3
 DEFAULT_MAX_RUNTIME_LOCALIZATION_RESEALS_PER_LEG = 1
 DEFAULT_MAX_LOCALIZATION_READINESS_RETRIES_PER_LEG = 2
+CANDIDATE_ROUTE_SENSOR_TIMING_PHASE = (
+    "candidate_route_sensor_timing_readiness"
+)
 
 
 from .mission_config import (
@@ -316,6 +324,47 @@ def _admit_observation_tf_readiness(
     )
     if not result.ready:
         raise ObservationTfReadinessError(
+            result,
+            evidence_path=str(path),
+            evidence_sha256=digest,
+            phase=phase,
+            typed_run_already_issued=typed_run_already_issued,
+        )
+    return path, digest
+
+
+def _admit_sensor_timing_readiness(
+    profile,
+    evidence_path: Path,
+    *,
+    phase: str,
+    typed_run_already_issued: bool = False,
+) -> tuple[Path, str]:
+    """Persist one passive camera/LiDAR timing gate or fail closed."""
+
+    runtime = profile.resolved_runtime()
+    result = observe_sensor_timing_readiness(
+        SensorTimingReadinessConfig(
+            image_topic=profile.resolved_compressed_image_topic,
+            camera_info_topic=profile.resolved_camera_info_topic,
+            scan_topic=runtime.scan_topic,
+            expected_image_frame=profile.camera_optical_frame,
+            expected_camera_info_frame=profile.camera_optical_frame,
+            expected_scan_frame=profile.scan_frame,
+        )
+    )
+    path = Path(evidence_path)
+    digest = write_content_hashed_json(
+        path,
+        {
+            **result.to_dict(),
+            "phase": phase,
+            "typed_run_already_issued": typed_run_already_issued,
+        },
+        hash_field="sensor_timing_readiness_sha256",
+    )
+    if not result.ready:
+        raise SensorTimingReadinessError(
             result,
             evidence_path=str(path),
             evidence_sha256=digest,
@@ -574,7 +623,19 @@ def _run_motion_leg(
     startup_reseal_permit_context: StartupResealPermitContext | None = None,
     mission_leg_permit_context: MissionLegPermitContext | None = None,
     observation_tf_evidence_path: Path | None = None,
+    sensor_timing_readiness_phase: str | None = None,
 ) -> MotionLegOutcome:
+    if sensor_timing_readiness_phase is not None and (
+        not isinstance(sensor_timing_readiness_phase, str)
+        or not sensor_timing_readiness_phase.strip()
+    ):
+        raise ValueError(
+            "sensor_timing_readiness_phase must be a nonempty string"
+        )
+    if sensor_timing_readiness_phase is not None and not execute:
+        raise ValueError(
+            "sensor timing readiness is only meaningful before live motion"
+        )
     if require_fresh_confirmation and fresh_confirmation_reason not in {
         "startup",
         "runtime_localization",
@@ -783,6 +844,37 @@ def _run_motion_leg(
         )
     if not execute:
         return dry_outcome
+    if sensor_timing_readiness_phase is not None:
+        sensor_timing_path, sensor_timing_sha256 = (
+            _admit_sensor_timing_readiness(
+                profile,
+                session_root
+                / "preflight"
+                / f"{run_id}_camera_lidar_timing_before_motion.json",
+                phase=sensor_timing_readiness_phase,
+                typed_run_already_issued=True,
+            )
+        )
+        _append_jsonl(
+            session_root / "adaptive_replans.jsonl",
+            {
+                "schema_version": 1,
+                "event": "route_sensor_timing_readiness_admitted",
+                "timestamp": time.time(),
+                "run_id": run_id,
+                "mission_leg_kind": (
+                    None
+                    if mission_leg_evidence_kind is None
+                    else mission_leg_evidence_kind.value
+                ),
+                "mission_leg_index": mission_leg_evidence_index,
+                "target_id": mission_leg_evidence_target_id,
+                "sensor_timing_readiness_json": str(sensor_timing_path),
+                "sensor_timing_readiness_sha256": sensor_timing_sha256,
+                "typed_run_already_issued": True,
+                "motion_published": False,
+            },
+        )
     motion_permit_path = None
     motion_permit_sha256 = ""
     mission_leg_permit_path = None
@@ -1460,6 +1552,9 @@ def _run_candidate_motion_leg(
         uncertainty_map_yaml=request.uncertainty_map_yaml,
         uncertainty_sigma_multiplier=request.uncertainty_sigma_multiplier,
         localization_branch_proof_id=request.localization_branch_proof_id,
+        sensor_timing_readiness_phase=(
+            CANDIDATE_ROUTE_SENSOR_TIMING_PHASE
+        ),
         mission_leg_permit_context=MissionLegPermitContext(
             mission_authorization_json=request.mission_authorization_json,
             session_id=request.session_id,
@@ -1555,6 +1650,9 @@ def _run_candidate_startup_reseal_motion_leg(
         uncertainty_map_yaml=request.uncertainty_map_yaml,
         uncertainty_sigma_multiplier=request.uncertainty_sigma_multiplier,
         localization_branch_proof_id=request.localization_branch_proof_id,
+        sensor_timing_readiness_phase=(
+            CANDIDATE_ROUTE_SENSOR_TIMING_PHASE
+        ),
         startup_reseal_permit_context=permit_context,
     )
 
@@ -1625,6 +1723,9 @@ def _run_candidate_runtime_localization_reseal_motion_leg(
         uncertainty_map_yaml=request.uncertainty_map_yaml,
         uncertainty_sigma_multiplier=request.uncertainty_sigma_multiplier,
         localization_branch_proof_id=request.localization_branch_proof_id,
+        sensor_timing_readiness_phase=(
+            CANDIDATE_ROUTE_SENSOR_TIMING_PHASE
+        ),
         runtime_localization_permit_context=permit_context,
     )
 
@@ -1877,6 +1978,20 @@ def main(argv=None) -> int:
             )
         session_root.mkdir(parents=True, exist_ok=False)
         survey_root = session_root / "coverage"
+        preauthorization_sensor_timing_path: Path | None = None
+        preauthorization_sensor_timing_sha256: str | None = None
+        if resolved_run_mode.camera_phase_enabled:
+            (
+                preauthorization_sensor_timing_path,
+                preauthorization_sensor_timing_sha256,
+            ) = _admit_sensor_timing_readiness(
+                profile,
+                session_root
+                / "preflight"
+                / "camera_lidar_timing_before_authorization.json",
+                phase="preauthorization_sensor_timing_readiness",
+                typed_run_already_issued=False,
+            )
         (
             preauthorization_observation_tf_path,
             preauthorization_observation_tf_sha256,
@@ -1966,6 +2081,12 @@ def main(argv=None) -> int:
                 observation_tf_evidence_sha256=(
                     preauthorization_observation_tf_sha256
                 ),
+                sensor_timing_evidence_path=(
+                    preauthorization_sensor_timing_path
+                ),
+                sensor_timing_evidence_sha256=(
+                    preauthorization_sensor_timing_sha256
+                ),
             ),
             PreauthorizationReadinessEffects(
                 seal_route=seal_stand_discovery_route,
@@ -2045,6 +2166,15 @@ def main(argv=None) -> int:
         )
         print(f"Initial readiness evidence: {initial_readiness_path}")
         print(f"Initial readiness SHA-256: {initial_readiness_sha256}")
+        if preauthorization_sensor_timing_path is not None:
+            print(
+                "Camera/LiDAR timing readiness passed without motion: "
+                f"{preauthorization_sensor_timing_path}"
+            )
+            print(
+                "Camera/LiDAR timing readiness SHA-256: "
+                f"{preauthorization_sensor_timing_sha256}"
+            )
         print(
             "Physical safety requirements: clear arena; unloaded robot; operator "
             "beside the robot; Ctrl+C and physical stop ready; separate exact-topic "
@@ -2233,6 +2363,18 @@ def main(argv=None) -> int:
                 ),
                 "preauthorization_observation_tf_sha256": (
                     preauthorization_observation_tf_sha256
+                ),
+                **(
+                    {}
+                    if preauthorization_sensor_timing_path is None
+                    else {
+                        "preauthorization_sensor_timing_json": str(
+                            preauthorization_sensor_timing_path
+                        ),
+                        "preauthorization_sensor_timing_sha256": (
+                            preauthorization_sensor_timing_sha256
+                        ),
+                    }
                 ),
             },
         )

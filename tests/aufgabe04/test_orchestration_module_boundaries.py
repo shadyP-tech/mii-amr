@@ -183,6 +183,8 @@ class OrchestrationModuleBoundaryTest(unittest.TestCase):
                 "observation_tf_runtime.py",
                 "post_observation.py",
                 "preauthorization.py",
+                "sensor_timing_contract.py",
+                "sensor_timing_runtime.py",
                 "active_localization.py",
                 "startup_reseal.py",
             },

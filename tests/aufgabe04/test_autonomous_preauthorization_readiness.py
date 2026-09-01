@@ -89,6 +89,10 @@ class AutonomousPreauthorizationReadinessTest(unittest.TestCase):
         self.observation_tf = (
             self.session_root / "preflight/lidar_scan_tf_before_authorization.json"
         )
+        self.sensor_timing = (
+            self.session_root
+            / "preflight/camera_lidar_timing_before_authorization.json"
+        )
         self.config = PreauthorizationReadinessConfig(
             session_root=self.session_root,
             survey_root=self.survey_root,
@@ -98,6 +102,8 @@ class AutonomousPreauthorizationReadinessTest(unittest.TestCase):
             maximum_localization_readiness_retries=1,
             observation_tf_evidence_path=self.observation_tf,
             observation_tf_evidence_sha256="f" * 64,
+            sensor_timing_evidence_path=self.sensor_timing,
+            sensor_timing_evidence_sha256="a" * 64,
         )
 
     @staticmethod
@@ -188,10 +194,81 @@ class AutonomousPreauthorizationReadinessTest(unittest.TestCase):
             str(self.observation_tf),
         )
         self.assertEqual(evidence["observation_tf_readiness_sha256"], "f" * 64)
+        self.assertEqual(
+            evidence["sensor_timing_readiness_json"],
+            str(self.sensor_timing),
+        )
+        self.assertEqual(evidence["sensor_timing_readiness_sha256"], "a" * 64)
         self.assertFalse(evidence["motion_authorized"])
         self.assertEqual(outcome.evidence_path, paths.readiness_evidence_json)
         with self.assertRaises(FrozenInstanceError):
             outcome.evidence_sha256 = "0" * 64  # type: ignore[misc]
+
+    def test_camera_lidar_timing_receipt_is_bound_into_hashed_readiness_evidence(
+        self,
+    ):
+        published = []
+        sensor_timing = (
+            self.session_root
+            / "preflight/camera_lidar_timing_before_authorization.json"
+        )
+        config = PreauthorizationReadinessConfig(
+            **{
+                **self.config.__dict__,
+                "sensor_timing_evidence_path": sensor_timing,
+                "sensor_timing_evidence_sha256": "a" * 64,
+            }
+        )
+
+        outcome = admit_preauthorization_readiness(
+            config,
+            self._effects(
+                lambda request: _outcome(request),
+                published=published,
+            ),
+        )
+
+        self.assertTrue(outcome.result.ready)
+        self.assertEqual(len(published), 1)
+        evidence_path, evidence, hash_field = published[0]
+        self.assertEqual(evidence_path, config.paths.readiness_evidence_json)
+        self.assertEqual(hash_field, "initial_readiness_sha256")
+        self.assertEqual(
+            evidence["sensor_timing_readiness_json"],
+            str(sensor_timing),
+        )
+        self.assertEqual(evidence["sensor_timing_readiness_sha256"], "a" * 64)
+
+    def test_camera_lidar_timing_binding_requires_exact_path_and_sha_pair(self):
+        exact_path = (
+            self.session_root
+            / "preflight/camera_lidar_timing_before_authorization.json"
+        )
+        invalid_overrides = (
+            {
+                "sensor_timing_evidence_path": exact_path,
+                "sensor_timing_evidence_sha256": None,
+            },
+            {
+                "sensor_timing_evidence_path": None,
+                "sensor_timing_evidence_sha256": "a" * 64,
+            },
+            {
+                "sensor_timing_evidence_path": (
+                    self.session_root / "preflight/camera_lidar_timing.json"
+                ),
+                "sensor_timing_evidence_sha256": "a" * 64,
+            },
+        )
+
+        for overrides in invalid_overrides:
+            with self.subTest(overrides=overrides), self.assertRaises(ValueError):
+                PreauthorizationReadinessConfig(
+                    **{
+                        **self.config.__dict__,
+                        **overrides,
+                    }
+                )
 
     def test_retry_reuses_one_seal_and_persists_attempt_events_in_order(self):
         seals = []
@@ -347,6 +424,15 @@ class AutonomousPreauthorizationReadinessTest(unittest.TestCase):
                     **self.config.__dict__,
                     "observation_tf_evidence_path": (
                         paths.readiness_root / "scan_tf.json"
+                    ),
+                }
+            )
+        with self.assertRaises(ValueError):
+            PreauthorizationReadinessConfig(
+                **{
+                    **self.config.__dict__,
+                    "sensor_timing_evidence_path": (
+                        paths.readiness_root / "sensor_timing.json"
                     ),
                 }
             )

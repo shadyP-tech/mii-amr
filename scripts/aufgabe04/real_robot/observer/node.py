@@ -89,6 +89,12 @@ from scripts.aufgabe04.real_robot.observer.evidence import (
     EvidencePose,
     PassiveObserverEvidence,
 )
+from scripts.aufgabe04.real_robot.readiness.sensor_timing_contract import (
+    DEFAULT_MAX_CAMERA_INFO_IMAGE_SKEW_SEC,
+    DEFAULT_MAX_FUTURE_TIMESTAMP_SEC,
+    DEFAULT_MAX_IMAGE_SCAN_SKEW_SEC,
+    DEFAULT_MAX_SENSOR_AGE_SEC,
+)
 from scripts.aufgabe04.real_robot.configuration.recommendation import (
     build_real_viewpoint_recommendation,
 )
@@ -1441,10 +1447,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-distance-m", type=float, default=0.33)
     parser.add_argument("--head-roi-padding-scale", type=float, default=1.8)
     parser.add_argument("--min-head-size-px", type=float, default=18.0)
-    parser.add_argument("--sync-tolerance-sec", type=float, default=0.10)
-    parser.add_argument("--camera-info-tolerance-sec", type=float, default=1.0)
-    parser.add_argument("--max-sensor-age-sec", type=float, default=0.5)
-    parser.add_argument("--max-future-timestamp-sec", type=float, default=0.05)
+    parser.add_argument(
+        "--sync-tolerance-sec",
+        type=float,
+        default=DEFAULT_MAX_IMAGE_SCAN_SKEW_SEC,
+    )
+    parser.add_argument(
+        "--camera-info-tolerance-sec",
+        type=float,
+        default=DEFAULT_MAX_CAMERA_INFO_IMAGE_SKEW_SEC,
+    )
+    parser.add_argument(
+        "--max-sensor-age-sec",
+        type=float,
+        default=DEFAULT_MAX_SENSOR_AGE_SEC,
+    )
+    parser.add_argument(
+        "--max-future-timestamp-sec",
+        type=float,
+        default=DEFAULT_MAX_FUTURE_TIMESTAMP_SEC,
+    )
     parser.add_argument(
         "--tf-timeout-sec",
         type=float,

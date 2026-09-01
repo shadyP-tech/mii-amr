@@ -383,6 +383,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         *,
         max_attempts: int,
         candidate_a_failures: int,
+        reject_candidate_sensor_timing: bool = False,
     ) -> dict[str, object]:
         """Run the real outer wrapper with ROS/motion replaced by typed effects."""
 
@@ -564,10 +565,26 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         capture_order: list[str] = []
         motion_targets: list[str] = []
         planning_commands: list[tuple[str, ...]] = []
+        sensor_timing_phases: list[tuple[str, bool]] = []
 
         def record_planning_command(command):
             planning_commands.append(tuple(command))
             return 0
+
+        def admit_sensor_timing(_profile, evidence_path, **kwargs):
+            sensor_timing_phases.append(
+                (
+                    kwargs["phase"],
+                    kwargs["typed_run_already_issued"],
+                )
+            )
+            if (
+                reject_candidate_sensor_timing
+                and kwargs["phase"]
+                == "candidate_route_sensor_timing_readiness"
+            ):
+                raise RuntimeError("candidate sensor timing rejected")
+            return Path(evidence_path), "6" * 64
 
         def capture_observation(*, profile, args, request):
             del profile, args
@@ -588,7 +605,18 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             return CandidateObservation(recommendation, f"QR_{uid}", None)
 
         def run_candidate_motion(*, profile, request):
-            del profile
+            autonomous_wrapper._admit_sensor_timing_readiness(
+                profile,
+                request.session_root
+                / "preflight"
+                / (
+                    f"{request.run_id}_camera_lidar_timing_before_motion.json"
+                ),
+                phase=(
+                    autonomous_wrapper.CANDIDATE_ROUTE_SENSOR_TIMING_PHASE
+                ),
+                typed_run_already_issued=True,
+            )
             motion_targets.append(request.target_id)
             return MotionLegOutcome(
                 run_id=request.run_id,
@@ -651,6 +679,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                         "2" * 64,
                     )
                 ),
+                _admit_sensor_timing_readiness=admit_sensor_timing,
                 _admit_preplanning_localization=lambda *_args, **_kwargs: Pose2D(
                     0.0, 0.0, 0.0
                 ),
@@ -729,6 +758,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             "motion_targets": motion_targets,
             "planning_command": planning_commands[0],
             "run_prompt_count": run_prompt.call_count,
+            "sensor_timing_phases": sensor_timing_phases,
             "failure": (
                 json.loads(
                     (session_root / "mission_failure.json").read_text(
@@ -802,6 +832,16 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 "2.0",
             )
             self.assertEqual(result["run_prompt_count"], 1)
+            self.assertEqual(
+                result["sensor_timing_phases"],
+                [
+                    ("preauthorization_sensor_timing_readiness", False),
+                    ("candidate_route_sensor_timing_readiness", True),
+                    ("candidate_route_sensor_timing_readiness", True),
+                    ("candidate_route_sensor_timing_readiness", True),
+                    ("candidate_route_sensor_timing_readiness", True),
+                ],
+            )
             events = [
                 json.loads(line)
                 for line in (session_root / "candidate_selection.jsonl")
@@ -847,6 +887,15 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 ["candidate_a", "candidate_b", "candidate_c"],
             )
             self.assertEqual(result["motion_targets"], result["capture_order"])
+            self.assertEqual(
+                result["sensor_timing_phases"],
+                [
+                    ("preauthorization_sensor_timing_readiness", False),
+                    ("candidate_route_sensor_timing_readiness", True),
+                    ("candidate_route_sensor_timing_readiness", True),
+                    ("candidate_route_sensor_timing_readiness", True),
+                ],
+            )
             failure = json.loads(
                 (session_root / "mission_failure.json").read_text(
                     encoding="utf-8"
@@ -866,6 +915,32 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             self.assertEqual(failure["max_candidate_observation_attempts"], 1)
             self.assertFalse(failure["motion_continues_authorized"])
             self.assertFalse((session_root / "mission_summary.json").exists())
+
+    def test_candidate_timing_rejection_starts_no_candidate_motion_or_observer(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._run_exact_two_camera_wrapper_retry_fixture(
+                Path(tmp),
+                max_attempts=1,
+                candidate_a_failures=0,
+                reject_candidate_sensor_timing=True,
+            )
+
+            self.assertEqual(result["exit_code"], 2)
+            self.assertEqual(result["motion_targets"], [])
+            self.assertEqual(result["capture_order"], [])
+            self.assertEqual(
+                result["sensor_timing_phases"],
+                [
+                    ("preauthorization_sensor_timing_readiness", False),
+                    ("candidate_route_sensor_timing_readiness", True),
+                ],
+            )
+            self.assertIn(
+                "candidate sensor timing rejected",
+                result["failure"]["reason"],
+            )
 
     def test_exact_two_final_summary_rejects_camera_seed_uid_mismatch(self):
         exact_summary = {
@@ -962,6 +1037,10 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             self.assertIs(actual, expected)
             kwargs = run.call_args.kwargs
             self.assertTrue(kwargs["execute"])
+            self.assertEqual(
+                kwargs["sensor_timing_readiness_phase"],
+                autonomous_wrapper.CANDIDATE_ROUTE_SENSOR_TIMING_PHASE,
+            )
             self.assertEqual(kwargs["run_id"], request.run_id)
             self.assertEqual(
                 kwargs["candidate_snapshot"],
@@ -3705,6 +3784,10 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 )
 
         self.assertIs(result, sentinel)
+        self.assertEqual(
+            run.call_args.kwargs["sensor_timing_readiness_phase"],
+            autonomous_wrapper.CANDIDATE_ROUTE_SENSOR_TIMING_PHASE,
+        )
         context = run.call_args.kwargs[
             "runtime_localization_permit_context"
         ]

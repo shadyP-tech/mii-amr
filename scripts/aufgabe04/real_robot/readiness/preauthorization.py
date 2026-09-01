@@ -132,6 +132,8 @@ class PreauthorizationReadinessConfig:
     maximum_localization_readiness_retries: int
     observation_tf_evidence_path: Path
     observation_tf_evidence_sha256: str
+    sensor_timing_evidence_path: Path | None = None
+    sensor_timing_evidence_sha256: str | None = None
 
     def __post_init__(self) -> None:
         session_root = _path(self.session_root, "session_root")
@@ -146,10 +148,20 @@ class PreauthorizationReadinessConfig:
             "observation_tf_evidence_path",
             ".json",
         )
+        sensor_timing = (
+            None
+            if self.sensor_timing_evidence_path is None
+            else _path(
+                self.sensor_timing_evidence_path,
+                "sensor_timing_evidence_path",
+                ".json",
+            )
+        )
         object.__setattr__(self, "session_root", session_root)
         object.__setattr__(self, "survey_root", survey_root)
         object.__setattr__(self, "coverage_plan_path", coverage_plan)
         object.__setattr__(self, "observation_tf_evidence_path", observation_tf)
+        object.__setattr__(self, "sensor_timing_evidence_path", sensor_timing)
         if not isinstance(self.session_id, str) or not _RUN_TOKEN.fullmatch(
             self.session_id
         ):
@@ -170,6 +182,16 @@ class PreauthorizationReadinessConfig:
                 "observation_tf_evidence_path must be the preauthorization "
                 "scan-TF receipt"
             )
+        if sensor_timing is not None:
+            expected_sensor_timing = (
+                session_root
+                / "preflight/camera_lidar_timing_before_authorization.json"
+            )
+            if sensor_timing != expected_sensor_timing:
+                raise ValueError(
+                    "sensor_timing_evidence_path must be the preauthorization "
+                    "camera/LiDAR timing receipt"
+                )
         if type(self.initial_leg_index) is not int or self.initial_leg_index < 0:
             raise ValueError("initial_leg_index must be a non-negative integer")
         if (
@@ -183,6 +205,18 @@ class PreauthorizationReadinessConfig:
             _SHA256.fullmatch(self.observation_tf_evidence_sha256)
         ):
             raise ValueError("observation_tf_evidence_sha256 must be a SHA-256")
+        if (sensor_timing is None) != (
+            self.sensor_timing_evidence_sha256 is None
+        ):
+            raise ValueError(
+                "sensor timing evidence path and SHA-256 must be provided "
+                "together"
+            )
+        if sensor_timing is not None and (
+            not isinstance(self.sensor_timing_evidence_sha256, str)
+            or not _SHA256.fullmatch(self.sensor_timing_evidence_sha256)
+        ):
+            raise ValueError("sensor_timing_evidence_sha256 must be a SHA-256")
         try:
             observation_tf.relative_to(self.readiness_root)
         except ValueError:
@@ -191,6 +225,16 @@ class PreauthorizationReadinessConfig:
             raise ValueError(
                 "observation TF evidence must be outside authorization_readiness"
             )
+        if sensor_timing is not None:
+            try:
+                sensor_timing.relative_to(self.readiness_root)
+            except ValueError:
+                pass
+            else:
+                raise ValueError(
+                    "sensor timing evidence must be outside "
+                    "authorization_readiness"
+                )
 
     @property
     def readiness_root(self) -> Path:
@@ -414,7 +458,7 @@ def admit_preauthorization_readiness(
                 "readiness_event_persistence_failed", paths, exc
             ) from exc
 
-    evidence = {
+    evidence: dict[str, object] = {
         **result.to_evidence(),
         **paths.to_evidence(),
         "observation_tf_readiness_json": str(
@@ -424,6 +468,17 @@ def admit_preauthorization_readiness(
             config.observation_tf_evidence_sha256
         ),
     }
+    if config.sensor_timing_evidence_path is not None:
+        evidence.update(
+            {
+                "sensor_timing_readiness_json": str(
+                    config.sensor_timing_evidence_path
+                ),
+                "sensor_timing_readiness_sha256": (
+                    config.sensor_timing_evidence_sha256
+                ),
+            }
+        )
     try:
         evidence_sha256 = effects.publish_hashed_json(
             paths.readiness_evidence_json,
