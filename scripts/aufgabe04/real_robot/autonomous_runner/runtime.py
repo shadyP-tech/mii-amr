@@ -78,10 +78,6 @@ from scripts.aufgabe04.navigation.coverage.record_stand_coverage_stop import (
     commit_stand_coverage_stop,
     plan_next_stand_coverage_leg,
 )
-from scripts.aufgabe04.navigation.coverage.exact_two_viewpoint_selection import (
-    DEFAULT_EXACT_TWO_CANDIDATE_SPACING_M,
-    DEFAULT_MINIMUM_EXACT_TWO_VIEWPOINT_BASELINE_M,
-)
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STATUS_PENDING_CAMERA,
     CoverageSurveyConfig,
@@ -140,6 +136,9 @@ from scripts.aufgabe04.real_robot.execution.artifact_paths import (
     resolve_child_artifact_paths,
     resolve_normal_artifact_path,
 )
+from scripts.aufgabe04.real_robot.execution.startup_active_localization import (
+    run_startup_active_localization_child,
+)
 from scripts.aufgabe04.real_robot.execution.child_runner import (
     DEFAULT_COLLISION_MARGIN_M,
     DEFAULT_LIDAR_STOP_DISTANCE_M,
@@ -151,11 +150,6 @@ from scripts.aufgabe04.real_robot.execution.child_runner import (
     parse_dry_run_outcome as _dry_motion_outcome_from_log,
     parse_motion_leg_outcome as _motion_outcome_from_log,
     semantic_log_size as _semantic_log_size,
-)
-from scripts.aufgabe04.navigation.execution.route_uncertainty_defaults import (
-    DEFAULT_UNCERTAINTY_BRAKING_LATENCY_DISTANCE_M,
-    DEFAULT_UNCERTAINTY_CLEARANCE_SAMPLE_SPACING_M,
-    DEFAULT_UNCERTAINTY_ODOM_DRIFT_BOUND_M,
 )
 from scripts.aufgabe04.real_robot.coverage_leg.execution import (
     CoverageLegConfig,
@@ -271,6 +265,11 @@ from .mission_config import (
     _write_json,
     _physical_clearance,
     candidate_snapshot_from_registry,
+)
+from .initial_coverage import (
+    InitialCoveragePlanningStatusError,
+    plan_initial_coverage,
+    startup_active_localization_config_from_args,
 )
 
 
@@ -433,6 +432,41 @@ def _pose_from_preplanning_preflight(preflight) -> Pose2D:
         raise RuntimeError(
             f"preplanning localization route pose is invalid: {exc}"
         ) from exc
+
+
+def _plan_initial_coverage_with_optional_startup_active_localization(
+    *,
+    args,
+    profile,
+    runtime,
+    session_root: Path,
+    survey_root: Path,
+    start: Pose2D,
+    inflation_radius_m: float,
+    candidate_keepout_radius_m: float,
+) -> tuple[Path, CoverageSurveyPlan, int, Pose2D]:
+    """Thin composition seam retained for integrations and test doubles."""
+
+    return plan_initial_coverage(
+        args=args,
+        profile=profile,
+        session_root=session_root,
+        survey_root=survey_root,
+        start=start,
+        inflation_radius_m=inflation_radius_m,
+        candidate_keepout_radius_m=candidate_keepout_radius_m,
+        admit_stationary_localization=lambda evidence_path: (
+            _admit_preplanning_localization(
+                runtime,
+                session_root,
+                evidence_path=evidence_path,
+            )
+        ),
+        append_event=_append_jsonl,
+        planner=plan_stand_coverage_survey,
+        active_localization_child=run_startup_active_localization_child,
+        load_plan=load_coverage_survey_plan,
+    )
 
 
 def _issue_mission_leg_motion_permit(
@@ -1644,6 +1678,38 @@ def _validate_inputs(parser, args, profile, calibration) -> None:
         parser.error(
             "--max-localization-readiness-retries-per-leg must be non-negative"
         )
+    if args.max_startup_active_localization_attempts < 1:
+        parser.error(
+            "--max-startup-active-localization-attempts must be positive"
+        )
+    try:
+        startup_active_localization_config_from_args(args)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.enable_startup_active_localization:
+        if not args.execute:
+            parser.error(
+                "--enable-startup-active-localization requires a physical "
+                "execution run mode"
+            )
+        if args.exact_inspection_point_count != 2:
+            parser.error(
+                "--enable-startup-active-localization requires exactly two "
+                "inspection points"
+            )
+        if args.run_mode == AutonomousRunMode.RESUME_NEXT_COVERAGE_LEG.value:
+            parser.error(
+                "startup active localization is only available before a new "
+                "initial coverage plan, not while resuming a checkpoint"
+            )
+        if (
+            args.startup_active_localization_angular_speed_radps
+            > profile.max_angular_speed_radps + 1.0e-12
+        ):
+            parser.error(
+                "--startup-active-localization-angular-speed-radps must not "
+                "exceed the robot profile angular speed"
+            )
     if (
         not math.isfinite(args.initialpose_prompt_window_sec)
         or args.initialpose_prompt_window_sec <= 0.0
@@ -1844,75 +1910,22 @@ def main(argv=None) -> int:
                 restored_resume.parent_checkpoint_path
             )
         else:
-            planning_command = [
-                "--map",
-                str(args.map),
-                "--semantic-map-id",
-                args.semantic_map_id,
-                "--planning-frame",
-                profile.map_frame,
-                "--start-x",
-                str(start.x_m),
-                "--start-y",
-                str(start.y_m),
-                "--start-yaw",
-                str(start.yaw_rad),
-                "--survey-id",
-                args.session_id,
-                "--output-dir",
-                str(survey_root),
-                "--lane-count",
-                "1",
-                "--stop-spacing-m",
-                str(args.inspection_stop_spacing_m),
-                "--inflation-radius-m",
-                str(inflation_radius_m),
-                "--candidate-keepout-radius-m",
-                str(candidate_keepout_radius_m),
-                "--expected-stand-count",
-                str(args.expected_stand_count),
-            ]
-            if args.exact_inspection_point_count is not None:
-                planning_command.extend(
-                    [
-                        "--exact-inspection-point-count",
-                        str(args.exact_inspection_point_count),
-                        "--exact-two-candidate-spacing-m",
-                        str(DEFAULT_EXACT_TWO_CANDIDATE_SPACING_M),
-                        "--minimum-exact-two-viewpoint-baseline-m",
-                        str(DEFAULT_MINIMUM_EXACT_TWO_VIEWPOINT_BASELINE_M),
-                        "--startup-route-selection-preflight-json",
-                        str(
-                            session_root
-                            / "preflight"
-                            / "preplanning_localization.json"
-                        ),
-                        "--startup-route-selection-robot-radius-m",
-                        str(profile.robot_radius_m),
-                        "--startup-route-selection-collision-margin-m",
-                        str(DEFAULT_COLLISION_MARGIN_M),
-                        "--startup-route-selection-tracking-tube-radius-m",
-                        str(DEFAULT_TRACKING_TUBE_RADIUS_M),
-                        "--startup-route-selection-odom-drift-bound-m",
-                        str(DEFAULT_UNCERTAINTY_ODOM_DRIFT_BOUND_M),
-                        "--startup-route-selection-braking-latency-distance-m",
-                        str(
-                            DEFAULT_UNCERTAINTY_BRAKING_LATENCY_DISTANCE_M
-                        ),
-                        "--startup-route-selection-sigma-multiplier",
-                        str(args.uncertainty_sigma_multiplier),
-                        "--startup-route-selection-clearance-sample-spacing-m",
-                        str(
-                            DEFAULT_UNCERTAINTY_CLEARANCE_SAMPLE_SPACING_M
-                        ),
-                    ]
+            try:
+                initial_planning = (
+                    _plan_initial_coverage_with_optional_startup_active_localization(
+                        args=args,
+                        profile=profile,
+                        runtime=runtime,
+                        session_root=session_root,
+                        survey_root=survey_root,
+                        start=start,
+                        inflation_radius_m=inflation_radius_m,
+                        candidate_keepout_radius_m=candidate_keepout_radius_m,
+                    )
                 )
-            planning_status = plan_stand_coverage_survey(planning_command)
-            if planning_status != 0:
-                return planning_status
-            plan_path = survey_root / "coverage_plan.json"
-            plan = load_coverage_survey_plan(plan_path)
-            initial_leg_index = 0
+            except InitialCoveragePlanningStatusError as exc:
+                return exc.status
+            plan_path, plan, initial_leg_index, start = initial_planning
         if (
             args.exact_inspection_point_count is not None
             and len(plan.viewpoints) != args.exact_inspection_point_count

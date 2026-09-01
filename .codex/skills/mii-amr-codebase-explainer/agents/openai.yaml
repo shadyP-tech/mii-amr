@@ -1,4 +1,0 @@
-interface:
-  display_name: "MII AMR Codebase Explainer"
-  short_description: "Explain mii-amr code and data flow"
-  default_prompt: "Use $mii-amr-codebase-explainer to explain how this part of the mii-amr codebase works."

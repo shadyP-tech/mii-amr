@@ -1,4 +1,0 @@
-interface:
-  display_name: "Aufgabe 03 Navigation"
-  short_description: "Nav2, mapping, planning, and LiDAR replans"
-  default_prompt: "Use $aufgabe03-navigation-mapping to plan, debug, or report the next Aufgabe 03 navigation run."

@@ -1,4 +1,0 @@
-interface:
-  display_name: "Grill Me"
-  short_description: "Rigorous project alignment questions"
-  default_prompt: "Use $grill-me to question my mii-amr implementation plan before coding."

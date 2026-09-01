@@ -37,6 +37,7 @@ class OrchestrationModuleBoundaryTest(unittest.TestCase):
             "run_detected_stand_exploration_sim.py",
             "run_detected_stand_observe_plan.py",
             "run_single_station_segment.py",
+            "run_startup_active_localization.py",
             "run_station_route.py",
         }
 
@@ -182,6 +183,7 @@ class OrchestrationModuleBoundaryTest(unittest.TestCase):
                 "observation_tf_runtime.py",
                 "post_observation.py",
                 "preauthorization.py",
+                "active_localization.py",
                 "startup_reseal.py",
             },
             "mission": {
@@ -197,6 +199,7 @@ class OrchestrationModuleBoundaryTest(unittest.TestCase):
                 "child_runner.py",
                 "localization_recovery.py",
                 "run_unloaded_segment.py",
+                "startup_active_localization.py",
             },
             "entrypoints": {
                 "capture_camera_calibration.py",

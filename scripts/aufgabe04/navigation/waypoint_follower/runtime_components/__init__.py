@@ -38,6 +38,9 @@ from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.safety im
 from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.step_cycle_guard import (
     StepCycleGuardRuntimeMixin,
 )
+from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.startup_active_localization import (
+    StartupActiveLocalizationRuntimeMixin,
+)
 
 __all__ = [
     "BlockageRecoveryRuntimeMixin",
@@ -51,4 +54,5 @@ __all__ = [
     "RouteCycleGuardRuntimeMixin",
     "SafetyRuntimeMixin",
     "StepCycleGuardRuntimeMixin",
+    "StartupActiveLocalizationRuntimeMixin",
 ]

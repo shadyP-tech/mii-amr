@@ -9,6 +9,12 @@ from scripts.aufgabe04.real_robot.execution.child_runner import (
     DEFAULT_UNCERTAINTY_SIGMA_MULTIPLIER,
 )
 from scripts.aufgabe04.real_robot.mission.modes import AutonomousRunMode
+from scripts.aufgabe04.navigation.localization.startup_active_localization import (
+    DEFAULT_STARTUP_ACTIVE_LOCALIZATION_ANGULAR_SPEED_RADPS,
+    DEFAULT_STARTUP_ACTIVE_LOCALIZATION_MAX_ATTEMPTS,
+    DEFAULT_STARTUP_ACTIVE_LOCALIZATION_ROTATION_RAD,
+    DEFAULT_STARTUP_ACTIVE_LOCALIZATION_TIMEOUT_SEC,
+)
 
 DEFAULT_MAP = Path("maps/aufgabe03/arena_1p898x3p9_auto.yaml")
 DEFAULT_OUTPUT_ROOT = Path("results/aufgabe04/real/autonomous_exploration")
@@ -185,6 +191,39 @@ def build_parser() -> argparse.ArgumentParser:
             "rehearsal or before later motion. Other failed gates remain "
             "terminal; zero disables these bounded retries."
         ),
+    )
+    parser.add_argument(
+        "--enable-startup-active-localization",
+        action="store_true",
+        help=(
+            "After the stopped startup route selector rejects every initial "
+            "route on uncertainty budget, allow a separately typed LOCALIZE "
+            "phase with bounded in-place rotation, then recollect stopped "
+            "AMCL evidence and retry the same exact selector. This does not "
+            "authorize the mission route or bypass the later RUN prompt."
+        ),
+    )
+    parser.add_argument(
+        "--max-startup-active-localization-attempts",
+        type=int,
+        default=DEFAULT_STARTUP_ACTIVE_LOCALIZATION_MAX_ATTEMPTS,
+    )
+    parser.add_argument(
+        "--startup-active-localization-rotation-rad",
+        "--startup-active-localization-turn-rad",
+        dest="startup_active_localization_rotation_rad",
+        type=float,
+        default=DEFAULT_STARTUP_ACTIVE_LOCALIZATION_ROTATION_RAD,
+    )
+    parser.add_argument(
+        "--startup-active-localization-angular-speed-radps",
+        type=float,
+        default=DEFAULT_STARTUP_ACTIVE_LOCALIZATION_ANGULAR_SPEED_RADPS,
+    )
+    parser.add_argument(
+        "--startup-active-localization-timeout-sec",
+        type=float,
+        default=DEFAULT_STARTUP_ACTIVE_LOCALIZATION_TIMEOUT_SEC,
     )
     parser.add_argument(
         "--uncertainty-sigma-multiplier",

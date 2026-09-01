@@ -41,6 +41,7 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     write_survey_progress,
 )
 from scripts.aufgabe04.navigation.missions.startup_route_uncertainty_selection import (
+    StartupRouteUncertaintySelectionRejected,
     load_startup_route_uncertainty_selector,
 )
 
@@ -84,6 +85,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--startup-route-selection-clearance-sample-spacing-m", type=float
+    )
+    parser.add_argument(
+        "--startup-route-selection-evidence-json",
+        type=Path,
+        default=None,
+        help=(
+            "Optional evidence path for startup uncertainty selection. "
+            "Autonomous active-localization retries use attempt-specific "
+            "paths so rejected evidence remains immutable."
+        ),
     )
     parser.add_argument("--survey-id", default="")
     parser.add_argument("--output-dir", type=Path, default=None)
@@ -210,7 +221,11 @@ def _startup_route_selection_values(args) -> dict[str, float] | None:
     return {name: float(value) for name, value in supplied.items()}
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    propagate_startup_route_selection_rejection: bool = False,
+) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     survey_id = args.survey_id.strip() or _default_survey_id()
@@ -226,6 +241,8 @@ def main(argv: list[str] | None = None) -> int:
         startup_selection_values = _startup_route_selection_values(args)
         startup_selection_path = (
             output_dir / "startup_route_uncertainty_selection.json"
+            if args.startup_route_selection_evidence_json is None
+            else args.startup_route_selection_evidence_json
         )
         if (
             startup_selection_values is not None
@@ -391,6 +408,10 @@ def main(argv: list[str] | None = None) -> int:
         paths["summary"].write_text(
             json.dumps(summary, indent=2, sort_keys=True) + "\n"
         )
+    except StartupRouteUncertaintySelectionRejected as exc:
+        if propagate_startup_route_selection_rejection:
+            raise
+        parser.exit(2, f"error: {exc}\n")
     except (OSError, ValueError) as exc:
         parser.exit(2, f"error: {exc}\n")
     print(json.dumps(summary, indent=2, sort_keys=True))

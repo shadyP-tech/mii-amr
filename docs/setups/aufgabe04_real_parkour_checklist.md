@@ -118,6 +118,18 @@ the child execution-attempt handoff before the follower runs; use the terminal
 Twist was actually published. Keep an operator beside the robot throughout the
 mission.
 
+The optional exact-two startup active-localization phase is separate from that
+mission authority. It can appear only after a successful stopped AMCL
+admission and a typed initial route-uncertainty rejection. Clear the robot's
+full swept rotation envelope, then type `LOCALIZE` only if you intend to permit
+that one bounded, translation-free in-place rotation. A completed rotation
+must end with repeated zero commands and stopped-odom proof, followed by a new
+stationary AMCL/TF admission and a new initial plan. It does not authorize the
+plan: review the subsequent readiness output and type the separate `RUN` only
+after all normal route gates pass. Wrong confirmation, another `/cmd_vel`
+publisher, stale scan/odom, an obstacle, excessive translation, missing trace,
+or an exhausted attempt budget leaves the robot stopped.
+
 For the next operator-authorized trial, disable nonessential RViz LaserScan,
 Path, and long-history displays. Start an observe-only external capture of
 `/tf` and `/tf_static` before motion and preserve it with the bundle so the

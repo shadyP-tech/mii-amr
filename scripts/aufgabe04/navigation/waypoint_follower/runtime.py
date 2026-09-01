@@ -28,6 +28,10 @@ from scripts.aufgabe04.navigation.execution.execution_route_certificate import (
 from scripts.aufgabe04.navigation.localization.odom_route_adapter import (
     OdomExecutionContext,
 )
+from scripts.aufgabe04.navigation.localization.startup_active_localization import (
+    StartupActiveLocalizationConfig,
+    StartupActiveLocalizationMotionResult,
+)
 from scripts.aufgabe04.navigation.waypoint_follower.pose_lookup import (
     SIMULATION_ODOM_FALLBACK_QUATERNION_NORM_TOLERANCE,
     PoseLookupResult,
@@ -104,6 +108,7 @@ from scripts.aufgabe04.navigation.waypoint_follower.runtime_components import (
     DynamicRouteRuntimeMixin,
     LocalizationRuntimeMixin,
     SafetyRuntimeMixin,
+    StartupActiveLocalizationRuntimeMixin,
 )
 from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.constants import (
     CALLBACK_SERVICE_BACKGROUND_EXECUTOR,
@@ -169,6 +174,7 @@ def _create_dedicated_tf_listener(runtime_config: ResolvedRuntimeConfig):
 
 
 class SimpleWaypointFollowerNode(
+    StartupActiveLocalizationRuntimeMixin,
     ControlLoopRuntimeMixin,
     CallbackServiceRuntimeMixin,
     BlockageRecoveryRuntimeMixin,
@@ -265,6 +271,7 @@ class SimpleWaypointFollowerNode(
         self.latest_odom = None
         self.latest_odom_receipt = None
         self.latest_odom_callback_count = 0
+        self.zero_command_publish_count = 0
         self.motion_published = False
         self.distance_estimate_m = 0.0
         self.last_pose = None
@@ -346,6 +353,7 @@ class SimpleWaypointFollowerNode(
         self.command_smoother.reset()
         self.last_command_shape_at = None
         self.cmd_vel_pub.publish(Twist())
+        self.zero_command_publish_count += 1
 
     def _publish_velocity_command(self, command: VelocityCommand) -> None:
         """Publish one already-validated command from the sole motion edge."""
@@ -729,34 +737,6 @@ class SimpleWaypointFollowerNode(
         )
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def run_simple_waypoint_follower(
     runtime_config: ResolvedRuntimeConfig,
     waypoints: Sequence[Pose2D],
@@ -879,5 +859,79 @@ def run_simple_waypoint_follower(
             tf_listener.unregister()
         if listener_node is not None:
             listener_node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+def run_startup_active_localization_motion(
+    runtime_config: ResolvedRuntimeConfig,
+    follower_config: FollowerConfig,
+    active_config: StartupActiveLocalizationConfig,
+    *,
+    attempt_index: int,
+    controller_trace_path: Path,
+) -> StartupActiveLocalizationMotionResult:
+    """Execute one bounded active-localization turn from the sole ROS edge."""
+
+    _require_ros()
+    rclpy.init(args=None)
+    node = None
+    follower_executor = None
+    follower_executor_thread = None
+    node_added_to_follower_executor = False
+    try:
+        node = SimpleWaypointFollowerNode(
+            runtime_config,
+            (),
+            follower_config,
+            controller_trace_path=Path(controller_trace_path),
+            tf_buffer=object(),
+        )
+        node.current_route_kind = "startup_active_localization"
+        follower_executor = MultiThreadedExecutor(
+            num_threads=FOLLOWER_EXECUTOR_NUM_THREADS,
+        )
+        node_added_to_follower_executor = follower_executor.add_node(node)
+        if not node_added_to_follower_executor:
+            raise RuntimeError(
+                "failed to add active-localization node to background executor"
+            )
+        node.enable_background_callback_service()
+        follower_executor_thread = threading.Thread(
+            target=follower_executor.spin,
+            name="aufgabe04-active-localization-callbacks",
+            daemon=False,
+        )
+        follower_executor_thread.start()
+        try:
+            return node.run_startup_active_localization(
+                active_config,
+                attempt_index=attempt_index,
+            )
+        except BaseException:
+            try:
+                node.publish_repeated_zero(
+                    count=active_config.stop_command_count
+                )
+            except BaseException:
+                pass
+            raise
+    finally:
+        if follower_executor is not None:
+            follower_executor.shutdown()
+        if (
+            follower_executor_thread is not None
+            and follower_executor_thread.ident is not None
+        ):
+            follower_executor_thread.join()
+        if (
+            follower_executor is not None
+            and node is not None
+            and node_added_to_follower_executor
+        ):
+            follower_executor.remove_node(node)
+        if node is not None:
+            node.disable_background_callback_service()
+            node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

@@ -21,6 +21,7 @@ loaded logistics mission or a two-robot run; see
 | `navigation/runtime_localization_reseal.py` | Classify the exact global-consistency zero/reseal contract and enforce its retry budget | None |
 | `navigation/runtime_motion_authorization.py` | Bind the mission-level `RUN` to one exact, same-target runtime-localization recovery child and its fresh artifacts | None |
 | `navigation/runtime_motion_consumption.py` | Atomically consume that exact child permit once and reject replay before follower motion | None |
+| `navigation/localization/startup_active_localization.py` | Validate the bounded rotation policy and content-hashed `LOCALIZE` evidence without ROS | None |
 | `navigation/mission_leg_motion_permit.py` | Bind one mission-level `RUN` to separately sealed routine coverage, candidate, and opposite-face child legs | None |
 | `navigation/mission_leg_motion_consumption.py` | Atomically consume each exact routine-leg permit once immediately before motion | None |
 | `navigation/startup_reseal_motion_authorization.py` | Bind the mission-level `RUN` to an exact bounded same-target pre-motion recovery and its fresh artifacts | None |
@@ -33,6 +34,8 @@ loaded logistics mission or a two-robot run; see
 | `real_robot/execution/artifact_paths.py` | Canonicalize existing sealed child artifacts so dry evidence, permits, and live argv bind one filesystem identity | None |
 | `real_robot/execution/child_runner.py` | Build child-runner and bundle argv, and parse one unambiguous append-only terminal outcome | None |
 | `real_robot/readiness/localization.py` | Classify the one bounded no-motion retryable uncertainty-admission failure without changing any limit | None |
+| `real_robot/readiness/active_localization.py` | Catch only a typed initial route-uncertainty rejection, require a bounded localization child, admit fresh stopped AMCL, and retry planning | None; injected effects only |
+| `real_robot/execution/startup_active_localization.py` | Bind one child process to the rejected selection, `LOCALIZE` authorization, controller trace, stopped-odom proof, and immutable result | Delegates only to the sole waypoint-follower motion edge |
 | `real_robot/mission/session_manifest.py` | Snapshot and content-hash resumable coverage checkpoints and terminal survey evidence; manifests explicitly authorize no motion | None |
 | `real_robot/mission/checkpoint_resume.py` | Re-hash, restore, and freshly replan one next coverage leg in a new session | None |
 | `real_robot/coverage_leg/replanning.py` | Rebuild a coverage leg from admitted startup/runtime-localization evidence while preserving bounded transient-overlay continuity | None; offline route/artifact reconstruction only |
@@ -355,6 +358,38 @@ rejection writes
 requesting `RUN`, and issues no motion authorization or permit. If the bounded
 budget expires, leave the robot stopped, correct the pose, and start a fresh
 session ID; failed session directories remain immutable evidence.
+
+For the exact-two physical workflow, startup active localization is an
+explicit opt-in fallback for a narrower condition: the first stopped AMCL
+admission has already passed, but the typed startup route selector rejects
+every reachable initial route on its unchanged uncertainty budget. Enable it
+with `--enable-startup-active-localization`. The parent then requests a
+separate typed `LOCALIZE`, never `RUN`, for one odometry-measured in-place
+rotation. The default is one near-full revolution at `0.12 rad/s`, bounded by
+`70 s`; translation commands are forbidden, measured translation above
+`0.03 m` stops the phase, and fresh LiDAR, odometry, a `0.20 m` scan envelope,
+exclusive `/cmd_vel` ownership, repeated zero commands, and a stopped odometry
+pair are mandatory. Afterward, the parent performs a fresh stationary AMCL/TF
+admission and retries initial planning with new attempt-specific evidence.
+Only a new successful plan can reach the later, separate typed `RUN` prompt.
+
+The phase does not recover a failed initial AMCL preflight, a generic planner
+error, an obstacle stop, or any failure after mission motion. It never changes
+the `0.03 m` certified route tube, uncertainty sigma multiplier, collision
+margin, or route-clearance admission. Its evidence is stored under
+`startup_active_localization/attempt_<index>/`, including the rejected route
+selection, content-hashed preflight/authorization/result, controller trace,
+semantic events, and post-motion preplanning localization receipt. For a
+reviewed experiment, use the explicit defaults (or tighter previously
+validated values):
+
+```bash
+  --enable-startup-active-localization \
+  --max-startup-active-localization-attempts 1 \
+  --startup-active-localization-rotation-rad 6.283185307179586 \
+  --startup-active-localization-angular-speed-radps 0.12 \
+  --startup-active-localization-timeout-sec 70
+```
 
 This readiness receipt is advisory, not a motion permit. After the operator
 types `RUN`, the normal execution path independently seals the route again and

@@ -1,4 +1,0 @@
-interface:
-  display_name: "Subagent Feedback Loop Review"
-  short_description: "Iteratively review plans with local project reviewer subagents."
-  default_prompt: "Use $subagent-feedback-loop-review to review this idea with the local project subagents in the required feedback loop."

@@ -1,4 +1,0 @@
-interface:
-  display_name: "Sim2Real Data Analysis"
-  short_description: "Analyze AMR endpoint and navigation CSVs"
-  default_prompt: "Use $sim2real-data-analysis to compare my AMR Sim2Real CSV results."

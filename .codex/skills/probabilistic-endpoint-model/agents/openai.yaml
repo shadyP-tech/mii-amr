@@ -1,4 +1,0 @@
-interface:
-  display_name: "Probabilistic Endpoint Model"
-  short_description: "Simple TurtleBot endpoint uncertainty"
-  default_prompt: "Use $probabilistic-endpoint-model to model TurtleBot endpoint uncertainty for Aufgabe 2."

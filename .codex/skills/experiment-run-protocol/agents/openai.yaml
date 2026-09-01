@@ -1,4 +1,0 @@
-interface:
-  display_name: "Experiment Run Protocol"
-  short_description: "Plan repeatable AMR robot experiment runs"
-  default_prompt: "Use $experiment-run-protocol to prepare a reproducible AMR experiment run."
