@@ -12,6 +12,7 @@ import math
 from pathlib import Path
 import re
 import sys
+from typing import Mapping
 
 ROOT = Path(__file__).resolve().parents[4]
 if str(ROOT) not in sys.path:
@@ -37,7 +38,7 @@ from scripts.aufgabe04.navigation.approach.exact_two_camera_admission import (
     exact_two_camera_handoff_sha256,
     load_exact_two_camera_handoff,
     require_handoff_candidate_support,
-    validate_live_candidate_snapshot_binding,
+    validate_live_exact_two_camera_population_binding,
 )
 from scripts.aufgabe04.navigation.approach.camera_decision_geometry_binding import (
     CAMERA_DECISION_PROJECTED_RECEIPT_SCHEMA_VERSION,
@@ -188,10 +189,6 @@ def _require_live_snapshot_registry_geometry(
         candidate.candidate_uid: candidate
         for candidate in registry.candidates
     }
-    if set(snapshot.candidate_uids) != set(registry_by_uid):
-        raise ValueError(
-            "candidate snapshot UID population differs from live registry"
-        )
     for frozen in snapshot.candidates:
         live = registry_by_uid[frozen.candidate_uid]
         sealed_evidence = require_handoff_candidate_support(
@@ -262,6 +259,7 @@ def _validate_exact_two_decision_contract(
     projection_path: Path | None,
     plan: CoverageSurveyPlan,
     registry: StandSurveyRegistry,
+    authenticated_decision_statuses: Mapping[str, str] | None = None,
 ) -> FrozenCandidate:
     if not _paths_match(
         receipt["exact_two_camera_handoff_path"], handoff_path
@@ -296,10 +294,12 @@ def _validate_exact_two_decision_contract(
         snapshot
     ):
         raise ValueError("receipt candidate snapshot SHA-256 mismatch")
-    validate_live_candidate_snapshot_binding(
+    validate_live_exact_two_camera_population_binding(
         handoff,
         snapshot,
+        registry,
         candidate_snapshot_path=snapshot_path,
+        authenticated_decision_statuses=authenticated_decision_statuses,
     )
     _require_live_snapshot_registry_geometry(snapshot, registry, handoff)
 
@@ -332,11 +332,15 @@ def _validate_exact_two_decision_contract(
                 receipt,
                 canonical_snapshot_path=snapshot_path,
                 canonical_snapshot=snapshot,
+                handoff=handoff,
                 registry=registry,
                 source_registry_sha256=handoff.source_registry_sha256,
                 camera_snapshot_path=camera_snapshot_path,
                 projection_path=projection_path,
                 candidate_uid=candidate_uid,
+                authenticated_decision_statuses=(
+                    authenticated_decision_statuses
+                ),
             )
         )
     elif camera_snapshot_path is not None or projection_path is not None:
@@ -349,6 +353,88 @@ def _validate_exact_two_decision_contract(
         planning_frame=plan.planning_frame,
     )
     return candidate
+
+
+def _load_authenticated_canonical_decision_statuses(
+    *,
+    survey_root: Path,
+    handoff: ExactTwoCameraHandoffArtifact,
+    handoff_path: Path,
+    snapshot_path: Path,
+    plan: CoverageSurveyPlan,
+    registry: StandSurveyRegistry,
+) -> dict[str, str]:
+    """Authenticate receipts for selected lifecycle changes already stored."""
+
+    evidence_by_uid = {
+        evidence.candidate_uid: evidence
+        for evidence in handoff.admission_decision.candidate_evidence
+    }
+    selected_uids = set(handoff.admission_decision.selected_candidate_uids)
+    changed_statuses: dict[str, str] = {}
+    for candidate in registry.candidates:
+        if candidate.candidate_uid not in selected_uids:
+            continue
+        sealed_status = evidence_by_uid[candidate.candidate_uid].registry_status
+        if candidate.status != sealed_status:
+            changed_statuses[candidate.candidate_uid] = candidate.status
+    if not changed_statuses:
+        return {}
+
+    canonical_receipts: dict[str, dict[str, object]] = {}
+    decisions_dir = Path(survey_root) / "decisions"
+    for candidate_uid, status in changed_statuses.items():
+        canonical_path = decisions_dir / f"{candidate_uid}.json"
+        if not canonical_path.is_file():
+            raise ValueError(
+                "selected candidate lifecycle transition has no canonical "
+                f"decision receipt: {candidate_uid!r}"
+            )
+        receipt = _load_receipt(
+            canonical_path,
+            survey_id=plan.survey_id,
+        )
+        if (
+            receipt["schema_version"] not in {2, 3}
+            or receipt["candidate_uid"] != candidate_uid
+            or receipt["decision"] != status
+        ):
+            raise ValueError(
+                "canonical decision receipt does not match selected "
+                f"candidate lifecycle: {candidate_uid!r}"
+            )
+        canonical_receipts[candidate_uid] = receipt
+
+    # The complete status map is supplied while validating every receipt so
+    # that sequential decisions can authenticate the same state-aware source
+    # registry.  The map is returned only after every receipt passes its full
+    # handoff, snapshot, support, camera-evidence, and projection contracts.
+    for candidate_uid, receipt in canonical_receipts.items():
+        projected = (
+            receipt["schema_version"]
+            == CAMERA_DECISION_PROJECTED_RECEIPT_SCHEMA_VERSION
+        )
+        _validate_exact_two_decision_contract(
+            receipt,
+            handoff_path=handoff_path,
+            snapshot_path=snapshot_path,
+            camera_snapshot_path=(
+                Path(str(receipt["camera_candidate_snapshot_path"]))
+                if projected
+                else None
+            ),
+            projection_path=(
+                Path(str(receipt["candidate_frame_projection_path"]))
+                if projected
+                else None
+            ),
+            plan=plan,
+            registry=registry,
+            authenticated_decision_statuses=changed_statuses,
+        )
+        if candidate_uid != receipt["candidate_uid"]:
+            raise ValueError("canonical decision receipt candidate mismatch")
+    return changed_statuses
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -425,6 +511,17 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError(
                     "schema_version 2 exact-two arguments are incomplete"
                 )
+            handoff = load_exact_two_camera_handoff(handoff_json)
+            authenticated_decision_statuses = (
+                _load_authenticated_canonical_decision_statuses(
+                    survey_root=args.survey_root,
+                    handoff=handoff,
+                    handoff_path=handoff_json,
+                    snapshot_path=snapshot_json,
+                    plan=plan,
+                    registry=registry,
+                )
+            )
             _validate_exact_two_decision_contract(
                 receipt,
                 handoff_path=handoff_json,
@@ -433,6 +530,9 @@ def main(argv: list[str] | None = None) -> int:
                 projection_path=args.candidate_frame_projection_json,
                 plan=plan,
                 registry=registry,
+                authenticated_decision_statuses=(
+                    authenticated_decision_statuses
+                ),
             )
             if current.status not in {
                 STATUS_PENDING_CAMERA,

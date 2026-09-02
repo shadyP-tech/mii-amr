@@ -28,6 +28,12 @@ from scripts.aufgabe04.navigation.approach.candidate_frame_reprojection import (
     CandidateFrameReprojectionResult,
     reproject_candidate_point,
 )
+from scripts.aufgabe04.navigation.approach.exact_two_camera_population_binding import (
+    validate_live_exact_two_camera_population_binding,
+)
+from scripts.aufgabe04.navigation.approach.exact_two_camera_contract import (
+    ExactTwoCameraHandoffArtifact,
+)
 from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import (
     REAL_VIEWPOINT_SOURCE,
     load_recommendation,
@@ -121,10 +127,12 @@ def require_projected_camera_candidate_binding(
     canonical_snapshot_path: Path,
     canonical_snapshot: CandidateSnapshot,
     registry: StandSurveyRegistry,
-    source_registry_sha256: str,
+    source_registry_sha256: str | None = None,
     camera_snapshot_path: Path,
     projection_path: Path,
     candidate_uid: str,
+    handoff: ExactTwoCameraHandoffArtifact | None = None,
+    authenticated_decision_statuses: Mapping[str, str] | None = None,
 ) -> FrozenCandidate:
     """Return the authenticated projected candidate named by a v3 receipt."""
 
@@ -163,9 +171,18 @@ def require_projected_camera_candidate_binding(
     if projection["source_candidate_snapshot_sha256"] != canonical_sha256:
         raise ValueError("frame projection source snapshot SHA-256 mismatch")
     sealed_registry_sha256 = _require_sha256(
-        source_registry_sha256,
+        (
+            handoff.source_registry_sha256
+            if source_registry_sha256 is None and handoff is not None
+            else source_registry_sha256
+        ),
         "source_registry_sha256",
     )
+    if (
+        handoff is not None
+        and handoff.source_registry_sha256 != sealed_registry_sha256
+    ):
+        raise ValueError("camera handoff source registry SHA-256 mismatch")
     if projection["source_registry_sha256"] != sealed_registry_sha256:
         raise ValueError("frame projection source registry SHA-256 mismatch")
 
@@ -193,12 +210,23 @@ def require_projected_camera_candidate_binding(
     if set(reprojections) != expected_uids:
         raise ValueError("frame projection candidate population mismatch")
 
-    registry_by_uid = {
-        candidate.candidate_uid: candidate
-        for candidate in registry.candidates
-    }
-    if set(registry_by_uid) != expected_uids:
-        raise ValueError("frame projection registry population mismatch")
+    if handoff is None:
+        registry_by_uid = {
+            candidate.candidate_uid: candidate
+            for candidate in registry.candidates
+        }
+        if set(registry_by_uid) != expected_uids:
+            raise ValueError("frame projection registry population mismatch")
+    else:
+        registry_by_uid = validate_live_exact_two_camera_population_binding(
+            handoff,
+            canonical_snapshot,
+            registry,
+            candidate_snapshot_path=canonical_snapshot_path,
+            authenticated_decision_statuses=(
+                authenticated_decision_statuses
+            ),
+        )
 
     expected_candidates: list[FrozenCandidate] = []
     for canonical_candidate in canonical_snapshot.candidates:

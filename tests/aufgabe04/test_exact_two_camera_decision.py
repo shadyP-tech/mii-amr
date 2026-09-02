@@ -25,6 +25,9 @@ from scripts.aufgabe04.navigation.approach.exact_two_camera_admission import (
     write_exact_two_camera_admission,
     write_exact_two_camera_handoff,
 )
+from scripts.aufgabe04.navigation.approach.exact_two_camera_population_binding import (
+    validate_live_exact_two_camera_population_binding,
+)
 from scripts.aufgabe04.navigation.approach.candidate_frame_projection import (
     CandidatePlanningFrame,
     project_candidate_snapshot_to_planning_frame,
@@ -35,6 +38,7 @@ from scripts.aufgabe04.navigation.approach.candidate_frame_reprojection import (
 )
 from scripts.aufgabe04.navigation.approach.camera_decision_geometry_binding import (
     CameraCandidateFrameBinding,
+    require_projected_camera_candidate_binding,
 )
 from scripts.aufgabe04.navigation.coverage.coverage_candidate_lifecycle import (
     evaluate_exact_two_lidar_checkpoint,
@@ -47,9 +51,11 @@ from scripts.aufgabe04.navigation.approach.record_stand_candidate_decision impor
     main as record_candidate_decision,
 )
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
+    REJECTION_BASIS_CAMERA,
+    REJECTION_BASIS_NEGATIVE_VISIBILITY,
     STATUS_CONFIRMED,
     STATUS_PROVISIONAL,
-    decide_candidate,
+    STATUS_REJECTED,
     load_stand_survey_registry,
     stand_survey_registry_sha256,
     write_coverage_survey_plan,
@@ -133,9 +139,37 @@ def _fixture(
     root: Path,
     *,
     boundary_uid: str | None = None,
+    with_boundary_audit_only_extra: bool = False,
     with_frame_provenance: bool = False,
 ):
     plan, progress, registry, _, admission = _ready_inputs()
+    if with_boundary_audit_only_extra:
+        template = registry.candidates[-1]
+        registry = replace(
+            registry,
+            candidates=(
+                *registry.candidates,
+                replace(
+                    template,
+                    candidate_uid="survey_candidate_0006",
+                    x_m=1.50,
+                    y_m=0.60,
+                    first_seen_sec=16.0,
+                    last_seen_sec=17.0,
+                    source_observation_ids=("observation_0006",),
+                    static_map_disposition=(
+                        STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL
+                    ),
+                ),
+            ),
+        )
+        lidar = evaluate_exact_two_lidar_checkpoint(plan, progress, registry)
+        admission = evaluate_exact_two_camera_admission(
+            plan,
+            progress,
+            registry,
+            lidar,
+        )
     if with_frame_provenance:
         registry = replace(
             registry,
@@ -479,6 +513,90 @@ class ExactTwoCameraDecisionTest(unittest.TestCase):
                 _sha256(Path(stored["camera_evidence_path"])),
             )
 
+    def test_schema_v2_commits_sequential_selected_candidates_with_sealed_boundary_extra(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = _fixture(
+                root,
+                with_boundary_audit_only_extra=True,
+            )
+            first_uid = "survey_candidate_0001"
+            second_uid = "survey_candidate_0003"
+
+            self.assertEqual(len(fixture.registry.candidates), 6)
+            self.assertEqual(len(fixture.snapshot.candidates), 5)
+            self.assertEqual(
+                fixture.handoff.admission_decision.selected_candidate_uids,
+                tuple(
+                    f"survey_candidate_{index:04d}"
+                    for index in range(1, 6)
+                ),
+            )
+            self.assertEqual(
+                fixture.handoff.admission_decision.boundary_audit_only_candidate_uids,
+                ("survey_candidate_0006",),
+            )
+            self.assertEqual(
+                fixture.handoff.admission_decision.excluded_candidate_uids,
+                ("survey_candidate_0006",),
+            )
+            self.assertEqual(
+                fixture.handoff.source_registry_sha256,
+                stand_survey_registry_sha256(fixture.registry),
+            )
+
+            first_receipt = _write_exact_two_receipt(
+                fixture,
+                root,
+                first_uid,
+            )
+            second_receipt = _write_exact_two_receipt(
+                fixture,
+                root,
+                second_uid,
+            )
+            first_payload = json.loads(first_receipt.read_text())
+            first_payload["decision"] = STATUS_REJECTED
+            first_receipt.write_text(
+                json.dumps(first_payload, indent=2, sort_keys=True) + "\n"
+            )
+            with redirect_stdout(StringIO()):
+                self.assertEqual(_record(fixture, first_receipt), 0)
+                self.assertEqual(_record(fixture, second_receipt), 0)
+
+            registry = load_stand_survey_registry(
+                fixture.survey_root / "stand_registry.json",
+                fixture.plan,
+            )
+            self.assertEqual(
+                registry.candidate_for(first_uid).status,
+                STATUS_REJECTED,
+            )
+            self.assertEqual(
+                registry.candidate_for(second_uid).status,
+                STATUS_CONFIRMED,
+            )
+            self.assertEqual(
+                registry.candidate_for("survey_candidate_0006").status,
+                STATUS_PROVISIONAL,
+            )
+            self.assertTrue(
+                (
+                    fixture.survey_root
+                    / "decisions"
+                    / f"{first_uid}.json"
+                ).is_file()
+            )
+            self.assertTrue(
+                (
+                    fixture.survey_root
+                    / "decisions"
+                    / f"{second_uid}.json"
+                ).is_file()
+            )
+
     def test_schema_v3_accepts_authenticated_arrival_projected_geometry(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -536,10 +654,63 @@ class ExactTwoCameraDecisionTest(unittest.TestCase):
                 stand_survey_registry_sha256(fixture.registry),
             )
 
-    def test_schema_v3_accepts_after_another_candidate_status_changes(self):
+    def test_schema_v3_accepts_projected_selected_candidate_with_sealed_boundary_extra(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            fixture = _fixture(root, with_frame_provenance=True)
+            fixture = _fixture(
+                root,
+                with_boundary_audit_only_extra=True,
+                with_frame_provenance=True,
+            )
+            uid = "survey_candidate_0003"
+            decision = _write_projected_exact_two_receipt(
+                fixture,
+                root,
+                uid,
+            )
+            receipt = json.loads(decision.receipt_path.read_text())
+
+            bound_candidate = require_projected_camera_candidate_binding(
+                receipt,
+                canonical_snapshot_path=fixture.snapshot_path,
+                canonical_snapshot=fixture.snapshot,
+                handoff=fixture.handoff,
+                registry=fixture.registry,
+                camera_snapshot_path=(
+                    decision.frame_binding.projected_snapshot_path
+                ),
+                projection_path=decision.frame_binding.evidence_path,
+                candidate_uid=uid,
+            )
+            self.assertEqual(bound_candidate, decision.camera_candidate)
+
+            with redirect_stdout(StringIO()):
+                result = _record(fixture, decision.receipt_path)
+
+            registry = load_stand_survey_registry(
+                fixture.survey_root / "stand_registry.json",
+                fixture.plan,
+            )
+            self.assertEqual(result, 0)
+            self.assertEqual(
+                registry.candidate_for(uid).status,
+                STATUS_CONFIRMED,
+            )
+            self.assertEqual(
+                registry.candidate_for("survey_candidate_0006").status,
+                STATUS_PROVISIONAL,
+            )
+
+    def test_schema_v3_accepts_after_another_canonical_decision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = _fixture(
+                root,
+                with_boundary_audit_only_extra=True,
+                with_frame_provenance=True,
+            )
             projected_uid = "survey_candidate_0003"
             previously_decided_uid = "survey_candidate_0001"
             decision = _write_projected_exact_two_receipt(
@@ -550,23 +721,17 @@ class ExactTwoCameraDecisionTest(unittest.TestCase):
             proof = json.loads(
                 decision.frame_binding.evidence_path.read_text()
             )
-
-            changed_registry = decide_candidate(
-                fixture.registry,
+            prior_receipt = _write_exact_two_receipt(
+                fixture,
+                root,
                 previously_decided_uid,
-                status=STATUS_CONFIRMED,
             )
-            original_other = fixture.registry.candidate_for(
-                previously_decided_uid
-            )
-            changed_other = changed_registry.candidate_for(
-                previously_decided_uid
-            )
-            assert original_other is not None
-            assert changed_other is not None
-            self.assertEqual(
-                replace(changed_other, status=original_other.status),
-                original_other,
+            with redirect_stdout(StringIO()):
+                self.assertEqual(_record(fixture, prior_receipt), 0)
+
+            changed_registry = load_stand_survey_registry(
+                fixture.survey_root / "stand_registry.json",
+                fixture.plan,
             )
             self.assertNotEqual(
                 stand_survey_registry_sha256(changed_registry),
@@ -575,11 +740,6 @@ class ExactTwoCameraDecisionTest(unittest.TestCase):
             self.assertEqual(
                 proof["source_registry_sha256"],
                 fixture.handoff.source_registry_sha256,
-            )
-            write_stand_survey_registry(
-                fixture.survey_root / "stand_registry.json",
-                changed_registry,
-                fixture.plan,
             )
 
             with redirect_stdout(StringIO()):
@@ -1114,6 +1274,321 @@ class ExactTwoCameraDecisionTest(unittest.TestCase):
                 registry.candidate_for(uid).status,
                 STATUS_PROVISIONAL,
             )
+
+    def test_selected_decision_rejects_unsealed_or_mutated_registry_extra(self):
+        for failure in ("unsealed_extra", "mutated_sealed_extra"):
+            with self.subTest(failure=failure):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    fixture = _fixture(
+                        root,
+                        with_boundary_audit_only_extra=(
+                            failure == "mutated_sealed_extra"
+                        ),
+                    )
+                    uid = "survey_candidate_0003"
+                    receipt_path = _write_exact_two_receipt(
+                        fixture,
+                        root,
+                        uid,
+                    )
+                    extra = (
+                        fixture.registry.candidate_for(
+                            "survey_candidate_0006"
+                        )
+                        if failure == "mutated_sealed_extra"
+                        else replace(
+                            fixture.registry.candidates[-1],
+                            candidate_uid="survey_candidate_0006",
+                            x_m=1.50,
+                            y_m=0.60,
+                            first_seen_sec=16.0,
+                            last_seen_sec=17.0,
+                            source_observation_ids=("observation_0006",),
+                            static_map_disposition=(
+                                STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL
+                            ),
+                        )
+                    )
+                    assert extra is not None
+                    if failure == "mutated_sealed_extra":
+                        extra = replace(extra, x_m=extra.x_m + 0.01)
+                        changed_candidates = tuple(
+                            extra
+                            if candidate.candidate_uid
+                            == extra.candidate_uid
+                            else candidate
+                            for candidate in fixture.registry.candidates
+                        )
+                    else:
+                        changed_candidates = (
+                            *fixture.registry.candidates,
+                            extra,
+                        )
+                    changed_registry = replace(
+                        fixture.registry,
+                        candidates=changed_candidates,
+                    )
+                    write_stand_survey_registry(
+                        fixture.survey_root / "stand_registry.json",
+                        changed_registry,
+                        fixture.plan,
+                    )
+
+                    with redirect_stderr(StringIO()):
+                        with self.assertRaises(SystemExit):
+                            _record(fixture, receipt_path)
+
+                    registry = load_stand_survey_registry(
+                        fixture.survey_root / "stand_registry.json",
+                        fixture.plan,
+                    )
+                    self.assertEqual(
+                        registry.candidate_for(uid).status,
+                        STATUS_PROVISIONAL,
+                    )
+                    self.assertFalse(
+                        (
+                            fixture.survey_root
+                            / "decisions"
+                            / f"{uid}.json"
+                        ).exists()
+                    )
+
+    def test_projected_binding_rejects_mutated_sealed_boundary_extra(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = _fixture(
+                root,
+                with_boundary_audit_only_extra=True,
+                with_frame_provenance=True,
+            )
+            uid = "survey_candidate_0003"
+            decision = _write_projected_exact_two_receipt(
+                fixture,
+                root,
+                uid,
+            )
+            receipt = json.loads(decision.receipt_path.read_text())
+            excluded = fixture.registry.candidate_for(
+                "survey_candidate_0006"
+            )
+            assert excluded is not None
+            changed_registry = replace(
+                fixture.registry,
+                candidates=tuple(
+                    replace(candidate, x_m=candidate.x_m + 0.01)
+                    if candidate.candidate_uid == excluded.candidate_uid
+                    else candidate
+                    for candidate in fixture.registry.candidates
+                ),
+            )
+
+            with self.assertRaises(ValueError):
+                require_projected_camera_candidate_binding(
+                    receipt,
+                    canonical_snapshot_path=fixture.snapshot_path,
+                    canonical_snapshot=fixture.snapshot,
+                    handoff=fixture.handoff,
+                    registry=changed_registry,
+                    camera_snapshot_path=(
+                        decision.frame_binding.projected_snapshot_path
+                    ),
+                    projection_path=decision.frame_binding.evidence_path,
+                    candidate_uid=uid,
+                )
+
+    def test_population_binding_rejects_unsealed_lifecycle_transitions(self):
+        mutations = (
+            (
+                "selected_confirmed_without_receipt",
+                "survey_candidate_0001",
+                STATUS_CONFIRMED,
+                None,
+            ),
+            (
+                "selected_camera_rejected_without_receipt",
+                "survey_candidate_0001",
+                STATUS_REJECTED,
+                REJECTION_BASIS_CAMERA,
+            ),
+            (
+                "selected_rejected_without_basis",
+                "survey_candidate_0001",
+                STATUS_REJECTED,
+                None,
+            ),
+            (
+                "selected_rejected_for_non_camera_reason",
+                "survey_candidate_0001",
+                STATUS_REJECTED,
+                REJECTION_BASIS_NEGATIVE_VISIBILITY,
+            ),
+            (
+                "excluded_candidate_confirmed",
+                "survey_candidate_0006",
+                STATUS_CONFIRMED,
+                None,
+            ),
+        )
+        for failure, uid, status, rejection_basis in mutations:
+            with self.subTest(failure=failure):
+                with tempfile.TemporaryDirectory() as tmp:
+                    fixture = _fixture(
+                        Path(tmp),
+                        with_boundary_audit_only_extra=True,
+                    )
+                    changed_registry = replace(
+                        fixture.registry,
+                        candidates=tuple(
+                            replace(
+                                candidate,
+                                status=status,
+                                rejection_basis=rejection_basis,
+                            )
+                            if candidate.candidate_uid == uid
+                            else candidate
+                            for candidate in fixture.registry.candidates
+                        ),
+                    )
+
+                    with self.assertRaises(ValueError):
+                        validate_live_exact_two_camera_population_binding(
+                            fixture.handoff,
+                            fixture.snapshot,
+                            changed_registry,
+                            candidate_snapshot_path=fixture.snapshot_path,
+                        )
+
+    def test_recorder_rejects_selected_lifecycle_edit_without_canonical_receipt(
+        self,
+    ):
+        transitions = (
+            (STATUS_CONFIRMED, None),
+            (STATUS_REJECTED, REJECTION_BASIS_CAMERA),
+        )
+        for status, rejection_basis in transitions:
+            with self.subTest(status=status):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    fixture = _fixture(
+                        root,
+                        with_boundary_audit_only_extra=True,
+                    )
+                    changed_uid = "survey_candidate_0001"
+                    current_uid = "survey_candidate_0003"
+                    current_receipt = _write_exact_two_receipt(
+                        fixture,
+                        root,
+                        current_uid,
+                    )
+                    changed_registry = replace(
+                        fixture.registry,
+                        candidates=tuple(
+                            replace(
+                                candidate,
+                                status=status,
+                                rejection_basis=rejection_basis,
+                            )
+                            if candidate.candidate_uid == changed_uid
+                            else candidate
+                            for candidate in fixture.registry.candidates
+                        ),
+                    )
+                    write_stand_survey_registry(
+                        fixture.survey_root / "stand_registry.json",
+                        changed_registry,
+                        fixture.plan,
+                    )
+
+                    with redirect_stderr(StringIO()):
+                        with self.assertRaises(SystemExit):
+                            _record(fixture, current_receipt)
+
+                    registry = load_stand_survey_registry(
+                        fixture.survey_root / "stand_registry.json",
+                        fixture.plan,
+                    )
+                    self.assertEqual(
+                        registry.candidate_for(changed_uid).status,
+                        status,
+                    )
+                    self.assertEqual(
+                        registry.candidate_for(current_uid).status,
+                        STATUS_PROVISIONAL,
+                    )
+                    self.assertFalse(
+                        (fixture.survey_root / "decisions").exists()
+                    )
+
+    def test_recorder_rejects_mismatched_or_unauthenticated_prior_receipt(
+        self,
+    ):
+        mutations = {
+            "lifecycle_status_mismatch": lambda receipt: receipt.__setitem__(
+                "decision", STATUS_REJECTED
+            ),
+            "camera_evidence_hash_mismatch": lambda receipt: receipt.__setitem__(
+                "camera_recommendation_sha256", "d" * 64
+            ),
+        }
+        for failure, mutate in mutations.items():
+            with self.subTest(failure=failure):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    fixture = _fixture(
+                        root,
+                        with_boundary_audit_only_extra=True,
+                    )
+                    prior_uid = "survey_candidate_0001"
+                    current_uid = "survey_candidate_0003"
+                    prior_receipt = _write_exact_two_receipt(
+                        fixture,
+                        root,
+                        prior_uid,
+                    )
+                    current_receipt = _write_exact_two_receipt(
+                        fixture,
+                        root,
+                        current_uid,
+                    )
+                    with redirect_stdout(StringIO()):
+                        self.assertEqual(_record(fixture, prior_receipt), 0)
+
+                    canonical_path = (
+                        fixture.survey_root
+                        / "decisions"
+                        / f"{prior_uid}.json"
+                    )
+                    canonical = json.loads(canonical_path.read_text())
+                    mutate(canonical)
+                    canonical_path.write_text(
+                        json.dumps(canonical, indent=2, sort_keys=True) + "\n"
+                    )
+
+                    with redirect_stderr(StringIO()):
+                        with self.assertRaises(SystemExit):
+                            _record(fixture, current_receipt)
+
+                    registry = load_stand_survey_registry(
+                        fixture.survey_root / "stand_registry.json",
+                        fixture.plan,
+                    )
+                    self.assertEqual(
+                        registry.candidate_for(prior_uid).status,
+                        STATUS_CONFIRMED,
+                    )
+                    self.assertEqual(
+                        registry.candidate_for(current_uid).status,
+                        STATUS_PROVISIONAL,
+                    )
+                    self.assertFalse(
+                        (
+                            fixture.survey_root
+                            / "decisions"
+                            / f"{current_uid}.json"
+                        ).exists()
+                    )
 
     def test_schema_v1_standard_mode_keeps_provisional_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

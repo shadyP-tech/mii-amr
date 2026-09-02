@@ -37,6 +37,9 @@ from scripts.aufgabe04.navigation.approach.exact_two_camera_artifacts import (
     write_exact_two_camera_admission,
     write_exact_two_camera_handoff,
 )
+from scripts.aufgabe04.navigation.approach.exact_two_camera_population_binding import (
+    validate_live_exact_two_camera_population_binding,
+)
 from scripts.aufgabe04.navigation.approach.exact_two_camera_contract import (
     EXACT_TWO_CAMERA_ADMISSION_SCHEMA_VERSION,
     EXACT_TWO_CAMERA_HANDOFF_SCHEMA_VERSION,
@@ -455,6 +458,7 @@ __all__ = [
     "validate_exact_two_camera_admission",
     "validate_exact_two_camera_handoff",
     "validate_live_candidate_snapshot_binding",
+    "validate_live_exact_two_camera_population_binding",
     "validate_live_registry_binding",
     "write_exact_two_camera_admission",
     "write_exact_two_camera_handoff",

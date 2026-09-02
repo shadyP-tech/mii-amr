@@ -175,6 +175,7 @@ class ExactTwoCameraAdmissionDecisionTest(unittest.TestCase):
             root / "scripts/aufgabe04/navigation/approach/exact_two_camera_admission.py",
             root / "scripts/aufgabe04/navigation/approach/exact_two_camera_contract.py",
             root / "scripts/aufgabe04/navigation/approach/exact_two_camera_artifacts.py",
+            root / "scripts/aufgabe04/navigation/approach/exact_two_camera_population_binding.py",
         )
         forbidden_roots = {"rclpy", "subprocess"}
         contract_types = {
