@@ -1334,6 +1334,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
         initial_sensor_wait_sec=args.initial_sensor_wait_sec,
         waypoint_timeout_sec=args.waypoint_timeout_sec,
+        terminal_heading_timeout_sec=args.terminal_heading_timeout_sec,
         stuck_timeout_sec=args.stuck_timeout_sec,
         stuck_progress_epsilon_m=args.stuck_progress_epsilon_m,
         stuck_heading_progress_epsilon_rad=(
@@ -1458,6 +1459,10 @@ def main(argv: list[str] | None = None) -> int:
             else {}
         ),
         controller_trace_jsonl=str(args.controller_trace_jsonl or ""),
+        waypoint_timeout_sec=follower_config.waypoint_timeout_sec,
+        terminal_heading_timeout_sec=(
+            follower_config.terminal_heading_timeout_sec
+        ),
         effective_goal_tolerance_m=resolved_terminal_goal_tolerance_m,
         effective_intermediate_goal_tolerance_m=(
             resolved_controller_config.goal_tolerance_m

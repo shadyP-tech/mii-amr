@@ -50,6 +50,7 @@ from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.control_r
     acquisition_goal_stop_details,
     certified_corner_stop_details,
     certified_static_start_stop_details,
+    terminal_heading_timeout_stop_details,
     waypoint_timeout_stop_details,
     with_controller_trace_failure,
     with_route_check_error,
@@ -59,6 +60,11 @@ from scripts.aufgabe04.navigation.waypoint_follower.startup import (
     StartupPoseAdmissionAction,
     StartupPoseAdmissionDecision,
     certified_static_startup_decision,
+)
+from scripts.aufgabe04.navigation.waypoint_follower.terminal_heading_budget import (
+    TerminalHeadingBudgetState,
+    reset_terminal_heading_budget,
+    terminal_heading_budget_decision,
 )
 
 
@@ -89,6 +95,17 @@ class StepCycleGuardDecision:
 
 class StepCycleGuardRuntimeMixin:
     """Turn one accepted pose into a route- and lifecycle-admitted step."""
+
+    def _reset_terminal_heading_budget(
+        self,
+        *,
+        target_index: int | None = None,
+    ) -> None:
+        """Reset the final-heading clock at an explicit lifecycle boundary."""
+
+        self.terminal_heading_budget_state = reset_terminal_heading_budget(
+            target_index=target_index,
+        )
 
     def _startup_pose_admission_decision(
         self,
@@ -151,6 +168,7 @@ class StepCycleGuardRuntimeMixin:
         selected_target_index = startup_decision.target_index
         if selected_target_index == 1:
             self.target_index = 1
+            self._reset_terminal_heading_budget(target_index=1)
             self.target_started_at = monotonic_fn()
             self._reset_progress_watchdog(monotonic_fn())
             return StartupPoseAdmissionDecision(
@@ -261,10 +279,14 @@ class StepCycleGuardRuntimeMixin:
                 target_changed=True,
             )
             self.target_index = step.target_index
+            self._reset_terminal_heading_budget(
+                target_index=step.target_index,
+            )
             self.certified_corner_latch = None
             self.target_started_at = monotonic_fn()
             self._reset_progress_watchdog(monotonic_fn())
         if step.reached_goal:
+            self._reset_terminal_heading_budget()
             now_monotonic = monotonic_fn()
             goal_decision = acquisition_goal_decision(
                 route_kind=self.current_route_kind,
@@ -307,6 +329,66 @@ class StepCycleGuardRuntimeMixin:
             timeout_elapsed,
             self.follower_config.waypoint_timeout_sec,
         )
+        terminal_heading_decision = terminal_heading_budget_decision(
+            getattr(
+                self,
+                "terminal_heading_budget_state",
+                TerminalHeadingBudgetState(target_index=self.target_index),
+            ),
+            target_index=step.target_index,
+            final_target_index=len(self.waypoints) - 1,
+            progress_mode=step.progress_mode,
+            now_monotonic=timeout_now,
+            timeout_sec=self.follower_config.terminal_heading_timeout_sec,
+            entry_allowed=not timeout_failure,
+        )
+        self.terminal_heading_budget_state = terminal_heading_decision.state
+        if terminal_heading_decision.active:
+            if not terminal_heading_decision.failure:
+                return WaypointLifecycleDecision(
+                    WaypointLifecycleAction.PROCEED
+                )
+            terminal_heading_started_at = (
+                terminal_heading_decision.state.started_at
+            )
+            assert terminal_heading_started_at is not None
+            terminal_heading_elapsed_sec = (
+                terminal_heading_decision.elapsed_sec
+            )
+            assert terminal_heading_elapsed_sec is not None
+            stop_details = terminal_heading_timeout_stop_details(
+                reason=terminal_heading_decision.failure,
+                route_kind=self.current_route_kind,
+                waypoint_elapsed_sec=timeout_elapsed,
+                waypoint_timeout_sec=(
+                    self.follower_config.waypoint_timeout_sec
+                ),
+                terminal_heading_elapsed_sec=(
+                    terminal_heading_elapsed_sec
+                ),
+                terminal_heading_timeout_sec=(
+                    self.follower_config.terminal_heading_timeout_sec
+                ),
+                terminal_heading_entry_waypoint_elapsed_sec=(
+                    terminal_heading_started_at - self.target_started_at
+                ),
+                target_index=step.target_index,
+                pursuit_index=step.pursuit_index,
+                distance_to_target_m=step.distance_to_target_m,
+                progress_mode=step.progress_mode,
+                controlled_heading_error_rad=(
+                    step.controlled_heading_error_rad
+                ),
+                robot_x_m=pose.x_m,
+                robot_y_m=pose.y_m,
+                robot_yaw_rad=pose.yaw_rad,
+            )
+            return WaypointLifecycleDecision(
+                WaypointLifecycleAction.STOP,
+                stop_reason=terminal_heading_decision.failure,
+                stop_details=stop_details,
+                evaluated_at=timeout_now,
+            )
         if not timeout_failure:
             return WaypointLifecycleDecision(
                 WaypointLifecycleAction.PROCEED

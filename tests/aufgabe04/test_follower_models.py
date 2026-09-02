@@ -1,3 +1,4 @@
+import math
 import sys
 import unittest
 from dataclasses import FrozenInstanceError
@@ -15,6 +16,9 @@ from scripts.aufgabe04.navigation.waypoint_follower.runtime import (  # noqa: E4
     tf_lookup_failure_details,
 )
 from scripts.aufgabe04.navigation.control.waypoint_controller import ControllerConfig  # noqa: E402
+from scripts.aufgabe04.navigation.waypoint_follower.terminal_heading_budget import (  # noqa: E402
+    DEFAULT_TERMINAL_HEADING_TIMEOUT_SEC,
+)
 
 
 class FollowerModelsTest(unittest.TestCase):
@@ -27,9 +31,24 @@ class FollowerModelsTest(unittest.TestCase):
         self.assertEqual(config.initial_sensor_wait_sec, 2.0)
         self.assertEqual(config.front_obstacle_slow_distance_m, 0.38)
         self.assertEqual(config.stuck_timeout_sec, 8.0)
+        self.assertEqual(
+            config.terminal_heading_timeout_sec,
+            DEFAULT_TERMINAL_HEADING_TIMEOUT_SEC,
+        )
         self.assertEqual(config.certified_corner_release_tolerance_m, 0.01)
         self.assertEqual(config.certified_corner_hold_tolerance_m, 0.025)
         self.assertEqual(config.certified_corner_max_reacquire_attempts, 2)
+
+    def test_follower_timeouts_must_be_finite_and_positive(self):
+        for field in ("waypoint_timeout_sec", "terminal_heading_timeout_sec"):
+            for value in (0.0, -1.0, math.inf, math.nan):
+                with self.subTest(field=field, value=value), self.assertRaises(
+                    ValueError
+                ):
+                    FollowerConfig(
+                        controller=ControllerConfig(),
+                        **{field: value},
+                    )
 
     def test_corner_hold_must_preserve_margin_inside_route_tube(self):
         with self.assertRaisesRegex(ValueError, "strictly inside"):

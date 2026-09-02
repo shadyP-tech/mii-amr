@@ -94,6 +94,7 @@ class RouteStepResolutionRuntimeMixin:
                         target_changed=True,
                     )
                 self.target_index = 0
+                self._reset_terminal_heading_budget(target_index=0)
                 self.target_started_at = monotonic_fn()
                 self._reset_progress_watchdog(monotonic_fn())
                 return ControlStepResolution(

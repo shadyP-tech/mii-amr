@@ -103,8 +103,10 @@ def _route_tube_stop_node(events: list[str]) -> SimpleWaypointFollowerNode:
     node.certified_corner_latch = None
     node.intermediate_terminal_heading_latch = None
     node.axis_acquisition_hold_started_at = None
+    node.axis_acquisition_target_revision = None
     node.viewpoint_sampling_started_at = None
     node.viewpoint_sampling_target_started_at = None
+    node.viewpoint_sampling_target_revision = None
     node.latest_front_clearance_details = None
     node._wait_for_initial_runtime_inputs = lambda _started_at: ""
     node._drain_runtime_callbacks = lambda: None
@@ -1137,6 +1139,144 @@ class ControlLoopOrderingTest(unittest.TestCase):
             decision.stop_details["viewpoint_sampling_target_revision"],
             7,
         )
+
+    def test_terminal_heading_gets_its_own_bounded_budget_after_long_leg(self):
+        node = _route_tube_stop_node([])
+        node.follower_config = FollowerConfig(
+            controller=ControllerConfig(),
+            waypoint_timeout_sec=45.0,
+            terminal_heading_timeout_sec=24.0,
+        )
+        node.target_started_at = 0.0
+        pose = Pose2D(0.19, 0.0, math.pi)
+        step = ControllerStep(
+            command=VelocityCommand(0.0, -0.18),
+            target_index=1,
+            reached_goal=False,
+            distance_to_target_m=0.024,
+            pursuit_index=1,
+            controlled_heading_error_rad=-math.pi,
+            progress_mode="terminal_heading",
+        )
+
+        with patch(
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime_components.control_loop.time.monotonic",
+            side_effect=(42.0, 46.0, 66.1),
+        ):
+            entered = node._waypoint_lifecycle_decision(step, pose)
+            after_waypoint_deadline = node._waypoint_lifecycle_decision(
+                step,
+                pose,
+            )
+            phase_expired = node._waypoint_lifecycle_decision(step, pose)
+
+        self.assertIs(entered.action, WaypointLifecycleAction.PROCEED)
+        self.assertIs(
+            after_waypoint_deadline.action,
+            WaypointLifecycleAction.PROCEED,
+        )
+        self.assertIs(phase_expired.action, WaypointLifecycleAction.STOP)
+        self.assertEqual(
+            phase_expired.stop_reason,
+            "terminal heading timeout",
+        )
+        self.assertEqual(
+            phase_expired.stop_details["fault_code"],
+            "terminal_heading_timeout",
+        )
+        self.assertAlmostEqual(
+            phase_expired.stop_details[
+                "terminal_heading_entry_waypoint_elapsed_sec"
+            ],
+            42.0,
+        )
+        self.assertAlmostEqual(
+            phase_expired.stop_details["terminal_heading_elapsed_sec"],
+            24.1,
+        )
+        self.assertTrue(phase_expired.stop_details["fail_closed"])
+
+    def test_terminal_heading_cannot_first_enter_after_waypoint_timeout(self):
+        node = _route_tube_stop_node([])
+        node.follower_config = FollowerConfig(
+            controller=ControllerConfig(),
+            waypoint_timeout_sec=45.0,
+            terminal_heading_timeout_sec=24.0,
+        )
+        node.target_started_at = 0.0
+        step = ControllerStep(
+            command=VelocityCommand(0.0, -0.18),
+            target_index=1,
+            reached_goal=False,
+            distance_to_target_m=0.024,
+            pursuit_index=1,
+            controlled_heading_error_rad=-math.pi,
+            progress_mode="terminal_heading",
+        )
+
+        with patch(
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime_components.control_loop.time.monotonic",
+            return_value=45.1,
+        ):
+            decision = node._waypoint_lifecycle_decision(
+                step,
+                Pose2D(0.19, 0.0, math.pi),
+            )
+
+        self.assertIs(decision.action, WaypointLifecycleAction.STOP)
+        self.assertEqual(decision.stop_reason, "waypoint timeout")
+        self.assertIsNone(node.terminal_heading_budget_state.started_at)
+
+    def test_leaving_terminal_heading_after_waypoint_deadline_fails_original_gate(self):
+        node = _route_tube_stop_node([])
+        node.follower_config = FollowerConfig(
+            controller=ControllerConfig(),
+            waypoint_timeout_sec=45.0,
+            terminal_heading_timeout_sec=24.0,
+        )
+        node.target_started_at = 0.0
+        terminal_step = ControllerStep(
+            command=VelocityCommand(0.0, -0.18),
+            target_index=1,
+            reached_goal=False,
+            distance_to_target_m=0.024,
+            pursuit_index=1,
+            controlled_heading_error_rad=-math.pi,
+            progress_mode="terminal_heading",
+        )
+        tracking_step = ControllerStep(
+            command=VelocityCommand(0.02, 0.0),
+            target_index=1,
+            reached_goal=False,
+            distance_to_target_m=0.031,
+            pursuit_index=1,
+            controlled_heading_error_rad=0.0,
+            progress_mode="path_tracking",
+        )
+
+        with patch(
+            "scripts.aufgabe04.navigation.waypoint_follower.runtime_components.control_loop.time.monotonic",
+            side_effect=(42.0, 46.0),
+        ):
+            entered = node._waypoint_lifecycle_decision(
+                terminal_step,
+                Pose2D(0.19, 0.0, math.pi),
+            )
+            left_after_deadline = node._waypoint_lifecycle_decision(
+                tracking_step,
+                Pose2D(0.18, 0.0, math.pi),
+            )
+
+        self.assertIs(entered.action, WaypointLifecycleAction.PROCEED)
+        self.assertIs(
+            left_after_deadline.action,
+            WaypointLifecycleAction.STOP,
+        )
+        self.assertEqual(
+            left_after_deadline.stop_reason,
+            "waypoint timeout",
+        )
+        self.assertEqual(node.terminal_heading_budget_state.started_at, 42.0)
 
     def test_ros_shutdown_returns_stopped_result_after_final_zero(self):
         events: list[str] = []

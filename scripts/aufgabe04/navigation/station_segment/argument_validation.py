@@ -160,6 +160,11 @@ def prepare_runtime_arguments(parser, args):
     if args.max_route_join_distance_m <= 0.0:
         parser.error("--max-route-join-distance-m must be positive")
     if (
+        not math.isfinite(args.terminal_heading_timeout_sec)
+        or args.terminal_heading_timeout_sec <= 0.0
+    ):
+        parser.error("--terminal-heading-timeout-sec must be positive")
+    if (
         not math.isfinite(args.axis_acquisition_wait_timeout_sec)
         or args.axis_acquisition_wait_timeout_sec <= 0.0
     ):

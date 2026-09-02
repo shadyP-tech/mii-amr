@@ -24,6 +24,9 @@ from scripts.aufgabe04.navigation.execution.route_uncertainty_defaults import (
 from scripts.aufgabe04.navigation.coverage.transient_overlay_resume_state import (
     load_jsonl_event_objects,
 )
+from scripts.aufgabe04.navigation.waypoint_follower.terminal_heading_budget import (
+    DEFAULT_TERMINAL_HEADING_TIMEOUT_SEC,
+)
 
 
 DEFAULT_LIDAR_STOP_DISTANCE_M = 0.20
@@ -203,6 +206,8 @@ def build_child_runner_command(
         str(DEFAULT_LIDAR_STOP_DISTANCE_M),
         "--certified-route-tube-radius-m",
         str(DEFAULT_TRACKING_TUBE_RADIUS_M),
+        "--terminal-heading-timeout-sec",
+        str(DEFAULT_TERMINAL_HEADING_TIMEOUT_SEC),
         "--results-csv",
         str(session_root / "station_segment_runs.csv"),
         "--semantic-log",
@@ -878,6 +883,7 @@ def semantic_log_size(path: Path) -> int:
 __all__ = [
     "DEFAULT_COLLISION_MARGIN_M",
     "DEFAULT_LIDAR_STOP_DISTANCE_M",
+    "DEFAULT_TERMINAL_HEADING_TIMEOUT_SEC",
     "DEFAULT_TRACKING_TUBE_RADIUS_M",
     "DEFAULT_UNCERTAINTY_SIGMA_MULTIPLIER",
     "MotionLegOutcome",

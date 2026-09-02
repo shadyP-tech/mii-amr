@@ -377,6 +377,9 @@ class DynamicRouteRuntimeMixin:
                 self.axis_acquisition_hold_started_at = None
                 self.axis_acquisition_target_revision = update.target_revision
         self.target_index = update.target_index
+        self._reset_terminal_heading_budget(
+            target_index=update.target_index,
+        )
         self.target_started_at = now
         self._reset_progress_watchdog(now)
         self.last_pose = pose

@@ -40,6 +40,9 @@ from scripts.aufgabe04.navigation.control.safety_checks import (  # noqa: E402
     validate_speed_limits,
 )
 from scripts.aufgabe04.navigation.planning.waypoint_csv import load_route_leg  # noqa: E402
+from scripts.aufgabe04.navigation.waypoint_follower.terminal_heading_budget import (  # noqa: E402
+    DEFAULT_TERMINAL_HEADING_TIMEOUT_SEC,
+)
 
 
 ROUTE_HEADER = (
@@ -935,6 +938,10 @@ class SegmentRunnerCliGateTest(unittest.TestCase):
         self.assertEqual(args.viewpoint_sampling_goal_tolerance_m, 0.01)
         self.assertEqual(args.physical_waypoint_tolerance_m, 0.02)
         self.assertEqual(args.physical_goal_tolerance_m, 0.03)
+        self.assertEqual(
+            args.terminal_heading_timeout_sec,
+            DEFAULT_TERMINAL_HEADING_TIMEOUT_SEC,
+        )
 
     def test_yes_bypass_argument_is_rejected(self):
         parser = build_parser()

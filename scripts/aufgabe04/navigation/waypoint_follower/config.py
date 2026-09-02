@@ -22,6 +22,9 @@ from scripts.aufgabe04.navigation.control.waypoint_controller import (
     ControllerConfig,
     StartEgressControlConfig,
 )
+from scripts.aufgabe04.navigation.waypoint_follower.terminal_heading_budget import (
+    DEFAULT_TERMINAL_HEADING_TIMEOUT_SEC,
+)
 
 
 @dataclass(frozen=True)
@@ -41,6 +44,7 @@ class FollowerConfig:
     allow_simulation_odom_after_stale_tf: bool = False
     initial_sensor_wait_sec: float = 2.0
     waypoint_timeout_sec: float = 45.0
+    terminal_heading_timeout_sec: float = DEFAULT_TERMINAL_HEADING_TIMEOUT_SEC
     stuck_timeout_sec: float = 8.0
     stuck_progress_epsilon_m: float = 0.03
     stuck_heading_progress_epsilon_rad: float = 0.10
@@ -102,6 +106,18 @@ class FollowerConfig:
             or self.control_rate_hz < 1.0
         ):
             raise ValueError("control_rate_hz must be finite and at least 1 Hz")
+        if (
+            not math.isfinite(self.waypoint_timeout_sec)
+            or self.waypoint_timeout_sec <= 0.0
+        ):
+            raise ValueError("waypoint_timeout_sec must be finite and positive")
+        if (
+            not math.isfinite(self.terminal_heading_timeout_sec)
+            or self.terminal_heading_timeout_sec <= 0.0
+        ):
+            raise ValueError(
+                "terminal_heading_timeout_sec must be finite and positive"
+            )
         if (
             self.command_smoothing.enabled
             and self.command_smoothing.max_linear_accel_mps2

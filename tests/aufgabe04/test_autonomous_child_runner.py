@@ -8,6 +8,7 @@ from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     MissionLegKind,
 )
 from scripts.aufgabe04.real_robot.execution.child_runner import (
+    DEFAULT_TERMINAL_HEADING_TIMEOUT_SEC,
     build_child_runner_command,
     parse_dry_run_outcome,
     parse_motion_leg_outcome,
@@ -100,6 +101,10 @@ class AutonomousChildRunnerRouteIdentityTest(unittest.TestCase):
 
         self.assertEqual(self._option(command, "--leg-index"), "0")
         self.assertEqual(self._option(command, "--mission-leg-index"), "1")
+        self.assertEqual(
+            self._option(command, "--terminal-heading-timeout-sec"),
+            str(DEFAULT_TERMINAL_HEADING_TIMEOUT_SEC),
+        )
         self.assertEqual(
             self._option(command, "--coverage-transient-replan-leg-index"),
             "1",

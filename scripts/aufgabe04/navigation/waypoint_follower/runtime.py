@@ -101,6 +101,9 @@ from scripts.aufgabe04.navigation.waypoint_follower.terminal_heading import (
     intermediate_terminal_heading_hold_diagnostics,
     reset_intermediate_terminal_heading_latch,
 )
+from scripts.aufgabe04.navigation.waypoint_follower.terminal_heading_budget import (
+    reset_terminal_heading_budget,
+)
 from scripts.aufgabe04.navigation.waypoint_follower.runtime_components import (
     BlockageRecoveryRuntimeMixin,
     CallbackServiceRuntimeMixin,
@@ -266,6 +269,9 @@ class SimpleWaypointFollowerNode(
         self.viewpoint_sampling_target_started_at: float | None = None
         self.viewpoint_sampling_target_revision: int | None = None
         self.target_index = 0
+        self.terminal_heading_budget_state = reset_terminal_heading_budget(
+            target_index=self.target_index,
+        )
         self.latest_scan = None
         self.latest_scan_receipt = None
         self.latest_odom = None
@@ -575,6 +581,7 @@ class SimpleWaypointFollowerNode(
                     target_changed=True,
                 )
             self.target_index = waypoint_index
+            self._reset_terminal_heading_budget(target_index=waypoint_index)
             self.target_started_at = time.monotonic()
             self._reset_progress_watchdog(time.monotonic())
             return None
@@ -587,6 +594,7 @@ class SimpleWaypointFollowerNode(
                 target_changed=True,
             )
         self.target_index = waypoint_index
+        self._reset_terminal_heading_budget(target_index=waypoint_index)
         self.target_started_at = time.monotonic()
         self._reset_progress_watchdog(time.monotonic())
         if not was_reverse:

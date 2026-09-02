@@ -2254,6 +2254,8 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
             args = self.base_args(paths) + [
                 "--initial-sensor-wait-sec",
                 "3.5",
+                "--terminal-heading-timeout-sec",
+                "26.0",
                 "--allowed-cmd-vel-publisher",
                 "/behavior_server",
             ]
@@ -2276,9 +2278,20 @@ class RunSingleStationSegmentEventsTest(unittest.TestCase):
             events = read_events(paths["events"])
             rows = read_result_rows(paths["results"])
             follower_config = follower.call_args.args[2]
+            controller_event = next(
+                event
+                for event in events
+                if event["event"] == "controller_config_resolved"
+            )
 
         self.assertEqual(status, 0)
         self.assertEqual(follower_config.initial_sensor_wait_sec, 3.5)
+        self.assertEqual(follower_config.terminal_heading_timeout_sec, 26.0)
+        self.assertEqual(controller_event["waypoint_timeout_sec"], 45.0)
+        self.assertEqual(
+            controller_event["terminal_heading_timeout_sec"],
+            26.0,
+        )
         self.assertEqual(follower_config.allowed_cmd_vel_publishers, ("/behavior_server",))
         self.assertFalse(
             follower_config.allow_simulation_odom_after_stale_tf

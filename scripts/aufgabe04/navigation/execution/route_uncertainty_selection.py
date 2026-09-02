@@ -6,11 +6,12 @@ executable one, and it never rewrites a caller's route.  The result is
 motion-neutral evidence only; the existing execution certificates and live
 runtime gates remain responsible for motion authority.
 
-Ranking is lexicographic and deterministic: admitted routes precede rejected
-routes, then larger minimum remaining clearance wins, then shorter route
-length, explicit planner order, and finally stable option identity.  When no
-route is admitted the returned decision is explicitly fail closed and carries
-no selected route.
+Ranking is deterministic and safety preserving: admitted routes always
+precede rejected routes.  Admitted routes are partitioned into descending,
+non-overlapping clearance-margin bands; margins within the configured band
+tolerance are treated as tied, then shorter route length, explicit planner
+order, and stable option identity decide.  When no route is admitted the
+returned decision is explicitly fail closed and carries no selected route.
 """
 
 from __future__ import annotations
@@ -33,17 +34,80 @@ from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.navigation.planning.costmap import Costmap
 
 
-ROUTE_UNCERTAINTY_SELECTION_SCHEMA_VERSION = 1
+ROUTE_UNCERTAINTY_SELECTION_SCHEMA_VERSION = 2
+
+# One tenth of a millimetre is deliberately much larger than the observed
+# micrometre-scale numerical variation while preserving millimetre-scale
+# residual-clearance distinctions.  The tie policy never turns a rejected
+# route into an accepted one.
+DEFAULT_ACCEPTED_MARGIN_TIE_TOLERANCE_M = 0.0001
 
 NO_ROUTE_OPTIONS = "no_route_options"
 NO_ACCEPTED_ROUTE_OPTIONS = "no_route_option_passed_uncertainty_admission"
 
 ROUTE_UNCERTAINTY_SELECTION_RANKING_ORDER = (
     "accepted_first",
-    "minimum_remaining_margin_m_descending",
-    "route_length_m_ascending",
+    "accepted_margin_tie_band_descending",
+    "route_length_m_ascending_within_accepted_margin_tie_band",
     "plan_order_ascending",
     "option_id_ascending",
+)
+
+
+@dataclass(frozen=True)
+class RouteUncertaintySelectionPolicy:
+    """Validated deterministic policy for ranking independently safe routes.
+
+    The tolerance applies only after exact route uncertainty admission.  It
+    cannot admit a rejected option or rank a rejected option above an accepted
+    option.  Accepted options are grouped from the largest remaining margin;
+    every margin no more than the inclusive tolerance below that group maximum
+    is tied and resolved by the documented non-safety fallback keys.
+    """
+
+    accepted_margin_tie_tolerance_m: float = (
+        DEFAULT_ACCEPTED_MARGIN_TIE_TOLERANCE_M
+    )
+
+    def __post_init__(self) -> None:
+        value = self.accepted_margin_tie_tolerance_m
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0.0
+        ):
+            raise ValueError(
+                "accepted_margin_tie_tolerance_m must be finite and "
+                "non-negative"
+            )
+        object.__setattr__(
+            self,
+            "accepted_margin_tie_tolerance_m",
+            float(value),
+        )
+
+    def to_evidence_dict(self) -> dict[str, object]:
+        return {
+            "accepted_precedes_rejected": True,
+            "accepted_margin_tie_tolerance_m": (
+                self.accepted_margin_tie_tolerance_m
+            ),
+            "accepted_margin_tie_boundary": "inclusive",
+            "accepted_margin_tie_grouping": (
+                "descending_nonoverlapping_bands_anchored_at_group_maximum"
+            ),
+            "accepted_margin_tie_fallback_order": [
+                "route_length_m_ascending",
+                "plan_order_ascending",
+                "option_id_ascending",
+            ],
+            "rejected_option_order_unchanged": True,
+        }
+
+
+DEFAULT_ROUTE_UNCERTAINTY_SELECTION_POLICY = (
+    RouteUncertaintySelectionPolicy()
 )
 
 
@@ -172,11 +236,31 @@ class _EvaluatedOption:
     admission_evidence_sha256: str
 
 
+@dataclass(frozen=True)
+class _AcceptedMarginTieBand:
+    band: int
+    maximum_margin_m: float
+    minimum_margin_m: float
+    ordered_option_ids: tuple[str, ...]
+
+    def to_evidence_dict(self) -> dict[str, object]:
+        return {
+            "band": self.band,
+            "maximum_margin_m": self.maximum_margin_m,
+            "minimum_margin_m": self.minimum_margin_m,
+            "ordered_option_ids": list(self.ordered_option_ids),
+        }
+
+
 def evaluate_route_uncertainty_selection(
     costmap: Costmap,
     options: Iterable[RouteUncertaintySelectionOption],
     covariance: PlanarCovariance,
     config: RouteUncertaintyAdmissionConfig,
+    *,
+    selection_policy: RouteUncertaintySelectionPolicy = (
+        DEFAULT_ROUTE_UNCERTAINTY_SELECTION_POLICY
+    ),
 ) -> RouteUncertaintySelectionDecision:
     """Evaluate every route exactly and select only from admitted options.
 
@@ -185,6 +269,11 @@ def evaluate_route_uncertainty_selection(
     caller contract error because no deterministic evidence partition can be
     constructed for duplicate IDs.
     """
+
+    if not isinstance(selection_policy, RouteUncertaintySelectionPolicy):
+        raise TypeError(
+            "selection_policy must be a RouteUncertaintySelectionPolicy"
+        )
 
     try:
         frozen_options = tuple(options)
@@ -206,7 +295,10 @@ def evaluate_route_uncertainty_selection(
         _evaluate_option(costmap, option, covariance, config)
         for option in frozen_options
     )
-    ordered = tuple(sorted(evaluated, key=_ranking_key))
+    ordered, accepted_margin_tie_bands = _order_evaluated_options(
+        evaluated,
+        selection_policy,
+    )
     ranked = tuple(
         RankedRouteUncertaintyOption(
             rank=rank,
@@ -237,6 +329,10 @@ def evaluate_route_uncertainty_selection(
             "mutates_route": False,
         },
         "ranking_order": list(ROUTE_UNCERTAINTY_SELECTION_RANKING_ORDER),
+        "ranking_policy": selection_policy.to_evidence_dict(),
+        "accepted_margin_tie_bands": [
+            band.to_evidence_dict() for band in accepted_margin_tie_bands
+        ],
         "decision": {
             "ready": ready,
             "reason": reason,
@@ -308,6 +404,116 @@ def _ranking_key(item: _EvaluatedOption) -> tuple[object, ...]:
     )
 
 
+def _order_evaluated_options(
+    evaluated: tuple[_EvaluatedOption, ...],
+    policy: RouteUncertaintySelectionPolicy,
+) -> tuple[tuple[_EvaluatedOption, ...], tuple[_AcceptedMarginTieBand, ...]]:
+    """Return a total order without a non-transitive pairwise comparator.
+
+    A naive ``abs(left_margin - right_margin) <= tolerance`` comparator is not
+    transitive for chains of three nearby margins.  Anchoring each descending
+    band at its maximum produces deterministic evidence independent of input
+    iteration order while retaining the intended inclusive tie boundary.
+    """
+
+    accepted = tuple(
+        item for item in evaluated if item.admission.decision.accepted
+    )
+    rejected = tuple(
+        sorted(
+            (
+                item
+                for item in evaluated
+                if not item.admission.decision.accepted
+            ),
+            key=_ranking_key,
+        )
+    )
+
+    finite_margin = sorted(
+        (
+            item
+            for item in accepted
+            if _finite_remaining_margin(item) is not None
+        ),
+        key=_accepted_exact_margin_key,
+    )
+    nonfinite_margin = tuple(
+        sorted(
+            (
+                item
+                for item in accepted
+                if _finite_remaining_margin(item) is None
+            ),
+            key=_accepted_fallback_key,
+        )
+    )
+
+    ordered_accepted: list[_EvaluatedOption] = []
+    bands: list[_AcceptedMarginTieBand] = []
+    remaining = finite_margin
+    tolerance_m = policy.accepted_margin_tie_tolerance_m
+    while remaining:
+        group_maximum_m = _finite_remaining_margin(remaining[0])
+        assert group_maximum_m is not None
+        tied: list[_EvaluatedOption] = []
+        outside: list[_EvaluatedOption] = []
+        for item in remaining:
+            margin_m = _finite_remaining_margin(item)
+            assert margin_m is not None
+            if group_maximum_m - margin_m <= tolerance_m:
+                tied.append(item)
+            else:
+                outside.append(item)
+        tied.sort(key=_accepted_fallback_key)
+        band_number = len(bands) + 1
+        band_minimum_m = min(
+            margin
+            for item in tied
+            if (margin := _finite_remaining_margin(item)) is not None
+        )
+        bands.append(
+            _AcceptedMarginTieBand(
+                band=band_number,
+                maximum_margin_m=group_maximum_m,
+                minimum_margin_m=band_minimum_m,
+                ordered_option_ids=tuple(
+                    item.option.option_id for item in tied
+                ),
+            )
+        )
+        ordered_accepted.extend(tied)
+        remaining = outside
+
+    ordered_accepted.extend(nonfinite_margin)
+    return tuple(ordered_accepted) + rejected, tuple(bands)
+
+
+def _finite_remaining_margin(item: _EvaluatedOption) -> float | None:
+    margin = item.admission.decision.remaining_margin_m
+    return margin if margin is not None and math.isfinite(margin) else None
+
+
+def _accepted_exact_margin_key(item: _EvaluatedOption) -> tuple[object, ...]:
+    margin = _finite_remaining_margin(item)
+    assert margin is not None
+    return (-margin, *_accepted_fallback_key(item))
+
+
+def _accepted_fallback_key(item: _EvaluatedOption) -> tuple[object, ...]:
+    length = item.route_length_m
+    length_key = (
+        length
+        if length is not None and math.isfinite(length)
+        else math.inf
+    )
+    return (
+        length_key,
+        item.option.plan_order,
+        item.option.option_id,
+    )
+
+
 def _route_length_or_none(route: tuple[Pose2D, ...]) -> float | None:
     if len(route) < 2:
         return None
@@ -327,11 +533,14 @@ def _route_length_or_none(route: tuple[Pose2D, ...]) -> float | None:
 
 
 __all__ = [
+    "DEFAULT_ACCEPTED_MARGIN_TIE_TOLERANCE_M",
+    "DEFAULT_ROUTE_UNCERTAINTY_SELECTION_POLICY",
     "NO_ACCEPTED_ROUTE_OPTIONS",
     "NO_ROUTE_OPTIONS",
     "ROUTE_UNCERTAINTY_SELECTION_RANKING_ORDER",
     "ROUTE_UNCERTAINTY_SELECTION_SCHEMA_VERSION",
     "RankedRouteUncertaintyOption",
+    "RouteUncertaintySelectionPolicy",
     "RouteUncertaintySelectionDecision",
     "RouteUncertaintySelectionOption",
     "evaluate_route_uncertainty_selection",

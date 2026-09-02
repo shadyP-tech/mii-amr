@@ -35,6 +35,7 @@ from scripts.aufgabe04.perception.stand_axis.model_profile import (
 from scripts.aufgabe04.real_robot.execution.child_runner import (
     DEFAULT_COLLISION_MARGIN_M,
     DEFAULT_LIDAR_STOP_DISTANCE_M,
+    DEFAULT_TERMINAL_HEADING_TIMEOUT_SEC,
     DEFAULT_TRACKING_TUBE_RADIUS_M,
 )
 from scripts.aufgabe04.real_robot.mission.coverage import (
@@ -123,6 +124,9 @@ def _checkpoint_config_sha256(args) -> str:
             "final_facing_offset_m": args.final_facing_offset_m,
             "axis_sample_count": args.axis_sample_count,
             "camera_timeout_sec": args.camera_timeout_sec,
+            "terminal_heading_timeout_sec": (
+                DEFAULT_TERMINAL_HEADING_TIMEOUT_SEC
+            ),
             "stand_model_sha256": stand_model_sha256,
             "lidar_track_morphology_profile": (
                 morphology_profile.to_evidence_dict()

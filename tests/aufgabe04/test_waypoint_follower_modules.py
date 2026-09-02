@@ -101,6 +101,7 @@ class WaypointFollowerModuleBoundaryTest(unittest.TestCase):
             "route_phases.py",
             "startup.py",
             "terminal_heading.py",
+            "terminal_heading_budget.py",
         )
         forbidden_roots = {
             "geometry_msgs",

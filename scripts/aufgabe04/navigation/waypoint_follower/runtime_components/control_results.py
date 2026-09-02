@@ -283,6 +283,53 @@ def waypoint_timeout_stop_details(
     }
 
 
+def terminal_heading_timeout_stop_details(
+    *,
+    reason: str,
+    route_kind: str,
+    waypoint_elapsed_sec: float,
+    waypoint_timeout_sec: float,
+    terminal_heading_elapsed_sec: float,
+    terminal_heading_timeout_sec: float,
+    terminal_heading_entry_waypoint_elapsed_sec: float,
+    target_index: int,
+    pursuit_index: int,
+    distance_to_target_m: float,
+    progress_mode: str,
+    controlled_heading_error_rad: float,
+    robot_x_m: float,
+    robot_y_m: float,
+    robot_yaw_rad: float,
+) -> dict[str, object]:
+    """Build explicit evidence for the bounded final-heading deadline."""
+
+    return {
+        "reason": reason,
+        "fault_code": "terminal_heading_timeout",
+        "phase": "terminal_heading",
+        "timeout_scope": "terminal_heading_phase",
+        "route_kind": route_kind,
+        "waypoint_elapsed_sec": waypoint_elapsed_sec,
+        "waypoint_timeout_sec": waypoint_timeout_sec,
+        "terminal_heading_elapsed_sec": terminal_heading_elapsed_sec,
+        "terminal_heading_timeout_sec": terminal_heading_timeout_sec,
+        "terminal_heading_entry_waypoint_elapsed_sec": (
+            terminal_heading_entry_waypoint_elapsed_sec
+        ),
+        "target_index": target_index,
+        "pursuit_index": pursuit_index,
+        "distance_to_target_m": distance_to_target_m,
+        "progress_mode": progress_mode,
+        "controlled_heading_error_rad": controlled_heading_error_rad,
+        "robot_pose": {
+            "x_m": robot_x_m,
+            "y_m": robot_y_m,
+            "yaw_rad": robot_yaw_rad,
+        },
+        "fail_closed": True,
+    }
+
+
 def clearance_motion_floor_stop_details(
     *,
     reason: str,

@@ -11,10 +11,12 @@ from scripts.aufgabe04.navigation.execution.route_uncertainty_budget import (
     PlanarCovariance,
 )
 from scripts.aufgabe04.navigation.execution.route_uncertainty_selection import (
+    DEFAULT_ACCEPTED_MARGIN_TIE_TOLERANCE_M,
     NO_ACCEPTED_ROUTE_OPTIONS,
     NO_ROUTE_OPTIONS,
     ROUTE_UNCERTAINTY_SELECTION_SCHEMA_VERSION,
     RouteUncertaintySelectionOption,
+    RouteUncertaintySelectionPolicy,
     evaluate_route_uncertainty_selection,
     route_uncertainty_selection_evidence_sha256,
 )
@@ -77,12 +79,16 @@ class RouteUncertaintySelectionTest(unittest.TestCase):
         self.covariance = PlanarCovariance(0.0, 0.0, 0.0)
         self.config = config()
 
-    def evaluate(self, options):
+    def evaluate(self, options, *, selection_policy=None):
+        kwargs = {}
+        if selection_policy is not None:
+            kwargs["selection_policy"] = selection_policy
         return evaluate_route_uncertainty_selection(
             self.costmap,
             options,
             self.covariance,
             self.config,
+            **kwargs,
         )
 
     def test_maximum_admitted_margin_precedes_shorter_route(self):
@@ -135,6 +141,166 @@ class RouteUncertaintySelectionTest(unittest.TestCase):
         )
         self.assertEqual(decision.ranked_options[0].route_length_m, 1.0)
         self.assertEqual(decision.ranked_options[1].route_length_m, 2.0)
+
+    def test_default_tie_band_ignores_micrometre_margin_noise(self):
+        short_lower_margin = option(
+            "short-lower-margin",
+            0,
+            (Pose2D(15.0, 10.0), Pose2D(16.0, 10.0)),
+        )
+        long_higher_margin = option(
+            "long-higher-margin",
+            1,
+            (
+                Pose2D(15.0, 10.000005),
+                Pose2D(17.0, 10.000005),
+            ),
+        )
+
+        decision = self.evaluate((long_higher_margin, short_lower_margin))
+
+        self.assertEqual(
+            DEFAULT_ACCEPTED_MARGIN_TIE_TOLERANCE_M,
+            0.0001,
+        )
+        self.assertEqual(decision.selected_option_id, "short-lower-margin")
+        margins = {
+            item.option.option_id: item.minimum_remaining_margin_m
+            for item in decision.ranked_options
+        }
+        self.assertGreater(
+            margins["long-higher-margin"],
+            margins["short-lower-margin"],
+        )
+        self.assertLess(
+            margins["long-higher-margin"]
+            - margins["short-lower-margin"],
+            DEFAULT_ACCEPTED_MARGIN_TIE_TOLERANCE_M,
+        )
+
+    def test_margin_tie_boundary_is_inclusive(self):
+        short_lower_margin = option(
+            "short-lower-margin",
+            0,
+            (Pose2D(15.0, 10.0), Pose2D(16.0, 10.0)),
+        )
+        long_higher_margin = option(
+            "long-higher-margin",
+            1,
+            (Pose2D(15.0, 10.1), Pose2D(17.0, 10.1)),
+        )
+        exact_margin_order = self.evaluate(
+            (short_lower_margin, long_higher_margin),
+            selection_policy=RouteUncertaintySelectionPolicy(
+                accepted_margin_tie_tolerance_m=0.0
+            ),
+        )
+        margins = {
+            item.option.option_id: item.minimum_remaining_margin_m
+            for item in exact_margin_order.ranked_options
+        }
+        difference_m = (
+            margins["long-higher-margin"]
+            - margins["short-lower-margin"]
+        )
+        self.assertGreater(difference_m, 0.0)
+
+        at_boundary = self.evaluate(
+            (long_higher_margin, short_lower_margin),
+            selection_policy=RouteUncertaintySelectionPolicy(
+                accepted_margin_tie_tolerance_m=difference_m
+            ),
+        )
+        below_boundary = self.evaluate(
+            (long_higher_margin, short_lower_margin),
+            selection_policy=RouteUncertaintySelectionPolicy(
+                accepted_margin_tie_tolerance_m=math.nextafter(
+                    difference_m,
+                    0.0,
+                )
+            ),
+        )
+
+        self.assertEqual(at_boundary.selected_option_id, "short-lower-margin")
+        self.assertEqual(below_boundary.selected_option_id, "long-higher-margin")
+
+    def test_margin_tie_policy_is_validated_and_recorded_in_evidence(self):
+        for invalid in (-0.001, math.inf, math.nan, True):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "must be finite and non-negative",
+                ):
+                    RouteUncertaintySelectionPolicy(
+                        accepted_margin_tie_tolerance_m=invalid
+                    )
+
+        route = (Pose2D(10.0, 15.0), Pose2D(11.0, 15.0))
+        decision = self.evaluate((option("only", 0, route),))
+
+        self.assertEqual(
+            decision.evidence["ranking_policy"],
+            {
+                "accepted_precedes_rejected": True,
+                "accepted_margin_tie_tolerance_m": 0.0001,
+                "accepted_margin_tie_boundary": "inclusive",
+                "accepted_margin_tie_grouping": (
+                    "descending_nonoverlapping_bands_anchored_at_group_maximum"
+                ),
+                "accepted_margin_tie_fallback_order": [
+                    "route_length_m_ascending",
+                    "plan_order_ascending",
+                    "option_id_ascending",
+                ],
+                "rejected_option_order_unchanged": True,
+            },
+        )
+        self.assertEqual(
+            decision.evidence["accepted_margin_tie_bands"],
+            [
+                {
+                    "band": 1,
+                    "maximum_margin_m": (
+                        decision.ranked_options[0].minimum_remaining_margin_m
+                    ),
+                    "minimum_margin_m": (
+                        decision.ranked_options[0].minimum_remaining_margin_m
+                    ),
+                    "ordered_option_ids": ["only"],
+                }
+            ],
+        )
+
+    def test_tie_band_order_is_deterministic_across_input_order(self):
+        shortest = option(
+            "shortest",
+            2,
+            (Pose2D(15.0, 10.0), Pose2D(16.0, 10.0)),
+        )
+        plan_first = option(
+            "plan-first",
+            0,
+            (Pose2D(15.0, 10.00004), Pose2D(16.5, 10.00004)),
+        )
+        plan_second = option(
+            "plan-second",
+            1,
+            (Pose2D(15.0, 10.00008), Pose2D(16.5, 10.00008)),
+        )
+
+        forward = self.evaluate((plan_second, shortest, plan_first))
+        reverse = self.evaluate((plan_first, shortest, plan_second))
+
+        expected = ("shortest", "plan-first", "plan-second")
+        self.assertEqual(
+            tuple(item.option.option_id for item in forward.ranked_options),
+            expected,
+        )
+        self.assertEqual(
+            tuple(item.option.option_id for item in reverse.ranked_options),
+            expected,
+        )
+        self.assertEqual(forward.evidence, reverse.evidence)
 
     def test_plan_order_then_stable_id_break_exact_ties(self):
         route = (Pose2D(10.0, 15.0), Pose2D(11.0, 15.0))

@@ -21,6 +21,9 @@ from scripts.aufgabe04.navigation.approach.viewpoint_sampling_contract import (
     INTERMEDIATE_TERMINAL_HEADING_HOLD_TOLERANCE_M,
     INTERMEDIATE_TERMINAL_HEADING_TARGET_ENVELOPE_RADIUS_M,
 )
+from scripts.aufgabe04.navigation.waypoint_follower.terminal_heading_budget import (
+    DEFAULT_TERMINAL_HEADING_TIMEOUT_SEC,
+)
 
 DEFAULT_ROUTE_CSV = Path("results/aufgabe04/routes/station_route.csv")
 DEFAULT_DIAGNOSTICS_JSON = Path(
@@ -418,6 +421,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--initial-sensor-wait-sec", type=float, default=2.0)
     parser.add_argument("--waypoint-timeout-sec", type=float, default=45.0)
+    parser.add_argument(
+        "--terminal-heading-timeout-sec",
+        type=float,
+        default=DEFAULT_TERMINAL_HEADING_TIMEOUT_SEC,
+        help=(
+            "Separate bounded budget for final in-place heading convergence "
+            "after terminal_heading is entered within the waypoint deadline."
+        ),
+    )
     parser.add_argument(
         "--axis-acquisition-wait-timeout-sec",
         type=float,
