@@ -423,7 +423,7 @@ class RosPreflightMapFromOdomSamplesTest(unittest.TestCase):
             binding["reasons"],
         )
 
-    def test_result_json_field_is_optional_and_persists_order(self):
+    def test_result_json_defaults_requirements_and_persists_sample_order(self):
         legacy_constructor = ros_preflight.RosPreflightResult(
             ok=True,
             failures=[],
@@ -450,7 +450,10 @@ class RosPreflightMapFromOdomSamplesTest(unittest.TestCase):
         )
         self.assertEqual(
             legacy_constructor.to_json_dict()["preflight_requirements"],
-            {},
+            {
+                "stationary_map_from_odom_pairing_requested": False,
+                "stationary_map_from_odom_pairing_required": False,
+            },
         )
         self.assertEqual(
             with_samples.to_json_dict()[

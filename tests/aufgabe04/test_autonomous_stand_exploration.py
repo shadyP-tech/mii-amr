@@ -28,6 +28,7 @@ from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
 )
 from scripts.aufgabe04.navigation.localization.ros_preflight import (
     RosObservation,
+    RosPreflightRequirements,
     RosPreflightResult,
 )
 from scripts.aufgabe04.navigation.localization.runtime_localization_reseal import (
@@ -227,6 +228,9 @@ def _stationary_localization_payload(
             "localization_source": "amcl",
             "use_sim_time": False,
         },
+        "preflight_requirements": RosPreflightRequirements(
+            require_stationary_map_from_odom_pairing=True,
+        ).to_evidence(execution_pose_owner="map"),
         "route_pose": {
             "frame_id": "map",
             "child_frame_id": "base_footprint",

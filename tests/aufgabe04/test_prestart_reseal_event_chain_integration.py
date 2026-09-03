@@ -12,7 +12,11 @@ from unittest.mock import patch
 from scripts.aufgabe04.navigation.entrypoints import run_single_station_segment
 from scripts.aufgabe04.navigation.control.follower_models import FollowerResult
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import MissionLegKind
-from scripts.aufgabe04.navigation.localization.ros_preflight import RosPreflightResult
+from scripts.aufgabe04.navigation.localization.ros_preflight import (
+    RosObservation,
+    RosPreflightRequirements,
+    RosPreflightResult,
+)
 from scripts.aufgabe04.navigation.coverage.stand_discovery_route import (
     seal_stand_discovery_route,
 )
@@ -104,45 +108,45 @@ def _write_fresh_localization_evidence(
     yaw_rad: float,
 ) -> None:
     pose = {"x_m": x_m, "y_m": y_m, "yaw_rad": yaw_rad}
+    evidence = RosPreflightResult(
+        ok=True,
+        failures=[],
+        observations=[
+            RosObservation(
+                name="stationary AMCL stability",
+                ok=True,
+                detail="samples=2/2",
+                data={
+                    "sample_count": 2,
+                    "required_sample_count": 2,
+                    "service_request_count": 2,
+                    "position_covariance_complete": True,
+                    "yaw_covariance_complete": True,
+                },
+            )
+        ],
+        runtime_config={
+            "localization_source": "amcl",
+            "use_sim_time": False,
+        },
+        preflight_requirements=RosPreflightRequirements().to_evidence(
+            execution_pose_owner="map",
+        ),
+        route_pose={
+            "frame_id": "map",
+            "child_frame_id": "base_footprint",
+            **pose,
+        },
+        odom_pose=None,
+        map_from_odom=None,
+        stationary_amcl_samples=[
+            {**pose, "covariance": [0.0] * 36},
+            {**pose, "covariance": [0.0] * 36},
+        ],
+        stationary_map_from_odom_samples=[],
+    ).to_json_dict()
     path.write_text(
-        json.dumps(
-            {
-                "ok": True,
-                "failures": [],
-                "observations": [
-                    {
-                        "name": "stationary AMCL stability",
-                        "ok": True,
-                        "detail": "samples=2/2",
-                        "data": {
-                            "sample_count": 2,
-                            "required_sample_count": 2,
-                            "service_request_count": 2,
-                            "position_covariance_complete": True,
-                            "yaw_covariance_complete": True,
-                        },
-                    }
-                ],
-                "runtime_config": {
-                    "localization_source": "amcl",
-                    "use_sim_time": False,
-                },
-                "route_pose": {
-                    "frame_id": "map",
-                    "child_frame_id": "base_footprint",
-                    **pose,
-                },
-                "odom_pose": None,
-                "map_from_odom": None,
-                "stationary_amcl_samples": [
-                    {**pose, "covariance": [0.0] * 36},
-                    {**pose, "covariance": [0.0] * 36},
-                ],
-                "stationary_map_from_odom_samples": [],
-            },
-            indent=2,
-            sort_keys=True,
-        )
+        json.dumps(evidence, indent=2, sort_keys=True)
         + "\n",
         encoding="utf-8",
     )

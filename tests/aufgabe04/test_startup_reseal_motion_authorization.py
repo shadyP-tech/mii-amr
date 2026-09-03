@@ -29,6 +29,11 @@ from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization 
     write_startup_reseal_motion_authorization,
     write_startup_reseal_motion_permit,
 )
+from scripts.aufgabe04.navigation.localization.ros_preflight import (
+    RosObservation,
+    RosPreflightRequirements,
+    RosPreflightResult,
+)
 from scripts.aufgabe04.real_robot.readiness.startup_reseal import (
     StartupResealPermitContext,
     write_startup_reseal_permit_summary,
@@ -321,40 +326,43 @@ class StartupResealMotionAuthorizationTest(unittest.TestCase):
 
     def _write_fresh_localization_evidence(self, **replacements):
         pose = {"x_m": 0.1, "y_m": 0.2, "yaw_rad": 0.3}
-        evidence = {
-            "ok": True,
-            "failures": [],
-            "observations": [
-                {
-                    "name": "stationary AMCL stability",
-                    "ok": True,
-                    "detail": "samples=2/2",
-                    "data": {
+        evidence = RosPreflightResult(
+            ok=True,
+            failures=[],
+            observations=[
+                RosObservation(
+                    name="stationary AMCL stability",
+                    ok=True,
+                    detail="samples=2/2",
+                    data={
                         "sample_count": 2,
                         "required_sample_count": 2,
                         "service_request_count": 2,
                         "position_covariance_complete": True,
                         "yaw_covariance_complete": True,
                     },
-                }
+                )
             ],
-            "runtime_config": {
+            runtime_config={
                 "localization_source": "amcl",
                 "use_sim_time": False,
             },
-            "route_pose": {
+            preflight_requirements=RosPreflightRequirements().to_evidence(
+                execution_pose_owner="map",
+            ),
+            route_pose={
                 "frame_id": "map",
                 "child_frame_id": "base_footprint",
                 **pose,
             },
-            "odom_pose": None,
-            "map_from_odom": None,
-            "stationary_amcl_samples": [
+            odom_pose=None,
+            map_from_odom=None,
+            stationary_amcl_samples=[
                 {**pose, "covariance": [0.0] * 36},
                 {**pose, "covariance": [0.0] * 36},
             ],
-            "stationary_map_from_odom_samples": [],
-        }
+            stationary_map_from_odom_samples=[],
+        ).to_json_dict()
         evidence.update(replacements)
         self.artifacts["fresh_stationary_localization_evidence"].write_text(
             json.dumps(evidence, indent=2, sort_keys=True) + "\n",
@@ -517,6 +525,38 @@ class StartupResealMotionAuthorizationTest(unittest.TestCase):
             ),
         )
         candidate_path = self.root / "candidate_startup_permit.json"
+        with self.assertRaisesRegex(
+            ValueError,
+            "did not require stationary map-from-odom pairing",
+        ):
+            write_startup_reseal_motion_permit(candidate_path, candidate)
+        self._write_fresh_localization_evidence(
+            preflight_requirements=RosPreflightRequirements().to_evidence(
+                execution_pose_owner="odom",
+            ),
+        )
+        candidate = replace(
+            candidate,
+            fresh_stationary_localization_evidence_sha256=self._sha(
+                "fresh_stationary_localization_evidence"
+            ),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "did not require stationary map-from-odom pairing",
+        ):
+            write_startup_reseal_motion_permit(candidate_path, candidate)
+        self._write_fresh_localization_evidence(
+            preflight_requirements=RosPreflightRequirements(
+                require_stationary_map_from_odom_pairing=True,
+            ).to_evidence(execution_pose_owner="map"),
+        )
+        candidate = replace(
+            candidate,
+            fresh_stationary_localization_evidence_sha256=self._sha(
+                "fresh_stationary_localization_evidence"
+            ),
+        )
         write_startup_reseal_motion_permit(candidate_path, candidate)
         kwargs = {
             **self._execution_kwargs(),
@@ -1099,6 +1139,42 @@ class StartupResealMotionAuthorizationTest(unittest.TestCase):
             (
                 {"observations": []},
                 "lacks an admitted stationary AMCL observation",
+            ),
+            (
+                {
+                    "preflight_requirements": {
+                        "stationary_map_from_odom_pairing_requested": False,
+                    }
+                },
+                "preflight_requirements fields mismatch",
+            ),
+            (
+                {
+                    "preflight_requirements": {
+                        "stationary_map_from_odom_pairing_requested": False,
+                        "stationary_map_from_odom_pairing_required": False,
+                        "unexpected": False,
+                    }
+                },
+                "preflight_requirements fields mismatch",
+            ),
+            (
+                {
+                    "preflight_requirements": {
+                        "stationary_map_from_odom_pairing_requested": 0,
+                        "stationary_map_from_odom_pairing_required": False,
+                    }
+                },
+                "preflight_requirements flags must be booleans",
+            ),
+            (
+                {
+                    "preflight_requirements": {
+                        "stationary_map_from_odom_pairing_requested": True,
+                        "stationary_map_from_odom_pairing_required": False,
+                    }
+                },
+                "preflight_requirements flags are inconsistent",
             ),
         )
         for index, (replacements, message) in enumerate(cases):

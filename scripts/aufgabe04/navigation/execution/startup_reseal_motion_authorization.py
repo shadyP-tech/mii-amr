@@ -33,6 +33,10 @@ from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
 from scripts.aufgabe04.navigation.execution.startup_reseal_route_binding import (
     validate_startup_reseal_route_binding,
 )
+from scripts.aufgabe04.navigation.localization.ros_preflight_evidence_contract import (
+    validate_ros_preflight_evidence_fields,
+    validate_ros_preflight_requirements_evidence,
+)
 
 
 STARTUP_RESEAL_MOTION_AUTHORIZATION_SCHEMA_VERSION = 3
@@ -1345,21 +1349,21 @@ def _validate_fresh_stationary_localization_evidence(
     evidence = _load_json_object(
         Path(permit.fresh_stationary_localization_evidence_path)
     )
-    expected_fields = {
-        "ok",
-        "failures",
-        "observations",
-        "runtime_config",
-        "route_pose",
-        "odom_pose",
-        "map_from_odom",
-        "stationary_amcl_samples",
-        "stationary_map_from_odom_samples",
-    }
-    if frozenset(evidence) != expected_fields:
-        raise ValueError(
-            "fresh stationary localization evidence fields mismatch"
-        )
+    validate_ros_preflight_evidence_fields(
+        evidence,
+        context="fresh stationary localization evidence",
+    )
+    validate_ros_preflight_requirements_evidence(
+        evidence.get("preflight_requirements"),
+        require_explicit_stationary_map_from_odom_pairing=(
+            permit.mission_leg_kind
+            in {
+                MissionLegKind.CANDIDATE_PREAPPROACH,
+                MissionLegKind.OPPOSITE_FACE,
+            }
+        ),
+        context="fresh stationary localization evidence",
+    )
     if evidence.get("ok") is not True or evidence.get("failures") != []:
         raise ValueError(
             "fresh stationary localization evidence was not admitted"

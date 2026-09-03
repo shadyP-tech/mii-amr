@@ -25,6 +25,11 @@ from scripts.aufgabe04.navigation.localization.localization_preflight_evidence i
 from scripts.aufgabe04.navigation.localization.odom_route_adapter import (
     STATIONARY_STABILITY_MINIMUM_SAMPLE_COUNT,
 )
+from scripts.aufgabe04.navigation.localization.ros_preflight_evidence_contract import (
+    ros_preflight_requirements_evidence,
+    validate_ros_preflight_evidence_fields,
+    validate_ros_preflight_requirements_evidence,
+)
 from scripts.aufgabe04.navigation.localization.stationary_map_odom_capture import (
     StationaryMapOdomEpochBaseline,
     StationaryMapOdomEpochCapture,
@@ -149,16 +154,16 @@ class RosPreflightRequirements:
         *,
         execution_pose_owner: str,
     ) -> Dict[str, object]:
-        return {
-            "stationary_map_from_odom_pairing_requested": (
+        return ros_preflight_requirements_evidence(
+            stationary_map_from_odom_pairing_requested=(
                 self.require_stationary_map_from_odom_pairing
             ),
-            "stationary_map_from_odom_pairing_required": (
+            stationary_map_from_odom_pairing_required=(
                 self.stationary_map_from_odom_pairing_required(
                     execution_pose_owner=execution_pose_owner,
                 )
             ),
-        }
+        )
 
 
 def _angular_distance_rad(first: float, second: float) -> float:
@@ -372,12 +377,26 @@ class RosPreflightResult:
     preflight_requirements: Dict[str, object] = field(default_factory=dict)
 
     def to_json_dict(self) -> Dict[str, object]:
-        return {
+        # The empty default preserves constructor compatibility; persisted
+        # evidence always uses the canonical two-flag requirement schema.
+        preflight_requirements = (
+            self.preflight_requirements
+            if self.preflight_requirements
+            else ros_preflight_requirements_evidence(
+                stationary_map_from_odom_pairing_requested=False,
+                stationary_map_from_odom_pairing_required=False,
+            )
+        )
+        validate_ros_preflight_requirements_evidence(
+            preflight_requirements,
+            context="ROS preflight result",
+        )
+        payload = {
             "ok": self.ok,
             "failures": self.failures,
             "observations": [asdict(observation) for observation in self.observations],
             "runtime_config": self.runtime_config,
-            "preflight_requirements": self.preflight_requirements,
+            "preflight_requirements": dict(preflight_requirements),
             "route_pose": self.route_pose,
             "odom_pose": self.odom_pose,
             "map_from_odom": self.map_from_odom,
@@ -386,6 +405,11 @@ class RosPreflightResult:
                 self.stationary_map_from_odom_samples
             ),
         }
+        validate_ros_preflight_evidence_fields(
+            payload,
+            context="ROS preflight result",
+        )
+        return payload
 
 
 def _require_ros() -> None:

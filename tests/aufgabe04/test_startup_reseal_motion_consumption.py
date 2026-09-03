@@ -37,6 +37,9 @@ from scripts.aufgabe04.navigation.execution.startup_reseal_motion_consumption im
     load_startup_reseal_motion_consumption_receipt,
     startup_reseal_motion_consumption_receipt_sha256,
 )
+from scripts.aufgabe04.navigation.localization.ros_preflight_evidence_contract import (
+    ros_preflight_requirements_evidence,
+)
 
 
 class StartupResealMotionConsumptionTest(unittest.TestCase):
@@ -97,6 +100,10 @@ class StartupResealMotionConsumptionTest(unittest.TestCase):
                 "localization_source": "amcl",
                 "use_sim_time": False,
             },
+            "preflight_requirements": ros_preflight_requirements_evidence(
+                stationary_map_from_odom_pairing_requested=False,
+                stationary_map_from_odom_pairing_required=False,
+            ),
             "route_pose": {
                 "frame_id": "map",
                 "child_frame_id": "base_footprint",
@@ -284,6 +291,23 @@ class StartupResealMotionConsumptionTest(unittest.TestCase):
         values.update(replacements)
         return consume_startup_reseal_motion_permit(**values)
 
+    def _rewrite_fresh_localization_and_permit(self, payload):
+        self.artifacts["fresh_stationary_localization_evidence"].write_text(
+            json.dumps(payload, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        raw = json.loads(self.permit_path.read_text(encoding="utf-8"))
+        raw.pop(STARTUP_RESEAL_MOTION_PERMIT_HASH_FIELD)
+        raw["fresh_stationary_localization_evidence_sha256"] = self._sha(
+            "fresh_stationary_localization_evidence"
+        )
+        raw[STARTUP_RESEAL_MOTION_PERMIT_HASH_FIELD] = payload_sha256(raw)
+        self.permit_path.write_text(
+            json.dumps(raw, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        self.permit = load_startup_reseal_motion_permit(self.permit_path)
+
     def test_first_claim_round_trips_and_identical_replay_rejects(self):
         receipt_path = default_startup_reseal_motion_consumption_receipt_path(
             self.permit_path
@@ -354,6 +378,21 @@ class StartupResealMotionConsumptionTest(unittest.TestCase):
             json.dumps(summary) + "\n",
             encoding="utf-8",
         )
+        localization_evidence = json.loads(
+            self.artifacts["fresh_stationary_localization_evidence"].read_text(
+                encoding="utf-8"
+            )
+        )
+        localization_evidence["preflight_requirements"] = (
+            ros_preflight_requirements_evidence(
+                stationary_map_from_odom_pairing_requested=True,
+                stationary_map_from_odom_pairing_required=True,
+            )
+        )
+        self.artifacts["fresh_stationary_localization_evidence"].write_text(
+            json.dumps(localization_evidence) + "\n",
+            encoding="utf-8",
+        )
         self.permit_path = self.root / "candidate_startup_permit.json"
         self.permit = replace(
             self.permit,
@@ -369,6 +408,9 @@ class StartupResealMotionConsumptionTest(unittest.TestCase):
             ),
             startup_reseal_summary_sha256=self._sha(
                 "startup_reseal_summary"
+            ),
+            fresh_stationary_localization_evidence_sha256=self._sha(
+                "fresh_stationary_localization_evidence"
             ),
         )
         write_startup_reseal_motion_permit(self.permit_path, self.permit)
@@ -452,6 +494,32 @@ class StartupResealMotionConsumptionTest(unittest.TestCase):
             "tampered\n", encoding="utf-8"
         )
         with self.assertRaisesRegex(ValueError, "dry_preflight hash mismatch"):
+            self._consume()
+        self.assertFalse(receipt_path.exists())
+
+    def test_fresh_localization_accepts_current_requirement_schema(self):
+        receipt_path = default_startup_reseal_motion_consumption_receipt_path(
+            self.permit_path
+        )
+        self._consume()
+        self.assertTrue(receipt_path.exists())
+
+    def test_fresh_localization_rejects_missing_requirement_schema(self):
+        receipt_path = default_startup_reseal_motion_consumption_receipt_path(
+            self.permit_path
+        )
+        payload = json.loads(
+            self.artifacts["fresh_stationary_localization_evidence"].read_text(
+                encoding="utf-8"
+            )
+        )
+        payload.pop("preflight_requirements")
+        self._rewrite_fresh_localization_and_permit(payload)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "fresh stationary localization evidence fields mismatch",
+        ):
             self._consume()
         self.assertFalse(receipt_path.exists())
 
