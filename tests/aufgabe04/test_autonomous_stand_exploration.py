@@ -136,6 +136,7 @@ from scripts.aufgabe04.stations.candidate_snapshot import (
     new_candidate_snapshot,
     write_candidate_snapshot,
 )
+from tests.aufgabe04.backside_axis_fixture import backside_axis_payload
 
 
 MAP = Path("maps/aufgabe03/arena_1p898x3p9_auto.yaml")
@@ -1815,16 +1816,9 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             axis_path = Path(tmp) / "axis.json"
             axis_path.write_text(
                 json.dumps(
-                    {
-                        "observation_kind": "real_stand_axis_without_qr",
-                        "stand_axis_rad": 0.0,
-                        "stand_center": {"x_m": 0.0, "y_m": 0.0},
-                        "robot_pose": {
-                            "x_m": 0.0,
-                            "y_m": 0.7,
-                            "yaw_rad": -math.pi / 2.0,
-                        },
-                    }
+                    backside_axis_payload(
+                        robot_yaw_rad=-math.pi / 2.0,
+                    )
                 )
             )
             selected = opposite_face_normal(axis_path)
@@ -4420,19 +4414,14 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             axis_path = root / "axis_observation.json"
             axis_path.write_text(
                 json.dumps(
-                    {
-                        "schema_version": 1,
-                        "observation_kind": "real_stand_axis_without_qr",
-                        "stand_id": candidate.candidate_uid,
-                        "planning_frame": plan.planning_frame,
-                        "stand_center": {"x_m": 0.2, "y_m": 0.0},
-                        "robot_pose": {
-                            "x_m": 0.2,
-                            "y_m": 0.55,
-                            "yaw_rad": -math.pi / 2.0,
-                        },
-                        "stand_axis_rad": 0.0,
-                    }
+                    backside_axis_payload(
+                        stand_id=candidate.candidate_uid,
+                        planning_frame=plan.planning_frame,
+                        stand_x_m=0.2,
+                        robot_x_m=0.2,
+                        robot_y_m=0.55,
+                        robot_yaw_rad=-math.pi / 2.0,
+                    )
                 )
             )
             outputs = plan_candidate_preapproach(

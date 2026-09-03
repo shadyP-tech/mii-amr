@@ -1,6 +1,22 @@
-"""Pure shared provenance constants for the passive real-camera observer."""
+"""Compatibility exports for passive real-camera observer provenance."""
 
-
-PASSIVE_VIEWPOINT_OBSERVER_VERSION = (
-    "aufgabe04-real-passive-viewpoint-v5-measured-metric-model-only"
+from scripts.aufgabe04.artifacts.backside_axis_observation import (
+    BACKSIDE_AXIS_OBSERVATION_KIND,
+    BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION,
+    BACKSIDE_AXIS_SAMPLE_SOURCE,
+    BACKSIDE_CLASSIFICATION_BASIS,
+    BACKSIDE_MODEL_EVIDENCE_STATE,
+    BACKSIDE_VISIBLE_FACE,
+    PASSIVE_VIEWPOINT_OBSERVER_VERSION,
 )
+
+
+__all__ = [
+    "BACKSIDE_AXIS_OBSERVATION_KIND",
+    "BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION",
+    "BACKSIDE_AXIS_SAMPLE_SOURCE",
+    "BACKSIDE_CLASSIFICATION_BASIS",
+    "BACKSIDE_MODEL_EVIDENCE_STATE",
+    "BACKSIDE_VISIBLE_FACE",
+    "PASSIVE_VIEWPOINT_OBSERVER_VERSION",
+]

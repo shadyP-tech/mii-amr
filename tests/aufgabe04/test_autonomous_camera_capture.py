@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from scripts.aufgabe04.artifacts.content_store import load_content_hashed_json
 from scripts.aufgabe04.perception.stand_axis.model_profile import (
+    load_measured_physical_stand_model,
     stand_model_from_payload,
     write_stand_model,
 )
@@ -17,6 +18,7 @@ from scripts.aufgabe04.real_robot.candidate.observation_deferral import (
 from scripts.aufgabe04.real_robot.observer.process import (
     PassiveObserverProcessEvidence,
 )
+from tests.aufgabe04.backside_axis_fixture import backside_axis_payload
 
 
 def _write_measured_model(root: Path) -> Path:
@@ -71,6 +73,20 @@ def _candidate() -> SimpleNamespace:
             uncertainty_m=0.02,
         ),
     )
+
+
+def _bound_backside_axis_payload(model_path: Path) -> dict[str, object]:
+    candidate = _candidate()
+    payload = backside_axis_payload(
+        stand_id=candidate.candidate_uid,
+        planning_frame="map",
+        stand_x_m=candidate.geometry.x_m,
+        stand_y_m=candidate.geometry.y_m,
+    )
+    payload["stand_model_profile_sha256"] = (
+        load_measured_physical_stand_model(model_path).sha256
+    )
+    return payload
 
 
 class AutonomousCameraCaptureTests(unittest.TestCase):
@@ -168,10 +184,12 @@ class AutonomousCameraCaptureTests(unittest.TestCase):
             root = Path(tmp)
             output_dir = root / "attempt"
             axis_path = output_dir / "axis_observation.json"
+            model_path = _write_measured_model(root)
+            axis_payload = _bound_backside_axis_payload(model_path)
 
             def complete_with_axis(**kwargs):
                 kwargs["axis_observation_path"].write_text(
-                    "{}", encoding="utf-8"
+                    json.dumps(axis_payload), encoding="utf-8"
                 )
                 return PassiveObserverProcessEvidence(
                     completion_kind="artifact",
@@ -185,8 +203,8 @@ class AutonomousCameraCaptureTests(unittest.TestCase):
 
             monitor.side_effect = complete_with_axis
             result = runtime._capture_camera_recommendation(
-                profile=object(),
-                args=_args(_write_measured_model(root)),
+                profile=SimpleNamespace(map_frame="map"),
+                args=_args(model_path),
                 candidate=_candidate(),
                 output_dir=output_dir,
             )
@@ -215,6 +233,108 @@ class AutonomousCameraCaptureTests(unittest.TestCase):
         )
         self.assertEqual(process_payload["completion_kind"], "artifact")
         self.assertEqual(process_payload["artifact_kind"], "axis_observation")
+
+    @patch.object(runtime.subprocess, "Popen")
+    @patch.object(runtime, "monitor_passive_observer_process")
+    def test_axis_artifact_rejects_candidate_binding_tampering(
+        self,
+        monitor,
+        _popen,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model_path = _write_measured_model(root)
+            model_sha256 = load_measured_physical_stand_model(
+                model_path
+            ).sha256
+            tampered_sha256 = (
+                ("0" if model_sha256[0] != "0" else "1")
+                + model_sha256[1:]
+            )
+            cases = (
+                ("stand_id", "stand_id", "different_candidate"),
+                ("planning_frame", "planning_frame", "odom"),
+                ("stand_x", "stand_center.x_m", 1.200002),
+                ("stand_y", "stand_center.y_m", -0.300002),
+                (
+                    "model_hash",
+                    "stand_model_profile_sha256",
+                    tampered_sha256,
+                ),
+            )
+
+            for label, expected_field, tampered_value in cases:
+                with self.subTest(label=label):
+                    payload = _bound_backside_axis_payload(model_path)
+                    if label == "stand_x":
+                        payload["stand_center"]["x_m"] = tampered_value
+                    elif label == "stand_y":
+                        payload["stand_center"]["y_m"] = tampered_value
+                    else:
+                        payload[expected_field] = tampered_value
+
+                    def complete_with_axis(**kwargs):
+                        kwargs["axis_observation_path"].write_text(
+                            json.dumps(payload), encoding="utf-8"
+                        )
+                        return PassiveObserverProcessEvidence(
+                            completion_kind="artifact",
+                            artifact_kind="axis_observation",
+                            artifact_path=kwargs["axis_observation_path"],
+                            deadline_expired=False,
+                            returncode=0,
+                            cleanup_actions=("graceful_wait",),
+                            signals_sent=(),
+                        )
+
+                    monitor.side_effect = complete_with_axis
+                    with self.assertRaises(RuntimeError) as caught:
+                        runtime._capture_camera_recommendation(
+                            profile=SimpleNamespace(map_frame="map"),
+                            args=_args(model_path),
+                            candidate=_candidate(),
+                            output_dir=root / f"attempt_{label}",
+                        )
+                    self.assertIn(expected_field, str(caught.exception))
+
+    @patch.object(runtime.subprocess, "Popen")
+    @patch.object(runtime, "monitor_passive_observer_process")
+    def test_axis_artifact_rejects_invalid_backside_contract(
+        self,
+        monitor,
+        _popen,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model_path = _write_measured_model(root)
+            payload = _bound_backside_axis_payload(model_path)
+            payload["qr_marker_detected"] = True
+
+            def complete_with_axis(**kwargs):
+                kwargs["axis_observation_path"].write_text(
+                    json.dumps(payload), encoding="utf-8"
+                )
+                return PassiveObserverProcessEvidence(
+                    completion_kind="artifact",
+                    artifact_kind="axis_observation",
+                    artifact_path=kwargs["axis_observation_path"],
+                    deadline_expired=False,
+                    returncode=0,
+                    cleanup_actions=("graceful_wait",),
+                    signals_sent=(),
+                )
+
+            monitor.side_effect = complete_with_axis
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "invalid backside axis receipt",
+            ):
+                runtime._capture_camera_recommendation(
+                    profile=SimpleNamespace(map_frame="map"),
+                    args=_args(model_path),
+                    candidate=_candidate(),
+                    output_dir=root / "attempt_invalid_contract",
+                )
 
     @patch.object(runtime.subprocess, "Popen")
     @patch.object(runtime, "monitor_passive_observer_process")

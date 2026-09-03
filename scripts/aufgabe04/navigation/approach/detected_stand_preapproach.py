@@ -8,6 +8,10 @@ import math
 from pathlib import Path
 from typing import Mapping
 
+from scripts.aufgabe04.navigation.approach.backside_axis_frame_projection import (
+    BacksideAxisFrameProjection,
+    load_backside_axis_planning_observation,
+)
 from scripts.aufgabe04.navigation.execution.dynamic_route_handoff import (
     validate_arena_boundary_evidence,
 )
@@ -204,11 +208,11 @@ def validate_detected_stand_preapproach_binding(
         else:
             axis_path = Path(axis_path_value)
             try:
-                axis_payload = _load_json(axis_path)
-                axis_digest = file_sha256(axis_path)
-                axis_rad = _finite_number(
-                    axis_payload.get("stand_axis_rad"), "stand_axis_rad"
+                axis_observation = load_backside_axis_planning_observation(
+                    axis_path
                 )
+                axis_digest = file_sha256(axis_path)
+                axis_rad = axis_observation.stand_axis_rad
                 face_normal = _finite_number(
                     metadata.get("selected_face_normal_rad"),
                     "selected_face_normal_rad",
@@ -216,45 +220,62 @@ def validate_detected_stand_preapproach_binding(
                 approach_offset = _finite_number(
                     metadata.get("approach_offset_m"), "approach_offset_m"
                 )
-                stand_center = axis_payload.get("stand_center")
-                robot_pose = axis_payload.get("robot_pose")
-                if not isinstance(stand_center, Mapping):
-                    raise ValueError("axis observation stand_center is missing")
-                if not isinstance(robot_pose, Mapping):
-                    raise ValueError("axis observation robot_pose is missing")
-                observed_stand_x = _finite_number(
-                    stand_center.get("x_m"), "axis stand x"
-                )
-                observed_stand_y = _finite_number(
-                    stand_center.get("y_m"), "axis stand y"
-                )
-                observed_robot_x = _finite_number(
-                    robot_pose.get("x_m"), "axis robot x"
-                )
-                observed_robot_y = _finite_number(
-                    robot_pose.get("y_m"), "axis robot y"
-                )
+                observed_normal = axis_observation.opposite_face_normal_rad
             except (OSError, json.JSONDecodeError, ValueError) as exc:
                 failures.append(f"axis observation validation failed: {exc}")
             else:
                 if metadata.get("axis_observation_sha256") != axis_digest:
                     failures.append("axis observation SHA-256 does not match")
-                if axis_payload.get("observation_kind") != (
-                    "real_stand_axis_without_qr"
+                if isinstance(
+                    axis_observation, BacksideAxisFrameProjection
                 ):
-                    failures.append("axis observation has the wrong kind")
-                if axis_payload.get("stand_id") != selected_uid:
+                    if metadata.get("axis_evidence_kind") != (
+                        "backside_axis_frame_projection"
+                    ):
+                        failures.append(
+                            "axis evidence kind does not identify its projection"
+                        )
+                    if metadata.get("source_axis_observation_json") != str(
+                        axis_observation.source_axis_observation_path
+                    ):
+                        failures.append(
+                            "source axis observation path does not match projection"
+                        )
+                    if metadata.get("source_axis_observation_sha256") != (
+                        axis_observation.source_axis_observation_sha256
+                    ):
+                        failures.append(
+                            "source axis observation SHA-256 does not match projection"
+                        )
+                    if metadata.get("axis_frame_projection_sha256") != (
+                        axis_observation.projection_sha256
+                    ):
+                        failures.append(
+                            "axis frame projection SHA-256 does not match"
+                        )
+                elif metadata.get("axis_evidence_kind") != (
+                    "native_backside_axis_observation"
+                ):
+                    failures.append("axis evidence kind is invalid")
+                if axis_observation.stand_id != selected_uid:
                     failures.append("axis observation stand ID does not match")
-                if axis_payload.get("planning_frame") != snapshot.planning_frame:
+                if (
+                    axis_observation.planning_frame
+                    != snapshot.planning_frame
+                ):
                     failures.append("axis observation planning frame does not match")
                 if (
                     math.hypot(
-                        observed_stand_x - selected.geometry.x_m,
-                        observed_stand_y - selected.geometry.y_m,
+                        axis_observation.stand_x_m - selected.geometry.x_m,
+                        axis_observation.stand_y_m - selected.geometry.y_m,
                     )
                     > 1.0e-6
                 ):
                     failures.append("axis observation stand center does not match")
+                if _angle_error(face_normal, observed_normal) > 1.0e-9:
+                    failures.append(
+                        "selected face normal does not match axis observation"
+                    )
                 perpendicular_error = abs(
                     abs(
                         math.atan2(
@@ -267,8 +288,8 @@ def validate_detected_stand_preapproach_binding(
                 if perpendicular_error > 0.15:
                     failures.append("selected face normal is not perpendicular to axis")
                 initial_side_angle = math.atan2(
-                    observed_robot_y - selected.geometry.y_m,
-                    observed_robot_x - selected.geometry.x_m,
+                    axis_observation.robot_y_m - selected.geometry.y_m,
+                    axis_observation.robot_x_m - selected.geometry.x_m,
                 )
                 if math.cos(face_normal - initial_side_angle) > -0.5:
                     failures.append(

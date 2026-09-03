@@ -43,6 +43,10 @@ from scripts.aufgabe04.navigation.approach.candidate_frame_reprojection import (
     CandidateFrameProvenance,
     CandidatePoint2D,
 )
+from scripts.aufgabe04.navigation.approach.backside_axis_frame_projection import (
+    BacksideAxisFrameProjection,
+    load_backside_axis_planning_observation,
+)
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
     STATUS_PENDING_CAMERA,
@@ -82,7 +86,11 @@ from scripts.aufgabe04.stations.candidate_snapshot import (
     new_candidate_snapshot,
     write_candidate_snapshot,
 )
+from scripts.aufgabe04.stations.station_identity_registry import (
+    load_station_identity_registry,
+)
 from tests.aufgabe04.test_detected_station_exploration import write_free_map
+from tests.aufgabe04.backside_axis_fixture import backside_axis_payload
 
 
 class AutonomousCandidateApproachTest(unittest.TestCase):
@@ -455,12 +463,11 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             axis_path = root / "axis.json"
             axis_path.write_text(
                 json.dumps(
-                    {
-                        "observation_kind": "real_stand_axis_without_qr",
-                        "stand_axis_rad": 0.0,
-                        "stand_center": {"x_m": 1.0, "y_m": 0.0},
-                        "robot_pose": {"x_m": 1.0, "y_m": 0.7},
-                    }
+                    backside_axis_payload(
+                        stand_id="candidate_a",
+                        stand_x_m=1.0,
+                        robot_x_m=1.0,
+                    )
                 )
             )
             planning_frames = iter(
@@ -489,6 +496,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             )
             capture_attempts = []
             planned_candidate_y_m = []
+            planned_axis_evidence = []
 
             def capture(request):
                 capture_attempts.append(request.attempt_index)
@@ -500,6 +508,12 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                 planned_candidate_y_m.append(
                     request.snapshot.candidates[0].geometry.y_m
                 )
+                if request.axis_observation_path is not None:
+                    planned_axis_evidence.append(
+                        load_backside_axis_planning_observation(
+                            request.axis_observation_path
+                        )
+                    )
                 return {"route_csv": "route.csv"}
 
             with self.assertRaises(CandidateApproachIncompleteError):
@@ -521,6 +535,11 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
 
             self.assertEqual(capture_attempts, [0])
             self.assertEqual(planned_candidate_y_m, [0.0, 0.20])
+            self.assertEqual(len(planned_axis_evidence), 1)
+            projected_axis = planned_axis_evidence[0]
+            self.assertIsInstance(projected_axis, BacksideAxisFrameProjection)
+            self.assertAlmostEqual(projected_axis.stand_y_m, 0.20)
+            self.assertAlmostEqual(projected_axis.robot_y_m, 0.90)
             admission_path = (
                 config.session_root
                 / "candidates"
@@ -533,6 +552,172 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             self.assertFalse(payload["accepted"])
             self.assertIn("bearing_error_above_maximum", payload["reasons"])
             self.assertFalse(payload["motion_authorized"])
+
+    def test_opposite_face_startup_reseal_reprojects_axis_across_yaw_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = replace(
+                self._config(
+                    root,
+                    (self._candidate("candidate_a", 2.0, 0.0),),
+                ),
+                max_startup_reseals_per_leg=1,
+                startup_reseal_motion_authorization_json=(
+                    root / "startup_authorization.json"
+                ),
+            )
+            config = self._write_frame_registry(
+                config,
+                frozen_map_from_odom=PlanarTransform2D(1.0, 0.0, 0.0),
+            )
+            planning_frames = iter(
+                (
+                    # Selection and first camera capture use the same frame.
+                    CandidatePlanningFrame(
+                        Pose2D(0.0, 0.0, 0.0),
+                        PlanarTransform2D(0.0, 0.0, 0.0),
+                    ),
+                    CandidatePlanningFrame(
+                        Pose2D(0.30, 0.0, 0.0),
+                        PlanarTransform2D(0.0, 0.0, 0.0),
+                    ),
+                    # Opposite planning first sees translation drift.
+                    CandidatePlanningFrame(
+                        Pose2D(0.30, 0.20, 0.0),
+                        PlanarTransform2D(0.0, 0.20, 0.0),
+                    ),
+                    # Startup reseal then sees a 90-degree AMCL yaw change.
+                    CandidatePlanningFrame(
+                        Pose2D(0.30, 0.20, 0.0),
+                        PlanarTransform2D(0.0, 0.0, math.pi / 2.0),
+                    ),
+                    CandidatePlanningFrame(
+                        Pose2D(0.70, 1.0, math.pi),
+                        PlanarTransform2D(0.0, 0.0, math.pi / 2.0),
+                    ),
+                )
+            )
+            axis_path = root / "axis.json"
+            axis_path.write_text(
+                json.dumps(
+                    backside_axis_payload(
+                        stand_id="candidate_a",
+                        stand_x_m=1.0,
+                        robot_x_m=1.0,
+                        robot_y_m=0.70,
+                    )
+                )
+            )
+            axis_plans = []
+            initial_motion_calls = []
+            replacement_motion_calls = []
+
+            def plan(request):
+                if request.axis_observation_path is not None:
+                    axis = load_backside_axis_planning_observation(
+                        request.axis_observation_path
+                    )
+                    candidate = request.snapshot.candidates[0]
+                    self.assertAlmostEqual(
+                        axis.stand_x_m, candidate.geometry.x_m
+                    )
+                    self.assertAlmostEqual(
+                        axis.stand_y_m, candidate.geometry.y_m
+                    )
+                    self.assertAlmostEqual(
+                        axis.opposite_face_normal_rad,
+                        request.approach_normal_rad,
+                    )
+                    axis_plans.append(axis)
+                return {"route_csv": "route.csv"}
+
+            def run_motion(request):
+                initial_motion_calls.append(request)
+                if request.mission_leg_kind != MissionLegKind.OPPOSITE_FACE:
+                    return self._completed(request)
+                return MotionLegOutcome(
+                    run_id=request.run_id,
+                    status="stopped",
+                    stop_reason="pose outside certified startup segment",
+                    stop_details={
+                        "source": "execution_route_certificate",
+                        "phase": "before_motion_confirmation",
+                        "reason": "pose outside certified startup segment",
+                        "fail_closed": True,
+                        "route_pose": {
+                            "x_m": 0.30,
+                            "y_m": 0.20,
+                            "yaw_rad": 0.0,
+                        },
+                    },
+                    motion_published=False,
+                    returncode=1,
+                    semantic_log_path=root / "opposite_initial.jsonl",
+                )
+
+            def run_replacement(request, _attempt):
+                replacement_motion_calls.append(request)
+                return self._completed(request)
+
+            def capture(request):
+                if request.attempt_index == 0:
+                    return CandidateObservation(None, None, axis_path)
+                return CandidateObservation(
+                    request.output_dir / "recommendation.json",
+                    "QR_A",
+                    None,
+                )
+
+            def admit_yaw_drift_frame(evidence_path):
+                evidence_path.parent.mkdir(parents=True, exist_ok=True)
+                evidence_path.write_text("{}\n", encoding="utf-8")
+                return next(planning_frames)
+
+            outcome = execute_candidate_approach_phase(
+                config,
+                CandidateApproachEffects(
+                    read_current_pose=lambda: Pose2D(0.70, 1.0, math.pi),
+                    admit_planning_frame=admit_yaw_drift_frame,
+                    select_initial_preapproach=self._nearest_selection,
+                    plan_preapproach=plan,
+                    run_motion_leg=run_motion,
+                    run_startup_reseal_motion_leg=run_replacement,
+                    capture_observation=capture,
+                    validate_facing=lambda request: {
+                        "candidate_uid": request.candidate.candidate_uid
+                    },
+                    commit_decision=lambda _request: None,
+                    clock=lambda: 10.0,
+                ),
+            )
+
+            self.assertEqual(outcome.visit_order, ("candidate_a",))
+            self.assertEqual(len(axis_plans), 2)
+            self.assertTrue(
+                all(
+                    isinstance(axis, BacksideAxisFrameProjection)
+                    for axis in axis_plans
+                )
+            )
+            self.assertAlmostEqual(axis_plans[0].stand_y_m, 0.20)
+            self.assertAlmostEqual(axis_plans[0].stand_axis_rad, 0.0)
+            self.assertAlmostEqual(axis_plans[1].stand_x_m, 0.0)
+            self.assertAlmostEqual(axis_plans[1].stand_y_m, 1.0)
+            self.assertAlmostEqual(
+                axis_plans[1].stand_axis_rad, math.pi / 2.0
+            )
+            self.assertAlmostEqual(
+                axis_plans[1].opposite_face_normal_rad, 0.0
+            )
+            self.assertEqual(len(initial_motion_calls), 2)
+            self.assertEqual(len(replacement_motion_calls), 1)
+            identity = load_station_identity_registry(
+                outcome.identity_registry_path,
+                candidate_snapshot=config.snapshot,
+            ).for_candidate("candidate_a")
+            self.assertIsNotNone(identity)
+            self.assertEqual(identity.qr_id, "QR_A")
+            self.assertEqual(identity.server_station_id, "station_QR_A")
 
     def test_typed_observer_timeout_defers_then_retries_after_other_candidate(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -919,12 +1104,10 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             axis_path = root / "axis.json"
             axis_path.write_text(
                 json.dumps(
-                    {
-                        "observation_kind": "real_stand_axis_without_qr",
-                        "stand_axis_rad": 0.0,
-                        "stand_center": {"x_m": 0.2, "y_m": 0.0},
-                        "robot_pose": {"x_m": 0.2, "y_m": 0.7},
-                    }
+                    backside_axis_payload(
+                        stand_x_m=0.2,
+                        robot_x_m=0.2,
+                    )
                 )
             )
             poses = iter((Pose2D(0.0, 0.0, 0.0), self._current_amcl_pose()))
@@ -1288,12 +1471,10 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             axis_path = root / "axis.json"
             axis_path.write_text(
                 json.dumps(
-                    {
-                        "observation_kind": "real_stand_axis_without_qr",
-                        "stand_axis_rad": 0.0,
-                        "stand_center": {"x_m": 0.2, "y_m": 0.0},
-                        "robot_pose": {"x_m": 0.2, "y_m": 0.7},
-                    }
+                    backside_axis_payload(
+                        stand_x_m=0.2,
+                        robot_x_m=0.2,
+                    )
                 )
             )
             poses = iter(
@@ -1819,12 +2000,10 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             axis_path = root / "axis.json"
             axis_path.write_text(
                 json.dumps(
-                    {
-                        "observation_kind": "real_stand_axis_without_qr",
-                        "stand_axis_rad": 0.0,
-                        "stand_center": {"x_m": 0.2, "y_m": 0.0},
-                        "robot_pose": {"x_m": 0.2, "y_m": 0.7},
-                    }
+                    backside_axis_payload(
+                        stand_x_m=0.2,
+                        robot_x_m=0.2,
+                    )
                 )
             )
             poses = iter(

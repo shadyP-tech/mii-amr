@@ -17,6 +17,10 @@ import time
 from typing import Callable, Mapping
 
 from scripts.aufgabe04.artifacts.content_store import write_content_hashed_json
+from scripts.aufgabe04.navigation.approach.backside_axis_frame_projection import (
+    load_backside_axis_planning_observation,
+    write_backside_axis_frame_projection,
+)
 from scripts.aufgabe04.navigation.foundation.artifacts import (
     write_diagnostics_json,
     write_route_csv,
@@ -1125,6 +1129,7 @@ def _admit_opposite_face_planning_geometry(
     FrozenCandidate,
     Pose2D,
     CandidatePlanningFrame | None,
+    _CandidateFrameProjectionArtifacts | None,
 ]:
     """Bind opposite-face planning to one fresh stopped execution frame."""
 
@@ -1142,6 +1147,7 @@ def _admit_opposite_face_planning_geometry(
                 candidate_uid=candidate_uid,
             ),
             None,
+            None,
         )
     if source_registry is None:
         raise RuntimeError("opposite-face frame registry is unavailable")
@@ -1158,7 +1164,13 @@ def _admit_opposite_face_planning_geometry(
         raise RuntimeError(
             "opposite-face candidate disappeared from projected snapshot"
         )
-    return artifacts.config, candidate, planning_frame.current_pose, planning_frame
+    return (
+        artifacts.config,
+        candidate,
+        planning_frame.current_pose,
+        planning_frame,
+        artifacts,
+    )
 
 
 def _motion_request(
@@ -1294,6 +1306,7 @@ def _execute_candidate_motion(
         replacement_snapshot = plan_request.snapshot
         replacement_snapshot_path = plan_request.snapshot_path
         approach_normal_rad = plan_request.approach_normal_rad
+        axis_evidence_path = plan_request.axis_observation_path
         if fresh_planning_frame is not None:
             if frame_source_config is None or source_registry is None:
                 raise RuntimeError(
@@ -1310,10 +1323,39 @@ def _execute_candidate_motion(
             replacement_snapshot = artifacts.config.snapshot
             replacement_snapshot_path = artifacts.config.snapshot_path
             if approach_normal_rad is not None and plan_planning_frame is not None:
-                approach_normal_rad = normalize_angle(
-                    approach_normal_rad
-                    + fresh_planning_frame.map_from_odom.yaw_rad
-                    - plan_planning_frame.map_from_odom.yaw_rad
+                if axis_evidence_path is None:
+                    raise RuntimeError(
+                        "frame-aware opposite-face recovery lacks axis evidence"
+                    )
+                replacement_candidate = replacement_snapshot.candidate_for(
+                    plan_request.candidate_uid
+                )
+                if replacement_candidate is None:
+                    raise RuntimeError(
+                        "opposite-face recovery candidate disappeared from snapshot"
+                    )
+                projected_axis_path = (
+                    source_root / "axis_observation_frame_projection.json"
+                )
+                write_backside_axis_frame_projection(
+                    projected_axis_path,
+                    axis_evidence_path=axis_evidence_path,
+                    target_candidate_projection_path=artifacts.evidence_path,
+                    target_candidate_projection_sha256=(
+                        artifacts.evidence_sha256
+                    ),
+                    target_candidate_x_m=(
+                        replacement_candidate.geometry.x_m
+                    ),
+                    target_candidate_y_m=(
+                        replacement_candidate.geometry.y_m
+                    ),
+                )
+                axis_evidence_path = projected_axis_path
+                approach_normal_rad = (
+                    load_backside_axis_planning_observation(
+                        projected_axis_path
+                    ).opposite_face_normal_rad
                 )
         return replacement_config, replace(
             plan_request,
@@ -1322,6 +1364,7 @@ def _execute_candidate_motion(
             snapshot=replacement_snapshot,
             snapshot_path=replacement_snapshot_path,
             approach_normal_rad=approach_normal_rad,
+            axis_observation_path=axis_evidence_path,
             prepared_plan=None,
             selection_evidence=None,
         )
@@ -1479,25 +1522,57 @@ def _capture_candidate_camera_result(
     if observation.axis_observation_path is None:
         raise RuntimeError("observer returned neither QR recommendation nor axis")
 
-    opposite_normal = opposite_face_normal(observation.axis_observation_path)
-    opposite_config, candidate, opposite_start, opposite_planning_frame = (
-        _admit_opposite_face_planning_geometry(
+    source_axis_evidence_path = observation.axis_observation_path
+    opposite_normal = opposite_face_normal(source_axis_evidence_path)
+    (
+        opposite_config,
+        candidate,
+        opposite_start,
+        opposite_planning_frame,
+        opposite_projection_artifacts,
+    ) = _admit_opposite_face_planning_geometry(
             source_config=source_config,
             effects=effects,
             source_registry=source_registry,
             candidate_uid=observation_frame.candidate.candidate_uid,
             candidate_root=candidate_root,
         )
-    )
+    axis_planning_evidence_path = source_axis_evidence_path
     if (
         observation_frame.planning_frame is not None
         and opposite_planning_frame is not None
     ):
-        frame_yaw_delta = normalize_angle(
-            opposite_planning_frame.map_from_odom.yaw_rad
-            - observation_frame.planning_frame.map_from_odom.yaw_rad
+        if (
+            observation_frame.decision_binding is None
+            or opposite_projection_artifacts is None
+        ):
+            raise RuntimeError(
+                "opposite-face frame projection lacks durable source evidence"
+            )
+        axis_planning_evidence_path = (
+            candidate_root / "opposite_face_axis_frame_projection.json"
         )
-        opposite_normal = normalize_angle(opposite_normal + frame_yaw_delta)
+        write_backside_axis_frame_projection(
+            axis_planning_evidence_path,
+            axis_evidence_path=source_axis_evidence_path,
+            source_candidate_projection_path=(
+                observation_frame.decision_binding.projection_path
+            ),
+            source_candidate_projection_sha256=(
+                observation_frame.decision_binding.projection_sha256
+            ),
+            target_candidate_projection_path=(
+                opposite_projection_artifacts.evidence_path
+            ),
+            target_candidate_projection_sha256=(
+                opposite_projection_artifacts.evidence_sha256
+            ),
+            target_candidate_x_m=candidate.geometry.x_m,
+            target_candidate_y_m=candidate.geometry.y_m,
+        )
+        opposite_normal = load_backside_axis_planning_observation(
+            axis_planning_evidence_path
+        ).opposite_face_normal_rad
     opposite_source = candidate_root / "opposite_face_source"
     opposite_sealed = None
     opposite_plan_request = None
@@ -1527,7 +1602,7 @@ def _capture_candidate_camera_result(
                 ),
                 physical_clearance=opposite_config.physical_clearance,
                 approach_normal_rad=opposite_normal,
-                axis_observation_path=observation.axis_observation_path,
+                axis_observation_path=axis_planning_evidence_path,
             )
             opposite_sealed = effects.plan_preapproach(opposite_plan_request)
             break

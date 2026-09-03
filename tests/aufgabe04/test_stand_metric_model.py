@@ -29,6 +29,9 @@ from scripts.aufgabe04.perception.stand_axis.model_projection import (
 from scripts.aufgabe04.perception.stand_axis.model_pipeline import (
     estimate_stand_axis_from_metric_model,
 )
+from scripts.aufgabe04.perception.stand_axis.model_backside_acquisition import (
+    MODEL_BACKSIDE_AXIS_SOURCE,
+)
 from scripts.aufgabe04.perception.stand_axis.model_refinement import (
     model_corridor_half_width_px,
     refine_projected_head_border,
@@ -545,6 +548,229 @@ class StandMetricGeometryTest(unittest.TestCase):
 
         self.assertTrue(estimate.usable, estimate.reason)
         self.assertAlmostEqual(estimate.yaw_deg, -25.0, delta=3.0)
+
+    @staticmethod
+    def _synthetic_backside_frame(*, include_neck: bool = True):
+        frame = numpy.zeros((240, 320, 3), dtype=numpy.uint8)
+        cv2.rectangle(frame, (120, 50), (200, 130), (255, 255, 255), 2)
+        if include_neck:
+            cv2.line(frame, (153, 131), (153, 205), (255, 255, 255), 2)
+            cv2.line(frame, (167, 131), (167, 205), (255, 255, 255), 2)
+        return frame
+
+    def _backside_options(self, **overrides):
+        options = {
+            "model_profile": self.profile,
+            "camera_fx_px": self.camera.fx_px,
+            "camera_fy_px": self.camera.fy_px,
+            "camera_cx_px": self.camera.cx_px,
+            "camera_cy_px": self.camera.cy_px,
+            "blur_kernel": 1,
+            "canny_low": 20,
+            "canny_high": 60,
+            "expected_head_center_u_px": 160.0,
+            "expected_head_center_v_px": 90.0,
+            "expected_head_height_px": 80.0,
+        }
+        options.update(overrides)
+        return options
+
+    def test_no_qr_measured_model_bootstraps_backside_axis(self):
+        frame = self._synthetic_backside_frame()
+        with patch(
+            "scripts.aufgabe04.perception.stand_axis.model_pipeline."
+            "detect_qr_quad",
+            return_value=None,
+        ):
+            estimate, debug = estimate_stand_axis_from_metric_model(
+                cv2,
+                frame,
+                **self._backside_options(),
+            )
+
+        self.assertTrue(estimate.usable, estimate.reason)
+        self.assertEqual(estimate.source, MODEL_BACKSIDE_AXIS_SOURCE)
+        self.assertEqual(estimate.evidence_state, "fresh_backside")
+        self.assertEqual(estimate.visible_face, "backside_candidate")
+        self.assertGreaterEqual(estimate.visible_face_confidence, 0.70)
+        self.assertIsNotNone(estimate.yaw_deg)
+        self.assertTrue(math.isfinite(estimate.yaw_deg))
+        self.assertIsNone(estimate.camera_face_normal_xyz)
+        self.assertEqual(
+            debug.visible_face_reason,
+            "qr_absent_model_head_and_neck_supported",
+        )
+        self.assertAlmostEqual(debug.head_scale_ratio, 1.0, delta=0.08)
+        self.assertLess(debug.head_center_error_ratio, 0.05)
+        self.assertEqual(debug.model_profile_sha256, self.profile.sha256)
+        self.assertIsNotNone(estimate.pose_reprojection_rmse_px)
+        self.assertEqual(
+            debug.pose_reprojection_rmse_px,
+            estimate.pose_reprojection_rmse_px,
+        )
+        self.assertEqual(
+            debug.pose_ambiguity_gap_px,
+            estimate.pose_ambiguity_gap_px,
+        )
+
+    def test_backside_bootstrap_rejects_ambiguous_planar_axis(self):
+        frame = self._synthetic_backside_frame()
+        best = PlanarPoseHypothesis(
+            rotation_vector=(0.0, 0.0, 0.0),
+            translation_xyz_m=(0.0, 0.0, 0.40),
+            face_normal_xyz=(0.0, 0.0, 1.0),
+            yaw_deg=0.0,
+            reprojection_rmse_px=0.04,
+            positive_depth=True,
+        )
+        competing = PlanarPoseHypothesis(
+            rotation_vector=(0.0, -0.35, 0.0),
+            translation_xyz_m=(0.0, 0.0, 0.40),
+            face_normal_xyz=(-0.34, 0.0, 0.94),
+            yaw_deg=20.0,
+            reprojection_rmse_px=0.05,
+            positive_depth=True,
+        )
+        ambiguous_pose = PlanarPoseResult(
+            accepted=True,
+            reason="pose_estimated",
+            hypotheses=(best, competing),
+            ambiguity_gap_px=0.01,
+        )
+        with (
+            patch(
+                "scripts.aufgabe04.perception.stand_axis.model_pipeline."
+                "detect_qr_quad",
+                return_value=None,
+            ),
+            patch(
+                "scripts.aufgabe04.perception.stand_axis."
+                "model_backside_acquisition.estimate_planar_pose_ippe",
+                return_value=ambiguous_pose,
+            ),
+        ):
+            estimate, debug = estimate_stand_axis_from_metric_model(
+                cv2,
+                frame,
+                **self._backside_options(),
+            )
+
+        self.assertFalse(estimate.usable)
+        self.assertEqual(
+            estimate.reason,
+            "model_backside_planar_pose_axis_ambiguous",
+        )
+        self.assertEqual(estimate.evidence_state, "unobservable")
+        self.assertIsNone(estimate.visible_face)
+        self.assertEqual(estimate.pose_reprojection_rmse_px, 0.04)
+        self.assertEqual(estimate.pose_ambiguity_gap_px, 0.01)
+        self.assertEqual(
+            debug.model_pose_fit_source,
+            "head_only_backside_ambiguous",
+        )
+        self.assertEqual(debug.pose_reprojection_rmse_px, 0.04)
+        self.assertEqual(debug.pose_ambiguity_gap_px, 0.01)
+
+    def test_absent_expected_geometry_preserves_seed_unavailable_contract(self):
+        frame = self._synthetic_backside_frame()
+        with patch(
+            "scripts.aufgabe04.perception.stand_axis.model_pipeline."
+            "detect_qr_quad",
+            return_value=None,
+        ):
+            estimate, debug = estimate_stand_axis_from_metric_model(
+                cv2,
+                frame,
+                model_profile=self.profile,
+                camera_fx_px=self.camera.fx_px,
+                camera_fy_px=self.camera.fy_px,
+                camera_cx_px=self.camera.cx_px,
+                camera_cy_px=self.camera.cy_px,
+                blur_kernel=1,
+            )
+
+        self.assertFalse(estimate.usable)
+        self.assertEqual(estimate.reason, "model_pose_seed_unavailable")
+        self.assertEqual(estimate.source, "model_seed")
+        self.assertEqual(debug.pose_seed_source, "none")
+
+    def test_backside_bootstrap_rejects_wrong_scale_off_center_and_no_neck(self):
+        cases = (
+            (
+                "wrong_scale",
+                self._synthetic_backside_frame(),
+                {"expected_head_height_px": 60.0},
+                "model_backside_head_scale_mismatch",
+            ),
+            (
+                "off_center",
+                self._synthetic_backside_frame(),
+                {"expected_head_center_u_px": 110.0},
+                "model_backside_target_center_mismatch",
+            ),
+            (
+                "no_neck",
+                self._synthetic_backside_frame(include_neck=False),
+                {},
+                "model_backside_head_and_neck_unavailable",
+            ),
+        )
+        for name, frame, overrides, expected_reason in cases:
+            with self.subTest(name=name), patch(
+                "scripts.aufgabe04.perception.stand_axis.model_pipeline."
+                "detect_qr_quad",
+                return_value=None,
+            ):
+                estimate, _debug = estimate_stand_axis_from_metric_model(
+                    cv2,
+                    frame,
+                    **self._backside_options(**overrides),
+                )
+
+            self.assertFalse(estimate.usable)
+            self.assertEqual(estimate.reason, expected_reason)
+            self.assertNotEqual(estimate.evidence_state, "fresh_backside")
+            self.assertIsNone(estimate.visible_face)
+
+    def test_detected_qr_never_falls_through_to_backside_bootstrap(self):
+        frame = self._synthetic_backside_frame()
+        qr_detection = QrQuadDetection(
+            (
+                ImagePoint(130.0, 60.0),
+                ImagePoint(190.0, 60.0),
+                ImagePoint(190.0, 120.0),
+                ImagePoint(130.0, 120.0),
+            ),
+            1.0,
+        )
+        rejected_pose = PlanarPoseResult(
+            accepted=False,
+            reason="pose_reprojection_error",
+            hypotheses=(),
+            ambiguity_gap_px=None,
+        )
+        with (
+            patch(
+                "scripts.aufgabe04.perception.stand_axis.model_pipeline."
+                "detect_qr_quad",
+                return_value=qr_detection,
+            ),
+            patch(
+                "scripts.aufgabe04.perception.stand_axis.model_pipeline."
+                "estimate_planar_pose_ippe",
+                return_value=rejected_pose,
+            ),
+        ):
+            estimate, debug = estimate_stand_axis_from_metric_model(
+                cv2,
+                frame,
+                **self._backside_options(),
+            )
+
+        self.assertFalse(estimate.usable)
+        self.assertEqual(estimate.reason, "model_pose_seed_unavailable")
+        self.assertNotEqual(estimate.source, MODEL_BACKSIDE_AXIS_SOURCE)
+        self.assertTrue(debug.qr_detected)
 
 
 class MetricPoseTrackerTest(unittest.TestCase):

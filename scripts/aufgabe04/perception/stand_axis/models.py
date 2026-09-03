@@ -45,6 +45,12 @@ class StandAxisImageEstimate:
     model_measurement_status: str | None = None
     pose_reprojection_rmse_px: float | None = None
     pose_ambiguity_gap_px: float | None = None
+    # Face classification is deliberately separate from planar pose.  A
+    # no-QR measured-model acquisition can establish an undirected stand axis
+    # and a fail-closed backside *candidate* without pretending that the thin
+    # head depth resolves front/back from one image.
+    visible_face: str | None = None
+    visible_face_confidence: float | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +80,9 @@ class StandAxisEdgeDebugArtifacts:
     model_reason: str | None = None
     model_measurement_status: str | None = None
     projected_landmarks: dict[str, ImagePoint] | None = None
+    visible_face_reason: str | None = None
+    head_scale_ratio: float | None = None
+    head_center_error_ratio: float | None = None
 
 
 @dataclass(frozen=True)

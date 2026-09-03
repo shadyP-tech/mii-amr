@@ -18,8 +18,10 @@ from scripts.aufgabe04.navigation.approach.candidate_preapproach_compute import 
     validate_approach_outside_transit_keepout,
     validate_physical_clearance,
 )
-from scripts.aufgabe04.navigation.approach.camera_axis_binding import (
-    load_opposite_face_normal,
+from scripts.aufgabe04.navigation.approach.backside_axis_frame_projection import (
+    BacksideAxisFrameProjection,
+    BacksideAxisPlanningObservation,
+    load_backside_axis_planning_observation,
 )
 from scripts.aufgabe04.navigation.approach.candidate_preapproach_models import (
     CandidatePreapproachPlan,
@@ -103,12 +105,24 @@ def materialize_candidate_preapproach_plan(
         expected_snapshot_sha256=snapshot_sha256,
         axis_observation_path=axis_observation_path,
     )
+    axis_observation = None
+    if axis_observation_path is not None:
+        axis_observation = load_backside_axis_planning_observation(
+            axis_observation_path
+        )
+        validate_backside_axis_candidate_binding(
+            axis_observation,
+            candidate_uid=prepared.candidate_uid,
+            planning_frame=snapshot.planning_frame,
+            candidate_x_m=candidate.geometry.x_m,
+            candidate_y_m=candidate.geometry.y_m,
+        )
     _validate_approach_bearing_binding(
         prepared=prepared,
         candidate_x_m=candidate.geometry.x_m,
         candidate_y_m=candidate.geometry.y_m,
         approach_normal_rad=approach_normal_rad,
-        axis_observation_path=axis_observation_path,
+        axis_observation=axis_observation,
     )
 
     output_dir.mkdir(parents=True, exist_ok=False)
@@ -190,15 +204,31 @@ def materialize_candidate_preapproach_plan(
     if selection_evidence is not None:
         metadata["camera_candidate_selection"] = dict(selection_evidence)
     if local_axis_observation is not None:
-        metadata.update(
-            {
-                "axis_observation_json": str(local_axis_observation.resolve()),
-                "axis_observation_sha256": file_sha256(local_axis_observation),
-                "selected_face_normal_rad": normalize_angle(
-                    float(approach_normal_rad)
-                ),
-            }
-        )
+        axis_metadata: dict[str, object] = {
+            "axis_observation_json": str(local_axis_observation.resolve()),
+            "axis_observation_sha256": file_sha256(local_axis_observation),
+            "selected_face_normal_rad": normalize_angle(
+                float(approach_normal_rad)
+            ),
+        }
+        if isinstance(axis_observation, BacksideAxisFrameProjection):
+            axis_metadata.update(
+                {
+                    "axis_evidence_kind": "backside_axis_frame_projection",
+                    "source_axis_observation_json": str(
+                        axis_observation.source_axis_observation_path
+                    ),
+                    "source_axis_observation_sha256": (
+                        axis_observation.source_axis_observation_sha256
+                    ),
+                    "axis_frame_projection_sha256": (
+                        axis_observation.projection_sha256
+                    ),
+                }
+            )
+        else:
+            axis_metadata["axis_evidence_kind"] = "native_backside_axis_observation"
+        metadata.update(axis_metadata)
     write_diagnostics_json(diagnostics_json, route_results, metadata=metadata)
     _write_json(
         pipeline_summary,
@@ -315,7 +345,7 @@ def _validate_approach_bearing_binding(
     candidate_x_m: float,
     candidate_y_m: float,
     approach_normal_rad: float | None,
-    axis_observation_path: Path | None,
+    axis_observation: BacksideAxisPlanningObservation | None,
 ) -> None:
     if approach_normal_rad is None:
         expected_bearing_rad = math.atan2(
@@ -325,8 +355,11 @@ def _validate_approach_bearing_binding(
     else:
         if not math.isfinite(approach_normal_rad):
             raise ValueError("approach face normal must be finite")
-        assert axis_observation_path is not None
-        observed_normal_rad = load_opposite_face_normal(axis_observation_path)
+        if axis_observation is None:
+            raise ValueError(
+                "axis-selected approach lacks a validated observation"
+            )
+        observed_normal_rad = axis_observation.opposite_face_normal_rad
         if abs(
             normalize_angle(observed_normal_rad - approach_normal_rad)
         ) > 1.0e-9:
@@ -340,6 +373,35 @@ def _validate_approach_bearing_binding(
         )
     ) > 1.0e-9:
         raise ValueError("prepared route has the wrong approach-bearing binding")
+
+
+def validate_backside_axis_candidate_binding(
+    observation: BacksideAxisPlanningObservation,
+    *,
+    candidate_uid: str,
+    planning_frame: str,
+    candidate_x_m: float,
+    candidate_y_m: float,
+    center_tolerance_m: float = 1.0e-6,
+) -> None:
+    """Bind a validated backside receipt to the exact frozen candidate."""
+
+    if observation.stand_id != candidate_uid:
+        raise ValueError("axis observation stand ID does not match candidate")
+    if observation.planning_frame != planning_frame:
+        raise ValueError(
+            "axis observation planning frame does not match snapshot"
+        )
+    if (
+        math.hypot(
+            observation.stand_x_m - candidate_x_m,
+            observation.stand_y_m - candidate_y_m,
+        )
+        > center_tolerance_m
+    ):
+        raise ValueError(
+            "axis observation stand center does not match candidate geometry"
+        )
 
 
 def _validate_prepared_plan_binding(
@@ -387,4 +449,5 @@ def _write_json(path: Path, payload: Mapping[str, object]) -> None:
 __all__ = [
     "materialize_candidate_preapproach_plan",
     "plan_candidate_preapproach",
+    "validate_backside_axis_candidate_binding",
 ]

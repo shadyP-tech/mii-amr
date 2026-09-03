@@ -42,6 +42,9 @@ from scripts.aufgabe04.navigation.approach.dynamic_approach_planner import (
 from scripts.aufgabe04.navigation.approach.candidate_frame_projection import (
     CandidatePlanningFrame,
 )
+from scripts.aufgabe04.navigation.approach.camera_axis_binding import (
+    load_backside_axis_observation,
+)
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     MISSION_LEG_RUN_CONFIRMATION,
@@ -1481,6 +1484,12 @@ def _capture_camera_recommendation(
         hash_field="observer_process_evidence_sha256",
     )
     if process_evidence.artifact_kind == "axis_observation":
+        _validate_captured_backside_axis_binding(
+            axis_observation_path=axis_observation_path,
+            candidate=candidate,
+            planning_frame=profile.map_frame,
+            stand_model_profile_sha256=stand_model.sha256,
+        )
         return None, None, axis_observation_path
     if process_evidence.artifact_kind != "recommendation":
         status_evidence = load_passive_observer_status(status_path)
@@ -1533,6 +1542,54 @@ def _capture_camera_recommendation(
     return recommendation_path, str(qr_texts[0]), (
         axis_observation_path if axis_observation_path.exists() else None
     )
+
+
+def _validate_captured_backside_axis_binding(
+    *,
+    axis_observation_path: Path,
+    candidate,
+    planning_frame: str,
+    stand_model_profile_sha256: str,
+) -> None:
+    """Bind one strict backside receipt to this exact camera attempt."""
+
+    try:
+        observation = load_backside_axis_observation(axis_observation_path)
+    except ValueError as exc:
+        raise RuntimeError(
+            "camera observer returned an invalid backside axis receipt: "
+            f"{exc}"
+        ) from exc
+
+    mismatches: list[str] = []
+    if observation.stand_id != candidate.candidate_uid:
+        mismatches.append("stand_id")
+    if observation.planning_frame != planning_frame:
+        mismatches.append("planning_frame")
+    if not math.isclose(
+        observation.stand_x_m,
+        float(candidate.geometry.x_m),
+        rel_tol=0.0,
+        abs_tol=1.0e-6,
+    ):
+        mismatches.append("stand_center.x_m")
+    if not math.isclose(
+        observation.stand_y_m,
+        float(candidate.geometry.y_m),
+        rel_tol=0.0,
+        abs_tol=1.0e-6,
+    ):
+        mismatches.append("stand_center.y_m")
+    if (
+        observation.stand_model_profile_sha256
+        != stand_model_profile_sha256
+    ):
+        mismatches.append("stand_model_profile_sha256")
+    if mismatches:
+        raise RuntimeError(
+            "camera observer backside axis receipt is not bound to this "
+            "candidate attempt: " + ", ".join(mismatches)
+        )
 
 
 def _run_candidate_motion_leg(

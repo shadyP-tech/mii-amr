@@ -4,9 +4,9 @@
 This node never creates a publisher and never commands motion.  It requires a
 sealed real-robot profile, measured camera calibration, a measured physical
 stand model, live ``CameraInfo``, compressed onboard images, a synchronized
-LaserScan, and exact-time TF.  Once current-frame model refinement, QR, and
-LiDAR evidence reach consensus it writes the same environment-tagged
-recommendation contract used by the shared survey planner.
+LaserScan, and exact-time TF.  Current-frame model, QR, and LiDAR consensus can
+write a QR-bound recommendation. Repeated model-backed backside-candidate
+evidence can write only the separate, motion-neutral axis receipt.
 """
 
 from __future__ import annotations
@@ -80,7 +80,11 @@ from scripts.aufgabe04.real_robot.configuration.profile import (
     transform_mismatches,
 )
 from scripts.aufgabe04.real_robot.observer.contract import (
+    BACKSIDE_AXIS_SAMPLE_SOURCE,
     PASSIVE_VIEWPOINT_OBSERVER_VERSION,
+)
+from scripts.aufgabe04.real_robot.observer.backside_axis_observation import (
+    build_backside_axis_observation,
 )
 from scripts.aufgabe04.real_robot.observer.tf_retry import (
     PassiveObserverTfRetryScheduler,
@@ -311,6 +315,11 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self.tf_listener = TransformListener(self.tf_buffer, self.node)
         self.completed = False
         self.axis_observation_committed = False
+        # A visible QR marker proves that the stationary viewpoint is not a
+        # geometric backside candidate even when OpenCV cannot decode it.
+        # Keep that fact latched until the robot starts a new motion epoch.
+        self._qr_marker_seen_in_stationary_epoch = False
+        self._qr_marker_stationary_epoch_anchor: Pose2D | None = None
         self.node.create_subscription(
             CompressedImage,
             self.profile.resolved_compressed_image_topic,
@@ -421,6 +430,12 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
 
         self.observation_evidence = None
         self._last_observation_update = None
+
+    def _reset_qr_marker_epoch(self) -> None:
+        """Forget marker presence only after leaving its stationary epoch."""
+
+        self._qr_marker_seen_in_stationary_epoch = False
+        self._qr_marker_stationary_epoch_anchor = None
 
     def _record_observation_frame(
         self,
@@ -730,12 +745,24 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             )
             return
         robot_pose = pose2d_from_transform(map_from_base)
+        marker_anchor = self._qr_marker_stationary_epoch_anchor
+        if marker_anchor is not None and not _pose_is_stationary(
+            marker_anchor,
+            robot_pose,
+            max_translation_m=self.args.stationary_translation_m,
+            max_rotation_rad=math.radians(self.args.stationary_rotation_deg),
+        ):
+            # Compare against the original marker pose as well as the previous
+            # sample, so several tiny pose changes cannot carry a front-marker
+            # latch indefinitely into a genuinely new viewpoint.
+            self._reset_qr_marker_epoch()
         if not _pose_is_stationary(
             self.last_pose,
             robot_pose,
             max_translation_m=self.args.stationary_translation_m,
             max_rotation_rad=math.radians(self.args.stationary_rotation_deg),
         ):
+            self._reset_qr_marker_epoch()
             self._note_observation_soft_miss(
                 "robot_not_stationary",
                 stamp_sec=image.stamp_sec,
@@ -902,6 +929,9 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             canny_low=resolved_stand_axis_profile.canny_low,
             canny_high=resolved_stand_axis_profile.canny_high,
             min_edge_height_px=resolved_stand_axis_profile.min_edge_height_px,
+            expected_head_center_u_px=projection.u_px - roi.x0,
+            expected_head_center_v_px=projection.v_px - roi.y0,
+            expected_head_height_px=expected_head_height_px,
         )
         if (
             debug.model_pose is not None
@@ -929,6 +959,23 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             ),
             "pose_ambiguity_gap_px": estimate.pose_ambiguity_gap_px,
             "refinement_support_mean": debug.refinement_support_mean,
+            "visible_face": getattr(estimate, "visible_face", None),
+            "visible_face_confidence": getattr(
+                estimate,
+                "visible_face_confidence",
+                None,
+            ),
+            "visible_face_reason": getattr(
+                debug,
+                "visible_face_reason",
+                None,
+            ),
+            "head_scale_ratio": getattr(debug, "head_scale_ratio", None),
+            "head_center_error_ratio": getattr(
+                debug,
+                "head_center_error_ratio",
+                None,
+            ),
         }
         axis_metadata = {
             "profile": asdict(resolved_stand_axis_profile),
@@ -944,6 +991,30 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         qr_texts = tuple(
             sorted(set(detect_qr_texts_bgr(roi_frame, self.cv2)))
         )
+        if debug.qr_detected:
+            self._qr_marker_seen_in_stationary_epoch = True
+            if self._qr_marker_stationary_epoch_anchor is None:
+                self._qr_marker_stationary_epoch_anchor = robot_pose
+            if not qr_texts:
+                # Do not let backside samples from either side of an
+                # intermittently visible, undecoded front marker form one
+                # consensus. The marker latch separately prevents a later
+                # backside artifact in this stationary epoch.
+                self._reset_observation_evidence()
+        if qr_texts and estimate.source == BACKSIDE_AXIS_SAMPLE_SOURCE:
+            self._reset_observation_evidence()
+            self._write_debug(frame, roi_frame, debug, metadata=axis_metadata)
+            self._write_status(
+                "evidence_not_committable",
+                reason=(
+                    "decoded QR text conflicts with backside-candidate "
+                    "model source"
+                ),
+                qr_texts=list(qr_texts),
+                expected_qr_id=self.args.expected_qr_id,
+                stand_axis_debug=axis_metadata,
+            )
+            return
         if estimate.model_profile_sha256 != self.stand_model_profile.sha256:
             self._reset_observation_evidence()
             self._write_debug(
@@ -1211,59 +1282,110 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             ),
         )
         if resolved_qr_id is None:
-            if self.args.axis_observation_json is not None:
-                _atomic_json(
-                    self.args.axis_observation_json,
-                    {
-                        "schema_version": 1,
-                        "observation_kind": "real_stand_axis_without_qr",
-                        "motion_capability": "none",
-                        "stream_id": self.args.stream_id,
-                        "stand_id": self.args.stand_id,
-                        "planning_frame": self.profile.map_frame,
-                        "stand_center": {
-                            "x_m": self.args.stand_x,
-                            "y_m": self.args.stand_y,
-                        },
-                        "robot_pose": {
-                            "x_m": robot_pose.x_m,
-                            "y_m": robot_pose.y_m,
-                            "yaw_rad": robot_pose.yaw_rad,
-                        },
-                        "stand_axis_rad": stand_axis,
-                        "axis_confidence": confidence,
-                        "axis_sample_count": consensus.sample_count,
-                        "sensor_stamp_sec": image.stamp_sec,
-                        "observer_version": OBSERVER_VERSION,
-                        "stand_model_profile_sha256": (
-                            estimate.model_profile_sha256
-                        ),
-                        "model_evidence_state": estimate.evidence_state,
-                        "pose_reprojection_rmse_px": (
-                            estimate.pose_reprojection_rmse_px
-                        ),
-                        "pose_ambiguity_gap_px": (
-                            estimate.pose_ambiguity_gap_px
-                        ),
-                        "robot_profile_sha256": real_robot_profile_sha256(
-                            self.profile
-                        ),
-                        "calibration_profile_sha256": (
-                            camera_calibration_sha256(self.calibration)
-                        ),
-                    },
+            snapshot = update.snapshot
+            try:
+                axis_observation = build_backside_axis_observation(
+                    stream_id=self.args.stream_id,
+                    stand_id=self.args.stand_id,
+                    planning_frame=self.profile.map_frame,
+                    stand_x_m=self.args.stand_x,
+                    stand_y_m=self.args.stand_y,
+                    robot_x_m=robot_pose.x_m,
+                    robot_y_m=robot_pose.y_m,
+                    robot_yaw_rad=robot_pose.yaw_rad,
+                    stand_axis_rad=stand_axis,
+                    axis_confidence=confidence,
+                    axis_sample_count=consensus.sample_count,
+                    consensus_source=consensus.source,
+                    estimate_source=estimate.source,
+                    estimate_evidence_state=estimate.evidence_state,
+                    estimate_visible_face=getattr(
+                        estimate,
+                        "visible_face",
+                        None,
+                    ),
+                    visible_face_confidence=getattr(
+                        estimate,
+                        "visible_face_confidence",
+                        None,
+                    ),
+                    debug_qr_detected=debug.qr_detected,
+                    qr_texts=qr_texts,
+                    evidence_qr_sample_count=(
+                        snapshot.current_qr_sample_count
+                    ),
+                    evidence_tentative_qr_id=snapshot.tentative_qr_id,
+                    evidence_latched_qr_id=snapshot.latched_qr_id,
+                    qr_marker_seen_in_stationary_epoch=(
+                        self._qr_marker_seen_in_stationary_epoch
+                    ),
+                    # Axis samples enter PassiveObserverEvidence only below
+                    # the stationary, synchronized-tuple, and final LiDAR
+                    # association gates in this method.
+                    all_samples_stationary=True,
+                    all_samples_synchronized=True,
+                    all_samples_lidar_associated=True,
+                    sensor_stamp_sec=image.stamp_sec,
+                    stand_model_profile_sha256=(
+                        estimate.model_profile_sha256
+                    ),
+                    stand_model_measurement_status=(
+                        self.stand_model_profile.measurement_status
+                    ),
+                    head_scale_ratio=getattr(
+                        debug,
+                        "head_scale_ratio",
+                        None,
+                    ),
+                    head_center_error_ratio=getattr(
+                        debug,
+                        "head_center_error_ratio",
+                        None,
+                    ),
+                    pose_reprojection_rmse_px=(
+                        estimate.pose_reprojection_rmse_px
+                    ),
+                    pose_ambiguity_gap_px=estimate.pose_ambiguity_gap_px,
+                    robot_profile_sha256=real_robot_profile_sha256(
+                        self.profile
+                    ),
+                    calibration_profile_sha256=(
+                        camera_calibration_sha256(self.calibration)
+                    ),
                 )
-                self.axis_observation_committed = True
-                self.completed = True
+            except (TypeError, ValueError) as exc:
+                # Ordinary QR/tracked metric estimates without a resolved QR
+                # must not silently become an opposite-face motion handoff.
+                self._write_status(
+                    "axis_observation_not_committable",
+                    reason=str(exc),
+                    axis_sample_count=consensus.sample_count,
+                    axis_sample_source=consensus.source,
+                    qr_texts=[],
+                    observation_evidence=snapshot.as_dict(),
+                    stand_axis_debug=axis_metadata,
+                )
+                return
+            if self.args.axis_observation_json is None:
+                self._write_status(
+                    "backside_axis_output_unconfigured",
+                    axis_sample_count=consensus.sample_count,
+                    axis_confidence=confidence,
+                    stand_axis_debug=axis_metadata,
+                )
+                return
+            _atomic_json(
+                self.args.axis_observation_json,
+                axis_observation,
+            )
+            self.axis_observation_committed = True
+            self.completed = True
             self._write_status(
-                "axis_committed_qr_unresolved",
-                axis_observation=(
-                    str(self.args.axis_observation_json)
-                    if self.args.axis_observation_json is not None
-                    else None
-                ),
+                "backside_axis_committed_qr_unresolved",
+                axis_observation=str(self.args.axis_observation_json),
                 axis_sample_count=consensus.sample_count,
                 axis_confidence=confidence,
+                visible_face="backside_candidate",
                 qr_texts=[],
                 stand_axis_debug=axis_metadata,
             )

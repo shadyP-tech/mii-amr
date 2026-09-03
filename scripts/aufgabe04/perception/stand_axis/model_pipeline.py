@@ -11,6 +11,9 @@ from scripts.aufgabe04.perception.stand_axis.geometry import (
     _unusable,
     estimate_stand_axis_from_corners,
 )
+from scripts.aufgabe04.perception.stand_axis.model_backside_acquisition import (
+    estimate_stand_axis_from_model_backside,
+)
 from scripts.aufgabe04.perception.stand_axis.model_profile import StandModelProfile
 from scripts.aufgabe04.perception.stand_axis.model_projection import project_stand_model
 from scripts.aufgabe04.perception.stand_axis.model_refinement import (
@@ -49,8 +52,16 @@ def estimate_stand_axis_from_metric_model(
     canny_high: int = 60,
     min_edge_height_px: float = 8.0,
     max_reprojection_rmse_px: float = 2.0,
+    expected_head_center_u_px: float | None = None,
+    expected_head_center_v_px: float | None = None,
+    expected_head_height_px: float | None = None,
 ) -> tuple[StandAxisImageEstimate, StandAxisEdgeDebugArtifacts]:
-    """Project from QR/tracking, then accept only current-frame rail support."""
+    """Acquire from QR/tracking or a gated no-QR backside candidate.
+
+    Every successful branch remains bound to current-frame rail support.  The
+    no-QR branch is available only with a measured physical model and a full
+    candidate-centred expected-head projection.
+    """
 
     camera = RectifiedCameraMatrix(
         float(camera_fx_px),
@@ -100,6 +111,36 @@ def estimate_stand_axis_from_metric_model(
         else ("tracked_pose" if pose_hint is not None else "none")
     )
     if seed_pose is None:
+        expected_geometry = (
+            expected_head_center_u_px,
+            expected_head_center_v_px,
+            expected_head_height_px,
+        )
+        if (
+            qr_corners is None
+            and pose_hint is None
+            and model_profile.committable
+            and model_profile.environment == "physical"
+            and all(value is not None for value in expected_geometry)
+        ):
+            return estimate_stand_axis_from_model_backside(
+                cv2,
+                frame,
+                raw_edges=raw_edges,
+                model_profile=model_profile,
+                expected_head_center_u_px=float(expected_head_center_u_px),
+                expected_head_center_v_px=float(expected_head_center_v_px),
+                expected_head_height_px=float(expected_head_height_px),
+                camera_fx_px=camera.fx_px,
+                camera_fy_px=camera.fy_px,
+                camera_cx_px=camera.cx_px,
+                camera_cy_px=camera.cy_px,
+                edge_preprocess=edge_preprocess,
+                canny_low=canny_low,
+                canny_high=canny_high,
+                min_edge_height_px=min_edge_height_px,
+                max_reprojection_rmse_px=max_reprojection_rmse_px,
+            )
         estimate = replace(
             _unusable("model_pose_seed_unavailable", source="model_seed"),
             evidence_state="unobservable",

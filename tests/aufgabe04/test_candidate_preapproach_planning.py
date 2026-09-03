@@ -7,6 +7,10 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from scripts.aufgabe04.navigation.approach.backside_axis_frame_projection import (
+    write_backside_axis_frame_projection,
+)
+
 from scripts.aufgabe04.navigation.approach.camera_candidate_selection import (
     CameraCandidateSelectionConfig,
     NoFeasibleCameraCandidateError,
@@ -46,6 +50,10 @@ from scripts.aufgabe04.stations.candidate_snapshot import (
     write_candidate_snapshot,
 )
 from tests.aufgabe04.test_detected_station_exploration import write_free_map
+from tests.aufgabe04.backside_axis_fixture import (
+    backside_axis_payload,
+    write_candidate_frame_projection_fixture,
+)
 
 
 PHYSICAL_CLEARANCE = {
@@ -204,6 +212,122 @@ class CandidatePreapproachPlanningTest(unittest.TestCase):
                     / "preapproach_execution"
                     / "route_certificate.json"
                 ).is_file()
+            )
+
+    def test_materialization_seals_shifted_derived_axis_projection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            map_yaml = write_free_map(
+                root, width=60, height=60, resolution=0.05
+            )
+            _, bundle = load_occupancy_grid_with_bundle(
+                map_yaml,
+                semantic_map_id="arena",
+                planning_frame="map",
+            )
+            candidate = self._candidate("candidate_1", 0.45, 0.15)
+            snapshot = new_candidate_snapshot(
+                snapshot_id="shifted_snapshot",
+                created_unix_sec=3.0,
+                planning_frame="map",
+                map_bundle_sha256=bundle.bundle_sha256,
+                candidates=(candidate,),
+            )
+            snapshot_path = root / "candidate_snapshot.json"
+            write_candidate_snapshot(snapshot_path, snapshot)
+            source_axis_path = root / "source_axis.json"
+            source_axis_path.write_text(
+                json.dumps(
+                    backside_axis_payload(
+                        stand_x_m=0.45,
+                        stand_y_m=-0.05,
+                        robot_x_m=0.45,
+                        robot_y_m=0.65,
+                    )
+                ),
+                encoding="utf-8",
+            )
+            source_projection_path = root / "source_projection.json"
+            source_projection_sha256, _, _ = (
+                write_candidate_frame_projection_fixture(
+                    source_projection_path,
+                    candidate_uid=candidate.candidate_uid,
+                    canonical_x_m=0.45,
+                    canonical_y_m=-0.05,
+                    transform_x_m=0.0,
+                    transform_y_m=0.0,
+                    transform_yaw_rad=0.0,
+                )
+            )
+            target_projection_path = root / "target_projection.json"
+            target_projection_sha256, target_x_m, target_y_m = (
+                write_candidate_frame_projection_fixture(
+                    target_projection_path,
+                    candidate_uid=candidate.candidate_uid,
+                    canonical_x_m=0.45,
+                    canonical_y_m=-0.05,
+                    transform_x_m=0.0,
+                    transform_y_m=0.20,
+                    transform_yaw_rad=0.0,
+                )
+            )
+            self.assertAlmostEqual(target_x_m, candidate.geometry.x_m)
+            self.assertAlmostEqual(target_y_m, candidate.geometry.y_m)
+            projected_axis_path = root / "projected_axis.json"
+            write_backside_axis_frame_projection(
+                projected_axis_path,
+                axis_evidence_path=source_axis_path,
+                source_candidate_projection_path=source_projection_path,
+                source_candidate_projection_sha256=(
+                    source_projection_sha256
+                ),
+                target_candidate_projection_path=target_projection_path,
+                target_candidate_projection_sha256=(
+                    target_projection_sha256
+                ),
+                target_candidate_x_m=target_x_m,
+                target_candidate_y_m=target_y_m,
+            )
+            selected_normal_rad = -math.pi / 2.0
+            prepared = compute_candidate_preapproach_plan(
+                map_yaml=map_yaml,
+                semantic_map_id="arena",
+                plan=self._plan(bundle.bundle_sha256),
+                snapshot=snapshot,
+                candidate_uid=candidate.candidate_uid,
+                start=Pose2D(-0.40, 0.15, 0.0),
+                approach_offset_m=0.70,
+                inflation_radius_m=0.25,
+                candidate_transit_radius_m=0.31,
+                physical_clearance=PHYSICAL_CLEARANCE,
+                approach_normal_rad=selected_normal_rad,
+            )
+            output_dir = root / "selected_opposite_route"
+
+            outputs = materialize_candidate_preapproach_plan(
+                prepared,
+                snapshot=snapshot,
+                snapshot_path=snapshot_path,
+                output_dir=output_dir,
+                physical_clearance=PHYSICAL_CLEARANCE,
+                axis_observation_path=projected_axis_path,
+                approach_normal_rad=selected_normal_rad,
+            )
+
+            self.assertTrue(Path(outputs["route_certificate_json"]).is_file())
+            metadata = json.loads(
+                Path(outputs["diagnostics_json"]).read_text(encoding="utf-8")
+            )["metadata"]
+            self.assertEqual(
+                metadata["axis_evidence_kind"],
+                "backside_axis_frame_projection",
+            )
+            self.assertEqual(
+                metadata["source_axis_observation_json"],
+                str(source_axis_path.absolute()),
+            )
+            self.assertEqual(
+                len(metadata["axis_frame_projection_sha256"]), 64
             )
 
     def test_map_binding_mismatch_fails_before_writes(self):
@@ -411,14 +535,14 @@ class CandidatePreapproachPlanningTest(unittest.TestCase):
             axis_path = root / "axis_observation.json"
             axis_path.write_text(
                 json.dumps(
-                    {
-                        "observation_kind": "real_stand_axis_without_qr",
-                        "stand_axis_rad": 0.0,
-                        "stand_center": {"x_m": 0.50, "y_m": 0.0},
-                        # The original observation was from -y.  A changed
+                    backside_axis_payload(
+                        stand_id=candidate.candidate_uid,
+                        stand_x_m=0.50,
+                        # The original observation was from -y. A changed
                         # artifact from +y resolves to the opposite normal.
-                        "robot_pose": {"x_m": 0.50, "y_m": 0.70},
-                    }
+                        robot_x_m=0.50,
+                        robot_y_m=0.70,
+                    )
                 )
             )
             output_dir = root / "must_not_exist"

@@ -424,6 +424,42 @@ class PassiveObservationCoreTest(unittest.TestCase):
         )
         self.assertEqual(offenders, [])
 
+    def test_operational_observer_wires_only_strict_backside_handoff(self):
+        observer_source = Path(observer_node.__file__).read_text(
+            encoding="utf-8"
+        )
+
+        for expected in (
+            "expected_head_center_u_px=projection.u_px - roi.x0",
+            "expected_head_center_v_px=projection.v_px - roi.y0",
+            "expected_head_height_px=expected_head_height_px",
+            "build_backside_axis_observation(",
+            "estimate_visible_face=getattr(",
+            "visible_face_confidence=getattr(",
+            "consensus_source=consensus.source",
+            "debug_qr_detected=debug.qr_detected",
+            "snapshot.current_qr_sample_count",
+            "snapshot.tentative_qr_id",
+            "snapshot.latched_qr_id",
+            "self._qr_marker_seen_in_stationary_epoch",
+            "self._qr_marker_stationary_epoch_anchor",
+            "self._reset_qr_marker_epoch()",
+            "qr_texts and estimate.source == BACKSIDE_AXIS_SAMPLE_SOURCE",
+            "decoded QR text conflicts",
+            '"axis_observation_not_committable"',
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, observer_source)
+
+        self.assertNotIn(
+            '"observation_kind": "real_stand_axis_without_qr"',
+            observer_source,
+        )
+        self.assertNotIn(
+            '"axis_committed_qr_unresolved"',
+            observer_source,
+        )
+
     def test_passive_observer_requires_measured_model_profile(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
