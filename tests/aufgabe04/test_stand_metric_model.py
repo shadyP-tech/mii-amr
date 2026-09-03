@@ -694,19 +694,13 @@ class StandMetricGeometryTest(unittest.TestCase):
         self.assertEqual(estimate.source, "model_seed")
         self.assertEqual(debug.pose_seed_source, "none")
 
-    def test_backside_bootstrap_rejects_wrong_scale_off_center_and_no_neck(self):
+    def test_backside_bootstrap_rejects_wrong_scale_and_no_neck(self):
         cases = (
             (
                 "wrong_scale",
                 self._synthetic_backside_frame(),
                 {"expected_head_height_px": 60.0},
                 "model_backside_head_scale_mismatch",
-            ),
-            (
-                "off_center",
-                self._synthetic_backside_frame(),
-                {"expected_head_center_u_px": 110.0},
-                "model_backside_target_center_mismatch",
             ),
             (
                 "no_neck",
@@ -731,6 +725,73 @@ class StandMetricGeometryTest(unittest.TestCase):
             self.assertEqual(estimate.reason, expected_reason)
             self.assertNotEqual(estimate.evidence_state, "fresh_backside")
             self.assertIsNone(estimate.visible_face)
+
+    def test_backside_bootstrap_rejects_large_expected_projection_error(self):
+        frame = self._synthetic_backside_frame()
+        with patch(
+            "scripts.aufgabe04.perception.stand_axis.model_pipeline."
+            "detect_qr_quad",
+            return_value=None,
+        ):
+            estimate, debug = estimate_stand_axis_from_metric_model(
+                cv2,
+                frame,
+                **self._backside_options(expected_head_center_u_px=110.0),
+            )
+
+        self.assertFalse(estimate.usable)
+        self.assertEqual(estimate.reason, "model_backside_target_center_mismatch")
+        self.assertEqual(estimate.source, MODEL_BACKSIDE_AXIS_SOURCE)
+        self.assertNotEqual(estimate.evidence_state, "fresh_backside")
+        self.assertIsNone(estimate.visible_face)
+        self.assertGreater(debug.head_center_error_ratio, 0.55)
+
+    def test_bounded_wide_proposal_can_be_reverified_at_strict_center(self):
+        frame = self._synthetic_backside_frame()
+        projected_center_u = 65.2
+        with patch(
+            "scripts.aufgabe04.perception.stand_axis.model_pipeline."
+            "detect_qr_quad",
+            return_value=None,
+        ):
+            proposal, proposal_debug = estimate_stand_axis_from_metric_model(
+                cv2,
+                frame,
+                **self._backside_options(
+                    expected_head_center_u_px=projected_center_u,
+                    backside_target_crop_horizontal_half_width_ratio=2.25,
+                ),
+            )
+            self.assertFalse(proposal.usable)
+            self.assertEqual(
+                proposal.reason,
+                "model_backside_target_center_mismatch",
+            )
+            self.assertIsNotNone(proposal.corners)
+            self.assertAlmostEqual(
+                proposal_debug.head_center_error_ratio,
+                1.185,
+                delta=0.03,
+            )
+            detected_center_u = sum(
+                point.u_px for point in proposal.corners
+            ) / len(proposal.corners)
+            detected_center_v = sum(
+                point.v_px for point in proposal.corners
+            ) / len(proposal.corners)
+            verified, verified_debug = estimate_stand_axis_from_metric_model(
+                cv2,
+                frame,
+                **self._backside_options(
+                    expected_head_center_u_px=detected_center_u,
+                    expected_head_center_v_px=detected_center_v,
+                ),
+            )
+
+        self.assertTrue(verified.usable, verified.reason)
+        self.assertEqual(verified.source, MODEL_BACKSIDE_AXIS_SOURCE)
+        self.assertEqual(verified.evidence_state, "fresh_backside")
+        self.assertLess(verified_debug.head_center_error_ratio, 0.05)
 
     def test_detected_qr_never_falls_through_to_backside_bootstrap(self):
         frame = self._synthetic_backside_frame()

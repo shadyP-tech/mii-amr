@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from scripts.aufgabe04.perception.candidate_lidar_association import (  # noqa: E402
+    associate_camera_registered_candidate_lidar_target,
     associate_candidate_lidar_target,
 )
 from scripts.aufgabe04.perception.stand_axis_lidar_roi import (  # noqa: E402
@@ -46,6 +47,21 @@ class CandidateLidarAssociationTest(unittest.TestCase):
         }
         arguments.update(overrides)
         return associate_candidate_lidar_target(scan, **arguments)
+
+    def associate_registered(self, scan, **overrides):
+        arguments = {
+            "map_bearing_rad": 0.0,
+            "observed_camera_bearing_rad": math.radians(9.2),
+            "cone_half_angle_rad": math.radians(3.0),
+            "accepted_range_m": (0.5249411022680418, 0.7449411022680419),
+            "now_sec": 10.1,
+            "max_scan_age_sec": 1.0,
+        }
+        arguments.update(overrides)
+        return associate_camera_registered_candidate_lidar_target(
+            scan,
+            **arguments,
+        )
 
     def test_regression_range_filters_0726_stand_before_0959_background_aggregation(self):
         scan = self.make_scan((0.726, 0.959))
@@ -229,6 +245,188 @@ class CandidateLidarAssociationTest(unittest.TestCase):
 
         self.assertFalse(association.associated)
         self.assertEqual(association.rejection_reason, "invalid_scan_geometry")
+
+    def test_registered_camera_cone_recovers_bounded_nine_degree_shift(self):
+        scan = self.make_scan(
+            (2.0,) * 25 + (0.70,) + (2.0,) * 5,
+            angle_min_deg=-16.0,
+            angle_increment_deg=1.0,
+        )
+
+        legacy = self.associate(scan)
+        registered = self.associate_registered(scan)
+
+        self.assertFalse(legacy.associated)
+        self.assertEqual(legacy.rejection_reason, "no_samples_in_accepted_range")
+        self.assertTrue(registered.associated)
+        self.assertAlmostEqual(registered.distance_m, 0.70)
+        self.assertAlmostEqual(registered.map_bearing_rad, 0.0)
+        self.assertAlmostEqual(
+            registered.registered_search_bearing_rad,
+            math.radians(9.2),
+        )
+        self.assertAlmostEqual(
+            registered.camera_map_bearing_delta_rad,
+            math.radians(9.2),
+        )
+        self.assertAlmostEqual(
+            registered.max_camera_map_bearing_delta_rad,
+            math.radians(12.0),
+        )
+        self.assertEqual(
+            registered.search_bearing_source,
+            "registered_camera_bearing",
+        )
+        self.assertIsNotNone(registered.search_association)
+        self.assertAlmostEqual(
+            registered.search_association.map_bearing_rad,
+            math.radians(9.2),
+        )
+        self.assertEqual(
+            registered.search_association.eligible_cluster_count,
+            1,
+        )
+
+    def test_registered_camera_bearing_beyond_limit_fails_before_scan_search(self):
+        registered = self.associate_registered(
+            self.make_scan((0.70,)),
+            observed_camera_bearing_rad=math.radians(12.01),
+        )
+
+        self.assertFalse(registered.associated)
+        self.assertEqual(
+            registered.rejection_reason,
+            "camera_map_bearing_delta_exceeds_limit",
+        )
+        self.assertIsNone(registered.search_association)
+
+    def test_registered_camera_map_delta_wraps_across_pi(self):
+        scan = self.make_scan(
+            (0.70,),
+            angle_min_deg=-179.0,
+            angle_increment_deg=1.0,
+        )
+
+        registered = self.associate_registered(
+            scan,
+            map_bearing_rad=math.radians(179.0),
+            observed_camera_bearing_rad=math.radians(-179.0),
+        )
+
+        self.assertTrue(registered.associated)
+        self.assertAlmostEqual(
+            registered.camera_map_bearing_delta_rad,
+            math.radians(2.0),
+        )
+
+    def test_registered_camera_cone_preserves_candidate_range_gate(self):
+        scan = self.make_scan(
+            (2.0,) * 25 + (0.90,) + (2.0,) * 5,
+            angle_min_deg=-16.0,
+            angle_increment_deg=1.0,
+        )
+
+        registered = self.associate_registered(scan)
+
+        self.assertFalse(registered.associated)
+        self.assertEqual(
+            registered.rejection_reason,
+            "no_samples_in_accepted_range",
+        )
+        self.assertIsNotNone(registered.search_association)
+        self.assertAlmostEqual(
+            registered.search_association.nearest_range_delta_m,
+            0.90 - registered.search_association.accepted_range_m[1],
+        )
+
+    def test_registered_camera_cone_preserves_scan_freshness_gate(self):
+        scan = self.make_scan(
+            (2.0,) * 25 + (0.70,) + (2.0,) * 5,
+            angle_min_deg=-16.0,
+            angle_increment_deg=1.0,
+            receipt_sec=1.0,
+        )
+
+        registered = self.associate_registered(scan)
+
+        self.assertFalse(registered.associated)
+        self.assertEqual(registered.rejection_reason, "stale_scan")
+        self.assertIsNotNone(registered.search_association)
+        self.assertEqual(
+            registered.search_association.rejection_reason,
+            "stale_scan",
+        )
+        self.assertAlmostEqual(registered.search_association.scan_age_sec, 9.1)
+
+    def test_registered_camera_cone_rejects_multiple_eligible_clusters(self):
+        ranges = [2.0] * 31
+        ranges[24] = 0.68
+        ranges[26] = 0.70
+        scan = self.make_scan(
+            ranges,
+            angle_min_deg=-16.0,
+            angle_increment_deg=1.0,
+        )
+
+        registered = self.associate_registered(scan)
+
+        self.assertFalse(registered.associated)
+        self.assertEqual(
+            registered.rejection_reason,
+            "ambiguous_registered_camera_clusters",
+        )
+        self.assertIsNotNone(registered.search_association)
+        self.assertFalse(registered.search_association.associated)
+        self.assertEqual(
+            registered.search_association.eligible_cluster_count,
+            2,
+        )
+        self.assertEqual(
+            registered.search_association.selected_cluster_sample_count,
+            0,
+        )
+
+    def test_registered_camera_inputs_must_be_finite(self):
+        scan = self.make_scan((0.70,))
+
+        with self.assertRaisesRegex(ValueError, "observed_camera_bearing_rad"):
+            self.associate_registered(
+                scan,
+                observed_camera_bearing_rad=float("nan"),
+            )
+        with self.assertRaisesRegex(ValueError, "max_camera_map_bearing_delta_rad"):
+            self.associate_registered(
+                scan,
+                max_camera_map_bearing_delta_rad=float("inf"),
+            )
+        with self.assertRaisesRegex(ValueError, "certified 12 degree"):
+            self.associate_registered(
+                scan,
+                max_camera_map_bearing_delta_rad=math.radians(12.01),
+            )
+        with self.assertRaisesRegex(ValueError, "nonnegative"):
+            self.associate_registered(
+                scan,
+                max_camera_map_bearing_delta_rad=-0.001,
+            )
+
+    def test_registered_camera_exact_certified_delta_and_limit_are_admitted(self):
+        ranges = [2.0] * 37
+        ranges[28] = 0.70
+        scan = self.make_scan(
+            ranges,
+            angle_min_deg=-16.0,
+            angle_increment_deg=1.0,
+        )
+
+        registered = self.associate_registered(
+            scan,
+            observed_camera_bearing_rad=math.radians(12.0),
+            max_camera_map_bearing_delta_rad=math.radians(12.0),
+        )
+
+        self.assertTrue(registered.associated)
+        self.assertEqual(registered.search_association.eligible_cluster_count, 1)
 
 
 if __name__ == "__main__":

@@ -16,14 +16,21 @@ from pathlib import Path
 import re
 
 
-PASSIVE_VIEWPOINT_OBSERVER_VERSION = (
+LEGACY_PASSIVE_VIEWPOINT_OBSERVER_VERSION = (
     "aufgabe04-real-passive-viewpoint-v6-backside-model-evidence"
 )
-BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION = 2
+PASSIVE_VIEWPOINT_OBSERVER_VERSION = (
+    "aufgabe04-real-passive-viewpoint-v7-bounded-camera-lidar-registration"
+)
+LEGACY_BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION = 2
+BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION = 3
 BACKSIDE_AXIS_OBSERVATION_KIND = "real_stand_backside_axis_without_qr"
 REAL_STAND_AXIS_OBSERVATION_KIND = BACKSIDE_AXIS_OBSERVATION_KIND
 BACKSIDE_AXIS_SAMPLE_SOURCE = "model_backside_current_frame"
 BACKSIDE_CURRENT_FRAME_SOURCE = BACKSIDE_AXIS_SAMPLE_SOURCE
+REGISTERED_BACKSIDE_AXIS_SAMPLE_SOURCE = (
+    "model_backside_current_frame_bounded_camera_lidar_registered"
+)
 BACKSIDE_MODEL_EVIDENCE_STATE = "fresh_backside"
 BACKSIDE_VISIBLE_FACE = "backside_candidate"
 BACKSIDE_CLASSIFICATION_BASIS = (
@@ -39,6 +46,27 @@ MINIMUM_BACKSIDE_AXIS_SAMPLE_COUNT = 2
 MINIMUM_HEAD_SCALE_RATIO = 0.60
 MAXIMUM_HEAD_SCALE_RATIO = 1.35
 MAXIMUM_HEAD_CENTER_ERROR_RATIO = 0.55
+MAXIMUM_REGISTRATION_HEAD_CENTER_OFFSET_RATIO = 1.50
+MAXIMUM_REGISTRATION_BEARING_DELTA_RAD = math.radians(12.0)
+TARGET_REGISTRATION_MODE_MAP_PROJECTION = "map_projection"
+TARGET_REGISTRATION_MODE_BOUNDED_CAMERA_LIDAR = (
+    "bounded_camera_lidar_registration"
+)
+TARGET_REGISTRATION_LIDAR_SOURCE_MAP = "map_bearing"
+TARGET_REGISTRATION_LIDAR_SOURCE_CAMERA = "registered_camera_bearing"
+TARGET_REGISTRATION_EVIDENCE_KEYS = (
+    "mode",
+    "original_head_center_error_ratio",
+    "center_offset_limit_ratio",
+    "final_strict_head_center_error_ratio",
+    "map_bearing_rad",
+    "lidar_search_bearing_rad",
+    "camera_map_bearing_delta_rad",
+    "bearing_delta_limit_rad",
+    "lidar_search_bearing_source",
+    "unique_eligible_lidar_cluster_required",
+    "eligible_lidar_cluster_count",
+)
 BACKSIDE_SAMPLE_GATE_KEYS = (
     "all_samples_stationary",
     "all_samples_synchronized",
@@ -102,11 +130,40 @@ def validated_backside_axis_observation(
     if not isinstance(payload, Mapping):
         raise ValueError("axis observation must be a mapping")
     schema_version = payload.get("schema_version")
-    if (
-        type(schema_version) is not int
-        or schema_version != BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION
+    if type(schema_version) is not int or schema_version not in (
+        LEGACY_BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION,
+        BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION,
     ):
-        raise ValueError("axis observation schema_version must be exactly 2")
+        raise ValueError("axis observation schema_version must be exactly 2 or 3")
+    is_legacy_receipt = (
+        schema_version == LEGACY_BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION
+    )
+    if is_legacy_receipt:
+        if "target_registration" in payload:
+            raise ValueError(
+                "schema-2 axis observation cannot contain target_registration"
+            )
+        expected_observer_version = LEGACY_PASSIVE_VIEWPOINT_OBSERVER_VERSION
+        expected_axis_sample_source = BACKSIDE_AXIS_SAMPLE_SOURCE
+        target_registration = None
+    else:
+        expected_observer_version = PASSIVE_VIEWPOINT_OBSERVER_VERSION
+        target_registration = _mapping(
+            payload.get("target_registration"), "target_registration"
+        )
+        if set(target_registration) != set(TARGET_REGISTRATION_EVIDENCE_KEYS):
+            raise ValueError(
+                "axis observation target_registration has unexpected fields"
+            )
+        mode = target_registration.get("mode")
+        if mode == TARGET_REGISTRATION_MODE_MAP_PROJECTION:
+            expected_axis_sample_source = BACKSIDE_AXIS_SAMPLE_SOURCE
+        elif mode == TARGET_REGISTRATION_MODE_BOUNDED_CAMERA_LIDAR:
+            expected_axis_sample_source = REGISTERED_BACKSIDE_AXIS_SAMPLE_SOURCE
+        else:
+            raise ValueError(
+                "axis observation target_registration.mode is unsupported"
+            )
     if payload.get("observation_kind") != BACKSIDE_AXIS_OBSERVATION_KIND:
         raise ValueError("unexpected axis observation kind")
     if payload.get("visible_face") != BACKSIDE_VISIBLE_FACE:
@@ -117,9 +174,9 @@ def validated_backside_axis_observation(
         raise ValueError(
             "axis observation visible_face_source is not current-frame"
         )
-    if payload.get("axis_sample_source") != BACKSIDE_AXIS_SAMPLE_SOURCE:
+    if payload.get("axis_sample_source") != expected_axis_sample_source:
         raise ValueError(
-            "axis observation axis_sample_source is not current-frame"
+            "axis observation axis_sample_source does not match target registration"
         )
     if payload.get("model_evidence_state") != BACKSIDE_MODEL_EVIDENCE_STATE:
         raise ValueError(
@@ -131,7 +188,7 @@ def validated_backside_axis_observation(
         )
     if payload.get("motion_capability") != "none":
         raise ValueError("axis observation motion_capability must be none")
-    if payload.get("observer_version") != PASSIVE_VIEWPOINT_OBSERVER_VERSION:
+    if payload.get("observer_version") != expected_observer_version:
         raise ValueError("axis observation observer_version is unsupported")
     if payload.get("stand_model_measurement_status") != "measured":
         raise ValueError(
@@ -218,6 +275,11 @@ def validated_backside_axis_observation(
     if not 0.0 <= head_center_error_ratio <= MAXIMUM_HEAD_CENTER_ERROR_RATIO:
         raise ValueError(
             "axis observation head_center_error_ratio must be in [0, 0.55]"
+        )
+    if target_registration is not None:
+        _validate_target_registration(
+            target_registration,
+            final_head_center_error_ratio=head_center_error_ratio,
         )
     for name in ("pose_reprojection_rmse_px", "pose_ambiguity_gap_px"):
         value = payload.get(name)
@@ -324,6 +386,168 @@ def _sha256(value: object, name: str) -> str:
     return value
 
 
+def _validate_target_registration(
+    evidence: Mapping[str, object],
+    *,
+    final_head_center_error_ratio: float,
+) -> None:
+    """Validate the exact camera/map registration evidence carried by v3."""
+
+    if set(evidence) != set(TARGET_REGISTRATION_EVIDENCE_KEYS):
+        raise ValueError(
+            "axis observation target_registration has unexpected fields"
+        )
+    mode = evidence.get("mode")
+    if mode not in (
+        TARGET_REGISTRATION_MODE_MAP_PROJECTION,
+        TARGET_REGISTRATION_MODE_BOUNDED_CAMERA_LIDAR,
+    ):
+        raise ValueError(
+            "axis observation target_registration.mode is unsupported"
+        )
+
+    original_center_error = _finite_number(
+        evidence.get("original_head_center_error_ratio"),
+        "target_registration.original_head_center_error_ratio",
+    )
+    center_offset_limit = _finite_number(
+        evidence.get("center_offset_limit_ratio"),
+        "target_registration.center_offset_limit_ratio",
+    )
+    final_strict_center_error = _finite_number(
+        evidence.get("final_strict_head_center_error_ratio"),
+        "target_registration.final_strict_head_center_error_ratio",
+    )
+    if not 0.0 <= center_offset_limit <= (
+        MAXIMUM_REGISTRATION_HEAD_CENTER_OFFSET_RATIO
+    ):
+        raise ValueError(
+            "axis observation target_registration.center_offset_limit_ratio "
+            "must be in [0, 1.5]"
+        )
+    if not 0.0 <= original_center_error <= center_offset_limit:
+        raise ValueError(
+            "axis observation target_registration original center error "
+            "exceeds its bounded limit"
+        )
+    if not 0.0 <= final_strict_center_error <= (
+        MAXIMUM_HEAD_CENTER_ERROR_RATIO
+    ):
+        raise ValueError(
+            "axis observation target_registration final strict center error "
+            "must be in [0, 0.55]"
+        )
+    if not math.isclose(
+        final_strict_center_error,
+        final_head_center_error_ratio,
+        rel_tol=1.0e-9,
+        abs_tol=1.0e-9,
+    ):
+        raise ValueError(
+            "axis observation target_registration final strict center error "
+            "differs from head_center_error_ratio"
+        )
+
+    map_bearing = _finite_number(
+        evidence.get("map_bearing_rad"),
+        "target_registration.map_bearing_rad",
+    )
+    lidar_search_bearing = _finite_number(
+        evidence.get("lidar_search_bearing_rad"),
+        "target_registration.lidar_search_bearing_rad",
+    )
+    camera_map_delta = _finite_number(
+        evidence.get("camera_map_bearing_delta_rad"),
+        "target_registration.camera_map_bearing_delta_rad",
+    )
+    bearing_delta_limit = _finite_number(
+        evidence.get("bearing_delta_limit_rad"),
+        "target_registration.bearing_delta_limit_rad",
+    )
+    if not 0.0 <= bearing_delta_limit <= (
+        MAXIMUM_REGISTRATION_BEARING_DELTA_RAD
+    ):
+        raise ValueError(
+            "axis observation target_registration.bearing_delta_limit_rad "
+            "must be in [0, 12 degrees]"
+        )
+    if not 0.0 <= camera_map_delta <= bearing_delta_limit:
+        raise ValueError(
+            "axis observation target_registration camera/map bearing delta "
+            "exceeds its bounded limit"
+        )
+
+    lidar_source = evidence.get("lidar_search_bearing_source")
+    unique_required = evidence.get(
+        "unique_eligible_lidar_cluster_required"
+    )
+    if type(unique_required) is not bool:
+        raise ValueError(
+            "axis observation target_registration unique cluster flag "
+            "must be boolean"
+        )
+    cluster_count = evidence.get("eligible_lidar_cluster_count")
+    if (
+        type(cluster_count) is not int
+        or cluster_count < 1
+    ):
+        raise ValueError(
+            "axis observation target_registration eligible cluster count "
+            "must be an integer >= 1"
+        )
+
+    search_map_delta = abs(
+        _normalize_angle(lidar_search_bearing - map_bearing)
+    )
+    if mode == TARGET_REGISTRATION_MODE_BOUNDED_CAMERA_LIDAR:
+        if lidar_source != TARGET_REGISTRATION_LIDAR_SOURCE_CAMERA:
+            raise ValueError(
+                "registered axis observation must use registered_camera_bearing"
+            )
+        if unique_required is not True or cluster_count != 1:
+            raise ValueError(
+                "registered axis observation requires exactly one eligible "
+                "LiDAR cluster"
+            )
+        if not math.isclose(
+            search_map_delta,
+            camera_map_delta,
+            rel_tol=1.0e-9,
+            abs_tol=1.0e-9,
+        ):
+            raise ValueError(
+                "registered axis observation search/map bearing delta differs "
+                "from camera/map bearing delta"
+            )
+    else:
+        if lidar_source != TARGET_REGISTRATION_LIDAR_SOURCE_MAP:
+            raise ValueError(
+                "nominal axis observation must use map_bearing"
+            )
+        if unique_required is not False:
+            raise ValueError(
+                "nominal axis observation cannot require a unique LiDAR cluster"
+            )
+        if not math.isclose(
+            search_map_delta,
+            0.0,
+            rel_tol=0.0,
+            abs_tol=1.0e-9,
+        ):
+            raise ValueError(
+                "nominal axis observation LiDAR search bearing must equal map bearing"
+            )
+        if not math.isclose(
+            original_center_error,
+            final_strict_center_error,
+            rel_tol=1.0e-9,
+            abs_tol=1.0e-9,
+        ):
+            raise ValueError(
+                "nominal axis observation original and final center errors differ"
+            )
+
+
 __all__ = [
     "BACKSIDE_AXIS_OBSERVATION_KIND",
     "BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION",
@@ -334,14 +558,24 @@ __all__ = [
     "BACKSIDE_SAMPLE_GATE_KEYS",
     "BACKSIDE_VISIBLE_FACE",
     "BacksideAxisObservation",
+    "LEGACY_BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION",
+    "LEGACY_PASSIVE_VIEWPOINT_OBSERVER_VERSION",
     "MAXIMUM_HEAD_CENTER_ERROR_RATIO",
+    "MAXIMUM_REGISTRATION_BEARING_DELTA_RAD",
+    "MAXIMUM_REGISTRATION_HEAD_CENTER_OFFSET_RATIO",
     "MAXIMUM_HEAD_SCALE_RATIO",
     "MINIMUM_BACKSIDE_AXIS_CONFIDENCE",
     "MINIMUM_BACKSIDE_AXIS_SAMPLE_COUNT",
     "MINIMUM_BACKSIDE_FACE_CONFIDENCE",
     "MINIMUM_HEAD_SCALE_RATIO",
     "PASSIVE_VIEWPOINT_OBSERVER_VERSION",
+    "REGISTERED_BACKSIDE_AXIS_SAMPLE_SOURCE",
     "REAL_STAND_AXIS_OBSERVATION_KIND",
+    "TARGET_REGISTRATION_EVIDENCE_KEYS",
+    "TARGET_REGISTRATION_LIDAR_SOURCE_CAMERA",
+    "TARGET_REGISTRATION_LIDAR_SOURCE_MAP",
+    "TARGET_REGISTRATION_MODE_BOUNDED_CAMERA_LIDAR",
+    "TARGET_REGISTRATION_MODE_MAP_PROJECTION",
     "load_backside_axis_observation",
     "load_opposite_face_normal",
     "opposite_face_normal_from_axis_observation",

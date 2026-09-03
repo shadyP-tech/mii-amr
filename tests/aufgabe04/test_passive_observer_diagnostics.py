@@ -50,6 +50,31 @@ class PassiveObserverDiagnosticsTests(unittest.TestCase):
         self.assertEqual(status.state, "no_status")
         self.assertIn("missing", status.load_error)
 
+    def test_registered_wrapper_does_not_change_legacy_diagnostic_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            status_path = Path(tmp) / "observer_status.json"
+            status_path.write_text(
+                json.dumps(
+                    {
+                        "state": "collecting_consensus",
+                        "candidate_lidar_association": {
+                            "nearest_range_delta_m": 0.031,
+                        },
+                        "camera_registered_candidate_lidar_association": {
+                            "associated": True,
+                            "search_association": {
+                                "nearest_range_delta_m": 0.400,
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            status = load_passive_observer_status(status_path)
+
+        self.assertAlmostEqual(status.nearest_lidar_range_delta_m, 0.031)
+
     def test_invalid_status_is_explicit_and_does_not_mask_child_exit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             status_path = Path(tmp) / "observer_status.json"

@@ -41,6 +41,8 @@ from scripts.aufgabe04.perception.ros_image_adapter import (
     compressed_msg_to_bgr_frame,
 )
 from scripts.aufgabe04.perception.candidate_lidar_association import (
+    DEFAULT_MAX_CAMERA_MAP_BEARING_DELTA_RAD,
+    associate_camera_registered_candidate_lidar_target,
     associate_candidate_lidar_target,
 )
 from scripts.aufgabe04.perception.stand_axis_consensus import axis_conditioning
@@ -68,7 +70,6 @@ from scripts.aufgabe04.real_robot.configuration.geometry import (
     optical_heading_from_transform,
     pose2d_from_transform,
     project_optical_point,
-    roi_from_projection,
     transform_point,
 )
 from scripts.aufgabe04.real_robot.configuration.profile import (
@@ -82,6 +83,7 @@ from scripts.aufgabe04.real_robot.configuration.profile import (
 from scripts.aufgabe04.real_robot.observer.contract import (
     BACKSIDE_AXIS_SAMPLE_SOURCE,
     PASSIVE_VIEWPOINT_OBSERVER_VERSION,
+    REGISTERED_BACKSIDE_AXIS_SAMPLE_SOURCE,
 )
 from scripts.aufgabe04.real_robot.observer.backside_axis_observation import (
     build_backside_axis_observation,
@@ -92,6 +94,21 @@ from scripts.aufgabe04.real_robot.observer.tf_retry import (
 from scripts.aufgabe04.real_robot.observer.evidence import (
     EvidencePose,
     PassiveObserverEvidence,
+)
+from scripts.aufgabe04.real_robot.observer.camera_target_registration import (
+    HeadRoiEvaluation,
+    select_camera_target_measurement,
+)
+from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import (
+    DEFAULT_BACKSIDE_REACQUISITION_PADDING_SCALE,
+    DEFAULT_BACKSIDE_REGISTRATION_MAX_CENTER_OFFSET_RATIO,
+    HeadRoiAttempt,
+    MAX_BACKSIDE_REACQUISITION_PADDING_SCALE,
+    MAX_BACKSIDE_REGISTRATION_CENTER_OFFSET_RATIO,
+    target_centered_head_roi_attempts,
+)
+from scripts.aufgabe04.real_robot.observer.registration_evidence import (
+    build_backside_target_registration_evidence,
 )
 from scripts.aufgabe04.real_robot.readiness.sensor_timing_contract import (
     DEFAULT_MAX_CAMERA_INFO_IMAGE_SKEW_SEC,
@@ -136,6 +153,19 @@ def _head_scale_gate(
         "side_balance": balance,
         "reason": "ok" if accepted else "head_size_projection_mismatch",
     }
+
+
+def _consensus_for_current_axis_source(update, axis_sample_source: str):
+    """Return only a consensus authenticated by the current accepted frame."""
+
+    consensus = update.axis_consensus
+    if (
+        consensus is None
+        or not update.axis_sample_accepted
+        or consensus.source != axis_sample_source
+    ):
+        return None
+    return consensus
 
 
 @dataclass(frozen=True)
@@ -816,12 +846,19 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 / projection.depth_m
             )
         )
-        roi = roi_from_projection(
+        roi_attempts = target_centered_head_roi_attempts(
             projection,
             intrinsics,
-            padding_scale=self.args.head_roi_padding_scale,
+            expected_head_height_px=expected_head_height_px,
+            nominal_padding_scale=self.args.head_roi_padding_scale,
+            backside_reacquisition_padding_scale=(
+                self.args.backside_reacquisition_padding_scale
+            ),
+            enable_backside_reacquisition=(
+                not self.args.disable_backside_reacquisition
+            ),
         )
-        if roi is None or expected_head_height_px < self.args.min_head_size_px:
+        if not roi_attempts or expected_head_height_px < self.args.min_head_size_px:
             self._note_observation_soft_miss(
                 "target_outside_camera_gate",
                 stamp_sec=image.stamp_sec,
@@ -904,35 +941,80 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             )
             self._write_status("image_rectification_failed", reason=str(exc))
             return
-        roi_frame = frame[roi.y0 : roi.y1, roi.x0 : roi.x1]
+
+        # A metric pose is expressed in camera coordinates, so its tracking
+        # context is the immutable full-frame calibration rather than a
+        # crop-local principal point.  Keeping this signature stable prevents
+        # a bounded reacquisition crop from resetting an otherwise valid pose.
         camera_signature = (
             intrinsics.fx_px,
             intrinsics.fy_px,
-            intrinsics.cx_px - roi.x0,
-            intrinsics.cy_px - roi.y0,
+            intrinsics.cx_px,
+            intrinsics.cy_px,
         )
         prediction = self.model_pose_tracker.prediction(
             now_sec=image.stamp_sec,
             profile_sha256=self.stand_model_profile.sha256,
             camera_signature=camera_signature,
         )
-        estimate, debug = estimate_stand_axis_from_metric_model(
-            self.cv2,
-            roi_frame,
-            model_profile=self.stand_model_profile,
-            camera_fx_px=intrinsics.fx_px,
-            camera_fy_px=intrinsics.fy_px,
-            camera_cx_px=intrinsics.cx_px - roi.x0,
-            camera_cy_px=intrinsics.cy_px - roi.y0,
-            pose_hint=prediction.pose,
-            edge_preprocess=resolved_stand_axis_profile.edge_preprocess,
-            canny_low=resolved_stand_axis_profile.canny_low,
-            canny_high=resolved_stand_axis_profile.canny_high,
-            min_edge_height_px=resolved_stand_axis_profile.min_edge_height_px,
-            expected_head_center_u_px=projection.u_px - roi.x0,
-            expected_head_center_v_px=projection.v_px - roi.y0,
-            expected_head_height_px=expected_head_height_px,
+
+        def evaluate_roi_attempt(
+            attempt: HeadRoiAttempt,
+            pose_hint,
+        ) -> HeadRoiEvaluation:
+            attempt_roi = attempt.roi
+            attempt_frame = frame[
+                attempt_roi.y0 : attempt_roi.y1,
+                attempt_roi.x0 : attempt_roi.x1,
+            ]
+            attempt_estimate, attempt_debug = estimate_stand_axis_from_metric_model(
+                self.cv2,
+                attempt_frame,
+                model_profile=self.stand_model_profile,
+                camera_fx_px=intrinsics.fx_px,
+                camera_fy_px=intrinsics.fy_px,
+                camera_cx_px=intrinsics.cx_px - attempt_roi.x0,
+                camera_cy_px=intrinsics.cy_px - attempt_roi.y0,
+                pose_hint=pose_hint,
+                edge_preprocess=resolved_stand_axis_profile.edge_preprocess,
+                canny_low=resolved_stand_axis_profile.canny_low,
+                canny_high=resolved_stand_axis_profile.canny_high,
+                min_edge_height_px=(
+                    resolved_stand_axis_profile.min_edge_height_px
+                ),
+                expected_head_center_u_px=(
+                    attempt.expected_center_u_px - attempt_roi.x0
+                ),
+                expected_head_center_v_px=(
+                    attempt.expected_center_v_px - attempt_roi.y0
+                ),
+                expected_head_height_px=attempt.expected_head_height_px,
+                backside_target_crop_horizontal_half_width_ratio=(
+                    attempt.backside_target_crop_half_width_ratio
+                ),
+            )
+            return HeadRoiEvaluation(
+                attempt=attempt,
+                frame=attempt_frame,
+                estimate=attempt_estimate,
+                debug=attempt_debug,
+            )
+
+        registration = select_camera_target_measurement(
+            roi_attempts,
+            tracked_pose=prediction.pose,
+            evaluate=evaluate_roi_attempt,
+            enable_reacquisition=not self.args.disable_backside_reacquisition,
+            max_center_offset_ratio=(
+                self.args.backside_registration_max_center_offset_ratio
+            ),
         )
+        selected = registration.selected
+        selected_attempt = selected.attempt
+        roi_frame = selected.frame
+        estimate = selected.estimate
+        debug = selected.debug
+        roi = selected_attempt.roi
         if (
             debug.model_pose is not None
             and (
@@ -952,6 +1034,15 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             "profile_sha256": self.stand_model_profile.sha256,
             "environment": self.stand_model_profile.environment,
             "measurement_status": self.stand_model_profile.measurement_status,
+            "target_projection": asdict(projection),
+            "head_roi": selected_attempt.metadata(),
+            "head_roi_attempts": [
+                evaluation.attempt.metadata()
+                for evaluation in registration.evaluations
+            ],
+            "camera_target_registration": registration.metadata(
+                enabled=not self.args.disable_backside_reacquisition
+            ),
             "evidence_state": estimate.evidence_state,
             "qr_detected": debug.qr_detected,
             "pose_reprojection_rmse_px": (
@@ -1169,22 +1260,68 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 stand_axis_debug=axis_metadata,
             )
             return
-        lidar_association = associate_candidate_lidar_target(
-            plain_scan,
-            map_bearing_rad=scan_bearing,
-            cone_half_angle_rad=math.radians(
-                self.args.lidar_cone_half_angle_deg
+        registration_applied = (
+            selected_attempt.source
+            == "camera_registered_backside_reacquisition"
+        )
+        registered_lidar_association = None
+        if registration_applied:
+            registered_lidar_association = (
+                associate_camera_registered_candidate_lidar_target(
+                    plain_scan,
+                    map_bearing_rad=scan_bearing,
+                    observed_camera_bearing_rad=observed_camera_bearing,
+                    cone_half_angle_rad=math.radians(
+                        self.args.lidar_cone_half_angle_deg
+                    ),
+                    accepted_range_m=(
+                        lower_surface_bound,
+                        upper_surface_bound,
+                    ),
+                    now_sec=now_sec,
+                    max_scan_age_sec=self.args.max_sensor_age_sec,
+                    min_cluster_sample_count=self.args.lidar_min_samples,
+                    max_camera_map_bearing_delta_rad=math.radians(
+                        self.args.backside_registration_max_bearing_delta_deg
+                    ),
+                )
+            )
+            # Keep the stable diagnostics payload shaped like the legacy
+            # association even when registration moves the narrow search
+            # cone.  The wrapper remains a separate, explicit provenance
+            # record and alone decides whether this exception path passed.
+            lidar_association = (
+                registered_lidar_association.search_association
+                or preliminary_lidar_association
+            )
+            axis_metadata[
+                "camera_registered_candidate_lidar_association"
+            ] = asdict(registered_lidar_association)
+            lidar_target_associated = registered_lidar_association.associated
+        else:
+            lidar_association = associate_candidate_lidar_target(
+                plain_scan,
+                map_bearing_rad=scan_bearing,
+                cone_half_angle_rad=math.radians(
+                    self.args.lidar_cone_half_angle_deg
+                ),
+                accepted_range_m=(lower_surface_bound, upper_surface_bound),
+                now_sec=now_sec,
+                max_scan_age_sec=self.args.max_sensor_age_sec,
+                min_cluster_sample_count=self.args.lidar_min_samples,
+                observed_camera_bearing_rad=observed_camera_bearing,
+            )
+            lidar_target_associated = lidar_association.associated
+        lidar_status_details = {
+            "candidate_lidar_association": asdict(lidar_association),
+            "camera_registered_candidate_lidar_association": (
+                None
+                if registered_lidar_association is None
+                else asdict(registered_lidar_association)
             ),
-            accepted_range_m=(lower_surface_bound, upper_surface_bound),
-            now_sec=now_sec,
-            max_scan_age_sec=self.args.max_sensor_age_sec,
-            min_cluster_sample_count=self.args.lidar_min_samples,
-            observed_camera_bearing_rad=observed_camera_bearing,
-        )
-        axis_metadata["candidate_lidar_association"] = asdict(
-            lidar_association
-        )
-        if not lidar_association.associated:
+        }
+        axis_metadata.update(lidar_status_details)
+        if not lidar_target_associated:
             update = self._record_observation_frame(
                 robot_pose=robot_pose,
                 image_stamp_sec=image.stamp_sec,
@@ -1199,9 +1336,9 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             self._write_status(
                 "lidar_target_mismatch",
                 center_distance_m=center_distance,
-                candidate_lidar_association=asdict(lidar_association),
                 accepted_range_m=[lower_surface_bound, upper_surface_bound],
                 observation_evidence=update.snapshot.as_dict(),
+                **lidar_status_details,
             )
             return
         if not conditioning.accepted:
@@ -1223,8 +1360,60 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 expected_qr_id=self.args.expected_qr_id,
                 observation_evidence=update.snapshot.as_dict(),
                 stand_axis_debug=axis_metadata,
+                **lidar_status_details,
             )
             return
+        axis_sample_source = estimate.source
+        target_registration = None
+        if estimate.source == BACKSIDE_AXIS_SAMPLE_SOURCE:
+            try:
+                target_registration = (
+                    build_backside_target_registration_evidence(
+                        final_head_center_error_ratio=(
+                            debug.head_center_error_ratio
+                        ),
+                        candidate_lidar_association=lidar_association,
+                        registration_decision=(
+                            registration.decision
+                            if registration_applied
+                            else None
+                        ),
+                        registered_lidar_association=(
+                            registered_lidar_association
+                        ),
+                    )
+                )
+            except (TypeError, ValueError) as exc:
+                update = self._record_observation_frame(
+                    robot_pose=robot_pose,
+                    image_stamp_sec=image.stamp_sec,
+                    scan_stamp_sec=scan.stamp_sec,
+                    observed_at_sec=now_sec,
+                    lidar_associated=True,
+                    axis_yaw_rad=None,
+                    axis_source=None,
+                    qr_texts=qr_texts,
+                )
+                self._write_debug(
+                    frame,
+                    roi_frame,
+                    debug,
+                    metadata=axis_metadata,
+                )
+                self._write_status(
+                    "evidence_not_committable",
+                    reason=f"target registration evidence unavailable: {exc}",
+                    qr_texts=list(qr_texts),
+                    observation_evidence=update.snapshot.as_dict(),
+                    stand_axis_debug=axis_metadata,
+                    **lidar_status_details,
+                )
+                return
+            if registration_applied:
+                axis_sample_source = (
+                    REGISTERED_BACKSIDE_AXIS_SAMPLE_SOURCE
+                )
+            axis_metadata["target_registration"] = target_registration
         update = self._record_observation_frame(
             robot_pose=robot_pose,
             image_stamp_sec=image.stamp_sec,
@@ -1232,10 +1421,15 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             observed_at_sec=now_sec,
             lidar_associated=True,
             axis_yaw_rad=optical_yaw,
-            axis_source=estimate.source,
+            axis_source=axis_sample_source,
             qr_texts=qr_texts,
         )
-        consensus = update.axis_consensus
+        # A completed bucket from a different acquisition mode cannot
+        # authenticate the current frame's registration evidence.
+        consensus = _consensus_for_current_axis_source(
+            update,
+            axis_sample_source,
+        )
         resolved_qr_id = update.resolved_qr_id
         self._write_debug(
             frame,
@@ -1252,6 +1446,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 expected_qr_id=self.args.expected_qr_id,
                 observation_evidence=update.snapshot.as_dict(),
                 stand_axis_debug=axis_metadata,
+                **lidar_status_details,
             )
             return
         if consensus is None:
@@ -1261,6 +1456,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 estimator_source=estimate.source,
                 observation_evidence=update.snapshot.as_dict(),
                 stand_axis_debug=axis_metadata,
+                **lidar_status_details,
             )
             return
         camera_heading = optical_heading_from_transform(map_from_camera)
@@ -1352,6 +1548,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                     calibration_profile_sha256=(
                         camera_calibration_sha256(self.calibration)
                     ),
+                    target_registration=target_registration,
                 )
             except (TypeError, ValueError) as exc:
                 # Ordinary QR/tracked metric estimates without a resolved QR
@@ -1364,6 +1561,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                     qr_texts=[],
                     observation_evidence=snapshot.as_dict(),
                     stand_axis_debug=axis_metadata,
+                    **lidar_status_details,
                 )
                 return
             if self.args.axis_observation_json is None:
@@ -1372,6 +1570,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                     axis_sample_count=consensus.sample_count,
                     axis_confidence=confidence,
                     stand_axis_debug=axis_metadata,
+                    **lidar_status_details,
                 )
                 return
             _atomic_json(
@@ -1388,6 +1587,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 visible_face="backside_candidate",
                 qr_texts=[],
                 stand_axis_debug=axis_metadata,
+                **lidar_status_details,
             )
             return
         recommendation = build_real_viewpoint_recommendation(
@@ -1423,6 +1623,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             qr_texts=[resolved_qr_id],
             observation_evidence=update.snapshot.as_dict(),
             stand_axis_debug=axis_metadata,
+            **lidar_status_details,
         )
         self.node.get_logger().info(
             f"committed passive recommendation: {self.args.recommended_pose_json}"
@@ -1568,6 +1769,42 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--target-distance-m", type=float, default=0.33)
     parser.add_argument("--head-roi-padding-scale", type=float, default=1.8)
+    parser.add_argument(
+        "--backside-reacquisition-padding-scale",
+        type=float,
+        default=DEFAULT_BACKSIDE_REACQUISITION_PADDING_SCALE,
+        help=(
+            "Target-centred expanded ROI padding used only after the nominal "
+            "no-QR backside acquisition cannot produce strict evidence."
+        ),
+    )
+    parser.add_argument(
+        "--disable-backside-reacquisition",
+        action="store_true",
+        help=(
+            "Disable the bounded expanded ROI retry and use only the nominal "
+            "projected head crop."
+        ),
+    )
+    parser.add_argument(
+        "--backside-registration-max-center-offset-ratio",
+        type=float,
+        default=DEFAULT_BACKSIDE_REGISTRATION_MAX_CENTER_OFFSET_RATIO,
+        help=(
+            "Maximum projected-to-detected head-centre displacement, in "
+            "expected head heights, for the proposal-only registration path. "
+            "The final metric pass still uses the strict receipt gate."
+        ),
+    )
+    parser.add_argument(
+        "--backside-registration-max-bearing-delta-deg",
+        type=float,
+        default=math.degrees(DEFAULT_MAX_CAMERA_MAP_BEARING_DELTA_RAD),
+        help=(
+            "Maximum map-to-camera bearing correction for shifting the same "
+            "narrow LiDAR cone after bounded visual registration."
+        ),
+    )
     parser.add_argument("--min-head-size-px", type=float, default=18.0)
     parser.add_argument(
         "--sync-tolerance-sec",
@@ -1657,6 +1894,15 @@ def _validate_args(parser: argparse.ArgumentParser, args) -> None:
         "--stand-head-center-height-m": args.stand_head_center_height_m,
         "--target-distance-m": args.target_distance_m,
         "--head-roi-padding-scale": args.head_roi_padding_scale,
+        "--backside-reacquisition-padding-scale": (
+            args.backside_reacquisition_padding_scale
+        ),
+        "--backside-registration-max-center-offset-ratio": (
+            args.backside_registration_max_center_offset_ratio
+        ),
+        "--backside-registration-max-bearing-delta-deg": (
+            args.backside_registration_max_bearing_delta_deg
+        ),
         "--min-head-size-px": args.min_head_size_px,
         "--sync-tolerance-sec": args.sync_tolerance_sec,
         "--camera-info-tolerance-sec": args.camera_info_tolerance_sec,
@@ -1674,6 +1920,30 @@ def _validate_args(parser: argparse.ArgumentParser, args) -> None:
     for name, value in positive.items():
         if not math.isfinite(value) or value <= 0.0:
             parser.error(f"{name} must be finite and positive")
+    if (
+        args.backside_reacquisition_padding_scale
+        > MAX_BACKSIDE_REACQUISITION_PADDING_SCALE
+    ):
+        parser.error(
+            "--backside-reacquisition-padding-scale must be no greater than "
+            f"{MAX_BACKSIDE_REACQUISITION_PADDING_SCALE}"
+        )
+    if (
+        args.backside_registration_max_center_offset_ratio
+        > MAX_BACKSIDE_REGISTRATION_CENTER_OFFSET_RATIO
+    ):
+        parser.error(
+            "--backside-registration-max-center-offset-ratio must be no "
+            f"greater than {MAX_BACKSIDE_REGISTRATION_CENTER_OFFSET_RATIO}"
+        )
+    if (
+        math.radians(args.backside_registration_max_bearing_delta_deg)
+        > DEFAULT_MAX_CAMERA_MAP_BEARING_DELTA_RAD + 1.0e-12
+    ):
+        parser.error(
+            "--backside-registration-max-bearing-delta-deg must be no greater "
+            f"than {math.degrees(DEFAULT_MAX_CAMERA_MAP_BEARING_DELTA_RAD):g}"
+        )
     if args.stand_uncertainty_m < 0.0:
         parser.error("--stand-uncertainty-m must be non-negative")
     if args.consensus_frames < 2:

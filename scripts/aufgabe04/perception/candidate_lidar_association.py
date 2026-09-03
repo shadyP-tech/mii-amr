@@ -9,17 +9,28 @@ clusters.
 The optional camera bearing must agree with the map cone and can then rank
 clusters that already passed the map cone and range gates.  It never expands
 either gate and this module has no motion or ROS side effects.
+
+When a separately validated camera-registration stage has found that the
+candidate is displaced from its map projection, the registered helper below
+can move the *same narrow cone* to the observed camera bearing.  That path is
+deliberately separate from :func:`associate_candidate_lidar_target`: it has a
+bounded camera/map delta, retains the strict candidate range gate, and requires
+exactly one eligible cluster.  Its wrapper records both bearings so a
+camera-centred search can never be mistaken for the legacy map-centred search.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from scripts.aufgabe04.perception.stand_axis_lidar_roi import PlainLaserScan
 
 
 CANDIDATE_LIDAR_ASSOCIATION_SCHEMA_VERSION = 1
+CAMERA_REGISTERED_LIDAR_ASSOCIATION_SCHEMA_VERSION = 1
+MAX_CAMERA_MAP_BEARING_DELTA_RAD = math.radians(12.0)
+DEFAULT_MAX_CAMERA_MAP_BEARING_DELTA_RAD = MAX_CAMERA_MAP_BEARING_DELTA_RAD
 
 
 @dataclass(frozen=True)
@@ -54,6 +65,29 @@ class CandidateLidarAssociation:
     selection_source: str
     nearest_cone_distance_m: float | None
     nearest_range_delta_m: float | None
+
+
+@dataclass(frozen=True)
+class CameraRegisteredCandidateLidarAssociation:
+    """Association evidence for a bounded camera-centred cone search.
+
+    ``search_association.map_bearing_rad`` is the centre actually supplied to
+    the unchanged legacy association engine.  The explicitly named fields on
+    this wrapper retain the original map bearing and make that reinterpretation
+    auditable without changing the legacy result schema.
+    """
+
+    schema_version: int
+    associated: bool
+    distance_m: float | None
+    rejection_reason: str
+    map_bearing_rad: float
+    registered_search_bearing_rad: float
+    camera_map_bearing_delta_rad: float
+    max_camera_map_bearing_delta_rad: float
+    search_bearing_source: str
+    unique_eligible_cluster_required: bool
+    search_association: CandidateLidarAssociation | None
 
 
 @dataclass(frozen=True)
@@ -241,6 +275,129 @@ def associate_candidate_lidar_target(
         selection_source=(
             "camera_bearing" if observed_camera_bearing_rad is not None else "map_bearing"
         ),
+    )
+
+
+def associate_camera_registered_candidate_lidar_target(
+    scan: PlainLaserScan | None,
+    *,
+    map_bearing_rad: float,
+    observed_camera_bearing_rad: float,
+    cone_half_angle_rad: float,
+    accepted_range_m: tuple[float, float],
+    now_sec: float | None = None,
+    max_scan_age_sec: float = 0.0,
+    min_cluster_sample_count: int = 1,
+    max_range_jump_m: float = 0.05,
+    max_point_gap_m: float = 0.04,
+    max_camera_map_bearing_delta_rad: float = (
+        DEFAULT_MAX_CAMERA_MAP_BEARING_DELTA_RAD
+    ),
+) -> CameraRegisteredCandidateLidarAssociation:
+    """Associate a candidate in a bounded camera-registered LiDAR cone.
+
+    This is an explicit exception path for a target registration that has
+    already been established from camera geometry.  It does not widen the
+    normal map-centred cone.  Instead, it first requires the wrapped difference
+    between the finite map and camera bearings to be within
+    ``max_camera_map_bearing_delta_rad``, then evaluates the unchanged narrow
+    cone and strict surface-range gate at the camera bearing.
+
+    Unlike the legacy ranking path, camera registration must leave exactly one
+    eligible contiguous cluster.  Multiple clusters therefore fail closed
+    instead of selecting whichever happens to be closest to the registered
+    bearing.
+    """
+
+    map_bearing_rad = _require_finite(map_bearing_rad, "map_bearing_rad")
+    observed_camera_bearing_rad = _require_finite(
+        observed_camera_bearing_rad,
+        "observed_camera_bearing_rad",
+    )
+    max_camera_map_bearing_delta_rad = _require_nonnegative(
+        max_camera_map_bearing_delta_rad,
+        "max_camera_map_bearing_delta_rad",
+    )
+    if (
+        max_camera_map_bearing_delta_rad
+        > MAX_CAMERA_MAP_BEARING_DELTA_RAD
+    ):
+        raise ValueError(
+            "max_camera_map_bearing_delta_rad cannot exceed the certified "
+            "12 degree registration bound"
+        )
+    camera_map_bearing_delta_rad = abs(
+        _angle_delta(observed_camera_bearing_rad, map_bearing_rad)
+    )
+    common = {
+        "schema_version": CAMERA_REGISTERED_LIDAR_ASSOCIATION_SCHEMA_VERSION,
+        "map_bearing_rad": map_bearing_rad,
+        "registered_search_bearing_rad": observed_camera_bearing_rad,
+        "camera_map_bearing_delta_rad": camera_map_bearing_delta_rad,
+        "max_camera_map_bearing_delta_rad": max_camera_map_bearing_delta_rad,
+        "search_bearing_source": "registered_camera_bearing",
+        "unique_eligible_cluster_required": True,
+    }
+    if camera_map_bearing_delta_rad > max_camera_map_bearing_delta_rad:
+        return CameraRegisteredCandidateLidarAssociation(
+            **common,
+            associated=False,
+            distance_m=None,
+            rejection_reason="camera_map_bearing_delta_exceeds_limit",
+            search_association=None,
+        )
+
+    # Reuse the legacy association without altering its behaviour.  Supplying
+    # the registered camera bearing as its map-centred search bearing moves the
+    # narrow cone while retaining scan validation, range-first filtering,
+    # clustering, staleness checks, and deterministic evidence generation.
+    search_association = associate_candidate_lidar_target(
+        scan,
+        map_bearing_rad=observed_camera_bearing_rad,
+        cone_half_angle_rad=cone_half_angle_rad,
+        accepted_range_m=accepted_range_m,
+        now_sec=now_sec,
+        max_scan_age_sec=max_scan_age_sec,
+        min_cluster_sample_count=min_cluster_sample_count,
+        max_range_jump_m=max_range_jump_m,
+        max_point_gap_m=max_point_gap_m,
+    )
+    if search_association.eligible_cluster_count > 1:
+        return CameraRegisteredCandidateLidarAssociation(
+            **common,
+            associated=False,
+            distance_m=None,
+            rejection_reason="ambiguous_registered_camera_clusters",
+            search_association=_association_rejected_as_ambiguous(
+                search_association
+            ),
+        )
+    return CameraRegisteredCandidateLidarAssociation(
+        **common,
+        associated=search_association.associated,
+        distance_m=search_association.distance_m,
+        rejection_reason=search_association.rejection_reason,
+        search_association=search_association,
+    )
+
+
+def _association_rejected_as_ambiguous(
+    association: CandidateLidarAssociation,
+) -> CandidateLidarAssociation:
+    """Clear any selected cluster while retaining ambiguity evidence."""
+
+    return replace(
+        association,
+        associated=False,
+        distance_m=None,
+        rejection_reason="ambiguous_registered_camera_clusters",
+        selected_cluster_sample_count=0,
+        selected_cluster_start_index=None,
+        selected_cluster_end_index=None,
+        selected_cluster_bearing_rad=None,
+        selected_cluster_bearing_delta_from_map_rad=None,
+        selected_cluster_bearing_delta_from_camera_rad=None,
+        selection_source="none",
     )
 
 

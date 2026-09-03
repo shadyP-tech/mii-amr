@@ -6,7 +6,7 @@ artifact layer owns the shared schema and validator consumed by navigation.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from scripts.aufgabe04.artifacts.backside_axis_observation import (
     BACKSIDE_AXIS_OBSERVATION_KIND,
@@ -17,6 +17,9 @@ from scripts.aufgabe04.artifacts.backside_axis_observation import (
     BACKSIDE_SAMPLE_GATE_KEYS,
     BACKSIDE_VISIBLE_FACE,
     PASSIVE_VIEWPOINT_OBSERVER_VERSION,
+    REGISTERED_BACKSIDE_AXIS_SAMPLE_SOURCE,
+    TARGET_REGISTRATION_MODE_BOUNDED_CAMERA_LIDAR,
+    TARGET_REGISTRATION_MODE_MAP_PROJECTION,
     validate_backside_axis_observation,
 )
 
@@ -57,11 +60,23 @@ def build_backside_axis_observation(
     pose_ambiguity_gap_px: float | None,
     robot_profile_sha256: str,
     calibration_profile_sha256: str,
+    target_registration: Mapping[str, object],
 ) -> dict[str, object]:
-    """Build schema 2 only from repeated current-frame backside evidence."""
+    """Build schema 3 from repeated, registered current-frame evidence."""
 
-    if consensus_source != BACKSIDE_AXIS_SAMPLE_SOURCE:
-        raise ValueError("backside consensus source is not current-frame model evidence")
+    if not isinstance(target_registration, Mapping):
+        raise ValueError("backside target registration is not a mapping")
+    registration_mode = target_registration.get("mode")
+    if registration_mode == TARGET_REGISTRATION_MODE_MAP_PROJECTION:
+        required_consensus_source = BACKSIDE_AXIS_SAMPLE_SOURCE
+    elif registration_mode == TARGET_REGISTRATION_MODE_BOUNDED_CAMERA_LIDAR:
+        required_consensus_source = REGISTERED_BACKSIDE_AXIS_SAMPLE_SOURCE
+    else:
+        raise ValueError("backside target registration mode is unsupported")
+    if consensus_source != required_consensus_source:
+        raise ValueError(
+            "backside consensus source does not match target registration"
+        )
     if estimate_source != BACKSIDE_AXIS_SAMPLE_SOURCE:
         raise ValueError("backside estimate source is not current-frame model evidence")
     if estimate_evidence_state != BACKSIDE_MODEL_EVIDENCE_STATE:
@@ -134,6 +149,7 @@ def build_backside_axis_observation(
         "pose_ambiguity_gap_px": pose_ambiguity_gap_px,
         "robot_profile_sha256": robot_profile_sha256,
         "calibration_profile_sha256": calibration_profile_sha256,
+        "target_registration": dict(target_registration),
     }
     validate_backside_axis_observation(payload)
     return payload

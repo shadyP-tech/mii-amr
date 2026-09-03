@@ -47,10 +47,17 @@ from scripts.aufgabe04.real_robot.configuration.profile import (
 from scripts.aufgabe04.real_robot.observer.contract import (
     PASSIVE_VIEWPOINT_OBSERVER_VERSION,
 )
+from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import (
+    BACKSIDE_REACQUISITION_TARGET_CROP_HALF_WIDTH_RATIO,
+    DEFAULT_BACKSIDE_REACQUISITION_PADDING_SCALE,
+    DEFAULT_BACKSIDE_REGISTRATION_MAX_CENTER_OFFSET_RATIO,
+    target_centered_head_roi_attempts,
+)
 from scripts.aufgabe04.real_robot.observer import node as observer_node
 from scripts.aufgabe04.real_robot.observer.node import (
     PassiveRealViewpointNode,
     _StampedMessage,
+    _consensus_for_current_axis_source,
     _head_scale_gate,
     _nearest,
     _pose_is_stationary,
@@ -264,6 +271,89 @@ class RealCameraGeometryTest(unittest.TestCase):
         self.assertAlmostEqual(transformed[0], 2.0)
         self.assertAlmostEqual(transformed[1], 4.0)
 
+    def test_backside_reacquisition_roi_stays_target_centered(self):
+        intrinsics = CameraIntrinsics(640, 480, 400.0, 400.0, 320.0, 240.0)
+        projection = project_optical_point(
+            (0.0, 0.0, 0.5),
+            intrinsics,
+            physical_size_m=0.08,
+        )
+
+        attempts = target_centered_head_roi_attempts(
+            projection,
+            intrinsics,
+            expected_head_height_px=64.0,
+            nominal_padding_scale=1.8,
+            backside_reacquisition_padding_scale=(
+                DEFAULT_BACKSIDE_REACQUISITION_PADDING_SCALE
+            ),
+        )
+
+        self.assertEqual(
+            [attempt.source for attempt in attempts],
+            [
+                "nominal_projection",
+                "target_centered_backside_reacquisition",
+            ],
+        )
+        nominal, expanded = attempts
+        self.assertEqual(nominal.expected_center_u_px, projection.u_px)
+        self.assertEqual(expanded.expected_center_u_px, projection.u_px)
+        self.assertEqual(nominal.expected_center_v_px, projection.v_px)
+        self.assertEqual(expanded.expected_center_v_px, projection.v_px)
+        self.assertLess(expanded.roi.x0, nominal.roi.x0)
+        self.assertGreater(expanded.roi.x1, nominal.roi.x1)
+        self.assertLess(expanded.roi.y0, nominal.roi.y0)
+        self.assertGreater(expanded.roi.y1, nominal.roi.y1)
+        self.assertEqual(
+            expanded.backside_target_crop_half_width_ratio,
+            BACKSIDE_REACQUISITION_TARGET_CROP_HALF_WIDTH_RATIO,
+        )
+
+    def test_backside_reacquisition_can_be_disabled(self):
+        intrinsics = CameraIntrinsics(640, 480, 400.0, 400.0, 320.0, 240.0)
+        projection = project_optical_point(
+            (0.0, 0.0, 0.5),
+            intrinsics,
+            physical_size_m=0.08,
+        )
+
+        attempts = target_centered_head_roi_attempts(
+            projection,
+            intrinsics,
+            expected_head_height_px=64.0,
+            nominal_padding_scale=1.8,
+            backside_reacquisition_padding_scale=(
+                DEFAULT_BACKSIDE_REACQUISITION_PADDING_SCALE
+            ),
+            enable_backside_reacquisition=False,
+        )
+
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0].source, "nominal_projection")
+
+    def test_reacquisition_policy_survives_roi_boundary_clipping(self):
+        intrinsics = CameraIntrinsics(160, 120, 400.0, 400.0, 80.0, 60.0)
+        projection = project_optical_point(
+            (0.0, 0.0, 0.25),
+            intrinsics,
+            physical_size_m=0.08,
+        )
+
+        attempts = target_centered_head_roi_attempts(
+            projection,
+            intrinsics,
+            expected_head_height_px=128.0,
+            nominal_padding_scale=4.5,
+        )
+
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(attempts[0].roi, attempts[1].roi)
+        self.assertNotEqual(
+            attempts[0].backside_target_crop_half_width_ratio,
+            attempts[1].backside_target_crop_half_width_ratio,
+        )
+
 class RealCameraStandAxisProfileTest(unittest.TestCase):
     def test_default_profile_resolves_model_refinement_edge_height(self):
         profile = RealCameraStandAxisProfile()
@@ -335,6 +425,41 @@ class PassiveObservationCoreTest(unittest.TestCase):
             "recommendation.json",
         ]
 
+    def test_consensus_must_match_the_current_accepted_axis_source(self):
+        nominal = SimpleNamespace(source="model_backside_current_frame")
+        matching = SimpleNamespace(
+            axis_consensus=nominal,
+            axis_sample_accepted=True,
+        )
+        stale_other_source = SimpleNamespace(
+            axis_consensus=nominal,
+            axis_sample_accepted=True,
+        )
+        duplicate = SimpleNamespace(
+            axis_consensus=nominal,
+            axis_sample_accepted=False,
+        )
+
+        self.assertIs(
+            _consensus_for_current_axis_source(
+                matching,
+                "model_backside_current_frame",
+            ),
+            nominal,
+        )
+        self.assertIsNone(
+            _consensus_for_current_axis_source(
+                stale_other_source,
+                "model_backside_current_frame_bounded_camera_lidar_registered",
+            )
+        )
+        self.assertIsNone(
+            _consensus_for_current_axis_source(
+                duplicate,
+                "model_backside_current_frame",
+            )
+        )
+
     def test_parser_defaults_to_channel_union_and_wires_valid_override(self):
         with tempfile.TemporaryDirectory() as temporary:
             model_path = Path(temporary) / "measured.json"
@@ -348,6 +473,18 @@ class PassiveObservationCoreTest(unittest.TestCase):
             self.assertEqual(defaults.tf_timeout_sec, 0.15)
             self.assertEqual(defaults.tf_retry_rate_hz, 50.0)
             self.assertAlmostEqual(defaults.stand_head_center_height_m, 0.171)
+            self.assertEqual(
+                defaults.backside_reacquisition_padding_scale,
+                DEFAULT_BACKSIDE_REACQUISITION_PADDING_SCALE,
+            )
+            self.assertEqual(
+                defaults.backside_registration_max_center_offset_ratio,
+                DEFAULT_BACKSIDE_REGISTRATION_MAX_CENTER_OFFSET_RATIO,
+            )
+            self.assertAlmostEqual(
+                defaults.backside_registration_max_bearing_delta_deg,
+                12.0,
+            )
 
             override = parser.parse_args(
                 [
@@ -392,6 +529,27 @@ class PassiveObservationCoreTest(unittest.TestCase):
             with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
                 _validate_args(parser, invalid_canny)
 
+            for flag, value in (
+                ("--backside-reacquisition-padding-scale", "4.51"),
+                (
+                    "--backside-registration-max-center-offset-ratio",
+                    "1.51",
+                ),
+                (
+                    "--backside-registration-max-bearing-delta-deg",
+                    "12.01",
+                ),
+            ):
+                with self.subTest(flag=flag):
+                    unsafe = parser.parse_args(
+                        [*self.parser_args(model_path), flag, value]
+                    )
+                    with (
+                        redirect_stderr(StringIO()),
+                        self.assertRaises(SystemExit),
+                    ):
+                        _validate_args(parser, unsafe)
+
     def test_parser_rejects_missing_stand_model_before_runtime(self):
         args = self.parser_args(Path("unused-model.json"))
         without_model = args[:4] + args[6:]
@@ -430,9 +588,6 @@ class PassiveObservationCoreTest(unittest.TestCase):
         )
 
         for expected in (
-            "expected_head_center_u_px=projection.u_px - roi.x0",
-            "expected_head_center_v_px=projection.v_px - roi.y0",
-            "expected_head_height_px=expected_head_height_px",
             "build_backside_axis_observation(",
             "estimate_visible_face=getattr(",
             "visible_face_confidence=getattr(",
@@ -444,6 +599,21 @@ class PassiveObservationCoreTest(unittest.TestCase):
             "self._qr_marker_seen_in_stationary_epoch",
             "self._qr_marker_stationary_epoch_anchor",
             "self._reset_qr_marker_epoch()",
+            "target_centered_head_roi_attempts(",
+            "backside_reacquisition_padding_scale",
+            "select_camera_target_measurement(",
+            "build_backside_target_registration_evidence(",
+            "associate_camera_registered_candidate_lidar_target(",
+            "registered_lidar_association.search_association",
+            "lidar_target_associated = registered_lidar_association.associated",
+            '"camera_registered_candidate_lidar_association"',
+            "axis_source=axis_sample_source",
+            "consensus.source != axis_sample_source",
+            "target_registration=target_registration",
+            "head_roi_attempts",
+            "attempt.expected_center_u_px - attempt_roi.x0",
+            "attempt.expected_center_v_px - attempt_roi.y0",
+            "expected_head_height_px=attempt.expected_head_height_px",
             "qr_texts and estimate.source == BACKSIDE_AXIS_SAMPLE_SOURCE",
             "decoded QR text conflicts",
             '"axis_observation_not_committable"',

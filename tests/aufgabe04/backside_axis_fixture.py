@@ -1,8 +1,9 @@
-"""Canonical schema-2 backside-axis receipts used by navigation tests."""
+"""Canonical schema-3 backside-axis receipts used by navigation tests."""
 
 from __future__ import annotations
 
 from dataclasses import replace
+import math
 from pathlib import Path
 
 from scripts.aufgabe04.artifacts.content_store import write_content_hashed_json
@@ -20,12 +21,17 @@ from scripts.aufgabe04.navigation.localization.odom_execution_certificate import
 )
 
 from scripts.aufgabe04.navigation.approach.camera_axis_binding import (
+    BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION,
     BACKSIDE_CLASSIFICATION_BASIS,
     BACKSIDE_CURRENT_FRAME_SOURCE,
     BACKSIDE_MODEL_EVIDENCE_STATE,
     BACKSIDE_VISIBLE_FACE,
     PASSIVE_VIEWPOINT_OBSERVER_VERSION,
     REAL_STAND_AXIS_OBSERVATION_KIND,
+)
+from scripts.aufgabe04.artifacts.backside_axis_observation import (
+    TARGET_REGISTRATION_LIDAR_SOURCE_MAP,
+    TARGET_REGISTRATION_MODE_MAP_PROJECTION,
 )
 from scripts.aufgabe04.stations.candidate_snapshot import (
     CandidateGeometry,
@@ -52,7 +58,7 @@ def backside_axis_payload(
 
     sample_count = 7
     return {
-        "schema_version": 2,
+        "schema_version": BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION,
         "observation_kind": REAL_STAND_AXIS_OBSERVATION_KIND,
         "motion_capability": "none",
         "stream_id": "test_backside_axis_stream",
@@ -82,6 +88,21 @@ def backside_axis_payload(
         "sensor_stamp_sec": 123.5,
         "head_scale_ratio": 1.0,
         "head_center_error_ratio": 0.05,
+        "target_registration": {
+            "mode": TARGET_REGISTRATION_MODE_MAP_PROJECTION,
+            "original_head_center_error_ratio": 0.05,
+            "center_offset_limit_ratio": 0.55,
+            "final_strict_head_center_error_ratio": 0.05,
+            "map_bearing_rad": 0.0,
+            "lidar_search_bearing_rad": 0.0,
+            "camera_map_bearing_delta_rad": 0.0,
+            "bearing_delta_limit_rad": math.radians(3.0),
+            "lidar_search_bearing_source": (
+                TARGET_REGISTRATION_LIDAR_SOURCE_MAP
+            ),
+            "unique_eligible_lidar_cluster_required": False,
+            "eligible_lidar_cluster_count": 1,
+        },
         "pose_reprojection_rmse_px": None,
         "pose_ambiguity_gap_px": None,
         "robot_profile_sha256": "1" * 64,

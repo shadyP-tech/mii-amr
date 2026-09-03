@@ -4,6 +4,7 @@ import tempfile
 import unittest
 
 from scripts.aufgabe04.navigation.approach.camera_axis_binding import (
+    BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION,
     BACKSIDE_CLASSIFICATION_BASIS,
     BACKSIDE_CURRENT_FRAME_SOURCE,
     BACKSIDE_MODEL_EVIDENCE_STATE,
@@ -14,6 +15,13 @@ from scripts.aufgabe04.navigation.approach.camera_axis_binding import (
     opposite_face_normal_from_axis_observation,
     validated_backside_axis_observation,
 )
+from scripts.aufgabe04.artifacts.backside_axis_observation import (
+    REGISTERED_BACKSIDE_AXIS_SAMPLE_SOURCE,
+    TARGET_REGISTRATION_LIDAR_SOURCE_CAMERA,
+    TARGET_REGISTRATION_LIDAR_SOURCE_MAP,
+    TARGET_REGISTRATION_MODE_BOUNDED_CAMERA_LIDAR,
+    TARGET_REGISTRATION_MODE_MAP_PROJECTION,
+)
 from scripts.aufgabe04.navigation.approach.candidate_preapproach_materialization import (
     validate_backside_axis_candidate_binding,
 )
@@ -21,7 +29,7 @@ from scripts.aufgabe04.navigation.approach.candidate_preapproach_materialization
 
 def _observation(*, robot_y_m: float = 0.7) -> dict[str, object]:
     return {
-        "schema_version": 2,
+        "schema_version": BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION,
         "observation_kind": REAL_STAND_AXIS_OBSERVATION_KIND,
         "stand_id": "candidate_1",
         "planning_frame": "map",
@@ -44,6 +52,21 @@ def _observation(*, robot_y_m: float = 0.7) -> dict[str, object]:
         "sensor_stamp_sec": 123.5,
         "head_scale_ratio": 0.98,
         "head_center_error_ratio": 0.07,
+        "target_registration": {
+            "mode": TARGET_REGISTRATION_MODE_MAP_PROJECTION,
+            "original_head_center_error_ratio": 0.07,
+            "center_offset_limit_ratio": 0.55,
+            "final_strict_head_center_error_ratio": 0.07,
+            "map_bearing_rad": -0.04,
+            "lidar_search_bearing_rad": -0.04,
+            "camera_map_bearing_delta_rad": 0.01,
+            "bearing_delta_limit_rad": math.radians(3.0),
+            "lidar_search_bearing_source": (
+                TARGET_REGISTRATION_LIDAR_SOURCE_MAP
+            ),
+            "unique_eligible_lidar_cluster_required": False,
+            "eligible_lidar_cluster_count": 1,
+        },
         "pose_reprojection_rmse_px": None,
         "pose_ambiguity_gap_px": None,
         "qr_marker_detected": False,
@@ -76,6 +99,30 @@ class CameraAxisBindingTest(unittest.TestCase):
 
         self.assertAlmostEqual(above, -math.pi / 2.0)
         self.assertAlmostEqual(below, math.pi / 2.0)
+
+    def test_registered_receipt_keeps_geometry_but_has_distinct_axis_source(self):
+        payload = _observation(robot_y_m=0.7)
+        payload["axis_sample_source"] = REGISTERED_BACKSIDE_AXIS_SAMPLE_SOURCE
+        payload["target_registration"] = {
+            "mode": TARGET_REGISTRATION_MODE_BOUNDED_CAMERA_LIDAR,
+            "original_head_center_error_ratio": 1.18,
+            "center_offset_limit_ratio": 1.50,
+            "final_strict_head_center_error_ratio": 0.07,
+            "map_bearing_rad": -0.03,
+            "lidar_search_bearing_rad": 0.13,
+            "camera_map_bearing_delta_rad": 0.16,
+            "bearing_delta_limit_rad": math.radians(12.0),
+            "lidar_search_bearing_source": (
+                TARGET_REGISTRATION_LIDAR_SOURCE_CAMERA
+            ),
+            "unique_eligible_lidar_cluster_required": True,
+            "eligible_lidar_cluster_count": 1,
+        }
+
+        self.assertAlmostEqual(
+            opposite_face_normal_from_axis_observation(payload),
+            -math.pi / 2.0,
+        )
 
     def test_invalid_or_ambiguous_observation_fails_closed(self):
         wrong_kind = _observation(robot_y_m=0.7)

@@ -106,12 +106,35 @@ def _target_crop(
     center_u_px: float,
     center_v_px: float,
     expected_height_px: float,
+    horizontal_half_width_ratio: float = 1.25,
 ) -> tuple[int, int, int, int] | None:
     frame_height, frame_width = frame_shape[:2]
-    x0 = max(0, int(math.floor(center_u_px - 1.25 * expected_height_px)))
+    if (
+        not math.isfinite(float(horizontal_half_width_ratio))
+        or float(horizontal_half_width_ratio) < 1.25
+        or float(horizontal_half_width_ratio) > 2.25
+    ):
+        raise ValueError(
+            "horizontal_half_width_ratio must be within [1.25, 2.25]"
+        )
+    x0 = max(
+        0,
+        int(
+            math.floor(
+                center_u_px
+                - float(horizontal_half_width_ratio) * expected_height_px
+            )
+        ),
+    )
     x1 = min(
         frame_width,
-        int(math.ceil(center_u_px + 1.25 * expected_height_px)) + 1,
+        int(
+            math.ceil(
+                center_u_px
+                + float(horizontal_half_width_ratio) * expected_height_px
+            )
+        )
+        + 1,
     )
     y0 = max(0, int(math.floor(center_v_px - 1.20 * expected_height_px)))
     # Retain enough image below the expected head for the independent paired
@@ -196,6 +219,7 @@ def estimate_stand_axis_from_model_backside(
     canny_high: int,
     min_edge_height_px: float,
     max_reprojection_rmse_px: float,
+    target_crop_horizontal_half_width_ratio: float = 1.25,
 ) -> tuple[StandAxisImageEstimate, StandAxisEdgeDebugArtifacts]:
     """Bootstrap an undirected stand axis from a QR-free current frame.
 
@@ -237,6 +261,7 @@ def estimate_stand_axis_from_model_backside(
         center_u_px=center_u,
         center_v_px=center_v,
         expected_height_px=expected_height,
+        horizontal_half_width_ratio=target_crop_horizontal_half_width_ratio,
     )
     if crop is None:
         return _failure(

@@ -55,6 +55,7 @@ def estimate_stand_axis_from_metric_model(
     expected_head_center_u_px: float | None = None,
     expected_head_center_v_px: float | None = None,
     expected_head_height_px: float | None = None,
+    backside_target_crop_horizontal_half_width_ratio: float = 1.25,
 ) -> tuple[StandAxisImageEstimate, StandAxisEdgeDebugArtifacts]:
     """Acquire from QR/tracking or a gated no-QR backside candidate.
 
@@ -140,6 +141,9 @@ def estimate_stand_axis_from_metric_model(
                 canny_high=canny_high,
                 min_edge_height_px=min_edge_height_px,
                 max_reprojection_rmse_px=max_reprojection_rmse_px,
+                target_crop_horizontal_half_width_ratio=(
+                    backside_target_crop_horizontal_half_width_ratio
+                ),
             )
         estimate = replace(
             _unusable("model_pose_seed_unavailable", source="model_seed"),
