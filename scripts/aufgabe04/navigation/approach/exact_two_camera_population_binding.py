@@ -43,9 +43,10 @@ def validate_live_exact_two_camera_population_binding(
     """Authenticate the registry and return its selected live candidates.
 
     Selected lifecycle changes made by prior camera decisions are normalized
-    only for the source-digest comparison.  Every other registry field and
-    every excluded or boundary audit-only candidate remains byte-for-byte
-    accountable to the handoff's full source-registry seal.
+    only for the source-digest comparison.  Every other registry field,
+    including retained candidates that were already inactive when the camera
+    population was admitted, remains byte-for-byte accountable to the
+    handoff's full source-registry seal.
     """
 
     validate_live_candidate_snapshot_binding(
@@ -66,40 +67,10 @@ def validate_live_exact_two_camera_population_binding(
         candidate.candidate_uid: candidate
         for candidate in registry.candidates
     }
-    registry_uids = set(registry_by_uid)
-    evidence_uids = {
-        evidence.candidate_uid for evidence in admission.candidate_evidence
-    }
-    if registry_uids != evidence_uids:
-        raise ExactTwoCameraAdmissionError(
-            "live_registry_population_mismatch",
-            "live registry UIDs do not match the sealed admission evidence",
-        )
-
-    selected_uid_set = set(selected_uids)
-    missing_selected = selected_uid_set.difference(registry_uids)
-    if missing_selected:
-        raise ExactTwoCameraAdmissionError(
-            "live_registry_population_mismatch",
-            "selected camera UIDs are missing from the live registry: "
-            f"{sorted(missing_selected)}",
-        )
-
-    extra_uids = registry_uids.difference(selected_uid_set)
-    sealed_excluded_uids = set(admission.excluded_candidate_uids)
-    sealed_audit_only_uids = set(
-        admission.boundary_audit_only_candidate_uids
+    _validate_camera_population_membership(
+        handoff,
+        registry_uids=set(registry_by_uid),
     )
-    allowed_extra_uids = sealed_excluded_uids.union(
-        sealed_audit_only_uids
-    )
-    unsealed_extra_uids = extra_uids.difference(allowed_extra_uids)
-    if unsealed_extra_uids or extra_uids != sealed_excluded_uids:
-        raise ExactTwoCameraAdmissionError(
-            "live_registry_population_mismatch",
-            "live registry contains candidates outside the sealed selected "
-            "and excluded camera populations",
-        )
 
     _validate_state_aware_full_registry_binding(
         handoff,
@@ -107,6 +78,43 @@ def validate_live_exact_two_camera_population_binding(
         authenticated_decision_statuses=authenticated_decision_statuses,
     )
     return {uid: registry_by_uid[uid] for uid in selected_uids}
+
+
+def _validate_camera_population_membership(
+    handoff: ExactTwoCameraHandoffArtifact,
+    *,
+    registry_uids: set[str],
+) -> None:
+    """Require the sealed active-camera population in the full registry.
+
+    Camera admission evidence intentionally covers only candidates that were
+    active LiDAR candidates at handoff time.  The survey registry is a fuller
+    lifecycle ledger and can also retain already-rejected LiDAR candidates.
+    Those inactive entries are authenticated below by the exact full-registry
+    digest; requiring them to appear in active-camera evidence would compare
+    two deliberately different populations.
+    """
+
+    admission = handoff.admission_decision
+    selected_uids = set(admission.selected_candidate_uids)
+    missing_selected = selected_uids.difference(registry_uids)
+    if missing_selected:
+        raise ExactTwoCameraAdmissionError(
+            "live_registry_population_mismatch",
+            "selected camera UIDs are missing from the live registry: "
+            f"{sorted(missing_selected)}",
+        )
+
+    camera_evidence_uids = {
+        evidence.candidate_uid for evidence in admission.candidate_evidence
+    }
+    missing_camera_evidence = camera_evidence_uids.difference(registry_uids)
+    if missing_camera_evidence:
+        raise ExactTwoCameraAdmissionError(
+            "live_registry_population_mismatch",
+            "sealed camera-evidence UIDs are missing from the live registry: "
+            f"{sorted(missing_camera_evidence)}",
+        )
 
 
 def _validate_state_aware_full_registry_binding(

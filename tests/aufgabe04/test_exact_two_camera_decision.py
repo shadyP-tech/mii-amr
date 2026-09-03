@@ -17,6 +17,7 @@ from scripts.aufgabe04.artifacts.content_store import (
 )
 from scripts.aufgabe04.navigation.approach.exact_two_camera_admission import (
     SUPPORT_CLASS_SINGLE_VIEW_REQUIRES_CAMERA_VALIDATION,
+    ExactTwoCameraAdmissionError,
     build_exact_two_camera_candidate_snapshot,
     evaluate_exact_two_camera_admission,
     exact_two_camera_handoff_sha256,
@@ -140,6 +141,7 @@ def _fixture(
     *,
     boundary_uid: str | None = None,
     with_boundary_audit_only_extra: bool = False,
+    with_retained_negative_visibility_history: bool = False,
     with_frame_provenance: bool = False,
 ):
     plan, progress, registry, _, admission = _ready_inputs()
@@ -160,6 +162,32 @@ def _fixture(
                     static_map_disposition=(
                         STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL
                     ),
+                ),
+            ),
+        )
+        lidar = evaluate_exact_two_lidar_checkpoint(plan, progress, registry)
+        admission = evaluate_exact_two_camera_admission(
+            plan,
+            progress,
+            registry,
+            lidar,
+        )
+    if with_retained_negative_visibility_history:
+        template = registry.candidates[-1]
+        registry = replace(
+            registry,
+            candidates=(
+                *registry.candidates,
+                replace(
+                    template,
+                    candidate_uid="survey_candidate_0006",
+                    x_m=1.50,
+                    y_m=0.60,
+                    first_seen_sec=16.0,
+                    last_seen_sec=17.0,
+                    source_observation_ids=("observation_0006",),
+                    status=STATUS_REJECTED,
+                    rejection_basis=REJECTION_BASIS_NEGATIVE_VISIBILITY,
                 ),
             ),
         )
@@ -702,6 +730,152 @@ class ExactTwoCameraDecisionTest(unittest.TestCase):
                 registry.candidate_for("survey_candidate_0006").status,
                 STATUS_PROVISIONAL,
             )
+
+    def test_population_binding_accepts_sealed_negative_visibility_history(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _fixture(
+                Path(tmp),
+                with_retained_negative_visibility_history=True,
+            )
+            retained_uid = "survey_candidate_0006"
+            evidence_uids = tuple(
+                evidence.candidate_uid
+                for evidence in fixture.handoff.admission_decision.candidate_evidence
+            )
+
+            self.assertEqual(len(fixture.registry.candidates), 6)
+            self.assertEqual(len(fixture.snapshot.candidates), 5)
+            self.assertNotIn(retained_uid, evidence_uids)
+            self.assertNotIn(retained_uid, fixture.snapshot.candidate_uids)
+            self.assertEqual(
+                fixture.handoff.source_registry_sha256,
+                stand_survey_registry_sha256(fixture.registry),
+            )
+
+            bound = validate_live_exact_two_camera_population_binding(
+                fixture.handoff,
+                fixture.snapshot,
+                fixture.registry,
+                candidate_snapshot_path=fixture.snapshot_path,
+            )
+
+            self.assertEqual(
+                tuple(bound),
+                fixture.handoff.admission_decision.selected_candidate_uids,
+            )
+            retained = fixture.registry.candidate_for(retained_uid)
+            assert retained is not None
+            self.assertEqual(retained.status, STATUS_REJECTED)
+            self.assertEqual(
+                retained.rejection_basis,
+                REJECTION_BASIS_NEGATIVE_VISIBILITY,
+            )
+
+    def test_schema_v3_commits_with_sealed_negative_visibility_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = _fixture(
+                root,
+                with_retained_negative_visibility_history=True,
+                with_frame_provenance=True,
+            )
+            uid = "survey_candidate_0003"
+            retained_uid = "survey_candidate_0006"
+            decision = _write_projected_exact_two_receipt(
+                fixture,
+                root,
+                uid,
+            )
+
+            with redirect_stdout(StringIO()):
+                result = _record(fixture, decision.receipt_path)
+
+            registry = load_stand_survey_registry(
+                fixture.survey_root / "stand_registry.json",
+                fixture.plan,
+            )
+            retained = registry.candidate_for(retained_uid)
+            assert retained is not None
+            self.assertEqual(result, 0)
+            self.assertEqual(
+                registry.candidate_for(uid).status,
+                STATUS_CONFIRMED,
+            )
+            self.assertEqual(retained.status, STATUS_REJECTED)
+            self.assertEqual(
+                retained.rejection_basis,
+                REJECTION_BASIS_NEGATIVE_VISIBILITY,
+            )
+            self.assertTrue(
+                (
+                    fixture.survey_root
+                    / "decisions"
+                    / f"{uid}.json"
+                ).is_file()
+            )
+
+    def test_population_binding_rejects_changed_negative_visibility_history(
+        self,
+    ):
+        for failure in ("geometry_mutation", "unsealed_addition"):
+            with self.subTest(failure=failure):
+                with tempfile.TemporaryDirectory() as tmp:
+                    fixture = _fixture(
+                        Path(tmp),
+                        with_retained_negative_visibility_history=True,
+                    )
+                    retained_uid = "survey_candidate_0006"
+                    retained = fixture.registry.candidate_for(retained_uid)
+                    assert retained is not None
+                    if failure == "geometry_mutation":
+                        changed_candidates = tuple(
+                            replace(candidate, x_m=candidate.x_m + 0.01)
+                            if candidate.candidate_uid == retained_uid
+                            else candidate
+                            for candidate in fixture.registry.candidates
+                        )
+                    else:
+                        changed_candidates = (
+                            *fixture.registry.candidates,
+                            replace(
+                                retained,
+                                candidate_uid="survey_candidate_0007",
+                                x_m=retained.x_m + 0.25,
+                                y_m=retained.y_m + 0.10,
+                                first_seen_sec=18.0,
+                                last_seen_sec=19.0,
+                                source_observation_ids=("observation_0007",),
+                            ),
+                        )
+                    changed_registry = replace(
+                        fixture.registry,
+                        candidates=changed_candidates,
+                    )
+                    self.assertNotEqual(
+                        stand_survey_registry_sha256(changed_registry),
+                        fixture.handoff.source_registry_sha256,
+                    )
+
+                    with self.assertRaises(
+                        ExactTwoCameraAdmissionError
+                    ) as raised:
+                        validate_live_exact_two_camera_population_binding(
+                            fixture.handoff,
+                            fixture.snapshot,
+                            changed_registry,
+                            candidate_snapshot_path=fixture.snapshot_path,
+                        )
+
+                    self.assertEqual(
+                        raised.exception.code,
+                        "live_registry_mismatch",
+                    )
+                    self.assertIn(
+                        "no longer matches the sealed camera handoff",
+                        str(raised.exception),
+                    )
 
     def test_schema_v3_accepts_after_another_canonical_decision(self):
         with tempfile.TemporaryDirectory() as tmp:
