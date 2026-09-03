@@ -428,6 +428,28 @@ class CandidateLidarAssociationTest(unittest.TestCase):
         self.assertTrue(registered.associated)
         self.assertEqual(registered.search_association.eligible_cluster_count, 1)
 
+    def test_registered_camera_default_degree_round_trip_keeps_certified_limit(self):
+        ranges = [2.0] * 37
+        ranges[28] = 0.70
+        scan = self.make_scan(
+            ranges,
+            angle_min_deg=-16.0,
+            angle_increment_deg=1.0,
+        )
+        round_tripped_limit = math.radians(math.degrees(math.radians(12.0)))
+
+        registered = self.associate_registered(
+            scan,
+            observed_camera_bearing_rad=math.radians(12.0),
+            max_camera_map_bearing_delta_rad=round_tripped_limit,
+        )
+
+        self.assertTrue(registered.associated)
+        self.assertAlmostEqual(
+            registered.max_camera_map_bearing_delta_rad,
+            math.radians(12.0),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

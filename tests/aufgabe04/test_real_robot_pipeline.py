@@ -529,6 +529,13 @@ class PassiveObservationCoreTest(unittest.TestCase):
             with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
                 _validate_args(parser, invalid_canny)
 
+            defaults = parser.parse_args(self.parser_args(model_path))
+            self.assertEqual(defaults.max_obliqueness_deg, 30.0)
+            self.assertEqual(
+                defaults.qr_bound_model_max_obliqueness_deg,
+                35.0,
+            )
+
             for flag, value in (
                 ("--backside-reacquisition-padding-scale", "4.51"),
                 (
@@ -538,6 +545,10 @@ class PassiveObservationCoreTest(unittest.TestCase):
                 (
                     "--backside-registration-max-bearing-delta-deg",
                     "12.01",
+                ),
+                (
+                    "--qr-bound-model-max-obliqueness-deg",
+                    "35.01",
                 ),
             ):
                 with self.subTest(flag=flag):
@@ -549,6 +560,19 @@ class PassiveObservationCoreTest(unittest.TestCase):
                         self.assertRaises(SystemExit),
                     ):
                         _validate_args(parser, unsafe)
+
+            narrower_than_generic = parser.parse_args(
+                [
+                    *self.parser_args(model_path),
+                    "--qr-bound-model-max-obliqueness-deg",
+                    "29.99",
+                ]
+            )
+            with (
+                redirect_stderr(StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                _validate_args(parser, narrower_than_generic)
 
     def test_parser_rejects_missing_stand_model_before_runtime(self):
         args = self.parser_args(Path("unused-model.json"))
@@ -614,6 +638,9 @@ class PassiveObservationCoreTest(unittest.TestCase):
             "attempt.expected_center_u_px - attempt_roi.x0",
             "attempt.expected_center_v_px - attempt_roi.y0",
             "expected_head_height_px=attempt.expected_head_height_px",
+            "admit_axis_sample(",
+            "axis_sample_admission.metadata()",
+            "qr_bound_model_max_obliqueness_deg",
             "qr_texts and estimate.source == BACKSIDE_AXIS_SAMPLE_SOURCE",
             "decoded QR text conflicts",
             '"axis_observation_not_committable"',

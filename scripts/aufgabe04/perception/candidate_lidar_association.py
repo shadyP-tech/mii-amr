@@ -29,8 +29,12 @@ from scripts.aufgabe04.perception.stand_axis_lidar_roi import PlainLaserScan
 
 CANDIDATE_LIDAR_ASSOCIATION_SCHEMA_VERSION = 1
 CAMERA_REGISTERED_LIDAR_ASSOCIATION_SCHEMA_VERSION = 1
-MAX_CAMERA_MAP_BEARING_DELTA_RAD = math.radians(12.0)
+MAX_CAMERA_MAP_BEARING_DELTA_DEG = 12.0
+MAX_CAMERA_MAP_BEARING_DELTA_RAD = math.radians(
+    MAX_CAMERA_MAP_BEARING_DELTA_DEG
+)
 DEFAULT_MAX_CAMERA_MAP_BEARING_DELTA_RAD = MAX_CAMERA_MAP_BEARING_DELTA_RAD
+CAMERA_MAP_BEARING_DELTA_BOUND_TOLERANCE_RAD = 1.0e-12
 
 
 @dataclass(frozen=True)
@@ -314,18 +318,11 @@ def associate_camera_registered_candidate_lidar_target(
         observed_camera_bearing_rad,
         "observed_camera_bearing_rad",
     )
-    max_camera_map_bearing_delta_rad = _require_nonnegative(
-        max_camera_map_bearing_delta_rad,
-        "max_camera_map_bearing_delta_rad",
-    )
-    if (
-        max_camera_map_bearing_delta_rad
-        > MAX_CAMERA_MAP_BEARING_DELTA_RAD
-    ):
-        raise ValueError(
-            "max_camera_map_bearing_delta_rad cannot exceed the certified "
-            "12 degree registration bound"
+    max_camera_map_bearing_delta_rad = (
+        normalize_certified_camera_map_bearing_limit(
+            max_camera_map_bearing_delta_rad
         )
+    )
     camera_map_bearing_delta_rad = abs(
         _angle_delta(observed_camera_bearing_rad, map_bearing_rad)
     )
@@ -399,6 +396,28 @@ def _association_rejected_as_ambiguous(
         selected_cluster_bearing_delta_from_camera_rad=None,
         selection_source="none",
     )
+
+
+def normalize_certified_camera_map_bearing_limit(value: float) -> float:
+    """Return a limit at or below the certified camera-registration cap.
+
+    CLI values cross a degrees-to-radians boundary.  A mathematically exact
+    12 degree default can therefore arrive a few floating-point ulps above the
+    radian constant.  Values inside a numerical-only tolerance are clamped to
+    the certified value; a meaningful increase still fails closed.
+    """
+
+    limit = _require_nonnegative(value, "max_camera_map_bearing_delta_rad")
+    if (
+        limit
+        > MAX_CAMERA_MAP_BEARING_DELTA_RAD
+        + CAMERA_MAP_BEARING_DELTA_BOUND_TOLERANCE_RAD
+    ):
+        raise ValueError(
+            "max_camera_map_bearing_delta_rad cannot exceed the certified "
+            f"{MAX_CAMERA_MAP_BEARING_DELTA_DEG:g} degree registration bound"
+        )
+    return min(limit, MAX_CAMERA_MAP_BEARING_DELTA_RAD)
 
 
 def _rejected(

@@ -159,6 +159,7 @@ class OrchestrationModuleBoundaryTest(unittest.TestCase):
                 "site_contract.py",
             },
             "observer": {
+                "axis_sample_policy.py",
                 "backside_axis_observation.py",
                 "camera_target_registration.py",
                 "contract.py",

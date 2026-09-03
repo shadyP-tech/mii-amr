@@ -41,9 +41,10 @@ from scripts.aufgabe04.perception.ros_image_adapter import (
     compressed_msg_to_bgr_frame,
 )
 from scripts.aufgabe04.perception.candidate_lidar_association import (
-    DEFAULT_MAX_CAMERA_MAP_BEARING_DELTA_RAD,
+    MAX_CAMERA_MAP_BEARING_DELTA_DEG,
     associate_camera_registered_candidate_lidar_target,
     associate_candidate_lidar_target,
+    normalize_certified_camera_map_bearing_limit,
 )
 from scripts.aufgabe04.perception.stand_axis_consensus import axis_conditioning
 from scripts.aufgabe04.perception.stand_axis.real_camera_profile import (
@@ -87,6 +88,11 @@ from scripts.aufgabe04.real_robot.observer.contract import (
 )
 from scripts.aufgabe04.real_robot.observer.backside_axis_observation import (
     build_backside_axis_observation,
+)
+from scripts.aufgabe04.real_robot.observer.axis_sample_policy import (
+    DEFAULT_QR_BOUND_MODEL_MAX_OBLIQUENESS_DEG,
+    admit_axis_sample,
+    normalize_qr_bound_model_obliqueness_limit,
 )
 from scripts.aufgabe04.real_robot.observer.tf_retry import (
     PassiveObserverTfRetryScheduler,
@@ -1050,6 +1056,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             ),
             "pose_ambiguity_gap_px": estimate.pose_ambiguity_gap_px,
             "refinement_support_mean": debug.refinement_support_mean,
+            "model_pose_fit_source": debug.model_pose_fit_source,
             "visible_face": getattr(estimate, "visible_face", None),
             "visible_face_confidence": getattr(
                 estimate,
@@ -1341,7 +1348,21 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 **lidar_status_details,
             )
             return
-        if not conditioning.accepted:
+        axis_sample_admission = admit_axis_sample(
+            estimate=estimate,
+            debug=debug,
+            conditioning=conditioning,
+            yaw_rad=optical_yaw,
+            qr_texts=qr_texts,
+            lidar_target_associated=lidar_target_associated,
+            max_qr_bound_model_obliqueness_rad=math.radians(
+                self.args.qr_bound_model_max_obliqueness_deg
+            ),
+        )
+        axis_metadata["axis_sample_admission"] = (
+            axis_sample_admission.metadata()
+        )
+        if not axis_sample_admission.accepted:
             update = self._record_observation_frame(
                 robot_pose=robot_pose,
                 image_stamp_sec=image.stamp_sec,
@@ -1363,7 +1384,12 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 **lidar_status_details,
             )
             return
-        axis_sample_source = estimate.source
+        axis_sample_source = axis_sample_admission.source
+        if (
+            axis_sample_source is None
+            or axis_sample_admission.yaw_rad is None
+        ):
+            raise AssertionError("accepted axis sample lacks yaw/source")
         target_registration = None
         if estimate.source == BACKSIDE_AXIS_SAMPLE_SOURCE:
             try:
@@ -1420,7 +1446,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             scan_stamp_sec=scan.stamp_sec,
             observed_at_sec=now_sec,
             lidar_associated=True,
-            axis_yaw_rad=optical_yaw,
+            axis_yaw_rad=axis_sample_admission.yaw_rad,
             axis_source=axis_sample_source,
             qr_texts=qr_texts,
         )
@@ -1799,10 +1825,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--backside-registration-max-bearing-delta-deg",
         type=float,
-        default=math.degrees(DEFAULT_MAX_CAMERA_MAP_BEARING_DELTA_RAD),
+        default=MAX_CAMERA_MAP_BEARING_DELTA_DEG,
         help=(
             "Maximum map-to-camera bearing correction for shifting the same "
             "narrow LiDAR cone after bounded visual registration."
+        ),
+    )
+    parser.add_argument(
+        "--qr-bound-model-max-obliqueness-deg",
+        type=float,
+        default=DEFAULT_QR_BOUND_MODEL_MAX_OBLIQUENESS_DEG,
+        help=(
+            "Maximum obliqueness for accepting a QR-decoded, joint QR/head "
+            "measured-model pose as an axis sample. This does not relax the "
+            "generic silhouette gate."
         ),
     )
     parser.add_argument("--min-head-size-px", type=float, default=18.0)
@@ -1903,6 +1939,9 @@ def _validate_args(parser: argparse.ArgumentParser, args) -> None:
         "--backside-registration-max-bearing-delta-deg": (
             args.backside_registration_max_bearing_delta_deg
         ),
+        "--qr-bound-model-max-obliqueness-deg": (
+            args.qr_bound_model_max_obliqueness_deg
+        ),
         "--min-head-size-px": args.min_head_size_px,
         "--sync-tolerance-sec": args.sync_tolerance_sec,
         "--camera-info-tolerance-sec": args.camera_info_tolerance_sec,
@@ -1936,13 +1975,28 @@ def _validate_args(parser: argparse.ArgumentParser, args) -> None:
             "--backside-registration-max-center-offset-ratio must be no "
             f"greater than {MAX_BACKSIDE_REGISTRATION_CENTER_OFFSET_RATIO}"
         )
-    if (
-        math.radians(args.backside_registration_max_bearing_delta_deg)
-        > DEFAULT_MAX_CAMERA_MAP_BEARING_DELTA_RAD + 1.0e-12
-    ):
+    try:
+        normalize_certified_camera_map_bearing_limit(
+            math.radians(
+                args.backside_registration_max_bearing_delta_deg
+            )
+        )
+    except ValueError as exc:
         parser.error(
-            "--backside-registration-max-bearing-delta-deg must be no greater "
-            f"than {math.degrees(DEFAULT_MAX_CAMERA_MAP_BEARING_DELTA_RAD):g}"
+            "invalid --backside-registration-max-bearing-delta-deg: "
+            f"{exc}"
+        )
+    try:
+        normalize_qr_bound_model_obliqueness_limit(
+            math.radians(args.qr_bound_model_max_obliqueness_deg),
+            generic_max_obliqueness_rad=math.radians(
+                args.max_obliqueness_deg
+            ),
+        )
+    except ValueError as exc:
+        parser.error(
+            "invalid --qr-bound-model-max-obliqueness-deg: "
+            f"{exc}"
         )
     if args.stand_uncertainty_m < 0.0:
         parser.error("--stand-uncertainty-m must be non-negative")
