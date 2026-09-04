@@ -27,6 +27,12 @@ class PassiveObserverDiagnosticsTests(unittest.TestCase):
                             "required_sample_count": 7,
                         },
                         "tf_retry": {"retry_count": 4},
+                        "observation_evidence": {
+                            "accepted_frame_count": 12,
+                            "lidar_rejection_count": 3,
+                            "soft_miss_count": 5,
+                            "last_soft_miss_reason": "camera_lidar_skew",
+                        },
                         "tf_retry_elapsed_sec": 0.061,
                         "retry_exhausted": False,
                     }
@@ -41,6 +47,13 @@ class PassiveObserverDiagnosticsTests(unittest.TestCase):
         self.assertEqual(status.consensus_required_sample_count, 7)
         self.assertEqual(status.tf_retry_count, 4)
         self.assertEqual(status.tf_retry_elapsed_sec, 0.061)
+        self.assertEqual(status.accepted_frame_count, 12)
+        self.assertEqual(status.lidar_rejection_count, 3)
+        self.assertEqual(status.soft_miss_count, 5)
+        self.assertEqual(
+            status.last_soft_miss_reason,
+            "camera_lidar_skew",
+        )
         self.assertFalse(status.retry_exhausted)
         self.assertIsNone(status.load_error)
 
@@ -162,6 +175,43 @@ class PassiveObserverDiagnosticsTests(unittest.TestCase):
             retry_exhausted=True,
             load_error=None,
         )
+        transient_after_candidate_frames = type(local_status)(
+            state="tf_pending_exact_time",
+            reason=None,
+            consensus_sample_count=0,
+            consensus_required_sample_count=7,
+            tf_retry_count=2,
+            tf_retry_elapsed_sec=0.03,
+            retry_exhausted=False,
+            load_error=None,
+            accepted_frame_count=340,
+            tf_retry_attempted_tuple_count=342,
+            tf_retry_exhausted_tuple_count=104,
+        )
+        exhausted_after_candidate_frames = type(local_status)(
+            state="tf_retry_exhausted",
+            reason=None,
+            consensus_sample_count=0,
+            consensus_required_sample_count=7,
+            tf_retry_count=8,
+            tf_retry_elapsed_sec=0.16,
+            retry_exhausted=True,
+            load_error=None,
+            accepted_frame_count=1,
+            tf_retry_attempted_tuple_count=2,
+            tf_retry_exhausted_tuple_count=1,
+        )
+        transient_without_candidate_frames = type(local_status)(
+            state="tf_pending_exact_time",
+            reason=None,
+            consensus_sample_count=0,
+            consensus_required_sample_count=7,
+            tf_retry_count=4,
+            tf_retry_elapsed_sec=0.08,
+            retry_exhausted=False,
+            load_error=None,
+            accepted_frame_count=0,
+        )
 
         self.assertTrue(
             is_candidate_local_observer_timeout(
@@ -173,6 +223,24 @@ class PassiveObserverDiagnosticsTests(unittest.TestCase):
             is_candidate_local_observer_timeout(
                 process=process,
                 status=systemic_status,
+            )
+        )
+        self.assertTrue(
+            is_candidate_local_observer_timeout(
+                process=process,
+                status=transient_after_candidate_frames,
+            )
+        )
+        self.assertTrue(
+            is_candidate_local_observer_timeout(
+                process=process,
+                status=exhausted_after_candidate_frames,
+            )
+        )
+        self.assertFalse(
+            is_candidate_local_observer_timeout(
+                process=process,
+                status=transient_without_candidate_frames,
             )
         )
 

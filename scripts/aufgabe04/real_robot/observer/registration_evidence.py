@@ -25,6 +25,7 @@ from scripts.aufgabe04.real_robot.observer.contract import (
 )
 from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import (
     HeadRoiRegistrationDecision,
+    REGISTERED_BACKSIDE_REACQUISITION_SOURCE,
 )
 
 
@@ -97,7 +98,7 @@ def build_backside_target_registration_evidence(
         raise ValueError("registered target evidence has no accepted image decision")
     if registration_decision.attempt is None or (
         registration_decision.attempt.source
-        != "camera_registered_backside_reacquisition"
+        != REGISTERED_BACKSIDE_REACQUISITION_SOURCE
     ):
         raise ValueError("registered target evidence has no strict retry attempt")
     if registration_decision.center_offset_ratio is None:

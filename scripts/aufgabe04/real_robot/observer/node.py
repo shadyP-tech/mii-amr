@@ -111,6 +111,7 @@ from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import (
     HeadRoiAttempt,
     MAX_BACKSIDE_REACQUISITION_PADDING_SCALE,
     MAX_BACKSIDE_REGISTRATION_CENTER_OFFSET_RATIO,
+    is_camera_registered_head_roi_attempt,
     target_centered_head_roi_attempts,
 )
 from scripts.aufgabe04.real_robot.observer.registration_evidence import (
@@ -1267,9 +1268,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 stand_axis_debug=axis_metadata,
             )
             return
-        registration_applied = (
-            selected_attempt.source
-            == "camera_registered_backside_reacquisition"
+        registration_applied = is_camera_registered_head_roi_attempt(
+            selected_attempt
         )
         registered_lidar_association = None
         if registration_applied:
@@ -1800,16 +1800,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_BACKSIDE_REACQUISITION_PADDING_SCALE,
         help=(
-            "Target-centred expanded ROI padding used only after the nominal "
-            "no-QR backside acquisition cannot produce strict evidence."
+            "Target-centred expanded ROI padding used after the nominal "
+            "QR/model or no-QR backside acquisition cannot produce strict "
+            "evidence."
         ),
     )
     parser.add_argument(
         "--disable-backside-reacquisition",
         action="store_true",
         help=(
-            "Disable the bounded expanded ROI retry and use only the nominal "
-            "projected head crop."
+            "Disable the bounded QR/model and backside expanded-ROI retry and "
+            "use only the nominal projected head crop."
         ),
     )
     parser.add_argument(

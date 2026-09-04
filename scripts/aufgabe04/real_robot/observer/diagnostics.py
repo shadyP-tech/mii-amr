@@ -59,6 +59,10 @@ class PassiveObserverStatusEvidence:
     nearest_lidar_range_delta_m: float | None = None
     tf_retry_attempted_tuple_count: int | None = None
     tf_retry_exhausted_tuple_count: int | None = None
+    accepted_frame_count: int | None = None
+    lidar_rejection_count: int | None = None
+    soft_miss_count: int | None = None
+    last_soft_miss_reason: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -79,6 +83,10 @@ class PassiveObserverStatusEvidence:
             "tf_retry_exhausted_tuple_count": (
                 self.tf_retry_exhausted_tuple_count
             ),
+            "accepted_frame_count": self.accepted_frame_count,
+            "lidar_rejection_count": self.lidar_rejection_count,
+            "soft_miss_count": self.soft_miss_count,
+            "last_soft_miss_reason": self.last_soft_miss_reason,
             "load_error": self.load_error,
         }
 
@@ -141,7 +149,9 @@ def load_passive_observer_status(
     tf_retry = _mapping(payload.get("tf_retry"))
     tf_retry_summary = _mapping(payload.get("tf_retry_attempt_summary"))
     lidar_association = _mapping(payload.get("candidate_lidar_association"))
+    observation_evidence = _mapping(payload.get("observation_evidence"))
     retry_exhausted_value = payload.get("retry_exhausted")
+    last_soft_miss_value = observation_evidence.get("last_soft_miss_reason")
     return PassiveObserverStatusEvidence(
         state=state,
         reason=reason,
@@ -173,6 +183,21 @@ def load_passive_observer_status(
         tf_retry_exhausted_tuple_count=_optional_nonnegative_int(
             tf_retry_summary.get("exhausted_tuple_count")
         ),
+        accepted_frame_count=_optional_nonnegative_int(
+            observation_evidence.get("accepted_frame_count")
+        ),
+        lidar_rejection_count=_optional_nonnegative_int(
+            observation_evidence.get("lidar_rejection_count")
+        ),
+        soft_miss_count=_optional_nonnegative_int(
+            observation_evidence.get("soft_miss_count")
+        ),
+        last_soft_miss_reason=(
+            last_soft_miss_value.strip()
+            if isinstance(last_soft_miss_value, str)
+            and last_soft_miss_value.strip()
+            else None
+        ),
     )
 
 
@@ -186,6 +211,36 @@ CANDIDATE_LOCAL_OBSERVER_TIMEOUT_STATES = frozenset(
         "target_outside_camera_gate",
     }
 )
+TRANSIENT_TF_OBSERVER_TIMEOUT_STATES = frozenset(
+    {
+        "tf_pending_exact_time",
+        "tf_retry_exhausted",
+    }
+)
+
+
+def candidate_local_observer_timeout_basis(
+    status: PassiveObserverStatusEvidence,
+) -> str | None:
+    """Explain why a status snapshot represents candidate-local failure.
+
+    The final status is replaceable and can land on a transient exact-time TF
+    retry just as the parent deadline expires.  ``accepted_frame_count`` is
+    accumulated independently and increments only after a transform-ready,
+    synchronized, LiDAR-associated frame reaches candidate processing.  It
+    therefore proves that a trailing TF state did not starve the observer of
+    all candidate evidence.
+    """
+
+    if status.state in CANDIDATE_LOCAL_OBSERVER_TIMEOUT_STATES:
+        return "final_candidate_local_state"
+    if (
+        status.state in TRANSIENT_TF_OBSERVER_TIMEOUT_STATES
+        and status.accepted_frame_count is not None
+        and status.accepted_frame_count > 0
+    ):
+        return "accumulated_transform_ready_candidate_frames"
+    return None
 
 
 def is_candidate_local_observer_timeout(
@@ -199,7 +254,7 @@ def is_candidate_local_observer_timeout(
         process.completion_kind == "deadline"
         and process.deadline_expired
         and status.load_error is None
-        and status.state in CANDIDATE_LOCAL_OBSERVER_TIMEOUT_STATES
+        and candidate_local_observer_timeout_basis(status) is not None
     )
 
 
@@ -256,6 +311,16 @@ def format_passive_observer_failure(
             "tf_retry_exhausted_tuples="
             f"{status.tf_retry_exhausted_tuple_count}"
         )
+    if status.accepted_frame_count is not None:
+        details.append(
+            f"accepted_candidate_frames={status.accepted_frame_count}"
+        )
+    if status.lidar_rejection_count is not None:
+        details.append(f"lidar_rejections={status.lidar_rejection_count}")
+    if status.soft_miss_count is not None:
+        details.append(f"soft_misses={status.soft_miss_count}")
+    if status.last_soft_miss_reason is not None:
+        details.append(f"last_soft_miss={status.last_soft_miss_reason}")
     if status.tf_retry_elapsed_sec is not None:
         details.append(
             f"tf_retry_elapsed_sec={status.tf_retry_elapsed_sec:.3f}"
@@ -272,7 +337,9 @@ def format_passive_observer_failure(
 
 __all__ = [
     "CANDIDATE_LOCAL_OBSERVER_TIMEOUT_STATES",
+    "TRANSIENT_TF_OBSERVER_TIMEOUT_STATES",
     "PassiveObserverStatusEvidence",
+    "candidate_local_observer_timeout_basis",
     "format_passive_observer_failure",
     "is_candidate_local_observer_timeout",
     "load_passive_observer_status",

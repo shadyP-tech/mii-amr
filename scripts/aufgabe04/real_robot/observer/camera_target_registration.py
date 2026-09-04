@@ -22,6 +22,8 @@ from scripts.aufgabe04.real_robot.observer.contract import (
 from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import (
     HeadRoiAttempt,
     HeadRoiRegistrationDecision,
+    REGISTERED_BACKSIDE_REACQUISITION_SOURCE,
+    REGISTERED_QR_MODEL_REACQUISITION_SOURCE,
     registered_head_roi_attempt,
     validate_backside_registration_center_offset_ratio,
 )
@@ -32,6 +34,21 @@ BACKSIDE_REACQUISITION_TRIGGER_REASONS = frozenset(
         "model_backside_head_and_neck_unavailable",
         "model_backside_target_crop_unavailable",
         "model_backside_target_center_mismatch",
+    }
+)
+QR_MODEL_REACQUISITION_TRIGGER_REASONS = frozenset(
+    {
+        "model_pose_seed_unavailable",
+        "projected_head_outside_image",
+    }
+)
+BACKSIDE_REACQUISITION_MODE = "backside"
+QR_MODEL_REACQUISITION_MODE = "qr_model"
+QR_MODEL_PROPOSAL_SOURCES = frozenset(
+    {
+        "model_projection",
+        "model_refined_head",
+        "model_current_frame_refined",
     }
 )
 
@@ -55,6 +72,7 @@ class CameraTargetRegistrationSelection:
     proposal: HeadRoiEvaluation | None
     decision: HeadRoiRegistrationDecision | None
     strict_retry: HeadRoiEvaluation | None
+    reacquisition_mode: str | None
 
     @property
     def registered(self) -> bool:
@@ -66,6 +84,9 @@ class CameraTargetRegistrationSelection:
         return {
             "enabled": bool(enabled),
             "attempted": proposal is not None,
+            "reacquisition_mode": self.reacquisition_mode,
+            "primary_estimator_reason": self.evaluations[0].estimate.reason,
+            "primary_qr_detected": self.evaluations[0].debug.qr_detected,
             "strict_retry_applied": self.registered,
             "measurement_accepted": (
                 self.registered and self.selected.estimate.usable
@@ -95,6 +116,65 @@ class CameraTargetRegistrationSelection:
         }
 
 
+def _reacquisition_mode(
+    primary: HeadRoiEvaluation,
+    *,
+    tracked_pose: object | None,
+) -> str | None:
+    """Classify one failed nominal measurement without relaxing its gates."""
+
+    estimate = primary.estimate
+    debug = primary.debug
+    if (
+        not debug.qr_detected
+        and tracked_pose is None
+        and estimate.source == BACKSIDE_AXIS_SAMPLE_SOURCE
+        and estimate.reason in BACKSIDE_REACQUISITION_TRIGGER_REASONS
+    ):
+        return BACKSIDE_REACQUISITION_MODE
+    if (
+        estimate.reason in QR_MODEL_REACQUISITION_TRIGGER_REASONS
+        and (
+            debug.qr_detected
+            or estimate.source == "model_projection"
+        )
+    ):
+        # ``model_pose_seed_unavailable`` needs positive QR evidence.  A
+        # ``model_projection`` result already proves that a QR or tracked
+        # metric pose existed, even when QR detection is intermittent on this
+        # particular crop.
+        return QR_MODEL_REACQUISITION_MODE
+    return None
+
+
+def _proposal_is_eligible(
+    proposal: HeadRoiEvaluation,
+    *,
+    reacquisition_mode: str,
+) -> bool:
+    """Keep wide evidence proposal-only until it can seed a strict retry."""
+
+    if proposal.estimate.corners is None:
+        return False
+    if reacquisition_mode == BACKSIDE_REACQUISITION_MODE:
+        return (
+            not proposal.debug.qr_detected
+            and proposal.estimate.source == BACKSIDE_AXIS_SAMPLE_SOURCE
+            and (
+                proposal.estimate.usable
+                or proposal.estimate.reason
+                == "model_backside_target_center_mismatch"
+            )
+        )
+    if reacquisition_mode == QR_MODEL_REACQUISITION_MODE:
+        return (
+            proposal.debug.qr_detected
+            and getattr(proposal.debug, "model_pose", None) is not None
+            and proposal.estimate.source in QR_MODEL_PROPOSAL_SOURCES
+        )
+    raise ValueError(f"unsupported reacquisition mode: {reacquisition_mode}")
+
+
 def select_camera_target_measurement(
     roi_attempts: tuple[HeadRoiAttempt, ...],
     *,
@@ -117,14 +197,15 @@ def select_camera_target_measurement(
     )
     primary = evaluate(roi_attempts[0], tracked_pose)
     evaluations = [primary]
+    reacquisition_mode = _reacquisition_mode(
+        primary,
+        tracked_pose=tracked_pose,
+    )
     if (
         not enable_reacquisition
         or len(roi_attempts) < 2
         or primary.estimate.usable
-        or primary.debug.qr_detected
-        or tracked_pose is not None
-        or primary.estimate.source != BACKSIDE_AXIS_SAMPLE_SOURCE
-        or primary.estimate.reason not in BACKSIDE_REACQUISITION_TRIGGER_REASONS
+        or reacquisition_mode is None
     ):
         return CameraTargetRegistrationSelection(
             selected=primary,
@@ -132,21 +213,14 @@ def select_camera_target_measurement(
             proposal=None,
             decision=None,
             strict_retry=None,
+            reacquisition_mode=None,
         )
 
     proposal = evaluate(roi_attempts[1], None)
     evaluations.append(proposal)
-    eligible = (
-        proposal.estimate.corners is not None
-        and not proposal.debug.qr_detected
-        and proposal.estimate.source == BACKSIDE_AXIS_SAMPLE_SOURCE
-        and (
-            proposal.estimate.usable
-            or (
-                proposal.estimate.reason
-                == "model_backside_target_center_mismatch"
-            )
-        )
+    eligible = _proposal_is_eligible(
+        proposal,
+        reacquisition_mode=reacquisition_mode,
     )
     decision = None
     if eligible:
@@ -154,6 +228,11 @@ def select_camera_target_measurement(
             proposal.attempt,
             proposal.estimate.corners,
             max_center_offset_ratio=max_center_offset_ratio,
+            registered_source=(
+                REGISTERED_QR_MODEL_REACQUISITION_SOURCE
+                if reacquisition_mode == QR_MODEL_REACQUISITION_MODE
+                else REGISTERED_BACKSIDE_REACQUISITION_SOURCE
+            ),
         )
     if decision is not None and decision.accepted and decision.attempt is not None:
         strict_retry = evaluate(decision.attempt, None)
@@ -164,6 +243,7 @@ def select_camera_target_measurement(
             proposal=proposal,
             decision=decision,
             strict_retry=strict_retry,
+            reacquisition_mode=reacquisition_mode,
         )
 
     # The wide-search result remains proposal-only, whether it is usable or
@@ -176,4 +256,5 @@ def select_camera_target_measurement(
         proposal=proposal,
         decision=decision,
         strict_retry=None,
+        reacquisition_mode=reacquisition_mode,
     )

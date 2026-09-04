@@ -122,6 +122,7 @@ from scripts.aufgabe04.real_robot.readiness.candidate_planning_frame import (
     build_candidate_planning_frame,
 )
 from scripts.aufgabe04.real_robot.observer.diagnostics import (
+    candidate_local_observer_timeout_basis,
     format_passive_observer_failure,
     is_candidate_local_observer_timeout,
     load_passive_observer_status,
@@ -1511,7 +1512,14 @@ def _capture_camera_recommendation(
                     **process_evidence.to_dict(),
                     "evidence_path": str(process_evidence_path),
                 },
-                status_evidence=status_evidence.to_dict(),
+                status_evidence={
+                    **status_evidence.to_dict(),
+                    "timeout_classification_basis": (
+                        candidate_local_observer_timeout_basis(
+                            status_evidence
+                        )
+                    ),
+                },
             )
         raise RuntimeError(reason)
     try:

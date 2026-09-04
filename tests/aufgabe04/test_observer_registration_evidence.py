@@ -11,6 +11,7 @@ from scripts.aufgabe04.perception.stand_axis_lidar_roi import PlainLaserScan
 from scripts.aufgabe04.real_robot.configuration.geometry import ImageRoi
 from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import (
     HeadRoiAttempt,
+    REGISTERED_QR_MODEL_REACQUISITION_SOURCE,
     registered_head_roi_attempt,
 )
 from scripts.aufgabe04.real_robot.observer.registration_evidence import (
@@ -151,6 +152,36 @@ class ObserverRegistrationEvidenceTest(unittest.TestCase):
                     associated=False,
                     rejection_reason="test_rejection",
                 ),
+            )
+
+    def test_qr_registration_cannot_be_relabelled_as_backside_evidence(self):
+        wrapper = associate_camera_registered_candidate_lidar_target(
+            self._scan(),
+            map_bearing_rad=0.0,
+            observed_camera_bearing_rad=math.radians(9.2),
+            cone_half_angle_rad=math.radians(3.0),
+            accepted_range_m=(0.60, 0.80),
+            now_sec=10.1,
+            max_scan_age_sec=1.0,
+        )
+        association = wrapper.search_association
+        self.assertIsNotNone(association)
+        decision = self._registered_decision()
+        self.assertIsNotNone(decision.attempt)
+        qr_decision = replace(
+            decision,
+            attempt=replace(
+                decision.attempt,
+                source=REGISTERED_QR_MODEL_REACQUISITION_SOURCE,
+            ),
+        )
+
+        with self.assertRaisesRegex(ValueError, "strict retry"):
+            build_backside_target_registration_evidence(
+                final_head_center_error_ratio=0.01,
+                candidate_lidar_association=association,
+                registration_decision=qr_decision,
+                registered_lidar_association=wrapper,
             )
 
     def test_final_strict_center_gate_cannot_be_relaxed(self):

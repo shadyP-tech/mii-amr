@@ -12,6 +12,7 @@ from scripts.aufgabe04.real_robot.configuration.geometry import (
 )
 from scripts.aufgabe04.real_robot.observer.camera_target_registration import (
     HeadRoiEvaluation,
+    QR_MODEL_REACQUISITION_MODE,
     select_camera_target_measurement,
 )
 from scripts.aufgabe04.real_robot.observer.contract import (
@@ -22,6 +23,7 @@ from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import (
     HeadRoiAttempt,
     MAX_BACKSIDE_REACQUISITION_PADDING_SCALE,
     MAX_BACKSIDE_REGISTRATION_CENTER_OFFSET_RATIO,
+    REGISTERED_QR_MODEL_REACQUISITION_SOURCE,
     registered_head_roi_attempt,
     target_centered_head_roi_attempts,
 )
@@ -42,10 +44,16 @@ def _estimate(
     )
 
 
-def _debug(*, qr_detected: bool = False, center_error=None):
+def _debug(
+    *,
+    qr_detected: bool = False,
+    center_error=None,
+    model_pose=None,
+):
     return SimpleNamespace(
         qr_detected=qr_detected,
         head_center_error_ratio=center_error,
+        model_pose=model_pose,
     )
 
 
@@ -210,6 +218,139 @@ class CameraTargetRegistrationTest(unittest.TestCase):
 
         self.assertFalse(selection.registered)
         self.assertEqual(calls, [("nominal_projection", tracked)])
+
+    def test_qr_pose_seed_failure_uses_bounded_strict_reacquisition(self):
+        calls = []
+        proposal_pose = object()
+
+        def evaluate(attempt, pose_hint):
+            calls.append((attempt.source, pose_hint))
+            if attempt.source == "nominal_projection":
+                return HeadRoiEvaluation(
+                    attempt,
+                    object(),
+                    _estimate(
+                        usable=False,
+                        reason="model_pose_seed_unavailable",
+                        source="model_seed",
+                    ),
+                    _debug(qr_detected=True),
+                )
+            if attempt.source == "target_centered_backside_reacquisition":
+                return HeadRoiEvaluation(
+                    attempt,
+                    object(),
+                    _estimate(
+                        usable=True,
+                        reason="axis_estimated_model_current_frame_refined",
+                        corners=self._corners(160.0, 180.0),
+                        source="model_current_frame_refined",
+                    ),
+                    _debug(qr_detected=True, model_pose=proposal_pose),
+                )
+            self.assertEqual(
+                attempt.source,
+                REGISTERED_QR_MODEL_REACQUISITION_SOURCE,
+            )
+            return HeadRoiEvaluation(
+                attempt,
+                object(),
+                _estimate(
+                    usable=True,
+                    reason="axis_estimated_model_current_frame_refined",
+                    corners=self._corners(160.0, 180.0),
+                    source="model_current_frame_refined",
+                ),
+                _debug(qr_detected=True, model_pose=proposal_pose),
+            )
+
+        selection = select_camera_target_measurement(
+            (self.nominal, self.proposal),
+            tracked_pose=None,
+            evaluate=evaluate,
+            enable_reacquisition=True,
+            max_center_offset_ratio=1.5,
+        )
+
+        self.assertTrue(selection.registered)
+        self.assertTrue(selection.selected.estimate.usable)
+        self.assertEqual(
+            selection.reacquisition_mode,
+            QR_MODEL_REACQUISITION_MODE,
+        )
+        self.assertEqual(
+            selection.selected.attempt.source,
+            REGISTERED_QR_MODEL_REACQUISITION_SOURCE,
+        )
+        self.assertEqual(len(calls), 3)
+        self.assertIsNone(calls[1][1])
+        self.assertIsNone(calls[2][1])
+        metadata = selection.metadata(enabled=True)
+        self.assertEqual(
+            metadata["reacquisition_mode"],
+            QR_MODEL_REACQUISITION_MODE,
+        )
+        self.assertTrue(metadata["strict_retry_applied"])
+        self.assertTrue(metadata["measurement_accepted"])
+
+    def test_bad_tracked_projection_does_not_suppress_qr_reacquisition(self):
+        calls = []
+        tracked = object()
+        proposal_pose = object()
+
+        def evaluate(attempt, pose_hint):
+            calls.append((attempt.source, pose_hint))
+            if attempt.source == "nominal_projection":
+                return HeadRoiEvaluation(
+                    attempt,
+                    object(),
+                    _estimate(
+                        usable=False,
+                        reason="projected_head_outside_image",
+                        corners=self._corners(10.0, 10.0),
+                        source="model_projection",
+                    ),
+                    _debug(model_pose=tracked),
+                )
+            if attempt.source == "target_centered_backside_reacquisition":
+                return HeadRoiEvaluation(
+                    attempt,
+                    object(),
+                    _estimate(
+                        usable=True,
+                        reason="axis_estimated_model_current_frame_refined",
+                        corners=self._corners(160.0, 180.0),
+                        source="model_current_frame_refined",
+                    ),
+                    _debug(qr_detected=True, model_pose=proposal_pose),
+                )
+            return HeadRoiEvaluation(
+                attempt,
+                object(),
+                _estimate(
+                    usable=True,
+                    reason="axis_estimated_model_current_frame_refined",
+                    corners=self._corners(160.0, 180.0),
+                    source="model_current_frame_refined",
+                ),
+                _debug(qr_detected=True, model_pose=proposal_pose),
+            )
+
+        selection = select_camera_target_measurement(
+            (self.nominal, self.proposal),
+            tracked_pose=tracked,
+            evaluate=evaluate,
+            enable_reacquisition=True,
+            max_center_offset_ratio=1.5,
+        )
+
+        self.assertTrue(selection.registered)
+        self.assertEqual(calls[0], ("nominal_projection", tracked))
+        self.assertIsNone(calls[1][1])
+        self.assertEqual(
+            selection.selected.attempt.source,
+            REGISTERED_QR_MODEL_REACQUISITION_SOURCE,
+        )
 
     def test_invalid_center_limit_is_rejected_even_when_reacquisition_is_inactive(self):
         def evaluate(attempt, _pose_hint):

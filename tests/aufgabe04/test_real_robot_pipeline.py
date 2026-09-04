@@ -626,6 +626,7 @@ class PassiveObservationCoreTest(unittest.TestCase):
             "target_centered_head_roi_attempts(",
             "backside_reacquisition_padding_scale",
             "select_camera_target_measurement(",
+            "is_camera_registered_head_roi_attempt(",
             "build_backside_target_registration_evidence(",
             "associate_camera_registered_candidate_lidar_target(",
             "registered_lidar_association.search_association",

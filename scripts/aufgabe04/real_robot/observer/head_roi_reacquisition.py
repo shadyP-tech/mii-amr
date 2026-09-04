@@ -20,6 +20,24 @@ DEFAULT_BACKSIDE_REGISTRATION_MAX_CENTER_OFFSET_RATIO = 1.5
 MAX_BACKSIDE_REGISTRATION_CENTER_OFFSET_RATIO = 1.5
 DEFAULT_BACKSIDE_TARGET_CROP_HALF_WIDTH_RATIO = 1.25
 BACKSIDE_REACQUISITION_TARGET_CROP_HALF_WIDTH_RATIO = 2.25
+# Preserve the original proposal/source strings for run-artifact and caller
+# compatibility.  ``CameraTargetRegistrationSelection.reacquisition_mode``
+# now distinguishes backside acquisition from QR/model recovery explicitly.
+TARGET_CENTERED_REACQUISITION_SOURCE = (
+    "target_centered_backside_reacquisition"
+)
+REGISTERED_BACKSIDE_REACQUISITION_SOURCE = (
+    "camera_registered_backside_reacquisition"
+)
+REGISTERED_QR_MODEL_REACQUISITION_SOURCE = (
+    "camera_registered_qr_model_reacquisition"
+)
+CAMERA_REGISTERED_REACQUISITION_SOURCES = frozenset(
+    {
+        REGISTERED_BACKSIDE_REACQUISITION_SOURCE,
+        REGISTERED_QR_MODEL_REACQUISITION_SOURCE,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -153,7 +171,7 @@ def target_centered_head_roi_attempts(
             attempts.append(
                 HeadRoiAttempt(
                     roi=proposal_roi,
-                    source="target_centered_backside_reacquisition",
+                    source=TARGET_CENTERED_REACQUISITION_SOURCE,
                     padding_scale=proposal_scale,
                     expected_center_u_px=float(projection.u_px),
                     expected_center_v_px=float(projection.v_px),
@@ -173,6 +191,7 @@ def registered_head_roi_attempt(
     max_center_offset_ratio: float = (
         DEFAULT_BACKSIDE_REGISTRATION_MAX_CENTER_OFFSET_RATIO
     ),
+    registered_source: str = REGISTERED_BACKSIDE_REACQUISITION_SOURCE,
 ) -> HeadRoiRegistrationDecision:
     """Build a strict second-pass attempt from bounded image evidence.
 
@@ -187,6 +206,11 @@ def registered_head_roi_attempt(
         max_center_offset_ratio
     )
     _validate_reacquisition_proposal(proposal_attempt)
+    if registered_source not in CAMERA_REGISTERED_REACQUISITION_SOURCES:
+        raise ValueError(
+            "registered_source must identify a supported strict camera "
+            "reacquisition path"
+        )
     base = {
         "projected_center_u_px": proposal_attempt.expected_center_u_px,
         "projected_center_v_px": proposal_attempt.expected_center_v_px,
@@ -257,7 +281,7 @@ def registered_head_roi_attempt(
         )
     attempt = HeadRoiAttempt(
         roi=roi,
-        source="camera_registered_backside_reacquisition",
+        source=registered_source,
         padding_scale=float(proposal_attempt.padding_scale),
         expected_center_u_px=detected_u,
         expected_center_v_px=detected_v,
@@ -276,6 +300,12 @@ def registered_head_roi_attempt(
         center_offset_ratio=offset_ratio,
         **base,
     )
+
+
+def is_camera_registered_head_roi_attempt(attempt: HeadRoiAttempt) -> bool:
+    """Whether ``attempt`` came from an accepted bounded recentering."""
+
+    return attempt.source in CAMERA_REGISTERED_REACQUISITION_SOURCES
 
 
 def _validate_padding_scale(value: float, name: str) -> None:
@@ -312,7 +342,7 @@ def validate_backside_registration_center_offset_ratio(value: float) -> float:
 def _validate_reacquisition_proposal(attempt: HeadRoiAttempt) -> None:
     """Reject hand-built proposal attempts that bypass generation-time caps."""
 
-    if attempt.source != "target_centered_backside_reacquisition":
+    if attempt.source != TARGET_CENTERED_REACQUISITION_SOURCE:
         raise ValueError(
             "proposal_attempt must be a target-centred backside reacquisition"
         )
