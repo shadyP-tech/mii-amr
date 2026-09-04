@@ -175,6 +175,7 @@ class OrchestrationModuleBoundaryTest(unittest.TestCase):
             "candidate": {
                 "approach.py",
                 "observation_deferral.py",
+                "opposite_face_route_fallback.py",
                 "recovery_failure.py",
                 "runtime_recovery.py",
                 "startup_recovery.py",

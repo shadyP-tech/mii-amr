@@ -100,6 +100,14 @@ from scripts.aufgabe04.real_robot.candidate.observation_deferral import (
     CandidateObservationDeferralLedger,
     CandidateObservationUnavailableError,
 )
+from scripts.aufgabe04.real_robot.candidate.opposite_face_route_fallback import (
+    bounded_approach_offsets,
+    evaluate_opposite_face_route_fallback,
+    opposite_face_route_attempt,
+)
+from scripts.aufgabe04.real_robot.candidate.recovery_failure import (
+    CandidateStartupRecoveryError,
+)
 from scripts.aufgabe04.stations.candidate_snapshot import (
     CandidateSnapshot,
     FrozenCandidate,
@@ -499,31 +507,6 @@ def opposite_face_normal(axis_observation_path: Path) -> float:
     """Compatibility wrapper for the pure axis-observation binding."""
 
     return load_opposite_face_normal(axis_observation_path)
-
-
-def bounded_approach_offsets(
-    requested_m: float,
-    minimum_m: float,
-    *,
-    step_m: float = 0.05,
-) -> tuple[float, ...]:
-    """Return descending standoffs without crossing the physical minimum."""
-
-    if not all(
-        math.isfinite(value) and value > 0.0
-        for value in (requested_m, minimum_m, step_m)
-    ):
-        raise ValueError("approach offsets and step must be finite and positive")
-    if requested_m + 1.0e-9 < minimum_m:
-        raise ValueError("requested approach offset is below physical minimum")
-    values = []
-    current = requested_m
-    while current > minimum_m + 1.0e-9:
-        values.append(round(current, 6))
-        current -= step_m
-    if not values or abs(values[-1] - minimum_m) > 1.0e-9:
-        values.append(round(minimum_m, 6))
-    return tuple(values)
 
 
 def is_approach_feasibility_failure(exc: ValueError) -> bool:
@@ -1235,8 +1218,17 @@ def _execute_candidate_motion(
     frame_source_config: CandidateApproachConfig | None = None,
     source_registry: StandSurveyRegistry | None = None,
     plan_planning_frame: CandidatePlanningFrame | None = None,
+    recovery_artifact_suffix: str = "",
 ) -> MotionLegOutcome:
     """Run one candidate routine with bounded startup and runtime recovery."""
+
+    if not isinstance(recovery_artifact_suffix, str) or any(
+        not (character.isalnum() or character == "_")
+        for character in recovery_artifact_suffix
+    ):
+        raise ValueError(
+            "candidate recovery artifact suffix must be path-safe"
+        )
 
     runtime_budget = config.max_runtime_localization_reseals_per_leg
     if type(runtime_budget) is not int or runtime_budget < 0:
@@ -1452,7 +1444,11 @@ def _execute_candidate_motion(
         config=CandidateStartupRecoveryConfig(
             initial_identity=_candidate_routine_identity(initial_request),
             recovery_root=(
-                candidate_root / f"{leg_kind.value}_startup_reseals"
+                candidate_root
+                / (
+                    f"{leg_kind.value}_startup_reseals"
+                    f"{recovery_artifact_suffix}"
+                )
             ),
             event_log_path=config.session_root / "adaptive_replans.jsonl",
             max_startup_reseals=config.max_startup_reseals_per_leg,
@@ -1476,7 +1472,11 @@ def _execute_candidate_motion(
                 run_id=startup_outcome.run_id,
             ),
             recovery_root=(
-                candidate_root / f"{leg_kind.value}_runtime_reseals"
+                candidate_root
+                / (
+                    f"{leg_kind.value}_runtime_reseals"
+                    f"{recovery_artifact_suffix}"
+                )
             ),
             event_log_path=config.session_root / "adaptive_replans.jsonl",
             max_runtime_reseals=runtime_budget,
@@ -1573,18 +1573,26 @@ def _capture_candidate_camera_result(
         opposite_normal = load_backside_axis_planning_observation(
             axis_planning_evidence_path
         ).opposite_face_normal_rad
-    opposite_source = candidate_root / "opposite_face_source"
-    opposite_sealed = None
-    opposite_plan_request = None
+    opposite_source_root = candidate_root / "opposite_face_source"
+    opposite_motion_outcome = None
     feasibility_failures = []
-    for inspection_offset_m in bounded_approach_offsets(
-        opposite_config.approach_offset_m,
-        float(
-            opposite_config.physical_clearance[
-                "minimum_active_standoff_m"
-            ]
-        ),
+    uncertainty_failures = []
+    for standoff_attempt_index, inspection_offset_m in enumerate(
+        bounded_approach_offsets(
+            opposite_config.approach_offset_m,
+            float(
+                opposite_config.physical_clearance[
+                    "minimum_active_standoff_m"
+                ]
+            ),
+        )
     ):
+        route_attempt = opposite_face_route_attempt(
+            base_run_id=f"{candidate_run_id}_opposite",
+            base_source_root=opposite_source_root,
+            attempt_index=standoff_attempt_index,
+            approach_offset_m=inspection_offset_m,
+        )
         try:
             opposite_plan_request = CandidatePreapproachRequest(
                 map_yaml=opposite_config.map_yaml,
@@ -1594,7 +1602,7 @@ def _capture_candidate_camera_result(
                 snapshot_path=opposite_config.snapshot_path,
                 candidate_uid=candidate.candidate_uid,
                 start=opposite_start,
-                output_dir=opposite_source,
+                output_dir=route_attempt.source_root,
                 approach_offset_m=inspection_offset_m,
                 inflation_radius_m=opposite_config.inflation_radius_m,
                 candidate_transit_radius_m=(
@@ -1605,30 +1613,119 @@ def _capture_candidate_camera_result(
                 axis_observation_path=axis_planning_evidence_path,
             )
             opposite_sealed = effects.plan_preapproach(opposite_plan_request)
-            break
         except ValueError as exc:
             if not is_approach_feasibility_failure(exc):
                 raise
             feasibility_failures.append(f"{inspection_offset_m:.3f} m: {exc}")
-    if opposite_sealed is None or opposite_plan_request is None:
+            effects.event_sink(
+                source_config.session_root / "candidate_selection.jsonl",
+                {
+                    "schema_version": 1,
+                    "event": (
+                        "opposite_face_standoff_static_feasibility_rejected"
+                    ),
+                    "timestamp_unix_sec": effects.clock(),
+                    "candidate_uid": candidate.candidate_uid,
+                    **route_attempt.to_event_fields(),
+                    "route_materialized": False,
+                    "reason": str(exc),
+                    "motion_published": False,
+                    "motion_continues_authorized": False,
+                },
+            )
+            continue
+        effects.event_sink(
+            source_config.session_root / "candidate_selection.jsonl",
+            {
+                "schema_version": 1,
+                "event": "opposite_face_standoff_route_materialized",
+                "timestamp_unix_sec": effects.clock(),
+                "candidate_uid": candidate.candidate_uid,
+                **route_attempt.to_event_fields(),
+                "route_materialized": True,
+                "fresh_dry_preflight_required": True,
+                "motion_published": False,
+                "motion_continues_authorized": False,
+            },
+        )
+        try:
+            opposite_motion_outcome = _execute_candidate_motion(
+                config=opposite_config,
+                effects=effects,
+                candidate_root=candidate_root,
+                plan_request=opposite_plan_request,
+                initial_sealed=opposite_sealed,
+                run_id=route_attempt.run_id,
+                leg_kind=MissionLegKind.OPPOSITE_FACE,
+                candidate_index=candidate_index,
+                target_id=candidate.candidate_uid,
+                frame_source_config=source_config,
+                source_registry=source_registry,
+                plan_planning_frame=opposite_planning_frame,
+                recovery_artifact_suffix=route_attempt.artifact_suffix,
+            )
+            break
+        except CandidateStartupRecoveryError as exc:
+            decision = evaluate_opposite_face_route_fallback(
+                exc,
+                expected_initial_run_id=route_attempt.run_id,
+            )
+            if not decision.eligible:
+                raise
+            rejected = exc.rejected_child
+            if rejected is None:
+                raise
+            uncertainty_failures.append(
+                f"{inspection_offset_m:.3f} m: {rejected.stop_reason}"
+            )
+            effects.event_sink(
+                source_config.session_root / "candidate_selection.jsonl",
+                {
+                    "schema_version": 1,
+                    "event": "opposite_face_route_uncertainty_fallback",
+                    "timestamp_unix_sec": effects.clock(),
+                    "candidate_uid": candidate.candidate_uid,
+                    **route_attempt.to_event_fields(),
+                    "rejected_run_id": rejected.run_id,
+                    "fallback_decision": decision.reason,
+                    "stop_reason": rejected.stop_reason,
+                    "stop_details": dict(rejected.stop_details),
+                    "motion_published": rejected.motion_published,
+                    "issued_motion_permit_kinds": list(
+                        rejected.issued_motion_permit_kinds
+                    ),
+                    **decision.to_event_fields(),
+                    "future_motion_requires_fresh_live_gates": True,
+                    "motion_authorized": False,
+                },
+            )
+            continue
+    if opposite_motion_outcome is None and not uncertainty_failures:
         raise RuntimeError(
             "no physically allowed opposite-face approach was A*-reachable: "
             + "; ".join(feasibility_failures)
         )
-    _execute_candidate_motion(
-        config=opposite_config,
-        effects=effects,
-        candidate_root=candidate_root,
-        plan_request=opposite_plan_request,
-        initial_sealed=opposite_sealed,
-        run_id=f"{candidate_run_id}_opposite",
-        leg_kind=MissionLegKind.OPPOSITE_FACE,
-        candidate_index=candidate_index,
-        target_id=candidate.candidate_uid,
-        frame_source_config=source_config,
-        source_registry=source_registry,
-        plan_planning_frame=opposite_planning_frame,
-    )
+    if opposite_motion_outcome is None:
+        details = "; ".join(uncertainty_failures + feasibility_failures)
+        effects.event_sink(
+            source_config.session_root / "candidate_selection.jsonl",
+            {
+                "schema_version": 1,
+                "event": "opposite_face_standoff_fallback_exhausted",
+                "timestamp_unix_sec": effects.clock(),
+                "candidate_uid": candidate.candidate_uid,
+                "uncertainty_rejections": list(uncertainty_failures),
+                "static_feasibility_rejections": list(feasibility_failures),
+                "motion_published": False,
+                "motion_continues_authorized": False,
+                "route_limits_unchanged": True,
+                "fail_closed": True,
+            },
+        )
+        raise RuntimeError(
+            "no opposite-face approach passed no-motion route-uncertainty "
+            f"dry preflight: {details}"
+        )
     opposite_arrival_frame = _admit_camera_arrival_geometry(
         source_config=source_config,
         effects=effects,

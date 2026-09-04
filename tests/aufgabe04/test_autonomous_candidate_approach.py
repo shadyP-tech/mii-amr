@@ -69,12 +69,16 @@ from scripts.aufgabe04.real_robot.candidate.approach import (
     CameraCandidateInitialSelection,
     CameraCandidateSelectionRequest,
     FacingValidationRequest,
+    bounded_approach_offsets,
     execute_candidate_approach_phase,
     nearest_candidate,
     plan_candidate_preapproach,
     validate_facing_pose,
 )
 from scripts.aufgabe04.real_robot.execution.child_runner import MotionLegOutcome
+from scripts.aufgabe04.real_robot.candidate.recovery_failure import (
+    CandidateStartupRecoveryError,
+)
 from scripts.aufgabe04.real_robot.candidate.observation_deferral import (
     CandidateApproachIncompleteError,
     CandidateObservationUnavailableError,
@@ -269,6 +273,61 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             motion_published=True,
             returncode=0,
             semantic_log_path=request.session_root / f"{request.run_id}.jsonl",
+        )
+
+    @staticmethod
+    def _route_uncertainty_rejection(
+        request,
+        *,
+        motion_published: bool = False,
+        status: str = "preflight_failed",
+        stop_reason: str | None = None,
+        stop_detail_overrides: dict[str, object] | None = None,
+        report_mission_leg_permit: bool = False,
+    ) -> MotionLegOutcome:
+        stop_reason = stop_reason or (
+            "odom execution admission failed: route uncertainty budget "
+            "exhausted: limiting_segment=segment:0002:0092 "
+            "remaining_margin=-0.154957 m"
+        )
+        uncertainty_path = (
+            request.session_root
+            / "odom_execution"
+            / f"{request.run_id}_dry_uncertainty_budget.json"
+        )
+        details = {
+            "reason": stop_reason,
+            "fault_code": "odom_execution_admission_failed",
+            "execution_pose_owner": "odom",
+            "global_consistency_monitor": "amcl",
+            "motion_published": False,
+            "fail_closed": True,
+            "uncertainty_budget_accepted": False,
+            "uncertainty_budget_json": str(uncertainty_path),
+            "uncertainty_budget_sha256": "d" * 64,
+            "route_uncertainty_limiting_segment_id": "segment:0002:0092",
+            "route_uncertainty_remaining_margin_m": -0.154957,
+        }
+        details.update(stop_detail_overrides or {})
+        return MotionLegOutcome(
+            run_id=request.run_id,
+            status=status,
+            stop_reason=stop_reason,
+            stop_details=details,
+            motion_published=motion_published,
+            returncode=1,
+            semantic_log_path=(
+                request.session_root / f"{request.run_id}.jsonl"
+            ),
+            dry_uncertainty_budget_path=uncertainty_path,
+            mission_leg_motion_permit_path=(
+                request.session_root / f"{request.run_id}_unexpected_permit.json"
+                if report_mission_leg_permit
+                else None
+            ),
+            mission_leg_motion_permit_sha256=(
+                "e" * 64 if report_mission_leg_permit else ""
+            ),
         )
 
     @staticmethod
@@ -1550,6 +1609,321 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                 [0, 1],
             )
             self.assertEqual(outcome.visit_order, (candidate.candidate_uid,))
+
+    def test_opposite_face_uncertainty_rejection_tries_smaller_standoff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate = self._candidate("candidate_1", 0.2, 0.0)
+            config = self._config(root, (candidate,))
+            axis_path = root / "axis.json"
+            axis_path.write_text(
+                json.dumps(
+                    backside_axis_payload(
+                        stand_x_m=0.2,
+                        robot_x_m=0.2,
+                    )
+                )
+            )
+            poses = iter(
+                (
+                    Pose2D(0.0, 0.0, 0.0),
+                    Pose2D(0.2, 0.7, 0.0),
+                    Pose2D(0.2, -0.55, 0.0),
+                )
+            )
+            opposite_plan_requests = []
+            opposite_motion_requests = []
+
+            def plan_preapproach(request):
+                if request.approach_normal_rad is None:
+                    return {"route_csv": "primary.csv"}
+                opposite_plan_requests.append(request)
+                if request.approach_offset_m in (0.70, 0.65):
+                    raise CandidatePreapproachUnreachableError(
+                        request.candidate_uid,
+                        "target is blocked",
+                    )
+                return {
+                    "route_csv": (
+                        f"opposite_{request.approach_offset_m:.2f}.csv"
+                    ),
+                    "test_approach_offset_m": (
+                        f"{request.approach_offset_m:.2f}"
+                    ),
+                }
+
+            def run_motion(request):
+                if request.mission_leg_kind is not MissionLegKind.OPPOSITE_FACE:
+                    return self._completed(request)
+                opposite_motion_requests.append(request)
+                if request.sealed["test_approach_offset_m"] == "0.60":
+                    return self._route_uncertainty_rejection(request)
+                return self._completed(request)
+
+            def capture(request):
+                if request.attempt_index == 0:
+                    return CandidateObservation(None, None, axis_path)
+                return CandidateObservation(
+                    request.output_dir / "recommendation.json",
+                    "QR_1",
+                    None,
+                )
+
+            outcome = execute_candidate_approach_phase(
+                config,
+                CandidateApproachEffects(
+                    select_initial_preapproach=self._nearest_selection,
+                    read_current_pose=lambda: next(poses),
+                    run_motion_leg=run_motion,
+                    capture_observation=capture,
+                    plan_preapproach=plan_preapproach,
+                    validate_facing=lambda request: {
+                        "candidate_uid": request.candidate.candidate_uid
+                    },
+                    commit_decision=lambda _request: None,
+                    clock=lambda: 10.0,
+                ),
+            )
+
+            self.assertEqual(
+                [
+                    request.approach_offset_m
+                    for request in opposite_plan_requests[:4]
+                ],
+                [0.70, 0.65, 0.60, 0.55],
+            )
+            self.assertEqual(
+                [
+                    float(request.sealed["test_approach_offset_m"])
+                    for request in opposite_motion_requests
+                ],
+                [0.60, 0.55],
+            )
+            self.assertEqual(
+                len({request.output_dir for request in opposite_plan_requests}),
+                len(opposite_plan_requests),
+            )
+            self.assertEqual(
+                len({request.run_id for request in opposite_motion_requests}),
+                2,
+            )
+            self.assertEqual(
+                len(
+                    {
+                        request.permit_json_path
+                        for request in opposite_motion_requests
+                    }
+                ),
+                2,
+            )
+            self.assertEqual(outcome.visit_order, (candidate.candidate_uid,))
+
+    def test_opposite_face_fallback_rejects_unsafe_or_inexact_outcome(self):
+        cases = (
+            ("motion_published", {"motion_published": True}),
+            (
+                "permit_reported",
+                {"report_mission_leg_permit": True},
+            ),
+            (
+                "wrong_fault",
+                {
+                    "stop_detail_overrides": {
+                        "fault_code": "some_other_failure"
+                    }
+                },
+            ),
+            (
+                "budget_claimed_accepted",
+                {
+                    "stop_detail_overrides": {
+                        "uncertainty_budget_accepted": True
+                    }
+                },
+            ),
+        )
+        for name, rejection_kwargs in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                candidate = self._candidate("candidate_1", 0.2, 0.0)
+                config = self._config(root, (candidate,))
+                axis_path = root / "axis.json"
+                axis_path.write_text(
+                    json.dumps(
+                        backside_axis_payload(
+                            stand_x_m=0.2,
+                            robot_x_m=0.2,
+                        )
+                    )
+                )
+                poses = iter(
+                    (
+                        Pose2D(0.0, 0.0, 0.0),
+                        Pose2D(0.2, 0.7, 0.0),
+                    )
+                )
+                opposite_plan_requests = []
+                capture = Mock(
+                    return_value=CandidateObservation(None, None, axis_path)
+                )
+
+                def plan_preapproach(request):
+                    if request.approach_normal_rad is None:
+                        return {"route_csv": "primary.csv"}
+                    opposite_plan_requests.append(request)
+                    return {
+                        "route_csv": "opposite.csv",
+                        "test_approach_offset_m": (
+                            f"{request.approach_offset_m:.2f}"
+                        ),
+                    }
+
+                def run_motion(request):
+                    if (
+                        request.mission_leg_kind
+                        is not MissionLegKind.OPPOSITE_FACE
+                    ):
+                        return self._completed(request)
+                    return self._route_uncertainty_rejection(
+                        request,
+                        **rejection_kwargs,
+                    )
+
+                with self.assertRaises(RuntimeError):
+                    execute_candidate_approach_phase(
+                        config,
+                        CandidateApproachEffects(
+                            select_initial_preapproach=self._nearest_selection,
+                            read_current_pose=lambda: next(poses),
+                            run_motion_leg=run_motion,
+                            capture_observation=capture,
+                            plan_preapproach=plan_preapproach,
+                            commit_decision=lambda _request: None,
+                        ),
+                    )
+
+                self.assertEqual(
+                    [
+                        request.approach_offset_m
+                        for request in opposite_plan_requests
+                    ],
+                    [0.70],
+                )
+                capture.assert_called_once()
+
+    def test_opposite_face_uncertainty_fallback_exhaustion_is_terminal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate = self._candidate("candidate_1", 0.2, 0.0)
+            config = self._config(root, (candidate,))
+            axis_path = root / "axis.json"
+            axis_path.write_text(
+                json.dumps(
+                    backside_axis_payload(
+                        stand_x_m=0.2,
+                        robot_x_m=0.2,
+                    )
+                )
+            )
+            poses = iter(
+                (
+                    Pose2D(0.0, 0.0, 0.0),
+                    Pose2D(0.2, 0.7, 0.0),
+                )
+            )
+            opposite_plan_requests = []
+            opposite_motion_requests = []
+            capture = Mock(
+                return_value=CandidateObservation(None, None, axis_path)
+            )
+            commit = Mock()
+
+            def plan_preapproach(request):
+                if request.approach_normal_rad is None:
+                    return {"route_csv": "primary.csv"}
+                opposite_plan_requests.append(request)
+                return {
+                    "route_csv": (
+                        f"opposite_{request.approach_offset_m:.2f}.csv"
+                    ),
+                    "test_approach_offset_m": (
+                        f"{request.approach_offset_m:.2f}"
+                    ),
+                }
+
+            def run_motion(request):
+                if request.mission_leg_kind is not MissionLegKind.OPPOSITE_FACE:
+                    return self._completed(request)
+                opposite_motion_requests.append(request)
+                return self._route_uncertainty_rejection(request)
+
+            with self.assertRaises(RuntimeError):
+                execute_candidate_approach_phase(
+                    config,
+                    CandidateApproachEffects(
+                        select_initial_preapproach=self._nearest_selection,
+                        read_current_pose=lambda: next(poses),
+                        run_motion_leg=run_motion,
+                        capture_observation=capture,
+                        plan_preapproach=plan_preapproach,
+                        commit_decision=commit,
+                    ),
+                )
+
+            expected_offsets = list(
+                bounded_approach_offsets(
+                    config.approach_offset_m,
+                    config.physical_clearance["minimum_active_standoff_m"],
+                )
+            )
+            self.assertEqual(
+                [
+                    float(request.sealed["test_approach_offset_m"])
+                    for request in opposite_motion_requests
+                ],
+                expected_offsets,
+            )
+            self.assertEqual(
+                len({request.output_dir for request in opposite_plan_requests}),
+                len(expected_offsets),
+            )
+            self.assertEqual(
+                len({request.run_id for request in opposite_motion_requests}),
+                len(expected_offsets),
+            )
+            capture.assert_called_once()
+            commit.assert_not_called()
+            self.assertFalse(
+                (config.session_root / "station_identity_registry.json").exists()
+            )
+
+    def test_direct_uncertainty_rejection_does_not_enter_standoff_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate = self._candidate("candidate_1", 0.2, 0.0)
+            config = self._config(root, (candidate,))
+            plan_requests = []
+            capture = Mock()
+
+            def plan_preapproach(request):
+                plan_requests.append(request)
+                return {"route_csv": "primary.csv"}
+
+            with self.assertRaises(CandidateStartupRecoveryError):
+                execute_candidate_approach_phase(
+                    config,
+                    CandidateApproachEffects(
+                        select_initial_preapproach=self._nearest_selection,
+                        read_current_pose=lambda: Pose2D(0.0, 0.0, 0.0),
+                        run_motion_leg=self._route_uncertainty_rejection,
+                        capture_observation=capture,
+                        plan_preapproach=plan_preapproach,
+                    ),
+                )
+
+            self.assertEqual(len(plan_requests), 1)
+            self.assertIsNone(plan_requests[0].approach_normal_rad)
+            capture.assert_not_called()
 
     def test_motion_outcome_identity_mismatch_blocks_observation(self):
         with tempfile.TemporaryDirectory() as tmp:
