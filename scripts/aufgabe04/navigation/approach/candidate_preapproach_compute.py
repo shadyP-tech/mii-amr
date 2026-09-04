@@ -11,6 +11,10 @@ import math
 from pathlib import Path
 from typing import Mapping
 
+from scripts.aufgabe04.navigation.approach.candidate_goal_cell_selection import (
+    NoSafetyRankedGoalRouteError,
+    plan_safety_ranked_quantized_goal,
+)
 from scripts.aufgabe04.navigation.approach.candidate_preapproach_models import (
     CandidatePlanningContext,
     CandidatePreapproachPlan,
@@ -209,18 +213,79 @@ def compute_candidate_preapproach_plan(
             str(exc),
         ) from exc
 
-    result = plan_route(
-        context.costmaps.planning_costmap,
-        start,
-        targets[0].pose,
-        snap_radius_m=plan.config.snap_radius_m,
-    )
-    unsmoothed = smooth_plan_route_results(
-        (result,),
-        costmap=context.costmaps.planning_costmap,
-        enabled=False,
-    )[0]
-    result = unsmoothed.result
+    goal_cell_selection = None
+    requested_goal = targets[0].pose
+    if approach_normal_rad is None:
+        result = plan_route(
+            context.costmaps.planning_costmap,
+            start,
+            requested_goal,
+            snap_radius_m=plan.config.snap_radius_m,
+        )
+        unsmoothed = smooth_plan_route_results(
+            (result,),
+            costmap=context.costmaps.planning_costmap,
+            enabled=False,
+        )[0]
+        result = unsmoothed.result
+        dry_run_smoothing = unsmoothed.summary
+        if result.route is None or result.failure is not None:
+            reason = (
+                result.failure.reason
+                if result.failure is not None
+                else "no route"
+            )
+            raise CandidatePreapproachUnreachableError(candidate_uid, reason)
+        try:
+            result, connector, smoothing = certify_and_smooth_exact_start_route(
+                result,
+                base_costmap=context.costmaps.base_costmap,
+                planning_costmap=context.costmaps.planning_costmap,
+                exact_start=start,
+                required_clearance_m=inflation_radius_m,
+            )
+        except ValueError as exc:
+            raise CandidatePreapproachUnreachableError(
+                candidate_uid,
+                str(exc),
+            ) from exc
+    else:
+        try:
+            selected_goal = plan_safety_ranked_quantized_goal(
+                base_costmap=context.costmaps.base_costmap,
+                planning_costmap=context.costmaps.planning_costmap,
+                start=start,
+                requested_goal=requested_goal,
+                stand=Pose2D(
+                    candidate.geometry.x_m,
+                    candidate.geometry.y_m,
+                    0.0,
+                ),
+                minimum_standoff_m=context.minimum_active_standoff_m,
+                snap_radius_m=plan.config.snap_radius_m,
+                required_start_clearance_m=inflation_radius_m,
+                route_rejection_reason=lambda route: (
+                    _candidate_route_clearance_failure(
+                        candidate_uid=candidate_uid,
+                        route=route,
+                        snapshot=snapshot,
+                        minimum_candidate_transit_radius_m=(
+                            context.minimum_candidate_transit_radius_m
+                        ),
+                    )
+                ),
+            )
+        except NoSafetyRankedGoalRouteError as exc:
+            raise CandidatePreapproachUnreachableError(
+                candidate_uid,
+                str(exc),
+            ) from exc
+        result = selected_goal.result
+        connector = selected_goal.connector
+        smoothing = selected_goal.smoothing
+        goal_cell_selection = selected_goal.evidence
+        dry_run_smoothing = smoothing
+
     metadata = build_route_metadata(
         map_yaml,
         context.grid,
@@ -230,11 +295,11 @@ def compute_candidate_preapproach_plan(
     )
     metadata["inflation_radius_m"] = inflation_radius_m
     metadata["line_of_sight_route_optimization"] = {
-        "enabled": False,
-        "legs": [unsmoothed.summary.to_metadata()],
-        "input_point_count": unsmoothed.summary.input_point_count,
-        "output_point_count": unsmoothed.summary.output_point_count,
-        "optimized_leg_count": int(unsmoothed.summary.optimized),
+        "enabled": dry_run_smoothing.enabled,
+        "legs": [dry_run_smoothing.to_metadata()],
+        "input_point_count": dry_run_smoothing.input_point_count,
+        "output_point_count": dry_run_smoothing.output_point_count,
+        "optimized_leg_count": int(dry_run_smoothing.optimized),
     }
     dry_run = StationRouteDryRun(
         grid=context.grid,
@@ -247,23 +312,6 @@ def compute_candidate_preapproach_plan(
         arena_bounds=plan.arena_bounds,
         metadata=metadata,
     )
-
-    if result.route is None or result.failure is not None:
-        reason = result.failure.reason if result.failure is not None else "no route"
-        raise CandidatePreapproachUnreachableError(candidate_uid, reason)
-    try:
-        result, connector, smoothing = certify_and_smooth_exact_start_route(
-            result,
-            base_costmap=dry_run.base_costmap,
-            planning_costmap=dry_run.planning_costmap,
-            exact_start=start,
-            required_clearance_m=inflation_radius_m,
-        )
-    except ValueError as exc:
-        raise CandidatePreapproachUnreachableError(
-            candidate_uid,
-            str(exc),
-        ) from exc
 
     assert result.route is not None
     endpoint = result.route.points[-1].pose
@@ -322,6 +370,7 @@ def compute_candidate_preapproach_plan(
             context.minimum_candidate_transit_radius_m
         ),
         minimum_static_inflation_m=context.minimum_static_inflation_m,
+        goal_cell_selection=goal_cell_selection,
     )
 
 
@@ -490,6 +539,27 @@ def _validate_candidate_route_clearance(
             candidate_uid,
             "terminal pose violates the selected stand LiDAR standoff",
         )
+    reason = _candidate_route_clearance_failure(
+        candidate_uid=candidate_uid,
+        route=route,
+        snapshot=snapshot,
+        minimum_candidate_transit_radius_m=(
+            minimum_candidate_transit_radius_m
+        ),
+    )
+    if reason is not None:
+        raise CandidatePreapproachUnreachableError(candidate_uid, reason)
+
+
+def _candidate_route_clearance_failure(
+    *,
+    candidate_uid: str,
+    route: Route,
+    snapshot: CandidateSnapshot,
+    minimum_candidate_transit_radius_m: float,
+) -> str | None:
+    """Return the first non-target keepout violation on a candidate route."""
+
     for candidate in snapshot.candidates:
         if candidate.candidate_uid == candidate_uid:
             continue
@@ -503,12 +573,12 @@ def _validate_candidate_route_clearance(
             candidate.geometry.y_m,
         )
         if measured + 1.0e-9 < required:
-            raise CandidatePreapproachUnreachableError(
-                candidate_uid,
+            return (
                 "route clearance to "
                 f"{candidate.candidate_uid} is {measured:.3f} m, "
-                f"below {required:.3f} m",
+                f"below {required:.3f} m"
             )
+    return None
 
 
 def _minimum_route_clearance_m(

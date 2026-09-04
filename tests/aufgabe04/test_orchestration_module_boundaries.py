@@ -174,6 +174,7 @@ class OrchestrationModuleBoundaryTest(unittest.TestCase):
             "passive_survey": {"prepare.py", "finalize.py"},
             "candidate": {
                 "approach.py",
+                "no_motion_route_rejection.py",
                 "observation_deferral.py",
                 "opposite_face_route_fallback.py",
                 "recovery_failure.py",
@@ -318,6 +319,7 @@ class OrchestrationModuleBoundaryTest(unittest.TestCase):
             for name in (
                 "camera_axis_binding.py",
                 "camera_candidate_selection.py",
+                "candidate_goal_cell_selection.py",
                 "candidate_preapproach_models.py",
                 "candidate_preapproach_compute.py",
                 "candidate_preapproach_materialization.py",

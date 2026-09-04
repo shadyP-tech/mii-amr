@@ -13,6 +13,9 @@ from pathlib import Path
 import shutil
 from typing import Mapping
 
+from scripts.aufgabe04.navigation.approach.candidate_goal_cell_selection import (
+    validate_goal_cell_selection_binding,
+)
 from scripts.aufgabe04.navigation.approach.candidate_preapproach_compute import (
     compute_candidate_preapproach_plan,
     validate_approach_outside_transit_keepout,
@@ -124,6 +127,12 @@ def materialize_candidate_preapproach_plan(
         approach_normal_rad=approach_normal_rad,
         axis_observation=axis_observation,
     )
+    _validate_goal_cell_policy_binding(
+        prepared=prepared,
+        candidate_x_m=candidate.geometry.x_m,
+        candidate_y_m=candidate.geometry.y_m,
+        approach_normal_rad=approach_normal_rad,
+    )
 
     output_dir.mkdir(parents=True, exist_ok=False)
     route_csv = output_dir / "route.csv"
@@ -203,6 +212,10 @@ def materialize_candidate_preapproach_plan(
     )
     if selection_evidence is not None:
         metadata["camera_candidate_selection"] = dict(selection_evidence)
+    if prepared.goal_cell_selection is not None:
+        metadata["goal_cell_selection"] = (
+            prepared.goal_cell_selection.to_metadata()
+        )
     if local_axis_observation is not None:
         axis_metadata: dict[str, object] = {
             "axis_observation_json": str(local_axis_observation.resolve()),
@@ -402,6 +415,40 @@ def validate_backside_axis_candidate_binding(
         raise ValueError(
             "axis observation stand center does not match candidate geometry"
         )
+
+
+def _validate_goal_cell_policy_binding(
+    *,
+    prepared: CandidatePreapproachPlan,
+    candidate_x_m: float,
+    candidate_y_m: float,
+    approach_normal_rad: float | None,
+) -> None:
+    evidence = prepared.goal_cell_selection
+    if approach_normal_rad is None:
+        if evidence is not None:
+            raise ValueError(
+                "robot-bearing approach must not carry axis goal-cell selection"
+            )
+        return
+    if evidence is None:
+        raise ValueError("camera-axis approach lacks goal-cell selection evidence")
+    expected_requested_goal = Pose2D(
+        candidate_x_m
+        + prepared.approach_offset_m * math.cos(approach_normal_rad),
+        candidate_y_m
+        + prepared.approach_offset_m * math.sin(approach_normal_rad),
+        prepared.approach_bearing_rad,
+    )
+    validate_goal_cell_selection_binding(
+        evidence,
+        base_costmap=prepared.dry_run.base_costmap,
+        planning_costmap=prepared.dry_run.planning_costmap,
+        result=prepared.result,
+        expected_requested_goal=expected_requested_goal,
+        stand=Pose2D(candidate_x_m, candidate_y_m, 0.0),
+        minimum_standoff_m=prepared.minimum_active_standoff_m,
+    )
 
 
 def _validate_prepared_plan_binding(

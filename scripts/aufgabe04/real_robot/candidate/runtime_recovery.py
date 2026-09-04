@@ -3,8 +3,11 @@
 This coordinator starts from an already-produced :class:`MotionLegOutcome`.
 It deliberately does not run the initial candidate request, which lets it sit
 after the existing startup-recovery coordinator without merging their retry
-budgets.  Completed and no-motion outcomes remain owned by the caller.  Only
-the exact, persisted ``FORCE_ZERO_RESEAL`` contract may enter this loop.
+budgets.  Completed and no-motion *initial* outcomes remain owned by the
+caller.  A replacement child that fails its preflight without publishing
+motion is preserved as a typed terminal failure; it is never mistaken for a
+replacement that consumed a runtime motion permit.  Only the exact, persisted
+``FORCE_ZERO_RESEAL`` contract may enter this loop.
 
 Live localization, same-routine replanning, replacement motion, permit
 issuance, and event persistence are injected effects.  Importing this module
@@ -28,11 +31,15 @@ from scripts.aufgabe04.navigation.localization.runtime_localization_reseal impor
     evaluate_runtime_localization_reseal,
     evaluate_runtime_localization_reseal_budget,
 )
-from scripts.aufgabe04.real_robot.candidate.startup_recovery import (
-    CandidateRoutineIdentity,
+from scripts.aufgabe04.real_robot.candidate.no_motion_route_rejection import (
+    NoMotionPreflightClassification,
+    classify_no_motion_preflight_failure,
 )
 from scripts.aufgabe04.real_robot.candidate.recovery_failure import (
     issued_motion_permit_kinds,
+)
+from scripts.aufgabe04.real_robot.candidate.startup_recovery import (
+    CandidateRoutineIdentity,
 )
 from scripts.aufgabe04.real_robot.execution.child_runner import MotionLegOutcome
 
@@ -460,6 +467,67 @@ def _validate_replacement_outcome_contract(outcome: MotionLegOutcome) -> None:
         raise TypeError("replacement outcome returncode must be an integer")
 
 
+def _raise_replacement_preflight_failure(
+    config: CandidateRuntimeRecoveryConfig,
+    effects: CandidateRuntimeRecoveryEffects[RequestT],
+    *,
+    outcome: MotionLegOutcome,
+    reseal_index: int,
+    classification: NoMotionPreflightClassification,
+) -> None:
+    """Persist and raise one replacement rejection without motion authority."""
+
+    if not classification.applies:
+        raise ValueError("replacement preflight classification does not apply")
+    policy_reason = (
+        "runtime replacement failed a structured preflight before motion"
+        if classification.evidence_valid
+        else (
+            "runtime replacement no-motion preflight evidence is invalid: "
+            f"{classification.reason}"
+        )
+    )
+    rejection = CandidateRuntimeRejectedOutcome.from_outcome(
+        outcome,
+        policy_reason=policy_reason,
+        decision_reason=classification.reason,
+    )
+    _emit(
+        config,
+        effects,
+        {
+            "event": "candidate_runtime_localization_replacement_preflight_failed",
+            "runtime_localization_reseal_index": reseal_index,
+            **rejection.to_event_fields(),
+            "reported_reason": outcome.stop_reason,
+            "runtime_replacement_outcome_classification": classification.reason,
+            "structured_no_motion_preflight_failure": (
+                classification.evidence_valid
+            ),
+            "issued_motion_permit_kinds": list(
+                classification.issued_motion_permit_kinds
+            ),
+            "runtime_localization_permit_validation_required": False,
+            "runtime_localization_permit_evidenced": False,
+            "motion_authorized": False,
+            "motion_continues_authorized": False,
+            "fail_closed": True,
+        },
+    )
+    phase = (
+        "replacement_preflight_failed"
+        if classification.evidence_valid
+        else "replacement_preflight_contract"
+    )
+    child_reason = outcome.stop_reason.strip() or "missing child stop reason"
+    raise CandidateRuntimeRecoveryError(
+        f"candidate runtime replacement {outcome.run_id} failed before motion: "
+        f"{child_reason}; fail-closed policy: {policy_reason}",
+        phase=phase,
+        rejected_child=rejection,
+    )
+
+
 def _reject_outcome(
     config: CandidateRuntimeRecoveryConfig,
     effects: CandidateRuntimeRecoveryEffects[RequestT],
@@ -511,10 +579,12 @@ def execute_candidate_runtime_localization_recovery(
 ) -> MotionLegOutcome:
     """Recover exact post-motion localization stops for one candidate routine.
 
-    The caller retains completed and no-motion outcomes unchanged.  Once this
-    coordinator launches a replacement, every child outcome must report a new
-    runtime-localization permit and either complete or present another exact
-    eligible ``FORCE_ZERO_RESEAL`` stop.  All other paths are terminal.
+    The caller retains completed and no-motion initial outcomes unchanged.
+    Once this coordinator launches a replacement, every child that completed
+    or may have published motion must report a new runtime-localization permit
+    and either complete or present another exact eligible
+    ``FORCE_ZERO_RESEAL`` stop.  A structured no-motion replacement preflight
+    rejection is preserved as a typed terminal error before permit validation.
     """
 
     if not isinstance(initial_outcome, MotionLegOutcome):
@@ -793,6 +863,24 @@ def execute_candidate_runtime_localization_recovery(
                 expected_run_id=replacement_identity.run_id,
                 reseal_index=reseal_index,
                 reason=str(exc),
+            )
+        preflight_classification = classify_no_motion_preflight_failure(
+            status=replacement_outcome.status,
+            stop_reason=replacement_outcome.stop_reason,
+            stop_details=replacement_outcome.stop_details,
+            motion_published=replacement_outcome.motion_published,
+            issued_motion_permit_kinds=issued_motion_permit_kinds(
+                replacement_outcome
+            ),
+            returncode=replacement_outcome.returncode,
+        )
+        if preflight_classification.applies:
+            _raise_replacement_preflight_failure(
+                config,
+                effects,
+                outcome=replacement_outcome,
+                reseal_index=reseal_index,
+                classification=preflight_classification,
             )
         try:
             permit_path, permit_digest = _validate_runtime_permit_evidence(

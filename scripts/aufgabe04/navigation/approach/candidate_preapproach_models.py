@@ -9,6 +9,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from scripts.aufgabe04.navigation.approach.candidate_goal_cell_selection import (
+    GoalCellSelectionEvidence,
+)
 from scripts.aufgabe04.navigation.execution.route_context import (
     StationRouteDryRun,
 )
@@ -71,6 +74,7 @@ class CandidatePreapproachPlan:
     minimum_active_standoff_m: float
     minimum_candidate_transit_radius_m: float
     minimum_static_inflation_m: float
+    goal_cell_selection: GoalCellSelectionEvidence | None
 
     @property
     def map_bundle_sha256(self) -> str:

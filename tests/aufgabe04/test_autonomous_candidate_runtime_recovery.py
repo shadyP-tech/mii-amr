@@ -503,6 +503,166 @@ class CandidateRuntimeRecoveryTest(unittest.TestCase):
                         effects=self._effects([completed]),
                     )
 
+    def test_no_motion_replacement_preflight_preserves_route_budget_failure(self):
+        run_id = self._identity(1).run_id
+        stop_reason = (
+            "odom execution admission failed: route uncertainty budget "
+            "exhausted: limiting_segment=segment:0001:0072 "
+            "remaining_margin=-0.026479 m"
+        )
+        stop_details = {
+            "reason": stop_reason,
+            "fault_code": "odom_execution_admission_failed",
+            "execution_pose_owner": "odom",
+            "global_consistency_monitor": "amcl",
+            "motion_published": False,
+            "fail_closed": True,
+            "uncertainty_budget_accepted": False,
+            "route_uncertainty_limiting_segment_id": "segment:0001:0072",
+            "route_uncertainty_remaining_margin_m": -0.026479,
+        }
+        replacement = _outcome(
+            self.root,
+            run_id=run_id,
+            status="preflight_failed",
+            stop_reason=stop_reason,
+            stop_details=stop_details,
+            motion_published=False,
+        )
+
+        with self.assertRaisesRegex(
+            CandidateRuntimeRecoveryError,
+            "route uncertainty budget exhausted",
+        ) as caught:
+            execute_candidate_runtime_localization_recovery(
+                _runtime_stop(self.root, self.identity.run_id),
+                config=self._config(1, recovery_name="replacement_preflight"),
+                effects=self._effects([replacement]),
+            )
+
+        error = caught.exception
+        self.assertEqual(error.phase, "replacement_preflight_failed")
+        self.assertIsNotNone(error.rejected_child)
+        assert error.rejected_child is not None
+        self.assertEqual(error.rejected_child.stop_reason, stop_reason)
+        self.assertEqual(error.rejected_child.stop_details, stop_details)
+        self.assertEqual(
+            error.rejected_child.decision_reason,
+            "structured_no_motion_preflight_failure",
+        )
+        failure = error.to_failure_fields()
+        self.assertEqual(failure["rejected_stop_reason"], stop_reason)
+        self.assertEqual(failure["rejected_stop_details"], stop_details)
+        self.assertFalse(failure["motion_continues_authorized"])
+        self.assertTrue(failure["fail_closed"])
+        self.assertEqual(
+            [event["event"] for event in self.events],
+            [
+                "candidate_runtime_localization_reseal_started",
+                "candidate_runtime_localization_admitted",
+                "candidate_runtime_localization_route_replanned",
+                (
+                    "candidate_runtime_localization_"
+                    "replacement_preflight_failed"
+                ),
+            ],
+        )
+        terminal_event = self.events[-1]
+        self.assertEqual(terminal_event["reported_reason"], stop_reason)
+        self.assertTrue(
+            terminal_event["structured_no_motion_preflight_failure"]
+        )
+        self.assertEqual(terminal_event["issued_motion_permit_kinds"], [])
+        self.assertFalse(
+            terminal_event["runtime_localization_permit_validation_required"]
+        )
+        self.assertFalse(
+            terminal_event["runtime_localization_permit_evidenced"]
+        )
+        self.assertFalse(terminal_event["motion_authorized"])
+        self.assertFalse(terminal_event["motion_continues_authorized"])
+
+    def test_no_motion_preflight_with_permit_is_a_contract_failure(self):
+        stop_reason = "odom execution admission failed: sealed route rejected"
+        replacement = _outcome(
+            self.root,
+            run_id=self._identity(1).run_id,
+            status="preflight_failed",
+            stop_reason=stop_reason,
+            stop_details={
+                "reason": stop_reason,
+                "motion_published": False,
+                "fail_closed": True,
+            },
+            motion_published=False,
+            permit_name="impossible_preflight_permit.json",
+            permit_digest="a" * 64,
+        )
+
+        with self.assertRaisesRegex(
+            CandidateRuntimeRecoveryError,
+            "no-motion preflight evidence is invalid",
+        ) as caught:
+            execute_candidate_runtime_localization_recovery(
+                _runtime_stop(self.root, self.identity.run_id),
+                config=self._config(
+                    1,
+                    recovery_name="preflight_with_permit",
+                ),
+                effects=self._effects([replacement]),
+            )
+
+        self.assertEqual(
+            caught.exception.phase,
+            "replacement_preflight_contract",
+        )
+        terminal_event = self.events[-1]
+        self.assertEqual(
+            terminal_event["runtime_replacement_outcome_classification"],
+            "no_motion_preflight_reported_motion_permit",
+        )
+        self.assertEqual(
+            terminal_event["issued_motion_permit_kinds"],
+            ["runtime_localization"],
+        )
+        self.assertFalse(terminal_event["motion_authorized"])
+        self.assertFalse(terminal_event["motion_continues_authorized"])
+        self.assertNotIn(
+            "candidate_runtime_localization_permit_evidenced",
+            [event["event"] for event in self.events],
+        )
+
+    def test_post_motion_replacement_without_runtime_permit_stays_gated(self):
+        replacement = _runtime_stop(
+            self.root,
+            self._identity(1).run_id,
+            permit_name=None,
+        )
+        replacement = replace(
+            replacement,
+            startup_reseal_motion_permit_path=None,
+            startup_reseal_motion_permit_sha256="",
+        )
+
+        with self.assertRaisesRegex(
+            CandidateRuntimeRecoveryError,
+            "lacks complete one-use runtime localization permit evidence",
+        ) as caught:
+            execute_candidate_runtime_localization_recovery(
+                _runtime_stop(self.root, self.identity.run_id),
+                config=self._config(
+                    1,
+                    recovery_name="post_motion_without_permit",
+                ),
+                effects=self._effects([replacement]),
+            )
+
+        self.assertEqual(caught.exception.phase, "outcome_rejection")
+        self.assertNotIn(
+            "candidate_runtime_localization_permit_evidenced",
+            [event["event"] for event in self.events],
+        )
+
     def test_one_use_runtime_permit_cannot_be_reused_between_replacements(self):
         shared_path = (self.root / "permits/shared.json").resolve()
         first = self._runtime_replacement_stop(1, "a")

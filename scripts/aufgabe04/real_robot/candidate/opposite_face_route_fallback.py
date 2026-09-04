@@ -14,11 +14,11 @@ from dataclasses import dataclass
 import math
 from pathlib import Path
 
+from scripts.aufgabe04.real_robot.candidate.no_motion_route_rejection import (
+    classify_no_motion_route_uncertainty_rejection,
+)
 from scripts.aufgabe04.real_robot.candidate.recovery_failure import (
     CandidateStartupRecoveryError,
-)
-from scripts.aufgabe04.real_robot.readiness.localization import (
-    evaluate_localization_readiness_retry,
 )
 
 
@@ -168,66 +168,25 @@ def evaluate_opposite_face_route_fallback(
             "rejected_child_not_initial_route_attempt",
             rejected_run_id=rejected.run_id,
         )
-    if rejected.motion_published is not False:
-        return _rejected(
-            "motion_was_published",
-            rejected_run_id=rejected.run_id,
-        )
-    if rejected.issued_motion_permit_kinds or rejected.issued_motion_permits:
-        return _rejected(
-            "motion_permit_was_issued",
-            rejected_run_id=rejected.run_id,
-        )
-    decision = evaluate_localization_readiness_retry(
+    route_rejection = classify_no_motion_route_uncertainty_rejection(
         status=rejected.status,
         stop_reason=rejected.stop_reason,
         stop_details=rejected.stop_details,
         motion_published=rejected.motion_published,
+        issued_motion_permit_kinds=rejected.issued_motion_permit_kinds,
+        motion_permit_evidence_present=bool(rejected.issued_motion_permits),
     )
-    if not decision.retryable:
+    if not route_rejection.eligible:
         return _rejected(
-            f"localization_readiness_{decision.reason}",
-            rejected_run_id=rejected.run_id,
-        )
-    details = rejected.stop_details
-    if details.get("reason") != rejected.stop_reason:
-        return _rejected(
-            "stop_reason_binding_mismatch",
-            rejected_run_id=rejected.run_id,
-        )
-    if details.get("motion_published") is not False:
-        return _rejected(
-            "nested_motion_evidence_not_false",
-            rejected_run_id=rejected.run_id,
-        )
-    if details.get("uncertainty_budget_accepted") is not False:
-        return _rejected(
-            "uncertainty_budget_rejection_missing",
-            rejected_run_id=rejected.run_id,
-        )
-    margin = details.get("route_uncertainty_remaining_margin_m")
-    if (
-        isinstance(margin, bool)
-        or not isinstance(margin, (int, float))
-        or not math.isfinite(float(margin))
-        or float(margin) >= 0.0
-    ):
-        return _rejected(
-            "negative_uncertainty_margin_missing",
-            rejected_run_id=rejected.run_id,
-        )
-    limiting_segment = details.get("route_uncertainty_limiting_segment_id")
-    if not isinstance(limiting_segment, str) or not limiting_segment.strip():
-        return _rejected(
-            "limiting_segment_missing",
+            route_rejection.reason,
             rejected_run_id=rejected.run_id,
         )
     return OppositeFaceRouteFallbackDecision(
         eligible=True,
         reason="new_standoff_route_dry_preflight_allowed",
         rejected_run_id=rejected.run_id,
-        remaining_margin_m=float(margin),
-        limiting_segment_id=limiting_segment.strip(),
+        remaining_margin_m=route_rejection.remaining_margin_m,
+        limiting_segment_id=route_rejection.limiting_segment_id,
     )
 
 
