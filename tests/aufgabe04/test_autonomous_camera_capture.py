@@ -13,6 +13,7 @@ from scripts.aufgabe04.perception.stand_axis.model_profile import (
 )
 from scripts.aufgabe04.real_robot.autonomous_runner import runtime
 from scripts.aufgabe04.real_robot.candidate.observation_deferral import (
+    CandidateObservationDeferralLedger,
     CandidateObservationUnavailableError,
 )
 from scripts.aufgabe04.real_robot.observer.process import (
@@ -443,6 +444,116 @@ class AutonomousCameraCaptureTests(unittest.TestCase):
         self.assertIn("consensus=3/7", message)
         self.assertIn("tf_retry_count=8", message)
         self.assertEqual(process_payload["completion_kind"], "deadline")
+        self.assertNotIsInstance(
+            caught.exception, CandidateObservationUnavailableError
+        )
+
+    @patch.object(runtime.subprocess, "Popen")
+    @patch.object(runtime, "monitor_passive_observer_process")
+    def test_rejected_frames_at_deadline_preserve_other_candidate_retries(
+        self,
+        monitor,
+        _popen,
+    ) -> None:
+        # Reduced evidence from the 2026-09-07 run: the final transient TF
+        # status followed 272 transformed but LiDAR-rejected observations.
+        status_payload = {
+            "state": "tf_pending_exact_time",
+            "reason": "future extrapolation by 0.005416 sec",
+            "axis_consensus": {
+                "sample_count": 0,
+                "peak_sample_count": 0,
+                "required_sample_count": 7,
+            },
+            "observation_evidence": {
+                "accepted_frame_count": 0,
+                "lidar_rejection_count": 272,
+                "soft_miss_count": 346,
+                "last_soft_miss_reason": "lidar_target_not_associated",
+                "poisoned": False,
+                "poison_reason": None,
+            },
+            "tf_retry_attempt_summary": {
+                "attempted_tuple_count": 127,
+                "exhausted_tuple_count": 2,
+            },
+            "retry_exhausted": False,
+        }
+
+        def expire(**kwargs):
+            (kwargs["recommendation_path"].parent / "observer_status.json").write_text(
+                json.dumps(status_payload), encoding="utf-8"
+            )
+            return PassiveObserverProcessEvidence(
+                completion_kind="deadline",
+                artifact_kind=None,
+                artifact_path=None,
+                deadline_expired=True,
+                returncode=130,
+                cleanup_actions=("send_sigint", "wait_after_sigint"),
+                signals_sent=("SIGINT",),
+            )
+
+        ledger = CandidateObservationDeferralLedger(
+            [f"survey_candidate_{index:04d}" for index in range(1, 6)],
+            max_attempts_per_candidate=2,
+        )
+        for index in (3, 1, 2, 4, 5):
+            uid = f"survey_candidate_{index:04d}"
+            ledger.select(uid)
+            if index in (3, 5):
+                ledger.mark_resolved({"qr_id": f"QR_{index}"})
+            else:
+                ledger.mark_unavailable(
+                    CandidateObservationUnavailableError(
+                        candidate_uid=uid,
+                        observation_attempt_index=0,
+                        reason="first-pass candidate observation unavailable",
+                        process_evidence={"completion_kind": "deadline"},
+                        status_evidence={"state": "metric_model_measurement_unavailable"},
+                    )
+                )
+        self.assertTrue(ledger.advance_pass())
+        ledger.select("survey_candidate_0001")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate = _candidate()
+            candidate.candidate_uid = "survey_candidate_0001"
+            monitor.side_effect = expire
+            with self.assertRaises(CandidateObservationUnavailableError) as caught:
+                runtime._capture_camera_recommendation(
+                    profile=object(),
+                    args=_args(_write_measured_model(root)),
+                    candidate=candidate,
+                    output_dir=root / "retry_attempt",
+                )
+            process_payload = load_content_hashed_json(
+                root / "retry_attempt" / "observer_process.json",
+                hash_field="observer_process_evidence_sha256",
+            )
+
+        error = caught.exception
+        self.assertEqual(error.status_evidence["accepted_frame_count"], 0)
+        self.assertEqual(error.status_evidence["lidar_rejection_count"], 272)
+        self.assertIn("lidar_rejections=272", str(error))
+        self.assertEqual(process_payload["completion_kind"], "deadline")
+        self.assertFalse(error.to_failure_fields()["motion_continues_authorized"])
+        ledger.mark_unavailable(error)
+        state = ledger.selection_state()
+        self.assertEqual(
+            state.eligible_candidate_uids,
+            ("survey_candidate_0002", "survey_candidate_0004"),
+        )
+        self.assertFalse(state.complete)
+        self.assertFalse(state.terminal_incomplete)
+        for uid in state.eligible_candidate_uids:
+            ledger.select(uid)
+            ledger.mark_resolved({"qr_id": f"QR_{uid}"})
+        final_state = ledger.selection_state()
+        self.assertTrue(final_state.terminal_incomplete)
+        self.assertFalse(final_state.complete)
+        self.assertEqual(final_state.unresolved_candidate_uids, (candidate.candidate_uid,))
 
     @patch.object(runtime.subprocess, "Popen")
     @patch.object(runtime, "monitor_passive_observer_process")

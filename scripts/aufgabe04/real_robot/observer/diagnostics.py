@@ -20,13 +20,13 @@ from scripts.aufgabe04.real_robot.observer.process import (
 
 
 def _optional_nonnegative_int(value: object) -> int | None:
-    if isinstance(value, bool):
-        return None
-    try:
-        result = int(value)
-    except (TypeError, ValueError):
-        return None
-    return result if result >= 0 else None
+    # Status counters are JSON integers.  Coercing arbitrary values can turn
+    # malformed evidence (for example 1.5 or True) into deferral authority.
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        else None
+    )
 
 
 def _optional_nonnegative_float(value: object) -> float | None:
@@ -41,6 +41,25 @@ def _optional_nonnegative_float(value: object) -> float | None:
 
 def _mapping(value: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _observation_evidence_load_error(value: object) -> str | None:
+    """Validate supplied decision evidence while accepting older snapshots."""
+
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        return "observation_evidence must be a JSON object"
+    for field in ("accepted_frame_count", "lidar_rejection_count"):
+        if field in value and _optional_nonnegative_int(value[field]) is None:
+            return f"observation_evidence.{field} must be a nonnegative integer"
+    if "poisoned" in value and not isinstance(value["poisoned"], bool):
+        return "observation_evidence.poisoned must be a boolean"
+    if value.get("poison_reason") is not None and not isinstance(
+        value["poison_reason"], str
+    ):
+        return "observation_evidence.poison_reason must be a string or null"
+    return None
 
 
 @dataclass(frozen=True)
@@ -63,6 +82,8 @@ class PassiveObserverStatusEvidence:
     lidar_rejection_count: int | None = None
     soft_miss_count: int | None = None
     last_soft_miss_reason: str | None = None
+    observation_evidence_poisoned: bool | None = None
+    observation_evidence_poison_reason: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -87,6 +108,10 @@ class PassiveObserverStatusEvidence:
             "lidar_rejection_count": self.lidar_rejection_count,
             "soft_miss_count": self.soft_miss_count,
             "last_soft_miss_reason": self.last_soft_miss_reason,
+            "observation_evidence_poisoned": self.observation_evidence_poisoned,
+            "observation_evidence_poison_reason": (
+                self.observation_evidence_poison_reason
+            ),
             "load_error": self.load_error,
         }
 
@@ -152,6 +177,8 @@ def load_passive_observer_status(
     observation_evidence = _mapping(payload.get("observation_evidence"))
     retry_exhausted_value = payload.get("retry_exhausted")
     last_soft_miss_value = observation_evidence.get("last_soft_miss_reason")
+    poisoned_value = observation_evidence.get("poisoned")
+    poison_reason_value = observation_evidence.get("poison_reason")
     return PassiveObserverStatusEvidence(
         state=state,
         reason=reason,
@@ -170,7 +197,9 @@ def load_passive_observer_status(
             if isinstance(retry_exhausted_value, bool)
             else None
         ),
-        load_error=None,
+        load_error=_observation_evidence_load_error(
+            payload.get("observation_evidence")
+        ),
         peak_consensus_sample_count=_optional_nonnegative_int(
             consensus.get("peak_sample_count")
         ),
@@ -196,6 +225,15 @@ def load_passive_observer_status(
             last_soft_miss_value.strip()
             if isinstance(last_soft_miss_value, str)
             and last_soft_miss_value.strip()
+            else None
+        ),
+        observation_evidence_poisoned=(
+            poisoned_value if isinstance(poisoned_value, bool) else None
+        ),
+        observation_evidence_poison_reason=(
+            poison_reason_value.strip()
+            if isinstance(poison_reason_value, str)
+            and poison_reason_value.strip()
             else None
         ),
     )
@@ -225,19 +263,30 @@ def candidate_local_observer_timeout_basis(
     """Explain why a status snapshot represents candidate-local failure.
 
     The final status is replaceable and can land on a transient exact-time TF
-    retry just as the parent deadline expires.  ``accepted_frame_count`` is
-    accumulated independently and increments only after a transform-ready,
-    synchronized, LiDAR-associated frame reaches candidate processing.  It
-    therefore proves that a trailing TF state did not starve the observer of
-    all candidate evidence.
+    retry just as the parent deadline expires.  Both accepted frames and
+    LiDAR-rejected frames reach ``record_frame`` only after exact-time TF
+    succeeds in the observer node.  Either accumulated count therefore proves
+    that the trailing TF state did not prevent all candidate processing.
+    A LiDAR rejection is evidence of processing, not a usable observation.
     """
 
+    if (
+        status.load_error is not None
+        or status.observation_evidence_poisoned is True
+        or status.observation_evidence_poison_reason is not None
+    ):
+        return None
     if status.state in CANDIDATE_LOCAL_OBSERVER_TIMEOUT_STATES:
         return "final_candidate_local_state"
     if (
         status.state in TRANSIENT_TF_OBSERVER_TIMEOUT_STATES
-        and status.accepted_frame_count is not None
-        and status.accepted_frame_count > 0
+        and any(
+            count is not None and count > 0
+            for count in (
+                _optional_nonnegative_int(status.accepted_frame_count),
+                _optional_nonnegative_int(status.lidar_rejection_count),
+            )
+        )
     ):
         return "accumulated_transform_ready_candidate_frames"
     return None
@@ -321,6 +370,16 @@ def format_passive_observer_failure(
         details.append(f"soft_misses={status.soft_miss_count}")
     if status.last_soft_miss_reason is not None:
         details.append(f"last_soft_miss={status.last_soft_miss_reason}")
+    if status.observation_evidence_poisoned is not None:
+        details.append(
+            "observation_evidence_poisoned="
+            f"{str(status.observation_evidence_poisoned).lower()}"
+        )
+    if status.observation_evidence_poison_reason is not None:
+        details.append(
+            "observation_evidence_poison_reason="
+            f"{status.observation_evidence_poison_reason}"
+        )
     if status.tf_retry_elapsed_sec is not None:
         details.append(
             f"tf_retry_elapsed_sec={status.tf_retry_elapsed_sec:.3f}"

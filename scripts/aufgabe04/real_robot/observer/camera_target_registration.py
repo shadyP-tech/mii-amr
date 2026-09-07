@@ -72,7 +72,10 @@ class CameraTargetRegistrationSelection:
     proposal: HeadRoiEvaluation | None
     decision: HeadRoiRegistrationDecision | None
     strict_retry: HeadRoiEvaluation | None
+    # Effective proposal path, which may differ from the nominal crop's
+    # initial trigger when the wider search discovers a QR.
     reacquisition_mode: str | None
+    initial_reacquisition_mode: str | None = None
 
     @property
     def registered(self) -> bool:
@@ -85,6 +88,7 @@ class CameraTargetRegistrationSelection:
             "enabled": bool(enabled),
             "attempted": proposal is not None,
             "reacquisition_mode": self.reacquisition_mode,
+            "initial_reacquisition_mode": self.initial_reacquisition_mode,
             "primary_estimator_reason": self.evaluations[0].estimate.reason,
             "primary_qr_detected": self.evaluations[0].debug.qr_detected,
             "strict_retry_applied": self.registered,
@@ -218,6 +222,20 @@ def select_camera_target_measurement(
 
     proposal = evaluate(roi_attempts[1], None)
     evaluations.append(proposal)
+    initial_reacquisition_mode = reacquisition_mode
+    if (
+        reacquisition_mode == BACKSIDE_REACQUISITION_MODE
+        and _proposal_is_eligible(
+            proposal,
+            reacquisition_mode=QR_MODEL_REACQUISITION_MODE,
+        )
+    ):
+        # A QR can be outside the nominal crop but inside the bounded wider
+        # search. Its model evidence selects the ordinary QR registration
+        # path; missing QR in the nominal crop must not lock in backside mode.
+        # Reuse the QR proposal policy and retain both the centre bound and
+        # the strict second pass below. No wide result is a measurement.
+        reacquisition_mode = QR_MODEL_REACQUISITION_MODE
     eligible = _proposal_is_eligible(
         proposal,
         reacquisition_mode=reacquisition_mode,
@@ -244,6 +262,7 @@ def select_camera_target_measurement(
             decision=decision,
             strict_retry=strict_retry,
             reacquisition_mode=reacquisition_mode,
+            initial_reacquisition_mode=initial_reacquisition_mode,
         )
 
     # The wide-search result remains proposal-only, whether it is usable or
@@ -257,4 +276,5 @@ def select_camera_target_measurement(
         decision=decision,
         strict_retry=None,
         reacquisition_mode=reacquisition_mode,
+        initial_reacquisition_mode=initial_reacquisition_mode,
     )

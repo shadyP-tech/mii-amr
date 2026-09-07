@@ -4,6 +4,7 @@ import tempfile
 import unittest
 
 from scripts.aufgabe04.real_robot.observer.diagnostics import (
+    candidate_local_observer_timeout_basis,
     format_passive_observer_failure,
     is_candidate_local_observer_timeout,
     load_passive_observer_status,
@@ -14,6 +15,24 @@ from scripts.aufgabe04.real_robot.observer.process import (
 
 
 class PassiveObserverDiagnosticsTests(unittest.TestCase):
+    def _load_payload(self, payload):
+        with tempfile.TemporaryDirectory() as tmp:
+            status_path = Path(tmp) / "observer_status.json"
+            status_path.write_text(json.dumps(payload), encoding="utf-8")
+            return load_passive_observer_status(status_path)
+
+    def _process(self, completion_kind="deadline"):
+        artifact = completion_kind == "artifact"
+        return PassiveObserverProcessEvidence(
+            completion_kind=completion_kind,
+            artifact_kind="axis_observation" if artifact else None,
+            artifact_path=Path("axis.json") if artifact else None,
+            deadline_expired=completion_kind == "deadline",
+            returncode=130 if completion_kind == "deadline" else 1,
+            cleanup_actions=("wait_after_sigint",),
+            signals_sent=("SIGINT",),
+        )
+
     def test_loads_retry_and_consensus_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             status_path = Path(tmp) / "observer_status.json"
@@ -243,6 +262,184 @@ class PassiveObserverDiagnosticsTests(unittest.TestCase):
                 status=transient_without_candidate_frames,
             )
         )
+
+    def test_lidar_rejected_frames_survive_trailing_tf_deadline_state(self):
+        # Final candidate_0001 snapshot from the 2026-09-07 run.  All 272
+        # LiDAR rejections followed successful exact-time transform lookup;
+        # accepted frames and consensus samples both stayed at zero.
+        for state in (
+            "tf_pending_exact_time",
+            "tf_retry_exhausted",
+            "metric_model_measurement_unavailable",
+        ):
+            with self.subTest(state=state):
+                status = self._load_payload(
+                    {
+                        "state": state,
+                        "axis_consensus": {
+                            "sample_count": 0,
+                            "required_sample_count": 7,
+                        },
+                        "tf_retry_attempt_summary": {
+                            "attempted_tuple_count": 127,
+                            "exhausted_tuple_count": 2,
+                        },
+                        "observation_evidence": {
+                            "accepted_frame_count": 0,
+                            "lidar_rejection_count": 272,
+                            "soft_miss_count": 346,
+                            "last_soft_miss_reason": "lidar_target_not_associated",
+                            "poisoned": False,
+                            "poison_reason": None,
+                        },
+                    }
+                )
+
+                self.assertTrue(
+                    is_candidate_local_observer_timeout(
+                        process=self._process(), status=status
+                    )
+                )
+                self.assertEqual(status.accepted_frame_count, 0)
+                self.assertEqual(status.consensus_sample_count, 0)
+                self.assertEqual(status.lidar_rejection_count, 272)
+                if state.startswith("tf_"):
+                    self.assertEqual(
+                        candidate_local_observer_timeout_basis(status),
+                        "accumulated_transform_ready_candidate_frames",
+                    )
+
+    def test_tf_activity_and_soft_misses_alone_do_not_allow_deferral(self):
+        for state in ("tf_pending_exact_time", "tf_retry_exhausted"):
+            for evidence in (
+                {},
+                {
+                    "accepted_frame_count": 0,
+                    "lidar_rejection_count": 0,
+                    "soft_miss_count": 346,
+                    "last_soft_miss_reason": "camera_lidar_skew",
+                },
+            ):
+                with self.subTest(state=state, evidence=evidence):
+                    status = self._load_payload(
+                        {
+                            "state": state,
+                            "axis_consensus": {"sample_count": 3},
+                            "tf_retry_attempt_summary": {
+                                "attempted_tuple_count": 127,
+                                "exhausted_tuple_count": 2,
+                            },
+                            "observation_evidence": evidence,
+                        }
+                    )
+
+                    self.assertFalse(
+                        is_candidate_local_observer_timeout(
+                            process=self._process(), status=status
+                        )
+                    )
+
+    def test_accumulated_frames_do_not_hide_child_exit_or_other_status(self):
+        for completion, state in (
+            ("child_exit", "tf_pending_exact_time"),
+            ("artifact", "tf_pending_exact_time"),
+            ("child_exit", "metric_model_measurement_unavailable"),
+            ("deadline", "unknown_status"),
+            ("deadline", "waiting_for_synchronized_sensors"),
+        ):
+            with self.subTest(completion=completion, state=state):
+                status = self._load_payload(
+                    {
+                        "state": state,
+                        "observation_evidence": {
+                            "accepted_frame_count": 1,
+                            "lidar_rejection_count": 272,
+                        },
+                    }
+                )
+
+                self.assertFalse(
+                    is_candidate_local_observer_timeout(
+                        process=self._process(completion), status=status
+                    )
+                )
+
+    def test_poisoned_identity_evidence_remains_terminal_at_deadline(self):
+        for state in ("tf_pending_exact_time", "evidence_not_committable"):
+            for poison in (
+                {"poisoned": True},
+                {
+                    "poisoned": False,
+                    "poison_reason": "conflicting_qr_ids_in_motion_epoch",
+                },
+            ):
+                with self.subTest(state=state, poison=poison):
+                    status = self._load_payload(
+                        {
+                            "state": state,
+                            "observation_evidence": {
+                                "accepted_frame_count": 1,
+                                "lidar_rejection_count": 272,
+                                **poison,
+                            },
+                        }
+                    )
+
+                    self.assertFalse(
+                        is_candidate_local_observer_timeout(
+                            process=self._process(), status=status
+                        )
+                    )
+                    self.assertIsNone(candidate_local_observer_timeout_basis(status))
+                    self.assertEqual(
+                        status.to_dict()["observation_evidence_poisoned"],
+                        poison["poisoned"],
+                    )
+                    message = format_passive_observer_failure(
+                        candidate_uid="candidate",
+                        process=self._process(),
+                        status=status,
+                        process_evidence_path=Path("process.json"),
+                    )
+                    self.assertIn("observation_evidence_poisoned=", message)
+                    if "poison_reason" in poison:
+                        self.assertIn(poison["poison_reason"], message)
+
+    def test_malformed_supplied_decision_evidence_cannot_allow_deferral(self):
+        malformed = [[], "bad evidence", {"poisoned": "false"}, {"poison_reason": 3}]
+        for field in ("accepted_frame_count", "lidar_rejection_count"):
+            for value in (-1, 1.5, True, "272", None, float("inf"), float("nan")):
+                malformed.append(
+                    {
+                        "accepted_frame_count": 1,
+                        "lidar_rejection_count": 272,
+                        field: value,
+                    }
+                )
+        for state in ("tf_pending_exact_time", "lidar_target_mismatch"):
+            for evidence in malformed:
+                with self.subTest(state=state, evidence=evidence):
+                    status = self._load_payload(
+                        {"state": state, "observation_evidence": evidence}
+                    )
+
+                    self.assertIsNotNone(status.load_error)
+                    self.assertIsNone(candidate_local_observer_timeout_basis(status))
+                    self.assertFalse(
+                        is_candidate_local_observer_timeout(
+                            process=self._process(), status=status
+                        )
+                    )
+
+    def test_missing_or_unreadable_status_remains_terminal(self):
+        missing = load_passive_observer_status(Path("missing-status.json"))
+        for status in (missing, self._load_payload([]), self._load_payload({})):
+            with self.subTest(state=status.state):
+                self.assertFalse(
+                    is_candidate_local_observer_timeout(
+                        process=self._process(), status=status
+                    )
+                )
 
 
 if __name__ == "__main__":

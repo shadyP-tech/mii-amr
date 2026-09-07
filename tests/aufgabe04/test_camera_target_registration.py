@@ -11,6 +11,7 @@ from scripts.aufgabe04.real_robot.configuration.geometry import (
     OpticalProjection,
 )
 from scripts.aufgabe04.real_robot.observer.camera_target_registration import (
+    BACKSIDE_REACQUISITION_MODE,
     HeadRoiEvaluation,
     QR_MODEL_REACQUISITION_MODE,
     select_camera_target_measurement,
@@ -86,6 +87,172 @@ class CameraTargetRegistrationTest(unittest.TestCase):
             ImagePoint(center_u_local - 40.0, center_v_local + 40.0),
         )
 
+    def _select_after_backside_failure(
+        self,
+        *,
+        proposal_estimate,
+        proposal_debug,
+        strict_estimate=None,
+    ):
+        calls = []
+
+        def evaluate(attempt, pose_hint):
+            calls.append((attempt.source, pose_hint))
+            if attempt is self.nominal:
+                return HeadRoiEvaluation(
+                    attempt,
+                    object(),
+                    _estimate(
+                        usable=False,
+                        reason="model_backside_head_and_neck_unavailable",
+                    ),
+                    _debug(),
+                )
+            if attempt is self.proposal:
+                return HeadRoiEvaluation(
+                    attempt, object(), proposal_estimate, proposal_debug,
+                )
+            self.assertEqual(
+                attempt.source, REGISTERED_QR_MODEL_REACQUISITION_SOURCE,
+            )
+            self.assertIsNotNone(strict_estimate, "unexpected strict retry")
+            return HeadRoiEvaluation(
+                attempt, object(), strict_estimate, proposal_debug,
+            )
+
+        selection = select_camera_target_measurement(
+            (self.nominal, self.proposal),
+            tracked_pose=None,
+            evaluate=evaluate,
+            enable_reacquisition=True,
+            max_center_offset_ratio=1.5,
+        )
+        return selection, calls
+
+    def test_backside_miss_can_reacquire_qr_with_bounded_strict_retry(self):
+        proposal_estimate = _estimate(
+            usable=True,
+            reason="axis_estimated_model_current_frame_refined",
+            source="model_current_frame_refined",
+            corners=self._corners(90.0, 182.0),
+        )
+        strict_estimate = _estimate(
+            usable=True,
+            reason="axis_estimated_model_current_frame_refined",
+            source="model_current_frame_refined",
+            corners=self._corners(90.0, 182.0),
+        )
+        selection, calls = self._select_after_backside_failure(
+            proposal_estimate=proposal_estimate,
+            proposal_debug=_debug(qr_detected=True, model_pose=object()),
+            strict_estimate=strict_estimate,
+        )
+
+        self.assertTrue(selection.registered)
+        self.assertIs(selection.selected.estimate, strict_estimate)
+        self.assertIsNot(selection.selected, selection.proposal)
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all(pose_hint is None for _, pose_hint in calls))
+        self.assertAlmostEqual(
+            selection.selected.attempt.expected_center_u_px, 310.0,
+        )
+        self.assertAlmostEqual(
+            selection.selected.attempt.expected_center_v_px, 312.0,
+        )
+        metadata = selection.metadata(enabled=True)
+        self.assertEqual(
+            metadata["initial_reacquisition_mode"], BACKSIDE_REACQUISITION_MODE,
+        )
+        self.assertEqual(metadata["reacquisition_mode"], QR_MODEL_REACQUISITION_MODE)
+        self.assertTrue(metadata["measurement_accepted"])
+        self.assertEqual(metadata["decision"]["max_center_offset_ratio"], 1.5)
+
+    def test_cross_mode_proposal_still_requires_qr_pose_corners_and_model_source(self):
+        base_estimate = _estimate(
+            usable=True,
+            reason="axis_estimated_model_current_frame_refined",
+            source="model_current_frame_refined",
+            corners=self._corners(90.0, 182.0),
+        )
+        for label, estimate_changes, debug in (
+            ("missing_qr", {}, _debug(model_pose=object())),
+            ("missing_pose", {}, _debug(qr_detected=True)),
+            ("missing_corners", {"corners": None},
+             _debug(qr_detected=True, model_pose=object())),
+            ("unsupported_source", {"source": "adaptive_edge_current_frame"},
+             _debug(qr_detected=True, model_pose=object())),
+            ("contradictory_backside", {"source": BACKSIDE_AXIS_SAMPLE_SOURCE},
+             _debug(qr_detected=True, model_pose=object())),
+        ):
+            with self.subTest(label=label):
+                estimate = SimpleNamespace(
+                    **{**vars(base_estimate), **estimate_changes},
+                )
+                selection, calls = self._select_after_backside_failure(
+                    proposal_estimate=estimate,
+                    proposal_debug=debug,
+                )
+
+                self.assertEqual(len(calls), 2)
+                self.assertFalse(selection.registered)
+                self.assertIs(selection.selected.attempt, self.nominal)
+                self.assertIsNone(selection.decision)
+                self.assertEqual(
+                    selection.reacquisition_mode, BACKSIDE_REACQUISITION_MODE,
+                )
+
+    def test_cross_mode_qr_proposal_cannot_exceed_registration_bound(self):
+        selection, calls = self._select_after_backside_failure(
+            proposal_estimate=_estimate(
+                usable=True,
+                reason="axis_estimated_model_current_frame_refined",
+                source="model_current_frame_refined",
+                corners=self._corners(40.0, 180.0),
+            ),
+            proposal_debug=_debug(qr_detected=True, model_pose=object()),
+        )
+
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(selection.registered)
+        self.assertIs(selection.selected.attempt, self.nominal)
+        self.assertIsNotNone(selection.decision)
+        self.assertEqual(
+            selection.decision.reason, "detected_head_outside_registration_window",
+        )
+        self.assertEqual(selection.decision.max_center_offset_ratio, 1.5)
+
+    def test_cross_mode_ambiguous_or_failed_strict_measurement_is_not_accepted(self):
+        # Existing QR proposal policy admits a refined head with an ambiguous
+        # axis as a seed. Neither it nor a usable wide result can replace the
+        # result of the mandatory strict pass.
+        for proposal_usable, source, reason in (
+            (False, "model_refined_head", "planar_pose_axis_ambiguous"),
+            (True, "model_current_frame_refined", "model_pose_seed_unavailable"),
+        ):
+            with self.subTest(reason=reason):
+                strict_estimate = _estimate(
+                    usable=False, reason=reason, source="model_refined_head",
+                )
+                selection, calls = self._select_after_backside_failure(
+                    proposal_estimate=_estimate(
+                        usable=proposal_usable,
+                        reason=(
+                            "axis_estimated_model_current_frame_refined"
+                            if proposal_usable else "planar_pose_axis_ambiguous"
+                        ),
+                        source=source,
+                        corners=self._corners(90.0, 182.0),
+                    ),
+                    proposal_debug=_debug(qr_detected=True, model_pose=object()),
+                    strict_estimate=strict_estimate,
+                )
+
+                self.assertEqual(len(calls), 3)
+                self.assertTrue(selection.registered)
+                self.assertIs(selection.selected.estimate, strict_estimate)
+                self.assertFalse(selection.selected.estimate.usable)
+                self.assertFalse(selection.metadata(enabled=True)["measurement_accepted"])
+
     def test_offset_proposal_requires_and_selects_strict_second_pass(self):
         calls = []
 
@@ -146,6 +313,10 @@ class CameraTargetRegistrationTest(unittest.TestCase):
         metadata = selection.metadata(enabled=True)
         self.assertTrue(metadata["strict_retry_applied"])
         self.assertTrue(metadata["measurement_accepted"])
+        self.assertEqual(
+            metadata["initial_reacquisition_mode"], BACKSIDE_REACQUISITION_MODE,
+        )
+        self.assertEqual(metadata["reacquisition_mode"], BACKSIDE_REACQUISITION_MODE)
         self.assertAlmostEqual(
             metadata["decision"]["center_offset_ratio"],
             1.125,
@@ -290,8 +461,53 @@ class CameraTargetRegistrationTest(unittest.TestCase):
             metadata["reacquisition_mode"],
             QR_MODEL_REACQUISITION_MODE,
         )
+        self.assertEqual(
+            metadata["initial_reacquisition_mode"], QR_MODEL_REACQUISITION_MODE,
+        )
         self.assertTrue(metadata["strict_retry_applied"])
         self.assertTrue(metadata["measurement_accepted"])
+
+    def test_qr_reacquisition_does_not_transition_to_backside_without_qr(self):
+        calls = []
+
+        def evaluate(attempt, _pose_hint):
+            calls.append(attempt.source)
+            if attempt is self.nominal:
+                return HeadRoiEvaluation(
+                    attempt,
+                    object(),
+                    _estimate(
+                        usable=False,
+                        reason="model_pose_seed_unavailable",
+                        source="model_seed",
+                    ),
+                    _debug(qr_detected=True),
+                )
+            self.assertIs(attempt, self.proposal)
+            return HeadRoiEvaluation(
+                attempt,
+                object(),
+                _estimate(
+                    usable=True,
+                    reason="axis_estimated_model_backside_current_frame",
+                    corners=self._corners(90.0, 182.0),
+                ),
+                _debug(),
+            )
+
+        selection = select_camera_target_measurement(
+            (self.nominal, self.proposal),
+            tracked_pose=None,
+            evaluate=evaluate,
+            enable_reacquisition=True,
+            max_center_offset_ratio=1.5,
+        )
+
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(selection.registered)
+        self.assertIs(selection.selected.attempt, self.nominal)
+        self.assertIsNone(selection.decision)
+        self.assertEqual(selection.reacquisition_mode, QR_MODEL_REACQUISITION_MODE)
 
     def test_bad_tracked_projection_does_not_suppress_qr_reacquisition(self):
         calls = []
