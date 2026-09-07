@@ -449,69 +449,67 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                 ).is_file()
             )
 
-    def test_arrival_bearing_miss_rejects_before_camera_process(self):
+    def test_arrival_bearing_miss_corrects_locally_before_first_camera_process(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            config = replace(
-                self._config(
-                    root,
-                    (self._candidate("candidate_a", 2.0, 0.0),),
-                ),
-                max_camera_observation_attempts_per_candidate=1,
-            )
             config = self._write_frame_registry(
-                config,
+                self._config(root, (self._candidate("candidate_a", 2.0, 0.0),)),
                 frozen_map_from_odom=PlanarTransform2D(1.0, 0.0, 0.0),
             )
             planning_frames = iter(
-                (
-                    CandidatePlanningFrame(
-                        Pose2D(0.0, 0.0, 0.0),
-                        PlanarTransform2D(0.0, 0.0, 0.0),
-                    ),
-                    CandidatePlanningFrame(
-                        Pose2D(0.30, 0.0, math.radians(30.0)),
-                        PlanarTransform2D(0.0, 0.0, 0.0),
-                    ),
+                CandidatePlanningFrame(pose, PlanarTransform2D(0.0, 0.0, 0.0))
+                for pose in (
+                    Pose2D(0.0, 0.0, 0.0),
+                    Pose2D(0.30, 0.0, math.radians(30.0)),
+                    Pose2D(0.30, 0.0, math.radians(30.0)),
+                    Pose2D(0.30, 0.0, 0.0),
                 )
             )
-            capture = Mock()
+            planned = []
+            moved = []
+            captures = []
 
-            with self.assertRaises(CandidateApproachIncompleteError):
-                execute_candidate_approach_phase(
-                    config,
-                    CandidateApproachEffects(
-                        read_current_pose=lambda: Pose2D(0.30, 0.0, 0.0),
-                        admit_planning_frame=lambda _path: next(
-                            planning_frames
-                        ),
-                        select_initial_preapproach=self._nearest_selection,
-                        plan_preapproach=lambda _request: {
-                            "route_csv": "route.csv"
-                        },
-                        run_motion_leg=self._completed,
-                        capture_observation=capture,
-                        commit_decision=lambda _request: None,
-                        clock=lambda: 10.0,
-                    ),
-                )
+            def plan(request):
+                planned.append(request)
+                if request.inspection_view_path is not None:
+                    request.output_dir.mkdir(parents=True)
+                    (request.output_dir / "pipeline_summary.json").write_text(json.dumps({
+                        "selected_approach_pose": {"x_m": 0.30, "y_m": 0.0, "yaw_rad": 0.0}
+                    }))
+                return {"route_csv": "route.csv"}
 
-            capture.assert_not_called()
-            admission_path = (
-                config.session_root
-                / "candidates"
-                / "000_candidate_a"
-                / "candidate_arrival_admission.json"
-            )
-            payload = json.loads(admission_path.read_text())
-            self.assertFalse(payload["accepted"])
-            self.assertIn(
-                "bearing_error_above_maximum",
-                payload["reasons"],
-            )
-            self.assertFalse(payload["motion_authorized"])
+            def capture(request):
+                captures.append(request.attempt_index)
+                return CandidateObservation(request.output_dir / "recommendation.json", "QR_A", None)
 
-    def test_opposite_face_bearing_miss_rejects_second_camera_process(self):
+            def motion(request):
+                moved.append(request)
+                return self._completed(request)
+
+            result = execute_candidate_approach_phase(config, CandidateApproachEffects(
+                read_current_pose=lambda: Pose2D(0.30, 0.0, 0.0),
+                admit_planning_frame=lambda _path: next(planning_frames),
+                select_initial_preapproach=self._nearest_selection,
+                plan_preapproach=plan, run_motion_leg=motion, capture_observation=capture,
+                validate_facing=lambda request: {"candidate_uid": request.candidate.candidate_uid},
+                commit_decision=lambda _request: None,
+            ))
+            self.assertEqual(result.visit_order, ("candidate_a",))
+            self.assertEqual(captures, [0])
+            self.assertEqual(len(moved), 2)
+            self.assertNotEqual(moved[0].run_id, moved[1].run_id)
+            self.assertNotEqual(moved[0].mission_leg_index, moved[1].mission_leg_index)
+            correction = json.loads(planned[1].inspection_view_path.read_text())
+            self.assertEqual(correction["purpose"], "arrival_alignment")
+            self.assertFalse(correction["stand_axis_authorized"])
+            candidate_root = config.session_root / "candidates" / "000_candidate_a"
+            rejected = json.loads((candidate_root / "candidate_arrival_admission.json").read_text())
+            self.assertEqual(rejected["reasons"], ["bearing_error_above_maximum"])
+            self.assertEqual(rejected["thresholds"]["max_bearing_error_rad"], math.radians(3))
+            progress = json.loads((candidate_root / "inspection_progress.json").read_text())
+            self.assertEqual(len(progress["view_history"]), 1)
+
+    def test_opposite_face_range_miss_rejects_second_camera_process(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config = replace(
@@ -552,7 +550,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                     CandidatePlanningFrame(
                         Pose2D(
                             1.0,
-                            -0.50,
+                            -1.00,
                             math.pi / 2.0 + math.radians(30.0),
                         ),
                         PlanarTransform2D(0.0, 0.20, 0.0),
@@ -609,13 +607,14 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                 config.session_root
                 / "candidates"
                 / "000_candidate_a"
+                / "inspection_opposite_01"
                 / "camera_attempt_01_arrival"
                 / "admission.json"
             )
             payload = json.loads(admission_path.read_text())
             self.assertEqual(payload["observation_attempt_index"], 1)
             self.assertFalse(payload["accepted"])
-            self.assertIn("bearing_error_above_maximum", payload["reasons"])
+            self.assertIn("range_above_maximum", payload["reasons"])
             self.assertFalse(payload["motion_authorized"])
 
     def test_opposite_face_startup_reseal_reprojects_axis_across_yaw_drift(self):
@@ -784,7 +783,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             self.assertEqual(identity.qr_id, "QR_A")
             self.assertEqual(identity.server_station_id, "station_QR_A")
 
-    def test_typed_observer_timeout_defers_then_retries_after_other_candidate(self):
+    def test_typed_observer_timeout_inspects_same_candidate_before_next_candidate(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config = self._config(
@@ -850,21 +849,21 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                 ),
             )
 
-            self.assertEqual(motion_targets, ["candidate_a", "candidate_b", "candidate_a"])
-            self.assertEqual(outcome.visit_order, ("candidate_b", "candidate_a"))
+            self.assertEqual(motion_targets, ["candidate_a", "candidate_a", "candidate_b"])
+            self.assertEqual(outcome.visit_order, ("candidate_a", "candidate_b"))
             self.assertEqual(
                 capture_roots,
-                ["000_candidate_a", "001_candidate_b", "002_candidate_a"],
+                ["000_candidate_a", "000_candidate_a", "001_candidate_b"],
             )
             self.assertEqual(capture_count, {"candidate_a": 2, "candidate_b": 1})
-            self.assertTrue(
+            self.assertFalse(
                 any(
                     event.get("event")
                     == "camera_candidate_observation_deferred"
                     for event in events
                 )
             )
-            self.assertTrue(
+            self.assertFalse(
                 any(
                     event.get("event")
                     == "camera_candidate_observation_retry_pass"
@@ -884,6 +883,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                     ),
                 ),
                 max_camera_observation_attempts_per_candidate=1,
+                max_candidate_inspection_views=1,
             )
             poses = iter(Pose2D(0.0, 0.0, 0.0) for _ in range(3))
 
@@ -1604,7 +1604,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             )
             self.assertEqual(
                 [request.mission_leg_index for request in motion_requests],
-                [0, 0],
+                [0, 100001],
             )
             self.assertEqual(
                 [request.target_id for request in motion_requests],
@@ -1845,6 +1845,8 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             commit = Mock()
 
             def plan_preapproach(request):
+                if request.inspection_view_path is not None:
+                    raise CandidatePreapproachUnreachableError(request.candidate_uid, "local view blocked")
                 if request.approach_normal_rad is None:
                     return {"route_csv": "primary.csv"}
                 opposite_plan_requests.append(request)
@@ -1868,7 +1870,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                     config,
                     CandidateApproachEffects(
                         select_initial_preapproach=self._nearest_selection,
-                        read_current_pose=lambda: next(poses),
+                        read_current_pose=lambda: Pose2D(0.0, 0.0, 0.0),
                         run_motion_leg=run_motion,
                         capture_observation=capture,
                         plan_preapproach=plan_preapproach,
@@ -2591,6 +2593,8 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             commit = Mock()
 
             def plan_preapproach(request):
+                if request.inspection_view_path is not None:
+                    raise CandidatePreapproachUnreachableError(request.candidate_uid, "local view blocked")
                 if request.approach_normal_rad is None:
                     return {"route_csv": "primary.csv"}
                 attempted_offsets.append(request.approach_offset_m)
@@ -2599,14 +2603,14 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                 )
 
             with self.assertRaisesRegex(
-                RuntimeError,
-                "no physically allowed opposite-face approach",
+                CandidateApproachIncompleteError,
+                "candidate approach incomplete",
             ):
                 execute_candidate_approach_phase(
                     config,
                     CandidateApproachEffects(
                         select_initial_preapproach=self._nearest_selection,
-                        read_current_pose=lambda: next(poses),
+                        read_current_pose=lambda: Pose2D(0.0, 0.0, 0.0),
                         run_motion_leg=self._completed,
                         capture_observation=lambda request: CandidateObservation(
                             None,
@@ -2628,6 +2632,115 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             self.assertFalse(
                 (config.session_root / "stand_facing_catalog.json").exists()
             )
+
+    def test_five_joint_qr_identities_finish_without_extra_visits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = self._config(root, tuple(self._candidate(f"candidate_{i}", 0.2 + i * 0.1, 0.0)
+                                              for i in range(5)))
+            visited = []
+            events = []
+            def capture(request):
+                visited.append(request.candidate.candidate_uid)
+                return CandidateObservation(request.output_dir / "recommendation.json",
+                                            f"QR_{request.candidate.candidate_uid}", None)
+            result = execute_candidate_approach_phase(config, CandidateApproachEffects(
+                select_initial_preapproach=self._nearest_selection,
+                read_current_pose=lambda: Pose2D(0.0, 0.0, 0.0),
+                plan_preapproach=lambda request: {"route_csv": "route.csv"},
+                run_motion_leg=self._completed, capture_observation=capture,
+                validate_facing=lambda request: {"candidate_uid": request.candidate.candidate_uid},
+                commit_decision=lambda request: None,
+                event_sink=lambda path, event: events.append(event),
+            ))
+            self.assertEqual(result.stand_count, 5)
+            self.assertEqual(len(visited), 5)
+            self.assertEqual(len(set(visited)), 5)
+            identity = load_station_identity_registry(result.identity_registry_path,
+                                                       candidate_snapshot=config.snapshot)
+            self.assertEqual(len({mapping.qr_id for mapping in identity.mappings}), 5)
+            self.assertFalse(any(event["event"] == "camera_candidate_observation_retry_pass"
+                                 for event in events))
+
+    def test_inspection_startup_reseal_reprojects_advisory_view_without_axis_authority(self):
+        from scripts.aufgabe04.navigation.approach.candidate_inspection_view import load_candidate_inspection_view
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = replace(self._config(root, (self._candidate("candidate_a", 2.0, 0.0),)),
+                             max_startup_reseals_per_leg=1,
+                             startup_reseal_motion_authorization_json=root / "startup_authorization.json")
+            config = self._write_frame_registry(config,
+                        frozen_map_from_odom=PlanarTransform2D(1.0, 0.0, 0.0))
+            final_normal = math.radians(-39)
+            final_pose = Pose2D(0.7 * math.cos(final_normal), 1 + 0.7 * math.sin(final_normal),
+                                final_normal + math.pi)
+            frames = iter((
+                CandidatePlanningFrame(Pose2D(0.0, 0.0, 0.0), PlanarTransform2D(0.0, 0.0, 0.0)),
+                CandidatePlanningFrame(Pose2D(0.3, 0.0, 0.0), PlanarTransform2D(0.0, 0.0, 0.0)),
+                CandidatePlanningFrame(Pose2D(0.3, 0.2, 0.0), PlanarTransform2D(0.0, 0.2, 0.0)),
+                CandidatePlanningFrame(Pose2D(0.3, 0.2, 0.0), PlanarTransform2D(0.0, 0.0, math.pi / 2)),
+                CandidatePlanningFrame(final_pose, PlanarTransform2D(0.0, 0.0, math.pi / 2)),
+            ))
+            view_plans, moves, replacements = [], [], []
+            progress_path = root / "progress.json"
+            progress_path.write_text("{}")
+            def plan(request):
+                if request.inspection_view_path is not None:
+                    self.assertIsNone(request.approach_normal_rad)
+                    self.assertIsNone(request.axis_observation_path)
+                    evidence = load_candidate_inspection_view(request.inspection_view_path)
+                    view_plans.append(evidence)
+                    center = evidence["stand_center"]
+                    angle = evidence["view_normal_rad"]
+                    request.output_dir.mkdir(parents=True)
+                    (request.output_dir / "pipeline_summary.json").write_text(json.dumps({
+                        "selected_approach_pose": {"x_m": center["x_m"] + 0.7 * math.cos(angle),
+                                                   "y_m": center["y_m"] + 0.7 * math.sin(angle),
+                                                   "yaw_rad": angle + math.pi}
+                    }))
+                return {"route_csv": "route.csv"}
+            def run_motion(request):
+                moves.append(request)
+                if "_inspection_" not in request.run_id:
+                    return self._completed(request)
+                return MotionLegOutcome(
+                    run_id=request.run_id, status="stopped", stop_reason="pose outside certified startup segment",
+                    stop_details={"source": "execution_route_certificate", "phase": "before_motion_confirmation",
+                                  "reason": "pose outside certified startup segment", "fail_closed": True,
+                                  "route_pose": {"x_m": 0.3, "y_m": 0.2, "yaw_rad": 0.0}},
+                    motion_published=False, returncode=1, semantic_log_path=root / "initial.jsonl",
+                )
+            def replacement(request, attempt):
+                replacements.append(request)
+                return self._completed(request)
+            def admit(path):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("{}")
+                return next(frames)
+            with patch("scripts.aufgabe04.real_robot.candidate.inspection_adapters.load_candidate_inspection_observation",
+                       return_value={"candidate_uid": "candidate_a", "planning_frame": "map",
+                                     "stand_center": {"x_m": 1.0, "y_m": 0.0},
+                                     "classification": "oblique", "qr_id": "QR_A",
+                                     "camera_relative_yaw_rad": math.radians(51)}):
+                result = execute_candidate_approach_phase(config, CandidateApproachEffects(
+                    select_initial_preapproach=self._nearest_selection, read_current_pose=lambda: final_pose,
+                    admit_planning_frame=admit, plan_preapproach=plan, run_motion_leg=run_motion,
+                    run_startup_reseal_motion_leg=replacement,
+                    capture_observation=lambda request: (CandidateObservation(None, None, None, progress_path)
+                        if request.attempt_index == 0 else CandidateObservation(request.output_dir / "recommendation.json", "QR_A", None)),
+                    validate_facing=lambda request: {"candidate_uid": request.candidate.candidate_uid},
+                    commit_decision=lambda request: None,
+                ))
+            self.assertEqual(result.stand_count, 1)
+            self.assertEqual(len(view_plans), 2)
+            self.assertAlmostEqual(view_plans[0]["view_normal_rad"], math.radians(-129))
+            self.assertAlmostEqual(view_plans[1]["view_normal_rad"], math.radians(-39))
+            self.assertAlmostEqual(view_plans[1]["stand_center"]["x_m"], 0.0)
+            self.assertAlmostEqual(view_plans[1]["stand_center"]["y_m"], 1.0)
+            self.assertIsNotNone(view_plans[1]["source_view"])
+            self.assertEqual(len(replacements), 1)
+            self.assertEqual(moves[1].mission_leg_kind, MissionLegKind.CANDIDATE_PREAPPROACH)
+            self.assertNotEqual(moves[1].run_id, replacements[0].run_id)
 
     def test_facing_validation_failure_prevents_decision_commit(self):
         with tempfile.TemporaryDirectory() as tmp:

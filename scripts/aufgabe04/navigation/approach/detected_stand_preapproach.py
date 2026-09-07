@@ -8,6 +8,12 @@ import math
 from pathlib import Path
 from typing import Mapping
 
+from scripts.aufgabe04.navigation.approach.candidate_inspection_view import (
+    INSPECTION_VIEW_BEARING_MODE,
+    load_candidate_inspection_view,
+    validate_candidate_inspection_view_binding,
+)
+
 from scripts.aufgabe04.navigation.approach.backside_axis_frame_projection import (
     BacksideAxisFrameProjection,
     load_backside_axis_planning_observation,
@@ -158,6 +164,7 @@ def validate_detected_stand_preapproach_binding(
     if bearing_mode not in {
         ROBOT_TO_STAND_BEARING_MODE,
         CAMERA_AXIS_FACE_BEARING_MODE,
+        INSPECTION_VIEW_BEARING_MODE,
     }:
         failures.append("detected stand approach bearing mode is unsupported")
     if metadata.get("physical_clearance_enforced") is not True:
@@ -311,6 +318,31 @@ def validate_detected_stand_preapproach_binding(
                         "camera-axis terminal position does not match selected face"
                     )
 
+    if bearing_mode == INSPECTION_VIEW_BEARING_MODE:
+        try:
+            from scripts.aufgabe04.navigation.foundation.models import Pose2D
+
+            view_path = Path(str(metadata.get("inspection_view_json", "")))
+            view = load_candidate_inspection_view(view_path)
+            if metadata.get("inspection_view_sha256") != file_sha256(view_path):
+                raise ValueError("inspection view file hash mismatch")
+            start = metadata["route_start_pose_provenance"]["pose"]
+            validate_candidate_inspection_view_binding(
+                view, snapshot=snapshot, candidate_uid=selected_uid,
+                start=Pose2D(**start),
+            )
+            if metadata.get("axis_observation_json") is not None:
+                raise ValueError("inspection view cannot claim certified backside axis")
+            offset = _finite_number(metadata.get("approach_offset_m"), "approach_offset_m")
+            normal = float(view["view_normal_rad"])
+            if math.hypot(
+                final.pose.x_m - selected.geometry.x_m - offset * math.cos(normal),
+                final.pose.y_m - selected.geometry.y_m - offset * math.sin(normal),
+            ) > 0.06:
+                raise ValueError("inspection terminal position differs from requested view")
+        except (OSError, TypeError, KeyError, ValueError) as exc:
+            failures.append(f"inspection view validation failed: {exc}")
+
     clearance = metadata.get("physical_clearance")
     if not isinstance(clearance, Mapping):
         failures.append("physical_clearance metadata is missing")
@@ -416,6 +448,7 @@ def seal_detected_stand_preapproach(
     if source_metadata.get("approach_bearing_mode") not in {
         ROBOT_TO_STAND_BEARING_MODE,
         CAMERA_AXIS_FACE_BEARING_MODE,
+        INSPECTION_VIEW_BEARING_MODE,
     }:
         raise ValueError("source route has an unsupported approach bearing")
     if source_metadata.get("physical_clearance_enforced") is not True:

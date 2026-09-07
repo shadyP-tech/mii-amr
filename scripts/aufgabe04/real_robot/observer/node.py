@@ -117,6 +117,13 @@ from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import (
 from scripts.aufgabe04.real_robot.observer.registration_evidence import (
     build_backside_target_registration_evidence,
 )
+from scripts.aufgabe04.artifacts.candidate_inspection_observation import (
+    build_candidate_inspection_observation,
+)
+from scripts.aufgabe04.real_robot.observer.inspection_progress import (
+    InspectionProgress,
+    classify_inspection_progress,
+)
 from scripts.aufgabe04.real_robot.readiness.sensor_timing_contract import (
     DEFAULT_MAX_CAMERA_INFO_IMAGE_SKEW_SEC,
     DEFAULT_MAX_FUTURE_TIMESTAMP_SEC,
@@ -462,11 +469,14 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             reason=reason,
         )
 
-    def _reset_observation_evidence(self) -> None:
+    def _reset_observation_evidence(self, *, reset_inspection: bool = True) -> None:
         """Drop evidence after a sealed sensor/frame contract violation."""
 
         self.observation_evidence = None
         self._last_observation_update = None
+        self._inspection_frame = None
+        if reset_inspection:
+            self._inspection_progress = None
 
     def _reset_qr_marker_epoch(self) -> None:
         """Forget marker presence only after leaving its stationary epoch."""
@@ -499,6 +509,17 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             qr_texts=qr_texts,
         )
         self._last_observation_update = update
+        self._inspection_frame = {
+            "frame_stamp_sec": image_stamp_sec,
+            "robot_pose": asdict(robot_pose),
+            "frame_accepted": update.frame_accepted,
+            "poisoned": update.snapshot.poisoned,
+            "current_qr_id": update.resolved_qr_id,
+            "current_qr_sample_count": update.snapshot.current_qr_sample_count,
+            "motion_epoch_reset": update.motion_epoch_reset,
+            "axis_sample_accepted": update.axis_sample_accepted,
+            "qr_sample_accepted": update.qr_sample_accepted,
+        }
         return update
 
     def _lookup(self, target_frame: str, source_frame: str, stamp) -> object:
@@ -1080,8 +1101,12 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             "profile": asdict(resolved_stand_axis_profile),
             "estimator_mode": "metric_model_only",
             "estimator_usable": estimate.usable,
+            "estimator_view_mode": estimate.mode,
             "estimator_reason": estimate.reason,
             "estimator_source": estimate.source,
+            "advisory_camera_relative_yaw_rad": (
+                None if estimate.yaw_deg is None else math.radians(estimate.yaw_deg)
+            ),
             "metric_model": model_metadata,
             "preliminary_candidate_lidar_association": asdict(
                 preliminary_lidar_association
@@ -1099,7 +1124,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 # intermittently visible, undecoded front marker form one
                 # consensus. The marker latch separately prevents a later
                 # backside artifact in this stationary epoch.
-                self._reset_observation_evidence()
+                self._reset_observation_evidence(reset_inspection=False)
         if qr_texts and estimate.source == BACKSIDE_AXIS_SAMPLE_SOURCE:
             self._reset_observation_evidence()
             self._write_debug(frame, roi_frame, debug, metadata=axis_metadata)
@@ -1685,7 +1710,81 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             },
         )
 
+    def _maybe_commit_inspection_progress(self, state: str, details: dict):
+        """Publish a third, advisory result only after stronger paths declined."""
+
+        output = getattr(self.args, "inspection_observation_json", None)
+        if output is None or getattr(self, "completed", False):
+            return None
+        current = getattr(self, "_inspection_frame", None)
+        # Each processed tuple can be consumed by exactly its immediate
+        # status publication. A later TF/sensor/motion status cannot reuse it.
+        self._inspection_frame = None
+        axis_sample_accepted = qr_sample_accepted = False
+        if current is not None:
+            current = dict(current)
+            axis_sample_accepted = current.pop("axis_sample_accepted", False)
+            qr_sample_accepted = current.pop("qr_sample_accepted", False)
+        if state not in {
+            "metric_model_measurement_unavailable", "evidence_not_committable",
+            "axis_observation_not_committable", "collecting_consensus",
+        }:
+            return None
+        if current is None:
+            return None
+        progress = getattr(self, "_inspection_progress", None)
+        if progress is None:
+            progress = InspectionProgress(
+                required_frames=getattr(self.args, "inspection_progress_frames", 7),
+                minimum_span_sec=getattr(self.args, "inspection_progress_min_span_sec", 2.0),
+                max_age_sec=max(5.0, getattr(self.args, "inspection_progress_min_span_sec", 2.0)),
+                max_translation_m=self.args.stationary_translation_m,
+                max_rotation_rad=math.radians(self.args.stationary_rotation_deg),
+            )
+            self._inspection_progress = progress
+        fields = progress.record(
+            **current,
+            classification=classify_inspection_progress(state, details),
+        )
+        if (
+            state == "collecting_consensus" and axis_sample_accepted
+        ) or (
+            qr_sample_accepted and current.get("current_qr_sample_count", 0) < 2
+        ):
+            # Give axis acquisition its full consensus window and a new QR
+            # decode its second latch sample. Keep epoch poison/identity while
+            # clearing earlier failure timing, so recovery cannot hide conflict.
+            progress.restart_acquisition_window()
+            return None
+        if state == "collecting_consensus":
+            return None
+        if fields is None:
+            return None
+        payload = build_candidate_inspection_observation(
+            candidate_uid=self.args.stand_id,
+            stream_id=self.args.stream_id,
+            planning_frame=self.profile.map_frame,
+            stand_center={"x_m": self.args.stand_x, "y_m": self.args.stand_y},
+            robot_profile_sha256=real_robot_profile_sha256(self.profile),
+            calibration_profile_sha256=camera_calibration_sha256(self.calibration),
+            stand_model_profile_sha256=self.stand_model_profile.sha256,
+            **fields,
+        )
+        _atomic_json(output, payload)
+        self.completed = True
+        return payload
+
     def _write_status(self, state: str, **details) -> None:
+        progress = self._maybe_commit_inspection_progress(state, details)
+        if progress is not None:
+            details = {
+                **details,
+                "inspection_observation": str(self.args.inspection_observation_json),
+                "inspection_classification": progress["classification"],
+                "inspection_observation_sha256": progress["inspection_observation_sha256"],
+                "preceding_state": state,
+            }
+            state = "inspection_progress_committed"
         observation_evidence = getattr(self, "observation_evidence", None)
         stand_model = getattr(self, "stand_model_profile", None)
         if observation_evidence is not None:
@@ -1910,6 +2009,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--status-events-jsonl", type=Path, default=None)
     parser.add_argument("--recommended-pose-json", required=True, type=Path)
     parser.add_argument("--axis-observation-json", type=Path, default=None)
+    parser.add_argument("--inspection-observation-json", type=Path, default=None)
+    parser.add_argument("--inspection-progress-frames", type=int, default=7)
+    parser.add_argument("--inspection-progress-min-span-sec", type=float, default=2.0)
     parser.add_argument("--debug-dir", type=Path, default=None)
     parser.add_argument("--once", action="store_true")
     return parser
@@ -2003,6 +2105,10 @@ def _validate_args(parser: argparse.ArgumentParser, args) -> None:
         parser.error("--stand-uncertainty-m must be non-negative")
     if args.consensus_frames < 2:
         parser.error("--consensus-frames must be at least two")
+    if args.inspection_progress_frames < 7:
+        parser.error("--inspection-progress-frames must be at least seven")
+    if not math.isfinite(args.inspection_progress_min_span_sec) or args.inspection_progress_min_span_sec < 2.0:
+        parser.error("--inspection-progress-min-span-sec must be at least two seconds")
     nominal_consensus_span_sec = (
         args.consensus_frames - 1
     ) / args.process_rate_hz
@@ -2026,6 +2132,8 @@ def _validate_args(parser: argparse.ArgumentParser, args) -> None:
         output_paths.append(args.status_events_jsonl.resolve())
     if args.axis_observation_json is not None:
         output_paths.append(args.axis_observation_json.resolve())
+    if args.inspection_observation_json is not None:
+        output_paths.append(args.inspection_observation_json.resolve())
     if len(set(output_paths)) != len(output_paths):
         parser.error(
             "status, status events, recommendation, and axis outputs must "

@@ -92,6 +92,77 @@ def _bound_backside_axis_payload(model_path: Path) -> dict[str, object]:
 
 class AutonomousCameraCaptureTests(unittest.TestCase):
     @patch.object(runtime.subprocess, "Popen")
+    @patch.object(runtime, "monitor_passive_observer_process")
+    @patch.object(runtime, "real_robot_profile_sha256", return_value="b" * 64)
+    @patch.object(runtime, "load_bound_camera_inspection")
+    def test_intermediate_inspection_is_bound_after_child_reap(
+        self, load_bound, profile_hash, monitor, popen
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model_path = _write_measured_model(root)
+            output = root / "attempt"
+            inspection_path = output / "inspection_observation.json"
+            monitor.return_value = PassiveObserverProcessEvidence(
+                completion_kind="artifact",
+                artifact_kind="inspection_observation",
+                artifact_path=inspection_path,
+                deadline_expired=False,
+                returncode=0,
+                cleanup_actions=("graceful_wait",),
+                signals_sent=(),
+            )
+
+            def inspect_after_reap(*args, **kwargs):
+                self.assertEqual(monitor.call_count, 1)
+                self.assertTrue((output / "observer_process.json").exists())
+                return {"qr_id": "QR_001", "completion_authorized": False}
+
+            load_bound.side_effect = inspect_after_reap
+            result = runtime._capture_camera_recommendation(
+                profile=SimpleNamespace(
+                    map_frame="map", calibration_profile_sha256="c" * 64
+                ),
+                args=_args(model_path), candidate=_candidate(), output_dir=output,
+            )
+            self.assertEqual(result, (None, "QR_001", None, inspection_path))
+            bound = load_bound.call_args.kwargs
+            self.assertEqual(bound["candidate_uid"], _candidate().candidate_uid)
+            self.assertEqual(bound["stream_id"], "session_001_survey_candidate_0004")
+            self.assertEqual(bound["stand_x_m"], 1.2)
+            self.assertEqual(bound["stand_y_m"], -0.3)
+            self.assertEqual(bound["robot_profile_sha256"], "b" * 64)
+            self.assertEqual(bound["calibration_profile_sha256"], "c" * 64)
+            self.assertEqual(
+                bound["stand_model_profile_sha256"],
+                load_measured_physical_stand_model(model_path).sha256,
+            )
+            self.assertEqual(
+                monitor.call_args.kwargs["inspection_observation_path"],
+                inspection_path,
+            )
+            self.assertIn("--inspection-observation-json", popen.call_args.args[0])
+
+    @patch.object(runtime, "_capture_camera_recommendation")
+    def test_capture_adapter_preserves_inspection_path_and_legacy_success(self, capture):
+        request = SimpleNamespace(candidate=_candidate(), output_dir=Path("out"), attempt_index=2)
+        for result in (
+            (Path("recommendation.json"), "QR_004", None),
+            (None, "QR_001", None, Path("inspection.json")),
+        ):
+            with self.subTest(result=result):
+                capture.return_value = result
+                observation = runtime._capture_candidate_observation(
+                    profile=object(), args=object(), request=request
+                )
+                self.assertEqual(observation.recommendation_path, result[0])
+                self.assertEqual(observation.qr_id, result[1])
+                self.assertEqual(
+                    observation.inspection_observation_path,
+                    result[3] if len(result) == 4 else None,
+                )
+
+    @patch.object(runtime.subprocess, "Popen")
     def test_missing_model_fails_before_attempt_artifacts_or_process(
         self,
         popen,

@@ -44,6 +44,12 @@ loaded logistics mission or a two-robot run; see
 | `real_robot/coverage_leg/execution.py` | Run the bounded per-leg coverage retry/reseal state machine behind injected ROS and child-process effects | None; delegates any authorized motion to the existing child runner |
 | `real_robot/mission/coverage.py` | Commit each completed coverage leg as one ordered observe/fuse/checkpoint transaction and gate candidate materialization | None; cannot execute a leg itself |
 | `real_robot/candidate/approach.py` | Order frozen candidates, orchestrate sealed pre-approach/opposite-face inspection, and publish validated identity/facing artifacts behind injected live effects | None; cannot sample ROS, prompt, launch a process, or publish motion itself |
+| `real_robot/candidate/inspection_policy.py` | Retain candidate inspection progress and prioritize novel viewing directions within a finite budget | None |
+| `real_robot/candidate/inspection_execution.py` | Finish bounded local inspection views before returning to candidate selection | None; injected planning and existing child execution effects only |
+| `artifacts/candidate_inspection_observation.py` | Validate hashed intermediate camera evidence without granting axis, completion, or motion authority | None |
+| `real_robot/observer/inspection_progress.py` | Accumulate distinct stationary associated frames and classify unresolved views | None |
+| `navigation/approach/candidate_inspection_view.py` | Bind a proposed search view to its target, current snapshot, start, direction, and source evidence | None |
+| `perception/stand_axis/model_backside_topology.py` | Recover low-contrast boundary proposals through a bounded fallback while preserving strict downstream measurement checks | None |
 | `real_robot/observer/node.py` | Synchronize image, scan, and exact-time TF; rectify the image; validate measured-model, LiDAR, and QR evidence | None |
 | `real_robot/entrypoints/run_autonomous_stand_exploration.py` | Wire CLI/profile/operator authorization to the focused coverage, child-runner, and inspection modules | Dry-run by default; explicit physical gate |
 | `real_robot/passive_survey/prepare.py` | Produce immutable per-candidate observer and catalog-validation commands | None |
@@ -54,6 +60,42 @@ The shared `plan_synchronized_viewpoint.py` accepts
 `--environment real --workflow-mode survey-only`. In real mode it cannot watch
 or generate a dynamic motion route. It only validates an already committed
 passive recommendation and updates the shared arrival catalog.
+
+### Candidate-local camera inspection
+
+The camera phase stays with one candidate while acquiring its QR-facing view.
+`--max-candidate-inspection-views` bounds the views for each candidate, including
+the initial view; the default is eight and the accepted range is 1–16. The
+legacy `--max-camera-observation-attempts-per-candidate` remains parseable, but
+does not request another tour of the same unsuccessful camera views.
+
+A committed QR/axis recommendation completes the observation. A validated
+backside-axis receipt selects the existing opposite-face approach. Other
+observations can produce `inspection_observation.json`: a target-bound,
+non-authorizing account of a readable or unreadable front, an oblique or
+edge-on view, an unresolved backside, or unavailable geometry. QR identity
+progress and advisory camera angles are distinct from accepted axis consensus.
+Missing QR text alone does not establish a backside.
+
+The inspection policy uses measured-angle hypotheses and viewing-direction
+history to propose another view of the same stand. Each move requires fresh
+planning geometry, a sealed route, uncertainty preflight, and a unique motion
+permit through the existing sole motion owner. A bearing-only arrival miss
+triggers a bounded certified reapproach and recheck before camera inspection;
+the 3-degree gate remains unchanged. Pure zero-length rotation routes are not
+introduced by this workflow.
+
+Progress retains achieved views, provisional QR identities, and failed view
+plans. A candidate that exhausts its local budget remains explicitly unresolved
+instead of restarting an identical camera tour. Mission success still requires
+the expected five unique candidate–QR identities and the existing validated
+axis/facing evidence. Intermediate inspection receipts cannot satisfy that
+completion contract or carry axis consensus across robot motion.
+
+The passive observer yields intermediate progress only after at least seven
+distinct accepted frames spanning two seconds in a stationary sensor epoch.
+Normal QR/axis or backside completion takes precedence. Sensor, localization,
+artifact, and route failures retain their existing fail-closed behavior.
 
 ## 1. Inspect the Live ROS Interface
 

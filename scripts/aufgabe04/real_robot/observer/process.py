@@ -19,7 +19,7 @@ import time
 from typing import Callable, Literal, Protocol
 
 
-ObserverArtifactKind = Literal["recommendation", "axis_observation"]
+ObserverArtifactKind = Literal["recommendation", "axis_observation", "inspection_observation"]
 ObserverCompletionKind = Literal["artifact", "deadline", "child_exit"]
 ObserverCleanupAction = Literal[
     "exit_observed",
@@ -132,6 +132,7 @@ def _detect_artifact(
     *,
     recommendation_path: Path,
     axis_observation_path: Path,
+    inspection_observation_path: Path | None = None,
 ) -> _DetectedArtifact | None:
     # A recommendation is the richer terminal result when both files become
     # visible between polls.  The axis-only file remains a valid completion.
@@ -139,6 +140,8 @@ def _detect_artifact(
         return _DetectedArtifact("recommendation", recommendation_path)
     if axis_observation_path.exists():
         return _DetectedArtifact("axis_observation", axis_observation_path)
+    if inspection_observation_path is not None and inspection_observation_path.exists():
+        return _DetectedArtifact("inspection_observation", inspection_observation_path)
     return None
 
 
@@ -272,6 +275,7 @@ def monitor_passive_observer_process(
     recommendation_path: Path,
     axis_observation_path: Path,
     timeout_sec: float,
+    inspection_observation_path: Path | None = None,
     poll_interval_sec: float = 0.1,
     graceful_wait_timeout_sec: float = 3.0,
     sigint_wait_timeout_sec: float = 5.0,
@@ -330,6 +334,7 @@ def monitor_passive_observer_process(
         artifact = _detect_artifact(
             recommendation_path=recommendation,
             axis_observation_path=axis_observation,
+            inspection_observation_path=inspection_observation_path,
         )
         if artifact is not None:
             completion_kind = "artifact"
@@ -342,6 +347,7 @@ def monitor_passive_observer_process(
             artifact = _detect_artifact(
                 recommendation_path=recommendation,
                 axis_observation_path=axis_observation,
+                inspection_observation_path=inspection_observation_path,
             )
             completion_kind = "artifact" if artifact is not None else "child_exit"
             break
@@ -353,6 +359,7 @@ def monitor_passive_observer_process(
             artifact = _detect_artifact(
                 recommendation_path=recommendation,
                 axis_observation_path=axis_observation,
+                inspection_observation_path=inspection_observation_path,
             )
             completion_kind = "artifact" if artifact is not None else "deadline"
             break

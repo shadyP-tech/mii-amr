@@ -113,6 +113,10 @@ from scripts.aufgabe04.real_robot.configuration.profile import (
     camera_calibration_sha256,
     load_camera_calibration,
     load_real_robot_profile,
+    real_robot_profile_sha256,
+)
+from scripts.aufgabe04.real_robot.autonomous_runner.camera_inspection_binding import (
+    load_bound_camera_inspection,
 )
 from scripts.aufgabe04.real_robot.configuration.site_contract import (
     validate_physical_site_contract,
@@ -1413,7 +1417,10 @@ def _capture_camera_recommendation(
     candidate,
     output_dir: Path,
     observation_attempt_index: int = 0,
-) -> tuple[Path | None, str | None, Path | None]:
+) -> (
+    tuple[Path | None, str | None, Path | None]
+    | tuple[None, str | None, None, Path]
+):
     if args.stand_model_profile is None:
         raise RuntimeError(
             "camera exploration requires a measured physical stand model"
@@ -1430,6 +1437,7 @@ def _capture_camera_recommendation(
     process_evidence_path = output_dir / "observer_process.json"
     recommendation_path = output_dir / "recommendation.json"
     axis_observation_path = output_dir / "axis_observation.json"
+    inspection_observation_path = output_dir / "inspection_observation.json"
     command = [
         sys.executable,
         "scripts/aufgabe04/real_robot/entrypoints/passive_viewpoint_node.py",
@@ -1465,6 +1473,8 @@ def _capture_camera_recommendation(
         str(recommendation_path),
         "--axis-observation-json",
         str(axis_observation_path),
+        "--inspection-observation-json",
+        str(inspection_observation_path),
         "--debug-dir",
         str(output_dir / "perception_debug"),
         "--once",
@@ -1480,6 +1490,7 @@ def _capture_camera_recommendation(
         process=process,
         recommendation_path=recommendation_path,
         axis_observation_path=axis_observation_path,
+        inspection_observation_path=inspection_observation_path,
         timeout_sec=args.camera_timeout_sec,
     )
     write_content_hashed_json(
@@ -1487,6 +1498,19 @@ def _capture_camera_recommendation(
         process_evidence.to_dict(),
         hash_field="observer_process_evidence_sha256",
     )
+    if process_evidence.artifact_kind == "inspection_observation":
+        inspection = load_bound_camera_inspection(
+            inspection_observation_path,
+            candidate_uid=candidate.candidate_uid,
+            stream_id=f"{args.session_id}_{candidate.candidate_uid}",
+            planning_frame=profile.map_frame,
+            stand_x_m=float(candidate.geometry.x_m),
+            stand_y_m=float(candidate.geometry.y_m),
+            stand_model_profile_sha256=stand_model.sha256,
+            robot_profile_sha256=real_robot_profile_sha256(profile),
+            calibration_profile_sha256=profile.calibration_profile_sha256,
+        )
+        return None, inspection["qr_id"], None, inspection_observation_path
     if process_evidence.artifact_kind == "axis_observation":
         _validate_captured_backside_axis_binding(
             axis_observation_path=axis_observation_path,
@@ -1806,20 +1830,14 @@ def _capture_candidate_observation(
 ) -> CandidateObservation:
     """Adapt the passive observer process to the typed candidate boundary."""
 
-    recommendation_path, qr_id, axis_observation_path = (
-        _capture_camera_recommendation(
-            profile=profile,
-            args=args,
-            candidate=request.candidate,
-            output_dir=request.output_dir,
-            observation_attempt_index=request.attempt_index,
-        )
+    result = _capture_camera_recommendation(
+        profile=profile,
+        args=args,
+        candidate=request.candidate,
+        output_dir=request.output_dir,
+        observation_attempt_index=request.attempt_index,
     )
-    return CandidateObservation(
-        recommendation_path=recommendation_path,
-        qr_id=qr_id,
-        axis_observation_path=axis_observation_path,
-    )
+    return CandidateObservation(*result)
 
 
 from .cli import (
@@ -1888,6 +1906,8 @@ def _validate_inputs(parser, args, profile, calibration) -> None:
         parser.error(
             "--max-camera-observation-attempts-per-candidate must be positive"
         )
+    if not 1 <= args.max_candidate_inspection_views <= 16:
+        parser.error("--max-candidate-inspection-views must be between 1 and 16")
     if args.max_route_admission_attempts_per_candidate < 1:
         parser.error(
             "--max-route-admission-attempts-per-candidate must be positive"
@@ -2766,6 +2786,9 @@ def main(argv=None) -> int:
                 ),
                 max_camera_observation_attempts_per_candidate=(
                     args.max_camera_observation_attempts_per_candidate
+                ),
+                max_candidate_inspection_views=(
+                    args.max_candidate_inspection_views
                 ),
                 max_route_admission_attempts_per_candidate=(
                     args.max_route_admission_attempts_per_candidate

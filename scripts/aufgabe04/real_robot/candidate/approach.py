@@ -16,6 +16,16 @@ from pathlib import Path
 import time
 from typing import Callable, Mapping
 
+from scripts.aufgabe04.navigation.approach.candidate_inspection_view import (
+    load_candidate_inspection_view, write_candidate_inspection_view,
+)
+from scripts.aufgabe04.real_robot.candidate.inspection_execution import (
+    CandidateInspectionRouteUnavailableError,
+)
+from scripts.aufgabe04.real_robot.candidate.inspection_policy import (
+    novel_view, validate_inspection_budget,
+)
+
 from scripts.aufgabe04.artifacts.content_store import write_content_hashed_json
 from scripts.aufgabe04.navigation.approach.backside_axis_frame_projection import (
     load_backside_axis_planning_observation,
@@ -208,6 +218,7 @@ class CandidateApproachConfig:
     require_uncertainty_aware_selection: bool = False
     camera_arrival_max_bearing_error_rad: float = math.radians(3.0)
     camera_arrival_range_slack_m: float = 0.20
+    max_candidate_inspection_views: int = 8
 
 
 @dataclass(frozen=True)
@@ -228,6 +239,7 @@ class CandidatePreapproachRequest:
     axis_observation_path: Path | None = None
     prepared_plan: CandidatePreapproachPlan | None = None
     selection_evidence: Mapping[str, object] | None = None
+    inspection_view_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -277,6 +289,7 @@ class CandidateObservation:
     recommendation_path: Path | None
     qr_id: str | None
     axis_observation_path: Path | None
+    inspection_observation_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -306,6 +319,7 @@ class _CandidateObservationFrame:
     candidate: FrozenCandidate
     planning_frame: CandidatePlanningFrame | None
     decision_binding: CameraCandidateFrameBinding | None
+    observation_pose: Pose2D | None = None
 
 
 @dataclass(frozen=True)
@@ -803,6 +817,7 @@ def _plan_preapproach_from_request(
         axis_observation_path=request.axis_observation_path,
         prepared_plan=request.prepared_plan,
         selection_evidence=request.selection_evidence,
+        inspection_view_path=request.inspection_view_path,
     )
 
 
@@ -1326,6 +1341,7 @@ def _execute_candidate_motion(
         replacement_snapshot_path = plan_request.snapshot_path
         approach_normal_rad = plan_request.approach_normal_rad
         axis_evidence_path = plan_request.axis_observation_path
+        inspection_view_path = plan_request.inspection_view_path
         if fresh_planning_frame is not None:
             if frame_source_config is None or source_registry is None:
                 raise RuntimeError(
@@ -1376,6 +1392,22 @@ def _execute_candidate_motion(
                         projected_axis_path
                     ).opposite_face_normal_rad
                 )
+        if inspection_view_path is not None:
+            old_view = load_candidate_inspection_view(inspection_view_path)
+            normal = float(old_view["view_normal_rad"])
+            if fresh_planning_frame is not None:
+                if plan_planning_frame is None:
+                    raise RuntimeError("inspection recovery lacks source planning frame")
+                normal += (fresh_planning_frame.map_from_odom.yaw_rad
+                           - plan_planning_frame.map_from_odom.yaw_rad)
+            replacement_view_path = source_root / "inspection_view_frame_projection.json"
+            write_candidate_inspection_view(
+                replacement_view_path, snapshot=replacement_snapshot,
+                candidate_uid=plan_request.candidate_uid, start=fresh_start_pose,
+                view_normal_rad=normal, purpose=str(old_view["purpose"]),
+                view_index=int(old_view["view_index"]), source_view_path=inspection_view_path,
+            )
+            inspection_view_path = replacement_view_path
         return replacement_config, replace(
             plan_request,
             start=fresh_start_pose,
@@ -1384,6 +1416,7 @@ def _execute_candidate_motion(
             snapshot_path=replacement_snapshot_path,
             approach_normal_rad=approach_normal_rad,
             axis_observation_path=axis_evidence_path,
+            inspection_view_path=inspection_view_path,
             prepared_plan=None,
             selection_evidence=None,
         )
@@ -1519,35 +1552,19 @@ def _execute_candidate_motion(
     )
 
 
-def _capture_candidate_camera_result(
+def _move_certified_opposite_face(
     *,
     observation_frame: _CandidateObservationFrame,
+    observation: CandidateObservation,
     source_config: CandidateApproachConfig,
     effects: CandidateApproachEffects,
     source_registry: StandSurveyRegistry | None,
     candidate_root: Path,
     candidate_run_id: str,
     candidate_index: int,
-) -> tuple[CandidateObservation, _CandidateObservationFrame]:
-    """Resolve one candidate behind the bounded direct/opposite-face policy.
-
-    Observation availability failures stay typed so the parent state machine
-    can defer this candidate only after the passive child has been reaped.
-    Route, localization, motion, and artifact-integrity failures remain
-    terminal and are deliberately not caught here.
-    """
-
-    observation = effects.capture_observation(
-        CandidateObservationRequest(
-            candidate=observation_frame.candidate,
-            output_dir=candidate_root / "camera_lidar_attempt_00",
-            attempt_index=0,
-        )
-    )
-    if observation.recommendation_path is not None:
-        return observation, observation_frame
-    if observation.axis_observation_path is None:
-        raise RuntimeError("observer returned neither QR recommendation nor axis")
+    observed_view_normals: tuple[float, ...] = (),
+) -> _CandidateObservationFrame:
+    """Execute the unchanged certified backside-to-opposite-face motion contract."""
 
     source_axis_evidence_path = observation.axis_observation_path
     opposite_normal = opposite_face_normal(source_axis_evidence_path)
@@ -1600,6 +1617,13 @@ def _capture_candidate_camera_result(
         opposite_normal = load_backside_axis_planning_observation(
             axis_planning_evidence_path
         ).opposite_face_normal_rad
+    canonical_opposite = opposite_normal - (
+        0.0 if opposite_planning_frame is None else opposite_planning_frame.map_from_odom.yaw_rad
+    )
+    if not novel_view(canonical_opposite, list(observed_view_normals)):
+        raise CandidateInspectionRouteUnavailableError(
+            "certified opposite face repeats a previously inspected direction"
+        )
     opposite_source_root = candidate_root / "opposite_face_source"
     opposite_motion_outcome = None
     feasibility_failures = []
@@ -1640,6 +1664,18 @@ def _capture_candidate_camera_result(
                 axis_observation_path=axis_planning_evidence_path,
             )
             opposite_sealed = effects.plan_preapproach(opposite_plan_request)
+            summary_path = opposite_plan_request.output_dir / "pipeline_summary.json"
+            if summary_path.is_file():
+                goal = json.loads(summary_path.read_text())["selected_approach_pose"]
+                achieved_normal = math.atan2(
+                    goal["y_m"] - candidate.geometry.y_m,
+                    goal["x_m"] - candidate.geometry.x_m,
+                ) - (0.0 if opposite_planning_frame is None else
+                     opposite_planning_frame.map_from_odom.yaw_rad)
+                if not novel_view(achieved_normal, list(observed_view_normals)):
+                    raise CandidateInspectionRouteUnavailableError(
+                        "quantized opposite-face goal repeats an observed view"
+                    )
         except ValueError as exc:
             if not is_approach_feasibility_failure(exc):
                 raise
@@ -1728,7 +1764,7 @@ def _capture_candidate_camera_result(
             )
             continue
     if opposite_motion_outcome is None and not uncertainty_failures:
-        raise RuntimeError(
+        raise CandidateInspectionRouteUnavailableError(
             "no physically allowed opposite-face approach was A*-reachable: "
             + "; ".join(feasibility_failures)
         )
@@ -1749,7 +1785,7 @@ def _capture_candidate_camera_result(
                 "fail_closed": True,
             },
         )
-        raise RuntimeError(
+        raise CandidateInspectionRouteUnavailableError(
             "no opposite-face approach passed no-motion route-uncertainty "
             f"dry preflight: {details}"
         )
@@ -1761,19 +1797,34 @@ def _capture_candidate_camera_result(
         candidate_root=candidate_root,
         observation_attempt_index=1,
     )
-    observation = effects.capture_observation(
-        CandidateObservationRequest(
-            candidate=opposite_arrival_frame.candidate,
-            output_dir=candidate_root / "camera_lidar_attempt_01",
-            attempt_index=1,
-        )
+    return opposite_arrival_frame
+
+
+def _capture_candidate_camera_result(
+    *, observation_frame: _CandidateObservationFrame,
+    source_config: CandidateApproachConfig, effects: CandidateApproachEffects,
+    source_registry: StandSurveyRegistry | None, candidate_root: Path,
+    candidate_run_id: str, candidate_index: int,
+) -> tuple[CandidateObservation, _CandidateObservationFrame]:
+    """Adapt the bounded local controller to existing certified route effects."""
+
+    from scripts.aufgabe04.real_robot.candidate.inspection_adapters import (
+        execute_local_candidate_inspection,
     )
-    if observation.recommendation_path is None:
-        raise RuntimeError(
-            "QR side remained unresolved after opposite-face inspection for "
-            f"{candidate.candidate_uid}"
-        )
-    return observation, opposite_arrival_frame
+
+    return execute_local_candidate_inspection(
+        observation_frame=observation_frame, source_config=source_config,
+        effects=effects, source_registry=source_registry,
+        candidate_root=candidate_root, candidate_run_id=candidate_run_id,
+        candidate_index=candidate_index,
+        admit_arrival=_admit_camera_arrival_geometry,
+        admit_planning=_admit_opposite_face_planning_geometry,
+        move_certified_opposite=_move_certified_opposite_face,
+        execute_motion=_execute_candidate_motion,
+        frame_type=_CandidateObservationFrame,
+        request_type=CandidatePreapproachRequest,
+        observation_request_type=CandidateObservationRequest,
+    )
 
 
 def execute_candidate_approach_phase(
@@ -1782,6 +1833,7 @@ def execute_candidate_approach_phase(
 ) -> CandidateApproachComplete:
     """Execute the post-coverage candidate state machine behind live effects."""
 
+    validate_inspection_budget(config.max_candidate_inspection_views)
     exact_two_support_by_uid = validate_candidate_approach_handoff(config)
     source_registry = (
         None
@@ -1798,9 +1850,9 @@ def execute_candidate_approach_phase(
     candidate_index = 0
     observation_ledger = CandidateObservationDeferralLedger(
         unresolved,
-        max_attempts_per_candidate=(
-            config.max_camera_observation_attempts_per_candidate
-        ),
+        # A candidate now owns its bounded local inspection episode. It is
+        # never sent through another global tour after that episode exhausts.
+        max_attempts_per_candidate=1,
     )
     route_admission_ledger = CandidateRouteAdmissionDeferralLedger(
         unresolved,
@@ -2094,13 +2146,10 @@ def execute_candidate_approach_phase(
         if observation_selection != observation_selection_preview:
             raise RuntimeError("candidate observation selection changed after motion")
         try:
-            observation_frame = _admit_camera_arrival_geometry(
-                source_config=config,
-                effects=effects,
-                source_registry=source_registry,
-                candidate_uid=candidate.candidate_uid,
-                candidate_root=candidate_root,
-                observation_attempt_index=0,
+            observation_frame = _CandidateObservationFrame(
+                config=planning_config, candidate=candidate,
+                planning_frame=selection_planning_frame,
+                decision_binding=None, observation_pose=current,
             )
             observation, observation_frame = (
                 _capture_candidate_camera_result(

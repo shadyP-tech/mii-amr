@@ -11,6 +11,10 @@ import math
 from pathlib import Path
 from typing import Mapping
 
+from scripts.aufgabe04.navigation.approach.candidate_inspection_view import (
+    INSPECTION_VIEW_BEARING_MODE,
+)
+
 from scripts.aufgabe04.navigation.approach.candidate_goal_cell_selection import (
     NoSafetyRankedGoalRouteError,
     plan_safety_ranked_quantized_goal,
@@ -129,6 +133,7 @@ def compute_candidate_preapproach_plan(
     candidate_transit_radius_m: float,
     physical_clearance: Mapping[str, float],
     approach_normal_rad: float | None = None,
+    inspection_view_normal_rad: float | None = None,
     planning_context: CandidatePlanningContext | None = None,
 ) -> CandidatePreapproachPlan:
     """Compute the exact route used for both candidate scoring and sealing."""
@@ -151,7 +156,14 @@ def compute_candidate_preapproach_plan(
     if snapshot.map_bundle_sha256 != plan.map_bundle_sha256:
         raise ValueError("candidate snapshot map differs from coverage plan")
 
-    if approach_normal_rad is None:
+    if approach_normal_rad is not None and inspection_view_normal_rad is not None:
+        raise ValueError("inspection view and certified face normal are exclusive")
+    if inspection_view_normal_rad is not None:
+        if not math.isfinite(inspection_view_normal_rad):
+            raise ValueError("inspection view normal must be finite")
+        bearing = normalize_angle(inspection_view_normal_rad + math.pi)
+        bearing_mode = INSPECTION_VIEW_BEARING_MODE
+    elif approach_normal_rad is None:
         bearing = math.atan2(
             candidate.geometry.y_m - start.y_m,
             candidate.geometry.x_m - start.x_m,

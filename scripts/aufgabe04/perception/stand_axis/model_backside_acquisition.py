@@ -35,6 +35,9 @@ from scripts.aufgabe04.perception.stand_axis.head_candidates import (
     _head_first_face_from_edges,
     _short_centered_neck_support,
 )
+from scripts.aufgabe04.perception.stand_axis.model_backside_topology import (
+    backside_topology_proposal_batches,
+)
 from scripts.aufgabe04.perception.stand_axis.model_profile import (
     StandModelProfile,
 )
@@ -44,7 +47,6 @@ from scripts.aufgabe04.perception.stand_axis.models import (
     StandAxisImageEstimate,
 )
 from scripts.aufgabe04.perception.stand_axis.preprocessing import (
-    _edge_topology_hypotheses,
     _topology_edges_from_frame,
     _topology_supported_measurement_edges,
 )
@@ -280,13 +282,6 @@ def estimate_stand_axis_from_model_backside(
         canny_high=canny_high,
         fallback_edges=crop_raw_edges,
     )
-    topology_hypotheses = _edge_topology_hypotheses(
-        cv2,
-        topology_seed,
-        close_kernel=3,
-        close_iterations=1,
-        include_gap_recovery=True,
-    )
     model_aspect = (
         float(camera_fx_px)
         / float(camera_fy_px)
@@ -301,95 +296,105 @@ def estimate_stand_axis_from_model_backside(
         )
 
     candidate_records = []
-    for topology in topology_hypotheses:
-        measurement = _topology_supported_measurement_edges(
-            cv2,
-            crop_raw_edges,
-            topology,
-            min_edge_height_px=min_edge_height_px,
-        )
-        candidate = _head_first_face_from_edges(
-            cv2,
-            topology,
-            measurement_edges=measurement,
-            min_edge_height_px=min_edge_height_px,
-            min_aspect_ratio=(
-                MIN_NORMALIZED_PROJECTED_ASPECT * model_aspect
-            ),
-            max_aspect_ratio=(
-                MAX_NORMALIZED_PROJECTED_ASPECT * model_aspect
-            ),
-            fixed_parallel_side_direction=None,
-            bounded_endpoint_recovery=True,
-        )
-        if candidate is None or not candidate.rectangle_fit_reliable:
-            continue
-        local_corners = order_corners(candidate.corners)
-        support = _quadrilateral_edge_support(
-            cv2,
-            candidate.face_mask,
-            local_corners,
-        )
-        short_neck_supported = _short_centered_neck_support(
-            measurement,
-            local_corners,
-        )
-        top_left, top_right, bottom_right, bottom_left = local_corners
-        head_width = (
-            _distance(top_left, top_right)
-            + _distance(bottom_left, bottom_right)
-        ) / 2.0
-        head_height = _mean_head_height(local_corners)
-        head_center_u = sum(point.u_px for point in local_corners) / 4.0
-        head_bottom_v = (
-            bottom_left.v_px + bottom_right.v_px
-        ) / 2.0
-        stem_anchor_supported = any(
-            abs(stem_u - head_center_u) <= 0.20 * head_width
-            and abs(stem_v - head_bottom_v) <= 0.25 * head_height
-            for stem_u, stem_v in _stem_anchor_candidates_from_edges(
+    for topology_hypotheses in backside_topology_proposal_batches(
+        cv2,
+        topology_seed,
+        crop_raw_edges,
+        edge_preprocess=edge_preprocess,
+    ):
+        for topology in topology_hypotheses:
+            measurement = _topology_supported_measurement_edges(
                 cv2,
+                crop_raw_edges,
                 topology,
                 min_edge_height_px=min_edge_height_px,
             )
-        )
-        neck_supported = short_neck_supported and stem_anchor_supported
-        global_corners = _global_corners(
-            local_corners,
-            x_offset=x0,
-            y_offset=y0,
-        )
-        observed_height = _mean_head_height(global_corners)
-        scale_ratio = observed_height / expected_height
-        observed_center_u = sum(point.u_px for point in global_corners) / 4.0
-        observed_center_v = sum(point.v_px for point in global_corners) / 4.0
-        center_error_ratio = math.hypot(
-            observed_center_u - center_u,
-            observed_center_v - center_v,
-        ) / expected_height
-        normalized_aspect = (
-            quadrilateral_aspect_ratio(global_corners) / model_aspect
-        )
-        rank = (
-            int(support.accepted and neck_supported),
-            -center_error_ratio,
-            -abs(math.log(max(scale_ratio, 1.0e-9))),
-            support.mean,
-        )
-        candidate_records.append(
-            (
-                rank,
+            candidate = _head_first_face_from_edges(
+                cv2,
                 topology,
-                measurement,
-                candidate,
-                global_corners,
-                support,
-                neck_supported,
-                scale_ratio,
-                center_error_ratio,
-                normalized_aspect,
+                measurement_edges=measurement,
+                min_edge_height_px=min_edge_height_px,
+                min_aspect_ratio=(
+                    MIN_NORMALIZED_PROJECTED_ASPECT * model_aspect
+                ),
+                max_aspect_ratio=(
+                    MAX_NORMALIZED_PROJECTED_ASPECT * model_aspect
+                ),
+                fixed_parallel_side_direction=None,
+                bounded_endpoint_recovery=True,
             )
-        )
+            if candidate is None or not candidate.rectangle_fit_reliable:
+                continue
+            local_corners = order_corners(candidate.corners)
+            support = _quadrilateral_edge_support(
+                cv2,
+                candidate.face_mask,
+                local_corners,
+            )
+            short_neck_supported = _short_centered_neck_support(
+                measurement,
+                local_corners,
+            )
+            top_left, top_right, bottom_right, bottom_left = local_corners
+            head_width = (
+                _distance(top_left, top_right)
+                + _distance(bottom_left, bottom_right)
+            ) / 2.0
+            head_height = _mean_head_height(local_corners)
+            head_center_u = sum(point.u_px for point in local_corners) / 4.0
+            head_bottom_v = (
+                bottom_left.v_px + bottom_right.v_px
+            ) / 2.0
+            stem_anchor_supported = any(
+                abs(stem_u - head_center_u) <= 0.20 * head_width
+                and abs(stem_v - head_bottom_v) <= 0.25 * head_height
+                for stem_u, stem_v in _stem_anchor_candidates_from_edges(
+                    cv2,
+                    topology,
+                    min_edge_height_px=min_edge_height_px,
+                )
+            )
+            neck_supported = short_neck_supported and stem_anchor_supported
+            global_corners = _global_corners(
+                local_corners,
+                x_offset=x0,
+                y_offset=y0,
+            )
+            observed_height = _mean_head_height(global_corners)
+            scale_ratio = observed_height / expected_height
+            observed_center_u = sum(point.u_px for point in global_corners) / 4.0
+            observed_center_v = sum(point.v_px for point in global_corners) / 4.0
+            center_error_ratio = math.hypot(
+                observed_center_u - center_u,
+                observed_center_v - center_v,
+            ) / expected_height
+            normalized_aspect = (
+                quadrilateral_aspect_ratio(global_corners) / model_aspect
+            )
+            rank = (
+                int(support.accepted and neck_supported),
+                -center_error_ratio,
+                -abs(math.log(max(scale_ratio, 1.0e-9))),
+                support.mean,
+            )
+            candidate_records.append(
+                (
+                    rank,
+                    topology,
+                    measurement,
+                    candidate,
+                    global_corners,
+                    support,
+                    neck_supported,
+                    scale_ratio,
+                    center_error_ratio,
+                    normalized_aspect,
+                )
+            )
+        # The raw-boundary recovery batch is acquisition-only. Existing
+        # filtered proposals retain their metric and pose rejection semantics.
+        if candidate_records:
+            break
 
     if not candidate_records:
         return _failure(

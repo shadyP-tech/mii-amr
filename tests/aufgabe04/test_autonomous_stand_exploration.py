@@ -648,6 +648,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         motion_targets: list[str] = []
         planning_commands: list[tuple[str, ...]] = []
         sensor_timing_phases: list[tuple[str, bool]] = []
+        current_candidate_pose = [Pose2D(0.0, 0.0, 0.0)]
 
         def record_planning_command(command):
             planning_commands.append(tuple(command))
@@ -700,6 +701,8 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 typed_run_already_issued=True,
             )
             motion_targets.append(request.target_id)
+            goal = json.loads(Path(request.sealed["test_goal_json"]).read_text())
+            current_candidate_pose[0] = Pose2D(**goal)
             return MotionLegOutcome(
                 run_id=request.run_id,
                 status="completed",
@@ -711,6 +714,28 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             )
 
         def candidate_effects_factory(**effects):
+            def plan_preapproach(request):
+                # Simulate achieved route endpoints for the wrapper's injected
+                # child. Real geometry/sealing is exercised by planner tests.
+                goal = Pose2D(0.0, 0.0, 0.0)
+                if request.inspection_view_path is not None:
+                    view = json.loads(request.inspection_view_path.read_text())
+                    normal = view["view_normal_rad"]
+                    center = view["stand_center"]
+                    goal = Pose2D(
+                        center["x_m"] + request.approach_offset_m * math.cos(normal),
+                        center["y_m"] + request.approach_offset_m * math.sin(normal),
+                        math.atan2(math.sin(normal + math.pi), math.cos(normal + math.pi)),
+                    )
+                request.output_dir.mkdir(parents=True, exist_ok=True)
+                goal_payload = {key: getattr(goal, key) for key in ("x_m", "y_m", "yaw_rad")}
+                goal_path = request.output_dir / "test_goal.json"
+                goal_path.write_text(json.dumps(goal_payload))
+                (request.output_dir / "pipeline_summary.json").write_text(json.dumps({
+                    "selected_approach_pose": goal_payload,
+                }))
+                return {"route_csv": "route.csv", "test_goal_json": str(goal_path)}
+
             def select(request):
                 self.assertIsNotNone(request.route_uncertainty_context)
                 uid = sorted(request.unresolved)[0]
@@ -750,13 +775,13 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 read_current_pose=effects["read_current_pose"],
                 admit_planning_frame=lambda _evidence_path: (
                     CandidatePlanningFrame(
-                        Pose2D(0.0, 0.0, 0.0),
+                        current_candidate_pose[0],
                         PlanarTransform2D(0.0, 0.0, 0.0),
                     )
                 ),
                 run_motion_leg=effects["run_motion_leg"],
                 capture_observation=effects["capture_observation"],
-                plan_preapproach=lambda _request: {"route_csv": "route.csv"},
+                plan_preapproach=plan_preapproach,
                 select_initial_preapproach=select,
                 load_route_uncertainty_readiness=load_route_uncertainty_readiness,
                 validate_facing=lambda request: {
@@ -813,9 +838,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 execute_coverage_mission=execute_coverage_fixture,
                 CoverageExactTwoCameraReady=FakeExactTwoCameraReady,
                 CandidateApproachEffects=candidate_effects_factory,
-                read_current_pose2d_from_amcl=lambda *_args, **_kwargs: Pose2D(
-                    0.0, 0.0, 0.0
-                ),
+                read_current_pose2d_from_amcl=lambda *_args, **_kwargs: current_candidate_pose[0],
                 _run_candidate_motion_leg=run_candidate_motion,
                 _capture_candidate_observation=capture_observation,
             ),
@@ -855,6 +878,8 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                         "0",
                         "--max-camera-observation-attempts-per-candidate",
                         str(max_attempts),
+                        "--max-candidate-inspection-views",
+                        str(max_attempts),
                         "--localization-branch-proof-id",
                         "known_start",
                         "--run-mode",
@@ -883,7 +908,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             ),
         }
 
-    def test_exact_two_wrapper_defers_local_timeout_and_completes_after_retry(self):
+    def test_exact_two_wrapper_finishes_local_retry_before_next_candidate(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = self._run_exact_two_camera_wrapper_retry_fixture(
                 Path(tmp),
@@ -894,7 +919,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             self.assertEqual(result["exit_code"], 0, result["failure"])
             self.assertEqual(
                 result["capture_order"],
-                ["candidate_a", "candidate_b", "candidate_c", "candidate_a"],
+                ["candidate_a", "candidate_a", "candidate_b", "candidate_c"],
             )
             self.assertEqual(result["motion_targets"], result["capture_order"])
             planning_command = result["planning_command"]
@@ -961,19 +986,26 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 .read_text(encoding="utf-8")
                 .splitlines()
             ]
-            self.assertTrue(
+            self.assertFalse(
                 any(
                     event.get("event")
                     == "camera_candidate_observation_deferred"
                     for event in events
                 )
             )
-            self.assertTrue(
+            self.assertFalse(
                 any(
                     event.get("event")
                     == "camera_candidate_observation_retry_pass"
                     for event in events
                 )
+            )
+            progress = json.loads((
+                session_root / "candidates/000_candidate_a/inspection_progress.json"
+            ).read_text())
+            self.assertEqual(
+                [item["outcome"] for item in progress["view_history"]],
+                ["observation_unavailable", "resolved"],
             )
             summary = json.loads(
                 (session_root / "mission_summary.json").read_text(
@@ -1970,11 +2002,32 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         self.assertEqual(args.max_startup_reseals_per_leg, 3)
         self.assertEqual(args.max_runtime_localization_reseals_per_leg, 1)
         self.assertEqual(args.max_localization_readiness_retries_per_leg, 2)
+        self.assertEqual(args.max_candidate_inspection_views, 8)
         self.assertEqual(args.uncertainty_sigma_multiplier, 2.0)
         self.assertFalse(args.prompt_for_initialpose)
         self.assertEqual(args.initialpose_prompt_window_sec, 2.0)
         self.assertFalse(resolved.stop_after_coverage)
         self.assertTrue(resolved.execute)
+
+    def test_candidate_inspection_budget_is_bounded_before_runtime(self):
+        required = [
+            "--robot-profile", "robot.json", "--camera-calibration", "camera.json",
+            "--physical-site", "site.json",
+        ]
+        for invalid in ("0", "17", "-1", "1.5"):
+            with self.subTest(invalid=invalid), redirect_stderr(StringIO()):
+                with self.assertRaises(SystemExit):
+                    build_parser().parse_args(
+                        [*required, "--max-candidate-inspection-views", invalid]
+                    )
+        for valid in (1, 8, 16):
+            with self.subTest(valid=valid):
+                self.assertEqual(
+                    build_parser().parse_args([
+                        *required, "--max-candidate-inspection-views", str(valid)
+                    ]).max_candidate_inspection_views,
+                    valid,
+                )
 
     def test_initialpose_prompt_option_is_explicit_and_non_authorizing(self):
         args = build_parser().parse_args(

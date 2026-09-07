@@ -23,6 +23,7 @@ DEFAULT_MAX_STARTUP_RESEALS_PER_LEG = 3
 DEFAULT_MAX_RUNTIME_LOCALIZATION_RESEALS_PER_LEG = 1
 DEFAULT_MAX_LOCALIZATION_READINESS_RETRIES_PER_LEG = 2
 DEFAULT_MAX_CAMERA_OBSERVATION_ATTEMPTS_PER_CANDIDATE = 2
+DEFAULT_MAX_CANDIDATE_INSPECTION_VIEWS = 8
 DEFAULT_MAX_ROUTE_ADMISSION_ATTEMPTS_PER_CANDIDATE = 2
 
 
@@ -90,9 +91,20 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_MAX_CAMERA_OBSERVATION_ATTEMPTS_PER_CANDIDATE,
         help=(
-            "Bound candidate-local passive-observer retries. A timed-out "
-            "candidate is deferred while other candidates run; every retry "
-            "still requires a fresh route and all live motion gates."
+            "Legacy camera-attempt bound retained for compatibility. "
+            "Candidate inspection now uses --max-candidate-inspection-views "
+            "to finish bounded local views before selecting another stand."
+        ),
+    )
+    parser.add_argument(
+        "--max-candidate-inspection-views",
+        type=int,
+        choices=range(1, 17),
+        default=DEFAULT_MAX_CANDIDATE_INSPECTION_VIEWS,
+        help=(
+            "Maximum observation views per candidate, including its initial "
+            "view (1-16). Each new view uses fresh route and motion admission; "
+            "exhausted candidates remain explicitly incomplete."
         ),
     )
     parser.add_argument(

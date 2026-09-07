@@ -13,6 +13,12 @@ from pathlib import Path
 import shutil
 from typing import Mapping
 
+from scripts.aufgabe04.navigation.approach.candidate_inspection_view import (
+    INSPECTION_VIEW_BEARING_MODE,
+    load_candidate_inspection_view,
+    validate_candidate_inspection_view_binding,
+)
+
 from scripts.aufgabe04.navigation.approach.candidate_goal_cell_selection import (
     validate_goal_cell_selection_binding,
 )
@@ -66,6 +72,7 @@ def materialize_candidate_preapproach_plan(
     axis_observation_path: Path | None = None,
     approach_normal_rad: float | None = None,
     selection_evidence: Mapping[str, object] | None = None,
+    inspection_view_path: Path | None = None,
 ) -> dict[str, str]:
     """Validate, write, and seal one previously computed candidate plan."""
 
@@ -99,7 +106,17 @@ def materialize_candidate_preapproach_plan(
         raise ValueError(
             "axis-selected approach requires both normal and observation"
         )
-    expected_mode = (
+    if inspection_view_path is not None and approach_normal_rad is not None:
+        raise ValueError("inspection view cannot replace certified backside evidence")
+    inspection_view = None
+    if inspection_view_path is not None:
+        inspection_view = load_candidate_inspection_view(inspection_view_path)
+        validate_candidate_inspection_view_binding(
+            inspection_view, snapshot=snapshot,
+            candidate_uid=prepared.candidate_uid, start=prepared.start,
+            view_normal_rad=normalize_angle(prepared.approach_bearing_rad - math.pi),
+        )
+    expected_mode = INSPECTION_VIEW_BEARING_MODE if inspection_view else (
         ROBOT_TO_STAND_BEARING_MODE
         if approach_normal_rad is None
         else CAMERA_AXIS_FACE_BEARING_MODE
@@ -123,13 +140,14 @@ def materialize_candidate_preapproach_plan(
             candidate_x_m=candidate.geometry.x_m,
             candidate_y_m=candidate.geometry.y_m,
         )
-    _validate_approach_bearing_binding(
-        prepared=prepared,
-        candidate_x_m=candidate.geometry.x_m,
-        candidate_y_m=candidate.geometry.y_m,
-        approach_normal_rad=approach_normal_rad,
-        axis_observation=axis_observation,
-    )
+    if inspection_view is None:
+        _validate_approach_bearing_binding(
+            prepared=prepared,
+            candidate_x_m=candidate.geometry.x_m,
+            candidate_y_m=candidate.geometry.y_m,
+            approach_normal_rad=approach_normal_rad,
+            axis_observation=axis_observation,
+        )
     _validate_goal_cell_policy_binding(
         prepared=prepared,
         candidate_x_m=candidate.geometry.x_m,
@@ -155,7 +173,7 @@ def materialize_candidate_preapproach_plan(
         final_yaw_by_leg={0: prepared.terminal_yaw_rad},
     )
     metadata = dict(prepared.dry_run.metadata)
-    planning_order = (
+    planning_order = "candidate-local-inspection" if inspection_view else (
         "route-aware-camera-selection"
         if selection_evidence is not None
         else (
@@ -215,6 +233,11 @@ def materialize_candidate_preapproach_plan(
     )
     if selection_evidence is not None:
         metadata["camera_candidate_selection"] = dict(selection_evidence)
+    if inspection_view_path is not None:
+        local_view = output_dir / "inspection_view.json"
+        shutil.copyfile(inspection_view_path, local_view)
+        metadata["inspection_view_json"] = str(local_view.resolve())
+        metadata["inspection_view_sha256"] = file_sha256(local_view)
     if prepared.goal_cell_selection is not None:
         metadata["goal_cell_selection"] = (
             prepared.goal_cell_selection.to_metadata()
@@ -280,12 +303,22 @@ def plan_candidate_preapproach(
     axis_observation_path: Path | None = None,
     prepared_plan: CandidatePreapproachPlan | None = None,
     selection_evidence: Mapping[str, object] | None = None,
+    inspection_view_path: Path | None = None,
 ) -> dict[str, str]:
     """Compute when needed, then materialize the exact selected route."""
 
     if (approach_normal_rad is None) != (axis_observation_path is None):
         raise ValueError(
             "axis-selected approach requires both normal and observation"
+        )
+    inspection_view = None if inspection_view_path is None else (
+        load_candidate_inspection_view(inspection_view_path)
+    )
+    if inspection_view is not None:
+        if approach_normal_rad is not None:
+            raise ValueError("inspection view and certified face normal are exclusive")
+        validate_candidate_inspection_view_binding(
+            inspection_view, snapshot=snapshot, candidate_uid=candidate_uid, start=start,
         )
     selected = prepared_plan or compute_candidate_preapproach_plan(
         map_yaml=map_yaml,
@@ -299,6 +332,9 @@ def plan_candidate_preapproach(
         candidate_transit_radius_m=candidate_transit_radius_m,
         physical_clearance=physical_clearance,
         approach_normal_rad=approach_normal_rad,
+        inspection_view_normal_rad=(None if inspection_view is None else float(
+            inspection_view["view_normal_rad"]
+        )),
     )
     _validate_prepared_plan_binding(
         selected,
@@ -317,6 +353,7 @@ def plan_candidate_preapproach(
         axis_observation_path=axis_observation_path,
         approach_normal_rad=approach_normal_rad,
         selection_evidence=selection_evidence,
+        inspection_view_path=inspection_view_path,
     )
 
 
