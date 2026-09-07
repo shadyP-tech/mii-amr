@@ -178,6 +178,8 @@ class OrchestrationModuleBoundaryTest(unittest.TestCase):
                 "observation_deferral.py",
                 "opposite_face_route_fallback.py",
                 "recovery_failure.py",
+                "route_admission_deferral.py",
+                "route_uncertainty_readiness.py",
                 "runtime_recovery.py",
                 "startup_recovery.py",
             },
@@ -325,6 +327,7 @@ class OrchestrationModuleBoundaryTest(unittest.TestCase):
                 "candidate_preapproach_materialization.py",
                 "candidate_preapproach_planning.py",
                 "candidate_preapproach_selection.py",
+                "candidate_route_uncertainty_selection.py",
             )
         )
         forbidden_prefixes = (

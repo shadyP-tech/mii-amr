@@ -36,6 +36,9 @@ from scripts.aufgabe04.navigation.approach.candidate_preapproach_selection impor
 from scripts.aufgabe04.navigation.approach.candidate_preapproach_planning import (
     CandidatePreapproachUnreachableError,
 )
+from scripts.aufgabe04.navigation.approach.candidate_route_uncertainty_selection import (
+    NoUncertaintyAdmittedCameraCandidateError,
+)
 from scripts.aufgabe04.navigation.approach.candidate_frame_projection import (
     CandidatePlanningFrame,
 )
@@ -78,6 +81,9 @@ from scripts.aufgabe04.real_robot.candidate.approach import (
 from scripts.aufgabe04.real_robot.execution.child_runner import MotionLegOutcome
 from scripts.aufgabe04.real_robot.candidate.recovery_failure import (
     CandidateStartupRecoveryError,
+)
+from scripts.aufgabe04.real_robot.candidate.route_admission_deferral import (
+    CandidateRouteAdmissionIncompleteError,
 )
 from scripts.aufgabe04.real_robot.candidate.observation_deferral import (
     CandidateApproachIncompleteError,
@@ -1897,17 +1903,210 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                 (config.session_root / "station_identity_registry.json").exists()
             )
 
-    def test_direct_uncertainty_rejection_does_not_enter_standoff_fallback(self):
+    def test_direct_uncertainty_rejection_defers_to_next_candidate(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            candidate = self._candidate("candidate_1", 0.2, 0.0)
-            config = self._config(root, (candidate,))
+            first = self._candidate("candidate_1", 0.2, 0.0)
+            second = self._candidate("candidate_2", 0.5, 0.0)
+            config = self._config(root, (first, second))
             plan_requests = []
-            capture = Mock()
+            motion_requests = []
+            events = []
+            rejected_once = False
 
             def plan_preapproach(request):
                 plan_requests.append(request)
                 return {"route_csv": "primary.csv"}
+
+            def run_motion(request):
+                nonlocal rejected_once
+                motion_requests.append(request)
+                if request.target_id == first.candidate_uid and not rejected_once:
+                    rejected_once = True
+                    return self._route_uncertainty_rejection(request)
+                return self._completed(request)
+
+            outcome = execute_candidate_approach_phase(
+                config,
+                CandidateApproachEffects(
+                    select_initial_preapproach=self._nearest_selection,
+                    read_current_pose=lambda: Pose2D(0.0, 0.0, 0.0),
+                    run_motion_leg=run_motion,
+                    capture_observation=lambda request: CandidateObservation(
+                        request.output_dir / "recommendation.json",
+                        f"QR_{request.candidate.candidate_uid}",
+                        None,
+                    ),
+                    validate_facing=lambda request: {
+                        "candidate_uid": request.candidate.candidate_uid
+                    },
+                    commit_decision=lambda request: None,
+                    plan_preapproach=plan_preapproach,
+                    event_sink=lambda _path, payload: events.append(payload),
+                    clock=lambda: 10.0,
+                ),
+            )
+
+            self.assertEqual(
+                [request.target_id for request in motion_requests],
+                [
+                    first.candidate_uid,
+                    second.candidate_uid,
+                    first.candidate_uid,
+                ],
+            )
+            self.assertEqual(
+                outcome.visit_order,
+                (second.candidate_uid, first.candidate_uid),
+            )
+            deferred = next(
+                event
+                for event in events
+                if event["event"] == "camera_candidate_route_admission_deferred"
+            )
+            self.assertEqual(deferred["candidate_uid"], first.candidate_uid)
+            self.assertEqual(
+                deferred["route_admission_deferral_reason"],
+                "next_candidate_route_dry_preflight_allowed",
+            )
+            self.assertFalse(deferred["motion_authorized"])
+            ranked_first_again = [
+                event
+                for event in events
+                if event["event"] == "camera_candidate_ranked"
+                and event["selected_candidate_uid"] == first.candidate_uid
+            ][-1]
+            self.assertEqual(
+                ranked_first_again["candidate_observation_attempt_number"],
+                1,
+            )
+
+    def test_uncertainty_preselection_rejection_has_no_route_or_motion_effect(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidates = (
+                self._candidate("candidate_1", 0.2, 0.0),
+                self._candidate("candidate_2", 0.5, 0.0),
+            )
+            config = self._config(root, candidates)
+            plan_preapproach = Mock()
+            run_motion = Mock()
+            capture = Mock()
+            commit = Mock()
+            events = []
+
+            def reject_all(request):
+                self.assertEqual(
+                    request.unresolved,
+                    frozenset(
+                        candidate.candidate_uid for candidate in candidates
+                    ),
+                )
+                raise NoUncertaintyAdmittedCameraCandidateError(
+                    {
+                        "schema_version": 2,
+                        "selected_candidate_uid": None,
+                        "route_uncertainty_selection_applied": True,
+                        "motion_authorized": False,
+                    }
+                )
+
+            with self.assertRaises(
+                NoUncertaintyAdmittedCameraCandidateError
+            ):
+                execute_candidate_approach_phase(
+                    config,
+                    CandidateApproachEffects(
+                        select_initial_preapproach=reject_all,
+                        read_current_pose=lambda: Pose2D(0.0, 0.0, 0.0),
+                        run_motion_leg=run_motion,
+                        capture_observation=capture,
+                        commit_decision=commit,
+                        plan_preapproach=plan_preapproach,
+                        event_sink=lambda _path, payload: events.append(payload),
+                        clock=lambda: 10.0,
+                    ),
+                )
+
+            plan_preapproach.assert_not_called()
+            run_motion.assert_not_called()
+            capture.assert_not_called()
+            commit.assert_not_called()
+            self.assertFalse(
+                (config.session_root / "station_identity_registry.json").exists()
+            )
+            self.assertEqual(len(events), 1)
+            self.assertEqual(
+                events[0]["event"],
+                "camera_candidate_selection_failed",
+            )
+            self.assertFalse(events[0]["motion_authorized"])
+
+    def test_all_child_route_rejections_stop_at_exact_attempt_bound(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = self._candidate("candidate_1", 0.2, 0.0)
+            second = self._candidate("candidate_2", 0.5, 0.0)
+            config = replace(
+                self._config(root, (first, second)),
+                max_route_admission_attempts_per_candidate=1,
+            )
+            motion_targets = []
+            capture = Mock()
+            events = []
+
+            def reject_route(request):
+                motion_targets.append(request.target_id)
+                return self._route_uncertainty_rejection(request)
+
+            with self.assertRaises(
+                CandidateRouteAdmissionIncompleteError
+            ) as captured:
+                execute_candidate_approach_phase(
+                    config,
+                    CandidateApproachEffects(
+                        select_initial_preapproach=self._nearest_selection,
+                        read_current_pose=lambda: Pose2D(0.0, 0.0, 0.0),
+                        run_motion_leg=reject_route,
+                        capture_observation=capture,
+                        plan_preapproach=lambda _request: {
+                            "route_csv": "primary.csv"
+                        },
+                        event_sink=lambda _path, payload: events.append(payload),
+                        clock=lambda: 10.0,
+                    ),
+                )
+
+            self.assertEqual(
+                motion_targets,
+                [first.candidate_uid, second.candidate_uid],
+            )
+            capture.assert_not_called()
+            self.assertEqual(
+                sum(
+                    event["event"]
+                    == "camera_candidate_route_admission_deferred"
+                    for event in events
+                ),
+                2,
+            )
+            fields = captured.exception.to_failure_fields()
+            self.assertEqual(
+                fields["unresolved_candidate_uids"],
+                [first.candidate_uid, second.candidate_uid],
+            )
+            self.assertEqual(
+                len(fields["candidate_route_admission_attempts"]),
+                2,
+            )
+            self.assertFalse(fields["motion_continues_authorized"])
+
+    def test_unsafe_direct_uncertainty_rejection_remains_terminal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate = self._candidate("candidate_1", 0.2, 0.0)
+            config = self._config(root, (candidate,))
+            capture = Mock()
 
             with self.assertRaises(CandidateStartupRecoveryError):
                 execute_candidate_approach_phase(
@@ -1915,14 +2114,19 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                     CandidateApproachEffects(
                         select_initial_preapproach=self._nearest_selection,
                         read_current_pose=lambda: Pose2D(0.0, 0.0, 0.0),
-                        run_motion_leg=self._route_uncertainty_rejection,
+                        run_motion_leg=lambda request: (
+                            self._route_uncertainty_rejection(
+                                request,
+                                motion_published=True,
+                            )
+                        ),
                         capture_observation=capture,
-                        plan_preapproach=plan_preapproach,
+                        plan_preapproach=lambda request: {
+                            "route_csv": "primary.csv"
+                        },
                     ),
                 )
 
-            self.assertEqual(len(plan_requests), 1)
-            self.assertIsNone(plan_requests[0].approach_normal_rad)
             capture.assert_not_called()
 
     def test_motion_outcome_identity_mismatch_blocks_observation(self):

@@ -213,6 +213,9 @@ from scripts.aufgabe04.real_robot.candidate.approach import (
     CandidateObservationRequest,
     execute_candidate_approach_phase,
 )
+from scripts.aufgabe04.real_robot.candidate.route_uncertainty_readiness import (
+    load_candidate_route_uncertainty_readiness,
+)
 from scripts.aufgabe04.real_robot.candidate.startup_recovery import (
     CandidateStartupRecoveryAttempt,
 )
@@ -1885,6 +1888,10 @@ def _validate_inputs(parser, args, profile, calibration) -> None:
         parser.error(
             "--max-camera-observation-attempts-per-candidate must be positive"
         )
+    if args.max_route_admission_attempts_per_candidate < 1:
+        parser.error(
+            "--max-route-admission-attempts-per-candidate must be positive"
+        )
     if (
         not math.isfinite(args.uncertainty_sigma_multiplier)
         or args.uncertainty_sigma_multiplier <= 0.0
@@ -2760,6 +2767,11 @@ def main(argv=None) -> int:
                 max_camera_observation_attempts_per_candidate=(
                     args.max_camera_observation_attempts_per_candidate
                 ),
+                max_route_admission_attempts_per_candidate=(
+                    args.max_route_admission_attempts_per_candidate
+                ),
+                robot_radius_m=profile.robot_radius_m,
+                require_uncertainty_aware_selection=True,
             ),
             CandidateApproachEffects(
                 read_current_pose=lambda: read_current_pose2d_from_amcl(
@@ -2775,6 +2787,9 @@ def main(argv=None) -> int:
                         session_root,
                         evidence_path=evidence_path,
                     )
+                ),
+                load_route_uncertainty_readiness=(
+                    load_candidate_route_uncertainty_readiness
                 ),
                 run_motion_leg=lambda request: _run_candidate_motion_leg(
                     profile=profile,

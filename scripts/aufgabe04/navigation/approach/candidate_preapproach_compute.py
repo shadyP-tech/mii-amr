@@ -38,18 +38,11 @@ from scripts.aufgabe04.navigation.execution.route_context import (
     build_route_metadata,
 )
 from scripts.aufgabe04.navigation.foundation.models import Pose2D, Route
-from scripts.aufgabe04.navigation.planning.certified_exact_start_route import (
-    certify_and_smooth_exact_start_route,
-)
-from scripts.aufgabe04.navigation.planning.global_planner import plan_route
 from scripts.aufgabe04.navigation.planning.map_io import (
     load_occupancy_grid_with_bundle,
 )
 from scripts.aufgabe04.navigation.planning.route_costmaps import (
     build_station_route_costmaps,
-)
-from scripts.aufgabe04.navigation.planning.route_smoothing import (
-    smooth_plan_route_results,
 )
 from scripts.aufgabe04.navigation.planning.station_approach import (
     navigation_targets_from_visits,
@@ -213,78 +206,42 @@ def compute_candidate_preapproach_plan(
             str(exc),
         ) from exc
 
-    goal_cell_selection = None
     requested_goal = targets[0].pose
-    if approach_normal_rad is None:
-        result = plan_route(
-            context.costmaps.planning_costmap,
-            start,
-            requested_goal,
+    try:
+        selected_goal = plan_safety_ranked_quantized_goal(
+            base_costmap=context.costmaps.base_costmap,
+            planning_costmap=context.costmaps.planning_costmap,
+            start=start,
+            requested_goal=requested_goal,
+            stand=Pose2D(
+                candidate.geometry.x_m,
+                candidate.geometry.y_m,
+                0.0,
+            ),
+            minimum_standoff_m=context.minimum_active_standoff_m,
             snap_radius_m=plan.config.snap_radius_m,
+            required_start_clearance_m=inflation_radius_m,
+            route_rejection_reason=lambda route: (
+                _candidate_route_clearance_failure(
+                    candidate_uid=candidate_uid,
+                    route=route,
+                    snapshot=snapshot,
+                    minimum_candidate_transit_radius_m=(
+                        context.minimum_candidate_transit_radius_m
+                    ),
+                )
+            ),
         )
-        unsmoothed = smooth_plan_route_results(
-            (result,),
-            costmap=context.costmaps.planning_costmap,
-            enabled=False,
-        )[0]
-        result = unsmoothed.result
-        dry_run_smoothing = unsmoothed.summary
-        if result.route is None or result.failure is not None:
-            reason = (
-                result.failure.reason
-                if result.failure is not None
-                else "no route"
-            )
-            raise CandidatePreapproachUnreachableError(candidate_uid, reason)
-        try:
-            result, connector, smoothing = certify_and_smooth_exact_start_route(
-                result,
-                base_costmap=context.costmaps.base_costmap,
-                planning_costmap=context.costmaps.planning_costmap,
-                exact_start=start,
-                required_clearance_m=inflation_radius_m,
-            )
-        except ValueError as exc:
-            raise CandidatePreapproachUnreachableError(
-                candidate_uid,
-                str(exc),
-            ) from exc
-    else:
-        try:
-            selected_goal = plan_safety_ranked_quantized_goal(
-                base_costmap=context.costmaps.base_costmap,
-                planning_costmap=context.costmaps.planning_costmap,
-                start=start,
-                requested_goal=requested_goal,
-                stand=Pose2D(
-                    candidate.geometry.x_m,
-                    candidate.geometry.y_m,
-                    0.0,
-                ),
-                minimum_standoff_m=context.minimum_active_standoff_m,
-                snap_radius_m=plan.config.snap_radius_m,
-                required_start_clearance_m=inflation_radius_m,
-                route_rejection_reason=lambda route: (
-                    _candidate_route_clearance_failure(
-                        candidate_uid=candidate_uid,
-                        route=route,
-                        snapshot=snapshot,
-                        minimum_candidate_transit_radius_m=(
-                            context.minimum_candidate_transit_radius_m
-                        ),
-                    )
-                ),
-            )
-        except NoSafetyRankedGoalRouteError as exc:
-            raise CandidatePreapproachUnreachableError(
-                candidate_uid,
-                str(exc),
-            ) from exc
-        result = selected_goal.result
-        connector = selected_goal.connector
-        smoothing = selected_goal.smoothing
-        goal_cell_selection = selected_goal.evidence
-        dry_run_smoothing = smoothing
+    except NoSafetyRankedGoalRouteError as exc:
+        raise CandidatePreapproachUnreachableError(
+            candidate_uid,
+            str(exc),
+        ) from exc
+    result = selected_goal.result
+    connector = selected_goal.connector
+    smoothing = selected_goal.smoothing
+    goal_cell_selection = selected_goal.evidence
+    dry_run_smoothing = smoothing
 
     metadata = build_route_metadata(
         map_yaml,

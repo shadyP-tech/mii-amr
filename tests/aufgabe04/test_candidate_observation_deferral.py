@@ -104,6 +104,20 @@ class CandidateObservationDeferralLedgerTest(unittest.TestCase):
         self.assertEqual(retry_state.pass_index, 1)
         self.assertEqual(retry_state.eligible_candidate_uids, ("candidate_c",))
 
+    def test_preview_selection_does_not_consume_observation_attempt(self):
+        ledger = CandidateObservationDeferralLedger(["candidate_a"])
+
+        preview = ledger.preview_selection("candidate_a")
+
+        self.assertEqual(preview.candidate_uid, "candidate_a")
+        self.assertEqual(preview.attempt_number, 1)
+        self.assertEqual(
+            ledger.selection_state().attempt_count_by_candidate["candidate_a"],
+            0,
+        )
+        selection = ledger.select("candidate_a")
+        self.assertEqual(selection, preview)
+
     def test_default_two_attempt_bound_ends_in_structured_incomplete_error(self):
         ledger = CandidateObservationDeferralLedger(
             ["candidate_b", "candidate_a"]

@@ -148,6 +148,10 @@ def _checkpoint_config_sha256(args) -> str:
             "max_localization_readiness_retries_per_leg": (
                 args.max_localization_readiness_retries_per_leg
             ),
+            "max_route_admission_attempts_per_candidate": (
+                getattr(args, "max_route_admission_attempts_per_candidate", 2)
+            ),
+            "candidate_route_uncertainty_preselection_required": True,
             "uncertainty_sigma_multiplier": (
                 args.uncertainty_sigma_multiplier
             ),

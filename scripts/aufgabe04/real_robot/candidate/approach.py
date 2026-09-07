@@ -34,6 +34,10 @@ from scripts.aufgabe04.navigation.approach.candidate_preapproach_planning import
 from scripts.aufgabe04.navigation.approach.candidate_preapproach_selection import (
     plan_and_select_camera_candidate,
 )
+from scripts.aufgabe04.navigation.approach.candidate_route_uncertainty_selection import (
+    CandidateRouteUncertaintyContext,
+    NoUncertaintyAdmittedCameraCandidateError,
+)
 from scripts.aufgabe04.navigation.approach.camera_axis_binding import (
     load_opposite_face_normal,
 )
@@ -99,6 +103,13 @@ from scripts.aufgabe04.real_robot.candidate.runtime_recovery import (
 from scripts.aufgabe04.real_robot.candidate.observation_deferral import (
     CandidateObservationDeferralLedger,
     CandidateObservationUnavailableError,
+)
+from scripts.aufgabe04.real_robot.candidate.route_admission_deferral import (
+    CandidateRouteAdmissionDeferralLedger,
+    evaluate_candidate_route_admission_deferral,
+)
+from scripts.aufgabe04.real_robot.candidate.route_uncertainty_readiness import (
+    CandidateRouteUncertaintyReadinessRequest,
 )
 from scripts.aufgabe04.real_robot.candidate.opposite_face_route_fallback import (
     bounded_approach_offsets,
@@ -192,6 +203,9 @@ class CandidateApproachConfig:
     camera_selection_linear_speed_mps: float = 0.055
     camera_selection_angular_speed_radps: float = 0.18
     max_camera_observation_attempts_per_candidate: int = 2
+    max_route_admission_attempts_per_candidate: int = 2
+    robot_radius_m: float | None = None
+    require_uncertainty_aware_selection: bool = False
     camera_arrival_max_bearing_error_rad: float = math.radians(3.0)
     camera_arrival_range_slack_m: float = 0.20
 
@@ -222,6 +236,7 @@ class CameraCandidateSelectionRequest:
     current_pose: Pose2D
     unresolved: frozenset[str]
     support_class_by_uid: Mapping[str, str] | None
+    route_uncertainty_context: CandidateRouteUncertaintyContext | None = None
 
 
 @dataclass(frozen=True)
@@ -811,6 +826,7 @@ def _select_initial_preapproach(
             angular_speed_radps=config.camera_selection_angular_speed_radps,
         ),
         support_class_by_uid=request.support_class_by_uid,
+        route_uncertainty_context=request.route_uncertainty_context,
     )
     return CameraCandidateInitialSelection(
         candidate_uid=planned.selected_candidate_uid,
@@ -823,6 +839,7 @@ def _validate_initial_selection(
     selection: CameraCandidateInitialSelection,
     *,
     unresolved: set[str],
+    require_uncertainty_aware_selection: bool = False,
 ) -> None:
     if not isinstance(selection, CameraCandidateInitialSelection):
         raise TypeError(
@@ -845,6 +862,12 @@ def _validate_initial_selection(
         and selection.prepared_plan.candidate_uid != selection.candidate_uid
     ):
         raise RuntimeError("camera selector returned a route for another candidate")
+    if require_uncertainty_aware_selection and (
+        selection.evidence.get("route_uncertainty_selection_applied") is not True
+    ):
+        raise RuntimeError(
+            "camera candidate selection lacks required route uncertainty admission"
+        )
 
 
 @dataclass(frozen=True)
@@ -867,6 +890,10 @@ class CandidateApproachEffects:
         [CandidateDecisionRequest], None
     ] = commit_candidate_decision
     admit_planning_frame: Callable[[Path], CandidatePlanningFrame] | None = None
+    load_route_uncertainty_readiness: Callable[
+        [CandidateRouteUncertaintyReadinessRequest],
+        CandidateRouteUncertaintyContext,
+    ] | None = None
     admit_startup_localization: Callable[[Path], Pose2D] | None = None
     run_startup_reseal_motion_leg: Callable[
         [CandidateMotionLegRequest, CandidateStartupRecoveryAttempt],
@@ -1775,6 +1802,12 @@ def execute_candidate_approach_phase(
             config.max_camera_observation_attempts_per_candidate
         ),
     )
+    route_admission_ledger = CandidateRouteAdmissionDeferralLedger(
+        unresolved,
+        max_attempts_per_candidate=(
+            config.max_route_admission_attempts_per_candidate
+        ),
+    )
     selection_log_path = config.session_root / "candidate_selection.jsonl"
 
     while unresolved:
@@ -1794,10 +1827,36 @@ def execute_candidate_approach_phase(
                 )
                 continue
             raise observation_ledger.incomplete_error()
-        eligible = set(observation_state.eligible_candidate_uids)
+        route_state = route_admission_ledger.selection_state(
+            observation_state.eligible_candidate_uids
+        )
+        if not route_state.eligible_candidate_uids:
+            if route_admission_ledger.advance_pass(
+                observation_state.eligible_candidate_uids
+            ):
+                effects.event_sink(
+                    selection_log_path,
+                    {
+                        "schema_version": 1,
+                        "event": "camera_candidate_route_admission_retry_pass",
+                        "timestamp_unix_sec": effects.clock(),
+                        **route_admission_ledger.selection_state(
+                            observation_state.eligible_candidate_uids
+                        ).to_dict(),
+                        "future_motion_requires_fresh_live_gates": True,
+                        "motion_authorized": False,
+                    },
+                )
+                continue
+            raise route_admission_ledger.incomplete_error(
+                observation_state.eligible_candidate_uids
+            )
+        eligible = set(route_state.eligible_candidate_uids)
         planning_config = config
         frame_projection_artifacts = None
         selection_planning_frame = None
+        route_uncertainty_context = None
+        planning_frame_evidence_path = None
         if effects.admit_planning_frame is None:
             current = _read_finite_pose2d(
                 effects,
@@ -1827,6 +1886,34 @@ def execute_candidate_approach_phase(
             )
             planning_config = frame_projection_artifacts.config
             current = planning_frame.current_pose
+        if config.require_uncertainty_aware_selection:
+            loader = effects.load_route_uncertainty_readiness
+            if loader is None or planning_frame_evidence_path is None:
+                raise RuntimeError(
+                    "required candidate route uncertainty readiness effect "
+                    "is unavailable"
+                )
+            robot_radius_m = config.robot_radius_m
+            if (
+                isinstance(robot_radius_m, bool)
+                or not isinstance(robot_radius_m, (int, float))
+                or not math.isfinite(float(robot_radius_m))
+                or float(robot_radius_m) <= 0.0
+            ):
+                raise RuntimeError(
+                    "required candidate route uncertainty robot radius is invalid"
+                )
+            route_uncertainty_context = loader(
+                CandidateRouteUncertaintyReadinessRequest(
+                    preflight_json=planning_frame_evidence_path,
+                    expected_start=current,
+                    planning_frame=planning_config.planning_frame,
+                    robot_radius_m=float(robot_radius_m),
+                    sigma_multiplier=(
+                        planning_config.uncertainty_sigma_multiplier
+                    ),
+                )
+            )
         try:
             selection = effects.select_initial_preapproach(
                 CameraCandidateSelectionRequest(
@@ -1834,9 +1921,13 @@ def execute_candidate_approach_phase(
                     current_pose=current,
                     unresolved=frozenset(eligible),
                     support_class_by_uid=exact_two_support_by_uid,
+                    route_uncertainty_context=route_uncertainty_context,
                 )
             )
-        except NoFeasibleCameraCandidateError as exc:
+        except (
+            NoFeasibleCameraCandidateError,
+            NoUncertaintyAdmittedCameraCandidateError,
+        ) as exc:
             effects.event_sink(
                 config.session_root / "candidate_selection.jsonl",
                 {
@@ -1867,15 +1958,21 @@ def execute_candidate_approach_phase(
                     "motion_authorized": False,
                 },
             )
-        _validate_initial_selection(selection, unresolved=eligible)
-        observation_selection = observation_ledger.select(
-            selection.candidate_uid
+        _validate_initial_selection(
+            selection,
+            unresolved=eligible,
+            require_uncertainty_aware_selection=(
+                config.require_uncertainty_aware_selection
+            ),
         )
         candidate = planning_config.snapshot.candidate_for(
             selection.candidate_uid
         )
         if candidate is None:
             raise RuntimeError("selected candidate disappeared from snapshot")
+        observation_selection_preview = observation_ledger.preview_selection(
+            candidate.candidate_uid
+        )
         candidate_root = (
             config.session_root
             / "candidates"
@@ -1904,10 +2001,11 @@ def execute_candidate_approach_phase(
             selection_log_path,
             {
                 **dict(selection.evidence),
-                **observation_selection.to_event_fields(),
+                **observation_selection_preview.to_event_fields(),
                 "event": "camera_candidate_ranked",
                 "timestamp_unix_sec": effects.clock(),
                 "selected_candidate_uid": candidate.candidate_uid,
+                **route_state.to_dict(),
                 "route_materialized": False,
                 "motion_authorized": False,
             },
@@ -1948,20 +2046,53 @@ def execute_candidate_approach_phase(
         candidate_run_id = (
             f"{config.session_id}_candidate_{candidate_index:03d}"
         )
-        outcome = _execute_candidate_motion(
-            config=planning_config,
-            effects=effects,
-            candidate_root=candidate_root,
-            plan_request=preapproach_plan_request,
-            initial_sealed=sealed,
-            run_id=candidate_run_id,
-            leg_kind=MissionLegKind.CANDIDATE_PREAPPROACH,
-            candidate_index=candidate_index,
-            target_id=candidate.candidate_uid,
-            frame_source_config=config,
-            source_registry=source_registry,
-            plan_planning_frame=selection_planning_frame,
-        )
+        try:
+            outcome = _execute_candidate_motion(
+                config=planning_config,
+                effects=effects,
+                candidate_root=candidate_root,
+                plan_request=preapproach_plan_request,
+                initial_sealed=sealed,
+                run_id=candidate_run_id,
+                leg_kind=MissionLegKind.CANDIDATE_PREAPPROACH,
+                candidate_index=candidate_index,
+                target_id=candidate.candidate_uid,
+                frame_source_config=config,
+                source_registry=source_registry,
+                plan_planning_frame=selection_planning_frame,
+            )
+        except CandidateStartupRecoveryError as exc:
+            deferral = evaluate_candidate_route_admission_deferral(
+                exc,
+                expected_initial_run_id=candidate_run_id,
+            )
+            if not deferral.eligible or exc.rejected_child is None:
+                raise
+            attempt = route_admission_ledger.mark_rejected(
+                candidate_uid=candidate.candidate_uid,
+                rejected_child=exc.rejected_child,
+                decision=deferral,
+            )
+            effects.event_sink(
+                selection_log_path,
+                {
+                    "schema_version": 1,
+                    "event": "camera_candidate_route_admission_deferred",
+                    "timestamp_unix_sec": effects.clock(),
+                    "candidate_uid": candidate.candidate_uid,
+                    "selected_candidate_uid": candidate.candidate_uid,
+                    **attempt.to_dict(),
+                    **deferral.to_event_fields(),
+                    "future_motion_requires_fresh_live_gates": True,
+                    "route_materialized": True,
+                    "motion_authorized": False,
+                },
+            )
+            candidate_index += 1
+            continue
+        observation_selection = observation_ledger.select(candidate.candidate_uid)
+        if observation_selection != observation_selection_preview:
+            raise RuntimeError("candidate observation selection changed after motion")
         try:
             observation_frame = _admit_camera_arrival_geometry(
                 source_config=config,

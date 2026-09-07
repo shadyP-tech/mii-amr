@@ -12,6 +12,10 @@ from scripts.aufgabe04.navigation.approach.camera_candidate_selection import (
     CameraCandidateSelectionConfig,
     select_camera_candidate,
 )
+from scripts.aufgabe04.navigation.approach.candidate_route_uncertainty_selection import (
+    CandidateRouteUncertaintyContext,
+    select_uncertainty_admitted_camera_candidate,
+)
 from scripts.aufgabe04.navigation.approach.candidate_preapproach_planning import (
     CandidatePreapproachPlan,
     CandidatePreapproachUnreachableError,
@@ -31,6 +35,7 @@ class PlannedCameraCandidateSelection:
 
     selection: CameraCandidateSelection
     selected_plan: CandidatePreapproachPlan
+    evidence: Mapping[str, object] | None = None
 
     @property
     def selected_candidate_uid(self) -> str:
@@ -41,9 +46,14 @@ class PlannedCameraCandidateSelection:
         return False
 
     def to_evidence(self) -> dict[str, object]:
-        evidence = self.selection.to_evidence()
+        evidence = dict(
+            self.selection.to_evidence()
+            if self.evidence is None
+            else self.evidence
+        )
         evidence.update(
             {
+                "selected_candidate_uid": self.selected_candidate_uid,
                 "selected_route_reused_for_materialization": True,
                 "selected_map_bundle_sha256": (
                     self.selected_plan.map_bundle_sha256
@@ -68,8 +78,14 @@ def plan_and_select_camera_candidate(
     physical_clearance: Mapping[str, float],
     selection_config: CameraCandidateSelectionConfig,
     support_class_by_uid: Mapping[str, str] | None = None,
+    route_uncertainty_context: CandidateRouteUncertaintyContext | None = None,
 ) -> PlannedCameraCandidateSelection:
-    """Preview all unresolved routes, rank them, and retain the winner."""
+    """Preview all unresolved routes, admit/rank them, and retain the winner.
+
+    When a stopped-localization uncertainty context is supplied, every exact
+    preview route must pass it before the established camera ranking can select
+    the candidate.  The downstream child dry-run remains authoritative.
+    """
 
     unresolved_uids = frozenset(unresolved)
     if not unresolved_uids:
@@ -167,13 +183,27 @@ def plan_and_select_camera_candidate(
             )
         )
 
-    selection = select_camera_candidate(options, selection_config)
-    selected_plan = route_by_uid.get(selection.selected_candidate_uid)
+    if route_uncertainty_context is None:
+        selection = select_camera_candidate(options, selection_config)
+        selected_plan = route_by_uid.get(selection.selected_candidate_uid)
+        evidence = selection.to_evidence()
+    else:
+        admitted = select_uncertainty_admitted_camera_candidate(
+            base_costmap=context.costmaps.base_costmap,
+            options=tuple(options),
+            plans_by_uid=route_by_uid,
+            selection_config=selection_config,
+            uncertainty=route_uncertainty_context,
+        )
+        selection = admitted.selection
+        selected_plan = admitted.selected_plan
+        evidence = admitted.to_evidence()
     if selected_plan is None:
         raise RuntimeError("selected camera candidate has no reusable route plan")
     return PlannedCameraCandidateSelection(
         selection=selection,
         selected_plan=selected_plan,
+        evidence=evidence,
     )
 
 

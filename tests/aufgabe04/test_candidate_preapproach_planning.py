@@ -202,7 +202,7 @@ class CandidatePreapproachPlanningTest(unittest.TestCase):
                 physical_clearance=PHYSICAL_CLEARANCE,
             )
 
-            self.assertIsNone(prepared.goal_cell_selection)
+            self.assertIsNotNone(prepared.goal_cell_selection)
             self.assertFalse(output_dir.exists())
             materialize_candidate_preapproach_plan(
                 prepared,
@@ -228,6 +228,10 @@ class CandidatePreapproachPlanningTest(unittest.TestCase):
             self.assertEqual(
                 metadata["candidate_route_metrics"]["route_length_m"],
                 prepared.route_length_m,
+            )
+            self.assertEqual(
+                metadata["goal_cell_selection"]["policy"],
+                GOAL_CELL_SELECTION_POLICY,
             )
             self.assertTrue(
                 (
@@ -723,6 +727,111 @@ class CandidatePreapproachPlanningTest(unittest.TestCase):
             )
             self.assertFalse(selection["unselected_option_evidence_persisted"])
             self.assertNotIn("options", selection)
+
+    def test_robot_bearing_target_uses_safer_equivalent_goal_cell(self):
+        """Normal approaches receive the same bounded endpoint protection."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            map_yaml = write_free_map(
+                root,
+                width=60,
+                height=60,
+                resolution=0.05,
+            )
+            _, bundle = load_occupancy_grid_with_bundle(
+                map_yaml,
+                semantic_map_id="arena",
+                planning_frame="map",
+            )
+            candidate = self._candidate("candidate_1", 0.0, -0.2)
+            snapshot = new_candidate_snapshot(
+                snapshot_id="direct_goal_cell_selection",
+                created_unix_sec=3.0,
+                planning_frame="map",
+                map_bundle_sha256=bundle.bundle_sha256,
+                candidates=(candidate,),
+            )
+            prepared = compute_candidate_preapproach_plan(
+                map_yaml=map_yaml,
+                semantic_map_id="arena",
+                plan=self._plan(bundle.bundle_sha256),
+                snapshot=snapshot,
+                candidate_uid=candidate.candidate_uid,
+                start=Pose2D(0.0, 0.3, 0.0),
+                approach_offset_m=0.70,
+                inflation_radius_m=0.25,
+                candidate_transit_radius_m=0.31,
+                physical_clearance=PHYSICAL_CLEARANCE,
+            )
+
+            evidence = prepared.goal_cell_selection
+            self.assertIsNotNone(evidence)
+            assert evidence is not None
+            self.assertEqual(evidence.requested_goal_cell, GridCell(20, 30))
+            self.assertEqual(evidence.selected_goal_cell, GridCell(19, 29))
+            options = {option.cell: option for option in evidence.options}
+            requested = options[evidence.requested_goal_cell]
+            selected = options[evidence.selected_goal_cell]
+            self.assertGreater(
+                selected.route_raw_clearance_lower_bound_m,
+                requested.route_raw_clearance_lower_bound_m + 0.049,
+            )
+
+            requested_result = plan_route(
+                prepared.dry_run.planning_costmap,
+                prepared.start,
+                requested.goal,
+                snap_radius_m=0.30,
+            )
+            requested_result, _, _ = certify_and_smooth_exact_start_route(
+                requested_result,
+                base_costmap=prepared.dry_run.base_costmap,
+                planning_costmap=prepared.dry_run.planning_costmap,
+                exact_start=prepared.start,
+                required_clearance_m=0.25,
+            )
+            assert requested_result.route is not None
+            admission_config = RouteUncertaintyAdmissionConfig(
+                robot_radius_m=0.105,
+                collision_margin_m=0.02,
+                fixed_odom_tracking_bound_m=0.03,
+                empirical_odom_drift_bound_m=0.02,
+                braking_latency_distance_m=0.015,
+                localization_sigma_multiplier=2.0,
+                heading_sigma_rad=0.0,
+                heading_lever_arm_m=0.105,
+                sampling_spacing_m=0.005,
+                heading_reference_x_m=prepared.start.x_m,
+                heading_reference_y_m=prepared.start.y_m,
+            )
+            covariance = PlanarCovariance(
+                xx_m2=0.015625,
+                xy_m2=0.0,
+                yy_m2=0.015625,
+            )
+            requested_admission = evaluate_route_uncertainty_admission(
+                prepared.dry_run.base_costmap,
+                tuple(point.pose for point in requested_result.route.points),
+                covariance,
+                admission_config,
+            )
+            selected_admission = evaluate_route_uncertainty_admission(
+                prepared.dry_run.base_costmap,
+                tuple(point.pose for point in prepared.result.route.points),
+                covariance,
+                admission_config,
+            )
+            self.assertFalse(requested_admission.decision.accepted)
+            self.assertTrue(selected_admission.decision.accepted)
+            self.assertLess(
+                requested_admission.decision.remaining_margin_m,
+                0.0,
+            )
+            self.assertGreater(
+                selected_admission.decision.remaining_margin_m,
+                0.0,
+            )
 
     def test_map_binding_mismatch_fails_before_writes(self):
         with tempfile.TemporaryDirectory() as tmp:

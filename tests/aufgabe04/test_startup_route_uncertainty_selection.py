@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +10,9 @@ import unittest
 from scripts.aufgabe04.artifacts.content_store import load_content_hashed_json
 from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.localization.preflight_route_uncertainty_context import (
+    load_preflight_route_uncertainty_context,
+)
 from scripts.aufgabe04.navigation.missions.startup_route_uncertainty_selection import (
     STARTUP_ROUTE_UNCERTAINTY_SELECTION_HASH_FIELD,
     StartupRouteUncertaintySelectionRejected,
@@ -195,6 +199,55 @@ class StartupRouteUncertaintySelectionTest(unittest.TestCase):
                     sigma_multiplier=2.0,
                     clearance_sample_spacing_m=0.005,
                 )
+
+    def test_selector_preserves_the_shared_preflight_context_binding(self):
+        start = Pose2D(-1.0, 0.0, 0.0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            preflight = root / "preflight.json"
+            raw = (
+                json.dumps(preflight_payload(start), sort_keys=True) + "\n"
+            ).encode("utf-8")
+            preflight.write_bytes(raw)
+            selector = load_startup_route_uncertainty_selector(
+                preflight_json=preflight,
+                evidence_json=root / "selection.json",
+                expected_start=start,
+                planning_frame="map",
+                robot_radius_m=0.105,
+                collision_margin_m=0.02,
+                tracking_tube_radius_m=0.03,
+                odom_drift_bound_m=0.02,
+                braking_latency_distance_m=0.015,
+                sigma_multiplier=2.0,
+                clearance_sample_spacing_m=0.005,
+            )
+            context = load_preflight_route_uncertainty_context(
+                preflight_json=preflight,
+                expected_start=start,
+                planning_frame="map",
+                robot_radius_m=0.105,
+                collision_margin_m=0.02,
+                tracking_tube_radius_m=0.03,
+                odom_drift_bound_m=0.02,
+                braking_latency_distance_m=0.015,
+                sigma_multiplier=2.0,
+                clearance_sample_spacing_m=0.005,
+            )
+
+        self.assertEqual(
+            selector.preflight_sha256,
+            hashlib.sha256(raw).hexdigest(),
+        )
+        self.assertEqual(selector.preflight_sha256, context.preflight_sha256)
+        self.assertEqual(selector.expected_start, context.expected_start)
+        self.assertEqual(selector.planning_frame, context.planning_frame)
+        self.assertEqual(selector.covariance, context.covariance)
+        self.assertEqual(selector.admission_config, context.admission_config)
+        self.assertEqual(
+            selector.covariance_evidence,
+            context.covariance_evidence,
+        )
 
 
 def compact_hash_from_file(path: Path) -> str:

@@ -23,6 +23,7 @@ DEFAULT_MAX_STARTUP_RESEALS_PER_LEG = 3
 DEFAULT_MAX_RUNTIME_LOCALIZATION_RESEALS_PER_LEG = 1
 DEFAULT_MAX_LOCALIZATION_READINESS_RETRIES_PER_LEG = 2
 DEFAULT_MAX_CAMERA_OBSERVATION_ATTEMPTS_PER_CANDIDATE = 2
+DEFAULT_MAX_ROUTE_ADMISSION_ATTEMPTS_PER_CANDIDATE = 2
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -92,6 +93,18 @@ def build_parser() -> argparse.ArgumentParser:
             "Bound candidate-local passive-observer retries. A timed-out "
             "candidate is deferred while other candidates run; every retry "
             "still requires a fresh route and all live motion gates."
+        ),
+    )
+    parser.add_argument(
+        "--max-route-admission-attempts-per-candidate",
+        type=int,
+        default=DEFAULT_MAX_ROUTE_ADMISSION_ATTEMPTS_PER_CANDIDATE,
+        help=(
+            "Bound candidate-local no-motion route-uncertainty deferrals. "
+            "An exact pre-motion route admission rejection excludes that "
+            "candidate while other candidates run; every retry still uses a "
+            "fresh route, dry preflight, route uncertainty budget, and "
+            "one-use permit gate. Other child failures remain terminal."
         ),
     )
     parser.add_argument(

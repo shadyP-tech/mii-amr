@@ -418,6 +418,28 @@ class CandidateObservationDeferralLedger:
         )
         return self._selected
 
+    def preview_selection(self, candidate_uid: str) -> CandidateObservationSelection:
+        """Return the next observation slot without reserving it."""
+
+        uid = _candidate_uid(candidate_uid)
+        if self._selected is not None:
+            raise RuntimeError(
+                "candidate observation selection already active for "
+                f"{self._selected.candidate_uid}"
+            )
+        if uid not in self._attempt_counts:
+            raise ValueError(f"unknown candidate_uid {uid}")
+        if uid not in self._eligible():
+            raise RuntimeError(
+                f"candidate {uid} is not eligible in observation pass "
+                f"{self._pass_index}"
+            )
+        return CandidateObservationSelection(
+            candidate_uid=uid,
+            pass_index=self._pass_index,
+            attempt_number=self._attempt_counts[uid] + 1,
+        )
+
     def mark_unavailable(
         self,
         error: CandidateObservationUnavailableError,

@@ -10,9 +10,6 @@ be used before a survey target is committed.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
-import json
-import math
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -29,8 +26,8 @@ from scripts.aufgabe04.navigation.execution.route_uncertainty_budget import (
     PlanarCovariance,
 )
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
-from scripts.aufgabe04.navigation.localization.amcl_covariance_envelope import (
-    conservative_amcl_covariance_envelope,
+from scripts.aufgabe04.navigation.localization.preflight_route_uncertainty_context import (
+    load_preflight_route_uncertainty_context,
 )
 from scripts.aufgabe04.navigation.planning.costmap import Costmap
 
@@ -198,132 +195,29 @@ def load_startup_route_uncertainty_selector(
 ) -> StartupRouteUncertaintySelector:
     """Load and strictly bind the selector to preplanning evidence."""
 
-    preflight_path = Path(preflight_json)
     evidence_path = Path(evidence_json)
-    if preflight_path.is_symlink():
-        raise ValueError(
-            "startup route selection preflight path must not be a symlink"
-        )
-    try:
-        raw = preflight_path.read_bytes()
-    except OSError as exc:
-        raise ValueError(
-            "startup route selection preflight evidence is unavailable: "
-            f"{preflight_path}"
-        ) from exc
-    try:
-        payload = json.loads(
-            raw.decode("utf-8"),
-            object_pairs_hook=_strict_object_pairs,
-        )
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-        raise ValueError(
-            "startup route selection preflight evidence is malformed"
-        ) from exc
-    if not isinstance(payload, Mapping) or payload.get("ok") is not True:
-        raise ValueError(
-            "startup route selection requires a successful preplanning "
-            "localization preflight"
-        )
-
-    _validate_preflight_start(
-        payload.get("route_pose"),
+    context = load_preflight_route_uncertainty_context(
+        preflight_json=preflight_json,
         expected_start=expected_start,
         planning_frame=planning_frame,
-    )
-    samples = payload.get("stationary_amcl_samples")
-    if not isinstance(samples, list) or any(
-        not isinstance(sample, Mapping) for sample in samples
-    ):
-        raise ValueError(
-            "startup route selection preflight AMCL samples are malformed"
-        )
-    covariance, heading_sigma_rad, covariance_evidence = (
-        conservative_amcl_covariance_envelope(samples)
-    )
-    admission_config = RouteUncertaintyAdmissionConfig(
         robot_radius_m=robot_radius_m,
         collision_margin_m=collision_margin_m,
-        fixed_odom_tracking_bound_m=tracking_tube_radius_m,
-        empirical_odom_drift_bound_m=odom_drift_bound_m,
+        tracking_tube_radius_m=tracking_tube_radius_m,
+        odom_drift_bound_m=odom_drift_bound_m,
         braking_latency_distance_m=braking_latency_distance_m,
-        localization_sigma_multiplier=sigma_multiplier,
-        heading_sigma_rad=heading_sigma_rad,
-        heading_lever_arm_m=robot_radius_m,
-        sampling_spacing_m=clearance_sample_spacing_m,
-        heading_reference_x_m=expected_start.x_m,
-        heading_reference_y_m=expected_start.y_m,
+        sigma_multiplier=sigma_multiplier,
+        clearance_sample_spacing_m=clearance_sample_spacing_m,
     )
     return StartupRouteUncertaintySelector(
-        preflight_json=preflight_path,
-        preflight_sha256=hashlib.sha256(raw).hexdigest(),
+        preflight_json=context.preflight_json,
+        preflight_sha256=context.preflight_sha256,
         evidence_json=evidence_path,
-        expected_start=expected_start,
-        planning_frame=_nonempty_token(planning_frame, "planning_frame"),
-        covariance_evidence=covariance_evidence,
-        admission_config=admission_config,
-        covariance=covariance,
+        expected_start=context.expected_start,
+        planning_frame=context.planning_frame,
+        covariance_evidence=context.covariance_evidence,
+        admission_config=context.admission_config,
+        covariance=context.covariance,
     )
-
-
-def _validate_preflight_start(
-    value: object,
-    *,
-    expected_start: Pose2D,
-    planning_frame: str,
-) -> None:
-    if not isinstance(value, Mapping):
-        raise ValueError(
-            "startup route selection preflight has no admitted route pose"
-        )
-    if value.get("frame_id") != _nonempty_token(
-        planning_frame, "planning_frame"
-    ):
-        raise ValueError(
-            "startup route selection preflight route-pose frame mismatch"
-        )
-    try:
-        observed = Pose2D(
-            float(value["x_m"]),
-            float(value["y_m"]),
-            float(value["yaw_rad"]),
-        )
-    except (KeyError, TypeError, ValueError, OverflowError) as exc:
-        raise ValueError(
-            "startup route selection preflight route pose is malformed"
-        ) from exc
-    values = (
-        observed.x_m,
-        observed.y_m,
-        observed.yaw_rad,
-        expected_start.x_m,
-        expected_start.y_m,
-        expected_start.yaw_rad,
-    )
-    if not all(math.isfinite(item) for item in values):
-        raise ValueError(
-            "startup route selection route-pose binding is non-finite"
-        )
-    if observed != expected_start:
-        raise ValueError(
-            "startup route selection preflight route pose does not match "
-            "the admitted planning start"
-        )
-
-
-def _strict_object_pairs(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"duplicate JSON key {key!r}")
-        result[key] = value
-    return result
-
-
-def _nonempty_token(value: object, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{name} must be a non-empty string")
-    return value
 
 
 __all__ = [

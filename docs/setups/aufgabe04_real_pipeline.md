@@ -522,6 +522,28 @@ validates it instead of asking for another `RUN`.
 Missing, malformed, already-consumed, scope-mismatched, or artifact-mismatched
 permits fail closed before follower motion.
 
+Before candidate ranking, the parent now evaluates every geometrically
+reachable exact route against the covariance envelope from that same stopped
+planning-frame preflight. Routes with an exhausted uncertainty margin are
+removed as infeasible; the existing turn-risk, LiDAR-support, duration, and
+confidence order is then applied only to admitted routes. Normal and
+axis-guided approaches both compare only rasterization-equivalent goal cells
+and retain the route with materially greater static clearance. The retained
+admission receipt is bound to the exact route points and protected final yaw
+written to the route CSV. These are selection aids only: the newer child
+dry/live preflight remains authoritative and every safety threshold is
+unchanged.
+
+If that newer child preflight still returns an exact no-motion
+route-uncertainty rejection before any permit is issued, the parent may defer
+that candidate and continue with the next unresolved candidate. This is bounded by
+`--max-route-admission-attempts-per-candidate` (default `2`). The candidate
+remains unresolved, the camera-observation attempt is not consumed, and a later
+retry must repeat route materialization, dry/live preflight, the unchanged
+uncertainty budget, and one-use permit admission. Any child outcome that
+published motion, issued a permit, failed a sensor/TF/velocity-owner gate, or
+has malformed evidence remains terminal.
+
 Recovery evidence is written as an ordered sequence in
 `adaptive_replans.jsonl`: `runtime_localization_reseal_started`,
 `runtime_localization_admitted`, `runtime_localization_route_replanned`, and
@@ -530,7 +552,9 @@ permit and its atomic one-use receipt are stored under `motion_authorization/`,
 and the child semantic log records permit admission. A failed gate instead records
 `runtime_localization_reseal_failed` and authorizes no continuation. This
 recovery currently applies only to center-corridor coverage legs. Candidate
-pre-approach and opposite-face legs remain terminal on the same stop. A
+pre-approach and opposite-face legs do not use this runtime-localization
+recovery path; their only no-motion route-uncertainty continuations are the
+bounded candidate deferral and opposite-face standoff fallback described above. A
 coverage child that already adopted a `transient_navigation_blockage_replanned`
 overlay carries a content-hashed resume-state binding through the same-target
 localization reseal; the adopted overlay, source run IDs, route hashes, and

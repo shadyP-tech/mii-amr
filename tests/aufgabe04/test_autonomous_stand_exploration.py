@@ -26,6 +26,25 @@ from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     load_mission_leg_motion_permit,
     write_mission_leg_motion_authorization,
 )
+from scripts.aufgabe04.navigation.execution.route_uncertainty_admission import (
+    RouteUncertaintyAdmissionConfig,
+)
+from scripts.aufgabe04.navigation.execution.route_uncertainty_budget import (
+    PlanarCovariance,
+)
+from scripts.aufgabe04.navigation.approach.candidate_route_uncertainty_selection import (
+    CandidateRouteUncertaintyContext,
+)
+from scripts.aufgabe04.navigation.approach.candidate_frame_projection import (
+    CandidatePlanningFrame,
+)
+from scripts.aufgabe04.navigation.approach.candidate_frame_reprojection import (
+    CandidateFrameProvenance,
+    CandidatePoint2D,
+)
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
+    PlanarTransform2D,
+)
 from scripts.aufgabe04.navigation.localization.ros_preflight import (
     RosObservation,
     RosPreflightRequirements,
@@ -49,9 +68,11 @@ from scripts.aufgabe04.navigation.waypoint_follower.runtime import (
     STATIC_PHYSICAL_ROUTE_KINDS,
 )
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
+    STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
     STATUS_PENDING_CAMERA,
     CoverageSurveyConfig,
     CoverageSurveyPlan,
+    StandSurveyRegistry,
     SurveyCandidate,
     SurveyViewpoint,
     load_coverage_survey_plan,
@@ -503,6 +524,53 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             planned_covered_cells=(first_cell, second_cell),
             planned_coverage_ratio=1.0,
         )
+        frozen_map_from_odom = PlanarTransform2D(0.0, 0.0, 0.0)
+        registry = StandSurveyRegistry(
+            schema_version=STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
+            survey_id=plan.survey_id,
+            planning_frame=plan.planning_frame,
+            map_bundle_sha256=plan.map_bundle_sha256,
+            candidates=tuple(
+                SurveyCandidate(
+                    candidate_uid=item.candidate_uid,
+                    x_m=item.geometry.x_m,
+                    y_m=item.geometry.y_m,
+                    radius_m=item.geometry.radius_m,
+                    uncertainty_m=item.geometry.uncertainty_m,
+                    keepout_radius_m=item.geometry.keepout_radius_m,
+                    confidence=item.confidence,
+                    hit_count=item.hit_count,
+                    first_seen_sec=item.first_seen_sec,
+                    last_seen_sec=item.last_seen_sec,
+                    source_observation_ids=item.source.observation_ids,
+                    viewpoint_ids=("survey_vp_001", "survey_vp_002"),
+                    status=STATUS_PENDING_CAMERA,
+                    frame_provenance=(
+                        CandidateFrameProvenance.from_frozen_map_observation(
+                            map_frame="map",
+                            odom_frame="odom",
+                            frozen_map_point=CandidatePoint2D(
+                                item.geometry.x_m,
+                                item.geometry.y_m,
+                            ),
+                            frozen_map_from_odom=frozen_map_from_odom,
+                            source_evidence_id=(
+                                f"frame_evidence_{item.candidate_uid}"
+                            ),
+                        )
+                    ),
+                )
+                for item in candidates
+            ),
+        )
+        snapshot = candidate_snapshot_from_registry(
+            registry,
+            plan,
+            registry_path=session_root / "coverage" / "stand_registry.json",
+            snapshot_id="exact_two_wrapper_bound_snapshot",
+        )
+        snapshot_path = root / "bound_candidate_snapshot.json"
+        snapshot_sha256 = write_candidate_snapshot(snapshot_path, snapshot)
         candidate_uids = list(snapshot.candidate_uids)
 
         class FakeExactTwoCameraReady:
@@ -547,6 +615,15 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 }
 
         coverage_phase = FakeExactTwoCameraReady()
+
+        def execute_coverage_fixture(*_args, **_kwargs):
+            write_stand_survey_registry(
+                session_root / "coverage" / "stand_registry.json",
+                registry,
+                plan,
+            )
+            return coverage_phase
+
         profile = SimpleNamespace(
             robot_id="turtlebot1",
             robot_radius_m=0.105,
@@ -635,22 +712,53 @@ class AutonomousStandExplorationTest(unittest.TestCase):
 
         def candidate_effects_factory(**effects):
             def select(request):
+                self.assertIsNotNone(request.route_uncertainty_context)
                 uid = sorted(request.unresolved)[0]
                 return CameraCandidateInitialSelection(
                     candidate_uid=uid,
                     prepared_plan=None,
                     evidence={
                         "selected_candidate_uid": uid,
+                        "route_uncertainty_selection_applied": True,
                         "motion_authorized": False,
+                    },
+                )
+
+            def load_route_uncertainty_readiness(_request):
+                return CandidateRouteUncertaintyContext(
+                    covariance=PlanarCovariance(0.0, 0.0, 0.0),
+                    admission_config=RouteUncertaintyAdmissionConfig(
+                        robot_radius_m=0.105,
+                        collision_margin_m=0.02,
+                        fixed_odom_tracking_bound_m=0.03,
+                        empirical_odom_drift_bound_m=0.02,
+                        braking_latency_distance_m=0.0,
+                        localization_sigma_multiplier=2.0,
+                        heading_sigma_rad=0.0,
+                        heading_lever_arm_m=0.105,
+                        sampling_spacing_m=0.005,
+                        heading_reference_x_m=0.0,
+                        heading_reference_y_m=0.0,
+                    ),
+                    source_evidence={
+                        "schema_version": 1,
+                        "source": "test_candidate_route_uncertainty_readiness",
                     },
                 )
 
             return CandidateApproachEffects(
                 read_current_pose=effects["read_current_pose"],
+                admit_planning_frame=lambda _evidence_path: (
+                    CandidatePlanningFrame(
+                        Pose2D(0.0, 0.0, 0.0),
+                        PlanarTransform2D(0.0, 0.0, 0.0),
+                    )
+                ),
                 run_motion_leg=effects["run_motion_leg"],
                 capture_observation=effects["capture_observation"],
                 plan_preapproach=lambda _request: {"route_csv": "route.csv"},
                 select_initial_preapproach=select,
+                load_route_uncertainty_readiness=load_route_uncertainty_readiness,
                 validate_facing=lambda request: {
                     "candidate_uid": request.candidate.candidate_uid
                 },
@@ -702,7 +810,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 write_startup_reseal_motion_authorization=(
                     lambda *_args, **_kwargs: "5" * 64
                 ),
-                execute_coverage_mission=lambda *_args, **_kwargs: coverage_phase,
+                execute_coverage_mission=execute_coverage_fixture,
                 CoverageExactTwoCameraReady=FakeExactTwoCameraReady,
                 CandidateApproachEffects=candidate_effects_factory,
                 read_current_pose2d_from_amcl=lambda *_args, **_kwargs: Pose2D(

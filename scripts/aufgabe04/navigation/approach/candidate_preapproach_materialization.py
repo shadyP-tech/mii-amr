@@ -29,6 +29,9 @@ from scripts.aufgabe04.navigation.approach.backside_axis_frame_projection import
 from scripts.aufgabe04.navigation.approach.candidate_preapproach_models import (
     CandidatePreapproachPlan,
 )
+from scripts.aufgabe04.navigation.approach.candidate_route_uncertainty_selection import (
+    validate_candidate_route_uncertainty_selection_binding,
+)
 from scripts.aufgabe04.navigation.approach.detected_stand_preapproach import (
     CAMERA_AXIS_FACE_BEARING_MODE,
     ROBOT_TO_STAND_BEARING_MODE,
@@ -332,6 +335,11 @@ def _validate_selection_evidence(
         raise ValueError(
             "selection_evidence motion_authorized must be absent, null, or false"
         )
+    if selection_evidence.get("route_uncertainty_selection_applied") is True:
+        validate_candidate_route_uncertainty_selection_binding(
+            selection_evidence,
+            prepared,
+        )
 
 
 def _validate_source_artifacts(
@@ -425,19 +433,15 @@ def _validate_goal_cell_policy_binding(
     approach_normal_rad: float | None,
 ) -> None:
     evidence = prepared.goal_cell_selection
-    if approach_normal_rad is None:
-        if evidence is not None:
-            raise ValueError(
-                "robot-bearing approach must not carry axis goal-cell selection"
-            )
-        return
     if evidence is None:
-        raise ValueError("camera-axis approach lacks goal-cell selection evidence")
+        raise ValueError("candidate approach lacks goal-cell selection evidence")
     expected_requested_goal = Pose2D(
         candidate_x_m
-        + prepared.approach_offset_m * math.cos(approach_normal_rad),
+        - prepared.approach_offset_m
+        * math.cos(prepared.approach_bearing_rad),
         candidate_y_m
-        + prepared.approach_offset_m * math.sin(approach_normal_rad),
+        - prepared.approach_offset_m
+        * math.sin(prepared.approach_bearing_rad),
         prepared.approach_bearing_rad,
     )
     validate_goal_cell_selection_binding(
