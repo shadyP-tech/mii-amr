@@ -247,6 +247,19 @@ class LidarVisibilitySession:
         if self.finalized:
             raise ValueError("cannot buffer a receipt after visibility finalization")
         validate_lidar_visibility_receipt(receipt)
+        if receipt.schema_version != 2:
+            raise ValueError("new visibility sessions require schema 2 receipts")
+        config = self.observer_config
+        if config is None:  # pragma: no cover - enabled session invariant.
+            raise ValueError("enabled visibility session has no observer config")
+        frozen_geometry = (
+            config["observation_geometry_mode"]
+            == FROZEN_ODOM_OBSERVATION_GEOMETRY
+        )
+        if frozen_geometry != (receipt.frame_provenance is not None):
+            raise ValueError(
+                "visibility receipt provenance differs from observation geometry mode"
+            )
         if (
             receipt.survey_id != self._survey_id
             or receipt.viewpoint_id != self._viewpoint_id

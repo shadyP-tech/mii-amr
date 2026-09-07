@@ -20,6 +20,8 @@ _HARD_VETO_REASON_BY_CLASSIFICATION = {
     "no_intersection": "no_scan_ray_intersects_candidate_envelope",
     "nearer": "nearer_return_occludes_candidate",
     "matching": "matching_return_supports_candidate",
+    "frame_unavailable": "candidate_visibility_frame_unavailable",
+    "not_planned_visible": "projected_candidate_not_planned_visible",
 }
 _KNOWN_CLASSIFICATIONS = frozenset(
     {*_HARD_VETO_REASON_BY_CLASSIFICATION, "clear", "invalid"}

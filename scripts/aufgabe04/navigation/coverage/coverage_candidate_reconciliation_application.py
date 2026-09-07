@@ -61,6 +61,8 @@ def bounded_negative_visibility_reconciliation_policy_contract() -> dict[str, ob
         ),
         "recommendation_report_policy_mode": POLICY_MODE_EVIDENCE_ONLY,
         "reconciliation_config": values,
+        "candidate_geometry": "canonical_odom_projected_into_receipt_epoch",
+        "matching_or_nearer_envelope_ray_vetoes_rejection": True,
         "application_scope": "terminal_exact_two_full_viewpoint_receipt_set",
         "required_candidate_status": STATUS_PROVISIONAL,
         "rejection_basis": REJECTION_BASIS_NEGATIVE_VISIBILITY,

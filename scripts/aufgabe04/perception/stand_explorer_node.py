@@ -49,6 +49,9 @@ from scripts.aufgabe04.perception.lidar_visibility_session import (
     disabled_visibility_summary_fields,
     proposal_detector_config_evidence,
 )
+from scripts.aufgabe04.perception.lidar_visibility_frames import (
+    LidarVisibilityFrameProvenance,
+)
 from scripts.aufgabe04.perception.models import LidarStandDetectorConfig
 from scripts.aufgabe04.perception.stand_confirmation import (
     StandConfirmationAccumulator,
@@ -712,6 +715,20 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
                 range_min_m=msg.range_min,
                 range_max_m=msg.range_max,
                 ranges_m=msg.ranges,
+                frame_provenance=(
+                    None if frozen_frame is None
+                    else LidarVisibilityFrameProvenance(
+                        map_frame=frozen_frame.certificate.map_frame,
+                        odom_frame=frozen_frame.certificate.odom_frame,
+                        map_from_odom=frozen_frame.certificate.map_from_odom,
+                        canonical_scan_pose_odom=Pose2D(
+                            exact_time_tf_pose.x_m,
+                            exact_time_tf_pose.y_m,
+                            exact_time_tf_pose.yaw_rad,
+                        ),
+                        source_evidence_id=frozen_frame.certificate_sha256,
+                    )
+                ),
             )
             self.visibility_session.buffer_receipt(receipt)
         candidates = detect_stand_candidates_from_scan(

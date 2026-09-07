@@ -6,6 +6,8 @@ import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
+from scripts.aufgabe04.perception.lidar_visibility_frames import LidarVisibilityFrameProvenance
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import PlanarTransform2D
 from scripts.aufgabe04.artifacts.content_store import payload_sha256
 from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds
 from scripts.aufgabe04.navigation.coverage.coverage_visibility_reporting import (
@@ -101,6 +103,12 @@ def _receipt(*, observer_config_sha256: str, **overrides):
         "ranges_m": (1.0, None, 2.0),
     }
     values.update(overrides)
+    values.setdefault("frame_provenance", LidarVisibilityFrameProvenance(
+        map_frame="map", odom_frame="odom",
+        map_from_odom=PlanarTransform2D(0.0, 0.0, 0.0),
+        canonical_scan_pose_odom=values["scan_pose_map"],
+        source_evidence_id="c" * 64,
+    ))
     return lidar_visibility_receipt_from_scan(**values)
 
 
@@ -128,6 +136,14 @@ def _summary(
         VISIBILITY_RECEIPT_SET_SHA256_KEY: visibility_receipts_sha256(receipts),
         VISIBILITY_OBSERVER_CONFIG_KEY: observer_config,
         VISIBILITY_OBSERVER_CONFIG_SHA256_KEY: config_sha256,
+        "frozen_odom_observation_geometry": {
+            "schema_version": 1,
+            "mode": "frozen_map_from_odom",
+            "odom_execution_certificate_sha256": "c" * 64,
+            "source_frames": {"map_frame": "map", "odom_frame": "odom", "base_frame": "base_footprint"},
+            "scan_tf_target_frame": "odom",
+            "map_from_odom": {"x_m": 0.0, "y_m": 0.0, "yaw_rad": 0.0},
+        },
         "processed_scan_count": 1,
         "planning_frame": "map",
         "map_bundle_sha256": MAP_SHA256,
@@ -139,6 +155,32 @@ def _summary(
 
 
 class CoverageVisibilityReportingTest(unittest.TestCase):
+    def test_new_frozen_receipts_require_summary_bound_frame_provenance(self):
+        for mutation in (
+            "missing_geometry", "certificate", "transform", "odom_frame", "schema_bool",
+        ):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                summary = _summary(Path(directory) / "receipts.jsonl")
+                geometry = summary["frozen_odom_observation_geometry"]
+                if mutation == "missing_geometry":
+                    del summary["frozen_odom_observation_geometry"]
+                elif mutation == "certificate":
+                    geometry["odom_execution_certificate_sha256"] = "d" * 64
+                elif mutation == "transform":
+                    geometry["map_from_odom"]["x_m"] = 0.02
+                elif mutation == "schema_bool":
+                    geometry["schema_version"] = True
+                else:
+                    geometry["source_frames"]["odom_frame"] = "other_robot_odom"
+                with self.assertRaises(ValueError):
+                    validate_coverage_visibility_evidence(summary, _plan(), VIEWPOINT_ID, True)
+
+    def test_new_frozen_receipt_cannot_omit_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            summary = _summary(Path(directory) / "receipts.jsonl", receipt_overrides={"frame_provenance": None})
+            with self.assertRaisesRegex(ValueError, "provenance is missing"):
+                validate_coverage_visibility_evidence(summary, _plan(), VIEWPOINT_ID, True)
+
     def test_valid_summary_returns_frozen_evidence_and_json_safe_fields(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "visibility_receipts.jsonl"

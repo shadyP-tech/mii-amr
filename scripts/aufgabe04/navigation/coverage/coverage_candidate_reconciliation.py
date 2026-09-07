@@ -18,6 +18,13 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from scripts.aufgabe04.artifacts.content_store import payload_sha256
+from scripts.aufgabe04.navigation.coverage.candidate_visibility_frames import (
+    CandidateVisibilityProjection,
+    project_candidate_for_visibility,
+)
+from scripts.aufgabe04.navigation.coverage.candidate_visibility_rays import (
+    select_candidate_visibility_ray,
+)
 from scripts.aufgabe04.navigation.planning.costmap import Costmap
 from scripts.aufgabe04.navigation.planning.map_io import (
     CELL_FREE,
@@ -51,7 +58,7 @@ from scripts.aufgabe04.perception.lidar_visibility_evidence import (
 )
 
 
-COVERAGE_CANDIDATE_RECONCILIATION_SCHEMA_VERSION = 2
+COVERAGE_CANDIDATE_RECONCILIATION_SCHEMA_VERSION = 3
 ACTION_RETAIN = "retain"
 ACTION_REJECT_PROVISIONAL = "reject_provisional"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -136,16 +143,21 @@ class CandidateVisibilityRayEvidence:
     scan_stamp_sec: float
     classification: str
     reason: str
-    candidate_distance_m: float
+    candidate_distance_m: float | None
     candidate_envelope_radius_m: float
-    near_edge_distance_m: float
-    far_edge_distance_m: float
+    near_edge_distance_m: float | None
+    far_edge_distance_m: float | None
     conservative_distance_limit_m: float
     selected_ray_index: int | None
     selected_ray_bearing_rad: float | None
     selected_ray_offset_rad: float | None
     selected_range_m: float | None
     static_supercover_cells: tuple[GridCell, ...]
+    frame_projection: CandidateVisibilityProjection
+    intersecting_ray_indices: tuple[int, ...] = ()
+    supporting_ray_indices: tuple[int, ...] = ()
+    occluding_ray_indices: tuple[int, ...] = ()
+    invalid_ray_indices: tuple[int, ...] = ()
 
     def to_evidence_dict(self) -> dict[str, object]:
         return {
@@ -155,6 +167,11 @@ class CandidateVisibilityRayEvidence:
             "scan_stamp_sec": self.scan_stamp_sec,
             "classification": self.classification,
             "reason": self.reason,
+            "frame_projection": self.frame_projection.to_evidence_dict(),
+            "intersecting_ray_indices": list(self.intersecting_ray_indices),
+            "supporting_ray_indices": list(self.supporting_ray_indices),
+            "occluding_ray_indices": list(self.occluding_ray_indices),
+            "invalid_ray_indices": list(self.invalid_ray_indices),
             "candidate_distance_m": self.candidate_distance_m,
             "candidate_envelope_radius_m": self.candidate_envelope_radius_m,
             "near_edge_distance_m": self.near_edge_distance_m,
@@ -320,6 +337,9 @@ def reconcile_provisional_candidate_visibility(
             static_costmap=static_costmap,
             config=config,
             maximum_visibility_distance_m=plan.config.visibility_radius_m,
+            planned_visible_cells=(
+                plan.viewpoint_for(receipt.viewpoint_id).visible_cells
+            ),
         )
         for receipt in eligible_receipts
     )
@@ -334,6 +354,10 @@ def reconcile_provisional_candidate_visibility(
     )
 
     reasons: list[str] = []
+    reasons.extend(sorted(
+        {item.reason for item in ray_evidence
+         if item.classification == "frame_unavailable"}
+    ))
     if candidate.status != STATUS_PROVISIONAL:
         reasons.append("candidate_not_provisional")
     if len(source_viewpoint_ids) != 1:
@@ -383,8 +407,34 @@ def _evaluate_receipt_ray(
     static_costmap: Costmap,
     config: CoverageCandidateReconciliationConfig,
     maximum_visibility_distance_m: float,
+    planned_visible_cells: tuple[GridCell, ...] | None = None,
 ) -> CandidateVisibilityRayEvidence:
-    target = Pose2D(candidate.x_m, candidate.y_m, 0.0)
+    projection = project_candidate_for_visibility(candidate, receipt)
+    target = projection.target
+    if target is None:
+        return CandidateVisibilityRayEvidence(
+            receipt_id=receipt.receipt_id,
+            receipt_sha256=receipt.receipt_sha256,
+            viewpoint_id=receipt.viewpoint_id,
+            scan_stamp_sec=receipt.scan_stamp_sec,
+            classification="frame_unavailable",
+            reason=projection.reason,
+            candidate_distance_m=None,
+            candidate_envelope_radius_m=(
+                candidate.radius_m + candidate.uncertainty_m
+            ),
+            near_edge_distance_m=None,
+            far_edge_distance_m=None,
+            conservative_distance_limit_m=min(
+                receipt.range_max_m, maximum_visibility_distance_m,
+            ),
+            selected_ray_index=None,
+            selected_ray_bearing_rad=None,
+            selected_ray_offset_rad=None,
+            selected_range_m=None,
+            static_supercover_cells=(),
+            frame_projection=projection,
+        )
     dx = target.x_m - receipt.scan_pose_map.x_m
     dy = target.y_m - receipt.scan_pose_map.y_m
     distance = math.hypot(dx, dy)
@@ -416,7 +466,21 @@ def _evaluate_receipt_ray(
         "far_edge_distance_m": far_edge,
         "conservative_distance_limit_m": conservative_distance_limit,
         "static_supercover_cells": supercover,
+        "frame_projection": projection,
     }
+    if (
+        planned_visible_cells is not None
+        and static_costmap.world_to_grid(target) not in planned_visible_cells
+    ):
+        return CandidateVisibilityRayEvidence(
+            classification="not_planned_visible",
+            reason="projected_candidate_not_planned_visible",
+            selected_ray_index=None,
+            selected_ray_bearing_rad=None,
+            selected_ray_offset_rad=None,
+            selected_range_m=None,
+            **common,
+        )
     if not segment_is_collision_free(
         static_costmap,
         receipt.scan_pose_map,
@@ -445,62 +509,25 @@ def _evaluate_receipt_ray(
             **common,
         )
     target_bearing = math.atan2(dy, dx) - receipt.scan_pose_map.yaw_rad
-    ray_index, ray_bearing, ray_offset = _nearest_intersecting_ray(
+    selection = select_candidate_visibility_ray(
         receipt,
         target_bearing_rad=target_bearing,
         candidate_distance_m=distance,
         envelope_radius_m=envelope_radius,
+        far_edge_clearance_margin_m=config.far_edge_clearance_margin_m,
+        matching_range_tolerance_m=config.matching_range_tolerance_m,
     )
-    if ray_index is None:
-        return CandidateVisibilityRayEvidence(
-            classification="no_intersection",
-            reason="no_scan_ray_intersects_candidate_envelope",
-            selected_ray_index=None,
-            selected_ray_bearing_rad=None,
-            selected_ray_offset_rad=None,
-            selected_range_m=None,
-            **common,
-        )
-    selected_range = receipt.ranges_m[ray_index]
-    selected = {
-        "selected_ray_index": ray_index,
-        "selected_ray_bearing_rad": ray_bearing,
-        "selected_ray_offset_rad": ray_offset,
-        "selected_range_m": selected_range,
-    }
-    if selected_range is None:
-        return CandidateVisibilityRayEvidence(
-            classification="invalid",
-            reason="selected_scan_ray_invalid",
-            **selected,
-            **common,
-        )
-    if (
-        selected_range
-        < near_edge - config.matching_range_tolerance_m
-    ):
-        return CandidateVisibilityRayEvidence(
-            classification="nearer",
-            reason="nearer_return_occludes_candidate",
-            **selected,
-            **common,
-        )
-    if (
-        selected_range
-        <= far_edge
-        + config.far_edge_clearance_margin_m
-        + config.matching_range_tolerance_m
-    ):
-        return CandidateVisibilityRayEvidence(
-            classification="matching",
-            reason="matching_return_supports_candidate",
-            **selected,
-            **common,
-        )
     return CandidateVisibilityRayEvidence(
-        classification="clear",
-        reason="finite_ray_clears_candidate_far_edge",
-        **selected,
+        classification=selection.classification,
+        reason=selection.reason,
+        selected_ray_index=selection.selected_ray_index,
+        selected_ray_bearing_rad=selection.selected_ray_bearing_rad,
+        selected_ray_offset_rad=selection.selected_ray_offset_rad,
+        selected_range_m=selection.selected_range_m,
+        intersecting_ray_indices=selection.intersecting_ray_indices,
+        supporting_ray_indices=selection.supporting_ray_indices,
+        occluding_ray_indices=selection.occluding_ray_indices,
+        invalid_ray_indices=selection.invalid_ray_indices,
         **common,
     )
 
@@ -522,36 +549,6 @@ def _far_envelope_pose(
         center.y_m + scale * dy,
         0.0,
     )
-
-
-def _nearest_intersecting_ray(
-    receipt: LidarVisibilityReceipt,
-    *,
-    target_bearing_rad: float,
-    candidate_distance_m: float,
-    envelope_radius_m: float,
-) -> tuple[int | None, float | None, float | None]:
-    best: tuple[float, int, float] | None = None
-    for index in range(len(receipt.ranges_m)):
-        ray_bearing = (
-            receipt.angle_min_rad + index * receipt.angle_increment_rad
-        )
-        offset = _normalize_angle(ray_bearing - target_bearing_rad)
-        perpendicular_distance = candidate_distance_m * abs(math.sin(offset))
-        forward_projection = candidate_distance_m * math.cos(offset)
-        if (
-            forward_projection <= 0.0
-            or perpendicular_distance > envelope_radius_m + _EPSILON
-        ):
-            continue
-        candidate_key = (abs(offset), index, ray_bearing)
-        if best is None or candidate_key < best:
-            best = candidate_key
-    if best is None:
-        return None, None, None
-    offset, index, ray_bearing = best
-    signed_offset = _normalize_angle(ray_bearing - target_bearing_rad)
-    return index, ray_bearing, signed_offset
 
 
 def _separated_clear_scan_stamps(
@@ -633,10 +630,6 @@ def _validated_static_costmap(occupancy_grid: OccupancyGrid) -> Costmap:
     ):
         raise ValueError("occupancy_grid contains an invalid cell value")
     return Costmap.from_occupancy_grid(occupancy_grid, block_unknown=True)
-
-
-def _normalize_angle(angle_rad: float) -> float:
-    return math.atan2(math.sin(angle_rad), math.cos(angle_rad))
 
 
 def _finite(value: float, name: str) -> float:

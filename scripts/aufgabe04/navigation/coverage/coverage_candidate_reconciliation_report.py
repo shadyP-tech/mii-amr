@@ -33,7 +33,7 @@ from scripts.aufgabe04.perception.lidar_visibility_evidence import (
 )
 
 
-COVERAGE_CANDIDATE_RECONCILIATION_REPORT_SCHEMA_VERSION = 2
+COVERAGE_CANDIDATE_RECONCILIATION_REPORT_SCHEMA_VERSION = 3
 POLICY_MODE_EVIDENCE_ONLY = (
     "evidence_only_bounded_negative_visibility_recommendation"
 )
@@ -51,6 +51,8 @@ def evidence_only_reconciliation_policy_contract() -> dict[str, object]:
         **values,
         "registry_mutation_enabled": False,
         "motion_authorized": False,
+        "candidate_geometry": "canonical_odom_projected_into_receipt_epoch",
+        "matching_or_nearer_envelope_ray_vetoes_rejection": True,
     }
 
 

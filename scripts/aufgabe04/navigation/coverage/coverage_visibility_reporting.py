@@ -176,6 +176,7 @@ def validate_coverage_visibility_evidence(
                 "LiDAR visibility receipt identity differs from "
                 "survey/viewpoint/planning-frame/map/config"
             )
+        _validate_receipt_frame_binding(receipt, observer_config, summary)
 
     return CoverageVisibilityEvidence(
         survey_id=plan.survey_id,
@@ -190,6 +191,55 @@ def validate_coverage_visibility_evidence(
         observer_config_sha256=observer_config_sha256,
         receipts=receipts,
     )
+
+
+def _validate_receipt_frame_binding(
+    receipt: LidarVisibilityReceipt,
+    observer_config: Mapping[str, object],
+    summary: Mapping[str, object],
+) -> None:
+    """Bind new receipt geometry to its epoch without changing shared config."""
+
+    if receipt.schema_version == 1:
+        # Historical hashes remain readable; reconciliation cannot use these
+        # provenance-free receipts to reject a candidate.
+        return
+    frame = receipt.frame_provenance
+    mode = observer_config["observation_geometry_mode"]
+    if mode == LIVE_MAP_OBSERVATION_GEOMETRY:
+        if frame is not None:
+            raise ValueError("live-map visibility receipt has frozen provenance")
+        return
+    if frame is None:
+        raise ValueError("frozen visibility receipt frame provenance is missing")
+    geometry = _required_mapping(summary, "frozen_odom_observation_geometry")
+    source_frames = _required_mapping(geometry, "source_frames")
+    if (
+        type(geometry.get("schema_version")) is not int
+        or geometry.get("schema_version") != 1
+        or geometry.get("mode") != "frozen_map_from_odom"
+        or source_frames.get("map_frame") != frame.map_frame
+        or source_frames.get("odom_frame") != frame.odom_frame
+        or geometry.get("scan_tf_target_frame") != frame.odom_frame
+        or _required_sha256(geometry, "odom_execution_certificate_sha256")
+        != frame.source_evidence_id
+    ):
+        raise ValueError(
+            "visibility receipt frozen frame identity differs from summary"
+        )
+    transform = _required_mapping(geometry, "map_from_odom")
+    expected = {
+        "x_m": frame.map_from_odom.x_m,
+        "y_m": frame.map_from_odom.y_m,
+        "yaw_rad": frame.map_from_odom.yaw_rad,
+    }
+    if set(transform) != set(expected) or any(
+        isinstance(transform[key], bool)
+        or not isinstance(transform[key], (int, float))
+        or transform[key] != value
+        for key, value in expected.items()
+    ):
+        raise ValueError("visibility receipt frozen transform differs from summary")
 
 
 def _validate_observer_config_binding(

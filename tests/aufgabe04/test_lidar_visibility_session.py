@@ -3,6 +3,7 @@ import math
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,6 +14,8 @@ if str(ROOT) not in sys.path:
 
 from scripts.aufgabe04.artifacts.content_store import payload_sha256  # noqa: E402
 from scripts.aufgabe04.navigation.foundation.models import Pose2D  # noqa: E402
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import PlanarTransform2D
+from scripts.aufgabe04.perception.lidar_visibility_frames import LidarVisibilityFrameProvenance
 from scripts.aufgabe04.perception.lidar_stand_morphology import (  # noqa: E402
     MORPHOLOGY_PROFILE_EVIDENCE_KEY,
     PROPOSAL_DETECTOR_CONFIG_EVIDENCE_KEY,
@@ -29,6 +32,7 @@ from scripts.aufgabe04.perception.lidar_visibility_evidence import (  # noqa: E4
 )
 from scripts.aufgabe04.perception.lidar_visibility_session import (  # noqa: E402
     FROZEN_ODOM_OBSERVATION_GEOMETRY,
+    LIVE_MAP_OBSERVATION_GEOMETRY,
     LidarVisibilitySession,
     disabled_visibility_summary_fields,
     proposal_detector_config_evidence,
@@ -44,7 +48,9 @@ SURVEY_ID = "survey_01"
 VIEWPOINT_ID = "viewpoint_01"
 
 
-def _create_session(path: Path) -> LidarVisibilitySession:
+def _create_session(
+    path: Path, *, geometry_mode=FROZEN_ODOM_OBSERVATION_GEOMETRY
+) -> LidarVisibilitySession:
     profile = stand_width_profile_from_radius(0.06)
     return LidarVisibilitySession.create(
         output_path=path,
@@ -53,7 +59,7 @@ def _create_session(path: Path) -> LidarVisibilitySession:
         runtime_config={"map_frame": "map", "scan_topic": "/scan"},
         timing_limits={"max_scan_age_sec": 1.0},
         map_bundle_sha256=MAP_SHA256,
-        observation_geometry_mode=FROZEN_ODOM_OBSERVATION_GEOMETRY,
+        observation_geometry_mode=geometry_mode,
         proposal_detector_config=proposal_detector_config_evidence(
             LidarStandDetectorConfig()
         ),
@@ -86,6 +92,12 @@ def _receipt(
         range_min_m=0.08,
         range_max_m=3.5,
         ranges_m=(1.0, math.inf, 2.0),
+        frame_provenance=LidarVisibilityFrameProvenance(
+            map_frame="map", odom_frame="odom",
+            map_from_odom=PlanarTransform2D(0.0, 0.0, 0.0),
+            canonical_scan_pose_odom=Pose2D(0.0, 0.0, 0.0),
+            source_evidence_id="c" * 64,
+        ),
     )
 
 
@@ -257,6 +269,43 @@ class LidarVisibilitySessionTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "must be finalized"):
                 session.summary_fields(processed_scan_count=0)
+
+    def test_frozen_session_rejects_missing_provenance_and_legacy_receipts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = _create_session(Path(directory) / "visibility.jsonl")
+            no_provenance = replace(_receipt(session), frame_provenance=None)
+            with self.assertRaisesRegex(ValueError, "observation geometry mode"):
+                session.buffer_receipt(no_provenance)
+            with self.assertRaisesRegex(ValueError, "schema 2"):
+                session.buffer_receipt(replace(no_provenance, schema_version=1))
+            self.assertEqual(session.receipt_count, 0)
+
+    def test_epoch_transform_does_not_change_observer_config_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = _create_session(Path(directory) / "first.jsonl")
+            second = _create_session(Path(directory) / "second.jsonl")
+            first_receipt = _receipt(first)
+            second_receipt = replace(_receipt(second), frame_provenance=replace(
+                first_receipt.frame_provenance,
+                map_from_odom=PlanarTransform2D(0.1, 0.0, 0.0),
+                canonical_scan_pose_odom=Pose2D(-0.1, 0.0, 0.0),
+                source_evidence_id="d" * 64,
+            ))
+            first.buffer_receipt(first_receipt)
+            second.buffer_receipt(second_receipt)
+            self.assertEqual(first.observer_config_sha256, second.observer_config_sha256)
+            self.assertNotEqual(first_receipt.receipt_sha256, second_receipt.receipt_sha256)
+
+    def test_live_map_session_preserves_explicitly_missing_frozen_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = _create_session(
+                Path(directory) / "visibility.jsonl",
+                geometry_mode=LIVE_MAP_OBSERVATION_GEOMETRY,
+            )
+            with self.assertRaisesRegex(ValueError, "observation geometry mode"):
+                session.buffer_receipt(_receipt(session))
+            session.buffer_receipt(replace(_receipt(session), frame_provenance=None))
+            self.assertEqual(session.receipt_count, 1)
 
 
 if __name__ == "__main__":

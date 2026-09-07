@@ -8,6 +8,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds
+from scripts.aufgabe04.navigation.approach.candidate_frame_reprojection import (
+    CandidateFrameProvenance, CandidatePoint2D,
+)
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import PlanarTransform2D
+from scripts.aufgabe04.perception.lidar_visibility_frames import LidarVisibilityFrameProvenance
 from scripts.aufgabe04.navigation.coverage.coverage_candidate_reconciliation import (
     ACTION_REJECT_PROVISIONAL,
     ACTION_RETAIN,
@@ -168,6 +173,12 @@ def _candidate(
         source_observation_ids=(f"observation_{suffix}",),
         viewpoint_ids=viewpoint_ids,
         status=status,
+        frame_provenance=CandidateFrameProvenance.from_frozen_map_observation(
+            map_frame="map", odom_frame="odom",
+            frozen_map_point=CandidatePoint2D(CANDIDATE_POSE.x_m, CANDIDATE_POSE.y_m),
+            frozen_map_from_odom=PlanarTransform2D(0.0, 0.0, 0.0),
+            source_evidence_id="c" * 64,
+        ),
     )
 
 
@@ -222,6 +233,12 @@ def _receipt(
         "ranges_m": _ranges(target_range),
     }
     values.update(overrides)
+    values.setdefault("frame_provenance", LidarVisibilityFrameProvenance(
+        map_frame="map", odom_frame="odom",
+        map_from_odom=PlanarTransform2D(0.0, 0.0, 0.0),
+        canonical_scan_pose_odom=values["scan_pose_map"],
+        source_evidence_id="d" * 64,
+    ))
     return lidar_visibility_receipt_from_scan(**values)
 
 

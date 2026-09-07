@@ -309,6 +309,12 @@ class StandExplorerTfTest(unittest.TestCase):
                 range_min_m=0.08,
                 range_max_m=3.5,
                 ranges_m=(1.0, math.inf, 2.0),
+                frame_provenance=stand_explorer_node.LidarVisibilityFrameProvenance(
+                    map_frame="map", odom_frame="odom",
+                    map_from_odom=stand_explorer_node.PlanarTransform2D(0.0, 0.0, 0.0),
+                    canonical_scan_pose_odom=stand_explorer_node.Pose2D(0.0, 0.0, 0.0),
+                    source_evidence_id="c" * 64,
+                ),
             )
             visibility_session.buffer_receipt(receipt)
             fake_node = SimpleNamespace(

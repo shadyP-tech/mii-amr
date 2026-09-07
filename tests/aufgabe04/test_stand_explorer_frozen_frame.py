@@ -4,6 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 
 from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
@@ -41,6 +42,64 @@ def _certificate(
 
 
 class StandExplorerFrozenFrameTest(unittest.TestCase):
+    def test_processed_scan_receipt_binds_exact_odom_pose_and_frozen_certificate(self):
+        certificate = _certificate()
+        frozen = stand_explorer_node.FrozenObserverFrame(
+            certificate_path=Path("certificate.json"),
+            certificate=certificate,
+            certificate_sha256=odom_execution_certificate_sha256(certificate),
+        )
+        stamp = SimpleNamespace(sec=10, nanosec=0)
+        now = SimpleNamespace(sec=10, nanosec=10_000_000)
+        receipt_buffer = []
+        warnings = []
+        node = SimpleNamespace(
+            frozen_observer_frame=frozen,
+            runtime=SimpleNamespace(map_frame="map", odom_frame="odom", scan_topic="/scan"),
+            get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: now)),
+            get_logger=lambda: SimpleNamespace(warn=warnings.append),
+            timing_limits=stand_explorer_node.DEFAULT_OBSERVATION_TIMING_LIMITS,
+            processed_scan_count=0,
+            detected_candidate_count=0,
+            map_bundle=SimpleNamespace(bundle_sha256="a" * 64),
+            detector_config=stand_explorer_node.LidarStandDetectorConfig(),
+            visibility_session=SimpleNamespace(
+                enabled=True, survey_id="survey_01", viewpoint_id="viewpoint_01",
+                observer_config_sha256="b" * 64,
+                buffer_receipt=receipt_buffer.append,
+            ),
+        )
+        pending = stand_explorer_node._PendingScan(
+            message=SimpleNamespace(
+                angle_min=0.0, angle_increment=0.05, range_min=0.05,
+                range_max=5.0, ranges=(math.inf,),
+            ),
+            scan_frame="base_scan", scan_stamp_sec=10.0,
+            query_time=object(), deadline_monotonic_sec=0.0,
+        )
+        transform = SimpleNamespace(
+            header=SimpleNamespace(stamp=stamp, frame_id="odom"),
+            child_frame_id="base_scan",
+            transform=SimpleNamespace(
+                translation=SimpleNamespace(x=3.0, y=4.0),
+                rotation=SimpleNamespace(x=0.0, y=0.0, z=math.sin(-math.pi / 8.0), w=math.cos(-math.pi / 8.0)),
+            ),
+        )
+        with patch.object(stand_explorer_node, "detect_stand_candidates_from_scan", return_value=()):
+            stand_explorer_node.StandExplorerNode._process_scan_with_transform(node, pending, transform)
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(receipt_buffer), 1)
+        receipt = receipt_buffer[0]
+        self.assertEqual(receipt.schema_version, 2)
+        self.assertEqual(receipt.frame_provenance.source_evidence_id, frozen.certificate_sha256)
+        self.assertEqual(receipt.frame_provenance.map_from_odom, certificate.map_from_odom)
+        self.assertEqual(receipt.frame_provenance.canonical_scan_pose_odom.x_m, 3.0)
+        self.assertEqual(receipt.frame_provenance.canonical_scan_pose_odom.y_m, 4.0)
+        self.assertAlmostEqual(receipt.frame_provenance.canonical_scan_pose_odom.yaw_rad, -math.pi / 4.0)
+        self.assertAlmostEqual(receipt.scan_pose_map.x_m, -3.0)
+        self.assertAlmostEqual(receipt.scan_pose_map.y_m, 5.0)
+        self.assertEqual(receipt.pose_stamp_sec, receipt.scan_stamp_sec)
+
     def test_nonzero_yaw_composition_maps_odom_scan_pose_into_map(self):
         composed = stand_explorer_node.compose_frozen_scan_pose_in_map(
             odom_from_scan=PlanarTransform(3.0, 4.0, -math.pi / 4.0),

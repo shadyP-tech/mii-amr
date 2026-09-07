@@ -19,9 +19,12 @@ from typing import Iterable, Mapping, Sequence
 
 from scripts.aufgabe04.artifacts.content_store import payload_sha256
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.perception.lidar_visibility_frames import (
+    LidarVisibilityFrameProvenance,
+)
 
 
-LIDAR_VISIBILITY_RECEIPT_SCHEMA_VERSION = 1
+LIDAR_VISIBILITY_RECEIPT_SCHEMA_VERSION = 2
 VISIBILITY_EVIDENCE_ENABLED_KEY = "lidar_visibility_evidence_enabled"
 VISIBILITY_RECEIPTS_JSONL_KEY = "lidar_visibility_receipts_jsonl"
 VISIBILITY_RECEIPT_COUNT_KEY = "lidar_visibility_receipt_count"
@@ -38,7 +41,7 @@ _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _SAFE_FRAME_OR_TOPIC = re.compile(r"^/?[A-Za-z][A-Za-z0-9_/.-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _HASH_FIELD = "receipt_sha256"
-_PAYLOAD_FIELDS = frozenset(
+_LEGACY_PAYLOAD_FIELDS = frozenset(
     {
         "schema_version",
         "receipt_id",
@@ -60,6 +63,7 @@ _PAYLOAD_FIELDS = frozenset(
         "ranges_m",
     }
 )
+_PAYLOAD_FIELDS = _LEGACY_PAYLOAD_FIELDS | {"frame_provenance"}
 
 
 @dataclass(frozen=True)
@@ -84,6 +88,7 @@ class LidarVisibilityReceipt:
     range_min_m: float
     range_max_m: float
     ranges_m: tuple[float | None, ...]
+    frame_provenance: LidarVisibilityFrameProvenance | None = None
 
     @property
     def finite_range_count(self) -> int:
@@ -154,6 +159,7 @@ def lidar_visibility_receipt_from_scan(
     range_min_m: float,
     range_max_m: float,
     ranges_m: Iterable[float],
+    frame_provenance: LidarVisibilityFrameProvenance | None = None,
 ) -> LidarVisibilityReceipt:
     """Build and validate one JSON-safe exact-time visibility receipt."""
 
@@ -167,19 +173,24 @@ def lidar_visibility_receipt_from_scan(
         scan_topic=scan_topic,
         map_bundle_sha256=map_bundle_sha256,
         observer_config_sha256=observer_config_sha256,
-        scan_stamp_sec=float(scan_stamp_sec),
-        pose_stamp_sec=float(pose_stamp_sec),
-        observer_clock_sec=float(observer_clock_sec),
+        scan_stamp_sec=_finite_json_number(scan_stamp_sec, "scan_stamp_sec"),
+        pose_stamp_sec=_finite_json_number(pose_stamp_sec, "pose_stamp_sec"),
+        observer_clock_sec=_finite_json_number(
+            observer_clock_sec, "observer_clock_sec"
+        ),
         scan_pose_map=scan_pose_map,
-        angle_min_rad=float(angle_min_rad),
-        angle_increment_rad=float(angle_increment_rad),
-        range_min_m=float(range_min_m),
-        range_max_m=float(range_max_m),
+        angle_min_rad=_finite_json_number(angle_min_rad, "angle_min_rad"),
+        angle_increment_rad=_finite_json_number(
+            angle_increment_rad, "angle_increment_rad"
+        ),
+        range_min_m=_finite_json_number(range_min_m, "range_min_m"),
+        range_max_m=_finite_json_number(range_max_m, "range_max_m"),
         ranges_m=sanitized_scan_ranges(
             ranges_m,
             range_min_m=range_min_m,
             range_max_m=range_max_m,
         ),
+        frame_provenance=frame_provenance,
     )
     return validate_lidar_visibility_receipt(receipt)
 
@@ -189,8 +200,23 @@ def validate_lidar_visibility_receipt(
 ) -> LidarVisibilityReceipt:
     if not isinstance(receipt, LidarVisibilityReceipt):
         raise ValueError("receipt must be a LidarVisibilityReceipt")
-    if receipt.schema_version != LIDAR_VISIBILITY_RECEIPT_SCHEMA_VERSION:
+    if (
+        type(receipt.schema_version) is not int
+        or receipt.schema_version not in (1, 2)
+    ):
         raise ValueError("unsupported LiDAR visibility receipt schema_version")
+    if receipt.schema_version == 1 and receipt.frame_provenance is not None:
+        raise ValueError("legacy visibility receipt cannot contain frame provenance")
+    if receipt.frame_provenance is not None:
+        if not isinstance(
+            receipt.frame_provenance, LidarVisibilityFrameProvenance
+        ):
+            raise ValueError(
+                "frame_provenance must be LidarVisibilityFrameProvenance"
+            )
+        if receipt.frame_provenance.map_frame != receipt.planning_frame:
+            raise ValueError("visibility frame provenance planning frame mismatch")
+        receipt.frame_provenance.validate_scan_pose_map(receipt.scan_pose_map)
     for value, name in (
         (receipt.receipt_id, "receipt_id"),
         (receipt.survey_id, "survey_id"),
@@ -220,7 +246,9 @@ def validate_lidar_visibility_receipt(
     if abs(scan_stamp - pose_stamp) > _EXACT_TIME_EPSILON_SEC:
         raise ValueError("scan pose must be resolved at the exact scan timestamp")
     if not isinstance(receipt.scan_pose_map, Pose2D) or not all(
-        math.isfinite(value)
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
         for value in (
             receipt.scan_pose_map.x_m,
             receipt.scan_pose_map.y_m,
@@ -255,7 +283,7 @@ def visibility_receipt_payload(
     receipt: LidarVisibilityReceipt,
 ) -> dict[str, object]:
     validate_lidar_visibility_receipt(receipt)
-    return {
+    payload = {
         "schema_version": receipt.schema_version,
         "receipt_id": receipt.receipt_id,
         "survey_id": receipt.survey_id,
@@ -279,6 +307,12 @@ def visibility_receipt_payload(
         "range_max_m": receipt.range_max_m,
         "ranges_m": list(receipt.ranges_m),
     }
+    if receipt.schema_version >= 2:
+        payload["frame_provenance"] = (
+            None if receipt.frame_provenance is None
+            else receipt.frame_provenance.to_mapping()
+        )
+    return payload
 
 
 def visibility_receipts_sha256(
@@ -385,7 +419,11 @@ def load_lidar_visibility_receipt_snapshot(
 def _receipt_from_hashed_payload(
     payload: Mapping[str, object],
 ) -> LidarVisibilityReceipt:
-    if frozenset(payload) != _PAYLOAD_FIELDS | {_HASH_FIELD}:
+    schema_version = _required_integer(payload, "schema_version")
+    if schema_version not in (1, 2):
+        raise ValueError("unsupported LiDAR visibility receipt schema_version")
+    fields = _LEGACY_PAYLOAD_FIELDS if schema_version == 1 else _PAYLOAD_FIELDS
+    if frozenset(payload) != fields | {_HASH_FIELD}:
         raise ValueError("visibility receipt fields do not match schema")
     stored_hash = payload.get(_HASH_FIELD)
     if not isinstance(stored_hash, str) or _SHA256.fullmatch(stored_hash) is None:
@@ -402,7 +440,7 @@ def _receipt_from_hashed_payload(
     if not isinstance(ranges, list):
         raise ValueError("ranges_m must be an array")
     receipt = LidarVisibilityReceipt(
-        schema_version=_required_integer(unhashed, "schema_version"),
+        schema_version=schema_version,
         receipt_id=_required_string(unhashed, "receipt_id"),
         survey_id=_required_string(unhashed, "survey_id"),
         viewpoint_id=_required_string(unhashed, "viewpoint_id"),
@@ -428,6 +466,12 @@ def _receipt_from_hashed_payload(
         ranges_m=tuple(
             None if value is None else _finite_json_number(value, "ranges_m")
             for value in ranges
+        ),
+        frame_provenance=(
+            None if unhashed.get("frame_provenance") is None
+            else LidarVisibilityFrameProvenance.from_mapping(
+                _required_mapping(unhashed, "frame_provenance")
+            )
         ),
     )
     return validate_lidar_visibility_receipt(receipt)
@@ -463,20 +507,17 @@ def _required_number(payload: Mapping[str, object], name: str) -> float:
 def _finite_json_number(value: object, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{name} must be numeric")
-    parsed = float(value)
+    try:
+        parsed = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"{name} must be finite") from exc
     if not math.isfinite(parsed):
         raise ValueError(f"{name} must be finite")
     return parsed
 
 
 def _finite(value: float, name: str) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError(f"{name} must be finite") from exc
-    if not math.isfinite(parsed):
-        raise ValueError(f"{name} must be finite")
-    return parsed
+    return _finite_json_number(value, name)
 
 
 def _finite_positive(value: float, name: str) -> float:
@@ -516,6 +557,7 @@ __all__ = [
     "VISIBILITY_RECEIPTS_JSONL_KEY",
     "VISIBILITY_RECEIPT_SET_SHA256_KEY",
     "LidarVisibilityReceipt",
+    "LidarVisibilityFrameProvenance",
     "append_lidar_visibility_receipts",
     "lidar_visibility_receipt_from_scan",
     "load_lidar_visibility_receipt_snapshot",
