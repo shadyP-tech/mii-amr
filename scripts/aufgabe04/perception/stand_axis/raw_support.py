@@ -252,12 +252,15 @@ def _fit_raw_edge_side_in_band(
     outward_sign: float = 0.0,
     fixed_direction: tuple[float, float] | None = None,
     minimum_coverage: float = 0.45,
+    coherent_metric_rail: bool = False,
 ):
     """Fit one proposed side from nearby raw pixels without connectivity.
 
     The topology side supplies only a search band. For every pixel-sized bin
     along that side, one untouched Canny pixel is selected by the requested
     outer/nearest policy and a robust line is fitted through those samples.
+    Metric callers first associate one coherent rail within that same band,
+    so nearer fragments cannot discard its pixels before the robust fit.
     This prevents a closed topology mask from measuring its own proposal.
     """
 
@@ -303,6 +306,29 @@ def _fit_raw_edge_side_in_band(
         along_px[candidate_indices] + 0.5
     ).astype(numpy.int32)
     candidate_offsets = normal_offset[candidate_indices]
+    if coherent_metric_rail:
+        from scripts.aufgabe04.perception.stand_axis.metric_edge_association import (
+            coherent_metric_rail_points,
+        )
+
+        candidates = coherent_metric_rail_points(
+            cv2,
+            candidates,
+            candidate_bins,
+            start,
+            end,
+            band_px=band_px,
+            expected_length_px=expected_length_px,
+            minimum_coverage=minimum_coverage,
+            fixed_direction=fixed_direction,
+        )
+        if len(candidates) == 0:
+            return None, candidates
+        relative_candidates = candidates - numpy.array((start.u_px, start.v_px))
+        candidate_bins = numpy.floor(
+            relative_candidates @ tangent + 0.5
+        ).astype(numpy.int32)
+        candidate_offsets = relative_candidates @ normal
     nearest_by_bin: dict[int, int] = {}
     if outward_sign:
         sample_order = numpy.argsort(-outward_sign * candidate_offsets)
@@ -765,8 +791,8 @@ def _raw_side_evidence_and_corners(
         start, end, intervals, outward_sign, minimum_coverage = side_specs[name]
         if prefer_prediction:
             # A metric projection identifies which of several nearby parallel
-            # rails belongs to the stand. Select the closest current-frame edge
-            # in each tangent bin instead of the outermost heater/QR edge.
+            # rails belongs to the stand. Rank coherent raw rails first, then
+            # select their nearest pixels instead of outermost heater/QR edges.
             outward_sign = 0.0
         side_band_px = (
             parallel_side_band_px
@@ -783,6 +809,7 @@ def _raw_side_evidence_and_corners(
             outward_sign=outward_sign,
             fixed_direction=fixed_direction,
             minimum_coverage=minimum_coverage,
+            coherent_metric_rail=prefer_prediction,
         )
 
     top, top_evidence = fit_side("top")

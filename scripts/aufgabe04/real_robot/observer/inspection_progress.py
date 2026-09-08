@@ -4,9 +4,17 @@ from dataclasses import dataclass
 import math
 
 from scripts.aufgabe04.artifacts.candidate_inspection_observation import (
+    MAX_ADVISORY_ACCUMULATION_WINDOW_SEC,
     MIN_PROGRESS_FRAMES,
     MIN_PROGRESS_SPAN_SEC,
 )
+
+
+# The measured production QR/model path takes about 1.4 seconds per frame.
+# Seven advisory frames therefore need more than the independent five-second
+# QR/axis latch lifetime. Every sample must still pass fresh sensor gates at
+# ingestion; this bounded history gives no older QR or metric pose authority.
+INSPECTION_PROGRESS_WINDOW_SEC = MAX_ADVISORY_ACCUMULATION_WINDOW_SEC
 
 
 @dataclass(frozen=True)
@@ -25,6 +33,13 @@ def classify_inspection_progress(state: str, details: dict) -> InspectionClassif
     yaw = axis.get("advisory_camera_relative_yaw_rad")
     if isinstance(yaw, bool) or not isinstance(yaw, (int, float)) or not math.isfinite(yaw):
         yaw = None
+    front = details.get("front_observation") or {}
+    if front.get("axis_state") == "unresolved" and front.get("classification") in {
+        "front_readable", "front_unreadable",
+    }:
+        # A contradicted QR-free estimate cannot supply even the advisory
+        # angle of an observed front marker.
+        return InspectionClassification(front["classification"], reason, None)
     model_edge_view = (
         axis.get("estimator_usable") is True
         and yaw is not None
@@ -49,13 +64,15 @@ class InspectionProgress:
     """Keep distinct sensor tuples from one stationary, unpoisoned view."""
 
     def __init__(self, *, required_frames=MIN_PROGRESS_FRAMES, minimum_span_sec=MIN_PROGRESS_SPAN_SEC,
-                 max_age_sec=5.0, max_translation_m=0.02, max_rotation_rad=math.radians(2)):
+                 max_age_sec=INSPECTION_PROGRESS_WINDOW_SEC,
+                 max_translation_m=0.02, max_rotation_rad=math.radians(2)):
         if isinstance(required_frames, bool) or not isinstance(required_frames, int) or required_frames < MIN_PROGRESS_FRAMES:
             raise ValueError("inspection progress needs at least seven frames")
         if not math.isfinite(minimum_span_sec) or minimum_span_sec < MIN_PROGRESS_SPAN_SEC:
             raise ValueError("inspection progress needs at least two seconds")
-        if not math.isfinite(max_age_sec) or max_age_sec < minimum_span_sec:
-            raise ValueError("inspection window is shorter than its minimum span")
+        if (type(max_age_sec) not in (int, float) or not math.isfinite(max_age_sec)
+                or not minimum_span_sec <= max_age_sec <= INSPECTION_PROGRESS_WINDOW_SEC):
+            raise ValueError("inspection window must cover its minimum span and cannot exceed 15 seconds")
         self.required_frames = required_frames
         self.minimum_span_sec = minimum_span_sec
         self.max_age_sec = max_age_sec
@@ -73,23 +90,26 @@ class InspectionProgress:
 
     def record(self, *, frame_stamp_sec, robot_pose, frame_accepted, poisoned, classification,
                current_qr_id=None, current_qr_sample_count=0, motion_epoch_reset=False):
-        if poisoned:
-            self._poisoned = True
-            self._samples.clear()
-        if self._poisoned or frame_accepted is not True:
-            return None
         if isinstance(frame_stamp_sec, bool) or not math.isfinite(frame_stamp_sec) or frame_stamp_sec < 0:
             raise ValueError("inspection frame timestamp is invalid")
         pose = tuple(float(robot_pose[k]) for k in ("x_m", "y_m", "yaw_rad"))
         if not all(math.isfinite(v) for v in pose):
             raise ValueError("inspection pose is invalid")
+        new_motion_epoch = motion_epoch_reset
         if self._anchor is not None:
             dx, dy = pose[0] - self._anchor[0], pose[1] - self._anchor[1]
             dyaw = abs(math.atan2(math.sin(pose[2] - self._anchor[2]), math.cos(pose[2] - self._anchor[2])))
-            if motion_epoch_reset or math.hypot(dx, dy) > self.max_translation_m or dyaw > self.max_rotation_rad:
-                self._samples.clear()
-                self._anchor = None
-                self._seen_qr_id = None
+            new_motion_epoch = new_motion_epoch or math.hypot(dx, dy) > self.max_translation_m or dyaw > self.max_rotation_rad
+        if new_motion_epoch:
+            self._samples.clear()
+            self._anchor = None
+            self._seen_qr_id = None
+            self._poisoned = False
+        if poisoned:
+            self._poisoned = True
+            self._samples.clear()
+        if self._poisoned or frame_accepted is not True:
+            return None
         if self._anchor is None:
             self._anchor = pose
         if current_qr_id is not None:
@@ -125,6 +145,7 @@ class InspectionProgress:
             "sensor_stamps_sec": stamps,
             "first_sensor_stamp_sec": stamps[0],
             "sensor_stamp_sec": stamps[-1],
+            "advisory_accumulation_window_sec": self.max_age_sec,
             "sample_gate_evidence": {k: True for k in (
                 "all_samples_stationary", "all_samples_synchronized", "all_samples_lidar_associated", "all_samples_fresh",
             )},

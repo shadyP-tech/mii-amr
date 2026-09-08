@@ -134,6 +134,10 @@ class PassiveObserverEvidence:
         self._motion_epoch = 0
         self._axis_samples: dict[str, dict[float, float]] = {}
         self._qr_samples: dict[float, str] = {}
+        # A past associated identity remains an ambiguity veto within this
+        # stationary epoch; expiration removes its latch authority, not the
+        # knowledge that a different identity would contradict it.
+        self._epoch_qr_id: str | None = None
         self._seen_frame_stamps: set[float] = set()
         self._latest_reference_stamp = -math.inf
         self._poison_reason: str | None = None
@@ -182,10 +186,22 @@ class PassiveObserverEvidence:
         self._motion_reset_count += 1
         self._axis_samples.clear()
         self._qr_samples.clear()
+        self._epoch_qr_id = None
         self._seen_frame_stamps.clear()
         self._latest_reference_stamp = -math.inf
         self._poison_reason = None
         self._last_soft_miss_reason = None
+
+    def discard_axis_samples(self, *, sources: Iterable[str]) -> None:
+        """Invalidate contradicted axis modes without erasing QR or poison.
+
+        Positive front-marker evidence invalidates QR-free backside geometry.
+        Identity history, duplicate stamps, TTLs and stationary epoch binding
+        must survive that change; it is not a new observation epoch.
+        """
+
+        for source in sources:
+            self._axis_samples.pop(source, None)
 
     def _ensure_motion_epoch(self, pose: EvidencePose) -> bool:
         self._validate_pose(pose)
@@ -259,7 +275,10 @@ class PassiveObserverEvidence:
         self._peak_axis_sample_count = max(self._peak_axis_sample_count, count)
         return True
 
-    def _record_qr(self, *, stamp: float, qr_texts: Iterable[str]) -> tuple[bool, str | None]:
+    def _record_qr(
+        self, *, stamp: float, qr_texts: Iterable[str],
+        expected_qr_id: str | None = None,
+    ) -> tuple[bool, str | None]:
         unique = tuple(sorted({str(text).strip() for text in qr_texts if str(text).strip()}))
         if len(unique) > 1:
             self._poison_reason = "multiple_qr_ids_in_associated_frame"
@@ -269,12 +288,17 @@ class PassiveObserverEvidence:
         if not unique:
             return False, None
         qr_id = unique[0]
-        active_ids = set(self._qr_samples.values())
-        if active_ids and active_ids != {qr_id}:
+        if expected_qr_id is not None and qr_id != expected_qr_id:
+            self._poison_reason = "associated_qr_identity_differs_from_expected"
+            self._axis_samples.clear()
+            self._qr_samples.clear()
+            return False, self._poison_reason
+        if self._epoch_qr_id is not None and self._epoch_qr_id != qr_id:
             self._poison_reason = "conflicting_qr_ids_in_motion_epoch"
             self._axis_samples.clear()
             self._qr_samples.clear()
             return False, self._poison_reason
+        self._epoch_qr_id = qr_id
         self._qr_samples[stamp] = qr_id
         newest = sorted(self._qr_samples, reverse=True)[: self.required_qr_samples]
         self._qr_samples = {
@@ -421,6 +445,8 @@ class PassiveObserverEvidence:
         axis_yaw_rad: float | None,
         axis_source: str | None,
         qr_texts: Iterable[str] = (),
+        qr_symbol_count: int | None = None,
+        expected_qr_id: str | None = None,
     ) -> PassiveObserverEvidenceUpdate:
         """Record one synchronized frame if its LiDAR association is fresh.
 
@@ -429,6 +455,10 @@ class PassiveObserverEvidence:
         """
 
         self._validate_target(target_key)
+        if qr_symbol_count is not None and (
+            type(qr_symbol_count) is not int or qr_symbol_count < 0
+        ):
+            raise ValueError("QR symbol count must be a nonnegative integer")
         frame_stamp = self._validate_stamp("frame_stamp_sec", frame_stamp_sec)
         lidar_stamp = self._validate_stamp("lidar_stamp_sec", lidar_stamp_sec)
         observed_at = self._validate_stamp("observed_at_sec", observed_at_sec)
@@ -489,9 +519,21 @@ class PassiveObserverEvidence:
 
         self._remember_frame(frame_stamp)
         self._accepted_frame_count += 1
+        if qr_symbol_count is not None and qr_symbol_count > 1:
+            # Repeated payloads on distinct symbols are still ambiguous. A
+            # text set must never collapse them into one target identity.
+            self._poison_reason = "multiple_qr_symbols_in_associated_frame"
+            self._axis_samples.clear()
+            self._qr_samples.clear()
+            return self._update(
+                frame_accepted=False, axis_sample_accepted=False,
+                qr_sample_accepted=False, reason=self._poison_reason,
+                motion_epoch_reset=reset,
+            )
         qr_accepted, poison_reason = self._record_qr(
             stamp=frame_stamp,
             qr_texts=qr_texts,
+            expected_qr_id=expected_qr_id,
         )
         if poison_reason is not None:
             return self._update(

@@ -65,7 +65,10 @@ from scripts.aufgabe04.perception.stand_axis_handoff import (
     RigidTransform,
     rectified_pixel_bearing_in_scan,
 )
-from scripts.aufgabe04.qr_scanning.opencv_qr_detector import detect_qr_texts_bgr
+from scripts.aufgabe04.qr_scanning.opencv_qr_detector import (
+    detect_qr_observations_bgr,
+    detect_qr_texts_bgr,
+)
 from scripts.aufgabe04.real_robot.configuration.geometry import (
     intrinsics_from_camera_info,
     optical_heading_from_transform,
@@ -105,6 +108,9 @@ from scripts.aufgabe04.real_robot.observer.camera_target_registration import (
     HeadRoiEvaluation,
     select_camera_target_measurement,
 )
+from scripts.aufgabe04.real_robot.observer.qr_target_binding import (
+    bind_qr_observations_to_target,
+)
 from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import (
     DEFAULT_BACKSIDE_REACQUISITION_PADDING_SCALE,
     DEFAULT_BACKSIDE_REGISTRATION_MAX_CENTER_OFFSET_RATIO,
@@ -121,8 +127,13 @@ from scripts.aufgabe04.artifacts.candidate_inspection_observation import (
     build_candidate_inspection_observation,
 )
 from scripts.aufgabe04.real_robot.observer.inspection_progress import (
+    INSPECTION_PROGRESS_WINDOW_SEC,
     InspectionProgress,
     classify_inspection_progress,
+)
+from scripts.aufgabe04.real_robot.observer.front_observation import (
+    BACKSIDE_AXIS_SOURCES,
+    front_observation_decision,
 )
 from scripts.aufgabe04.real_robot.readiness.sensor_timing_contract import (
     DEFAULT_MAX_CAMERA_INFO_IMAGE_SKEW_SEC,
@@ -484,6 +495,41 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self._qr_marker_seen_in_stationary_epoch = False
         self._qr_marker_stationary_epoch_anchor = None
 
+    def _note_front_observation(self, decision, robot_pose: Pose2D) -> None:
+        """Veto QR-free axes without resetting target identity evidence."""
+
+        if decision.marker_observed_now:
+            self._qr_marker_seen_in_stationary_epoch = True
+            if self._qr_marker_stationary_epoch_anchor is None:
+                self._qr_marker_stationary_epoch_anchor = robot_pose
+        if decision.marker_seen_in_stationary_epoch and self.observation_evidence is not None:
+            self.observation_evidence.discard_axis_samples(
+                sources=BACKSIDE_AXIS_SOURCES,
+            )
+
+    def _record_front_seen_axis_unresolved(
+        self, *, decision, robot_pose, image_stamp_sec, scan_stamp_sec,
+        observed_at_sec, lidar_associated, qr_texts,
+    ):
+        """Record the ordinary gated QR channel with no contradicted axis."""
+
+        if not decision.withhold_backside_axis:
+            raise ValueError("front unresolved recording requires a withheld axis")
+        update = self._record_observation_frame(
+            robot_pose=robot_pose,
+            image_stamp_sec=image_stamp_sec,
+            scan_stamp_sec=scan_stamp_sec,
+            observed_at_sec=observed_at_sec,
+            lidar_associated=lidar_associated,
+            axis_yaw_rad=None,
+            axis_source=None,
+            qr_texts=qr_texts,
+        )
+        return update, decision.metadata(
+            lidar_associated=lidar_associated,
+            frame_accepted=update.frame_accepted,
+        )
+
     def _record_observation_frame(
         self,
         *,
@@ -495,6 +541,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         axis_yaw_rad: float | None,
         axis_source: str | None,
         qr_texts: tuple[str, ...],
+        qr_symbol_count: int | None = None,
     ):
         evidence = self._ensure_observation_evidence(robot_pose)
         update = evidence.record_frame(
@@ -507,6 +554,11 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             axis_yaw_rad=axis_yaw_rad,
             axis_source=axis_source,
             qr_texts=qr_texts,
+            qr_symbol_count=qr_symbol_count,
+            expected_qr_id=(
+                None if getattr(self.args, "expected_qr_id", AUTO_QR_ID) == AUTO_QR_ID
+                else self.args.expected_qr_id
+            ),
         )
         self._last_observation_update = update
         self._inspection_frame = {
@@ -995,6 +1047,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 attempt_roi.y0 : attempt_roi.y1,
                 attempt_roi.x0 : attempt_roi.x1,
             ]
+            qr_observations = detect_qr_observations_bgr(attempt_frame, self.cv2)
             attempt_estimate, attempt_debug = estimate_stand_axis_from_metric_model(
                 self.cv2,
                 attempt_frame,
@@ -1004,6 +1057,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 camera_cx_px=intrinsics.cx_px - attempt_roi.x0,
                 camera_cy_px=intrinsics.cy_px - attempt_roi.y0,
                 pose_hint=pose_hint,
+                qr_observations=qr_observations,
                 edge_preprocess=resolved_stand_axis_profile.edge_preprocess,
                 canny_low=resolved_stand_axis_profile.canny_low,
                 canny_high=resolved_stand_axis_profile.canny_high,
@@ -1026,6 +1080,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 frame=attempt_frame,
                 estimate=attempt_estimate,
                 debug=attempt_debug,
+                qr_observations=qr_observations,
             )
 
         registration = select_camera_target_measurement(
@@ -1112,33 +1167,37 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 preliminary_lidar_association
             ),
         }
-        qr_texts = tuple(
-            sorted(set(detect_qr_texts_bgr(roi_frame, self.cv2)))
+        selected_qr_observations = getattr(selected, "qr_observations", None)
+        if selected_qr_observations is None:
+            # Preserve legacy injected evaluations; the operational evaluator
+            # always carries the same observations used by metric fitting.
+            qr_texts = tuple(sorted(set(detect_qr_texts_bgr(roi_frame, self.cv2))))
+        else:
+            qr_texts = tuple(sorted({
+                observation.text for observation in selected_qr_observations
+            }))
+        qr_binding = bind_qr_observations_to_target(
+            selected_qr_observations, roi=roi, intrinsics=intrinsics,
+            scan_from_camera=scan_from_camera_geometry, scan=plain_scan,
+            map_bearing_rad=scan_bearing,
+            cone_half_angle_rad=math.radians(self.args.lidar_cone_half_angle_deg),
+            accepted_range_m=(lower_surface_bound, upper_surface_bound),
+            now_sec=now_sec, max_scan_age_sec=self.args.max_sensor_age_sec,
+            min_cluster_sample_count=self.args.lidar_min_samples,
+            camera_registration_accepted=is_camera_registered_head_roi_attempt(selected_attempt),
+            max_camera_map_bearing_delta_rad=math.radians(
+                self.args.backside_registration_max_bearing_delta_deg
+            ),
         )
-        if debug.qr_detected:
-            self._qr_marker_seen_in_stationary_epoch = True
-            if self._qr_marker_stationary_epoch_anchor is None:
-                self._qr_marker_stationary_epoch_anchor = robot_pose
-            if not qr_texts:
-                # Do not let backside samples from either side of an
-                # intermittently visible, undecoded front marker form one
-                # consensus. The marker latch separately prevents a later
-                # backside artifact in this stationary epoch.
-                self._reset_observation_evidence(reset_inspection=False)
-        if qr_texts and estimate.source == BACKSIDE_AXIS_SAMPLE_SOURCE:
-            self._reset_observation_evidence()
-            self._write_debug(frame, roi_frame, debug, metadata=axis_metadata)
-            self._write_status(
-                "evidence_not_committable",
-                reason=(
-                    "decoded QR text conflicts with backside-candidate "
-                    "model source"
-                ),
-                qr_texts=list(qr_texts),
-                expected_qr_id=self.args.expected_qr_id,
-                stand_axis_debug=axis_metadata,
-            )
-            return
+        qr_evidence_texts = qr_binding.qr_texts_for_evidence
+        axis_metadata["decoded_qr_target_binding"] = qr_binding.metadata()
+        front_decision = front_observation_decision(
+            qr_texts=qr_texts,
+            qr_marker_detected=debug.qr_detected,
+            estimate_source=estimate.source,
+            marker_seen_in_stationary_epoch=self._qr_marker_seen_in_stationary_epoch,
+        )
+        self._note_front_observation(front_decision, robot_pose)
         if estimate.model_profile_sha256 != self.stand_model_profile.sha256:
             self._reset_observation_evidence()
             self._write_debug(
@@ -1154,18 +1213,68 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 stand_axis_debug=axis_metadata,
             )
             return
+        if qr_binding.symbol_count > 1:
+            update = self._record_observation_frame(
+                robot_pose=robot_pose,
+                image_stamp_sec=image.stamp_sec, scan_stamp_sec=scan.stamp_sec,
+                observed_at_sec=now_sec,
+                lidar_associated=preliminary_lidar_association.associated,
+                axis_yaw_rad=None, axis_source=None, qr_texts=(),
+                qr_symbol_count=qr_binding.symbol_count,
+            )
+            self._write_debug(frame, roi_frame, debug, metadata=axis_metadata)
+            self._write_status(
+                "evidence_not_committable",
+                reason="multiple_qr_symbols_in_candidate_frame",
+                qr_texts=list(qr_texts),
+                observation_evidence=update.snapshot.as_dict(),
+                stand_axis_debug=axis_metadata,
+            )
+            return
         if (
             self.args.expected_qr_id != AUTO_QR_ID
             and qr_texts
             and qr_texts != (self.args.expected_qr_id,)
         ):
-            self._reset_observation_evidence()
+            update = self._record_observation_frame(
+                robot_pose=robot_pose,
+                image_stamp_sec=image.stamp_sec, scan_stamp_sec=scan.stamp_sec,
+                observed_at_sec=now_sec, lidar_associated=qr_binding.accepted,
+                axis_yaw_rad=None, axis_source=None,
+                qr_texts=qr_evidence_texts,
+            )
             self._write_debug(frame, roi_frame, debug, metadata=axis_metadata)
             self._write_status(
                 "evidence_not_committable",
                 reason="observed QR identity differs from expected identity",
                 qr_texts=list(qr_texts),
                 expected_qr_id=self.args.expected_qr_id,
+                observation_evidence=update.snapshot.as_dict(),
+                stand_axis_debug=axis_metadata,
+            )
+            return
+        if front_decision.withhold_backside_axis:
+            # Positive QR evidence contradicts this geometry mode, not the
+            # identity channel. Retain its ordinary target/sensor gates and
+            # poison history while withholding every QR-free axis sample.
+            update, front_metadata = self._record_front_seen_axis_unresolved(
+                decision=front_decision,
+                robot_pose=robot_pose,
+                image_stamp_sec=image.stamp_sec,
+                scan_stamp_sec=scan.stamp_sec,
+                observed_at_sec=now_sec,
+                lidar_associated=(preliminary_lidar_association.associated or qr_binding.accepted),
+                qr_texts=qr_evidence_texts,
+            )
+            self._write_debug(frame, roi_frame, debug, metadata=axis_metadata)
+            self._write_status(
+                "evidence_not_committable",
+                reason="front_seen_axis_unresolved",
+                estimator_reason=estimate.reason,
+                qr_texts=list(qr_texts),
+                expected_qr_id=self.args.expected_qr_id,
+                observation_evidence=update.snapshot.as_dict(),
+                front_observation=front_metadata,
                 stand_axis_debug=axis_metadata,
             )
             return
@@ -1175,10 +1284,10 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 image_stamp_sec=image.stamp_sec,
                 scan_stamp_sec=scan.stamp_sec,
                 observed_at_sec=now_sec,
-                lidar_associated=preliminary_lidar_association.associated,
+                lidar_associated=(preliminary_lidar_association.associated or qr_binding.accepted),
                 axis_yaw_rad=None,
                 axis_source=None,
-                qr_texts=qr_texts,
+                qr_texts=qr_evidence_texts,
             )
             self._write_debug(
                 frame,
@@ -1207,10 +1316,10 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 image_stamp_sec=image.stamp_sec,
                 scan_stamp_sec=scan.stamp_sec,
                 observed_at_sec=now_sec,
-                lidar_associated=preliminary_lidar_association.associated,
+                lidar_associated=(preliminary_lidar_association.associated or qr_binding.accepted),
                 axis_yaw_rad=None,
                 axis_source=None,
-                qr_texts=qr_texts,
+                qr_texts=qr_evidence_texts,
             )
             self._write_debug(
                 frame,
@@ -1236,10 +1345,10 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 image_stamp_sec=image.stamp_sec,
                 scan_stamp_sec=scan.stamp_sec,
                 observed_at_sec=now_sec,
-                lidar_associated=preliminary_lidar_association.associated,
+                lidar_associated=(preliminary_lidar_association.associated or qr_binding.accepted),
                 axis_yaw_rad=None,
                 axis_source=None,
-                qr_texts=qr_texts,
+                qr_texts=qr_evidence_texts,
             )
             self._write_debug(
                 frame,
@@ -1362,7 +1471,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 lidar_associated=False,
                 axis_yaw_rad=None,
                 axis_source=None,
-                qr_texts=qr_texts,
+                qr_texts=qr_evidence_texts,
             )
             self._write_debug(frame, roi_frame, debug, metadata=axis_metadata)
             self._write_status(
@@ -1378,7 +1487,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             debug=debug,
             conditioning=conditioning,
             yaw_rad=optical_yaw,
-            qr_texts=qr_texts,
+            qr_texts=qr_evidence_texts,
             lidar_target_associated=lidar_target_associated,
             max_qr_bound_model_obliqueness_rad=math.radians(
                 self.args.qr_bound_model_max_obliqueness_deg
@@ -1396,7 +1505,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 lidar_associated=True,
                 axis_yaw_rad=None,
                 axis_source=None,
-                qr_texts=qr_texts,
+                qr_texts=qr_evidence_texts,
             )
             self._write_debug(frame, roi_frame, debug, metadata=axis_metadata)
             self._write_status(
@@ -1443,7 +1552,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                     lidar_associated=True,
                     axis_yaw_rad=None,
                     axis_source=None,
-                    qr_texts=qr_texts,
+                    qr_texts=qr_evidence_texts,
                 )
                 self._write_debug(
                     frame,
@@ -1473,7 +1582,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             lidar_associated=True,
             axis_yaw_rad=axis_sample_admission.yaw_rad,
             axis_source=axis_sample_source,
-            qr_texts=qr_texts,
+            qr_texts=qr_evidence_texts,
         )
         # A completed bucket from a different acquisition mode cannot
         # authenticate the current frame's registration evidence.
@@ -1737,7 +1846,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             progress = InspectionProgress(
                 required_frames=getattr(self.args, "inspection_progress_frames", 7),
                 minimum_span_sec=getattr(self.args, "inspection_progress_min_span_sec", 2.0),
-                max_age_sec=max(5.0, getattr(self.args, "inspection_progress_min_span_sec", 2.0)),
+                max_age_sec=INSPECTION_PROGRESS_WINDOW_SEC,
                 max_translation_m=self.args.stationary_translation_m,
                 max_rotation_rad=math.radians(self.args.stationary_rotation_deg),
             )
@@ -2107,8 +2216,9 @@ def _validate_args(parser: argparse.ArgumentParser, args) -> None:
         parser.error("--consensus-frames must be at least two")
     if args.inspection_progress_frames < 7:
         parser.error("--inspection-progress-frames must be at least seven")
-    if not math.isfinite(args.inspection_progress_min_span_sec) or args.inspection_progress_min_span_sec < 2.0:
-        parser.error("--inspection-progress-min-span-sec must be at least two seconds")
+    if (not math.isfinite(args.inspection_progress_min_span_sec)
+            or not 2.0 <= args.inspection_progress_min_span_sec <= INSPECTION_PROGRESS_WINDOW_SEC):
+        parser.error("--inspection-progress-min-span-sec must be between two and 15 seconds")
     nominal_consensus_span_sec = (
         args.consensus_frames - 1
     ) / args.process_rate_hz

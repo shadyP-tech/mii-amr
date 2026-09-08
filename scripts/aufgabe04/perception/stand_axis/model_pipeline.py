@@ -34,6 +34,7 @@ from scripts.aufgabe04.perception.stand_axis.qr_pose_seed import (
     estimate_planar_pose_ippe,
     select_temporally_consistent_pose,
 )
+from scripts.aufgabe04.qr_scanning.qr_observation import DecodedQrObservation
 
 
 def estimate_stand_axis_from_metric_model(
@@ -56,6 +57,7 @@ def estimate_stand_axis_from_metric_model(
     expected_head_center_v_px: float | None = None,
     expected_head_height_px: float | None = None,
     backside_target_crop_horizontal_half_width_ratio: float = 1.25,
+    qr_observations: tuple[DecodedQrObservation, ...] | None = None,
 ) -> tuple[StandAxisImageEstimate, StandAxisEdgeDebugArtifacts]:
     """Acquire from QR/tracking or a gated no-QR backside candidate.
 
@@ -79,6 +81,21 @@ def estimate_stand_axis_from_metric_model(
         canny_low=canny_low,
         canny_high=canny_high,
     )
+    if qr_observations is not None:
+        if any(not isinstance(item, DecodedQrObservation) for item in qr_observations):
+            raise ValueError("metric model QR observations have an invalid type")
+        if len(qr_observations) > 1:
+            estimate = replace(
+                _unusable("model_qr_identity_ambiguous", source="model_seed"),
+                evidence_state="unobservable", model_profile_sha256=model_profile.sha256,
+                model_measurement_status=model_profile.measurement_status,
+            )
+            return estimate, StandAxisEdgeDebugArtifacts(
+                edges=raw_edges, raw_edges=raw_edges, qr_detected=True,
+                evidence_state="unobservable", model_reason=estimate.reason,
+                model_profile_sha256=model_profile.sha256,
+                model_measurement_status=model_profile.measurement_status,
+            )
     # A tracked pose already constrains the narrow refinement corridors.  In
     # that state, avoid paying for the 4x acquisition pyramid on every frame;
     # a native QR observation may still refresh the seed.  Once tracking
@@ -87,8 +104,10 @@ def estimate_stand_axis_from_metric_model(
         cv2,
         frame,
         scales=((1.0,) if pose_hint is not None else (1.0, 2.0, 4.0)),
+        **({"decoded_observations": qr_observations} if qr_observations is not None else {}),
     )
     qr_corners = None if qr_detection is None else qr_detection.corners
+    qr_marker_detected = qr_corners is not None or bool(qr_observations)
     qr_pose = None
     if qr_corners is not None:
         qr_pose = estimate_planar_pose_ippe(
@@ -107,7 +126,9 @@ def estimate_stand_axis_from_metric_model(
         qr_seed = select_temporally_consistent_pose(qr_pose, pose_hint)
     seed_pose = qr_seed if qr_seed is not None else pose_hint
     pose_seed_source = (
-        f"qr_pyramid_{qr_detection.scale:g}x"
+        (f"qr_pyramid_{qr_detection.scale:g}x"
+         if qr_detection.detector == "opencv_native"
+         else f"qr_{qr_detection.detector}_{qr_detection.scale:g}x")
         if qr_seed is not None and qr_detection is not None
         else ("tracked_pose" if pose_hint is not None else "none")
     )
@@ -118,7 +139,7 @@ def estimate_stand_axis_from_metric_model(
             expected_head_height_px,
         )
         if (
-            qr_corners is None
+            not qr_marker_detected
             and pose_hint is None
             and model_profile.committable
             and model_profile.environment == "physical"
@@ -146,7 +167,12 @@ def estimate_stand_axis_from_metric_model(
                 ),
             )
         estimate = replace(
-            _unusable("model_pose_seed_unavailable", source="model_seed"),
+            _unusable(
+                "model_qr_text_without_geometry"
+                if qr_observations and qr_corners is None
+                else "model_pose_seed_unavailable",
+                source="model_seed",
+            ),
             evidence_state="unobservable",
             model_profile_sha256=model_profile.sha256,
             model_measurement_status=model_profile.measurement_status,
@@ -156,7 +182,7 @@ def estimate_stand_axis_from_metric_model(
             raw_edges=raw_edges,
             evidence_state="unobservable",
             model_profile_sha256=model_profile.sha256,
-            qr_detected=qr_corners is not None,
+            qr_detected=qr_marker_detected,
             qr_detection_scale=(
                 None if qr_detection is None else qr_detection.scale
             ),
@@ -211,7 +237,7 @@ def estimate_stand_axis_from_metric_model(
             ),
             model_corridor_half_width_px=corridor_half_width_px,
             model_pose=seed_pose,
-            qr_detected=qr_corners is not None,
+            qr_detected=qr_marker_detected,
             qr_detection_scale=(
                 None if qr_detection is None else qr_detection.scale
             ),
@@ -303,7 +329,7 @@ def estimate_stand_axis_from_metric_model(
             model_corridor_half_width_px=corridor_half_width_px,
             model_pose_fit_source=pose_fit_source,
             model_pose=seed_pose,
-            qr_detected=qr_corners is not None,
+            qr_detected=qr_marker_detected,
             qr_detection_scale=(
                 None if qr_detection is None else qr_detection.scale
             ),
@@ -362,7 +388,7 @@ def estimate_stand_axis_from_metric_model(
         model_corridor_half_width_px=corridor_half_width_px,
         model_pose_fit_source=pose_fit_source,
         model_pose=best,
-        qr_detected=qr_corners is not None,
+        qr_detected=qr_marker_detected,
         qr_detection_scale=(
             None if qr_detection is None else qr_detection.scale
         ),

@@ -29,6 +29,39 @@ def observation_payload():
 
 
 class InspectionObservationTests(unittest.TestCase):
+    def test_declared_advisory_window_is_bounded_even_after_rehashing(self):
+        for window in (15.01, 1.9, True, None, "15"):
+            with self.subTest(window=window):
+                data = observation_payload()
+                data.pop(HASH_FIELD)
+                data["advisory_accumulation_window_sec"] = window
+                with self.assertRaises(ValueError):
+                    validate_candidate_inspection_observation(
+                        content_hashed_payload(data, hash_field=HASH_FIELD),
+                    )
+
+    def test_declared_advisory_window_must_cover_actual_span(self):
+        data = observation_payload()
+        data.pop(HASH_FIELD)
+        data.update(
+            advisory_accumulation_window_sec=5.0,
+            sensor_stamps_sec=[10.0 + 1.4 * i for i in range(7)],
+            sensor_stamp_sec=18.4,
+        )
+        with self.assertRaises(ValueError):
+            validate_candidate_inspection_observation(
+                content_hashed_payload(data, hash_field=HASH_FIELD),
+            )
+        data["advisory_accumulation_window_sec"] = 15.0
+        accepted = build_candidate_inspection_observation(**data)
+        self.assertEqual(accepted["advisory_accumulation_window_sec"], 15.0)
+        self.assertFalse(accepted["completion_authorized"])
+
+    def test_legacy_receipt_without_window_remains_valid(self):
+        payload = observation_payload()
+        self.assertNotIn("advisory_accumulation_window_sec", payload)
+        self.assertEqual(validate_candidate_inspection_observation(payload), payload)
+
     def test_roundtrip_and_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/"progress.json"

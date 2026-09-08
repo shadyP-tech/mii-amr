@@ -7,6 +7,9 @@ from dataclasses import dataclass, field
 from typing import Sequence
 
 from scripts.aufgabe04.navigation.control.driving_behavior import CommandSmoothingConfig
+from scripts.aufgabe04.navigation.waypoint_follower.initial_tf_acquisition import (
+    DEFAULT_INITIAL_TF_ACQUISITION_WAIT_SEC,
+)
 from scripts.aufgabe04.navigation.coverage.transient_blockage_policy import (
     DEFAULT_LINEAR_MOTION_FLOOR_MPS,
     PersistentObstacleConfig,
@@ -43,6 +46,7 @@ class FollowerConfig:
     amcl_edge_future_tolerance_sec: float = 1.1
     allow_simulation_odom_after_stale_tf: bool = False
     initial_sensor_wait_sec: float = 2.0
+    initial_tf_acquisition_wait_sec: float = DEFAULT_INITIAL_TF_ACQUISITION_WAIT_SEC
     waypoint_timeout_sec: float = 45.0
     terminal_heading_timeout_sec: float = DEFAULT_TERMINAL_HEADING_TIMEOUT_SEC
     stuck_timeout_sec: float = 8.0
@@ -92,6 +96,14 @@ class FollowerConfig:
     )
 
     def __post_init__(self) -> None:
+        if (type(self.initial_sensor_wait_sec) not in (int, float)
+                or not math.isfinite(self.initial_sensor_wait_sec)
+                or self.initial_sensor_wait_sec <= 0):
+            raise ValueError("initial_sensor_wait_sec must be finite and positive")
+        if (type(self.initial_tf_acquisition_wait_sec) not in (int, float)
+                or not math.isfinite(self.initial_tf_acquisition_wait_sec)
+                or not 0 <= self.initial_tf_acquisition_wait_sec <= DEFAULT_INITIAL_TF_ACQUISITION_WAIT_SEC):
+            raise ValueError("initial_tf_acquisition_wait_sec must be between 0 and 3 seconds")
         if not isinstance(self.command_smoothing, CommandSmoothingConfig):
             raise ValueError(
                 "command_smoothing must be a CommandSmoothingConfig"

@@ -261,8 +261,16 @@ landmarks and searches only narrow raw-Canny corridors around the front-head
 projection. A
 dashed magenta model is prediction-only. The normal solid front rectangle
 appears only after all four physical sides have fresh current-frame support.
-Model corridors select the current edge nearest the predicted physical rail,
-remain bounded by projected head size, profile status/tolerance, and seed
+Model corridors first associate coherent current-frame rails, ranking their
+raw-pixel coverage before proximity to the predicted physical border. This
+prevents nearer QR/background fragments from replacing pieces of a continuous
+stand rail before line fitting. Segment proposals never supply synthetic
+measurement pixels. The two bottom intervals around the stem are fitted with
+shared direction hypotheses as well as observed segment directions. Each final
+corner must also have raw evidence along both nearby incident sides, with a
+small allowance for rounded corners; otherwise the model remains prediction-only
+with `model_corner_evidence_insufficient`.
+The corridors remain bounded by projected head size, profile status/tolerance, and seed
 reprojection residual, and reject refinements whose scale, centre, or corner
 displacement no longer agrees with the projection. Metric-model corridors may
 reach 8 px; legacy/global edge paths retain their previous 6 px ceiling.

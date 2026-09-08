@@ -642,8 +642,9 @@ class PassiveObservationCoreTest(unittest.TestCase):
             "admit_axis_sample(",
             "axis_sample_admission.metadata()",
             "qr_bound_model_max_obliqueness_deg",
-            "qr_texts and estimate.source == BACKSIDE_AXIS_SAMPLE_SOURCE",
-            "decoded QR text conflicts",
+            "front_observation_decision(",
+            "front_decision.withhold_backside_axis",
+            "self._record_front_seen_axis_unresolved(",
             '"axis_observation_not_committable"',
         ):
             with self.subTest(expected=expected):

@@ -96,6 +96,7 @@ class WaypointFollowerModuleBoundaryTest(unittest.TestCase):
         pure_modules = (
             "config.py",
             "directives.py",
+            "initial_tf_acquisition.py",
             "pose_lookup.py",
             "route_admission.py",
             "route_phases.py",

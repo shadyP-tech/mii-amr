@@ -93,6 +93,7 @@ class CameraTargetRegistrationTest(unittest.TestCase):
         proposal_estimate,
         proposal_debug,
         strict_estimate=None,
+        primary_reason="model_backside_head_and_neck_unavailable",
     ):
         calls = []
 
@@ -104,7 +105,7 @@ class CameraTargetRegistrationTest(unittest.TestCase):
                     object(),
                     _estimate(
                         usable=False,
-                        reason="model_backside_head_and_neck_unavailable",
+                        reason=primary_reason,
                     ),
                     _debug(),
                 )
@@ -128,6 +129,53 @@ class CameraTargetRegistrationTest(unittest.TestCase):
             max_center_offset_ratio=1.5,
         )
         return selection, calls
+
+    def test_recorded_clipped_head_failures_trigger_only_bounded_strict_retry(self):
+        for reason in (
+            "model_backside_neck_support_insufficient",
+            "model_backside_head_scale_mismatch",
+            "model_backside_planar_pose_unavailable",
+        ):
+            with self.subTest(reason=reason):
+                failed_strict = _estimate(
+                    usable=False, reason="planar_pose_axis_ambiguous", source="model_refined_head",
+                )
+                selection, calls = self._select_after_backside_failure(
+                    primary_reason=reason,
+                    proposal_estimate=_estimate(
+                        usable=True, reason="axis_estimated_model_current_frame_refined",
+                        source="model_current_frame_refined", corners=self._corners(90., 182.),
+                    ),
+                    proposal_debug=_debug(qr_detected=True, model_pose=object()),
+                    strict_estimate=failed_strict,
+                )
+                self.assertEqual(len(calls), 3)
+                self.assertTrue(selection.registered)
+                self.assertIs(selection.selected.estimate, failed_strict)
+                self.assertFalse(selection.metadata(enabled=True)["measurement_accepted"])
+
+    def test_decoded_text_without_quad_can_search_but_ambiguous_identity_cannot(self):
+        for reason, expected_calls in (
+            ("model_qr_text_without_geometry", 2),
+            ("model_qr_identity_ambiguous", 1),
+        ):
+            calls = []
+
+            def evaluate(attempt, pose_hint):
+                calls.append(attempt)
+                return HeadRoiEvaluation(
+                    attempt, object(),
+                    _estimate(usable=False, reason=reason, source="model_seed"),
+                    _debug(qr_detected=True),
+                )
+
+            selection = select_camera_target_measurement(
+                (self.nominal, self.proposal), tracked_pose=None,
+                evaluate=evaluate, enable_reacquisition=True, max_center_offset_ratio=1.5,
+            )
+            self.assertEqual(len(calls), expected_calls)
+            self.assertFalse(selection.registered)
+            self.assertIs(selection.selected.attempt, self.nominal)
 
     def test_backside_miss_can_reacquire_qr_with_bounded_strict_retry(self):
         proposal_estimate = _estimate(

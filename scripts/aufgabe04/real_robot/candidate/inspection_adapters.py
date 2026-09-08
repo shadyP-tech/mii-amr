@@ -22,11 +22,15 @@ from scripts.aufgabe04.navigation.approach.candidate_preapproach_models import (
     CandidatePreapproachUnreachableError,
 )
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import MissionLegKind
+from scripts.aufgabe04.navigation.planning.map_io import read_map_metadata
 from scripts.aufgabe04.real_robot.candidate.inspection_execution import (
     CandidateInspectionEffects, CandidateInspectionRouteUnavailableError,
     execute_candidate_inspection,
 )
 from scripts.aufgabe04.real_robot.candidate.inspection_policy import novel_view
+from scripts.aufgabe04.real_robot.candidate.inspection_route_search import (
+    CandidateInspectionRouteSearch, bounded_inspection_standoffs,
+)
 from scripts.aufgabe04.real_robot.candidate.observation_deferral import (
     CandidateObservationUnavailableError,
 )
@@ -45,6 +49,12 @@ def execute_local_candidate_inspection(
     candidate_uid = observation_frame.candidate.candidate_uid
     seen_normals: list[float] = []
     motion_serial = 0
+    route_search = CandidateInspectionRouteSearch(
+        candidate_uid,
+        event_sink=lambda event: effects.event_sink(
+            candidate_root / "inspection_route_proposals.jsonl", event,
+        ),
+    )
 
     def fresh_frame(root: Path):
         config, candidate, pose, planning, artifacts = admit_planning(
@@ -109,7 +119,12 @@ def execute_local_candidate_inspection(
                     or text == "target is blocked"
                     or text == "source route has fewer than two waypoints"):
                 raise
-            raise CandidateInspectionRouteUnavailableError(text) from exc
+            if isinstance(exc, CandidatePreapproachUnreachableError) and exc.candidate_uid != candidate_uid:
+                raise
+            raise CandidateInspectionRouteUnavailableError(
+                text, reason_code="static_proposal_unavailable",
+                evidence={"error_type": type(exc).__name__, "motion_published": False},
+            ) from exc
         summary_path = request.output_dir / "pipeline_summary.json"
         if summary_path.is_file():
             goal = json.loads(summary_path.read_text())["selected_approach_pose"]
@@ -119,7 +134,8 @@ def execute_local_candidate_inspection(
             ) - yaw(frame), 2.0 * math.pi)
             if purpose == "diverse_inspection" and not novel_view(achieved, seen_normals):
                 raise CandidateInspectionRouteUnavailableError(
-                    "quantized inspection goal repeats an observed viewing direction"
+                    "quantized inspection goal repeats an observed viewing direction",
+                    reason_code="quantized_view_already_observed",
                 )
         elif frame.planning_frame is not None:
             raise RuntimeError("inspection route lacks materialized goal evidence")
@@ -140,7 +156,10 @@ def execute_local_candidate_inspection(
             )
             if not decision.eligible:
                 raise
-            raise CandidateInspectionRouteUnavailableError(str(exc)) from exc
+            raise CandidateInspectionRouteUnavailableError(
+                str(exc), reason_code="no_motion_route_uncertainty_rejection",
+                evidence=decision.to_event_fields(),
+            ) from exc
         return frame
 
     def admit(root, fallback_frame, index):
@@ -195,7 +214,28 @@ def execute_local_candidate_inspection(
         raise error  # Defensive: the bounded loop returns or raises above.
 
     def move_view(frame, requested_normal, root, index, source_path):
-        planned = plan_and_move(frame, requested_normal, root, index, source_path)
+        map_yaml = Path(source_config.map_yaml)
+        if map_yaml.is_file():
+            resolution = read_map_metadata(map_yaml).resolution
+        else:
+            # Preserve injected no-map offline effects without inventing a
+            # raster margin. The production planner still requires the map
+            # and fails closed if it is absent; no smaller pose is proposed.
+            resolution = None
+        offsets = bounded_inspection_standoffs(
+            source_config.approach_offset_m,
+            minimum_active_standoff_m=float(source_config.physical_clearance["minimum_active_standoff_m"]),
+            candidate_transit_radius_m=source_config.candidate_transit_radius_m,
+            map_resolution_m=resolution,
+        )
+        planned = route_search.move_direction(
+            requested_normal_rad=requested_normal, standoffs=offsets, output_root=root,
+            move=lambda offset, proposal_root: plan_and_move(
+                frame, requested_normal, proposal_root, index, source_path, offset=offset,
+            ),
+        )
+        # Arrival handling remains outside no-motion standoff fallback: the
+        # successful child may have moved and its failures cannot retry radius.
         return admit_corrected(root / "arrival", planned, index)
 
     def move_opposite(frame, observation, root, index):
@@ -240,6 +280,6 @@ def execute_local_candidate_inspection(
             capture=lambda frame, output, index: effects.capture_observation(
                 observation_request_type(frame.candidate, output, index)),
             canonical_normal=normal, move_view=move_view, move_opposite=move_opposite,
-            progress_evidence=progress,
+            progress_evidence=progress, route_search_evidence=route_search.to_dict,
         ),
     )

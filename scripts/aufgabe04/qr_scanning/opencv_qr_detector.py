@@ -2,30 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-
-
-def _nonblank_texts(decoded: object) -> tuple[str, ...]:
-    if decoded is None:
-        return ()
-    if isinstance(decoded, str):
-        candidates: Iterable[object] = (decoded,)
-    else:
-        try:
-            iter(decoded)  # type: ignore[arg-type]
-        except TypeError:
-            candidates = ()
-        else:
-            candidates = decoded  # type: ignore[assignment]
-
-    texts = []
-    for candidate in candidates:
-        if candidate is None:
-            continue
-        text = str(candidate).strip()
-        if text:
-            texts.append(text)
-    return tuple(texts)
+from scripts.aufgabe04.qr_scanning.qr_observation import (
+    DecodedQrObservation, validated_qr_corners,
+)
+from scripts.aufgabe04.qr_scanning.isolated_qr_identity import decode_isolated_native_quad
 
 
 def detect_qr_texts_bgr(frame, cv2) -> tuple[str, ...]:
@@ -35,84 +15,122 @@ def detect_qr_texts_bgr(frame, cv2) -> tuple[str, ...]:
     environments that do not have OpenCV installed.
     """
 
-    for candidate in _qr_decode_candidates(frame, cv2):
-        texts = _detect_qr_texts_single_candidate(candidate, cv2)
-        if texts:
-            return texts
-    return ()
+    return tuple(item.text for item in detect_qr_observations_bgr(frame, cv2))
 
 
-def _detect_qr_texts_single_candidate(frame, cv2) -> tuple[str, ...]:
-    texts = _detect_qr_texts_with_wechat(frame, cv2)
-    if texts:
-        return texts
-    return _detect_qr_texts_with_standard_opencv(frame, cv2)
+def detect_qr_observations_bgr(frame, cv2) -> tuple[DecodedQrObservation, ...]:
+    """Share text and corners from the same decoder and bounded preprocessing.
+
+    Every corner is restored to the input crop. Multiple returned identities
+    remain multiple observations; callers must not pick one as target proof.
+    """
+    provisional = ()
+    for candidate, scale, border in _qr_decode_candidates_with_geometry(frame, cv2):
+        for observations in _candidate_observations(
+            candidate, cv2, image_shape=getattr(frame, "shape", None),
+            scale=scale, border_px=border,
+        ):
+            if not observations:
+                continue
+            if len(observations) > 1:
+                return observations
+            if provisional and provisional[0].text != observations[0].text:
+                return provisional + observations
+            if observations[0].corners is not None:
+                return observations
+            # A text-only decode cannot donate its identity to unrelated
+            # native geometry. Continue only to find a decoder that returns
+            # both the same unique payload and that symbol's actual corners.
+            if not provisional:
+                provisional = observations
+    return provisional
 
 
-def _detect_qr_texts_with_wechat(frame, cv2) -> tuple[str, ...]:
-    wechat_detector_factory = getattr(cv2, "wechat_qrcode_WeChatQRCode", None)
-    if wechat_detector_factory is None:
-        return ()
-
+def _candidate_observations(candidate, cv2, *, image_shape, scale, border_px):
+    factory = getattr(cv2, "wechat_qrcode_WeChatQRCode", None)
+    if factory is not None:
+        try:
+            result = factory().detectAndDecode(candidate)
+            yield _decoded_observations(
+                result[0], result[1] if len(result) > 1 else None,
+                detector="wechat", image_shape=image_shape, scale=scale, border_px=border_px,
+            )
+        except Exception:
+            pass
     try:
-        wechat_detector = wechat_detector_factory()
-        wechat_result = wechat_detector.detectAndDecode(frame)
+        result = cv2.QRCodeDetector().detectAndDecodeMulti(candidate)
+        yield _decoded_observations(
+            result[1], result[2] if len(result) > 2 else None,
+            detector="opencv_multi", image_shape=image_shape, scale=scale, border_px=border_px,
+        ) if result and result[0] and len(result) > 1 else ()
+        if len(result) > 2 and result[2] is not None:
+            isolated = decode_isolated_native_quad(
+                candidate, result[2], cv2, image_shape=image_shape,
+                scale=scale, border_px=border_px,
+            )
+            if isolated is not None:
+                yield (isolated,)
     except Exception:
-        return ()
-    wechat_texts = wechat_result[0] if wechat_result else ()
-    return _nonblank_texts(wechat_texts)
-
-
-def _detect_qr_texts_with_standard_opencv(frame, cv2) -> tuple[str, ...]:
-    detector = cv2.QRCodeDetector()
+        pass
     try:
-        multi_result = detector.detectAndDecodeMulti(frame)
+        result = cv2.QRCodeDetector().detectAndDecode(candidate)
+        yield _decoded_observations(
+            result[0], result[1] if len(result) > 1 else None,
+            detector="opencv_single", image_shape=image_shape, scale=scale, border_px=border_px,
+        ) if result else ()
     except Exception:
-        multi_result = ()
-    ok = bool(multi_result[0]) if multi_result else False
-    decoded = multi_result[1] if len(multi_result) > 1 else ()
-    if ok:
-        texts = _nonblank_texts(decoded)
-        if texts:
-            return texts
+        pass
 
+
+def _decoded_observations(decoded, points, *, detector, image_shape, scale, border_px):
+    texts = ((decoded,) if isinstance(decoded, str)
+             else tuple(decoded) if decoded is not None else ())
+    if hasattr(points, "tolist"):
+        points = points.tolist()
     try:
-        single_result = detector.detectAndDecode(frame)
-    except Exception:
-        single_result = ()
-    single_text = single_result[0] if single_result else ""
-    texts = _nonblank_texts(single_text)
-    if texts:
-        return texts
-    return ()
+        # A single symbol may be returned as 4x2 or 1x4x2, depending on
+        # decoder/OpenCV version. Never flatten several symbols together.
+        single_quad = len(points) == 4 and all(len(row) == 2 for row in points)
+        groups = (points,) if single_quad else points
+        len(groups)
+    except (TypeError, ValueError):
+        groups = ()
+    result = []
+    for index, raw in enumerate(texts):
+        text = "" if raw is None else str(raw).strip()
+        if not text:
+            continue
+        corners = validated_qr_corners(
+            groups[index] if index < len(groups) else None,
+            image_shape=image_shape, scale=scale, border_px=border_px,
+        )
+        result.append(DecodedQrObservation(text, corners, detector, float(scale)))
+    return tuple(result)
 
 
-def _qr_decode_candidates(frame, cv2) -> tuple[object, ...]:
-    candidates = [frame]
-    candidates.extend(_preprocessed_qr_candidates(frame, cv2))
-    return tuple(candidates)
-
-
-def _preprocessed_qr_candidates(frame, cv2) -> tuple[object, ...]:
+def _qr_decode_candidates_with_geometry(frame, cv2):
+    yield frame, 1.0, 0
     try:
         height, width = frame.shape[:2]
-    except AttributeError:
-        return ()
-
+    except (AttributeError, ValueError):
+        return
     scale = 4 if max(height, width) < 220 else 2
-    candidates = []
     enlarged = _resize_for_qr(cv2, frame, scale=scale)
+    image = enlarged if enlarged is not None else frame
+    effective_scale = float(scale) if enlarged is not None else 1.0
+    border = max(12, int(0.08 * max(image.shape[:2])))
     if enlarged is not None:
-        candidates.append(_add_quiet_border(cv2, enlarged, border_px=max(12, int(0.08 * max(enlarged.shape[:2])))))
-
-    gray = _to_gray(cv2, enlarged if enlarged is not None else frame)
+        bordered = _add_quiet_border(cv2, enlarged, border_px=border)
+        actual_border = (bordered.shape[0] - enlarged.shape[0]) // 2
+        yield bordered, effective_scale, actual_border
+    gray = _to_gray(cv2, image)
     if gray is not None:
-        bordered_gray = _add_quiet_border(cv2, gray, border_px=max(12, int(0.08 * max(gray.shape[:2]))))
-        candidates.append(bordered_gray)
-        thresholded = _threshold_for_qr(cv2, bordered_gray)
+        bordered = _add_quiet_border(cv2, gray, border_px=border)
+        actual_border = (bordered.shape[0] - gray.shape[0]) // 2
+        yield bordered, effective_scale, actual_border
+        thresholded = _threshold_for_qr(cv2, bordered)
         if thresholded is not None:
-            candidates.append(thresholded)
-    return tuple(candidate for candidate in candidates if candidate is not None)
+            yield thresholded, effective_scale, actual_border
 
 
 def _resize_for_qr(cv2, frame, *, scale: int):

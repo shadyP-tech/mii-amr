@@ -46,8 +46,15 @@ loaded logistics mission or a two-robot run; see
 | `real_robot/candidate/approach.py` | Order frozen candidates, orchestrate sealed pre-approach/opposite-face inspection, and publish validated identity/facing artifacts behind injected live effects | None; cannot sample ROS, prompt, launch a process, or publish motion itself |
 | `real_robot/candidate/inspection_policy.py` | Retain candidate inspection progress and prioritize novel viewing directions within a finite budget | None |
 | `real_robot/candidate/inspection_execution.py` | Finish bounded local inspection views before returning to candidate selection | None; injected planning and existing child execution effects only |
+| `real_robot/candidate/inspection_route_search.py` | Try bounded stand-off alternatives and record route proposals separately from observed views | None; injected certified route execution only |
 | `artifacts/candidate_inspection_observation.py` | Validate hashed intermediate camera evidence without granting axis, completion, or motion authority | None |
 | `real_robot/observer/inspection_progress.py` | Accumulate distinct stationary associated frames and classify unresolved views | None |
+| `real_robot/observer/front_observation.py` | Withhold contradicted backside axes while retaining provisional front-marker evidence | None |
+| `real_robot/observer/qr_target_binding.py` | Require a decoded symbol's own image ray and a unique target LiDAR cluster before identity consensus | None |
+| `qr_scanning/qr_observation.py` | Bind decoded text to validated corners from the same detector result | None |
+| `qr_scanning/isolated_qr_identity.py` | Re-decode one rectified native QR quadrilateral when the production decoder supplies placeholder bounds | None |
+| `navigation/waypoint_follower/initial_tf_acquisition.py` | Bound acquisition of a never-ready execution TF edge and retain executor/edge diagnostics | None |
+| `navigation/waypoint_follower/runtime_components/initial_runtime_inputs.py` | Apply the stopped acquisition policy to fresh sensor inputs and the existing localization checks | Zero commands only |
 | `navigation/approach/candidate_inspection_view.py` | Bind a proposed search view to its target, current snapshot, start, direction, and source evidence | None |
 | `perception/stand_axis/model_backside_topology.py` | Recover low-contrast boundary proposals through a bounded fallback while preserving strict downstream measurement checks | None |
 | `real_robot/observer/node.py` | Synchronize image, scan, and exact-time TF; rectify the image; validate measured-model, LiDAR, and QR evidence | None |
@@ -86,7 +93,16 @@ the 3-degree gate remains unchanged. Pure zero-length rotation routes are not
 introduced by this workflow.
 
 Progress retains achieved views, provisional QR identities, and failed view
-plans. A candidate that exhausts its local budget remains explicitly unresolved
+plans. Generic inspection searches smaller stand-off distances in 0.05 m steps,
+bounded by the existing physical and raster keepout floor. Each direction has
+at most nine distance proposals and each candidate has at most 64 generic route
+proposals. A blocked pose does not exhaust its direction before the remaining
+distance proposals are considered. Only typed static or proven no-motion route
+admission failures permit another proposal; controller and sensor faults remain
+terminal. The progress artifacts distinguish proposal exhaustion from exhausting
+the configured number of camera views.
+
+A candidate that exhausts its local budget remains explicitly unresolved
 instead of restarting an identical camera tour. Mission success still requires
 the expected five unique candidate–QR identities and the existing validated
 axis/facing evidence. Intermediate inspection receipts cannot satisfy that
@@ -94,8 +110,56 @@ completion contract or carry axis consensus across robot motion.
 
 The passive observer yields intermediate progress only after at least seven
 distinct accepted frames spanning two seconds in a stationary sensor epoch.
+Advisory accumulation has a separate 15-second cap to accommodate measured
+camera-processing latency. The QR latch and metric-axis evidence retain their
+five-second expiry; old identities or axis samples cannot gain authority from
+the longer advisory window. Each sample must still pass the existing freshness,
+synchronization, association and stationary-epoch checks when ingested.
 Normal QR/axis or backside completion takes precedence. Sensor, localization,
 artifact, and route failures retain their existing fail-closed behavior.
+
+QR text and its image corners share one decoder observation when available;
+corners from a different symbol cannot supply that text's metric pose. Bounded
+crop reacquisition also handles partial-head neck, planar-fit and scale failures,
+then reruns strict metric checks. The existing image-displacement, camera-bearing,
+LiDAR range and uniqueness bounds still apply.
+
+Before decoded text enters temporal identity consensus, its own quadrilateral
+must agree with the target's LiDAR bearing and range and select exactly one
+eligible cluster. A target return elsewhere in the crop cannot bind a neighboring
+QR symbol. Missing quadrilaterals stay diagnostic; multiple symbols remain
+ambiguous even when they carry the same payload.
+
+The production WeChat decoder can return the whole input crop as placeholder
+corners. Those bounds are rejected. When native QR detection finds one actual
+quadrilateral, the fallback rectifies only that symbol and decodes it again,
+binding the resulting text to the native corners. It cannot attach a full-crop
+payload to unrelated geometry.
+
+A visible or decoded front marker vetoes QR-free backside axis evidence for its
+stationary epoch. This removes the contradicted axis samples while preserving
+temporal QR identity, duplicate-frame history and ambiguity checks. A front seen
+without target association is diagnostic evidence only: it cannot produce the
+associated-frame inspection receipt, QR identity latch, or completed goal. The
+observer records this as a front with unresolved axis instead of erasing the
+whole evidence history.
+
+### Initial execution TF acquisition
+
+Preflight and the waypoint follower have separate TF listeners. The follower
+therefore acquires its own execution-frame transform before any motion. Its
+ordinary two-second input deadline may be followed by one bounded acquisition
+phase of at most three seconds, only for a never-acquired execution TF edge
+reporting a missing/disconnected lookup while scan and odometry remain fresh
+and the TF executor heartbeat is healthy. Stale transforms, an edge previously
+acquired by this follower, localization faults and post-motion failures do not
+qualify for this extension.
+
+Successful acquisition still passes the full sensor, localization and certified
+route-start checks. Persistent failure stops the child. Startup diagnostics
+record the actual frame pair, acquisition attempts and executor health; candidate
+recovery reporting preserves the child's stop reason. This acquisition phase
+does not grant localization reseal authority or reuse a consumed motion permit.
 
 ## 1. Inspect the Live ROS Interface
 

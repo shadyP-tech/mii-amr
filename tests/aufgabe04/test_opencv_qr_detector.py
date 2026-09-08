@@ -1,12 +1,21 @@
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.aufgabe04.qr_scanning.opencv_qr_detector import detect_qr_texts_bgr  # noqa: E402
+from scripts.aufgabe04.qr_scanning.opencv_qr_detector import (  # noqa: E402
+    detect_qr_observations_bgr, detect_qr_texts_bgr,
+)
+from scripts.aufgabe04.qr_scanning.qr_observation import validated_qr_corners
+
+try:
+    import numpy
+except ImportError:
+    numpy = None
 
 
 class FakeDetector:
@@ -48,6 +57,60 @@ class FakeWeChatDetector:
 
 
 class OpenCvQRDetectorTest(unittest.TestCase):
+    @unittest.skipIf(numpy is None, "NumPy unavailable")
+    def test_wechat_numpy_results_bind_text_to_its_own_quad_after_blank(self):
+        first = ((2, 2), (12, 2), (12, 12), (2, 12))
+        second = ((30, 30), (50, 30), (50, 50), (30, 50))
+        cv2 = FakeCv2(
+            RaisingDetector(),
+            FakeWeChatDetector((numpy.array(["", " Start "]), numpy.array([first, second]))),
+        )
+        observations = detect_qr_observations_bgr(numpy.zeros((80, 80, 3)), cv2)
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(observations[0].text, "Start")
+        self.assertEqual(observations[0].corners, second)
+        self.assertEqual(observations[0].detector, "wechat")
+
+    @unittest.skipIf(numpy is None, "NumPy unavailable")
+    def test_native_single_and_multi_numpy_shapes_preserve_same_geometry(self):
+        quad = numpy.array(((2, 2), (12, 2), (12, 12), (2, 12)))
+        for points in (quad, quad.reshape(1, 4, 2)):
+            for single in (False, True):
+                with self.subTest(shape=points.shape, single=single):
+                    cv2 = FakeCv2(FakeDetector(
+                        (False, (), None) if single else (True, numpy.array(["Start"]), points),
+                        ("Start", points),
+                    ))
+                    observations = detect_qr_observations_bgr(numpy.zeros((80, 80, 3)), cv2)
+                    self.assertEqual(observations[0].corners, tuple(map(tuple, quad)))
+
+    def test_invalid_quad_keeps_text_without_borrowing_native_geometry(self):
+        for points in (None, 17, ((1, 2),), ((1, 1), (3, 3), (1, 3), (3, 1))):
+            with self.subTest(points=points):
+                cv2 = FakeCv2(RaisingDetector(), FakeWeChatDetector((("Start",), points)))
+                observations = detect_qr_observations_bgr(object(), cv2)
+                self.assertEqual(len(observations), 1)
+                self.assertEqual(observations[0].text, "Start")
+                self.assertIsNone(observations[0].corners)
+
+    def test_corner_restore_accounts_for_scale_and_quiet_border(self):
+        original = ((10, 20), (30, 20), (30, 40), (10, 40))
+        transformed = tuple((x * 4 + 64, y * 4 + 64) for x, y in original)
+        self.assertEqual(validated_qr_corners(
+            transformed, image_shape=(100, 100, 3), scale=4, border_px=64,
+        ), original)
+        self.assertIsNone(validated_qr_corners(
+            transformed, image_shape=(30, 100, 3), scale=4, border_px=64,
+        ))
+
+    def test_multiple_same_identity_symbols_remain_distinct(self):
+        first = ((2, 2), (12, 2), (12, 12), (2, 12))
+        second = tuple((u + 30, v) for u, v in first)
+        cv2 = FakeCv2(FakeDetector((True, ("Start", "Start"), (first, second)), ("", None)))
+        observations = detect_qr_observations_bgr(object(), cv2)
+        self.assertEqual(tuple(item.text for item in observations), ("Start", "Start"))
+        self.assertNotEqual(observations[0].corners, observations[1].corners)
+
     def test_returns_nonblank_multi_detect_texts(self):
         cv2 = FakeCv2(FakeDetector((True, (" QR_001 ", "", "DEPOT_01"), None, None), ("", None, None)))
 
@@ -76,13 +139,36 @@ class OpenCvQRDetectorTest(unittest.TestCase):
 
         self.assertEqual(detect_qr_texts_bgr(object(), cv2), ("QR_003",))
 
-    def test_wechat_qr_detector_wins_over_standard_qrcode_detector(self):
+    def test_conflicting_payloads_after_text_only_wechat_remain_ambiguous(self):
         cv2 = FakeCv2(
             FakeDetector((False, (), None, None), ("QR_004", None, None)),
             FakeWeChatDetector((("QR_005",), None)),
         )
 
-        self.assertEqual(detect_qr_texts_bgr(object(), cv2), ("QR_005",))
+        self.assertEqual(detect_qr_texts_bgr(object(), cv2), ("QR_005", "QR_004"))
+
+    def test_recorded_wechat_crop_bounds_cannot_supply_symbol_geometry(self):
+        bounds = ((0., 0.), (498., 0.), (498., 497.), (0., 497.))
+        cv2 = FakeCv2(RaisingDetector(), FakeWeChatDetector((("Start",), (bounds,))))
+        observations = detect_qr_observations_bgr(SimpleNamespace(shape=(498, 499, 3)), cv2)
+        self.assertEqual(observations[0].text, "Start")
+        self.assertIsNone(observations[0].corners)
+
+    def test_placeholder_quad_requires_independently_decoded_matching_native_quad(self):
+        bounds = ((0., 0.), (99., 0.), (99., 99.), (0., 99.))
+        symbol = ((40., 40.), (60., 40.), (60., 60.), (40., 60.))
+        for native_text in ("Start", "Neighbor"):
+            cv2 = FakeCv2(
+                FakeDetector((True, (native_text,), (symbol,)), ("", None)),
+                FakeWeChatDetector((("Start",), (bounds,))),
+            )
+            observations = detect_qr_observations_bgr(SimpleNamespace(shape=(100, 100, 3)), cv2)
+            if native_text == "Start":
+                self.assertEqual(len(observations), 1)
+                self.assertEqual(observations[0].detector, "opencv_multi")
+                self.assertEqual(observations[0].corners, symbol)
+            else:
+                self.assertEqual(tuple(x.text for x in observations), ("Start", "Neighbor"))
 
     def test_opencv_decoder_errors_fall_back_to_wechat_detector(self):
         cv2 = FakeCv2(

@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from scripts.aufgabe04.real_robot.observer.inspection_progress import (
+    INSPECTION_PROGRESS_WINDOW_SEC,
     InspectionProgress, InspectionClassification, classify_inspection_progress,
 )
 from scripts.aufgabe04.real_robot.observer.node import PassiveRealViewpointNode
@@ -21,6 +22,39 @@ def frame(stamp, **overrides):
 
 
 class InspectionProgressTests(unittest.TestCase):
+    def test_measured_cpu_cadence_accumulates_seven_fresh_ingestion_frames(self):
+        progress = InspectionProgress()
+        for i in range(6):
+            self.assertIsNone(progress.record(**frame(
+                10 + 1.4 * i, current_qr_id="Start", current_qr_sample_count=2,
+            )))
+        value = progress.record(**frame(
+            18.4, current_qr_id="Start", current_qr_sample_count=2,
+        ))
+        self.assertEqual(value["sample_count"], 7)
+        self.assertAlmostEqual(value["sensor_stamp_sec"] - value["first_sensor_stamp_sec"], 8.4)
+        self.assertEqual(value["qr_id"], "Start")
+        self.assertEqual(value["advisory_accumulation_window_sec"], INSPECTION_PROGRESS_WINDOW_SEC)
+
+    def test_advisory_window_has_finite_fifteen_second_hard_cap(self):
+        for invalid in (15.01, float("inf"), float("nan"), True, None, 1.9):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                InspectionProgress(max_age_sec=invalid)
+        progress = InspectionProgress()
+        for i in range(10):
+            self.assertIsNone(progress.record(**frame(10 + 3 * i)))
+
+    def test_long_advisory_history_uses_only_current_qr_latch(self):
+        progress = InspectionProgress()
+        for i in range(6):
+            progress.record(**frame(
+                10 + 1.4 * i, current_qr_id="Start" if i < 2 else None,
+                current_qr_sample_count=2 if i < 2 else 0,
+            ))
+        value = progress.record(**frame(18.4))
+        self.assertIsNone(value["qr_id"])
+        self.assertEqual(value["qr_sample_count"], 0)
+
     def test_seven_distinct_frames_and_two_seconds_required(self):
         progress=InspectionProgress()
         for i in range(6):self.assertIsNone(progress.record(**frame(10+i/3)))

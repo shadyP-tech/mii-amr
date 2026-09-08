@@ -23,6 +23,7 @@ CLASSIFICATIONS = frozenset({
 })
 MIN_PROGRESS_FRAMES = 7
 MIN_PROGRESS_SPAN_SEC = 2.0
+MAX_ADVISORY_ACCUMULATION_WINDOW_SEC = 15.0
 
 
 def _finite(value, field):
@@ -72,6 +73,14 @@ def validate_candidate_inspection_observation(payload: Mapping) -> dict:
         raise ValueError("inspection stamps must be distinct and increasing")
     if values[-1] - values[0] + 1e-9 < MIN_PROGRESS_SPAN_SEC:
         raise ValueError("inspection observation span is too short")
+    # Older receipts did not declare a separate advisory history window.
+    # New receipts must carry a bounded window that covers their actual span.
+    if "advisory_accumulation_window_sec" in data:
+        window = _finite(data["advisory_accumulation_window_sec"], "advisory accumulation window")
+        if not MIN_PROGRESS_SPAN_SEC <= window <= MAX_ADVISORY_ACCUMULATION_WINDOW_SEC:
+            raise ValueError("inspection advisory window must be between two and 15 seconds")
+        if values[-1] - values[0] > window + 1e-9:
+            raise ValueError("inspection observation span exceeds its advisory window")
     if isinstance(data.get("sample_count"), bool) or not isinstance(data.get("sample_count"), int) or data.get("sample_count") != len(values):
         raise ValueError("inspection sample count differs from stamps")
     if data.get("sensor_stamp_sec") != values[-1] or data.get("first_sensor_stamp_sec") != values[0]:

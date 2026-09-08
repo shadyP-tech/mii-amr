@@ -29,6 +29,7 @@ class FollowerModelsTest(unittest.TestCase):
         config = FollowerConfig(controller=ControllerConfig())
 
         self.assertEqual(config.initial_sensor_wait_sec, 2.0)
+        self.assertEqual(config.initial_tf_acquisition_wait_sec, 3.0)
         self.assertEqual(config.front_obstacle_slow_distance_m, 0.38)
         self.assertEqual(config.stuck_timeout_sec, 8.0)
         self.assertEqual(
@@ -40,7 +41,7 @@ class FollowerModelsTest(unittest.TestCase):
         self.assertEqual(config.certified_corner_max_reacquire_attempts, 2)
 
     def test_follower_timeouts_must_be_finite_and_positive(self):
-        for field in ("waypoint_timeout_sec", "terminal_heading_timeout_sec"):
+        for field in ("initial_sensor_wait_sec", "waypoint_timeout_sec", "terminal_heading_timeout_sec"):
             for value in (0.0, -1.0, math.inf, math.nan):
                 with self.subTest(field=field, value=value), self.assertRaises(
                     ValueError
@@ -49,6 +50,21 @@ class FollowerModelsTest(unittest.TestCase):
                         controller=ControllerConfig(),
                         **{field: value},
                     )
+
+    def test_initial_tf_acquisition_budget_is_optional_and_bounded(self):
+        for value in (0.0, 1.0, 3.0):
+            with self.subTest(value=value):
+                config = FollowerConfig(
+                    controller=ControllerConfig(),
+                    initial_tf_acquisition_wait_sec=value,
+                )
+                self.assertEqual(config.initial_tf_acquisition_wait_sec, value)
+        for value in (-1.0, 3.01, math.inf, math.nan, True, "3"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                FollowerConfig(
+                    controller=ControllerConfig(),
+                    initial_tf_acquisition_wait_sec=value,
+                )
 
     def test_corner_hold_must_preserve_margin_inside_route_tube(self):
         with self.assertRaisesRegex(ValueError, "strictly inside"):

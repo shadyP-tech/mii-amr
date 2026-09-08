@@ -11,6 +11,9 @@ from scripts.aufgabe04.perception.stand_axis.geometry import (
     _well_formed_quadrilateral,
     order_corners,
 )
+from scripts.aufgabe04.perception.stand_axis.metric_edge_association import (
+    observed_metric_corner_arms,
+)
 from scripts.aufgabe04.perception.stand_axis.models import (
     ImagePoint,
     _QuadrilateralEdgeSupport,
@@ -121,6 +124,12 @@ def refine_projected_head_border(
         return RefinedHeadMeasurement(
             False, "model_corridor_refinement_unavailable", None, evidence, None
         )
+    if not _well_formed_quadrilateral(corners) or not _corners_inside_image(
+        corners, raw_edges.shape
+    ):
+        return RefinedHeadMeasurement(
+            False, "model_refinement_geometry_inconsistent", None, evidence, None
+        )
     support = _quadrilateral_edge_support(cv2, evidence, corners)
     if not support.accepted:
         return RefinedHeadMeasurement(
@@ -170,6 +179,14 @@ def refine_projected_head_border(
         return RefinedHeadMeasurement(
             False,
             "model_refinement_geometry_inconsistent",
+            None,
+            evidence,
+            support,
+        )
+    if not observed_metric_corner_arms(cv2, raw_edges, refined):
+        return RefinedHeadMeasurement(
+            False,
+            "model_corner_evidence_insufficient",
             None,
             evidence,
             support,

@@ -54,6 +54,7 @@ from scripts.aufgabe04.perception.stand_axis.models import (
 from scripts.aufgabe04.perception.debug.stand_axis_viewer import (
     annotate_projected_model_landmarks,
 )
+from scripts.aufgabe04.qr_scanning.qr_observation import DecodedQrObservation
 
 
 def profile_payload(
@@ -315,6 +316,69 @@ class StandMetricGeometryTest(unittest.TestCase):
         self.assertEqual(detection.scale, 4.0)
         self.assertEqual(detection.corners[0], ImagePoint(10.0, 20.0))
         self.assertEqual(detection.corners[2], ImagePoint(30.0, 40.0))
+
+    def test_decoded_identity_uses_only_its_own_corners_without_native_fallback(self):
+        quad = ((10., 10.), (30., 10.), (30., 30.), (10., 30.))
+        frame = numpy.zeros((80, 80, 3), dtype=numpy.uint8)
+        for observations, expected in (
+            ((DecodedQrObservation("Start", quad, "wechat", 2.),), True),
+            ((DecodedQrObservation("Start", None, "wechat"),), False),
+            ((DecodedQrObservation("Start", quad, "wechat"),
+              DecodedQrObservation("Start", quad, "wechat")), False),
+        ):
+            with self.subTest(observations=observations), patch(
+                "scripts.aufgabe04.perception.stand_axis.qr_pose_seed."
+                "_detect_qr_quad_corners_native",
+                side_effect=AssertionError("must not borrow unrelated native corners"),
+            ):
+                result = detect_qr_quad(cv2, frame, decoded_observations=observations)
+                self.assertEqual(result is not None, expected)
+                if result is not None:
+                    self.assertEqual(result.text, "Start")
+                    self.assertEqual(result.detector, "wechat")
+                    self.assertEqual(result.scale, 2.)
+
+    def test_multiple_same_text_symbols_reject_even_with_good_tracked_pose(self):
+        projected = project_stand_model(cv2, self.profile, frontal_pose(), self.camera)
+        frame = numpy.zeros((480, 640, 3), dtype=numpy.uint8)
+        polygon = numpy.asarray([[
+            (round(point.u_px), round(point.v_px)) for point in projected.head_corners
+        ]], dtype=numpy.int32)
+        cv2.polylines(frame, polygon, True, (255, 255, 255), 2)
+        quad = tuple((point.u_px, point.v_px) for point in self._qr_pixels())
+        observations = (
+            DecodedQrObservation("Start", quad, "wechat"),
+            DecodedQrObservation("Start", tuple((u + 150, v) for u, v in quad), "wechat"),
+        )
+        estimate, debug = estimate_stand_axis_from_metric_model(
+            cv2, frame, model_profile=self.profile,
+            camera_fx_px=self.camera.fx_px, camera_fy_px=self.camera.fy_px,
+            camera_cx_px=self.camera.cx_px, camera_cy_px=self.camera.cy_px,
+            pose_hint=frontal_pose(), qr_observations=observations,
+        )
+        self.assertFalse(estimate.usable)
+        self.assertEqual(estimate.reason, "model_qr_identity_ambiguous")
+        self.assertIsNone(debug.model_pose)
+        self.assertTrue(debug.qr_detected)
+
+    def test_text_without_corners_cannot_bootstrap_qr_free_backside(self):
+        frame = numpy.zeros((480, 640, 3), dtype=numpy.uint8)
+        with patch(
+            "scripts.aufgabe04.perception.stand_axis.model_pipeline."
+            "estimate_stand_axis_from_model_backside",
+            side_effect=AssertionError("decoded front must not become a backside"),
+        ):
+            estimate, debug = estimate_stand_axis_from_metric_model(
+                cv2, frame, model_profile=self.profile,
+                camera_fx_px=self.camera.fx_px, camera_fy_px=self.camera.fy_px,
+                camera_cx_px=self.camera.cx_px, camera_cy_px=self.camera.cy_px,
+                expected_head_center_u_px=320., expected_head_center_v_px=240.,
+                expected_head_height_px=100.,
+                qr_observations=(DecodedQrObservation("Start", None, "wechat"),),
+            )
+        self.assertEqual(estimate.reason, "model_qr_text_without_geometry")
+        self.assertFalse(estimate.usable)
+        self.assertTrue(debug.qr_detected)
 
     def test_projection_corridor_refines_only_real_current_frame_edges(self):
         projected = project_stand_model(cv2, self.profile, frontal_pose(), self.camera)

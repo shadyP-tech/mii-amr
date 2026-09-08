@@ -32,6 +32,7 @@ def candidate_view_options(
     achieved_normals: list[float],
     attempted_normals: list[float],
     advisory_yaw_rad: float | None = None,
+    exhausted_normals: list[float] | None = None,
 ) -> tuple[float, ...]:
     """Offer diverse hypotheses, without assigning either side as QR front."""
 
@@ -44,7 +45,10 @@ def candidate_view_options(
     ):
         angle = min(math.pi / 2, max(MINIMUM_VIEW_SEPARATION_RAD, abs(advisory_yaw_rad)))
         hypotheses = [angle, -angle, *hypotheses]
-    previous = achieved_normals + attempted_normals
+    # Legacy callers supply fully attempted directions. The live controller
+    # separately tracks pose proposals and only excludes a failed direction
+    # once all its bounded standoffs have been considered.
+    previous = achieved_normals + (attempted_normals if exhausted_normals is None else exhausted_normals)
     selected: list[float] = []
     for offset in hypotheses:
         normal = math.remainder(current_normal_rad + offset, 2.0 * math.pi)
@@ -60,6 +64,8 @@ class CandidateInspectionState:
     history: list[dict[str, object]] = field(default_factory=list)
     attempted_normals: list[float] = field(default_factory=list)
     achieved_normals: list[float] = field(default_factory=list)
+    exhausted_normals: list[float] = field(default_factory=list)
+    termination_reason: str | None = None
     provisional_qr_ids: set[str] = field(default_factory=set)
     route_failures: list[dict[str, object]] = field(default_factory=list)
 
@@ -93,6 +99,14 @@ class CandidateInspectionState:
             "candidate_uid": self.candidate_uid, "max_views": self.max_views,
             "view_history": list(self.history),
             "attempted_view_normals_rad": list(self.attempted_normals),
+            "achieved_view_normals_rad": list(self.achieved_normals),
+            "exhausted_view_normals_rad": list(self.exhausted_normals),
+            "local_view_count": len(self.history),
+            "termination_reason": self.termination_reason,
+            "view_budget_exhausted": self.termination_reason == "view_budget_exhausted",
+            "proposal_search_exhausted": self.termination_reason in {
+                "view_proposals_exhausted", "route_proposal_budget_exhausted",
+            },
             "provisional_qr_ids": sorted(self.provisional_qr_ids),
             "route_failures": list(self.route_failures),
             "joint_observation_ready": bool(self.history and

@@ -265,6 +265,11 @@ class FollowerCallbackServiceTest(unittest.TestCase):
                 created["listener_node_namespace"] = namespace
                 events.append("listener_node.init")
 
+            def create_timer(self, period, callback):
+                created["heartbeat_period"] = period
+                created["heartbeat_callback"] = callback
+                return object()
+
             def destroy_node(self):
                 events.append("listener_node.destroy")
 
@@ -283,6 +288,9 @@ class FollowerCallbackServiceTest(unittest.TestCase):
 
             def run(self):
                 events.append("node.run")
+                created["health_before_callback"] = self.initial_tf_executor_health_probe()
+                created["heartbeat_callback"]()
+                created["health_after_callback"] = self.initial_tf_executor_health_probe()
                 return expected_result
 
             def destroy_node(self):
@@ -359,6 +367,9 @@ class FollowerCallbackServiceTest(unittest.TestCase):
                 self.ident = 1234
                 events.append(f"thread.start:{self.name}")
 
+            def is_alive(self):
+                return self.ident is not None
+
             def join(self):
                 events.append(f"thread.join:{self.name}")
 
@@ -433,6 +444,11 @@ class FollowerCallbackServiceTest(unittest.TestCase):
         self.assertIs(created["tf_listener_buffer"], created["buffer"])
         self.assertIs(created["tf_listener_node"], created["listener_node"])
         self.assertFalse(created["tf_listener_spin_thread"])
+        self.assertEqual(created["heartbeat_period"], 0.05)
+        self.assertFalse(created["health_before_callback"]["ready"])
+        self.assertTrue(created["health_after_callback"]["ready"])
+        self.assertEqual(created["health_after_callback"]["heartbeat_count"], 1)
+        self.assertFalse(created["health_after_callback"]["tf_delivery_proven"])
         self.assertIs(created["injected_tf_buffer"], created["buffer"])
         threads_by_name = {thread.name: thread for thread in created["threads"]}
         self.assertEqual(

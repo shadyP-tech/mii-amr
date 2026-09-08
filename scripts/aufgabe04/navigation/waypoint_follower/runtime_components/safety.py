@@ -36,6 +36,9 @@ from scripts.aufgabe04.navigation.coverage.transient_blockage_policy import (
 from scripts.aufgabe04.navigation.waypoint_follower.route_admission import (
     stuck_progress_details,
 )
+from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.initial_runtime_inputs import (
+    wait_for_initial_runtime_inputs,
+)
 from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.bindings import (
     RuntimeBindingProxy,
 )
@@ -78,51 +81,7 @@ class SafetyRuntimeMixin:
     """Live safety behavior mixed into the sole follower node."""
 
     def _wait_for_initial_runtime_inputs(self, started_at: float) -> str:
-        deadline = started_at + self.follower_config.initial_sensor_wait_sec
-        last_failure = "missing scan"
-        while rclpy.ok():
-            self._service_or_wait_for_callbacks(0.05)
-            scan_failure = self._freshness_failure(
-                "scan",
-                self.latest_scan,
-                self.latest_scan_receipt,
-                self.follower_config.max_scan_age_sec,
-            )
-            if scan_failure:
-                last_failure = scan_failure
-            else:
-                odom_failure = self._freshness_failure(
-                    "odom",
-                    self.latest_odom,
-                    self.latest_odom_receipt,
-                    self.follower_config.max_odom_age_sec,
-                )
-                if odom_failure:
-                    last_failure = odom_failure
-                else:
-                    pose_lookup = self._current_pose_lookup()
-                    if pose_lookup.pose is None:
-                        self.latest_stop_details = pose_lookup.details
-                        last_failure = "map-to-base transform unavailable"
-                    else:
-                        # Odom-owned execution still depends on the live
-                        # map<-odom edge as a read-only global-consistency
-                        # monitor.  A newly constructed child TF buffer can
-                        # receive odom<-base before map<-odom, so warm and
-                        # validate that second edge while motion remains zero
-                        # and inside the existing bounded startup wait.
-                        localization_failure = (
-                            self._global_consistency_monitor_failure()
-                        )
-                        if localization_failure:
-                            last_failure = localization_failure
-                        else:
-                            self.latest_stop_details = None
-                            return ""
-            if time.monotonic() >= deadline:
-                return last_failure
-            self.publish_zero()
-        return "ROS shutdown"
+        return wait_for_initial_runtime_inputs(self, started_at)
 
     def _safety_failure(self) -> str:
         self.latest_stop_details = None

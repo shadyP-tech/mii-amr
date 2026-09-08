@@ -69,6 +69,10 @@ from scripts.aufgabe04.navigation.control.waypoint_controller import (
     compute_start_egress_vertex_command,
 )
 from scripts.aufgabe04.navigation.waypoint_follower.config import FollowerConfig
+from scripts.aufgabe04.navigation.waypoint_follower.initial_tf_acquisition import (
+    TF_EXECUTOR_HEARTBEAT_PERIOD_SEC,
+    TfExecutorHeartbeat,
+)
 from scripts.aufgabe04.navigation.waypoint_follower.route_admission import (
     certified_startup_join_action,
     dynamic_join_envelope_failure,
@@ -161,7 +165,7 @@ def _require_ros() -> None:
 
 
 def _create_dedicated_tf_listener(runtime_config: ResolvedRuntimeConfig):
-    """Create an isolated owner for only the TF listener subscriptions."""
+    """Create an isolated owner for TF subscriptions and their service heartbeat."""
 
     listener_node = Node(
         TF_LISTENER_NODE_NAME,
@@ -172,6 +176,13 @@ def _create_dedicated_tf_listener(runtime_config: ResolvedRuntimeConfig):
         tf_buffer,
         listener_node,
         spin_thread=False,
+    )
+    # The timer proves this isolated executor is servicing callbacks. It does
+    # not claim that a broadcaster delivered any required TF edge.
+    listener_node.initial_tf_heartbeat = TfExecutorHeartbeat()
+    listener_node.create_timer(
+        TF_EXECUTOR_HEARTBEAT_PERIOD_SEC,
+        listener_node.initial_tf_heartbeat.tick,
     )
     return listener_node, tf_buffer, tf_listener
 
@@ -821,6 +832,11 @@ def run_simple_waypoint_follower(
         # its sensor wait/control loop.
         tf_executor_thread.start()
         follower_executor_thread.start()
+        node.initial_tf_executor_health_probe = lambda: (
+            listener_node.initial_tf_heartbeat.snapshot(
+                thread_alive=tf_executor_thread.is_alive()
+            )
+        )
         try:
             return node.run()
         except BaseException:

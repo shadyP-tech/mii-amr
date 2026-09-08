@@ -316,6 +316,49 @@ class CandidateStartupRecoveryTest(unittest.TestCase):
         self.assertFalse(self.admitted_paths)
         self.assertFalse(self.replacement_attempts)
 
+    def test_before_motion_tf_failure_preserves_cause_without_authorizing_reseal(self):
+        # Recorded 2026-09-08 failure shape: an execution-frame TF lookup,
+        # distinct from the map/odom continuity evidence eligible for reseal.
+        reason = "odom-to-base transform unavailable"
+        details = {
+            "source": "tf_lookup",
+            "reason": "lookup_exception",
+            "exception_type": "ConnectivityException",
+            "target_frame": "odom",
+            "source_frame": "base_footprint",
+            "execution_phase": "before_motion",
+            "phase": "initial_runtime_input_wait",
+            "motion_published": False,
+        }
+        effects, calls = self._effects(
+            initial=_outcome(
+                self.root,
+                run_id=self.identity.run_id,
+                status="stopped",
+                stop_reason=reason,
+                stop_details=details,
+                mission_leg_motion_permit_sha256="a" * 64,
+            ),
+            replacements=[],
+        )
+        with self.assertRaisesRegex(CandidateStartupRecoveryError, reason) as caught:
+            execute_candidate_motion_with_startup_recovery(
+                _Request(self.identity), config=self._config(3), effects=effects,
+            )
+
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(self.admitted_paths)
+        self.assertFalse(self.replanned_attempts)
+        self.assertFalse(self.replacement_attempts)
+        self.assertEqual(self.events[-1]["reason"], reason)
+        self.assertEqual(self.events[-1]["stop_details"], details)
+        failure = caught.exception.to_failure_fields()
+        self.assertEqual(failure["stop_reason"], reason)
+        self.assertEqual(failure["issued_motion_permit_kinds"], ["routine_mission_leg"])
+        self.assertFalse(failure["motion_published"])
+        self.assertFalse(failure["motion_continues_authorized"])
+        self.assertTrue(failure["fail_closed"])
+
     def test_replacement_request_cannot_change_routine_identity(self):
         def wrong_replan(attempt: CandidateStartupRecoveryAttempt) -> _Request:
             attempt.source_root.mkdir(parents=False)

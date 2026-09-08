@@ -12,6 +12,8 @@ from scripts.aufgabe04.perception.stand_axis.geometry import (
 )
 from scripts.aufgabe04.perception.stand_axis.model_profile import ModelPoint3D
 from scripts.aufgabe04.perception.stand_axis.models import ImagePoint
+from scripts.aufgabe04.qr_scanning.opencv_qr_detector import detect_qr_observations_bgr
+from scripts.aufgabe04.qr_scanning.qr_observation import DecodedQrObservation
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,8 @@ class QrQuadDetection:
 
     corners: tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint]
     scale: float
+    text: str | None = None
+    detector: str = "opencv_native"
 
 
 @dataclass(frozen=True)
@@ -192,6 +196,7 @@ def detect_qr_quad(
     frame,
     *,
     scales: Sequence[float] = (1.0, 2.0, 4.0),
+    decoded_observations: tuple[DecodedQrObservation, ...] | None = None,
 ) -> QrQuadDetection | None:
     """Acquire QR corners through a bounded image pyramid.
 
@@ -204,6 +209,10 @@ def detect_qr_quad(
         raise ValueError("QR detection requires a non-empty image")
     if not scales:
         raise ValueError("QR detection scales must not be empty")
+    if decoded_observations:
+        # Positive decoder evidence is authoritative about symbol multiplicity.
+        # Never pair another detector's largest quad with an unrelated text.
+        return qr_quad_from_decoded_observations(decoded_observations)
     for raw_scale in scales:
         scale = float(raw_scale)
         if not math.isfinite(scale) or scale < 1.0:
@@ -225,7 +234,24 @@ def detect_qr_quad(
             for point in corners
         )
         return QrQuadDetection(restored, scale)
+    if decoded_observations is None:
+        return qr_quad_from_decoded_observations(detect_qr_observations_bgr(frame, cv2))
     return None
+
+
+def qr_quad_from_decoded_observations(
+    observations: tuple[DecodedQrObservation, ...],
+) -> QrQuadDetection | None:
+    """Select only one decoded symbol with its own original-image corners."""
+    if any(not isinstance(item, DecodedQrObservation) for item in observations):
+        raise ValueError("QR metric seed requires decoded observation values")
+    if len(observations) != 1 or observations[0].corners is None:
+        return None
+    observation = observations[0]
+    return QrQuadDetection(
+        order_corners(tuple(ImagePoint(u, v) for u, v in observation.corners)),
+        observation.scale, observation.text, observation.detector,
+    )
 
 
 def detect_qr_quad_corners(

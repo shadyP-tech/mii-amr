@@ -469,7 +469,8 @@ def execute_candidate_motion_with_startup_recovery(
                 outcome=outcome,
                 expected_run_id=expected_identity.run_id,
                 reseal_index=completed_reseal_count,
-                reason="outcome is not an eligible startup-segment mismatch",
+                reason="outcome is not eligible for startup reseal recovery",
+                preserve_child_reason=True,
             )
         if completed_reseal_count >= config.max_startup_reseals:
             rejection = RejectedChildFailure.from_outcome(

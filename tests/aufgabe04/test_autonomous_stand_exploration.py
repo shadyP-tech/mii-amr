@@ -159,6 +159,7 @@ from scripts.aufgabe04.stations.candidate_snapshot import (
     write_candidate_snapshot,
 )
 from tests.aufgabe04.backside_axis_fixture import backside_axis_payload
+from tests.aufgabe04.test_detected_station_exploration import write_free_map
 
 
 MAP = Path("maps/aufgabe03/arena_1p898x3p9_auto.yaml")
@@ -428,9 +429,12 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             )
         }
         for name, path in fixture_paths.items():
-            if name == "stand_model.json":
+            if name in {"stand_model.json", "map.yaml"}:
                 continue
             path.write_text("{}\n", encoding="utf-8")
+        # Local inspection reads the raster resolution to preserve transit
+        # clearance while trying smaller standoffs, even with injected motion.
+        write_free_map(root, width=60, height=60, resolution=0.05)
         write_stand_model(
             fixture_paths["stand_model.json"],
             stand_model_from_payload(

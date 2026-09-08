@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Callable
+from scripts.aufgabe04.qr_scanning.qr_observation import DecodedQrObservation
 
 from scripts.aufgabe04.perception.stand_axis.models import (
     StandAxisEdgeDebugArtifacts,
@@ -34,11 +35,15 @@ BACKSIDE_REACQUISITION_TRIGGER_REASONS = frozenset(
         "model_backside_head_and_neck_unavailable",
         "model_backside_target_crop_unavailable",
         "model_backside_target_center_mismatch",
+        "model_backside_neck_support_insufficient",
+        "model_backside_head_scale_mismatch",
+        "model_backside_planar_pose_unavailable",
     }
 )
 QR_MODEL_REACQUISITION_TRIGGER_REASONS = frozenset(
     {
         "model_pose_seed_unavailable",
+        "model_qr_text_without_geometry",
         "projected_head_outside_image",
     }
 )
@@ -61,6 +66,7 @@ class HeadRoiEvaluation:
     frame: object
     estimate: StandAxisImageEstimate
     debug: StandAxisEdgeDebugArtifacts
+    qr_observations: tuple[DecodedQrObservation, ...] | None = None
 
 
 @dataclass(frozen=True)
