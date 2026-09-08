@@ -554,21 +554,21 @@ class ExactTwoCameraDecisionTest(unittest.TestCase):
             second_uid = "survey_candidate_0003"
 
             self.assertEqual(len(fixture.registry.candidates), 6)
-            self.assertEqual(len(fixture.snapshot.candidates), 5)
+            self.assertEqual(len(fixture.snapshot.candidates), 6)
             self.assertEqual(
                 fixture.handoff.admission_decision.selected_candidate_uids,
                 tuple(
                     f"survey_candidate_{index:04d}"
-                    for index in range(1, 6)
+                    for index in range(1, 7)
                 ),
             )
             self.assertEqual(
                 fixture.handoff.admission_decision.boundary_audit_only_candidate_uids,
-                ("survey_candidate_0006",),
+                (),
             )
             self.assertEqual(
                 fixture.handoff.admission_decision.excluded_candidate_uids,
-                ("survey_candidate_0006",),
+                (),
             )
             self.assertEqual(
                 fixture.handoff.source_registry_sha256,

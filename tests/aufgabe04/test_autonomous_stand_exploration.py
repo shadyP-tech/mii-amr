@@ -586,7 +586,12 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 self.camera_handoff_sha256 = "e" * 64
 
             def to_mission_summary(self):
+                from scripts.aufgabe04.navigation.coverage.candidate_inspection_pool import (
+                    candidate_inspection_pool_policy_evidence,
+                )
                 return {
+                    "expected_stand_count": 3,
+                    "inspection_pool_policy": candidate_inspection_pool_policy_evidence(3),
                     "lidar_checkpoint_admission": str(
                         root / "lidar_checkpoint_admission.json"
                     ),
@@ -603,7 +608,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                     "lidar_boundary_provisional_candidate_count": 0,
                     "lidar_population_retained_candidate_count": 3,
                     "camera_seed_candidate_count": 3,
-                    "camera_seed_selection_mode": "strict_exact",
+                    "camera_seed_selection_mode": "bounded_inspection_pool",
                     "camera_seed_candidate_uids": candidate_uids,
                     "camera_seed_boundary_fill_candidate_uids": [],
                     "camera_seed_boundary_audit_only_candidate_uids": [],
@@ -1048,7 +1053,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             )
             self.assertEqual(failure["status"], "failed_closed")
             self.assertEqual(
-                failure["failure_phase"], "candidate_approach_incomplete"
+                failure["failure_phase"], "candidate_qr_goal_incomplete"
             )
             self.assertEqual(
                 failure["resolved_candidate_uids"],

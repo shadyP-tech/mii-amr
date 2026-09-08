@@ -1,0 +1,163 @@
+{
+  "description": "Projection of recorded LiDAR candidate count/support and geometry for ROS-free checkpoint/admission regression. Uses synthetic grid coverage in tests; not a route certificate or physical replay. Full observation-ID lists and frame transforms are omitted; the first real observation ID per candidate is retained.",
+  "source_run": "stand_explore_exact2_camera_20260907T145747Z",
+  "source_commit": "8c4b584469727932229b005e0952c0511785c772",
+  "source_checkpoint": "checkpoints/coverage_leg_002",
+  "source_artifact_sha256": {
+    "coverage_plan.json": "23b169ff637015a9f2d91f5416c52131db504c76d5bd6fe5c9603b059625c5dd",
+    "coverage_progress.json": "3c59e707ab9e21a915fc1c4dab5571d6fe3e50ac4a5265edee3a124c28ae76a6",
+    "stand_registry.json": "db8dc0ea69f499ba72a9470a0da30481ce30da973714a586e3fed1a578cb54f6"
+  },
+  "source_map_bundle_sha256": "a0dc0d4c73e96f113ec262640bcdece2bfc2e1f68e8394701ecafd5e569ae17a",
+  "config": {
+    "candidate_keepout_radius_m": 0.33999999999999997,
+    "candidate_merge_distance_m": 0.18,
+    "candidate_radius_m": 0.06,
+    "candidate_uncertainty_m": 0.02,
+    "coverage_threshold": 0.95,
+    "exact_inspection_point_count": 2,
+    "exact_two_candidate_spacing_m": 0.4,
+    "expected_stand_count": 5,
+    "inflation_radius_m": 0.25,
+    "lane_count": 1,
+    "minimum_boundary_clearance_m": 0.1,
+    "minimum_candidate_confidence": 0.55,
+    "minimum_candidate_hits": 3,
+    "minimum_distinct_viewpoints": 2,
+    "minimum_exact_two_viewpoint_baseline_m": 1.0,
+    "observation_epoch_max_age_sec": 8.0,
+    "snap_radius_m": 0.3,
+    "stop_spacing_m": 0.7,
+    "visibility_radius_m": 1.35
+  },
+  "candidates": [
+    {
+      "candidate_uid": "survey_candidate_0001",
+      "confidence": 0.6298067147420667,
+      "first_seen_sec": 1788793146.8643296,
+      "hit_count": 124,
+      "keepout_radius_m": 0.33999999999999997,
+      "last_seen_sec": 1788793217.1144931,
+      "radius_m": 0.06,
+      "rejection_basis": null,
+      "static_map_disposition": "static_map_admitted",
+      "status": "pending_camera",
+      "uncertainty_m": 0.02,
+      "viewpoint_ids": [
+        "survey_vp_001",
+        "survey_vp_002"
+      ],
+      "x_m": -1.0258823787818643,
+      "y_m": -0.5094520148562866,
+      "source_observation_ids": [
+        "stand_observation_survey_vp_001_000006"
+      ]
+    },
+    {
+      "candidate_uid": "survey_candidate_0002",
+      "confidence": 0.7019903166777152,
+      "first_seen_sec": 1788793146.8643296,
+      "hit_count": 64,
+      "keepout_radius_m": 0.33999999999999997,
+      "last_seen_sec": 1788793154.313339,
+      "radius_m": 0.06,
+      "rejection_basis": null,
+      "static_map_disposition": "static_map_admitted",
+      "status": "provisional",
+      "uncertainty_m": 0.02,
+      "viewpoint_ids": [
+        "survey_vp_001"
+      ],
+      "x_m": -0.2529660463032615,
+      "y_m": 0.6309129126815398,
+      "source_observation_ids": [
+        "stand_observation_survey_vp_001_000004"
+      ]
+    },
+    {
+      "candidate_uid": "survey_candidate_0003",
+      "confidence": 0.6894462543640835,
+      "first_seen_sec": 1788793146.8643296,
+      "hit_count": 136,
+      "keepout_radius_m": 0.33999999999999997,
+      "last_seen_sec": 1788793217.1144931,
+      "radius_m": 0.06,
+      "rejection_basis": null,
+      "static_map_disposition": "static_map_admitted",
+      "status": "pending_camera",
+      "uncertainty_m": 0.02,
+      "viewpoint_ids": [
+        "survey_vp_001",
+        "survey_vp_002"
+      ],
+      "x_m": 0.10516709097274912,
+      "y_m": -0.7348665321804826,
+      "source_observation_ids": [
+        "stand_observation_survey_vp_001_000007"
+      ]
+    },
+    {
+      "candidate_uid": "survey_candidate_0004",
+      "confidence": 0.727055392820606,
+      "first_seen_sec": 1788793146.8643296,
+      "hit_count": 42,
+      "keepout_radius_m": 0.33999999999999997,
+      "last_seen_sec": 1788793154.2129247,
+      "radius_m": 0.06,
+      "rejection_basis": null,
+      "static_map_disposition": "static_map_admitted",
+      "status": "provisional",
+      "uncertainty_m": 0.02,
+      "viewpoint_ids": [
+        "survey_vp_001"
+      ],
+      "x_m": 1.7435888324987527,
+      "y_m": 0.6252106817445104,
+      "source_observation_ids": [
+        "stand_observation_survey_vp_001_000001"
+      ]
+    },
+    {
+      "candidate_uid": "survey_candidate_0005",
+      "confidence": 0.6255247870609387,
+      "first_seen_sec": 1788793209.5752316,
+      "hit_count": 80,
+      "keepout_radius_m": 0.33999999999999997,
+      "last_seen_sec": 1788793217.1144931,
+      "radius_m": 0.06,
+      "rejection_basis": null,
+      "static_map_disposition": "static_map_admitted",
+      "status": "provisional",
+      "uncertainty_m": 0.02,
+      "viewpoint_ids": [
+        "survey_vp_002"
+      ],
+      "x_m": 1.1550451322610227,
+      "y_m": 0.808465670657618,
+      "source_observation_ids": [
+        "stand_observation_survey_vp_002_000006"
+      ]
+    },
+    {
+      "candidate_uid": "survey_candidate_0006",
+      "confidence": 0.6557544088297196,
+      "first_seen_sec": 1788793209.5752316,
+      "hit_count": 80,
+      "keepout_radius_m": 0.33999999999999997,
+      "last_seen_sec": 1788793217.1144931,
+      "radius_m": 0.06,
+      "rejection_basis": null,
+      "static_map_disposition": "static_map_admitted",
+      "status": "provisional",
+      "uncertainty_m": 0.02,
+      "viewpoint_ids": [
+        "survey_vp_002"
+      ],
+      "x_m": 1.4364024366384103,
+      "y_m": -0.15945830334884042,
+      "source_observation_ids": [
+        "stand_observation_survey_vp_002_000013"
+      ]
+    }
+  ]
+}

@@ -142,7 +142,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             planning_frame="map",
             map_bundle_sha256=map_sha256,
             arena_bounds=ArenaBounds(),
-            config=CoverageSurveyConfig(),
+            config=CoverageSurveyConfig(expected_stand_count=len(snapshot.candidates)),
             viewpoints=(
                 SurveyViewpoint(
                     viewpoint_id="survey_vp_001",
@@ -159,6 +159,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             session_root=root / "session",
             survey_root=root / "survey",
             session_id="mission",
+            expected_stand_count=len(snapshot.candidates),
             semantic_map_id="arena",
             planning_frame="map",
             map_yaml=root / "map.yaml",

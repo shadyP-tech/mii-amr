@@ -1022,19 +1022,22 @@ class AutonomousCoverageMissionTest(unittest.TestCase):
                 outcome.camera_validation_decision.lidar_checkpoint_sha256,
             )
             summary = outcome.to_mission_summary()
-            self.assertEqual(summary["stand_count"], 5)
+            self.assertEqual(summary["stand_count"], 6)
+            self.assertEqual(summary["candidate_pool_count"], 6)
+            self.assertEqual(summary["expected_stand_count"], 5)
+            self.assertEqual(summary["confirmed_stand_count"], 0)
             self.assertEqual(summary["active_lidar_registry_candidate_count"], 6)
-            self.assertEqual(summary["camera_seed_candidate_count"], 5)
+            self.assertEqual(summary["camera_seed_candidate_count"], 6)
             self.assertEqual(
                 summary["camera_seed_boundary_audit_only_candidate_uids"],
-                [surplus_uid],
+                [],
             )
             self.assertEqual(
                 summary["camera_seed_excluded_candidate_uids"],
-                [surplus_uid],
+                [],
             )
-            self.assertNotIn(surplus_uid, outcome.candidate_snapshot.candidate_uids)
-            self.assertNotIn(
+            self.assertIn(surplus_uid, outcome.candidate_snapshot.candidate_uids)
+            self.assertIn(
                 surplus_uid,
                 outcome.camera_handoff.admitted_candidate_uids,
             )
@@ -1045,7 +1048,7 @@ class AutonomousCoverageMissionTest(unittest.TestCase):
                         "single_view_requires_camera_validation_candidate_uids"
                     ]
                 ),
-                3,
+                4,
             )
             self.assertTrue(summary["lidar_checkpoint_complete"])
             self.assertTrue(summary["camera_validation_population_ready"])

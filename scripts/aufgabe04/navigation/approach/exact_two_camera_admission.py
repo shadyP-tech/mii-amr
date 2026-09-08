@@ -158,8 +158,8 @@ def evaluate_exact_two_camera_admission(
         reasons.append("lidar_checkpoint_not_ready")
     if expected_count is None:
         reasons.append("expected_stand_count_unset")
-    elif selected_count != expected_count:
-        reasons.append("selected_candidate_count_mismatch")
+    elif not seed_selection.ready:
+        reasons.extend(seed_selection.reasons)
     if blocked:
         reasons.append("selected_candidates_not_camera_admissible")
     if len(multi_view) + len(single_view) != selected_count:
@@ -181,6 +181,8 @@ def evaluate_exact_two_camera_admission(
         camera_population_ready=not reasons,
         motion_authorized=False,
         expected_stand_count=expected_count,
+        inspection_pool_policy_id=seed_selection.inspection_pool_policy_id,
+        inspection_pool_limit=seed_selection.inspection_pool_limit,
         active_candidate_count=active_count,
         camera_seed_selection_mode=seed_selection.selection_mode,
         selected_candidate_uids=seed_selection.selected_candidate_uids,
@@ -255,6 +257,7 @@ def build_exact_two_camera_candidate_snapshot(
                         observation_ids=tuple(
                             sorted(set(candidate.source_observation_ids))
                         ),
+                        perception_advisories=candidate.perception_advisories,
                     ),
                     confidence=candidate.confidence,
                     hit_count=candidate.hit_count,
@@ -412,6 +415,7 @@ def _validate_admission_against_plan_registry(
         "map_bundle_sha256": plan.map_bundle_sha256,
         "plan_sha256": plan_sha256,
         "source_registry_sha256": stand_survey_registry_sha256(registry),
+        "expected_stand_count": plan.config.expected_stand_count,
     }
     for field_name, value in expected.items():
         if getattr(admission, field_name) != value:

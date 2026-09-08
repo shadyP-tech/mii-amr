@@ -35,6 +35,10 @@ from scripts.aufgabe04.navigation.coverage.coverage_visibility_reporting import 
     coverage_visibility_epoch_fields,
     validate_coverage_visibility_evidence,
 )
+from scripts.aufgabe04.navigation.coverage.coverage_morphology_conflict import (
+    CoverageMorphologyConflictEvidence,
+    retain_candidate_perception_advisories,
+)
 from scripts.aufgabe04.navigation.planning.map_io import FrozenMapBundle, OccupancyGrid
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.navigation.missions.plan_first_detected_station import (
@@ -149,6 +153,55 @@ class CoverageVisibilityReconciliationAdmission:
     @property
     def evidence_artifacts(self) -> tuple[ContentHashedAdmissionArtifact, ...]:
         return (self.artifact, self.application_artifact)
+
+
+@dataclass(frozen=True)
+class CoverageMorphologyConflictAdmission:
+    evidence: CoverageMorphologyConflictEvidence
+    artifact: ContentHashedAdmissionArtifact
+
+    @property
+    def updated_registry(self) -> StandSurveyRegistry:
+        return self.evidence.updated_registry
+
+    @property
+    def evidence_artifacts(self) -> tuple[ContentHashedAdmissionArtifact, ...]:
+        return (self.artifact,)
+
+
+def prepare_coverage_morphology_conflicts(
+    *, survey_root: Path, registry: StandSurveyRegistry,
+    plan: CoverageSurveyPlan, viewpoint_id: str, occupancy_grid: OccupancyGrid,
+    epoch_admission: CoverageEpochPerceptionAdmission,
+    prior_registry: StandSurveyRegistry | None = None,
+) -> CoverageMorphologyConflictAdmission | None:
+    """Bind rejected tracks and visibility gaps to persistent candidates."""
+
+    epoch_admission.morphology_artifact.validated()
+    source_payload = epoch_admission.morphology_artifact.payload
+    if any(source_payload.get(key) != value for key, value in
+           epoch_admission.morphology_admission.to_evidence_dict().items()):
+        raise ValueError("morphology advisory source differs from hashed track evidence")
+    contract = source_payload.get("observer_contract")
+    detector = contract.get("proposal_detector_config") if isinstance(contract, Mapping) else None
+    if not isinstance(detector, Mapping) or "max_range_m" not in detector:
+        if any(candidate.frame_provenance is not None for candidate in registry.candidates):
+            raise ValueError("frame-bound morphology evidence is missing proposal range")
+        return None  # Legacy frame-free fixtures carry no physical range claim.
+    result = retain_candidate_perception_advisories(
+        registry, plan=plan,
+        static_costmap=Costmap.from_occupancy_grid(occupancy_grid).with_arena_bounds(plan.arena_bounds),
+        morphology=epoch_admission.morphology_admission, viewpoint_id=viewpoint_id,
+        morphology_sha256=epoch_admission.morphology_artifact.sha256,
+        proposal_max_range_m=float(detector["max_range_m"]),
+        prior_registry=prior_registry,
+    )
+    artifact = _content_hashed_artifact(
+        kind="candidate_perception_advisories", survey_root=survey_root,
+        viewpoint_id=viewpoint_id, filename_label="candidate_perception_advisories",
+        payload=result.payload, hash_field="candidate_perception_advisories_sha256",
+    )
+    return CoverageMorphologyConflictAdmission(evidence=result, artifact=artifact)
 
 
 def load_stopped_observer_summary(path: Path) -> dict[str, object]:
@@ -486,6 +539,7 @@ def prepare_coverage_visibility_reconciliation(
 def coverage_stop_perception_summary_fields(
     epoch_admission: CoverageEpochPerceptionAdmission,
     reconciliation: CoverageVisibilityReconciliationAdmission | None,
+    morphology_conflicts: CoverageMorphologyConflictAdmission | None = None,
 ) -> dict[str, object]:
     """Return compact, JSON-safe bindings shared by epoch and summary."""
 
@@ -504,6 +558,15 @@ def coverage_stop_perception_summary_fields(
             epoch_admission.static_map_artifact.sha256
         ),
     }
+    if morphology_conflicts is not None:
+        fields.update({
+            "candidate_perception_advisories_json": str(morphology_conflicts.artifact.path),
+            "candidate_perception_advisories_sha256": morphology_conflicts.artifact.sha256,
+            "candidate_perception_advisory_count": len(morphology_conflicts.evidence.advisories),
+            "candidate_perception_unresolved_candidate_uids": sorted({
+                item.candidate_uid for item in morphology_conflicts.evidence.advisories
+            }),
+        })
     if reconciliation is None:
         return {
             **fields,
@@ -667,6 +730,7 @@ def _content_hashed_artifact(
 __all__ = [
     "ContentHashedAdmissionArtifact",
     "CoverageEpochPerceptionAdmission",
+    "CoverageMorphologyConflictAdmission",
     "CoverageVisibilityReconciliationAdmission",
     "build_confirmed_epoch_stands",
     "coverage_stop_perception_summary_fields",
@@ -674,6 +738,7 @@ __all__ = [
     "load_stopped_observer_summary",
     "observer_scan_pose",
     "prepare_coverage_epoch_perception_admission",
+    "prepare_coverage_morphology_conflicts",
     "prepare_coverage_visibility_reconciliation",
     "validate_observer_morphology_contract",
 ]

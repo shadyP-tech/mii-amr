@@ -56,6 +56,8 @@ _ADMISSION_FIELDS = frozenset(
         "camera_population_ready",
         "motion_authorized",
         "expected_stand_count",
+        "inspection_pool_policy_id",
+        "inspection_pool_limit",
         "active_candidate_count",
         "camera_seed_selection_mode",
         "selected_candidate_count",
@@ -524,6 +526,14 @@ def admission_from_payload(
         motion_authorized=_bool(item["motion_authorized"], "motion_authorized"),
         expected_stand_count=(
             None if expected is None else _integer(expected, "expected_stand_count")
+        ),
+        inspection_pool_policy_id=_string(
+            item["inspection_pool_policy_id"], "inspection_pool_policy_id"
+        ),
+        inspection_pool_limit=(
+            None if item["inspection_pool_limit"] is None else _integer(
+                item["inspection_pool_limit"], "inspection_pool_limit"
+            )
         ),
         active_candidate_count=_integer(
             item["active_candidate_count"], "active_candidate_count"

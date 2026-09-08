@@ -18,6 +18,9 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from scripts.aufgabe04.artifacts.content_store import payload_sha256
+from scripts.aufgabe04.navigation.coverage.candidate_inspection_pool import (
+    candidate_inspection_pool_count_reasons,
+)
 from scripts.aufgabe04.navigation.coverage.stand_candidate_population_retention import (
     STATIC_MAP_DISPOSITION_ADMITTED,
     STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL,
@@ -45,7 +48,7 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
 
 
 COVERAGE_CANDIDATE_LIFECYCLE_SCHEMA_VERSION = 3
-EXACT_TWO_LIDAR_CHECKPOINT_SCHEMA_VERSION = 4
+EXACT_TWO_LIDAR_CHECKPOINT_SCHEMA_VERSION = 5
 STATIC_MAP_ADMISSION_BASIS = "validated_survey_registry_membership"
 BOUNDARY_PROVISIONAL_STATIC_MAP_BASIS = "boundary_provisional_static_map_shortfall"
 _COVERAGE_COMPARISON_EPSILON = 1.0e-12
@@ -251,7 +254,7 @@ class ExactTwoLidarCheckpointDecision:
 
     @property
     def selected_lidar_candidate_uids(self) -> tuple[str, ...]:
-        """Return the exact camera-seed population selected at this gate."""
+        """Return the bounded camera inspection population selected at this gate."""
 
         return self.camera_seed_selection.selected_candidate_uids
 
@@ -261,11 +264,7 @@ class ExactTwoLidarCheckpointDecision:
 
     @property
     def camera_seed_candidate_count_met(self) -> bool:
-        return (
-            self.camera_seed_selection.ready
-            and self.expected_stand_count is not None
-            and self.camera_seed_candidate_count == self.expected_stand_count
-        )
+        return self.camera_seed_selection.ready
 
     @property
     def boundary_fill_candidate_uids(self) -> tuple[str, ...]:
@@ -339,7 +338,13 @@ class ExactTwoLidarCheckpointDecision:
                 "camera_seed_candidate_count_met": (
                     self.camera_seed_candidate_count_met
                 ),
-                "gate_count_basis": "selected_camera_seed_candidate_count",
+                "gate_count_basis": "bounded_inspection_pool_for_distinct_qr_goal",
+                "inspection_pool_policy_id": (
+                    self.camera_seed_selection.inspection_pool_policy_id
+                ),
+                "inspection_pool_limit": (
+                    self.camera_seed_selection.inspection_pool_limit
+                ),
                 "admitted_lidar_candidate_uids": list(
                     self.admitted_lidar_candidate_uids
                 ),
@@ -469,9 +474,8 @@ def evaluate_exact_two_lidar_checkpoint(
     )
     expected_stand_count = plan.config.expected_stand_count
     active_candidate_count = len(population.active_lidar_candidate_uids)
-    active_candidate_count_met = (
-        expected_stand_count is not None
-        and active_candidate_count == expected_stand_count
+    active_candidate_count_met = not candidate_inspection_pool_count_reasons(
+        expected_stand_count, active_candidate_count
     )
     unsupported_active = tuple(
         item.candidate_uid

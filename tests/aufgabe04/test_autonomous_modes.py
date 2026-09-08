@@ -79,7 +79,7 @@ class AutonomousRunModeTests(unittest.TestCase):
                     AutonomousAuthorizationScope.EXACT_TWO_CAMERA,
                 )
                 self.assertIn(
-                    "camera-approach phase",
+                    "bounded camera inspection pool",
                     resolved.authorization_scope_text,
                 )
 

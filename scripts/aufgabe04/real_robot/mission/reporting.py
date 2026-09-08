@@ -11,6 +11,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from scripts.aufgabe04.real_robot.mission.modes import AutonomousRunMode
+from scripts.aufgabe04.real_robot.mission.camera_goal_reporting import (
+    validate_completed_qr_goal,
+)
 
 
 def build_completed_camera_mission_summary(
@@ -48,9 +51,19 @@ def build_completed_camera_mission_summary(
         )
     if type(candidate_phase_fields.get("stand_count")) is not int:
         raise ValueError("completed candidate phase has no stand count")
+    goal_reporting = "goal_completed" in candidate_phase_fields or (
+        exact_two_coverage_summary is not None
+        and "inspection_pool_policy" in exact_two_coverage_summary
+    )
+    if goal_reporting:
+        validate_completed_qr_goal(
+            candidate_phase_fields,
+            snapshot_sha256=snapshot_sha256,
+            coverage=exact_two_coverage_summary,
+        )
 
     result: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2 if goal_reporting else 1,
         "status": "complete",
         "run_mode": run_mode,
         "motion_published": True,
@@ -87,7 +100,13 @@ def build_completed_camera_mission_summary(
         "camera_exploration_complete": True,
         "exploration_complete": True,
     }
-    result.update(candidate_phase_fields)
+    result.update({
+        key: value for key, value in candidate_phase_fields.items()
+        if key not in {
+            "schema_version", "artifact_kind", "status", "run_mode",
+            "session_id", "candidate_snapshot", "candidate_snapshot_sha256",
+        }
+    })
     result["motion_authorized"] = False
 
     if exact_mode:
@@ -127,7 +146,9 @@ def build_completed_camera_mission_summary(
         seed_count = exact_two_coverage_summary["camera_seed_candidate_count"]
         if (
             not isinstance(camera_uids, list)
-            or len(camera_uids) != candidate_phase_fields["stand_count"]
+            or len(camera_uids) != candidate_phase_fields[
+                "candidate_pool_count" if goal_reporting else "stand_count"
+            ]
         ):
             raise ValueError(
                 "completed camera stand count differs from exact-two handoff"
@@ -216,6 +237,16 @@ def build_completed_camera_mission_summary(
                 ),
             }
         )
+    if goal_reporting:
+        result["candidate_snapshot"] = str(snapshot_path)
+        result["candidate_snapshot_sha256"] = snapshot_sha256
+        result["camera_candidate_resolution_complete"] = not bool(
+            candidate_phase_fields.get("remaining_candidate_uids")
+        )
+        if exact_two_coverage_summary is not None:
+            result["inspection_pool_policy"] = exact_two_coverage_summary[
+                "inspection_pool_policy"
+            ]
     return result
 
 

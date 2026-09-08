@@ -79,7 +79,8 @@ class ResolvedAutonomousRunMode:
         ):
             return (
                 "exactly two center-corridor coverage legs followed by the "
-                "camera-approach phase for all LiDAR-admitted stands"
+                "bounded camera inspection pool, ending when the configured "
+                "number of distinct QR identities and stand poses is validated"
             )
         if (
             self.authorization_scope

@@ -3,7 +3,7 @@ import json
 import unittest
 
 from scripts.aufgabe04.navigation.coverage.exact_two_camera_seed_selection import (
-    SELECTION_MODE_EXACT_BOUNDARY_DEFICIT_FILL,
+    SELECTION_MODE_BOUNDED_INSPECTION_POOL,
     SELECTION_MODE_NOT_READY,
     SELECTION_MODE_STRICT_EXACT,
     SELECTION_MODE_STRICT_EXACT_BOUNDARY_AUDIT_ONLY,
@@ -25,52 +25,20 @@ class ExactTwoCameraSeedSelectionTest(unittest.TestCase):
             boundary_provisional_candidate_uids=boundary,
         )
 
-    def test_exact_strict_population_excludes_boundary_as_audit_only(self):
+    def test_goal_sized_strict_population_still_includes_all_boundary_candidates(self):
         decision = self._select(
-            strict=(
-                "candidate_05",
-                "candidate_01",
-                "candidate_03",
-                "candidate_02",
-                "candidate_04",
-            ),
+            strict=tuple(f"candidate_{i:02d}" for i in range(5, 0, -1)),
             boundary=("candidate_07", "candidate_06"),
         )
-
         self.assertTrue(decision.ready)
-        self.assertEqual(decision.reasons, ())
-        self.assertEqual(
-            decision.selection_mode,
-            SELECTION_MODE_STRICT_EXACT_BOUNDARY_AUDIT_ONLY,
-        )
-        self.assertEqual(
-            decision.selected_candidate_uids,
-            (
-                "candidate_01",
-                "candidate_02",
-                "candidate_03",
-                "candidate_04",
-                "candidate_05",
-            ),
-        )
-        self.assertEqual(decision.boundary_fill_candidate_uids, ())
-        self.assertEqual(
-            decision.boundary_audit_only_candidate_uids,
-            ("candidate_06", "candidate_07"),
-        )
-        self.assertEqual(
-            decision.excluded_candidate_uids,
-            ("candidate_06", "candidate_07"),
-        )
-        self.assertEqual(
-            decision.boundary_audit_only_candidate_uids,
-            decision.boundary_provisional_candidate_uids,
-        )
-        self.assertFalse(
-            set(decision.strict_static_map_admitted_candidate_uids).intersection(
-                decision.excluded_candidate_uids
-            )
-        )
+        self.assertEqual(decision.selection_mode, SELECTION_MODE_BOUNDED_INSPECTION_POOL)
+        self.assertEqual(decision.selected_candidate_uids,
+                         tuple(f"candidate_{i:02d}" for i in range(1, 8)))
+        self.assertEqual(decision.boundary_fill_candidate_uids, ("candidate_06", "candidate_07"))
+        self.assertEqual(decision.boundary_audit_only_candidate_uids, ())
+        self.assertEqual(decision.excluded_candidate_uids, ())
+        self.assertEqual(decision.expected_stand_count, 5)
+        self.assertEqual(decision.inspection_pool_limit, 10)
         self.assertFalse(decision.motion_authorized)
 
     def test_exact_strict_population_without_boundary_uses_strict_mode(self):
@@ -80,7 +48,7 @@ class ExactTwoCameraSeedSelectionTest(unittest.TestCase):
         )
 
         self.assertTrue(decision.ready)
-        self.assertEqual(decision.selection_mode, SELECTION_MODE_STRICT_EXACT)
+        self.assertEqual(decision.selection_mode, SELECTION_MODE_BOUNDED_INSPECTION_POOL)
         self.assertEqual(
             decision.selected_candidate_uids,
             ("candidate_01", "candidate_02"),
@@ -96,7 +64,7 @@ class ExactTwoCameraSeedSelectionTest(unittest.TestCase):
         self.assertTrue(decision.ready)
         self.assertEqual(
             decision.selection_mode,
-            SELECTION_MODE_EXACT_BOUNDARY_DEFICIT_FILL,
+            SELECTION_MODE_BOUNDED_INSPECTION_POOL,
         )
         self.assertEqual(
             decision.selected_candidate_uids,
@@ -141,24 +109,24 @@ class ExactTwoCameraSeedSelectionTest(unittest.TestCase):
             ("candidate_10", "candidate_20", "candidate_30"),
         )
 
-    def test_strict_overflow_fails_closed_without_truncation(self):
+    def test_pool_cap_overflow_fails_closed_without_truncation(self):
         decision = self._select(
             expected=2,
             strict=("candidate_01", "candidate_02", "candidate_03"),
-            boundary=("candidate_04",),
+            boundary=("candidate_04", "candidate_05"),
         )
 
         self.assertFalse(decision.ready)
         self.assertEqual(
             decision.reasons,
-            ("strict_candidate_count_exceeds_expected",),
+            ("inspection_pool_candidate_count_exceeds_limit",),
         )
         self.assertEqual(decision.selection_mode, SELECTION_MODE_NOT_READY)
         self.assertEqual(decision.selected_candidate_uids, ())
         self.assertEqual(decision.boundary_fill_candidate_uids, ())
         self.assertEqual(
             decision.excluded_candidate_uids,
-            ("candidate_01", "candidate_02", "candidate_03", "candidate_04"),
+            ("candidate_01", "candidate_02", "candidate_03", "candidate_04", "candidate_05"),
         )
 
     def test_usable_population_below_expected_fails_closed(self):
@@ -176,20 +144,25 @@ class ExactTwoCameraSeedSelectionTest(unittest.TestCase):
         self.assertEqual(decision.usable_candidate_count, 4)
         self.assertEqual(decision.selected_candidate_uids, ())
 
-    def test_boundary_surplus_is_ambiguous_when_strict_has_a_deficit(self):
-        decision = self._select(
-            expected=5,
-            strict=("candidate_01", "candidate_02", "candidate_03"),
-            boundary=("candidate_04", "candidate_05", "candidate_06"),
-        )
+    def test_strict_and_boundary_surplus_within_cap_remain_inspectable(self):
+        for strict_count in (3, 6, 10):
+            with self.subTest(strict_count=strict_count):
+                total = max(6, strict_count)
+                decision = self._select(
+                    strict=tuple(f"candidate_{i:02d}" for i in range(strict_count)),
+                    boundary=tuple(f"candidate_{i:02d}" for i in range(strict_count, total)),
+                )
+                self.assertTrue(decision.ready)
+                self.assertEqual(decision.selected_candidate_count, total)
+                self.assertEqual(decision.excluded_candidate_uids, ())
 
-        self.assertFalse(decision.ready)
-        self.assertEqual(
-            decision.reasons,
-            ("boundary_candidate_surplus_ambiguous",),
-        )
-        self.assertEqual(decision.selected_candidate_uids, ())
-        self.assertEqual(decision.boundary_fill_candidate_uids, ())
+    def test_pool_policy_and_cap_forgery_are_rejected(self):
+        decision = self._select(expected=1, strict=("candidate_01",))
+        for changes in ({"inspection_pool_limit": 3},
+                        {"inspection_pool_policy_id": "take_best_five"},
+                        {"inspection_pool_limit": True}):
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "pool policy"):
+                replace(decision, **changes)
 
     def test_missing_noninteger_and_nonpositive_expected_counts_fail_closed(self):
         cases = (

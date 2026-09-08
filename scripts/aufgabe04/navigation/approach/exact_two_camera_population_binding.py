@@ -72,6 +72,15 @@ def validate_live_exact_two_camera_population_binding(
         registry_uids=set(registry_by_uid),
     )
 
+    for frozen in snapshot.candidates:
+        live_candidate = registry_by_uid[frozen.candidate_uid]
+        if frozen.source.perception_advisories != live_candidate.perception_advisories:
+            raise ExactTwoCameraAdmissionError(
+                "live_registry_mismatch",
+                "snapshot perception advisories differ from registry for "
+                f"{frozen.candidate_uid!r}",
+            )
+
     _validate_state_aware_full_registry_binding(
         handoff,
         registry,

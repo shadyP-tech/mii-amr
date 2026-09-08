@@ -1,15 +1,8 @@
-"""Pure camera-seed selection for an exact-two LiDAR checkpoint.
+"""Select a bounded camera inspection pool after exactly two LiDAR stops.
 
-Static-map-admitted candidates are the strict population.  Boundary-
-provisional candidates are never allowed to displace a strict candidate: they
-may fill only an exact strict-population deficit.  When the strict population
-already matches the expected stand count, every boundary candidate remains
-explicitly audit-only.
-
-The decision is motion-neutral and ROS-free.  Invalid inputs and ambiguous
-populations produce immutable ``ready=False`` evidence instead of selecting a
-best-effort subset.  Candidate support remains caller-owned: this module
-handles only UID identity, population counts, partition priority, and ordering.
+All usable strict and boundary hypotheses remain eligible. The expected stand
+count is the distinct decoded-QR goal, independent of the inspection pool size.
+Malformed or oversized populations fail closed without arbitrary truncation.
 """
 
 from __future__ import annotations
@@ -17,10 +10,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 
+from scripts.aufgabe04.navigation.coverage.candidate_inspection_pool import (
+    CANDIDATE_INSPECTION_POOL_POLICY_ID,
+    candidate_inspection_pool_count_reasons,
+    candidate_inspection_pool_limit,
+    candidate_inspection_pool_policy_evidence,
+)
 
-EXACT_TWO_CAMERA_SEED_SELECTION_SCHEMA_VERSION = 1
+EXACT_TWO_CAMERA_SEED_SELECTION_SCHEMA_VERSION = 2
+SELECTION_MODE_BOUNDED_INSPECTION_POOL = "bounded_inspection_pool"
 
 SELECTION_MODE_NOT_READY = "not_ready"
+# Import compatibility only; schema 2 never emits legacy exact-count modes.
 SELECTION_MODE_STRICT_EXACT = "strict_exact"
 SELECTION_MODE_STRICT_EXACT_BOUNDARY_AUDIT_ONLY = (
     "strict_exact_boundary_audit_only"
@@ -53,6 +54,8 @@ class ExactTwoCameraSeedSelectionDecision:
     reasons: tuple[str, ...]
     selection_mode: str
     expected_stand_count: int | None
+    inspection_pool_policy_id: str
+    inspection_pool_limit: int | None
     raw_strict_static_map_admitted_candidate_uids: tuple[str, ...]
     raw_boundary_provisional_candidate_uids: tuple[str, ...]
     strict_static_map_admitted_candidate_uids: tuple[str, ...]
@@ -113,46 +116,30 @@ class ExactTwoCameraSeedSelectionDecision:
         if not fill.issubset(boundary) or not audit_only.issubset(boundary):
             raise ValueError("boundary fill and audit-only UIDs must be boundary UIDs")
 
+        expected_limit = (
+            candidate_inspection_pool_limit(self.expected_stand_count)
+            if type(self.expected_stand_count) is int
+            and self.expected_stand_count > 0
+            else None
+        )
+        if (
+            self.inspection_pool_policy_id != CANDIDATE_INSPECTION_POOL_POLICY_ID
+            or self.inspection_pool_limit != expected_limit
+            or type(self.inspection_pool_limit) is not type(expected_limit)
+        ):
+            raise ValueError("camera inspection pool policy differs from the QR goal")
         if self.ready:
-            if self.reasons:
-                raise ValueError("ready camera seed decision cannot contain reasons")
-            if (
-                type(self.expected_stand_count) is not int
-                or self.expected_stand_count <= 0
-                or len(self.selected_candidate_uids)
-                != self.expected_stand_count
+            if self.reasons or candidate_inspection_pool_count_reasons(
+                self.expected_stand_count, len(self.selected_candidate_uids)
             ):
+                raise ValueError("ready inspection pool must satisfy goal and cap")
+            if strict.intersection(boundary):
+                raise ValueError("ready inspection pool partitions must be disjoint")
+            if self.selection_mode != SELECTION_MODE_BOUNDED_INSPECTION_POOL:
+                raise ValueError("ready camera seed selection mode differs from policy")
+            if selected != usable or excluded or audit_only or fill != boundary:
                 raise ValueError(
-                    "ready camera seed decision must select the expected count"
-                )
-            if not strict.issubset(selected) or strict.intersection(excluded):
-                raise ValueError(
-                    "ready camera seed decision cannot exclude a strict candidate"
-                )
-            expected_mode = (
-                SELECTION_MODE_EXACT_BOUNDARY_DEFICIT_FILL
-                if fill
-                else SELECTION_MODE_STRICT_EXACT_BOUNDARY_AUDIT_ONLY
-                if audit_only
-                else SELECTION_MODE_STRICT_EXACT
-            )
-            if self.selection_mode != expected_mode:
-                raise ValueError(
-                    "ready camera seed selection mode differs from partitions"
-                )
-            if self.selected_candidate_uids != tuple(
-                sorted(
-                    self.strict_static_map_admitted_candidate_uids
-                    + self.boundary_fill_candidate_uids
-                )
-            ):
-                raise ValueError(
-                    "ready camera seed UIDs must use global canonical order"
-                )
-            nonselected_boundary = boundary.difference(selected)
-            if audit_only != nonselected_boundary or excluded != audit_only:
-                raise ValueError(
-                    "all nonselected boundary UIDs must be excluded audit-only"
+                    "ready inspection pool must include all usable candidates"
                 )
         elif (
             not self.reasons
@@ -193,6 +180,11 @@ class ExactTwoCameraSeedSelectionDecision:
             "reasons": list(self.reasons),
             "selection_mode": self.selection_mode,
             "expected_stand_count": self.expected_stand_count,
+            "inspection_pool_policy_id": self.inspection_pool_policy_id,
+            "inspection_pool_limit": self.inspection_pool_limit,
+            "inspection_pool_policy": candidate_inspection_pool_policy_evidence(
+                self.expected_stand_count
+            ),
             "counts": {
                 "strict_static_map_admitted": self.strict_candidate_count,
                 "boundary_provisional": self.boundary_candidate_count,
@@ -246,7 +238,7 @@ def select_exact_two_camera_seed_candidates(
     static_map_admitted_candidate_uids: object,
     boundary_provisional_candidate_uids: object,
 ) -> ExactTwoCameraSeedSelectionDecision:
-    """Select exactly one expected-size, strict-first camera seed population.
+    """Select every usable hypothesis within the bounded inspection pool.
 
     Input order cannot affect the result.  UIDs are canonicalized
     lexicographically, matching the survey registry's stable candidate order.
@@ -280,27 +272,18 @@ def select_exact_two_camera_seed_candidates(
     inputs_valid = not reasons
     if inputs_valid:
         assert normalized_expected is not None
-        strict_count = len(strict.canonical_uids)
-        boundary_count = len(boundary.canonical_uids)
-        deficit = normalized_expected - strict_count
-        if strict_count > normalized_expected:
-            reasons.append(REASON_STRICT_CANDIDATE_COUNT_EXCEEDS_EXPECTED)
-        elif deficit == 0:
-            selected = strict.canonical_uids
-            boundary_audit_only = boundary.canonical_uids
-            selection_mode = (
-                SELECTION_MODE_STRICT_EXACT_BOUNDARY_AUDIT_ONLY
-                if boundary_audit_only
-                else SELECTION_MODE_STRICT_EXACT
+        reasons.extend(
+            candidate_inspection_pool_count_reasons(
+                normalized_expected,
+                len(strict.canonical_uids) + len(boundary.canonical_uids),
             )
-        elif boundary_count < deficit:
-            reasons.append(REASON_USABLE_CANDIDATE_COUNT_BELOW_EXPECTED)
-        elif boundary_count > deficit:
-            reasons.append(REASON_BOUNDARY_CANDIDATE_SURPLUS_AMBIGUOUS)
-        else:
+        )
+        if not reasons:
+            # Legacy field name retained for import/persistence consumers. It
+            # now denotes every selected boundary candidate, never deficit-only.
             boundary_fill = boundary.canonical_uids
             selected = tuple(sorted(strict.canonical_uids + boundary_fill))
-            selection_mode = SELECTION_MODE_EXACT_BOUNDARY_DEFICIT_FILL
+            selection_mode = SELECTION_MODE_BOUNDED_INSPECTION_POOL
 
     ready = not reasons
     if not ready:
@@ -320,6 +303,12 @@ def select_exact_two_camera_seed_candidates(
         reasons=tuple(reasons),
         selection_mode=selection_mode,
         expected_stand_count=normalized_expected,
+        inspection_pool_policy_id=CANDIDATE_INSPECTION_POOL_POLICY_ID,
+        inspection_pool_limit=(
+            candidate_inspection_pool_limit(normalized_expected)
+            if type(normalized_expected) is int and normalized_expected > 0
+            else None
+        ),
         raw_strict_static_map_admitted_candidate_uids=strict.raw_text_uids,
         raw_boundary_provisional_candidate_uids=boundary.raw_text_uids,
         strict_static_map_admitted_candidate_uids=strict.canonical_uids,
@@ -396,11 +385,12 @@ def _excluded_uids(
     for uid in strict_uids + boundary_uids:
         if uid not in selected and uid not in excluded:
             excluded.append(uid)
-    return tuple(excluded)
+    return tuple(sorted(excluded))
 
 
 __all__ = [
     "EXACT_TWO_CAMERA_SEED_SELECTION_SCHEMA_VERSION",
+    "SELECTION_MODE_BOUNDED_INSPECTION_POOL",
     "ExactTwoCameraSeedSelectionDecision",
     "REASON_BOUNDARY_CANDIDATE_SURPLUS_AMBIGUOUS",
     "REASON_CANDIDATE_UID_PARTITION_OVERLAP",

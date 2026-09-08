@@ -22,8 +22,8 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
 )
 
 
-EXACT_TWO_CAMERA_ADMISSION_SCHEMA_VERSION = 3
-EXACT_TWO_CAMERA_HANDOFF_SCHEMA_VERSION = 3
+EXACT_TWO_CAMERA_ADMISSION_SCHEMA_VERSION = 4
+EXACT_TWO_CAMERA_HANDOFF_SCHEMA_VERSION = 4
 
 SUPPORT_CLASS_MULTI_VIEW = "multi_view"
 SUPPORT_CLASS_SINGLE_VIEW_REQUIRES_CAMERA_VALIDATION = (
@@ -130,6 +130,8 @@ class ExactTwoCameraAdmissionDecision:
     camera_population_ready: bool
     motion_authorized: bool
     expected_stand_count: int | None
+    inspection_pool_policy_id: str
+    inspection_pool_limit: int | None
     active_candidate_count: int
     camera_seed_selection_mode: str
     selected_candidate_uids: tuple[str, ...]
@@ -206,6 +208,8 @@ class ExactTwoCameraAdmissionDecision:
             "camera_population_ready": self.camera_population_ready,
             "motion_authorized": self.motion_authorized,
             "expected_stand_count": self.expected_stand_count,
+            "inspection_pool_policy_id": self.inspection_pool_policy_id,
+            "inspection_pool_limit": self.inspection_pool_limit,
             "active_candidate_count": self.active_candidate_count,
             "camera_seed_selection_mode": self.camera_seed_selection_mode,
             "selected_candidate_count": self.selected_candidate_count,
@@ -371,6 +375,16 @@ def validate_exact_two_camera_admission(
         static_map_admitted_candidate_uids=strict_uids,
         boundary_provisional_candidate_uids=boundary_uids,
     )
+    if (
+        decision.inspection_pool_policy_id
+        != expected_selection.inspection_pool_policy_id
+        or decision.inspection_pool_limit != expected_selection.inspection_pool_limit
+        or type(decision.inspection_pool_limit)
+        is not type(expected_selection.inspection_pool_limit)
+    ):
+        raise ExactTwoCameraAdmissionError(
+            "invalid_admission", "inspection pool policy does not match the QR goal"
+        )
     selection_fields = {
         "camera_seed_selection_mode": expected_selection.selection_mode,
         "selected_candidate_uids": expected_selection.selected_candidate_uids,
@@ -423,10 +437,6 @@ def validate_exact_two_camera_admission(
         if decision.expected_stand_count is None:
             raise ExactTwoCameraAdmissionError(
                 "invalid_admission", "ready admission requires expected count"
-            )
-        if decision.selected_candidate_count != decision.expected_stand_count:
-            raise ExactTwoCameraAdmissionError(
-                "invalid_admission", "ready selected count does not match expected"
             )
         if decision.blocked_candidate_uids:
             raise ExactTwoCameraAdmissionError(

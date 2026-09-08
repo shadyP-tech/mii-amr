@@ -534,11 +534,10 @@ class CoverageCandidateReconciliationReportTest(unittest.TestCase):
             snapshot_id="reconciled_candidates",
         )
 
-        self.assertFalse(before.ready)
-        self.assertIn(
-            "strict_candidate_count_exceeds_expected",
-            before.reasons,
-        )
+        # Both pools are inspectable; only authenticated negative visibility
+        # may remove a hypothesis, never the desired final identity count.
+        self.assertTrue(before.ready)
+        self.assertEqual(before.camera_seed_selection.selected_candidate_count, 6)
         self.assertEqual(
             application.rejected_candidate_uids,
             ("survey_candidate_0001",),

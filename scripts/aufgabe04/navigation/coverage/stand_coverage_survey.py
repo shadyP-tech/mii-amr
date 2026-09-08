@@ -7,6 +7,13 @@ multi-viewpoint arena coverage without publishing motion or importing ROS.
 
 from __future__ import annotations
 
+from scripts.aufgabe04.artifacts.candidate_perception_advisory import (
+    CandidatePerceptionAdvisory,
+    advisory_from_payload,
+    advisory_payload,
+    validate_candidate_perception_advisory,
+)
+
 from dataclasses import dataclass, replace
 import json
 import math
@@ -267,6 +274,7 @@ class SurveyCandidate:
     static_map_disposition: str = STATIC_MAP_DISPOSITION_ADMITTED
     frame_provenance: CandidateFrameProvenance | None = None
     rejection_basis: str | None = None
+    perception_advisories: tuple[CandidatePerceptionAdvisory, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1054,6 +1062,13 @@ def validate_stand_survey_registry(
     observation_owners: dict[str, str] = {}
     for candidate in registry.candidates:
         _validate_survey_candidate(candidate)
+        for advisory in candidate.perception_advisories:
+            if (advisory.survey_id != registry.survey_id
+                or advisory.map_bundle_sha256 != registry.map_bundle_sha256
+                or advisory.candidate_frame.map_frame != registry.planning_frame):
+                raise ValueError("candidate perception advisory survey provenance differs")
+            if plan is not None and advisory.plan_sha256 != coverage_survey_plan_sha256(plan):
+                raise ValueError("candidate perception advisory plan hash differs")
         ids.append(candidate.candidate_uid)
         for observation_id in candidate.source_observation_ids:
             owner = observation_owners.get(observation_id)
@@ -1641,6 +1656,22 @@ def _validate_survey_candidate(candidate: SurveyCandidate) -> None:
         raise ValueError("candidate observation IDs must be unique")
     if len(candidate.viewpoint_ids) != len(set(candidate.viewpoint_ids)):
         raise ValueError("candidate viewpoint IDs must be unique")
+    if not isinstance(candidate.perception_advisories, tuple):
+        raise ValueError("candidate perception advisories must be an immutable tuple")
+    advisory_hashes = []
+    for advisory in candidate.perception_advisories:
+        validate_candidate_perception_advisory(advisory, candidate_uid=candidate.candidate_uid)
+        if not set(advisory.source_observation_ids).issubset(candidate.source_observation_ids):
+            raise ValueError("advisory candidate observations are absent from registry")
+        if not set(advisory.candidate_source_viewpoint_ids).issubset(candidate.viewpoint_ids):
+            raise ValueError("advisory candidate viewpoints are absent from registry")
+        if candidate.frame_provenance is None or (
+            candidate.frame_provenance.odom_frame != advisory.candidate_frame.odom_frame
+        ):
+            raise ValueError("advisory candidate frame differs from registry")
+        advisory_hashes.append(advisory.sha256)
+    if len(advisory_hashes) != len(set(advisory_hashes)):
+        raise ValueError("candidate perception advisories must be unique")
 
 
 def _validate_confirmed_stand(stand: ConfirmedStand) -> None:
@@ -1818,6 +1849,9 @@ def survey_candidate_payload(candidate: SurveyCandidate) -> dict[str, object]:
             else candidate.frame_provenance.to_mapping()
         ),
         "rejection_basis": candidate.rejection_basis,
+        # Preserve the canonical bytes of existing empty-advisory registries.
+        **({"perception_advisories": [advisory_payload(item) for item in candidate.perception_advisories]}
+           if candidate.perception_advisories else {}),
     }
 
 
@@ -1827,6 +1861,12 @@ def _candidate_from_payload(
     source_registry_schema_version: int,
 ) -> SurveyCandidate:
     item = _mapping(payload)
+    if "perception_advisories" in item and source_registry_schema_version != STAND_SURVEY_REGISTRY_SCHEMA_VERSION:
+        raise ValueError("legacy registry unexpectedly contains perception advisories")
+    perception_advisories = tuple(
+        advisory_from_payload(value)
+        for value in _list(item.get("perception_advisories", []))
+    )
     status = str(item["status"])
     if source_registry_schema_version == LEGACY_STAND_SURVEY_REGISTRY_SCHEMA_VERSION:
         if "static_map_disposition" in item:
@@ -1929,6 +1969,7 @@ def _candidate_from_payload(
         static_map_disposition=static_map_disposition,
         frame_provenance=frame_provenance,
         rejection_basis=rejection_basis,
+        perception_advisories=perception_advisories,
     )
 
 

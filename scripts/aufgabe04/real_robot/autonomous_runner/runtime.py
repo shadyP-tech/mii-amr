@@ -2,9 +2,9 @@
 """Run one fail-closed autonomous real-robot stand exploration mission.
 
 The mission plans a single center rail, drives certified A* legs to stopped
-inspection poses, fuses LiDAR candidates across those poses, visits every
-stable candidate at a robot-facing pre-approach, and commits calibrated
-camera/LiDAR QR-face poses.  Physical execution requires an explicit
+inspection poses, fuses LiDAR candidates across those poses, and inspects a
+bounded hypothesis pool until its distinct QR identity and calibrated pose
+goal is met. Physical execution requires an explicit
 ``execute-*`` or ``resume-*`` run mode and a mission-level typed ``RUN``.  The
 mission authorization may cover routine coverage and inspection children
 through exact one-use leg permits. Bounded startup and post-motion
@@ -29,6 +29,10 @@ import time
 ROOT = Path(__file__).resolve().parents[4]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from scripts.aufgabe04.navigation.coverage.candidate_inspection_pool import (
+    candidate_inspection_pool_limit,
+)
 
 from scripts.aufgabe04.artifacts.content_store import write_content_hashed_json
 from scripts.aufgabe04.navigation.coverage.coverage_candidate_admission import (
@@ -2239,6 +2243,13 @@ def main(argv=None) -> int:
         )
 
         authorization_scope = resolved_run_mode.authorization_scope_text
+        if args.run_mode == AutonomousRunMode.EXECUTE_EXACT_TWO_CAMERA.value:
+            authorization_scope += (
+                f" (goal {args.expected_stand_count} stands; at most "
+                f"{candidate_inspection_pool_limit(args.expected_stand_count)} "
+                f"hypotheses and {args.max_candidate_inspection_views} "
+                "camera views per candidate)"
+            )
         coverage_scoped_mode = not resolved_run_mode.camera_phase_enabled
         authorized_leg_kinds = (
             (MissionLegKind.COVERAGE,)
@@ -2747,6 +2758,7 @@ def main(argv=None) -> int:
                 plan=plan,
                 snapshot=snapshot,
                 snapshot_path=snapshot_path,
+                expected_stand_count=args.expected_stand_count,
                 approach_offset_m=args.candidate_approach_offset_m,
                 inflation_radius_m=inflation_radius_m,
                 candidate_transit_radius_m=candidate_keepout_radius_m,

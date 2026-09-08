@@ -16,6 +16,10 @@ from typing import Callable, Mapping, Protocol
 from scripts.aufgabe04.navigation.coverage.coverage_candidate_lifecycle import (
     ExactTwoLidarCheckpointDecision,
 )
+from scripts.aufgabe04.navigation.coverage.candidate_inspection_pool import (
+    candidate_inspection_pool_count_reasons,
+    candidate_inspection_pool_policy_evidence,
+)
 from scripts.aufgabe04.navigation.approach.exact_two_camera_admission import (
     ExactTwoCameraAdmissionDecision,
     ExactTwoCameraHandoffArtifact,
@@ -111,7 +115,7 @@ class CoverageExactTwoCameraReady:
     def to_mission_summary(self) -> dict[str, object]:
         decision = self.camera_validation_decision
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "status": self.status,
             "run_mode": self.run_mode,
             "motion_published": self.motion_published,
@@ -147,7 +151,12 @@ class CoverageExactTwoCameraReady:
             "candidate_snapshot": str(self.candidate_snapshot_path),
             "candidate_snapshot_sha256": self.candidate_snapshot_sha256,
             "stand_count": self.stand_count,
+            "candidate_pool_count": self.stand_count,
+            "confirmed_stand_count": 0,
             "expected_stand_count": decision.expected_stand_count,
+            "inspection_pool_policy": candidate_inspection_pool_policy_evidence(
+                decision.expected_stand_count
+            ),
             "active_lidar_registry_candidate_count": (
                 decision.active_candidate_count
             ),
@@ -592,9 +601,17 @@ def _require_exact_two_snapshot_population(
         raise RuntimeError(
             "exact-two candidate snapshot population differs from admission"
         )
-    if len(snapshot_uids) != expected_stand_count:
+    if decision.expected_stand_count != expected_stand_count:
         raise RuntimeError(
-            "exact-two candidate snapshot does not contain the expected stands"
+            "exact-two camera admission changed the expected QR goal"
+        )
+    reasons = candidate_inspection_pool_count_reasons(
+        expected_stand_count, len(snapshot_uids)
+    )
+    if reasons:
+        raise RuntimeError(
+            "exact-two candidate snapshot violates the inspection pool: "
+            + ", ".join(reasons)
         )
 
 

@@ -22,11 +22,15 @@ from scripts.aufgabe04.navigation.approach.candidate_inspection_view import (
 from scripts.aufgabe04.real_robot.candidate.inspection_execution import (
     CandidateInspectionRouteUnavailableError,
 )
+from scripts.aufgabe04.real_robot.candidate.qr_goal_progress import (
+    CandidateQrGoalIncompleteError, CandidateQrGoalProgress, CandidateQrGoalProgressStore,
+    resolve_candidate_qr_goal, validate_candidate_qr_goal_completion,
+)
 from scripts.aufgabe04.real_robot.candidate.inspection_policy import (
     novel_view, validate_inspection_budget,
 )
 
-from scripts.aufgabe04.artifacts.content_store import write_content_hashed_json
+from scripts.aufgabe04.artifacts.content_store import payload_sha256, write_content_hashed_json
 from scripts.aufgabe04.navigation.approach.backside_axis_frame_projection import (
     load_backside_axis_planning_observation,
     write_backside_axis_frame_projection,
@@ -142,6 +146,8 @@ from scripts.aufgabe04.stations.create_station_identity_registry import (
 from scripts.aufgabe04.stations.models import Station, StationPose
 from scripts.aufgabe04.stations.station_identity_registry import (
     StationIdentity,
+    load_station_identity_registry,
+    station_identity_registry_sha256,
     write_station_identity_registry,
 )
 
@@ -219,6 +225,7 @@ class CandidateApproachConfig:
     camera_arrival_max_bearing_error_rad: float = math.radians(3.0)
     camera_arrival_range_slack_m: float = 0.20
     max_candidate_inspection_views: int = 8
+    expected_stand_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -332,6 +339,13 @@ class CandidateApproachComplete:
     stand_facing_catalog_sha256: str
     facing_records: tuple[Mapping[str, object], ...]
     motion_authorized: bool = False
+    expected_stand_count: int | None = None
+    candidate_pool_count: int | None = None
+    confirmed_candidate_snapshot_path: Path | None = None
+    confirmed_candidate_snapshot_sha256: str | None = None
+    candidate_goal_progress_path: Path | None = None
+    candidate_goal_progress_sha256: str | None = None
+    goal_progress: Mapping[str, object] | None = None
 
     def to_mission_summary_fields(self) -> dict[str, object]:
         return {
@@ -343,6 +357,26 @@ class CandidateApproachComplete:
                 self.identity_registry_sha256
             ),
             "motion_authorized": self.motion_authorized,
+            "expected_stand_count": self.expected_stand_count,
+            "candidate_pool_count": self.candidate_pool_count,
+            "confirmed_candidate_snapshot": (
+                None if self.confirmed_candidate_snapshot_path is None
+                else str(self.confirmed_candidate_snapshot_path)
+            ),
+            "confirmed_candidate_snapshot_sha256": self.confirmed_candidate_snapshot_sha256,
+            "candidate_goal_progress": (
+                None if self.candidate_goal_progress_path is None
+                else str(self.candidate_goal_progress_path)
+            ),
+            "candidate_goal_progress_sha256": self.candidate_goal_progress_sha256,
+            **({} if self.goal_progress is None else {
+                key: self.goal_progress[key] for key in (
+                    "goal_completed", "confirmed_stand_count", "confirmed_candidate_uids",
+                    "confirmed_qr_ids", "remaining_candidate_uids", "unvisited_candidate_uids",
+                    "candidate_dispositions", "inspection_order", "keepout_candidate_uids",
+                    "candidate_geometry_unchanged",
+                )
+            }),
         }
 
 
@@ -396,6 +430,13 @@ def validate_candidate_approach_handoff(
             "candidate snapshot object differs from its live artifact"
         )
     handoff = load_exact_two_camera_handoff(handoff_path)
+    expected_count = resolve_candidate_qr_goal(
+        configured_count=config.expected_stand_count,
+        plan_count=config.plan.config.expected_stand_count,
+    )
+    if (type(handoff.admission_decision.expected_stand_count) is not int
+            or handoff.admission_decision.expected_stand_count != expected_count):
+        raise ValueError("exact-two handoff QR goal differs from the sealed coverage plan")
     actual_handoff_sha256 = exact_two_camera_handoff_sha256(handoff)
     if actual_handoff_sha256 != handoff_sha256:
         raise ValueError("exact-two camera handoff SHA-256 mismatch")
@@ -1834,6 +1875,10 @@ def execute_candidate_approach_phase(
     """Execute the post-coverage candidate state machine behind live effects."""
 
     validate_inspection_budget(config.max_candidate_inspection_views)
+    expected_count = resolve_candidate_qr_goal(
+        configured_count=config.expected_stand_count,
+        plan_count=config.plan.config.expected_stand_count,
+    )
     exact_two_support_by_uid = validate_candidate_approach_handoff(config)
     source_registry = (
         None
@@ -1844,6 +1889,17 @@ def execute_candidate_approach_phase(
         )
     )
     unresolved = set(config.snapshot.candidate_uids)
+    goal = CandidateQrGoalProgress(
+        config.snapshot.candidate_uids,
+        expected_stand_count=expected_count,
+        candidate_snapshot_sha256=candidate_snapshot_sha256(config.snapshot),
+        perception_advisories_by_uid={
+            candidate.candidate_uid: [advisory.to_dict() for advisory in candidate.source.perception_advisories]
+            for candidate in config.snapshot.candidates
+        },
+    )
+    goal_store = CandidateQrGoalProgressStore(config.session_root)
+    goal_store.write(goal)
     facing_records: list[Mapping[str, object]] = []
     identities: list[StationIdentity] = []
     visit_order: list[str] = []
@@ -1862,29 +1918,17 @@ def execute_candidate_approach_phase(
     )
     selection_log_path = config.session_root / "candidate_selection.jsonl"
 
-    while unresolved:
+    while unresolved and not goal.complete:
         observation_state = observation_ledger.selection_state()
-        if not observation_state.eligible_candidate_uids:
-            if observation_ledger.advance_pass():
-                effects.event_sink(
-                    selection_log_path,
-                    {
-                        "schema_version": 1,
-                        "event": "camera_candidate_observation_retry_pass",
-                        "timestamp_unix_sec": effects.clock(),
-                        **observation_ledger.selection_state().to_dict(),
-                        "future_motion_requires_fresh_live_gates": True,
-                        "motion_authorized": False,
-                    },
-                )
-                continue
-            raise observation_ledger.incomplete_error()
+        observation_eligible = set(observation_state.eligible_candidate_uids) & unresolved
+        if not observation_eligible:
+            raise CandidateQrGoalIncompleteError(goal, attempt_evidence=observation_ledger.attempts)
         route_state = route_admission_ledger.selection_state(
-            observation_state.eligible_candidate_uids
+            observation_eligible
         )
         if not route_state.eligible_candidate_uids:
             if route_admission_ledger.advance_pass(
-                observation_state.eligible_candidate_uids
+                observation_eligible
             ):
                 effects.event_sink(
                     selection_log_path,
@@ -1893,7 +1937,7 @@ def execute_candidate_approach_phase(
                         "event": "camera_candidate_route_admission_retry_pass",
                         "timestamp_unix_sec": effects.clock(),
                         **route_admission_ledger.selection_state(
-                            observation_state.eligible_candidate_uids
+                            observation_eligible
                         ).to_dict(),
                         "future_motion_requires_fresh_live_gates": True,
                         "motion_authorized": False,
@@ -1901,7 +1945,7 @@ def execute_candidate_approach_phase(
                 )
                 continue
             raise route_admission_ledger.incomplete_error(
-                observation_state.eligible_candidate_uids
+                observation_eligible
             )
         eligible = set(route_state.eligible_candidate_uids)
         planning_config = config
@@ -1980,6 +2024,9 @@ def execute_candidate_approach_phase(
             NoFeasibleCameraCandidateError,
             NoUncertaintyAdmittedCameraCandidateError,
         ) as exc:
+            for uid in eligible:
+                goal.mark_unavailable(uid, disposition="no_feasible_route", evidence=exc.to_evidence())
+            goal_store.write(goal)
             effects.event_sink(
                 config.session_root / "candidate_selection.jsonl",
                 {
@@ -1989,6 +2036,13 @@ def execute_candidate_approach_phase(
                     "motion_authorized": False,
                 },
             )
+            # The preview considered only this pass's eligible candidates.
+            # Earlier strictly no-motion deferrals may still have a bounded
+            # retry available after this infeasible subset is retired.
+            unresolved.difference_update(eligible)
+            if unresolved:
+                candidate_index += 1
+                continue
             raise
         if frame_projection_artifacts is not None:
             selection = replace(
@@ -2064,6 +2118,23 @@ def execute_candidate_approach_phase(
         )
         try:
             sealed = effects.plan_preapproach(preapproach_plan_request)
+        except CandidatePreapproachUnreachableError as exc:
+            if exc.candidate_uid != candidate.candidate_uid:
+                raise
+            goal.mark_unavailable(
+                candidate.candidate_uid, disposition="no_feasible_route",
+                evidence={"error_type": type(exc).__name__, "error_message": str(exc),
+                          "motion_published": False},
+            )
+            goal_store.write(goal)
+            unresolved.discard(candidate.candidate_uid)
+            effects.event_sink(selection_log_path, {
+                "event": "camera_candidate_no_feasible_route",
+                "candidate_uid": candidate.candidate_uid,
+                "reason": str(exc), "motion_authorized": False,
+            })
+            candidate_index += 1
+            continue
         except Exception as exc:
             effects.event_sink(
                 selection_log_path,
@@ -2140,11 +2211,21 @@ def execute_candidate_approach_phase(
                     "motion_authorized": False,
                 },
             )
+            goal.mark_unavailable(
+                candidate.candidate_uid,
+                disposition=("route_admission_exhausted"
+                             if attempt.attempt_number >= config.max_route_admission_attempts_per_candidate
+                             else "route_admission_deferred"),
+                evidence=attempt.to_dict(),
+            )
+            goal_store.write(goal)
             candidate_index += 1
             continue
         observation_selection = observation_ledger.select(candidate.candidate_uid)
         if observation_selection != observation_selection_preview:
             raise RuntimeError("candidate observation selection changed after motion")
+        goal.mark_inspection_started(candidate.candidate_uid)
+        goal_store.write(goal)
         try:
             observation_frame = _CandidateObservationFrame(
                 config=planning_config, candidate=candidate,
@@ -2179,6 +2260,11 @@ def execute_candidate_approach_phase(
                     "motion_authorized": False,
                 },
             )
+            goal.mark_unavailable(
+                candidate.candidate_uid, disposition="inspection_exhausted", evidence=exc.to_event_fields(),
+            )
+            goal_store.write(goal)
+            unresolved.discard(candidate.candidate_uid)
             candidate_index += 1
             continue
 
@@ -2203,6 +2289,36 @@ def execute_candidate_approach_phase(
             )
         )
         facing["qr_id"] = observation.qr_id
+        unique_identity = goal.record_validated_identity(
+            candidate.candidate_uid, observation.qr_id,
+            recommendation_path=observation.recommendation_path,
+        )
+        if not unique_identity:
+            ambiguity = CandidateObservationUnavailableError(
+                candidate_uid=candidate.candidate_uid,
+                observation_attempt_index=0,
+                reason="ambiguous_duplicate_qr",
+                process_evidence={"recommendation_path": str(observation.recommendation_path)},
+                status_evidence={"qr_id": observation.qr_id,
+                                 "spatial_merge_authorized": False},
+            )
+            observation_ledger.mark_unavailable(ambiguity)
+            confirmed_uids = set(goal.confirmed_candidate_uids)
+            facing_records = [record for record in facing_records
+                              if record["candidate_uid"] in confirmed_uids]
+            identities = [identity for identity in identities
+                          if identity.candidate_uid in confirmed_uids]
+            visit_order = [uid for uid in visit_order if uid in confirmed_uids]
+            unresolved.discard(candidate.candidate_uid)
+            goal_store.write(goal)
+            effects.event_sink(selection_log_path, {
+                "event": "camera_candidate_duplicate_qr_ambiguous",
+                "candidate_uid": candidate.candidate_uid, "qr_id": observation.qr_id,
+                "confirmed_candidate_uids": list(goal.confirmed_candidate_uids),
+                "spatial_merge_authorized": False, "motion_authorized": False,
+            })
+            candidate_index += 1
+            continue
         receipt = candidate_root / "candidate_decision.json"
         receipt_payload = build_camera_candidate_decision_receipt(
             config=config,
@@ -2259,6 +2375,7 @@ def execute_candidate_approach_phase(
         )
         visit_order.append(candidate.candidate_uid)
         unresolved.discard(candidate.candidate_uid)
+        goal_store.write(goal)
         effects.event_sink(
             selection_log_path,
             {
@@ -2271,21 +2388,34 @@ def execute_candidate_approach_phase(
         )
         candidate_index += 1
 
-    expected_count = len(config.snapshot.candidates)
+    if not goal.complete:
+        raise CandidateQrGoalIncompleteError(goal, attempt_evidence=observation_ledger.attempts)
+    confirmed_uids = set(goal.confirmed_candidate_uids)
     if (
-        unresolved
-        or not observation_ledger.selection_state().complete
-        or len(facing_records) != expected_count
+        len(facing_records) != expected_count
         or len(identities) != expected_count
         or len(visit_order) != expected_count
+        or {identity.candidate_uid for identity in identities} != confirmed_uids
+        or len({identity.qr_id for identity in identities}) != expected_count
     ):
         raise RuntimeError(
             "candidate approach completion invariant failed before final "
             "identity and facing artifacts"
         )
+    goal.finalize_goal()
+    goal_path, goal_sha256 = goal_store.write(goal)
+    # This subset is final identity metadata only. All routes above, including
+    # local inspection routes, retain the full immutable hypothesis snapshot.
+    confirmed_snapshot = replace(
+        config.snapshot,
+        candidates=tuple(candidate for candidate in config.snapshot.candidates
+                         if candidate.candidate_uid in confirmed_uids),
+    )
+    confirmed_snapshot_path = config.session_root / "confirmed_candidate_snapshot.json"
+    confirmed_snapshot_sha256 = write_candidate_snapshot(confirmed_snapshot_path, confirmed_snapshot)
 
     identity_registry, _source_sha = create_registry(
-        candidate_snapshot=config.snapshot,
+        candidate_snapshot=confirmed_snapshot,
         mappings=identities,
         registry_id=f"{config.session_id}_identities",
         created_unix_sec=effects.clock(),
@@ -2305,6 +2435,10 @@ def execute_candidate_approach_phase(
         "candidate_snapshot_sha256": candidate_snapshot_sha256(
             config.snapshot
         ),
+        "confirmed_candidate_snapshot_sha256": confirmed_snapshot_sha256,
+        "candidate_goal_progress_sha256": goal_sha256,
+        "expected_stand_count": expected_count,
+        "candidate_pool_count": len(config.snapshot.candidates),
         "station_identity_registry_sha256": identity_sha256,
         "stand_count": len(facing_records),
         "records": sorted(
@@ -2318,6 +2452,22 @@ def execute_candidate_approach_phase(
         catalog,
         hash_field="stand_facing_catalog_sha256",
     )
+    written_confirmed_snapshot = load_candidate_snapshot(confirmed_snapshot_path)
+    written_identity_registry = load_station_identity_registry(
+        identity_path, candidate_snapshot=written_confirmed_snapshot,
+    )
+    if candidate_snapshot_sha256(written_confirmed_snapshot) != confirmed_snapshot_sha256:
+        raise ValueError("written confirmed snapshot hash differs from completion evidence")
+    if station_identity_registry_sha256(written_identity_registry) != identity_sha256:
+        raise ValueError("written identity registry hash differs from completion evidence")
+    written_progress = validate_candidate_qr_goal_completion(
+        goal_path, candidate_snapshot=config.snapshot,
+        confirmed_candidate_snapshot=written_confirmed_snapshot,
+        identity_registry=written_identity_registry,
+        expected_stand_count=expected_count,
+    )
+    if payload_sha256(written_progress) != goal_sha256:
+        raise ValueError("written goal progress hash differs from completion evidence")
     return CandidateApproachComplete(
         stand_count=len(facing_records),
         visit_order=tuple(visit_order),
@@ -2326,6 +2476,13 @@ def execute_candidate_approach_phase(
         stand_facing_catalog_path=catalog_path,
         stand_facing_catalog_sha256=catalog_sha256,
         facing_records=tuple(facing_records),
+        expected_stand_count=expected_count,
+        candidate_pool_count=len(config.snapshot.candidates),
+        confirmed_candidate_snapshot_path=confirmed_snapshot_path,
+        confirmed_candidate_snapshot_sha256=confirmed_snapshot_sha256,
+        candidate_goal_progress_path=goal_path,
+        candidate_goal_progress_sha256=goal_sha256,
+        goal_progress=goal.to_dict(),
     )
 
 

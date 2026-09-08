@@ -310,6 +310,7 @@ def candidate_snapshot_from_registry(
                     ),
                     detector_config_sha256=detector_config_sha256,
                     observation_ids=candidate.source_observation_ids,
+                    perception_advisories=candidate.perception_advisories,
                 ),
                 confidence=candidate.confidence,
                 hit_count=candidate.hit_count,

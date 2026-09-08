@@ -240,102 +240,38 @@ class CoverageCandidateLifecycleTest(unittest.TestCase):
         self.assertEqual(decision.boundary_audit_only_candidate_uids, ())
         self.assertFalse(decision.camera_approach_authorized)
 
-    def test_five_strict_plus_one_boundary_selects_strict_and_audits_surplus(self):
-        surplus_uid = "survey_candidate_0006"
-        surplus_registry = registry(
-            self.plan,
-            *self.registry.candidates,
-            candidate(
-                6,
-                viewpoint_ids=("survey_vp_002",),
-                static_map_disposition=(
-                    STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL
-                ),
-            ),
-        )
-
-        decision = evaluate_exact_two_lidar_checkpoint(
-            self.plan,
-            self.progress,
-            surplus_registry,
-        )
-
-        self.assertTrue(decision.ready)
-        self.assertEqual(decision.active_lidar_candidate_count, 6)
-        self.assertFalse(decision.active_lidar_candidate_count_met)
-        self.assertEqual(decision.camera_seed_candidate_count, 5)
-        self.assertTrue(decision.camera_seed_candidate_count_met)
-        self.assertEqual(
-            decision.admitted_lidar_candidate_uids,
-            tuple(
-                f"survey_candidate_{index:04d}" for index in range(1, 6)
-            ),
-        )
-        self.assertEqual(
-            decision.boundary_audit_only_candidate_uids,
-            (surplus_uid,),
-        )
-        self.assertEqual(
-            decision.camera_seed_selection.excluded_candidate_uids,
-            (surplus_uid,),
-        )
-        payload = decision.to_evidence_dict()
-        self.assertEqual(
-            payload["lidar_candidate_gate"]["gate_count_basis"],
-            "selected_camera_seed_candidate_count",
-        )
-        self.assertEqual(
-            payload["lidar_candidate_gate"]["gate_support_basis"],
-            "selected_camera_seed_candidates",
-        )
-        self.assertEqual(
-            payload["camera_seed_selection"][
-                "boundary_audit_only_candidate_uids"
-            ],
-            [surplus_uid],
-        )
-
-    def test_strict_surplus_and_ambiguous_boundary_fill_fail_closed(self):
-        cases = (
-            (
-                registry(
-                    self.plan,
-                    *self.registry.candidates,
-                    candidate(6, viewpoint_ids=("survey_vp_002",)),
-                ),
-                "strict_candidate_count_exceeds_expected",
-            ),
-            (
-                registry(
-                    self.plan,
-                    *self.registry.candidates[:4],
-                    candidate(
-                        5,
-                        static_map_disposition=(
-                            STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL
-                        ),
-                    ),
-                    candidate(
-                        6,
-                        viewpoint_ids=("survey_vp_002",),
-                        static_map_disposition=(
-                            STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL
-                        ),
-                    ),
-                ),
-                "boundary_candidate_surplus_ambiguous",
-            ),
-        )
-        for candidate_registry, reason in cases:
-            with self.subTest(reason=reason):
-                decision = evaluate_exact_two_lidar_checkpoint(
-                    self.plan,
-                    self.progress,
-                    candidate_registry,
+    def test_all_six_strict_or_boundary_candidates_enter_pool_for_five_qr_goal(self):
+        for boundary in (False, True):
+            with self.subTest(boundary=boundary):
+                surplus_registry = registry(
+                    self.plan, *self.registry.candidates,
+                    candidate(6, viewpoint_ids=("survey_vp_002",),
+                              static_map_disposition=(STATIC_MAP_DISPOSITION_BOUNDARY_PROVISIONAL
+                                                      if boundary else "static_map_admitted")),
                 )
-                self.assertFalse(decision.ready)
-                self.assertIn(reason, decision.reasons)
-                self.assertEqual(decision.admitted_lidar_candidate_uids, ())
+                decision = evaluate_exact_two_lidar_checkpoint(
+                    self.plan, self.progress, surplus_registry,
+                )
+                self.assertTrue(decision.ready)
+                self.assertEqual(decision.expected_stand_count, 5)
+                self.assertEqual(decision.camera_seed_candidate_count, 6)
+                self.assertTrue(decision.camera_seed_candidate_count_met)
+                self.assertEqual(decision.admitted_lidar_candidate_uids,
+                                 tuple(c.candidate_uid for c in surplus_registry.candidates))
+                self.assertEqual(decision.boundary_audit_only_candidate_uids, ())
+                self.assertEqual(decision.camera_seed_selection.excluded_candidate_uids, ())
+                self.assertEqual(decision.camera_seed_selection.inspection_pool_limit, 10)
+                self.assertEqual(decision.to_evidence_dict()["lidar_candidate_gate"]["gate_count_basis"],
+                                 "bounded_inspection_pool_for_distinct_qr_goal")
+                self.assertFalse(decision.camera_approach_authorized)
+
+    def test_oversized_pool_fails_closed_without_deleting_candidates(self):
+        oversized = registry(self.plan, *(candidate(i) for i in range(1, 12)))
+        decision = evaluate_exact_two_lidar_checkpoint(self.plan, self.progress, oversized)
+        self.assertFalse(decision.ready)
+        self.assertIn("inspection_pool_candidate_count_exceeds_limit", decision.reasons)
+        self.assertEqual(decision.admitted_lidar_candidate_uids, ())
+        self.assertEqual(len(oversized.candidates), 11)
 
     def test_lifecycle_classes_preserve_status_boundaries(self):
         classified = classify_coverage_candidates(

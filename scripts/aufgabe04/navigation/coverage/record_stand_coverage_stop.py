@@ -33,6 +33,7 @@ from scripts.aufgabe04.navigation.coverage.coverage_candidate_reporting import (
 )
 from scripts.aufgabe04.navigation.coverage.coverage_stop_perception_admission import (
     CoverageEpochPerceptionAdmission,
+    CoverageMorphologyConflictAdmission,
     CoverageVisibilityReconciliationAdmission,
     build_confirmed_epoch_stands,
     coverage_stop_perception_summary_fields,
@@ -40,6 +41,7 @@ from scripts.aufgabe04.navigation.coverage.coverage_stop_perception_admission im
     load_validated_epoch_observations,
     observer_scan_pose,
     prepare_coverage_epoch_perception_admission,
+    prepare_coverage_morphology_conflicts,
     prepare_coverage_visibility_reconciliation,
 )
 from scripts.aufgabe04.navigation.planning.map_io import load_occupancy_grid_with_bundle
@@ -92,6 +94,7 @@ class PreparedCoverageStop:
     visibility_reconciliation: (
         CoverageVisibilityReconciliationAdmission | None
     ) = None
+    morphology_conflicts: CoverageMorphologyConflictAdmission | None = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -283,6 +286,7 @@ def _prepare_stand_coverage_stop(
         raw_stands=raw_stands,
     )
     stands = perception_admission.registry_population_stands
+    prior_registry = registry
     registry = fuse_confirmed_stands(
         registry,
         stands,
@@ -292,6 +296,14 @@ def _prepare_stand_coverage_stop(
             perception_admission.registry_static_map_dispositions
         ),
     )
+    morphology_conflicts = prepare_coverage_morphology_conflicts(
+        survey_root=survey_root, registry=registry, plan=plan,
+        viewpoint_id=viewpoint.viewpoint_id, occupancy_grid=grid,
+        epoch_admission=perception_admission,
+        prior_registry=prior_registry,
+    )
+    if morphology_conflicts is not None:
+        registry = morphology_conflicts.updated_registry
     completed_progress = mark_viewpoint_visited(
         plan,
         progress,
@@ -350,6 +362,7 @@ def _prepare_stand_coverage_stop(
         raw_stands=raw_stands,
         perception_admission=perception_admission,
         visibility_reconciliation=visibility_reconciliation,
+        morphology_conflicts=morphology_conflicts,
     )
 
 
@@ -370,6 +383,8 @@ def _write_committed_stop_state(
     artifacts = perception_admission.evidence_artifacts
     if prepared.visibility_reconciliation is not None:
         artifacts += prepared.visibility_reconciliation.evidence_artifacts
+    if prepared.morphology_conflicts is not None:
+        artifacts += prepared.morphology_conflicts.evidence_artifacts
     for artifact in artifacts:
         written_sha256 = write_content_hashed_json(
             artifact.path,
@@ -408,6 +423,7 @@ def _write_committed_stop_state(
     perception_fields = coverage_stop_perception_summary_fields(
         perception_admission,
         prepared.visibility_reconciliation,
+        prepared.morphology_conflicts,
     )
     epoch = {
         "schema_version": 1,

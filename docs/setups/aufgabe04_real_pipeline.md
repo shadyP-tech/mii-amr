@@ -471,9 +471,11 @@ redundant centerline viewpoint set and still rejects
 
 For a bounded two-stop LiDAR check, combine
 `--exact-inspection-point-count 2`, `--coverage-leg-limit 2`, and
-`--run-mode execute-coverage-checkpoint`. Successful completion means exactly
-five active static-map-admitted LiDAR candidates passed the frozen count and
-basic evidence gate. The result is a terminal, non-resumable checkpoint with
+`--run-mode execute-coverage-checkpoint`. Successful completion means the
+bounded inspection pool passed its count and basic evidence gates: five to
+ten usable strict or boundary hypotheses for the five-stand site. This is
+LiDAR readiness, not confirmation of five physical stand identities.
+The result is a terminal, non-resumable checkpoint with
 `camera_approach_authorized=false`; it does not promote single-view candidates
 to `pending_camera`, create a candidate snapshot, or continue into camera
 approach motion. Exact-two planning samples longitudinal center-corridor
@@ -485,12 +487,23 @@ For the explicit two-stop-to-camera workflow, use
 `--run-mode execute-exact-two-camera` with
 `--exact-inspection-point-count 2`; omit `--coverage-leg-limit` or set it to
 exactly `2`. This mode first seals terminal LiDAR evidence, then constructs a
-content-hashed handoff for exactly five active static-map-admitted candidates.
+content-hashed handoff for every usable strict or boundary hypothesis in the
+bounded pool. The cap is twice the expected stand count (ten for this site);
+a deficit or overflow fails closed without selecting an arbitrary subset.
 The handoff preserves which candidates are multi-view `pending_camera` and
 which are single-view `provisional`; only its bound camera decision path may
 resolve the latter. It continues in the same process under the initial `RUN`,
 while every candidate and opposite-face motion still requires its own sealed
 route, dry-run, live gates, and atomically consumed one-use permit.
+Each candidate has one bounded local inspection episode, controlled by
+`--max-candidate-inspection-views` (default eight). The mission finishes when
+five distinct QR identities have valid stand-pose evidence. Duplicate QR
+claimants are quarantined together and do not count toward that goal.
+Exhausted or unvisited hypotheses remain in the full candidate snapshot and
+its obstacle keepouts. A separate `confirmed_candidate_snapshot.json` binds
+the final identity registry; it must not replace the full pool in route
+planning. `candidate_goal_history/` records immutable progress revisions,
+including unresolved morphology conflicts and visibility gaps.
 Before each candidate route is planned, a stopped AMCL sample window must be
 paired with direct dynamic `map <- odom` samples and followed by a fresh,
 consistent transform lookup; missing or drifting evidence stops before route

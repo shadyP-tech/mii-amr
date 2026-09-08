@@ -21,6 +21,12 @@ from scripts.aufgabe04.artifacts.content_store import (
     payload_sha256,
     write_content_hashed_json,
 )
+from scripts.aufgabe04.artifacts.candidate_perception_advisory import (
+    CandidatePerceptionAdvisory,
+    advisory_from_payload,
+    advisory_payload,
+    validate_candidate_perception_advisory,
+)
 
 
 CANDIDATE_SNAPSHOT_SCHEMA_VERSION = 1
@@ -98,6 +104,7 @@ class CandidateSource:
     source_artifact_sha256: str
     detector_config_sha256: str
     observation_ids: tuple[str, ...]
+    perception_advisories: tuple[CandidatePerceptionAdvisory, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -202,6 +209,14 @@ def validate_candidate_snapshot(
     observation_owners: dict[str, str] = {}
     for candidate in snapshot.candidates:
         validate_frozen_candidate(candidate)
+        for advisory in candidate.source.perception_advisories:
+            if (
+                advisory.map_bundle_sha256 != snapshot.map_bundle_sha256
+                or advisory.candidate_frame.map_frame != snapshot.planning_frame
+            ):
+                raise CandidateSnapshotError(
+                    "provenance_mismatch", "perception advisory map differs from snapshot"
+                )
         if candidate.candidate_uid in candidate_uids:
             raise CandidateSnapshotError(
                 "candidate_conflict",
@@ -235,6 +250,13 @@ def validate_frozen_candidate(candidate: FrozenCandidate) -> None:
     _validate_id(candidate.candidate_uid, "candidate_uid")
     validate_candidate_geometry(candidate.geometry)
     validate_candidate_source(candidate.source)
+    for advisory in candidate.source.perception_advisories:
+        try:
+            validate_candidate_perception_advisory(
+                advisory, candidate_uid=candidate.candidate_uid
+            )
+        except ValueError as exc:
+            raise CandidateSnapshotError("invalid_source", str(exc)) from exc
     confidence = _finite_number(candidate.confidence, "confidence")
     if not 0.0 <= confidence <= 1.0:
         raise CandidateSnapshotError(
@@ -298,6 +320,20 @@ def validate_candidate_source(source: CandidateSource) -> None:
         raise CandidateSnapshotError(
             "invalid_source", "observation_ids must be sorted and unique"
         )
+    if not isinstance(source.perception_advisories, tuple):
+        raise CandidateSnapshotError("invalid_source", "advisories must be a tuple")
+    try:
+        digests = tuple(
+            validate_candidate_perception_advisory(item).sha256
+            for item in source.perception_advisories
+        )
+        if len(digests) != len(set(digests)):
+            raise ValueError("duplicate perception advisories")
+        for item in source.perception_advisories:
+            if not set(item.source_observation_ids).issubset(source.observation_ids):
+                raise ValueError("advisory observations do not belong to candidate source")
+    except ValueError as exc:
+        raise CandidateSnapshotError("invalid_source", str(exc)) from exc
 
 
 def candidate_geometry_sha256(geometry: CandidateGeometry) -> str:
@@ -392,12 +428,18 @@ def _geometry_payload_without_hash(
 
 
 def _source_payload_without_hash(source: CandidateSource) -> dict[str, object]:
-    return {
+    payload = {
         "source_kind": source.source_kind,
         "source_artifact_sha256": source.source_artifact_sha256,
         "detector_config_sha256": source.detector_config_sha256,
         "observation_ids": list(source.observation_ids),
     }
+    # Empty legacy sources retain their exact hash and on-disk schema.
+    if source.perception_advisories:
+        payload["perception_advisories"] = [
+            advisory_payload(item) for item in source.perception_advisories
+        ]
+    return payload
 
 
 def _snapshot_from_payload(payload: Mapping[str, object]) -> CandidateSnapshot:
@@ -453,12 +495,22 @@ def _geometry_from_payload(value: object, name: str) -> CandidateGeometry:
 
 def _source_from_payload(value: object, name: str) -> CandidateSource:
     item = _mapping(value, name)
-    _require_fields(item, _SOURCE_FIELDS, name)
+    optional = frozenset({"perception_advisories"}) if "perception_advisories" in item else frozenset()
+    _require_fields(item, _SOURCE_FIELDS | optional, name)
     stored = _string(item["source_sha256"], f"{name}.source_sha256")
     unhashed = dict(item)
     del unhashed["source_sha256"]
     _require_nested_hash(stored, unhashed, f"{name}.source_sha256")
     observation_ids = _list(item["observation_ids"], f"{name}.observation_ids")
+    try:
+        advisories = tuple(
+            advisory_from_payload(value)
+            for value in _list(item.get("perception_advisories", []), f"{name}.perception_advisories")
+        )
+        if optional and not advisories:
+            raise ValueError("empty advisory extension is not canonical")
+    except (TypeError, ValueError) as exc:
+        raise CandidateSnapshotError("invalid_source", str(exc)) from exc
     return CandidateSource(
         source_kind=_string(item["source_kind"], f"{name}.source_kind"),
         source_artifact_sha256=_string(
@@ -471,6 +523,7 @@ def _source_from_payload(value: object, name: str) -> CandidateSource:
             _string(value, f"{name}.observation_ids[{index}]")
             for index, value in enumerate(observation_ids)
         ),
+        perception_advisories=advisories,
     )
 
 
