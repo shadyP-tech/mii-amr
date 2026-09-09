@@ -4,9 +4,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from scripts.aufgabe04.perception.stand_axis.models import (
+        StandAxisEdgeDebugArtifacts,
+        StandAxisImageEstimate,
+    )
 
 from scripts.aufgabe04.perception.stand_axis.qr_pose_seed import (
     PlanarPoseHypothesis,
+)
+from scripts.aufgabe04.perception.stand_axis.observation_freshness import (
+    observation_freshness,
 )
 
 
@@ -16,6 +26,13 @@ class PosePrediction:
     pose: PlanarPoseHypothesis | None
     age_sec: float | None
     reason: str
+
+
+@dataclass(frozen=True)
+class PoseTrackerUpdate:
+    accepted: bool
+    reason: str
+    observation_age_sec: float | None
 
 
 class MetricPoseTracker:
@@ -50,6 +67,54 @@ class MetricPoseTracker:
         self._accepted_at_sec = float(now_sec)
         self._profile_sha256 = profile_sha256
         self._camera_signature = tuple(float(value) for value in camera_signature)
+
+    def update_from_observation(
+        self,
+        estimate: StandAxisImageEstimate | None,
+        artifacts: StandAxisEdgeDebugArtifacts | None,
+        *,
+        observed_at_sec: float | None,
+        completed_at_sec: float,
+        profile_sha256: str,
+        camera_signature: tuple[float, float, float, float],
+        result_fresh: bool = True,
+    ) -> PoseTrackerUpdate:
+        """Retain only verified, fresh poses, dated at image observation time.
+
+        A QR seed from a rejected fit is useful for that frame's search only.
+        Rejection leaves the previous verified pose and its expiry unchanged.
+        """
+
+        freshness = observation_freshness(
+            observed_at_sec=observed_at_sec,
+            now_sec=completed_at_sec,
+            max_age_sec=self.prediction_ttl_sec,
+        )
+        if not result_fresh or not freshness.accepted:
+            return PoseTrackerUpdate(False, "pose_observation_stale", freshness.age_sec)
+        if (
+            estimate is None
+            or artifacts is None
+            or not estimate.usable
+            or estimate.evidence_state != "fresh_refined"
+            or artifacts.evidence_state != "fresh_refined"
+            or artifacts.model_pose is None
+        ):
+            return PoseTrackerUpdate(False, "pose_not_verified", freshness.age_sec)
+        if (
+            estimate.model_profile_sha256 != profile_sha256
+            or artifacts.model_profile_sha256 != profile_sha256
+        ):
+            return PoseTrackerUpdate(False, "pose_profile_mismatch", freshness.age_sec)
+        if self._accepted_at_sec is not None and observed_at_sec <= self._accepted_at_sec:
+            return PoseTrackerUpdate(False, "pose_observation_not_newer", freshness.age_sec)
+        self.accept(
+            artifacts.model_pose,
+            now_sec=observed_at_sec,
+            profile_sha256=profile_sha256,
+            camera_signature=camera_signature,
+        )
+        return PoseTrackerUpdate(True, "verified_pose_observed", freshness.age_sec)
 
     def prediction(
         self,

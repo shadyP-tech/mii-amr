@@ -12,7 +12,8 @@ from scripts.aufgabe04.perception.stand_axis.geometry import (
     order_corners,
 )
 from scripts.aufgabe04.perception.stand_axis.metric_edge_association import (
-    observed_metric_corner_arms,
+    MetricCornerArmSupport,
+    metric_corner_arm_support,
 )
 from scripts.aufgabe04.perception.stand_axis.models import (
     ImagePoint,
@@ -34,6 +35,9 @@ class RefinedHeadMeasurement:
     corners: tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint] | None
     evidence_mask: object
     support: _QuadrilateralEdgeSupport | None
+    # Rejected intersections are diagnostics, never accepted measurements.
+    candidate_corners: tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint] | None = None
+    corner_arm_support: MetricCornerArmSupport | None = None
 
 
 def model_corridor_half_width_px(
@@ -128,12 +132,14 @@ def refine_projected_head_border(
         corners, raw_edges.shape
     ):
         return RefinedHeadMeasurement(
-            False, "model_refinement_geometry_inconsistent", None, evidence, None
+            False, "model_refinement_geometry_inconsistent", None, evidence, None,
+            candidate_corners=tuple(corners),
         )
     support = _quadrilateral_edge_support(cv2, evidence, corners)
     if not support.accepted:
         return RefinedHeadMeasurement(
-            False, "model_corridor_support_insufficient", None, evidence, support
+            False, "model_corridor_support_insufficient", None, evidence, support,
+            candidate_corners=tuple(corners),
         )
     projected = order_corners(projected_corners)
     refined = order_corners(corners)
@@ -182,14 +188,18 @@ def refine_projected_head_border(
             None,
             evidence,
             support,
+            candidate_corners=refined,
         )
-    if not observed_metric_corner_arms(cv2, raw_edges, refined):
+    corner_support = metric_corner_arm_support(cv2, raw_edges, refined)
+    if not corner_support.accepted:
         return RefinedHeadMeasurement(
             False,
             "model_corner_evidence_insufficient",
             None,
             evidence,
             support,
+            candidate_corners=refined,
+            corner_arm_support=corner_support,
         )
     return RefinedHeadMeasurement(
         True,
@@ -197,4 +207,6 @@ def refine_projected_head_border(
         corners,
         evidence,
         support,
+        candidate_corners=refined,
+        corner_arm_support=corner_support,
     )

@@ -60,6 +60,12 @@ from scripts.aufgabe04.perception.stand_axis.model_pipeline import (
 from scripts.aufgabe04.perception.stand_axis.pose_tracking import (
     MetricPoseTracker,
 )
+from scripts.aufgabe04.perception.stand_axis.observation_freshness import (
+    observation_freshness,
+)
+from scripts.aufgabe04.perception.stand_axis.model_diagnostics import (
+    metric_fit_diagnostics_payload,
+)
 from scripts.aufgabe04.perception.stand_axis_lidar_roi import PlainLaserScan
 from scripts.aufgabe04.perception.stand_axis_handoff import (
     RigidTransform,
@@ -68,6 +74,9 @@ from scripts.aufgabe04.perception.stand_axis_handoff import (
 from scripts.aufgabe04.qr_scanning.opencv_qr_detector import (
     detect_qr_observations_bgr,
     detect_qr_texts_bgr,
+)
+from scripts.aufgabe04.qr_scanning.native_qr_observations import (
+    detect_native_qr_observations_bgr,
 )
 from scripts.aufgabe04.real_robot.configuration.geometry import (
     intrinsics_from_camera_info,
@@ -1047,7 +1056,13 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 attempt_roi.y0 : attempt_roi.y1,
                 attempt_roi.x0 : attempt_roi.x1,
             ]
-            qr_observations = detect_qr_observations_bgr(attempt_frame, self.cv2)
+            qr_started_sec = time.monotonic()
+            qr_observations = (
+                detect_qr_observations_bgr(attempt_frame, self.cv2)
+                if pose_hint is None
+                else detect_native_qr_observations_bgr(attempt_frame, self.cv2)
+            )
+            qr_identity_ms = (time.monotonic() - qr_started_sec) * 1000.0
             attempt_estimate, attempt_debug = estimate_stand_axis_from_metric_model(
                 self.cv2,
                 attempt_frame,
@@ -1075,6 +1090,13 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                     attempt.backside_target_crop_half_width_ratio
                 ),
             )
+            attempt_debug = replace(
+                attempt_debug,
+                stage_timings_ms={
+                    **(attempt_debug.stage_timings_ms or {}),
+                    "qr_identity": qr_identity_ms,
+                },
+            )
             return HeadRoiEvaluation(
                 attempt=attempt,
                 frame=attempt_frame,
@@ -1098,19 +1120,23 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         estimate = selected.estimate
         debug = selected.debug
         roi = selected_attempt.roi
-        if (
-            debug.model_pose is not None
-            and (
-                estimate.evidence_state == "fresh_refined"
-                or debug.qr_detected
-            )
-        ):
-            self.model_pose_tracker.accept(
-                debug.model_pose,
-                now_sec=image.stamp_sec,
-                profile_sha256=self.stand_model_profile.sha256,
-                camera_signature=camera_signature,
-            )
+        # Processing can outlive the tuple's admission-time freshness check.
+        now_sec = self.node.get_clock().now().nanoseconds / 1_000_000_000.0
+        result_freshness = observation_freshness(
+            observed_at_sec=image.stamp_sec,
+            now_sec=now_sec,
+            max_age_sec=self.args.max_sensor_age_sec,
+            max_future_sec=self.args.max_future_timestamp_sec,
+        )
+        tracker_update = self.model_pose_tracker.update_from_observation(
+            estimate,
+            debug,
+            observed_at_sec=image.stamp_sec,
+            completed_at_sec=now_sec,
+            profile_sha256=self.stand_model_profile.sha256,
+            camera_signature=camera_signature,
+            result_fresh=result_freshness.accepted,
+        )
         model_metadata = {
             "mode": "metric_model_only",
             "profile_id": self.stand_model_profile.profile_id,
@@ -1134,6 +1160,14 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             "pose_ambiguity_gap_px": estimate.pose_ambiguity_gap_px,
             "refinement_support_mean": debug.refinement_support_mean,
             "model_pose_fit_source": debug.model_pose_fit_source,
+            **metric_fit_diagnostics_payload(debug),
+            "tracker_prediction": {
+                "state": prediction.state,
+                "age_sec": prediction.age_sec,
+                "reason": prediction.reason,
+            },
+            "tracker_update": asdict(tracker_update),
+            "result_freshness": asdict(result_freshness),
             "visible_face": getattr(estimate, "visible_face", None),
             "visible_face_confidence": getattr(
                 estimate,
@@ -1167,6 +1201,18 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 preliminary_lidar_association
             ),
         }
+        if not result_freshness.accepted:
+            self._note_observation_soft_miss(
+                "obsolete_detector_result", stamp_sec=image.stamp_sec, pose=robot_pose
+            )
+            self._write_debug(frame, roi_frame, debug, metadata=axis_metadata)
+            self._write_status(
+                "obsolete_detector_result",
+                image_stamp_sec=image.stamp_sec,
+                image_age_sec=result_freshness.age_sec,
+                stand_axis_debug=axis_metadata,
+            )
+            return
         selected_qr_observations = getattr(selected, "qr_observations", None)
         if selected_qr_observations is None:
             # Preserve legacy injected evaluations; the operational evaluator

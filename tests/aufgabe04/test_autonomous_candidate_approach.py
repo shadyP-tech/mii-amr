@@ -1,5 +1,6 @@
 import csv
 from dataclasses import replace
+from hashlib import sha256
 import json
 import math
 from pathlib import Path
@@ -280,6 +281,17 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             motion_published=True,
             returncode=0,
             semantic_log_path=request.session_root / f"{request.run_id}.jsonl",
+        )
+
+    @classmethod
+    def _startup_completed(cls, request) -> MotionLegOutcome:
+        permit = request.session_root / "permits" / f"{request.run_id}_startup.json"
+        permit.parent.mkdir(parents=True, exist_ok=True)
+        permit.write_text(json.dumps({"run_id": request.run_id}), encoding="utf-8")
+        return replace(
+            cls._completed(request),
+            startup_reseal_motion_permit_path=permit.resolve(),
+            startup_reseal_motion_permit_sha256=sha256(permit.read_bytes()).hexdigest(),
         )
 
     @staticmethod
@@ -722,7 +734,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
 
             def run_replacement(request, _attempt):
                 replacement_motion_calls.append(request)
-                return self._completed(request)
+                return self._startup_completed(request)
 
             def capture(request):
                 if request.attempt_index == 0:
@@ -2212,6 +2224,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                 }
 
             def initial_motion(request):
+                (root / "initial_permit.json").write_text("{}\n")
                 return MotionLegOutcome(
                     run_id=request.run_id,
                     status="stopped",
@@ -2241,7 +2254,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
 
             def replacement_motion(request, attempt):
                 replacement_attempts.append((request, attempt))
-                return self._completed(request)
+                return self._startup_completed(request)
 
             with patch("builtins.input") as prompt:
                 outcome = execute_candidate_approach_phase(
@@ -2343,7 +2356,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
 
             def replacement_motion(request, _attempt):
                 replacement_requests.append(request)
-                return self._completed(request)
+                return self._startup_completed(request)
 
             def admit_planning_frame(evidence_path):
                 evidence_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2389,6 +2402,80 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                 "/route/",
                 str(replacement_requests[0].candidate_snapshot_path),
             )
+
+    def test_runtime_then_prestart_recovery_finishes_same_candidate_before_next(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidates = (self._candidate("candidate_a", 0.2, 0.0),
+                          self._candidate("candidate_b", 0.4, 0.0))
+            authorization = root / "mission_authorization.json"
+            authorization.write_text("{}")
+            config = replace(self._config(root, candidates),
+                max_startup_reseals_per_leg=3,
+                startup_reseal_motion_authorization_json=root / "startup_authorization.json",
+                mission_motion_authorization_json=authorization,
+                max_runtime_localization_reseals_per_leg=1)
+            saved = json.loads((Path(__file__).parent / "fixtures" /
+                "candidate_runtime_prestart_stop_20260908.json").read_text())["stop_details"]
+            calls, plans = [], []
+            def plan(request):
+                plans.append(request)
+                request.output_dir.mkdir(parents=True, exist_ok=True)
+                return {"route_csv": str(request.output_dir / "route.csv")}
+            def stopped(request, *, owner, moving):
+                details = json.loads(json.dumps(saved))
+                if moving:
+                    for key in ("phase", "execution_phase", "motion_published", "initial_tf_acquisition"):
+                        details.pop(key, None)
+                permit = root / "permits" / f"{request.run_id}.json"
+                permit.parent.mkdir(exist_ok=True)
+                permit.write_text(json.dumps({"run_id": request.run_id}))
+                prefix = "mission_leg_motion_permit" if owner == "initial" else "motion_authorization_permit"
+                return MotionLegOutcome(run_id=request.run_id, status="stopped",
+                    stop_reason="global localization consistency requires zero and reseal",
+                    stop_details=details, motion_published=moving, returncode=2,
+                    semantic_log_path=root / f"{request.run_id}.jsonl",
+                    **{prefix + "_path": permit.resolve(),
+                       prefix + "_sha256": sha256(permit.read_bytes()).hexdigest()})
+            def initial(request):
+                calls.append(("initial", request.target_id))
+                return (stopped(request, owner="initial", moving=True)
+                        if request.target_id == "candidate_a" else self._completed(request))
+            def runtime(request, attempt):
+                calls.append(("runtime", request.target_id))
+                self.assertEqual(attempt.reseal_index, 1)
+                return stopped(request, owner="runtime", moving=False)
+            def startup(request, attempt):
+                calls.append(("startup", request.target_id))
+                self.assertEqual(attempt.reseal_index, 1)
+                self.assertIn("runtime_localization_reseal_001", attempt.rejected_outcome.run_id)
+                return self._startup_completed(request)
+            def admit(path):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("{}")
+                return Pose2D(0.05, 0.0, 0.0)
+            def capture(request):
+                uid = request.candidate.candidate_uid
+                calls.append(("camera", uid))
+                return CandidateObservation(request.output_dir / "recommendation.json", f"QR_{uid}", None)
+            result = execute_candidate_approach_phase(config, CandidateApproachEffects(
+                select_initial_preapproach=self._nearest_selection,
+                read_current_pose=lambda: Pose2D(0.0, 0.0, 0.0),
+                plan_preapproach=plan, run_motion_leg=initial,
+                run_startup_reseal_motion_leg=startup,
+                run_runtime_localization_reseal_motion_leg=runtime,
+                admit_startup_localization=admit, admit_runtime_localization=admit,
+                capture_observation=capture,
+                validate_facing=lambda request: {"candidate_uid": request.candidate.candidate_uid},
+                commit_decision=lambda request: None))
+            self.assertEqual(result.visit_order, ("candidate_a", "candidate_b"))
+            self.assertEqual(calls, [("initial", "candidate_a"), ("runtime", "candidate_a"),
+                ("startup", "candidate_a"), ("camera", "candidate_a"),
+                ("initial", "candidate_b"), ("camera", "candidate_b")])
+            for request in plans:
+                self.assertEqual(request.snapshot.candidate_uids, config.snapshot.candidate_uids)
+                self.assertEqual([candidate.geometry for candidate in request.snapshot.candidates],
+                                 [candidate.geometry for candidate in config.snapshot.candidates])
 
     def test_startup_replacement_runtime_reseal_continues_to_camera(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2713,7 +2800,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                 )
             def replacement(request, attempt):
                 replacements.append(request)
-                return self._completed(request)
+                return self._startup_completed(request)
             def admit(path):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("{}")

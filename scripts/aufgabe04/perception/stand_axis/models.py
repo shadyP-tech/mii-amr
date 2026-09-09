@@ -6,6 +6,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from scripts.aufgabe04.perception.stand_axis.metric_edge_association import (
+        MetricCornerArmSupport,
+    )
+    from scripts.aufgabe04.perception.stand_axis.pose_fit_diagnostics import (
+        MetricModelDiagnostics,
+    )
     from scripts.aufgabe04.perception.stand_structure_hypothesis import (
         StandStructureEvidence,
     )
@@ -83,6 +89,13 @@ class StandAxisEdgeDebugArtifacts:
     visible_face_reason: str | None = None
     head_scale_ratio: float | None = None
     head_center_error_ratio: float | None = None
+    # Measured border and semantic diagnostics remain available when a joint
+    # pose is rejected; only model_pose/evidence_state govern pose admission.
+    refined_corners: tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint] | None = None
+    candidate_corners: tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint] | None = None
+    corner_arm_support: MetricCornerArmSupport | None = None
+    model_diagnostics: MetricModelDiagnostics | None = None
+    stage_timings_ms: dict[str, float] | None = None
 
 
 @dataclass(frozen=True)

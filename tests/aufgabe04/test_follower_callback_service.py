@@ -213,7 +213,7 @@ class FollowerCallbackServiceTest(unittest.TestCase):
             map_frame="odom",
             base_frame="base_footprint",
         )
-        node.follower_config = SimpleNamespace(max_tf_age_sec=1.0)
+        node.follower_config = SimpleNamespace(max_tf_age_sec=1.0, max_future_timestamp_sec=0.25)
         lookup_time = object()
         lookup_timeout = object()
 

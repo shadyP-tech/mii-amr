@@ -18,6 +18,11 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+from scripts.aufgabe04.navigation.localization.initial_map_tf_recovery import (
+    initial_map_tf_recovery_error,
+    initial_tf_drift_report_error,
+)
+
 
 PRESTART_LOCALIZATION_RESEAL_SCHEMA_VERSION = 1
 
@@ -112,6 +117,34 @@ def evaluate_prestart_localization_reseal(
     if not isinstance(stop_details, Mapping):
         return _rejected("stop_details_not_mapping", motion_published)
 
+    acquisition = stop_details.get("initial_tf_acquisition")
+    if "initial_tf_acquisition" in stop_details:
+        if (not isinstance(acquisition, Mapping)
+                or type(acquisition.get("schema_version")) is not int
+                or acquisition["schema_version"] not in (1, 2)):
+            return _rejected("invalid_initial_tf_acquisition_schema", motion_published)
+    continuity = stop_details.get("continuity")
+    observed_drift = (
+        isinstance(continuity, Mapping)
+        and isinstance(continuity.get("reason"), str)
+        and continuity.get("reason") in _DRIFT_CONTINUITY_REASONS
+    )
+    if (stop_details.get("source") == "tf_lookup"
+            or isinstance(acquisition, Mapping)
+            and acquisition["schema_version"] == 2 and not observed_drift):
+        # New typed acquisition evidence cannot fall back to the historical
+        # monitor-warning contract when its fields are missing or invalid.
+        error = initial_map_tf_recovery_error(stop_details)
+        if error:
+            return _rejected(error, motion_published)
+        return _eligible(
+            reason="prestart_tf_warmup_retry_required",
+            recovery_action=TF_WARMUP_RETRY,
+            motion_published=motion_published,
+            continuity_reason=_MISSING_CONTINUITY_REASON,
+            monitor_warning="",
+        )
+
     required_top_level = (
         ("reason", GLOBAL_CONSISTENCY_STOP_REASON),
         ("fault_code", LOCALIZATION_RESEAL_FAULT_CODE),
@@ -185,6 +218,10 @@ def evaluate_prestart_localization_reseal(
         )
 
     if continuity_reason in _DRIFT_CONTINUITY_REASONS:
+        if isinstance(acquisition, Mapping) and acquisition.get("schema_version") == 2:
+            error = initial_tf_drift_report_error(stop_details)
+            if error:
+                return _rejected(error, motion_published)
         if monitor_warning:
             return _rejected(
                 "unexpected_monitor_warning_for_drift",

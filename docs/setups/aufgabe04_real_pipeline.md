@@ -47,14 +47,17 @@ loaded logistics mission or a two-robot run; see
 | `real_robot/candidate/inspection_policy.py` | Retain candidate inspection progress and prioritize novel viewing directions within a finite budget | None |
 | `real_robot/candidate/inspection_execution.py` | Finish bounded local inspection views before returning to candidate selection | None; injected planning and existing child execution effects only |
 | `real_robot/candidate/inspection_route_search.py` | Try bounded stand-off alternatives and record route proposals separately from observed views | None; injected certified route execution only |
+| `real_robot/candidate/recovery_dispatch.py` | Reclassify each candidate child outcome while retaining cumulative phase budgets and permit provenance | None; existing startup/runtime owners retain their explicit child-execution effects |
 | `artifacts/candidate_inspection_observation.py` | Validate hashed intermediate camera evidence without granting axis, completion, or motion authority | None |
 | `real_robot/observer/inspection_progress.py` | Accumulate distinct stationary associated frames and classify unresolved views | None |
 | `real_robot/observer/front_observation.py` | Withhold contradicted backside axes while retaining provisional front-marker evidence | None |
 | `real_robot/observer/qr_target_binding.py` | Require a decoded symbol's own image ray and a unique target LiDAR cluster before identity consensus | None |
 | `qr_scanning/qr_observation.py` | Bind decoded text to validated corners from the same detector result | None |
 | `qr_scanning/isolated_qr_identity.py` | Re-decode one rectified native QR quadrilateral when the production decoder supplies placeholder bounds | None |
-| `navigation/waypoint_follower/initial_tf_acquisition.py` | Bound acquisition of a never-ready execution TF edge and retain executor/edge diagnostics | None |
+| `navigation/waypoint_follower/initial_tf_acquisition.py` | Track both required TF edges under one bounded initial deadline and retain executor/edge diagnostics | None |
+| `navigation/waypoint_follower/runtime_components/tf_sampling.py` | Return typed exact-edge TF availability, freshness and pose-validation evidence from the executing listener | None |
 | `navigation/waypoint_follower/runtime_components/initial_runtime_inputs.py` | Apply the stopped acquisition policy to fresh sensor inputs and the existing localization checks | Zero commands only |
+| `navigation/localization/initial_map_tf_recovery.py` | Validate exhausted first-acquisition evidence for a new global-localization preparation attempt | None; fresh localization and a new route/permit remain required |
 | `navigation/approach/candidate_inspection_view.py` | Bind a proposed search view to its target, current snapshot, start, direction, and source evidence | None |
 | `perception/stand_axis/model_backside_topology.py` | Recover low-contrast boundary proposals through a bounded fallback while preserving strict downstream measurement checks | None |
 | `real_robot/observer/node.py` | Synchronize image, scan, and exact-time TF; rectify the image; validate measured-model, LiDAR, and QR evidence | None |
@@ -144,22 +147,39 @@ associated-frame inspection receipt, QR identity latch, or completed goal. The
 observer records this as a front with unresolved axis instead of erasing the
 whole evidence history.
 
-### Initial execution TF acquisition
+### Initial TF acquisition and candidate recovery
 
 Preflight and the waypoint follower have separate TF listeners. The follower
-therefore acquires its own execution-frame transform before any motion. Its
-ordinary two-second input deadline may be followed by one bounded acquisition
-phase of at most three seconds, only for a never-acquired execution TF edge
-reporting a missing/disconnected lookup while scan and odometry remain fresh
-and the TF executor heartbeat is healthy. Stale transforms, an edge previously
-acquired by this follower, localization faults and post-motion failures do not
-qualify for this extension.
+therefore acquires both `odom <- base_footprint` and `map <- odom` in its own
+buffer before any motion. Its ordinary two-second input deadline may be followed
+by one bounded acquisition phase of at most three seconds. The total deadline
+is shared by both edges; it cannot restart when the missing edge changes.
+Only a never-acquired edge with a typed `LookupException` or
+`ConnectivityException` qualifies while scan and odometry remain fresh and the
+TF executor heartbeat is healthy. Stale/future or malformed transforms, a lost
+previously acquired edge, measured localization drift and post-motion failures
+do not qualify. Sensor freshness, executor health, absence of motion and the
+absolute deadline are checked again after blocking TF calls.
 
 Successful acquisition still passes the full sensor, localization and certified
 route-start checks. Persistent failure stops the child. Startup diagnostics
-record the actual frame pair, acquisition attempts and executor health; candidate
-recovery reporting preserves the child's stop reason. This acquisition phase
-does not grant localization reseal authority or reuse a consumed motion permit.
+record both exact frame pairs, typed sample failures, acquisition history,
+elapsed time, executor health and execution-certificate identity. A complete
+before-motion report of an exhausted, never-acquired global edge may enter the
+existing bounded startup preparation policy. New typed reports cannot fall
+back to legacy warning-string admission when their fields are invalid. This
+classification grants no motion authority: fresh stationary localization,
+route certification and a new one-use permit are still required.
+
+Candidate recovery classifies every child outcome by its actual phase, including
+replacement children. A runtime recovery that stops before moving may therefore
+hand off to the startup policy; a startup replacement that moves and then has an
+eligible localization stop may hand off to runtime recovery. Startup and runtime
+counts remain separate and cumulative across these transitions. Every direct
+child must match its expected identity and permit kind before its result can be
+accepted or handed off. The same candidate, leg scope and full-pool keepouts are
+preserved. Unsupported failures remain terminal, with the original child cause
+retained alongside the recovery-policy decision.
 
 ## 1. Inspect the Live ROS Interface
 

@@ -67,58 +67,34 @@ Time = RuntimeBindingProxy("Time", Time)
 Empty = RuntimeBindingProxy("Empty", Empty)
 
 
+from .tf_sampling import map_tf_monitor_warning, sample_tf_pose
+
+
 class LocalizationEvidenceMixin:
     """Focused localization evidence behavior."""
 
-    def _global_consistency_monitor_failure(self) -> str:
-        """Stop/reseal on AMCL-map discontinuity without steering from it."""
+    def _map_from_odom_lookup(self) -> PoseLookupResult:
+        context = self.odom_execution_context
+        return sample_tf_pose(
+            self, target_frame=context.map_frame, source_frame=context.odom_frame,
+            max_future_sec=self.follower_config.amcl_edge_future_tolerance_sec,
+        )
+
+    def _global_consistency_monitor_failure(self, map_lookup: PoseLookupResult | None = None) -> str:
+        """Apply unchanged live continuity gates to one structured TF sample."""
 
         context = getattr(self, "odom_execution_context", None)
         if context is None:
             return ""
-        transform = None
-        lookup_error = ""
-        try:
-            transform = self.tf_buffer.lookup_transform(
-                context.map_frame,
-                context.odom_frame,
-                Time(),
-                timeout=Duration(seconds=0.1),
-            )
-            stamp = Time.from_msg(transform.header.stamp)
-            age_sec = (
-                self.get_clock().now() - stamp
-            ).nanoseconds / 1_000_000_000.0
-            if age_sec < -self.follower_config.amcl_edge_future_tolerance_sec:
-                lookup_error = "future_map_from_odom"
-            elif age_sec > self.follower_config.max_tf_age_sec:
-                lookup_error = "stale_map_from_odom"
-        except (TransformException, AttributeError, TypeError, ValueError) as exc:
-            lookup_error = f"map_from_odom_lookup_failed: {exc}"
-
-        live_transform = None
-        if transform is not None and not lookup_error:
-            try:
-                pose = _validated_planar_pose_from_tf(
-                    transform,
-                    expected_target_frame=context.map_frame,
-                    expected_source_frame=context.odom_frame,
-                )
-                live_transform = PlanarTransform2D(
-                    pose.x_m,
-                    pose.y_m,
-                    pose.yaw_rad,
-                )
-            except (AttributeError, TypeError, ValueError, OverflowError) as exc:
-                lookup_error = f"map_from_odom_malformed: {exc}"
-
-        continuity = evaluate_map_odom_continuity(
-            context,
-            live_transform if not lookup_error else None,
+        lookup = self._map_from_odom_lookup() if map_lookup is None else map_lookup
+        pose = lookup.pose
+        live_transform = None if pose is None else PlanarTransform2D(
+            pose.x_m, pose.y_m, pose.yaw_rad,
         )
+        continuity = evaluate_map_odom_continuity(context, live_transform)
         monitor = evaluate_global_consistency_monitor(
             reseal_required=not continuity.accepted,
-            diagnostic_warning=lookup_error,
+            diagnostic_warning=map_tf_monitor_warning(lookup),
         )
         if monitor.action != MONITOR_ACTION_FORCE_ZERO_RESEAL:
             return ""
@@ -133,95 +109,20 @@ class LocalizationEvidenceMixin:
             "monitor_reason": monitor.reason,
             "monitor_warning": monitor.diagnostic_warning,
             "continuity": continuity.to_evidence(),
+            "tf_sample": _pose_lookup_diagnostics(lookup),
             "fail_closed": True,
         }
         return reason
+
     def _current_pose_lookup(self) -> PoseLookupResult:
         context = getattr(self, "odom_execution_context", None)
-        target_frame = (
-            self.runtime_config.map_frame
-            if context is None
-            else context.odom_frame
+        return sample_tf_pose(
+            self,
+            target_frame=self.runtime_config.map_frame if context is None else context.odom_frame,
+            source_frame=self.runtime_config.base_frame,
+            max_future_sec=self.follower_config.max_future_timestamp_sec,
         )
-        try:
-            transform = self.tf_buffer.lookup_transform(
-                target_frame,
-                self.runtime_config.base_frame,
-                Time(),
-                timeout=Duration(seconds=0.1),
-            )
-        except TransformException as exc:
-            return PoseLookupResult(
-                None,
-                tf_lookup_failure_details(
-                    reason="lookup_exception",
-                    target_frame=target_frame,
-                    source_frame=self.runtime_config.base_frame,
-                    max_age_sec=self.follower_config.max_tf_age_sec,
-                    exception=exc,
-                ),
-            )
-        try:
-            transform_stamp = Time.from_msg(transform.header.stamp)
-        except (AttributeError, TypeError, ValueError, OverflowError) as exc:
-            return PoseLookupResult(
-                None,
-                tf_lookup_failure_details(
-                    reason="malformed_transform_stamp",
-                    target_frame=target_frame,
-                    source_frame=self.runtime_config.base_frame,
-                    max_age_sec=self.follower_config.max_tf_age_sec,
-                    exception=exc,
-                ),
-            )
-        age = (
-            self.get_clock().now() - transform_stamp
-        ).nanoseconds / 1_000_000_000.0
-        stamp_sec = transform_stamp.nanoseconds / 1_000_000_000.0
-        if age < -self.follower_config.max_future_timestamp_sec:
-            return PoseLookupResult(
-                None,
-                tf_lookup_failure_details(
-                    reason="future_transform",
-                    target_frame=target_frame,
-                    source_frame=self.runtime_config.base_frame,
-                    max_age_sec=self.follower_config.max_tf_age_sec,
-                    age_sec=age,
-                ),
-                stamp_sec,
-            )
-        if age > self.follower_config.max_tf_age_sec:
-            return PoseLookupResult(
-                None,
-                tf_lookup_failure_details(
-                    reason="stale_transform",
-                    target_frame=target_frame,
-                    source_frame=self.runtime_config.base_frame,
-                    max_age_sec=self.follower_config.max_tf_age_sec,
-                    age_sec=age,
-                ),
-                stamp_sec,
-            )
-        try:
-            pose = _validated_planar_pose_from_tf(
-                transform,
-                expected_target_frame=target_frame,
-                expected_source_frame=self.runtime_config.base_frame,
-            )
-        except (TypeError, ValueError) as exc:
-            return PoseLookupResult(
-                None,
-                tf_lookup_failure_details(
-                    reason="malformed_transform_pose",
-                    target_frame=target_frame,
-                    source_frame=self.runtime_config.base_frame,
-                    max_age_sec=self.follower_config.max_tf_age_sec,
-                    age_sec=age,
-                    exception=exc,
-                ),
-                stamp_sec,
-            )
-        return PoseLookupResult(pose, stamp_sec=stamp_sec)
+
     def _post_stale_tf_recovery_freshness_failure(self) -> str:
         scan_failure = self._freshness_failure(
             "scan",

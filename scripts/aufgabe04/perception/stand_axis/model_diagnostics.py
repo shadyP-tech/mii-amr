@@ -2,11 +2,44 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
+
 from scripts.aufgabe04.perception.stand_axis.model_profile import StandModelProfile
 from scripts.aufgabe04.perception.stand_axis.models import (
     StandAxisEdgeDebugArtifacts,
     StandAxisImageEstimate,
 )
+
+
+def metric_fit_diagnostics_payload(
+    artifacts: StandAxisEdgeDebugArtifacts | None,
+) -> dict[str, object]:
+    """Serialize observed geometry separately from projected hypotheses."""
+
+    def points(values):
+        return None if values is None else [asdict(point) for point in values]
+
+    return {
+        "fit_diagnostics": (
+            None if artifacts is None or artifacts.model_diagnostics is None
+            else asdict(artifacts.model_diagnostics)
+        ),
+        "stage_timings_ms": None if artifacts is None else artifacts.stage_timings_ms,
+        "predicted_corners": points(None if artifacts is None else artifacts.predicted_corners),
+        "refined_corners": points(None if artifacts is None else artifacts.refined_corners),
+        "candidate_corners": points(None if artifacts is None else artifacts.candidate_corners),
+        "corner_arm_support": (
+            None if artifacts is None or artifacts.corner_arm_support is None
+            else {
+                **asdict(artifacts.corner_arm_support),
+                "accepted": artifacts.corner_arm_support.accepted,
+            }
+        ),
+        "model_pose": (
+            None if artifacts is None or artifacts.model_pose is None
+            else asdict(artifacts.model_pose)
+        ),
+    }
 
 
 def resolved_fallback_face_to_qr_ratio(
@@ -85,4 +118,5 @@ def metric_model_status_payload(
         "pose_fit_source": (
             None if artifacts is None else artifacts.model_pose_fit_source
         ),
+        **metric_fit_diagnostics_payload(artifacts),
     }

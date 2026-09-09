@@ -147,8 +147,16 @@ is currently displayed (the annotated frame plus each enabled diagnostic
 window), so no window is hidden inside a composite video. A timestamped
 recording directory is created under
 `results/aufgabe04/stand_axis_debug_recordings` by default; change it with
-`--record-dir PATH` or set the output rate with `--record-fps N`. The recordings
-remain diagnostic-only and do not affect the detector or control the robot.
+`--record-dir PATH` or set the nominal video rate with `--record-fps N`.
+Each recorded frame also saves its unannotated decoded image as a lossless
+`source_NNNNNN.png` and one row in `metadata.jsonl`. The row identifies each
+AVI's actual frame index and includes capture/receipt/processing timestamps,
+calibration, ROI, model profile hash, observed/projected corners, fit residuals,
+stage timings, tracker decisions, and viewer options. Failed estimates are
+recorded too. Use the JSON timestamps for timing analysis; nominal AVI FPS
+does not measure camera or detector throughput. Source-image encoding adds
+recording overhead, so compare latency with recording disabled as well.
+The recordings remain diagnostic-only and never control the robot.
 
 In standalone raw-simulation edge mode (`--lidar-bearing-source fixed`), Canny
 is applied to the complete camera frame and `stand-axis-edges` displays that
@@ -287,6 +295,34 @@ real-camera model profile enables model-only mode by default: background-colour
 sampling and the legacy global edge detector are skipped, and an unobservable
 model produces no stand axis. Use `--legacy-edge-fallback` only for an explicit
 diagnostic comparison.
+
+Tracking now uses native QR detection only; a miss cannot invoke the general
+decoder's image transformations and fallback attempts. Full acquisition keeps
+those attempts available. The passive real observer similarly uses native,
+same-frame identity decoding while tracking; it never substitutes a previously
+decoded identity. `--no-qr-decode` disables the viewer's side-identity work,
+but acquisition may still use the metric model's QR fallback.
+
+Both consumers update the retained pose only from a usable `fresh_refined`
+observation with matching model provenance. QR detection alone cannot renew a
+failed seed. The retained pose is dated at image observation time and expires
+after 250 ms; processing completion does not renew its lifetime. The viewer's
+`--max-result-age-sec` applies even if no newer frame has arrived, and
+`--max-frame-age-sec` also checks source age after processing. The displayed
+`age` includes detection and processing up to rendering. The real observer
+rechecks its sensor-age budget after fitting, before admitting evidence.
+The 250 ms tracker lifetime is an additional search-prior constraint;
+increasing the observer's sensor-age budget does not extend it.
+
+Model diagnostics distinguish observed head, observed QR, seed projection,
+and refined projection. They report separate QR/head residuals, semantic
+corner errors, raw corner-arm support, rejected candidate corners, and
+head-to-QR ratios measured in the rectified QR plane. The measured profile
+expects head/QR = 78/62 and paper/QR = 71/62. These diagnostics help identify
+paper-border association; they do not override a failed joint fit or relax
+the raw-corner gate. Full model overlay landmarks are recomputed from the
+accepted refined pose. Stem landmarks remain predictions, not independently
+observed constraints in the angle solve.
 
 The checked-in `physical_stand_assumptions_v1.json` profile is intentionally
 marked `provisional`: it captures the old 78 mm head, 60 mm QR, and 7 mm depth
@@ -595,7 +631,7 @@ scripts/aufgabe04/perception/debug/run_stand_axis_viewer.sh \
   --front-face-to-qr-width-ratio 1.30 \
   --stand-face-size-m 0.078 \
   --max-frame-age-sec 0.25 \
-  --max-result-age-sec 0 \
+  --max-result-age-sec 0.18 \
   --max-scan-age-sec 0.5 \
   --display-edges \
   --display-face-mask \
@@ -610,10 +646,10 @@ axis difference, and final decision. Every output explicitly carries
 `observe_only=true` and `motion_authorized=false`; no velocity, navigation
 goal, station route, or approach command is published. Do not combine this
 mode with `--structural-diagnostic`, because that mode intentionally disables
-metric camera pose estimation. The command above disables detector-result age
-rejection because the current workstation can exceed that latency while
-running the full calibrated headless pipeline. Restore a positive
-`--max-result-age-sec` before treating timing as evidence.
+metric camera pose estimation. Keep the positive result-age budget when
+evaluating motion. A rejected slow result remains available in the recording's
+model diagnostics, but cannot be used as a fresh angle. Setting an age budget
+to zero explicitly disables that guard for offline-style visual diagnosis.
 
 Approximate yaw degrees require extra geometry:
 

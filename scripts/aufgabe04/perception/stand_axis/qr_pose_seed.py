@@ -197,12 +197,16 @@ def detect_qr_quad(
     *,
     scales: Sequence[float] = (1.0, 2.0, 4.0),
     decoded_observations: tuple[DecodedQrObservation, ...] | None = None,
+    allow_decode_fallback: bool = True,
 ) -> QrQuadDetection | None:
     """Acquire QR corners through a bounded image pyramid.
 
     The real 800x600 camera often renders the QR symbol too small for OpenCV
     4.5's native detector.  Upscaling is used only for acquisition; returned
     corners are always mapped back to the caller's original pixel domain.
+    Tracked callers can disable the generic decoder fallback after native
+    misses. Supplied decoded observations retain their identity and geometry
+    authority regardless of this policy.
     """
 
     if frame is None or not hasattr(frame, "shape") or len(frame.shape) < 2:
@@ -234,7 +238,7 @@ def detect_qr_quad(
             for point in corners
         )
         return QrQuadDetection(restored, scale)
-    if decoded_observations is None:
+    if allow_decode_fallback and decoded_observations is None:
         return qr_quad_from_decoded_observations(detect_qr_observations_bgr(frame, cv2))
     return None
 

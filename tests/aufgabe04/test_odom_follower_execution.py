@@ -101,9 +101,16 @@ class OdomFollowerExecutionTest(unittest.TestCase):
         node.latest_stop_details = None
         node._service_or_wait_for_callbacks = Mock()
         node._freshness_failure = Mock(return_value="")
-        node._current_pose_lookup = Mock(
-            return_value=PoseLookupResult(Pose2D(0.0, 0.0, 0.0))
-        )
+        def ready(pose, target, source):
+            return PoseLookupResult(pose, {
+                "source": "tf_lookup", "reason": "fresh_transform",
+                "target_frame": target, "source_frame": source,
+                "available": True, "validation_passed": True,
+                "max_age_sec": 1.0, "max_future_sec": 1.1,
+            }, stamp_sec=100.0)
+        node.get_clock = Mock(return_value=SimpleNamespace(now=lambda: _FakeTime(100_000_000_000)))
+        node._current_pose_lookup = Mock(return_value=ready(Pose2D(0.0, 0.0, 0.0), "odom", "base_footprint"))
+        node._map_from_odom_lookup = Mock(return_value=ready(Pose2D(1.0, 2.0, math.pi / 2.0), "map", "odom"))
         node.publish_zero = Mock()
         return node
 
@@ -198,7 +205,7 @@ class OdomFollowerExecutionTest(unittest.TestCase):
 
         self.assertEqual(result, "")
         self.assertEqual(node._global_consistency_monitor_failure.call_count, 2)
-        node.publish_zero.assert_called_once_with()
+        self.assertEqual(node.publish_zero.call_count, 2)
         self.assertIsNone(node.latest_stop_details)
 
     def test_initial_wait_keeps_persistent_global_tf_failure_terminal(self):
@@ -207,18 +214,20 @@ class OdomFollowerExecutionTest(unittest.TestCase):
         node._global_consistency_monitor_failure = Mock(return_value=failure)
         node.latest_stop_details = {"fault_code": "localization_reseal_required"}
 
+        now = [0.0]
+        node._service_or_wait_for_callbacks.side_effect = lambda _: now.__setitem__(0, now[0] + 0.4)
         with patch(
             "scripts.aufgabe04.navigation.waypoint_follower.runtime.rclpy",
             SimpleNamespace(ok=lambda: True),
         ), patch(
             "scripts.aufgabe04.navigation.waypoint_follower.runtime.time.monotonic",
-            side_effect=[0.5, 1.0],
+            side_effect=lambda: now[0],
         ):
             result = node._wait_for_initial_runtime_inputs(0.0)
 
         self.assertEqual(result, failure)
         self.assertEqual(node._global_consistency_monitor_failure.call_count, 2)
-        node.publish_zero.assert_called_once_with()
+        self.assertEqual(node.publish_zero.call_count, 3)
         self.assertEqual(
             node.latest_stop_details["fault_code"],
             "localization_reseal_required",

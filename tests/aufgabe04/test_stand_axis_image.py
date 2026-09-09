@@ -424,8 +424,8 @@ class StandAxisImageTest(unittest.TestCase):
         self.assertEqual(legacy_minimum, 0.65)
         self.assertEqual(legacy_maximum, 1.35)
 
-    def test_detector_result_freshness_requires_newer_frame_and_deadline(self):
-        self.assertFalse(
+    def test_detector_result_freshness_expires_without_a_newer_frame(self):
+        self.assertTrue(
             _detector_result_is_obsolete(
                 processed_sequence=10,
                 newest_sequence=10,

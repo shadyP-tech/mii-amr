@@ -1,0 +1,109 @@
+{
+  "source_run_id": "stand_explore_exact2_camera_20260908T143619Z_candidate_001_runtime_localization_reseal_001",
+  "source_sha256": "91c383fde511ceb73641d3399b263b475944c85d8457780e59585e1ec8613fe6",
+  "source_line": 16,
+  "stop_details": {
+    "continuity": {
+      "absolute_yaw_drift_rad": null,
+      "accepted": false,
+      "base_frame": "base_footprint",
+      "certificate_sha256": "f611e7955e26c60d8ea39092df25430ff95eaf9b5917adadc11a13ca18cf4e91",
+      "decision": "force_zero_reseal",
+      "fail_closed": true,
+      "frozen_map_from_odom": {
+        "x_m": -1.6105036284310639,
+        "y_m": -0.08429228009562106,
+        "yaw_rad": -0.48698294362131
+      },
+      "live_map_from_odom": null,
+      "map_frame": "map",
+      "max_translation_drift_m": 0.14034156361714037,
+      "max_yaw_drift_rad": 0.09206777224224688,
+      "odom_frame": "odom",
+      "reason": "map_from_odom_missing",
+      "relative_translation_x_m": null,
+      "relative_translation_y_m": null,
+      "relative_yaw_rad": null,
+      "requires_reseal": true,
+      "requires_zero_cycle": true,
+      "schema_version": 1,
+      "threshold_semantics": "accept_if_observed_less_than_or_equal_to_limit",
+      "translation_drift_m": null,
+      "validation_error": "live map_from_odom is missing"
+    },
+    "execution_phase": "before_motion",
+    "execution_pose_owner": "odom",
+    "fail_closed": true,
+    "fault_code": "localization_reseal_required",
+    "global_consistency_monitor": "amcl",
+    "initial_tf_acquisition": {
+      "denial_reason": "execution_edge_already_acquired",
+      "edges": {
+        "execution_pose": {
+          "attempt_count": 4,
+          "non_acquisition_failure_seen": false,
+          "recent_failures": [],
+          "source_frame": "base_footprint",
+          "successful_sample_count": 4,
+          "target_frame": "odom"
+        },
+        "global_consistency": {
+          "attempt_count": 4,
+          "non_acquisition_failure_seen": true,
+          "recent_failures": [
+            {
+              "attempt": 1,
+              "exception_type": null,
+              "monitor_warning": "map_from_odom_lookup_failed: \"map\" passed to lookupTransform argument target_frame does not exist.",
+              "reason": "global localization consistency requires zero and reseal"
+            },
+            {
+              "attempt": 2,
+              "exception_type": null,
+              "monitor_warning": "map_from_odom_lookup_failed: \"map\" passed to lookupTransform argument target_frame does not exist.",
+              "reason": "global localization consistency requires zero and reseal"
+            },
+            {
+              "attempt": 3,
+              "exception_type": null,
+              "monitor_warning": "map_from_odom_lookup_failed: \"map\" passed to lookupTransform argument target_frame does not exist.",
+              "reason": "global localization consistency requires zero and reseal"
+            },
+            {
+              "attempt": 4,
+              "exception_type": null,
+              "monitor_warning": "map_from_odom_lookup_failed: \"map\" passed to lookupTransform argument target_frame does not exist.",
+              "reason": "global localization consistency requires zero and reseal"
+            }
+          ],
+          "source_frame": "odom",
+          "successful_sample_count": 0,
+          "target_frame": "map"
+        }
+      },
+      "executor_health": {
+        "heartbeat_age_sec": 0.0006575890001840889,
+        "heartbeat_count": 41,
+        "heartbeat_max_age_sec": 0.5,
+        "ready": true,
+        "tf_delivery_proven": false,
+        "thread_alive": true
+      },
+      "extension_used": false,
+      "fresh_sensor_and_localization_admission_required": true,
+      "initial_sensor_wait_sec": 2.0,
+      "initial_tf_acquisition_wait_sec": 3.0,
+      "maximum_startup_wait_sec": 5.0,
+      "motion_authorized": false,
+      "phase": "initial_sensor_wait",
+      "schema_version": 1
+    },
+    "monitor_action": "FORCE_ZERO_RESEAL",
+    "monitor_reason": "reseal_required",
+    "monitor_warning": "map_from_odom_lookup_failed: \"map\" passed to lookupTransform argument target_frame does not exist.",
+    "motion_published": false,
+    "phase": "initial_runtime_input_wait",
+    "reason": "global localization consistency requires zero and reseal",
+    "source": "global_consistency_monitor"
+  }
+}

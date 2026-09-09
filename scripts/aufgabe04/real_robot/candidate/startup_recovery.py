@@ -34,6 +34,9 @@ from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization 
     STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY,
 )
 from scripts.aufgabe04.real_robot.execution.child_runner import MotionLegOutcome
+from scripts.aufgabe04.real_robot.candidate.recovery_dispatch import (
+    CandidateRecoveryHandoff, CandidateRecoveryState, validate_child_outcome,
+)
 from scripts.aufgabe04.real_robot.candidate.recovery_failure import (
     CandidateStartupRecoveryError,
     RejectedChildFailure,
@@ -345,20 +348,27 @@ def execute_candidate_motion_with_startup_recovery(
     *,
     config: CandidateStartupRecoveryConfig,
     effects: CandidateStartupRecoveryEffects[RequestT],
-) -> MotionLegOutcome:
+    recovery_state: CandidateRecoveryState | None = None,
+    resumed_handoff: CandidateRecoveryHandoff | None = None,
+) -> MotionLegOutcome | CandidateRecoveryHandoff:
     """Run one candidate routine with bounded, exact-identity startup retries.
 
     A completed initial or replacement outcome is returned.  Every other
     terminal path raises :class:`CandidateStartupRecoveryError`; no callback
     is invoked for an N+1 attempt after the configured budget is exhausted.
+    Shared routine state retains the cumulative count across typed runtime
+    handoffs. Resuming a handoff never executes the initial child again.
     """
 
     try:
-        _validate_request_identity(
-            initial_request,
-            expected=config.initial_identity,
-            effects=effects,
-        )
+        if resumed_handoff is None:
+            _validate_request_identity(
+                initial_request,
+                expected=config.initial_identity,
+                effects=effects,
+            )
+        elif recovery_state is None or resumed_handoff.next_owner != "startup":
+            raise ValueError("invalid candidate startup recovery handoff")
     except Exception as exc:
         raise _fail_callback(
             config,
@@ -370,7 +380,8 @@ def execute_candidate_motion_with_startup_recovery(
         ) from exc
 
     try:
-        outcome = effects.run_initial(initial_request)
+        outcome = (effects.run_initial(initial_request) if resumed_handoff is None
+                   else resumed_handoff.outcome)
     except Exception as exc:
         raise _fail_callback(
             config,
@@ -382,7 +393,9 @@ def execute_candidate_motion_with_startup_recovery(
         ) from exc
 
     expected_identity = config.initial_identity
-    completed_reseal_count = 0
+    completed_reseal_count = (
+        0 if recovery_state is None else recovery_state.startup_reseal_count
+    )
     while True:
         if not isinstance(outcome, MotionLegOutcome):
             exc = TypeError("motion callback must return MotionLegOutcome")
@@ -403,6 +416,26 @@ def execute_candidate_motion_with_startup_recovery(
                 reseal_index=completed_reseal_count,
                 reason="motion outcome run identity mismatch",
             )
+        try:
+            validate_child_outcome(outcome, expected_run_id=expected_identity.run_id)
+        except Exception as exc:
+            raise _fail_callback(
+                config, effects, phase="motion_outcome_contract",
+                run_id=expected_identity.run_id,
+                reseal_index=completed_reseal_count, exc=exc,
+            ) from exc
+        if (recovery_state is not None and resumed_handoff is None
+                and outcome.run_id == config.initial_identity.run_id
+                and issued_motion_permit_kinds(outcome)):
+            try:
+                recovery_state.remember_permit(outcome, kind="routine_mission_leg")
+            except Exception as exc:
+                _reject_outcome(
+                    config, effects, outcome=outcome,
+                    expected_run_id=expected_identity.run_id,
+                    reseal_index=completed_reseal_count,
+                    reason=str(exc), preserve_child_reason=True,
+                )
         if (
             config.allow_runtime_localization_handoff
             and outcome.motion_published is True
@@ -433,7 +466,8 @@ def execute_candidate_motion_with_startup_recovery(
                         "motion_continues_authorized": False,
                     },
                 )
-                return outcome
+                return (outcome if recovery_state is None
+                        else CandidateRecoveryHandoff(outcome, "runtime"))
         if outcome.status == "completed":
             if completed_reseal_count:
                 _emit(
@@ -635,6 +669,30 @@ def execute_candidate_motion_with_startup_recovery(
                 reseal_index=reseal_index,
                 exc=exc,
             ) from exc
+        if recovery_state is not None:
+            try:
+                validate_child_outcome(outcome, expected_run_id=replacement_identity.run_id)
+            except Exception as exc:
+                raise _fail_callback(
+                    config, effects, phase="replacement_outcome_contract",
+                    run_id=replacement_identity.run_id, reseal_index=reseal_index,
+                    exc=exc,
+                ) from exc
+            # Preflight can stop before permit issuance. All other direct
+            # startup children retain their actual startup permit class.
+            if not (outcome.status == "preflight_failed"
+                    and outcome.motion_published is False
+                    and not issued_motion_permit_kinds(outcome)):
+                try:
+                    recovery_state.remember_permit(outcome, kind="startup_reseal")
+                except Exception as exc:
+                    _reject_outcome(
+                        config, effects, outcome=outcome,
+                        expected_run_id=replacement_identity.run_id,
+                        reseal_index=reseal_index, reason=str(exc),
+                        preserve_child_reason=True,
+                    )
+            recovery_state.startup_reseal_count = reseal_index
         expected_identity = replacement_identity
         completed_reseal_count = reseal_index
 

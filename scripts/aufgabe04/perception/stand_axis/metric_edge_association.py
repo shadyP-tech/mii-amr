@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import math
 
 
@@ -132,13 +133,32 @@ def coherent_metric_rail_points(
     return candidates[best_selected]
 
 
-def observed_metric_corner_arms(cv2, raw_edges, corners) -> bool:
-    """Require both observed rails near each intersection, allowing rounding.
+@dataclass(frozen=True)
+class MetricCornerArmSupport:
+    """Raw support for the two incident rails at every semantic head corner."""
+
+    radius_px: float
+    minimum_bins: int
+    bins_by_corner: dict[str, dict[str, int]]
+
+    @property
+    def accepted(self) -> bool:
+        return all(
+            count >= self.minimum_bins
+            for arms in self.bins_by_corner.values()
+            for count in arms.values()
+        )
+
+
+def metric_corner_arm_support(cv2, raw_edges, corners) -> MetricCornerArmSupport:
+    """Count observed bins on both arms without discarding failed evidence.
 
     Long window/radiator segments may satisfy the trimmed side tests while
     their infinite-line intersections have no physical head corner nearby.
     Check the untouched image here: the side evidence mask deliberately omits
     endpoints. A corner pixel itself is not required, since heads are rounded.
+    Counts use the original 1.5 px minimum longitudinal distance, bounded
+    4–6 px radius, 2.5 px perpendicular allowance, and rounded pixel bins.
     """
 
     import numpy
@@ -152,17 +172,29 @@ def observed_metric_corner_arms(cv2, raw_edges, corners) -> bool:
     radius = max(4.0, min(6.0, 0.08 * shortest_side))
     margin = int(math.ceil(radius + 2.0))
     height, width = raw_edges.shape[:2]
+    names_and_arms = (
+        ("head_top_left", ("left", "top")),
+        ("head_top_right", ("top", "right")),
+        ("head_bottom_right", ("right", "bottom")),
+        ("head_bottom_left", ("bottom", "left")),
+    )
+    bins_by_corner = {}
     for index, corner in enumerate(corners):
         x0 = max(0, int(math.floor(corner.u_px)) - margin)
         y0 = max(0, int(math.floor(corner.v_px)) - margin)
         x1 = min(width, int(math.ceil(corner.u_px)) + margin + 1)
         y1 = min(height, int(math.ceil(corner.v_px)) + margin + 1)
         points = cv2.findNonZero(raw_edges[y0:y1, x0:x1])
-        if points is None:
-            return False
-        relative = points.reshape(-1, 2).astype(numpy.float64)
+        relative = (
+            numpy.empty((0, 2), dtype=numpy.float64) if points is None
+            else points.reshape(-1, 2).astype(numpy.float64)
+        )
         relative += numpy.array((x0 - corner.u_px, y0 - corner.v_px))
-        for neighbor in (corners[index - 1], corners[(index + 1) % 4]):
+        corner_name, arm_names = names_and_arms[index]
+        bins_by_corner[corner_name] = {}
+        for arm_name, neighbor in zip(
+            arm_names, (corners[index - 1], corners[(index + 1) % 4])
+        ):
             direction = numpy.array(
                 (neighbor.u_px - corner.u_px, neighbor.v_px - corner.v_px)
             )
@@ -175,6 +207,11 @@ def observed_metric_corner_arms(cv2, raw_edges, corners) -> bool:
             bins = numpy.unique(
                 numpy.floor(along[selected] + 0.5).astype(numpy.int32)
             )
-            if len(bins) < 2:
-                return False
-    return True
+            bins_by_corner[corner_name][arm_name] = len(bins)
+    return MetricCornerArmSupport(radius, 2, bins_by_corner)
+
+
+def observed_metric_corner_arms(cv2, raw_edges, corners) -> bool:
+    """Compatibility predicate using the same raw support as diagnostics."""
+
+    return metric_corner_arm_support(cv2, raw_edges, corners).accepted

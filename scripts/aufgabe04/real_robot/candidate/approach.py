@@ -106,13 +106,14 @@ from scripts.aufgabe04.real_robot.candidate.startup_recovery import (
     CandidateStartupRecoveryAttempt,
     CandidateStartupRecoveryConfig,
     CandidateStartupRecoveryEffects,
-    execute_candidate_motion_with_startup_recovery,
 )
 from scripts.aufgabe04.real_robot.candidate.runtime_recovery import (
     CandidateRuntimeRecoveryAttempt,
     CandidateRuntimeRecoveryConfig,
     CandidateRuntimeRecoveryEffects,
-    execute_candidate_runtime_localization_recovery,
+)
+from scripts.aufgabe04.real_robot.candidate.recovery_dispatch import (
+    execute_candidate_motion_with_recovery,
 )
 from scripts.aufgabe04.real_robot.candidate.observation_deferral import (
     CandidateObservationDeferralLedger,
@@ -1540,9 +1541,9 @@ def _execute_candidate_motion(
             )
         return runner(replacement_request, attempt)
 
-    startup_outcome = execute_candidate_motion_with_startup_recovery(
+    return execute_candidate_motion_with_recovery(
         initial_request,
-        config=CandidateStartupRecoveryConfig(
+        startup_config=CandidateStartupRecoveryConfig(
             initial_identity=_candidate_routine_identity(initial_request),
             recovery_root=(
                 candidate_root
@@ -1555,7 +1556,7 @@ def _execute_candidate_motion(
             max_startup_reseals=config.max_startup_reseals_per_leg,
             allow_runtime_localization_handoff=bool(runtime_budget),
         ),
-        effects=CandidateStartupRecoveryEffects(
+        startup_effects=CandidateStartupRecoveryEffects(
             run_initial=effects.run_motion_leg,
             run_replacement=run_replacement,
             admit_fresh_stationary_localization=admit_localization,
@@ -1564,14 +1565,8 @@ def _execute_candidate_motion(
             event_sink=lambda path, payload: effects.event_sink(path, payload),
             clock=effects.clock,
         ),
-    )
-    return execute_candidate_runtime_localization_recovery(
-        startup_outcome,
-        config=CandidateRuntimeRecoveryConfig(
-            initial_identity=replace(
-                _candidate_routine_identity(initial_request),
-                run_id=startup_outcome.run_id,
-            ),
+        runtime_config=CandidateRuntimeRecoveryConfig(
+            initial_identity=_candidate_routine_identity(initial_request),
             recovery_root=(
                 candidate_root
                 / (
@@ -1582,7 +1577,7 @@ def _execute_candidate_motion(
             event_log_path=config.session_root / "adaptive_replans.jsonl",
             max_runtime_reseals=runtime_budget,
         ),
-        effects=CandidateRuntimeRecoveryEffects(
+        runtime_effects=CandidateRuntimeRecoveryEffects(
             admit_fresh_stationary_localization=admit_runtime_localization,
             replan_same_routine=replan_runtime_same_routine,
             describe_request=_candidate_routine_identity,

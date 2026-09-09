@@ -1,7 +1,7 @@
 """Bounded acquisition of an execution TF edge in a new, stopped listener.
 
 The ordinary sensor deadline stays unchanged. One additional acquisition phase
-is available only for a never-acquired execution edge, with fresh sensors and
+is available only for never-acquired required TF edges, with fresh sensors and
 a demonstrably serviced TF executor. This is neither runtime TF recovery nor
 localization resealing; it cannot authorize a command or bypass admission.
 """
@@ -60,13 +60,23 @@ class InitialTfAcquisition:
     started_at: float
     sensor_wait_sec: float
     acquisition_wait_sec: float
+    required_edges: tuple[str, ...] = ("execution_pose",)
     phase: str = field(default="initial_sensor_wait", init=False)
     edges: dict[str, dict[str, object]] = field(default_factory=dict, init=False)
     extension_used: bool = field(default=False, init=False)
     executor_health: dict[str, object] = field(default_factory=dict, init=False)
     denial_reason: str = field(default="", init=False)
+    failed_edge_role: str = field(default="", init=False)
+    sensor_inputs_fresh: bool = field(default=False, init=False)
+    admission_failure_seen: bool = field(default=False, init=False)
+    elapsed_sec: float = field(default=0.0, init=False)
+    deadline_exhausted: bool = field(default=False, init=False)
+    execution_context: dict[str, object] | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
+        if (not self.required_edges or len(set(self.required_edges)) != len(self.required_edges)
+                or any(role not in ("execution_pose", "global_consistency") for role in self.required_edges)):
+            raise ValueError("initial acquisition requires distinct configured TF roles")
         if type(self.started_at) not in (int, float) or not math.isfinite(self.started_at):
             raise ValueError("startup acquisition start must be finite")
         if (type(self.sensor_wait_sec) not in (int, float)
@@ -87,6 +97,8 @@ class InitialTfAcquisition:
             "non_acquisition_failure_seen": False, "recent_failures": [],
         })
         edge["attempt_count"] += 1
+        edge["current_ready"] = ready
+        edge["last_sample"] = dict(details or {})
         if ready:
             edge["successful_sample_count"] += 1
             return
@@ -110,31 +122,44 @@ class InitialTfAcquisition:
         failure_details: Mapping[str, object], executor_health: Mapping[str, object],
     ) -> bool:
         self.executor_health = dict(executor_health)
+        self.sensor_inputs_fresh = sensors_fresh
+        self.elapsed_sec = max(0.0, now - self.started_at)
         if motion_published is not False:
             self.denial_reason = "motion_already_published"
             return False
         deadline = self.started_at + self.sensor_wait_sec
         if self.phase == "initial_sensor_wait" and now < deadline:
             return True
-        edge = self.edges.get("execution_pose", {})
+        failed_edges = [
+            (role, edge) for role, edge in self.edges.items()
+            if edge.get("current_ready") is not True
+        ]
+        matched_roles = [
+            role for role, edge in failed_edges
+            if failure_details.get("target_frame") == edge["target_frame"]
+            and failure_details.get("source_frame") == edge["source_frame"]
+        ]
         if self.acquisition_wait_sec <= 0:
             self.denial_reason = "cold_tf_acquisition_disabled"
         elif not sensors_fresh:
             self.denial_reason = "sensor_inputs_not_fresh"
         elif executor_health.get("ready") is not True:
             self.denial_reason = "tf_executor_not_ready"
-        elif edge.get("successful_sample_count", 0):
-            self.denial_reason = "execution_edge_already_acquired"
-        elif edge.get("non_acquisition_failure_seen", False):
-            self.denial_reason = "execution_edge_has_non_acquisition_failure"
+        elif self.admission_failure_seen:
+            self.denial_reason = "continuity_admission_failed"
+        elif any(edge.get("successful_sample_count", 0) for _, edge in failed_edges):
+            self.denial_reason = "required_tf_edge_already_acquired"
+        elif any(edge.get("non_acquisition_failure_seen", False) for edge in self.edges.values()):
+            self.denial_reason = "required_tf_edge_has_non_acquisition_failure"
         elif not is_cold_execution_tf_failure(failure_details):
-            self.denial_reason = "failure_not_initial_execution_tf_acquisition"
-        elif (failure_details.get("target_frame") != edge.get("target_frame")
-                or failure_details.get("source_frame") != edge.get("source_frame")):
-            self.denial_reason = "failure_not_execution_tf_edge"
+            self.denial_reason = "failure_not_initial_tf_acquisition"
+        elif len(matched_roles) != 1 or matched_roles[0] not in self.required_edges:
+            self.denial_reason = "failure_not_required_tf_edge"
         elif now >= deadline + self.acquisition_wait_sec:
             self.denial_reason = "cold_tf_acquisition_deadline_exhausted"
+            self.deadline_exhausted = True
         else:
+            self.failed_edge_role = matched_roles[0]
             self.phase = "cold_tf_acquisition"
             self.extension_used = True
             return True
@@ -143,24 +168,34 @@ class InitialTfAcquisition:
     def acquisition_deadline_exhausted(self, now: float) -> bool:
         """A callback wait cannot admit a sample after the extra phase expires."""
 
-        if self.extension_used and now >= (
+        self.elapsed_sec = max(0.0, now - self.started_at)
+        if now >= (
             self.started_at + self.sensor_wait_sec + self.acquisition_wait_sec
         ):
             self.denial_reason = "cold_tf_acquisition_deadline_exhausted"
+            self.deadline_exhausted = True
             return True
         return False
 
     def to_evidence(self) -> dict[str, object]:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "phase": self.phase,
             "initial_sensor_wait_sec": self.sensor_wait_sec,
             "initial_tf_acquisition_wait_sec": self.acquisition_wait_sec,
             "maximum_startup_wait_sec": self.sensor_wait_sec + self.acquisition_wait_sec,
             "extension_used": self.extension_used,
             "denial_reason": self.denial_reason,
+            "required_edges": list(self.required_edges),
+            "failed_edge_role": self.failed_edge_role,
+            "sensor_inputs_fresh": self.sensor_inputs_fresh,
+            "admission_failure_seen": self.admission_failure_seen,
+            "elapsed_sec": self.elapsed_sec,
+            "deadline_exhausted": self.deadline_exhausted,
+            "execution_context": self.execution_context,
             "executor_health": dict(self.executor_health),
-            "edges": {role: {**edge, "recent_failures": list(edge["recent_failures"])}
+            "edges": {role: {**edge, "recent_failures": list(edge["recent_failures"]),
+                             "last_sample": dict(edge["last_sample"])}
                       for role, edge in self.edges.items()},
             "motion_authorized": False,
             "fresh_sensor_and_localization_admission_required": True,

@@ -36,6 +36,15 @@ from scripts.aufgabe04.perception.debug.stand_model_overlay import (
     draw_dashed_polygon as _draw_dashed_polygon,
 )
 from scripts.aufgabe04.perception.debug.text_overlay import OverlayTextCursor
+from scripts.aufgabe04.perception.debug.viewer_frame_timing import ViewerFrameTiming
+from scripts.aufgabe04.perception.debug.stand_axis_recording import (
+    DebugWindowRecorder,
+    RECORDING_FILENAMES,
+)
+from scripts.aufgabe04.perception.debug.recording_metadata import recording_metadata
+from scripts.aufgabe04.perception.stand_axis.observation_freshness import (
+    observation_freshness,
+)
 from scripts.aufgabe04.perception.mask_processing import apply_morphology, build_mask_for_ranges
 from scripts.aufgabe04.perception.camera_stand_observation import (
     CameraStandObservation,
@@ -153,110 +162,6 @@ WINDOW_PROPOSAL_RECTANGLE = "aufgabe04/stand-axis-raw-proposal"
 NATIVE_PIXEL_DIAGNOSTIC_WINDOWS = frozenset(
     (WINDOW_FACE_MASK, WINDOW_RECTANGLE_MASK, WINDOW_PROPOSAL_RECTANGLE)
 )
-RECORDING_FILENAMES = {
-    WINDOW_FRAME: "annotated.avi",
-    WINDOW_MASK: "color_mask.avi",
-    WINDOW_EDGES: "edges.avi",
-    WINDOW_FACE_MASK: "side_evidence.avi",
-    WINDOW_RECTANGLE_MASK: "rectangle.avi",
-    WINDOW_PROPOSAL_RECTANGLE: "raw_proposal.avi",
-}
-
-
-class DebugWindowRecorder:
-    """Write one diagnostic video per currently displayed OpenCV window."""
-
-    def __init__(self, cv2, output_directory: Path, fps: float) -> None:
-        self._cv2 = cv2
-        self._output_directory = output_directory
-        self._fps = fps
-        self._writers = {}
-        self._sizes = {}
-        self._session_directory: Path | None = None
-
-    @property
-    def active(self) -> bool:
-        return bool(self._writers)
-
-    def _bgr_frame(self, image):
-        if image is None or len(image.shape) not in (2, 3):
-            raise ValueError("recording requires a non-empty grayscale or BGR image")
-        if len(image.shape) == 2:
-            return self._cv2.cvtColor(image, self._cv2.COLOR_GRAY2BGR)
-        if image.shape[2] != 3:
-            raise ValueError("recording requires grayscale or BGR images")
-        return image
-
-    def start(self, images: dict[str, object]) -> None:
-        if self.active:
-            return
-        if not images:
-            raise ValueError("no displayed windows are available to record")
-
-        session_name = (
-            "recording_"
-            + time.strftime("%Y%m%d_%H%M%S")
-            + f"_{time.time_ns() % 1_000_000_000:09d}"
-        )
-        session_directory = self._output_directory / session_name
-        session_directory.mkdir(parents=True, exist_ok=False)
-        codec = self._cv2.VideoWriter_fourcc(*"MJPG")
-        writers = {}
-        sizes = {}
-        try:
-            for window_name, image in images.items():
-                frame = self._bgr_frame(image)
-                height, width = frame.shape[:2]
-                if height <= 0 or width <= 0:
-                    raise ValueError("recording requires non-empty window images")
-                filename = RECORDING_FILENAMES.get(
-                    window_name,
-                    window_name.replace("/", "_") + ".avi",
-                )
-                writer = self._cv2.VideoWriter(
-                    str(session_directory / filename),
-                    codec,
-                    self._fps,
-                    (width, height),
-                )
-                if not writer.isOpened():
-                    writer.release()
-                    raise RuntimeError(f"could not open video writer for {window_name}")
-                writers[window_name] = writer
-                sizes[window_name] = (width, height)
-        except Exception:
-            for writer in writers.values():
-                writer.release()
-            raise
-
-        self._writers = writers
-        self._sizes = sizes
-        self._session_directory = session_directory
-        self.write(images)
-
-    def write(self, images: dict[str, object]) -> None:
-        for window_name, writer in self._writers.items():
-            image = images.get(window_name)
-            if image is None:
-                continue
-            frame = self._bgr_frame(image)
-            width, height = self._sizes[window_name]
-            if frame.shape[1] != width or frame.shape[0] != height:
-                frame = self._cv2.resize(
-                    frame,
-                    (width, height),
-                    interpolation=self._cv2.INTER_NEAREST,
-                )
-            writer.write(frame)
-
-    def stop(self) -> None:
-        if not self.active:
-            return
-        for writer in self._writers.values():
-            writer.release()
-        self._writers = {}
-        self._sizes = {}
-        self._session_directory = None
 
 
 @dataclass(frozen=True)
@@ -353,18 +258,13 @@ def _detector_result_is_obsolete(
     completed_monotonic_sec: float,
     max_result_age_sec: float,
 ) -> bool:
-    """Reject an expensive result only when a newer source frame exists."""
+    """Compatibility facade: absolute receipt age does not depend on sequences."""
 
-    if (
-        max_result_age_sec <= 0.0
-        or newest_sequence <= processed_sequence
-        or received_monotonic_sec is None
-    ):
-        return False
-    return (
-        completed_monotonic_sec - received_monotonic_sec
-        > max_result_age_sec
-    )
+    return not observation_freshness(
+        observed_at_sec=received_monotonic_sec,
+        now_sec=completed_monotonic_sec,
+        max_age_sec=max_result_age_sec,
+    ).accepted
 
 
 def _temporal_rectangle_artifacts(
@@ -882,7 +782,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-frame-age-sec",
         type=float,
         default=0.25,
-        help="Drop incoming ROS image messages older than this. Use 0 to disable.",
+        help="Reject real-camera images older than this at receipt or after detection. Use 0 to disable.",
     )
     parser.add_argument(
         "--max-result-age-sec",
@@ -890,7 +790,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.18,
         help=(
             "Discard a completed real-camera detector result when its local "
-            "receive-to-result age exceeds this and a newer frame is waiting. "
+            "receive-to-result age exceeds this, regardless of newer frame arrival. "
             "Use 0 to disable."
         ),
     )
@@ -972,15 +872,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("results/aufgabe04/stand_axis_debug_recordings"),
         help=(
-            "Directory where pressing r creates a timestamped set of diagnostic "
-            "AVI recordings (default: results/aufgabe04/stand_axis_debug_recordings)."
+            "Directory where pressing r records diagnostic AVIs, original PNGs, "
+            "and frame metadata (default: results/aufgabe04/stand_axis_debug_recordings)."
         ),
     )
     parser.add_argument(
         "--record-fps",
         type=float,
         default=15.0,
-        help="Frames per second for keyboard-started diagnostic recordings (default: 15).",
+        help="Nominal AVI playback FPS; metadata retains actual frame times (default: 15).",
     )
     return parser
 
@@ -2987,11 +2887,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     camera_cx_px = None
                     camera_cy_px = None
             last_display_sec = time.time()
-            age_ms = (
-                None
-                if args.sim_raw_image_topic or read.stamp_sec is None
-                else (last_display_sec - read.stamp_sec) * 1000.0
+            frame_timing = (
+                ViewerFrameTiming(read.received_monotonic_sec, None)
+                if args.sim_raw_image_topic else ViewerFrameTiming.from_read(read)
             )
+            tracker_update = None
+            prediction = None
 
             if args.resize != 1.0:
                 frame = cv2.resize(frame, None, fx=args.resize, fy=args.resize)
@@ -3449,19 +3350,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                             min_edge_height_px=args.min_edge_height_px,
                         )
                     )
-                    if (
-                        metric_artifacts.model_pose is not None
-                        and (
-                            metric_estimate.evidence_state == "fresh_refined"
-                            or metric_artifacts.qr_detected
-                        )
-                    ):
-                        model_pose_tracker.accept(
-                            metric_artifacts.model_pose,
-                            now_sec=time.monotonic(),
-                            profile_sha256=stand_model_profile.sha256,
-                            camera_signature=camera_signature,
-                        )
 
                 fallback_estimate = None
                 fallback_artifacts = None
@@ -3534,21 +3422,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 * 1000.0
             )
-            newest_after_detection = frame_source.read()
-            if (
-                not args.sim_raw_image_topic
-                and args.axis_source == "edges"
-                and _detector_result_is_obsolete(
-                    processed_sequence=read.sequence,
-                    newest_sequence=newest_after_detection.sequence,
-                    received_monotonic_sec=read.received_monotonic_sec,
-                    completed_monotonic_sec=detector_completed_monotonic,
-                    max_result_age_sec=args.max_result_age_sec,
+            result_freshness = frame_timing.assess(
+                now_sec=detector_completed_monotonic,
+                max_result_age_sec=args.max_result_age_sec,
+                max_frame_age_sec=args.max_frame_age_sec,
+            ) if not args.sim_raw_image_topic else None
+            result_obsolete = bool(
+                args.axis_source == "edges"
+                and result_freshness is not None
+                and not result_freshness.accepted
+            )
+            if metric_inputs_ready:
+                tracker_update = model_pose_tracker.update_from_observation(
+                    metric_estimate,
+                    metric_artifacts,
+                    observed_at_sec=frame_timing.observed_monotonic_sec,
+                    completed_at_sec=detector_completed_monotonic,
+                    profile_sha256=stand_model_profile.sha256,
+                    camera_signature=camera_signature,
+                    result_fresh=not result_obsolete,
                 )
-            ):
-                estimate = _unavailable_target_estimate(
-                    "obsolete_detector_result"
-                )
+            if result_obsolete:
+                estimate = _unavailable_target_estimate("obsolete_detector_result")
                 face_mask = None
                 rectangle_mask = None
                 rectangle_overlay = None
@@ -4262,6 +4157,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             filtered_ratio = statistics.median(ratio_window) if ratio_window else None
             filtered_proxy = statistics.median(proxy_window) if proxy_window else None
 
+            rendered_monotonic_sec = time.monotonic()
+            source_age_sec = (
+                None if args.sim_raw_image_topic
+                else frame_timing.source_age_sec(rendered_monotonic_sec)
+            )
+            age_ms = None if source_age_sec is None else source_age_sec * 1000.0
             annotated = display_frame.copy()
             text_cursor = annotate_frame(
                 cv2,
@@ -4537,14 +4438,49 @@ def main(argv: Sequence[str] | None = None) -> int:
                 for window_name, enabled, diagnostic_image in diagnostic_images:
                     if enabled and diagnostic_image is not None:
                         recording_images[window_name] = diagnostic_image
+            recording_options = {}
+            if recorder.active or record_start_pending:
+                recording_options = {
+                    "source_frame": decoded_source_frame,
+                    "metadata": recording_metadata({
+                        "source_sequence": read.sequence,
+                        "source_stamp_sec": read.stamp_sec,
+                        "source_frame_id": read.frame_id,
+                        "received_wall_sec": read.received_wall_sec,
+                        "received_monotonic_sec": read.received_monotonic_sec,
+                        "observed_monotonic_sec": frame_timing.observed_monotonic_sec,
+                        "detector_started_monotonic_sec": detector_started_monotonic,
+                        "detector_completed_monotonic_sec": detector_completed_monotonic,
+                        "rendered_monotonic_sec": rendered_monotonic_sec,
+                        "render_source_age_ms": age_ms,
+                        "result_freshness": result_freshness,
+                        "display_estimate": estimate,
+                        "model": _metric_model_status_payload(
+                            profile=stand_model_profile, inputs_ready=metric_inputs_ready,
+                            estimate=metric_estimate, artifacts=metric_artifacts,
+                        ),
+                        "tracker_prediction": prediction,
+                        "tracker_update": tracker_update,
+                        "calibration": calibration_snapshot,
+                        "target_roi": target_roi,
+                        "processing_intrinsics": {
+                            "fx_px": camera_fx_px, "fy_px": camera_fy_px,
+                            "cx_px": axis_camera_cx_px, "cy_px": axis_camera_cy_px,
+                        },
+                        "options": vars(args),
+                    }),
+                }
             if record_start_pending:
                 try:
-                    recorder.start(recording_images)
-                except (RuntimeError, ValueError) as exc:
+                    recorder.start(recording_images, **recording_options)
+                except (OSError, RuntimeError, ValueError) as exc:
                     print(f"WARNING: recording did not start: {exc}")
                 record_start_pending = False
             elif recorder.active:
-                recorder.write(recording_images)
+                try:
+                    recorder.write(recording_images, **recording_options)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    print(f"WARNING: recording stopped: {exc}")
 
             key = 0 if args.headless else cv2.waitKey(1) & 0xFF
             if key in (27, ord("q")):
@@ -4555,10 +4491,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if recorder.active:
                     recorder.stop()
                 else:
-                    try:
-                        recorder.start(recording_images)
-                    except (RuntimeError, ValueError) as exc:
-                        print(f"WARNING: recording did not start: {exc}")
+                    record_start_pending = True
             if key == ord("s") and args.save_snapshot is not None:
                 if args.structural_diagnostic:
                     _save_structural_viewer_capture(

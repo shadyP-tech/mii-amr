@@ -40,6 +40,10 @@ from scripts.aufgabe04.real_robot.candidate.recovery_failure import (
 )
 from scripts.aufgabe04.real_robot.candidate.startup_recovery import (
     CandidateRoutineIdentity,
+    _recovery_source_kind,
+)
+from scripts.aufgabe04.real_robot.candidate.recovery_dispatch import (
+    CandidateRecoveryHandoff, CandidateRecoveryState, validate_child_outcome,
 )
 from scripts.aufgabe04.real_robot.execution.child_runner import MotionLegOutcome
 
@@ -155,7 +159,8 @@ class CandidateRuntimeRejectedOutcome:
 
     def to_event_fields(self) -> dict[str, object]:
         return {
-            "reason": self.policy_reason,
+            "reason": self.stop_reason.strip() or self.policy_reason,
+            "rejection_policy_reason": self.policy_reason,
             "runtime_localization_decision_reason": self.decision_reason,
             "observed_run_id": self.run_id,
             "status": self.status,
@@ -555,7 +560,8 @@ def _reject_outcome(
         },
     )
     raise CandidateRuntimeRecoveryError(
-        f"candidate runtime recovery rejected {outcome.run_id}: {reason}",
+        f"candidate runtime recovery rejected {outcome.run_id}: "
+        f"{outcome.stop_reason.strip() or reason}; fail-closed policy: {reason}",
         phase="outcome_rejection",
         rejected_child=rejection,
     )
@@ -576,7 +582,8 @@ def execute_candidate_runtime_localization_recovery(
     *,
     config: CandidateRuntimeRecoveryConfig,
     effects: CandidateRuntimeRecoveryEffects[RequestT],
-) -> MotionLegOutcome:
+    recovery_state: CandidateRecoveryState | None = None,
+) -> MotionLegOutcome | CandidateRecoveryHandoff:
     """Recover exact post-motion localization stops for one candidate routine.
 
     The caller retains completed and no-motion initial outcomes unchanged.
@@ -585,6 +592,8 @@ def execute_candidate_runtime_localization_recovery(
     and either complete or present another exact eligible
     ``FORCE_ZERO_RESEAL`` stop.  A structured no-motion replacement preflight
     rejection is preserved as a typed terminal error before permit validation.
+    With shared routine state, an exactly eligible prestart stop instead
+    returns a typed startup handoff after runtime child/permit validation.
     """
 
     if not isinstance(initial_outcome, MotionLegOutcome):
@@ -597,6 +606,15 @@ def execute_candidate_runtime_localization_recovery(
             reseal_index=0,
             exc=exc,
         ) from exc
+    if recovery_state is not None:
+        try:
+            validate_child_outcome(initial_outcome, expected_run_id=config.initial_identity.run_id)
+        except Exception as exc:
+            raise _callback_failure(
+                config, effects, phase="initial_outcome_contract",
+                run_id=config.initial_identity.run_id, reseal_index=recovery_state.runtime_reseal_count,
+                exc=exc,
+            ) from exc
     if initial_outcome.status == "completed":
         return initial_outcome
     if initial_outcome.motion_published is False:
@@ -642,6 +660,8 @@ def execute_candidate_runtime_localization_recovery(
         source_permit_kind, source_permit_path, source_permit_sha256 = (
             _validate_source_motion_permit_evidence(outcome)
         )
+        if recovery_state is not None:
+            recovery_state.remember_permit(outcome, kind=source_permit_kind)
     except Exception as exc:
         _reject_outcome(
             config,
@@ -653,7 +673,9 @@ def execute_candidate_runtime_localization_recovery(
             decision_reason=decision.reason,
         )
 
-    completed_reseal_count = 0
+    completed_reseal_count = (
+        0 if recovery_state is None else recovery_state.runtime_reseal_count
+    )
     used_permit_paths: set[Path] = set()
     used_permit_digests: set[str] = set()
     while True:
@@ -886,6 +908,8 @@ def execute_candidate_runtime_localization_recovery(
             permit_path, permit_digest = _validate_runtime_permit_evidence(
                 replacement_outcome
             )
+            if recovery_state is not None:
+                recovery_state.remember_permit(replacement_outcome, kind="runtime_localization")
             if (
                 permit_path in used_permit_paths
                 or permit_digest in used_permit_digests
@@ -918,6 +942,8 @@ def execute_candidate_runtime_localization_recovery(
         )
 
         completed_reseal_count = reseal_index
+        if recovery_state is not None:
+            recovery_state.runtime_reseal_count = reseal_index
         if replacement_outcome.status == "completed":
             _emit(
                 config,
@@ -937,6 +963,18 @@ def execute_candidate_runtime_localization_recovery(
         source_permit_kind = "runtime_localization"
         source_permit_path = permit_path
         source_permit_sha256 = permit_digest
+        if recovery_state is not None and _recovery_source_kind(outcome) is not None:
+            _emit(config, effects, {
+                "event": "candidate_startup_recovery_handoff_ready",
+                "run_id": outcome.run_id,
+                "completed_startup_reseal_count": recovery_state.startup_reseal_count,
+                "completed_runtime_localization_reseal_count": recovery_state.runtime_reseal_count,
+                "source_rejection_stop_reason": outcome.stop_reason,
+                "source_rejection_stop_details": dict(outcome.stop_details),
+                "source_rejection_motion_permit_kind": "runtime_localization",
+                "motion_continues_authorized": False,
+            })
+            return CandidateRecoveryHandoff(outcome, "startup")
         decision = _eligible_decision(outcome)
         if not decision.eligible:
             _reject_outcome(
