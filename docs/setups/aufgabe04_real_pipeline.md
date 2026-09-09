@@ -1,5 +1,8 @@
 # Aufgabe 04 Real-Robot Experiment Pipeline
 
+September 9 handoff changes, capture/topology flags and the bounded camera pilot
+are documented in [the implementation note](aufgabe04_handoff_fixes_20260909.md).
+
 The real experiment path reuses the simulation pipeline's immutable station,
 catalog, route, and mission contracts, but replaces simulated sensing and
 runtime assumptions with dedicated hardware adapters. It is not approval for a
@@ -55,6 +58,7 @@ loaded logistics mission or a two-robot run; see
 | `qr_scanning/qr_observation.py` | Bind decoded text to validated corners from the same detector result | None |
 | `qr_scanning/isolated_qr_identity.py` | Re-decode one rectified native QR quadrilateral when the production decoder supplies placeholder bounds | None |
 | `navigation/waypoint_follower/initial_tf_acquisition.py` | Track both required TF edges under one bounded initial deadline and retain executor/edge diagnostics | None |
+| `navigation/waypoint_follower/tf_receipts.py` | Retain bounded receipt, ingestion-call and newest-buffer timing evidence at the executing listener's actual dynamic buffer | None; diagnostics only |
 | `navigation/waypoint_follower/runtime_components/tf_sampling.py` | Return typed exact-edge TF availability, freshness and pose-validation evidence from the executing listener | None |
 | `navigation/waypoint_follower/runtime_components/initial_runtime_inputs.py` | Apply the stopped acquisition policy to fresh sensor inputs and the existing localization checks | Zero commands only |
 | `navigation/localization/initial_map_tf_recovery.py` | Validate exhausted first-acquisition evidence for a new global-localization preparation attempt | None; fresh localization and a new route/permit remain required |
@@ -155,21 +159,37 @@ buffer before any motion. Its ordinary two-second input deadline may be followed
 by one bounded acquisition phase of at most three seconds. The total deadline
 is shared by both edges; it cannot restart when the missing edge changes.
 Only a never-acquired edge with a typed `LookupException` or
-`ConnectivityException` qualifies while scan and odometry remain fresh and the
-TF executor heartbeat is healthy. Stale/future or malformed transforms, a lost
-previously acquired edge, measured localization drift and post-motion failures
-do not qualify. Sensor freshness, executor health, absence of motion and the
-absolute deadline are checked again after blocking TF calls.
+`ConnectivityException` can enter the additional phase while scan and odometry
+remain fresh and the TF executor heartbeat is healthy. Once that phase has begun,
+a structurally validated old first `map <- odom` sample may use the remaining
+original deadline to await a fresh sample. It remains unavailable for motion;
+the exact certified frames and a fresh established execution edge are required.
+Its stale history is retained and cannot become pure missing-TF recovery evidence.
+Future or malformed transforms, stale execution transforms, a lost previously
+acquired edge, measured localization drift and post-motion failures do not
+qualify. Sensor freshness, executor health, absence of motion and the absolute
+deadline are checked again after blocking TF calls.
 
 Successful acquisition still passes the full sensor, localization and certified
 route-start checks. Persistent failure stops the child. Startup diagnostics
 record both exact frame pairs, typed sample failures, acquisition history,
-elapsed time, executor health and execution-certificate identity. A complete
-before-motion report of an exhausted, never-acquired global edge may enter the
-existing bounded startup preparation policy. New typed reports cannot fall
+elapsed time, executor health and execution-certificate identity. Reports also
+retain up to eight dynamic receipt records per required edge in
+`executor_health.tf_receipts`, measured at the executing
+buffer's `set_transform` call. Receipt/header times and immediate newest-buffer
+stamp observations do not prove insertion acceptance or authorize motion.
+A complete before-motion report of an exhausted, never-acquired global edge
+may enter the existing bounded startup preparation policy. New typed reports cannot fall
 back to legacy warning-string admission when their fields are invalid. This
 classification grants no motion authority: fresh stationary localization,
 route certification and a new one-use permit are still required.
+Candidate recovery, coverage recovery and startup-permit validation share the
+same binding between the outer TF failure label and its typed frame evidence.
+The display label is distinct from the machine reason `lookup_exception`.
+Terminal candidate errors include the typed TF cause, age and limit, acquisition
+denial and elapsed budget. See the
+[`2026-09-09 handoff audit`](aufgabe04_run_audit_20260909T123820Z.md) for the
+recorded missing-to-stale transition that motivated this hardening.
 
 Candidate recovery classifies every child outcome by its actual phase, including
 replacement children. A runtime recovery that stops before moving may therefore

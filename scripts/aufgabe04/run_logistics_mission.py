@@ -27,6 +27,7 @@ from scripts.aufgabe04.logistics.server_validation.artifacts import (
     write_validated_task_snapshot,
 )
 from scripts.aufgabe04.qr_scanning.qr_id_decoder import decode_qr_id
+from scripts.aufgabe04.stations.station_ids import canonical_server_station_id
 from scripts.aufgabe04.qr_scanning.scan_logger import append_qr_scan
 from scripts.aufgabe04.stations.station_map import DEFAULT_STATIONS
 from scripts.aufgabe04.stations.station_identity_registry import (
@@ -95,8 +96,8 @@ def _load_json(path: Path):
 
 
 def _local_station_ids(extra_ids: Iterable[str]) -> tuple[str, ...]:
-    station_ids = {station_id.upper() for station_id in DEFAULT_STATIONS}
-    station_ids.update(station_id.strip().upper() for station_id in extra_ids if station_id.strip())
+    station_ids = {canonical_server_station_id(station_id) for station_id in DEFAULT_STATIONS}
+    station_ids.update(canonical_server_station_id(station_id) for station_id in extra_ids if station_id.strip())
     return tuple(sorted(station_ids))
 
 

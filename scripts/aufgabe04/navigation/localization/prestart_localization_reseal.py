@@ -95,6 +95,29 @@ class PrestartLocalizationResealDecision:
         }
 
 
+def prestart_localization_stop_reason_matches(
+    stop_reason: object, stop_details: object,
+) -> bool:
+    """Bind the outer display reason; callers must separately admit the policy.
+
+    TF sampling records a machine reason and the exact failed frames in its
+    human-readable stop reason. Monitor stops use the
+    same reason in both locations. This check grants no recovery authority.
+    """
+
+    if not isinstance(stop_reason, str) or not isinstance(stop_details, Mapping):
+        return False
+    expected = stop_details.get("reason")
+    if stop_details.get("source") == "tf_lookup":
+        target, source = (stop_details.get(key) for key in ("target_frame", "source_frame"))
+        if not all(
+            isinstance(frame, str) and frame for frame in (target, source)
+        ):
+            return False
+        expected = f"TF transform unavailable: {target} <- {source}"
+    return isinstance(expected, str) and bool(expected) and stop_reason == expected
+
+
 def evaluate_prestart_localization_reseal(
     *,
     status: object,

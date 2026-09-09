@@ -9,6 +9,10 @@ from unittest.mock import Mock
 from scripts.aufgabe04.navigation.localization.localization_ownership import (
     evaluate_global_consistency_monitor,
 )
+from scripts.aufgabe04.navigation.localization.prestart_localization_reseal import (
+    evaluate_prestart_localization_reseal,
+    prestart_localization_stop_reason_matches,
+)
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
     PlanarTransform2D,
@@ -32,6 +36,7 @@ from scripts.aufgabe04.real_robot.coverage_leg.execution import (
 from scripts.aufgabe04.real_robot.readiness.startup_reseal import (
     StartupResealPermitContext,
 )
+from tests.aufgabe04.test_initial_map_tf_recovery import initial_map_tf_stop
 
 
 def _runtime_localization_stop_details() -> dict[str, object]:
@@ -635,6 +640,70 @@ class AutonomousCoverageExecutionTest(unittest.TestCase):
                 replan.call_args.kwargs["expected_target_viewpoint_id"],
                 "survey_vp_001",
             )
+
+    def test_typed_stale_tf_label_matches_without_becoming_recovery_eligible(self):
+        details = initial_map_tf_stop()
+        details["reason"] = "stale_transform"
+        self.assertTrue(prestart_localization_stop_reason_matches(
+            "TF transform unavailable: map <- odom", details,
+        ))
+        self.assertFalse(prestart_localization_stop_reason_matches(
+            "TF transform unavailable: odom <- base_footprint", details,
+        ))
+        self.assertFalse(evaluate_prestart_localization_reseal(
+            status="stopped", motion_published=False, stop_details=details,
+        ).eligible)
+
+    def test_typed_missing_global_tf_reprepares_coverage_with_new_permit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self._paths(root)
+            rejected = _outcome(
+                root, run_id="mission_coverage_000", status="stopped",
+                stop_reason="TF transform unavailable: map <- odom",
+                stop_details=initial_map_tf_stop(),
+            )
+            completed = _outcome(
+                root, run_id="mission_coverage_000_startup_reseal_001",
+                status="completed", motion_published=True,
+            )
+            run = Mock(side_effect=(rejected, completed))
+            admit = Mock(return_value=Pose2D(-0.48, -0.60, 1.69))
+            replan = Mock(return_value={
+                "route_csv": str(root / "tf_replacement.csv"),
+                "diagnostics_json": str(root / "tf_replacement.json"),
+                "summary_json": str(root / "tf_source_summary.json"),
+            })
+            seal = Mock(return_value=self._sealed(root))
+            events = []
+            outcome = execute_coverage_leg_with_replans(
+                profile=self.profile, config=self._config(),
+                effects=CoverageLegEffects(
+                    run_motion_leg=run, admit_preplanning_localization=admit,
+                    seal_route=seal, replan_startup_source=replan,
+                    event_sink=lambda _path, payload: events.append(payload),
+                ),
+                **paths, leg_index=0, target_viewpoint_id="survey_vp_001",
+                startup_reseal_motion_authorization_json=root / "startup_master.json",
+            )
+            self.assertIs(outcome, completed)
+            admit.assert_called_once()
+            replan.assert_called_once()
+            self.assertEqual(seal.call_count, 2)
+            self.assertEqual(run.call_count, 2)
+            retry = run.call_args_list[1].kwargs
+            context = retry["startup_reseal_permit_context"]
+            self.assertEqual(context.rejected_run_id, rejected.run_id)
+            self.assertEqual(context.target_viewpoint_id, "survey_vp_001")
+            self.assertEqual(context.recovery_source_kind,
+                STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY)
+            self.assertEqual(seal.call_args_list[1].kwargs["source_route_csv"],
+                root / "tf_replacement.csv")
+            decision = events[0]["prestart_localization_reseal_decision"]
+            self.assertEqual(decision["recovery_action"], "tf_warmup_retry")
+            self.assertTrue(decision["requires_fresh_localization"])
+            self.assertTrue(decision["requires_new_route_certificate"])
+            self.assertFalse(decision["automatic_motion_authorized"])
 
     def test_runtime_reseal_uses_injected_resolved_runtime_and_exact_permit(self):
         with tempfile.TemporaryDirectory() as tmp:

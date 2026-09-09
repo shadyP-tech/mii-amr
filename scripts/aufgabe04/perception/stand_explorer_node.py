@@ -26,6 +26,7 @@ from scripts.aufgabe04.navigation.localization.odom_execution_certificate import
 )
 from scripts.aufgabe04.navigation.foundation.ros_runtime_config import RuntimeConfig, resolve_runtime_config
 from scripts.aufgabe04.perception.lidar_stand_detector import detect_stand_candidates_from_scan
+from scripts.aufgabe04.perception.scan_topology import ScanTopology, SCAN_TOPOLOGY_PROFILES
 from scripts.aufgabe04.perception.lidar_stand_morphology import (
     MORPHOLOGY_PROFILE_EVIDENCE_KEY,
     MORPHOLOGY_PROFILE_SHA256_KEY,
@@ -114,6 +115,53 @@ class _PendingScan:
     scan_stamp_sec: float
     query_time: object
     deadline_monotonic_sec: float
+    received_monotonic_sec: float | None = None
+
+
+def _scan_input_diagnostics(node) -> dict[str, object]:
+    diagnostics = getattr(node, "scan_input_diagnostics", None)
+    if diagnostics is None:
+        diagnostics = {
+            "received_scan_count": 0, "ignored_disabled_scan_count": 0,
+            "rejected_scan_counts": {}, "latency_sec": {},
+        }
+        node.scan_input_diagnostics = diagnostics
+    return diagnostics
+
+
+def _record_scan_drop(node, reason: str, count: int = 1) -> None:
+    counts = _scan_input_diagnostics(node)["rejected_scan_counts"]
+    counts[reason] = counts.get(reason, 0) + count
+
+
+def _record_scan_latency(node, name: str, value: float) -> None:
+    if not math.isfinite(value) or (name != "scan_age_at_processing" and value < 0.0):
+        return
+    series = _scan_input_diagnostics(node)["latency_sec"].setdefault(
+        name, {"sample_count": 0, "total_sec": 0.0, "maximum_sec": None},
+    )
+    series["sample_count"] += 1
+    series["total_sec"] += value
+    series["maximum_sec"] = value if series["maximum_sec"] is None else max(series["maximum_sec"], value)
+
+
+def _scan_input_summary(node) -> dict[str, object] | None:
+    diagnostics = getattr(node, "scan_input_diagnostics", None)
+    if diagnostics is None:
+        return None  # Historical/test nodes have no received-input evidence.
+    return {
+        **diagnostics,
+        "received_scope": "callbacks_while_observation_enabled",
+        "pending_scan_count": len(getattr(node, "pending_scans", ())),
+        "rejected_scan_counts": dict(diagnostics["rejected_scan_counts"]),
+        "dropped_scan_count": sum(diagnostics["rejected_scan_counts"].values()),
+        "queue_drop_count": diagnostics["rejected_scan_counts"].get("pending_queue_full", 0),
+        "exact_tf_timeout_count": diagnostics["rejected_scan_counts"].get("exact_time_tf_timeout", 0),
+        "latency_sec": {
+            name: {**series, "mean_sec": series["total_sec"] / series["sample_count"]}
+            for name, series in diagnostics["latency_sec"].items()
+        },
+    }
 
 
 @dataclass(frozen=True)
@@ -456,7 +504,7 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
             output_path=getattr(args, "visibility_receipts_jsonl", None),
             survey_id=getattr(args, "visibility_survey_id", ""),
             viewpoint_id=getattr(args, "visibility_viewpoint_id", ""),
-            runtime_config=self.runtime.as_log_dict(),
+            runtime_config={**self.runtime.as_log_dict(), "scan_topology_profile": getattr(args, "scan_topology_profile", "linear")},
             timing_limits=self.timing_limits.as_dict(),
             map_bundle_sha256=(
                 None
@@ -488,6 +536,8 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
         )
         self.observation_count = 0
         self.processed_scan_count = 0
+        _scan_input_diagnostics(self)
+        self.last_scan_topology = None
         self.detected_candidate_count = 0
         self.accepted_observation_count = 0
         self.last_confirmed_stand_count = 0
@@ -525,19 +575,30 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
             return
         self.observation_enabled = enabled
         if not enabled:
+            if self.pending_scans:
+                _record_scan_drop(self, "observation_disabled", len(self.pending_scans))
             self.pending_scans.clear()
         state = "enabled" if enabled else "paused for localization readiness"
         self.get_logger().info(f"stand observation {state}")
 
     def _scan_callback(self, msg) -> None:
         if not self.observation_enabled:
+            _scan_input_diagnostics(self)["ignored_disabled_scan_count"] += 1
             return
-        scan_frame = msg.header.frame_id
+        _scan_input_diagnostics(self)["received_scan_count"] += 1
+        received_monotonic_sec = time.monotonic()
+        scan_frame = getattr(getattr(msg, "header", None), "frame_id", None)
         if not scan_frame:
+            _record_scan_drop(self, "missing_scan_frame")
             self.get_logger().warn("dropping scan without header.frame_id")
             return
-        scan_stamp_sec = _stamp_to_sec(msg.header.stamp)
-        observer_clock_sec = _stamp_to_sec(self.get_clock().now().to_msg())
+        try:
+            scan_stamp_sec = _stamp_to_sec(msg.header.stamp)
+            observer_clock_sec = _stamp_to_sec(self.get_clock().now().to_msg())
+        except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+            _record_scan_drop(self, "invalid_scan_timestamp")
+            self.get_logger().warn(f"dropping scan with malformed timestamp: {exc}")
+            return
         try:
             # Reject zero, invalid, stale, or materially future-dated scans
             # before asking tf2 to resolve them.
@@ -550,16 +611,19 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
                 ),
             )
         except ValueError as exc:
+            _record_scan_drop(self, "invalid_scan_timing")
             self.get_logger().warn(f"dropping scan: {exc}")
             return
         try:
             query_time = _transform_time_for_scan_stamp(msg.header.stamp)
         except (TypeError, ValueError) as exc:
+            _record_scan_drop(self, "invalid_scan_timestamp")
             self.get_logger().warn(f"dropping scan with invalid timestamp: {exc}")
             return
 
         if len(self.pending_scans) >= self.args.pending_scan_limit:
             dropped = self.pending_scans.popleft()
+            _record_scan_drop(self, "pending_queue_full")
             self.get_logger().warn(
                 "dropping oldest pending scan because the exact-time TF queue "
                 f"is full: stamp={dropped.scan_stamp_sec:.9f}"
@@ -571,6 +635,7 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
                 scan_stamp_sec=scan_stamp_sec,
                 query_time=query_time,
                 deadline_monotonic_sec=time.monotonic() + self.args.tf_timeout_sec,
+                received_monotonic_sec=received_monotonic_sec,
             )
         )
         # This retry is deliberately nonblocking. If TF has not arrived yet,
@@ -586,6 +651,7 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
                 getattr(self, "frozen_observer_frame", None),
             )
             if time.monotonic() > pending.deadline_monotonic_sec:
+                _record_scan_drop(self, "exact_time_tf_timeout")
                 self.get_logger().warn(
                     f"dropping scan: exact-time {tf_target_frame}<-"
                     f"{pending.scan_frame} TF timed out for stamp "
@@ -627,7 +693,13 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
                 )
                 self.pending_scans.append(pending)
                 continue
-            self._process_scan_with_transform(pending, transform)
+            processing_started_at = time.monotonic()
+            if pending.received_monotonic_sec is not None:
+                _record_scan_latency(self, "tf_queue_wait", processing_started_at - pending.received_monotonic_sec)
+            try:
+                self._process_scan_with_transform(pending, transform)
+            finally:
+                _record_scan_latency(self, "processing", time.monotonic() - processing_started_at)
 
     def _process_scan_with_transform(self, pending: _PendingScan, transform) -> None:
         msg = pending.message
@@ -648,6 +720,7 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
             )
             tf_stamp_sec = _stamp_to_sec(transform.header.stamp)
         except (AttributeError, TypeError, ValueError) as exc:
+            _record_scan_drop(self, "invalid_exact_time_tf")
             self.get_logger().warn(f"dropping scan: invalid exact-time TF: {exc}")
             return
         try:
@@ -665,6 +738,7 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
                 ),
             )
         except ValueError as exc:
+            _record_scan_drop(self, "invalid_observation_timing")
             self.get_logger().warn(f"dropping scan: {exc}")
             return
 
@@ -678,9 +752,11 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
                     map_from_odom=frozen_frame.certificate.map_from_odom,
                 )
         except ValueError as exc:
+            _record_scan_drop(self, "invalid_tf_pose")
             self.get_logger().warn(f"dropping scan: {exc}")
             return
         self.processed_scan_count += 1
+        _record_scan_latency(self, "scan_age_at_processing", timing.scan_age_sec)
         self.last_processed_scan_stamp_sec = scan_stamp_sec
         self.last_scan_pose_map = {
             "x_m": scan_pose_in_map.x_m,
@@ -731,10 +807,17 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
                 ),
             )
             self.visibility_session.buffer_receipt(receipt)
+        topology_profile = getattr(getattr(self, "args", None), "scan_topology_profile", "linear")
+        angle_max = getattr(msg, "angle_max", None)
+        self.last_scan_topology = ScanTopology(
+            len(msg.ranges), msg.angle_min, msg.angle_increment, angle_max, topology_profile,
+        ).evidence()
         candidates = detect_stand_candidates_from_scan(
             msg.ranges,
             angle_min_rad=msg.angle_min,
             angle_increment_rad=msg.angle_increment,
+            angle_max_rad=angle_max,
+            scan_topology_profile=topology_profile,
             config=self.detector_config,
         )
         self.detected_candidate_count += len(candidates)
@@ -742,6 +825,11 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
             return
 
         runtime_config = dict(self.runtime.as_log_dict())
+        runtime_config["lidar_scan_topology"] = dict(self.last_scan_topology)
+        runtime_config["lidar_wrapped_clusters"] = [
+            {"candidate_id": candidate.candidate_id, "source_indices": list(candidate.source_indices)}
+            for candidate in candidates if candidate.wraps_scan_seam
+        ]
         runtime_config[RUNTIME_TIMING_LIMITS_KEY] = self.timing_limits.as_dict()
         runtime_config[PROPOSAL_DETECTOR_CONFIG_EVIDENCE_KEY] = (
             proposal_detector_config_evidence(self.detector_config)
@@ -917,6 +1005,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-range-m", type=float, default=0.08)
     parser.add_argument("--max-range-m", type=float, default=3.5)
     parser.add_argument("--max-cluster-gap-m", type=float, default=0.08)
+    parser.add_argument(
+        "--scan-topology-profile", choices=SCAN_TOPOLOGY_PROFILES, default="linear",
+        help="Explicit full-rotation scanner contract; every scan must also pass conservative seam metadata checks.",
+    )
     parser.add_argument("--min-cluster-points", type=int, default=2)
     parser.add_argument("--min-width-m", type=float, default=0.03)
     parser.add_argument("--max-width-m", type=float, default=0.45)
@@ -966,6 +1058,9 @@ def observer_summary_payload(node: StandExplorerNode) -> dict[str, object]:
         "scan_frame_pose_in_planning_frame": node.last_scan_pose_map,
         "last_processed_scan_stamp_sec": node.last_processed_scan_stamp_sec,
         "processed_scan_count": node.processed_scan_count,
+        "scan_input_diagnostics": _scan_input_summary(node),
+        "scan_topology_profile": getattr(getattr(node, "args", None), "scan_topology_profile", "linear"),
+        "last_scan_topology": getattr(node, "last_scan_topology", None),
         "detected_candidate_count": node.detected_candidate_count,
         "accepted_observation_count": node.accepted_observation_count,
         "confirmed_stand_count": node.last_confirmed_stand_count,

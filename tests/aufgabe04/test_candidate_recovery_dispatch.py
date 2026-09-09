@@ -20,6 +20,7 @@ from scripts.aufgabe04.real_robot.candidate.startup_recovery import (
     CandidateStartupRecoveryEffects, CandidateStartupRecoveryError,
 )
 from scripts.aufgabe04.real_robot.execution.child_runner import MotionLegOutcome
+from tests.aufgabe04.test_initial_map_tf_recovery import initial_map_tf_stop
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,9 @@ class CandidateRecoveryDispatchTest(unittest.TestCase):
         elif phase == "preflight":
             status, reason = "preflight_failed", "route uncertainty rejected"
             details = {"reason": reason, "motion_published": False, "fail_closed": True}
+        elif phase == "cold_global_tf":
+            reason = "TF transform unavailable: map <- odom"
+            details = initial_map_tf_stop()
         elif phase != "prestart":
             raise AssertionError(phase)
         fields = {}
@@ -126,6 +130,59 @@ class CandidateRecoveryDispatchTest(unittest.TestCase):
         self.assertEqual(self.calls[-1][2].rejected_outcome.run_id, self.calls[-2][1].run_id)
         self.assertIsNotNone(result.startup_reseal_motion_permit_path)
         self.assertIsNone(result.motion_authorization_permit_path)
+
+    def test_cold_global_tf_stop_reprepares_candidate_with_distinct_permit(self):
+        result = self.execute([("initial", "cold_global_tf"), ("startup", "completed")])
+        self.assertEqual(result.status, "completed")
+        self.assertEqual([call[0] for call in self.calls], ["initial", "startup"])
+        self.assertEqual(len(self.admissions), 1)
+        attempt = self.calls[-1][2]
+        self.assertTrue(attempt.fresh_localization_evidence_path.is_file())
+        self.assertTrue((attempt.source_root / "route.csv").is_file())
+        self.assertEqual(attempt.identity.target_id, self.identity.target_id)
+        self.assertEqual(attempt.rejected_outcome.stop_reason, "TF transform unavailable: map <- odom")
+        self.assertEqual(attempt.rejected_outcome.stop_details["reason"], "lookup_exception")
+        self.assertNotEqual(result.run_id, attempt.rejected_outcome.run_id)
+        self.assertNotEqual(result.startup_reseal_motion_permit_path,
+                            attempt.rejected_outcome.mission_leg_motion_permit_path)
+        self.assertNotEqual(result.startup_reseal_motion_permit_sha256,
+                            attempt.rejected_outcome.mission_leg_motion_permit_sha256)
+
+    def test_cold_global_tf_stop_requires_matching_outer_frame_reason(self):
+        self.mutate_outcome = lambda owner, outcome: replace(
+            outcome, stop_reason="TF transform unavailable: odom <- base_footprint")
+        with self.assertRaisesRegex(CandidateStartupRecoveryError, "prestart_stop_reason_mismatch"):
+            self.execute([("initial", "cold_global_tf")])
+        self.assertEqual(len(self.calls), 1)
+        self.assertFalse(self.admissions)
+
+    def test_runtime_replacement_cold_global_tf_hands_back_to_startup(self):
+        result = self.execute([
+            ("initial", "runtime"), ("runtime", "cold_global_tf"), ("startup", "completed"),
+        ], runtime_budget=1)
+        self.assertEqual(result.status, "completed")
+        self.assertEqual([call[0] for call in self.calls], ["initial", "runtime", "startup"])
+        self.assertEqual(len(self.admissions), 2)
+        self.assertEqual(self.calls[-1][2].rejected_outcome.run_id, self.calls[-2][1].run_id)
+        self.assertIsNotNone(result.startup_reseal_motion_permit_path)
+        self.assertIsNone(result.motion_authorization_permit_path)
+
+    def test_cold_global_tf_history_with_stale_sample_remains_terminal(self):
+        def mutate(owner, outcome):
+            details = outcome.stop_details
+            state = details["initial_tf_acquisition"]
+            state["denial_reason"] = "required_tf_edge_has_non_acquisition_failure"
+            state["deadline_exhausted"] = False
+            state["elapsed_sec"] = 3.065
+            sample = state["edges"]["global_consistency"]["last_sample"]
+            sample.update(reason="stale_transform", available=True, stamp_sec=100.0, age_sec=1.664)
+            state["edges"]["global_consistency"]["non_acquisition_failure_seen"] = True
+            return outcome
+        self.mutate_outcome = mutate
+        with self.assertRaisesRegex(CandidateStartupRecoveryError, "initial_map_tf_deadline_not_exhausted"):
+            self.execute([("initial", "cold_global_tf")])
+        self.assertEqual(len(self.calls), 1)
+        self.assertFalse(self.admissions)
 
     def test_alternating_recoveries_keep_both_counters_and_routine(self):
         result = self.execute([("initial", "mismatch"), ("startup", "runtime"),

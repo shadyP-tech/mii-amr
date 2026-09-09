@@ -142,6 +142,11 @@ class AutonomousCameraCaptureTests(unittest.TestCase):
                 inspection_path,
             )
             self.assertIn("--inspection-observation-json", popen.call_args.args[0])
+            command = popen.call_args.args[0]
+            self.assertEqual(command[command.index("--capture-history-dir") + 1], str(output / "capture_history"))
+            self.assertEqual(command[command.index("--capture-max-frames") + 1], "64")
+            self.assertEqual(command[command.index("--capture-max-bytes") + 1], "33554432")
+            self.assertEqual(command[command.index("--scan-topology-profile") + 1], "linear")
 
     @patch.object(runtime, "_capture_camera_recommendation")
     def test_capture_adapter_preserves_inspection_path_and_legacy_success(self, capture):

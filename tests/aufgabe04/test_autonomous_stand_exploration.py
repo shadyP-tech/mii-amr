@@ -411,6 +411,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         max_attempts: int,
         candidate_a_failures: int,
         reject_candidate_sensor_timing: bool = False,
+        pilot_limit: int | None = None,
     ) -> dict[str, object]:
         """Run the real outer wrapper with ROS/motion replaced by typed effects."""
 
@@ -635,6 +636,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
 
         profile = SimpleNamespace(
             robot_id="turtlebot1",
+            calibration_profile_sha256="f" * 64,
             robot_radius_m=0.105,
             namespace="",
             amcl_topic="amcl_pose",
@@ -805,6 +807,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             patch.multiple(
                 autonomous_wrapper,
                 load_real_robot_profile=lambda *_args, **_kwargs: profile,
+                real_robot_profile_sha256=lambda _profile: "e" * 64,
                 load_camera_calibration=lambda *_args, **_kwargs: SimpleNamespace(),
                 validate_physical_site_contract=lambda *_args, **_kwargs: (
                     SimpleNamespace(
@@ -893,6 +896,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                         "known_start",
                         "--run-mode",
                         "execute-exact-two-camera",
+                        *([] if pilot_limit is None else ["--stop-after-camera-candidates", str(pilot_limit)]),
                     ]
                 )
             except SystemExit as exc:
@@ -916,6 +920,35 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 else None
             ),
         }
+
+    def test_camera_pilot_stops_after_one_receipt_without_completing_arena(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._run_exact_two_camera_wrapper_retry_fixture(
+                Path(tmp), max_attempts=1, candidate_a_failures=0, pilot_limit=1,
+            )
+            self.assertEqual(result["exit_code"], 0, result["failure"])
+            self.assertEqual(result["capture_order"], ["candidate_a"])
+            self.assertEqual(result["motion_targets"], ["candidate_a"])
+            root = result["session_root"]
+            summary = json.loads((root / "mission_summary.json").read_text())
+            self.assertEqual(summary["status"], "camera_checkpoint_complete")
+            self.assertEqual(summary["expected_stand_count"], 3)  # Fixture's sealed arena.
+            self.assertEqual(summary["keepout_candidate_uids"], ["candidate_a", "candidate_b", "candidate_c"])
+            self.assertEqual(summary["confirmed_candidate_uids"], ["candidate_a"])
+            for key in ("goal_completed", "exploration_complete", "camera_validation_complete", "motion_authorized"):
+                self.assertFalse(summary[key], key)
+            self.assertTrue(Path(summary["camera_checkpoint"]).is_file())
+            self.assertFalse((root / "stand_facing_catalog.json").exists())
+            self.assertFalse((root / "station_identity_registry.json").exists())
+
+    def test_camera_pilot_observation_failure_does_not_select_next_stand(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._run_exact_two_camera_wrapper_retry_fixture(
+                Path(tmp), max_attempts=1, candidate_a_failures=99, pilot_limit=1,
+            )
+            self.assertNotEqual(result["exit_code"], 0)
+            self.assertEqual(result["capture_order"], ["candidate_a"])
+            self.assertFalse((result["session_root"] / "camera_candidate_checkpoint.json").exists())
 
     def test_exact_two_wrapper_finishes_local_retry_before_next_candidate(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2772,6 +2805,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 map=MAP,
                 semantic_map_id="arena_1p898x3p9_auto",
                 lidar_epoch_sec=1.0,
+                scan_topology_profile="full_rotation",
             )
 
             def write_summary(command, **_kwargs):
@@ -2799,6 +2833,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 )
 
         command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--scan-topology-profile") + 1], "full_rotation")
         self.assertEqual(
             command[
                 command.index("--odom-execution-certificate-json") + 1

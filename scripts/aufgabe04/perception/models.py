@@ -21,6 +21,8 @@ class StandCandidate:
     center_y_m: float
     point_count: int
     confidence: float
+    source_indices: Tuple[int, ...] = ()
+    wraps_scan_seam: bool = False
 
 
 @dataclass(frozen=True)
@@ -28,8 +30,9 @@ class LidarStandDetectorConfig:
     min_range_m: float = 0.08
     max_range_m: float = 3.5
     max_cluster_gap_m: float = 0.08
-    # The TurtleBot LDS has roughly one-degree angular resolution.  A 7 cm
-    # stand head at 1.2--1.7 m commonly occupies only two adjacent beams.
+    # Sparse returns can occupy two adjacent beams. Use the scan's supplied
+    # increment (about 1.6 degrees in recent real receipts); these defaults
+    # are proposal heuristics, not measurements of the laser-plane stand shape.
     min_cluster_points: int = 2
     min_width_m: float = 0.03
     max_width_m: float = 0.45

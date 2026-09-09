@@ -82,10 +82,25 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--lidar-epoch-sec", type=float, default=8.0)
+    parser.add_argument(
+        "--scan-topology-profile", choices=("linear", "full_rotation"), default="linear",
+        help="Explicit scan topology assertion; full_rotation still validates each message's seam geometry.",
+    )
     parser.add_argument("--candidate-approach-offset-m", type=float, default=0.70)
     parser.add_argument("--final-facing-offset-m", type=float, default=0.35)
     parser.add_argument("--axis-sample-count", type=int, default=7)
     parser.add_argument("--camera-timeout-sec", type=float, default=90.0)
+    parser.add_argument(
+        "--stop-after-camera-candidates", type=int,
+        help="Stop after this many validated candidates as an incomplete pilot checkpoint; preserves the arena goal and full obstacle pool.",
+    )
+    parser.add_argument("--camera-capture-max-frames", type=int, default=64)
+    parser.add_argument("--camera-capture-max-bytes", type=int, default=33554432)
+    parser.add_argument(
+        "--server-qr-mapping-evidence", type=Path,
+        help="Sealed robot-scoped saved server mappings; without this, discovery records binding-pending identities.",
+    )
+    parser.add_argument("--server-robot-id", help="Exact robot ID in the saved server response; required with mapping evidence.")
     parser.add_argument(
         "--max-camera-observation-attempts-per-candidate",
         type=int,

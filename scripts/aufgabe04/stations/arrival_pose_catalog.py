@@ -374,6 +374,7 @@ def validate_catalog_provenance(provenance: CatalogProvenance) -> None:
         "survey_config_sha256",
         "calibration_profile_sha256",
         "survey_input_binding_sha256",
+        "obstacle_candidate_snapshot_sha256",
     ):
         digest = getattr(provenance, field)
         if digest:
@@ -598,7 +599,7 @@ def _catalog_payload_without_hash(catalog: ArrivalPoseCatalog) -> dict[str, obje
 
 
 def _provenance_payload(provenance: CatalogProvenance) -> dict[str, object]:
-    return {
+    payload = {
         "planning_frame": provenance.planning_frame,
         "map_yaml_sha256": provenance.map_yaml_sha256,
         "world_id": provenance.world_id,
@@ -614,6 +615,9 @@ def _provenance_payload(provenance: CatalogProvenance) -> dict[str, object]:
         "calibration_profile_sha256": provenance.calibration_profile_sha256,
         "survey_input_binding_sha256": provenance.survey_input_binding_sha256,
     }
+    if provenance.obstacle_candidate_snapshot_sha256:
+        payload["obstacle_candidate_snapshot_sha256"] = provenance.obstacle_candidate_snapshot_sha256
+    return payload
 
 
 def _arrival_pose_record_payload(record: ArrivalPoseRecord) -> dict[str, object]:
@@ -737,8 +741,9 @@ def _provenance_from_payload(payload: object) -> CatalogProvenance:
             "survey_input_binding_sha256",
         }
     )
-    if frozenset(item) not in (legacy_fields, bound_fields):
-        _require_exact_fields(item, bound_fields, "provenance")
+    obstacle_fields = bound_fields | {"obstacle_candidate_snapshot_sha256"}
+    if frozenset(item) not in (legacy_fields, bound_fields, obstacle_fields):
+        _require_exact_fields(item, obstacle_fields, "provenance")
     return CatalogProvenance(
         planning_frame=_require_string(item["planning_frame"], "provenance.planning_frame"),
         map_yaml_sha256=_require_string(
@@ -766,6 +771,10 @@ def _provenance_from_payload(payload: object) -> CatalogProvenance:
         calibration_profile_sha256=_require_string(
             item.get("calibration_profile_sha256", ""),
             "provenance.calibration_profile_sha256",
+        ),
+        obstacle_candidate_snapshot_sha256=_require_string(
+            item.get("obstacle_candidate_snapshot_sha256", ""),
+            "provenance.obstacle_candidate_snapshot_sha256",
         ),
         survey_input_binding_sha256=_require_string(
             item.get("survey_input_binding_sha256", ""),

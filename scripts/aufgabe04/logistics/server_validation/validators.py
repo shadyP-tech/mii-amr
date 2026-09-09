@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Iterable, Sequence
 
 from scripts.aufgabe04.task_client.models import RobotPlan, RobotStatus, ServerTaskSnapshot
+from scripts.aufgabe04.stations.station_ids import canonical_qr_id, canonical_server_station_id
 
 from .models import ValidatedServerTask, server_order_sha256
 
@@ -35,14 +36,17 @@ def _select_one_robot(items: Iterable[object], robot_id: str, item_name: str):
 
 
 def resolve_scanned_station(plan: RobotPlan, qr_id: str) -> str:
-    normalized = qr_id.strip().upper()
+    exact_qr = canonical_qr_id(qr_id)
+    if any(mapping.robot_id != plan.robot_id for mapping in plan.qr_mappings):
+        raise ValueError("qr_mappings entry belongs to another robot")
+    if len({mapping.qr_code_id for mapping in plan.qr_mappings}) != len(plan.qr_mappings):
+        raise ValueError("ambiguous duplicate qr_mappings QR identifier")
+    if len({mapping.station_id for mapping in plan.qr_mappings}) != len(plan.qr_mappings):
+        raise ValueError("ambiguous duplicate qr_mappings station identifier")
     for mapping in plan.qr_mappings:
-        if mapping.qr_code_id == normalized:
-            return mapping.station_id
-    known_stations = set(plan.expanded_path) | {mapping.station_id for mapping in plan.qr_mappings}
-    if normalized in known_stations:
-        return normalized
-    raise ValueError(f"unknown QR or station id: {normalized}")
+        if mapping.qr_code_id == exact_qr:
+            return canonical_server_station_id(mapping.station_id)
+    raise ValueError(f"unknown QR or station id without authoritative qr_mappings: {exact_qr}")
 
 
 def _remaining_station_order(plan: RobotPlan, target_station: str) -> tuple[str, ...]:
@@ -95,7 +99,7 @@ def build_server_task_snapshot(
         robot_id=robot_id,
         status=status,
         plan=plan,
-        scanned_qr_id=scanned_qr_id.strip().upper(),
+        scanned_qr_id=canonical_qr_id(scanned_qr_id),
         resolved_station_id=resolved_station,
     )
 
@@ -109,7 +113,8 @@ def validate_server_task(
     max_plan_age_sec: float = 3600.0,
 ) -> ValidatedServerTask:
     now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    local_stations = {station.strip().upper() for station in local_station_ids}
+    canonical_server_station_id(snapshot.status.target)
+    local_stations = {canonical_server_station_id(station) for station in local_station_ids}
     if not local_stations:
         raise ValueError("local station set must not be empty")
     if snapshot.status.robot_id != snapshot.robot_id:

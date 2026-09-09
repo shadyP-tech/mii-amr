@@ -4,6 +4,7 @@ import math
 from typing import Iterable, List, Sequence
 
 from .models import BaseFramePoint, LidarStandDetectorConfig, StandCandidate
+from .scan_topology import ScanTopology, wraps_scan_seam
 
 
 def _valid_range(raw_range: float, config: LidarStandDetectorConfig) -> bool:
@@ -23,6 +24,10 @@ def scan_points_from_ranges(
     config: LidarStandDetectorConfig | None = None,
 ) -> List[BaseFramePoint]:
     cfg = config or LidarStandDetectorConfig()
+    if (not all(type(value) in (int, float) and math.isfinite(value)
+                for value in (angle_min_rad, angle_increment_rad))
+            or angle_increment_rad == 0.0):
+        return []
     points: List[BaseFramePoint] = []
     for index, raw_range in enumerate(ranges):
         if not _valid_range(raw_range, cfg):
@@ -49,6 +54,7 @@ def cluster_scan_points(
     points: Sequence[BaseFramePoint],
     *,
     config: LidarStandDetectorConfig | None = None,
+    topology: ScanTopology | None = None,
 ) -> List[List[BaseFramePoint]]:
     cfg = config or LidarStandDetectorConfig()
     ordered = sorted(points, key=lambda point: point.source_index)
@@ -70,6 +76,14 @@ def cluster_scan_points(
 
     if current:
         clusters.append(current)
+    if (
+        len(clusters) > 1 and topology is not None
+        and topology.joins_endpoints(clusters[-1][-1].source_index, clusters[0][0].source_index)
+        and _distance(clusters[-1][-1], clusters[0][0]) <= cfg.max_cluster_gap_m
+    ):
+        # Keep explicit acquisition order over the seam, not a misleading
+        # sorted interval that appears to include every ray between 0 and N-1.
+        clusters = [clusters[-1] + clusters[0], *clusters[1:-1]]
     return clusters
 
 
@@ -111,6 +125,8 @@ def _candidate_from_cluster(
         center_y_m=center_y,
         point_count=len(cluster),
         confidence=confidence,
+        source_indices=tuple(point.source_index for point in cluster),
+        wraps_scan_seam=wraps_scan_seam(tuple(point.source_index for point in cluster)),
     )
 
 
@@ -118,10 +134,11 @@ def detect_stand_candidates(
     points: Sequence[BaseFramePoint],
     *,
     config: LidarStandDetectorConfig | None = None,
+    topology: ScanTopology | None = None,
 ) -> List[StandCandidate]:
     cfg = config or LidarStandDetectorConfig()
     candidates: List[StandCandidate] = []
-    for cluster in cluster_scan_points(points, config=cfg):
+    for cluster in cluster_scan_points(points, config=cfg, topology=topology):
         candidate = _candidate_from_cluster(
             cluster,
             candidate_index=len(candidates) + 1,
@@ -137,6 +154,8 @@ def detect_stand_candidates_from_scan(
     *,
     angle_min_rad: float,
     angle_increment_rad: float,
+    angle_max_rad: float | None = None,
+    scan_topology_profile: str = "linear",
     config: LidarStandDetectorConfig | None = None,
 ) -> List[StandCandidate]:
     cfg = config or LidarStandDetectorConfig()
@@ -146,5 +165,6 @@ def detect_stand_candidates_from_scan(
         angle_increment_rad=angle_increment_rad,
         config=cfg,
     )
-    return detect_stand_candidates(points, config=cfg)
-
+    topology = ScanTopology(len(ranges), angle_min_rad, angle_increment_rad,
+                            angle_max_rad, scan_topology_profile)
+    return detect_stand_candidates(points, config=cfg, topology=topology)

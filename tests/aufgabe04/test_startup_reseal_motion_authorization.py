@@ -38,6 +38,7 @@ from scripts.aufgabe04.real_robot.readiness.startup_reseal import (
     StartupResealPermitContext,
     write_startup_reseal_permit_summary,
 )
+from tests.aufgabe04.test_initial_map_tf_recovery import initial_map_tf_stop
 
 
 class StartupResealMotionAuthorizationTest(unittest.TestCase):
@@ -852,6 +853,40 @@ class StartupResealMotionAuthorizationTest(unittest.TestCase):
             load_startup_reseal_motion_permit(path).recovery_source_kind,
             source_kind,
         )
+
+    def test_typed_cold_global_tf_stop_issues_and_validates_new_permit(self):
+        source_kind = STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY
+        self._write_prestart_rejected_log(
+            stop_reason="TF transform unavailable: map <- odom",
+            stop_details=initial_map_tf_stop(),
+        )
+        self._write_summary(recovery_source_kind=source_kind)
+        permit = self._new_permit(recovery_source_kind=source_kind)
+        path = self.root / "typed-cold-tf-permit.json"
+        write_startup_reseal_motion_permit(path, permit)
+        self.assertEqual(validate_startup_reseal_motion_permit_for_execution(
+            path, **self._execution_kwargs(),
+        ), permit)
+        self.assertNotEqual(permit.run_id, permit.rejected_run_id)
+
+    def test_typed_global_tf_stop_cannot_bypass_reason_or_stale_history(self):
+        source_kind = STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY
+        for failure in ("wrong_outer_frames", "stale_history"):
+            with self.subTest(failure=failure):
+                details = initial_map_tf_stop()
+                reason = "TF transform unavailable: map <- odom"
+                if failure == "wrong_outer_frames":
+                    reason = "TF transform unavailable: odom <- base_footprint"
+                else:
+                    edge = details["initial_tf_acquisition"]["edges"]["global_consistency"]
+                    edge["non_acquisition_failure_seen"] = True
+                self._write_prestart_rejected_log(stop_reason=reason, stop_details=details)
+                self._write_summary(recovery_source_kind=source_kind)
+                with self.assertRaisesRegex(ValueError, "eligible prestart localization-continuity"):
+                    write_startup_reseal_motion_permit(
+                        self.root / f"invalid-typed-tf-{failure}.json",
+                        self._new_permit(recovery_source_kind=source_kind),
+                    )
 
     def test_prestart_requires_exact_consumed_started_stopped_sequence(self):
         source_kind = (

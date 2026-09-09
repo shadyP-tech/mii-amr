@@ -44,6 +44,8 @@ class CatalogProvenance:
     survey_config_sha256: str = ""
     calibration_profile_sha256: str = ""
     survey_input_binding_sha256: str = ""
+    # Full candidate pool, including hypotheses without a resolved QR identity.
+    obstacle_candidate_snapshot_sha256: str = ""
 
 
 @dataclass(frozen=True)

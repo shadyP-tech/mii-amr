@@ -25,8 +25,9 @@ from scripts.aufgabe04.real_robot.candidate.observation_deferral import (
     CandidateObservationAttemptEvidence,
 )
 from scripts.aufgabe04.stations.station_identity_registry import (
-    StationIdentity, StationIdentityRegistry, validate_station_identity,
+    StationIdentityRegistry,
 )
+from scripts.aufgabe04.stations.station_ids import canonical_qr_id
 
 from scripts.aufgabe04.stations.candidate_snapshot import CandidateSnapshot
 
@@ -142,7 +143,7 @@ class CandidateQrGoalProgress:
         observations and all geometry as explicit duplicate ambiguity.
         """
         record = self._record(uid)
-        validate_station_identity(StationIdentity(uid, qr_id, f"station_{qr_id}"))
+        qr_id = canonical_qr_id(qr_id)
         if record["qr_id"] is not None:
             raise RuntimeError("candidate already has a validated QR claim")
         record.update(qr_id=qr_id, recommendation_path=str(recommendation_path))
@@ -218,8 +219,8 @@ class CandidateQrGoalProgressStore:
 
 def validate_candidate_qr_goal_completion(
     progress_path: Path, *, candidate_snapshot: CandidateSnapshot,
-    confirmed_candidate_snapshot: CandidateSnapshot, identity_registry: StationIdentityRegistry,
-    expected_stand_count: int,
+    confirmed_candidate_snapshot: CandidateSnapshot, identity_registry: StationIdentityRegistry | None = None,
+    expected_stand_count: int, observed_qr_by_candidate: Mapping[str, str] | None = None,
 ) -> Mapping[str, object]:
     """Verify final progress against both snapshots and the identity registry.
 
@@ -264,8 +265,17 @@ def validate_candidate_qr_goal_completion(
     ))
     if subset != confirmed_candidate_snapshot:
         raise ValueError("confirmed snapshot changed source candidate geometry or provenance")
-    validate_station_identity_registry(identity_registry, candidate_snapshot=confirmed_candidate_snapshot)
-    identities = {mapping.candidate_uid: mapping.qr_id for mapping in identity_registry.mappings}
+    if identity_registry is not None:
+        validate_station_identity_registry(identity_registry, candidate_snapshot=confirmed_candidate_snapshot)
+        identities = {mapping.candidate_uid: mapping.qr_id for mapping in identity_registry.mappings}
+        if observed_qr_by_candidate is not None and dict(observed_qr_by_candidate) != identities:
+            raise ValueError("observed QR identities differ from the identity registry")
+    else:
+        if observed_qr_by_candidate is None:
+            raise ValueError("goal validation requires observed identities or a bound registry")
+        identities = {uid: canonical_qr_id(qr) for uid, qr in observed_qr_by_candidate.items()}
+        if set(identities) != set(confirmed_uids) or len(set(identities.values())) != expected_stand_count:
+            raise ValueError("observed identities must uniquely resolve the confirmed snapshot")
     if payload.get("confirmed_qr_ids") != sorted(identities.values()):
         raise ValueError("goal QR identities differ from the identity registry")
     dispositions = payload.get("candidate_dispositions")

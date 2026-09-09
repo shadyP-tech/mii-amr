@@ -25,6 +25,7 @@ import math
 from dataclasses import dataclass, replace
 
 from scripts.aufgabe04.perception.stand_axis_lidar_roi import PlainLaserScan
+from scripts.aufgabe04.perception.scan_topology import ScanTopology, wraps_scan_seam
 
 
 CANDIDATE_LIDAR_ASSOCIATION_SCHEMA_VERSION = 1
@@ -69,6 +70,9 @@ class CandidateLidarAssociation:
     selection_source: str
     nearest_cone_distance_m: float | None
     nearest_range_delta_m: float | None
+    selected_cluster_source_indices: tuple[int, ...] = ()
+    selected_cluster_wraps_scan_seam: bool = False
+    scan_topology: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -185,11 +189,16 @@ def associate_candidate_lidar_target(
         return _rejected(common, rejection_reason="no_scan")
 
     scan_age_sec = _scan_age(scan, now_sec=now_sec)
+    topology = ScanTopology(
+        len(scan.ranges), scan.angle_min, scan.angle_increment,
+        scan.angle_max, scan.scan_topology_profile,
+    )
     scan_common = {
         **common,
         "scan_frame_id": scan.scan_frame_id,
         "scan_stamp_sec": scan.scan_stamp_sec,
         "scan_age_sec": scan_age_sec,
+        "scan_topology": topology.evidence(),
     }
     if not _valid_scan_geometry(scan):
         return _rejected(scan_common, rejection_reason="invalid_scan_geometry")
@@ -227,6 +236,7 @@ def associate_candidate_lidar_target(
         in_range_samples,
         max_range_jump_m=max_range_jump_m,
         max_point_gap_m=max_point_gap_m,
+        topology=topology,
     )
     eligible = tuple(
         cluster for cluster in clusters if len(cluster.samples) >= min_cluster_sample_count
@@ -271,6 +281,8 @@ def associate_candidate_lidar_target(
         selected_cluster_sample_count=len(selected.samples),
         selected_cluster_start_index=selected.start_index,
         selected_cluster_end_index=selected.end_index,
+        selected_cluster_source_indices=tuple(sample.index for sample in selected.samples),
+        selected_cluster_wraps_scan_seam=wraps_scan_seam(tuple(sample.index for sample in selected.samples)),
         selected_cluster_bearing_rad=selected.bearing_rad,
         selected_cluster_bearing_delta_from_map_rad=abs(
             _angle_delta(selected.bearing_rad, map_bearing_rad)
@@ -391,6 +403,8 @@ def _association_rejected_as_ambiguous(
         selected_cluster_sample_count=0,
         selected_cluster_start_index=None,
         selected_cluster_end_index=None,
+        selected_cluster_source_indices=(),
+        selected_cluster_wraps_scan_seam=False,
         selected_cluster_bearing_rad=None,
         selected_cluster_bearing_delta_from_map_rad=None,
         selected_cluster_bearing_delta_from_camera_rad=None,
@@ -487,6 +501,7 @@ def _contiguous_clusters(
     *,
     max_range_jump_m: float,
     max_point_gap_m: float,
+    topology: ScanTopology | None = None,
 ) -> tuple[_ContiguousCluster, ...]:
     if not samples:
         return ()
@@ -502,6 +517,11 @@ def _contiguous_clusters(
             groups.append([sample])
         else:
             groups[-1].append(sample)
+    if len(groups) > 1 and topology is not None and _samples_are_contiguous(
+        groups[-1][-1], groups[0][0], max_range_jump_m=max_range_jump_m,
+        max_point_gap_m=max_point_gap_m, topology=topology,
+    ):
+        groups = [groups[-1] + groups[0], *groups[1:-1]]
     return tuple(_build_cluster(tuple(group)) for group in groups)
 
 
@@ -511,8 +531,11 @@ def _samples_are_contiguous(
     *,
     max_range_jump_m: float,
     max_point_gap_m: float,
+    topology: ScanTopology | None = None,
 ) -> bool:
-    if right.index != left.index + 1:
+    if right.index != left.index + 1 and not (
+        topology is not None and topology.joins_endpoints(left.index, right.index)
+    ):
         return False
     if abs(right.distance_m - left.distance_m) > max_range_jump_m:
         return False

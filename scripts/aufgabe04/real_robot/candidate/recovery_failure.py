@@ -8,6 +8,7 @@ connects to ROS, launches a process, or writes an artifact.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 from scripts.aufgabe04.real_robot.execution.child_runner import MotionLegOutcome
 
@@ -107,7 +108,34 @@ class RejectedChildFailure:
             if self.reported_reason == self.policy_reason
             else f"; fail-closed policy: {self.policy_reason}"
         )
-        return f"{prefix} {self.run_id}: {self.reported_reason}{policy_suffix}"
+        diagnostic = self._tf_diagnostic_summary()
+        return f"{prefix} {self.run_id}: {self.reported_reason}{diagnostic}{policy_suffix}"
+
+    def _tf_diagnostic_summary(self) -> str:
+        """Explain typed TF rejection without changing the child reason contract."""
+
+        details = self.stop_details
+        if details.get("source") != "tf_lookup":
+            return ""
+        fields = []
+        reason = details.get("reason")
+        if isinstance(reason, str) and reason:
+            fields.append(reason)
+        for label, value in (("age", details.get("age_sec")),
+                             ("limit", details.get("max_age_sec"))):
+            if type(value) in (int, float) and math.isfinite(value):
+                fields.append(f"{label}={value:.3f}s")
+        state = details.get("initial_tf_acquisition")
+        if isinstance(state, dict):
+            denial = state.get("denial_reason")
+            if isinstance(denial, str) and denial:
+                fields.append(denial)
+            elapsed = state.get("elapsed_sec")
+            maximum = state.get("maximum_startup_wait_sec")
+            if all(type(value) in (int, float) and math.isfinite(value)
+                   for value in (elapsed, maximum)):
+                fields.append(f"startup={elapsed:.3f}/{maximum:.3f}s")
+        return f" [{'; '.join(fields)}]" if fields else ""
 
     def to_event_fields(self) -> dict[str, object]:
         return {

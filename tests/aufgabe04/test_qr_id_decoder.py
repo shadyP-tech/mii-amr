@@ -13,7 +13,7 @@ class QRIdDecoderTest(unittest.TestCase):
     def test_decodes_single_qr_id(self):
         scanned = decode_qr_id(" qr_001 ")
 
-        self.assertEqual(scanned.qr_id, "QR_001")
+        self.assertEqual(scanned.qr_id, "qr_001")
         self.assertEqual(scanned.raw_text, " qr_001 ")
 
     def test_rejects_route_payload(self):

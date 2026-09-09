@@ -175,6 +175,27 @@ class InitialMapTfRecoveryTests(unittest.TestCase):
         self.assertTrue(decision.eligible, decision.reason)
         self.assertEqual(decision.recovery_action, "fresh_localization_reseal")
 
+    def test_optional_acquisition_counters_cannot_conceal_stale_history(self):
+        counters = ("non_acquisition_failure_count", "waitable_stale_sample_count")
+        for make_details in (initial_map_tf_stop, initial_tf_drift_stop):
+            for role in ("execution_pose", "global_consistency"):
+                with self.subTest(kind=make_details.__name__, role=role):
+                    details = make_details()
+                    self.assertTrue(decide(details).eligible)  # Older schema 2.
+                    edge = details["initial_tf_acquisition"]["edges"][role]
+                    edge.update(dict.fromkeys(counters, 0))
+                    self.assertTrue(decide(details).eligible)
+                    for counter in counters:
+                        for bad_value in (1, -1, True, 0.0, None):
+                            changed = deepcopy(details)
+                            changed["initial_tf_acquisition"]["edges"][role][counter] = bad_value
+                            decision = decide(changed)
+                            self.assertFalse(decision.eligible)
+                            self.assertEqual(decision.reason, "invalid_initial_map_tf_acquisition_counters")
+                        changed = deepcopy(details)
+                        del changed["initial_tf_acquisition"]["edges"][role][counter]
+                        self.assertFalse(decide(changed).eligible)
+
     def test_typed_drift_requires_complete_matching_context_and_acquired_global_edge(self):
         for path, value in (
             (("execution_context", "certificate_sha256"), "b" * 64),

@@ -215,6 +215,7 @@ from scripts.aufgabe04.real_robot.readiness.sensor_timing_runtime import (
 )
 from scripts.aufgabe04.real_robot.candidate.approach import (
     CandidateApproachConfig,
+    CandidateCameraCheckpoint,
     CandidateApproachEffects,
     CandidateMotionLegRequest,
     CandidateObservation,
@@ -1250,6 +1251,8 @@ def _capture_lidar_epoch(
     command = [
         sys.executable,
         "scripts/aufgabe04/perception/stand_explorer_node.py",
+        "--scan-topology-profile",
+        getattr(args, "scan_topology_profile", "linear"),
         "--namespace",
         profile.namespace,
         "--scan-topic",
@@ -1445,6 +1448,14 @@ def _capture_camera_recommendation(
     command = [
         sys.executable,
         "scripts/aufgabe04/real_robot/entrypoints/passive_viewpoint_node.py",
+        "--scan-topology-profile",
+        getattr(args, "scan_topology_profile", "linear"),
+        "--capture-history-dir",
+        str(output_dir / "capture_history"),
+        "--capture-max-frames",
+        str(getattr(args, "camera_capture_max_frames", 64)),
+        "--capture-max-bytes",
+        str(getattr(args, "camera_capture_max_bytes", 33554432)),
         "--robot-profile",
         str(args.robot_profile),
         "--camera-calibration",
@@ -1850,6 +1861,22 @@ from .cli import (
 
 
 def _validate_inputs(parser, args, profile, calibration) -> None:
+    pilot_limit = getattr(args, "stop_after_camera_candidates", None)
+    if pilot_limit is not None:
+        if type(pilot_limit) is not int or not 1 <= pilot_limit < args.expected_stand_count:
+            parser.error("--stop-after-camera-candidates must be positive and below the unchanged arena stand count")
+        if args.run_mode not in (AutonomousRunMode.EXECUTE_FULL.value, AutonomousRunMode.EXECUTE_EXACT_TWO_CAMERA.value):
+            parser.error("--stop-after-camera-candidates requires a camera execution mode")
+    if (getattr(args, "server_qr_mapping_evidence", None) is None) != (getattr(args, "server_robot_id", None) is None):
+        parser.error("--server-qr-mapping-evidence and --server-robot-id are required together")
+    if getattr(args, "server_qr_mapping_evidence", None) is not None:
+        from scripts.aufgabe04.stations.server_identity_binding import load_server_qr_mapping_evidence
+        load_server_qr_mapping_evidence(args.server_qr_mapping_evidence,
+                                       robot_id=args.server_robot_id, now_sec=time.time())
+    for field in ("camera_capture_max_frames", "camera_capture_max_bytes"):
+        value = getattr(args, field, 1)
+        if type(value) is not int or value <= 0:
+            parser.error(f"--{field.replace('_', '-')} must be positive")
     if (
         type(args.expected_stand_count) is not int
         or args.expected_stand_count <= 0
@@ -2759,6 +2786,11 @@ def main(argv=None) -> int:
                 snapshot=snapshot,
                 snapshot_path=snapshot_path,
                 expected_stand_count=args.expected_stand_count,
+                server_qr_mapping_evidence_path=args.server_qr_mapping_evidence,
+                server_robot_id=args.server_robot_id,
+                stop_after_camera_candidates=args.stop_after_camera_candidates,
+                calibration_profile_sha256=profile.calibration_profile_sha256,
+                robot_profile_sha256=real_robot_profile_sha256(profile),
                 approach_offset_m=args.candidate_approach_offset_m,
                 inflation_radius_m=inflation_radius_m,
                 candidate_transit_radius_m=candidate_keepout_radius_m,
@@ -2887,6 +2919,21 @@ def main(argv=None) -> int:
                 ),
             ),
         )
+        if isinstance(candidate_phase, CandidateCameraCheckpoint):
+            result = {
+                **(exact_two_camera_summary or {}),
+                **candidate_phase.to_mission_summary_fields(),
+                "session_id": args.session_id, "run_mode": args.run_mode,
+                "candidate_snapshot": str(snapshot_path),
+                "candidate_snapshot_sha256": snapshot_sha256,
+                "lidar_coverage_complete": True,
+                "camera_validation_complete": False,
+                "camera_approach_executed": True,
+                "motion_authorized": False,
+            }
+            _write_json(session_root / "mission_summary.json", result)
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0
         completed_stand_model = load_measured_physical_stand_model(
             args.stand_model_profile
         )

@@ -21,6 +21,9 @@ from scripts.aufgabe04.stations.candidate_snapshot import (
 )
 
 
+from scripts.aufgabe04.stations.station_ids import canonical_server_station_id
+
+
 STATION_IDENTITY_REGISTRY_SCHEMA_VERSION = 1
 
 _HASH_FIELD = "station_identity_registry_sha256"
@@ -203,6 +206,8 @@ def validate_station_identity(identity: StationIdentity) -> None:
     _validate_id(identity.candidate_uid, "candidate_uid")
     _validate_id(identity.qr_id, "qr_id")
     _validate_id(identity.server_station_id, "server_station_id")
+    if canonical_server_station_id(identity.server_station_id) != identity.server_station_id:
+        raise StationIdentityRegistryError("invalid_registry", "server_station_id is not canonical")
 
 
 def candidate_order_for_server_order(

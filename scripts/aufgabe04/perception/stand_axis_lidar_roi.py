@@ -30,6 +30,8 @@ class PlainLaserScan:
     scan_frame_id: str
     scan_stamp_sec: float | None = None
     receipt_sec: float | None = None
+    angle_max: float | None = None
+    scan_topology_profile: str = "linear"
 
 
 @dataclass(frozen=True)

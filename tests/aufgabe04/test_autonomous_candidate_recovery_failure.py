@@ -1,4 +1,5 @@
 from pathlib import Path
+from dataclasses import replace
 import unittest
 
 from scripts.aufgabe04.real_robot.candidate.recovery_failure import (
@@ -29,6 +30,31 @@ def _stopped_outcome() -> MotionLegOutcome:
 
 
 class CandidateRecoveryFailureTest(unittest.TestCase):
+    def test_stale_tf_terminal_message_explains_actual_run_without_rewriting_reason(self):
+        stop_reason = "TF transform unavailable: map <- odom"
+        outcome = replace(
+            _stopped_outcome(), stop_reason=stop_reason, motion_published=False,
+            stop_details={
+                "source": "tf_lookup", "reason": "stale_transform",
+                "age_sec": 1.664346432, "max_age_sec": 1.0,
+                "initial_tf_acquisition": {
+                    "denial_reason": "required_tf_edge_has_non_acquisition_failure",
+                    "elapsed_sec": 3.065873957, "maximum_startup_wait_sec": 5.0,
+                },
+            },
+        )
+        rejected = RejectedChildFailure.from_outcome(
+            outcome, policy_reason="invalid_initial_map_tf_stop",
+            preserve_child_reason=True,
+        )
+        message = rejected.rejection_message()
+        self.assertIn("stale_transform; age=1.664s; limit=1.000s", message)
+        self.assertIn("required_tf_edge_has_non_acquisition_failure", message)
+        self.assertIn("startup=3.066/5.000s", message)
+        self.assertIn("fail-closed policy: invalid_initial_map_tf_stop", message)
+        self.assertEqual(rejected.reported_reason, stop_reason)
+        self.assertEqual(rejected.to_failure_fields()["stop_reason"], stop_reason)
+
     def test_permit_evidence_is_complete_and_json_ready(self):
         outcome = _stopped_outcome()
 

@@ -1109,6 +1109,7 @@ def _validate_prestart_localization_rejected_semantic_log(
 ) -> None:
     from scripts.aufgabe04.navigation.localization.prestart_localization_reseal import (
         evaluate_prestart_localization_reseal,
+        prestart_localization_stop_reason_matches,
     )
 
     same_run = _same_run_events(permit)
@@ -1143,8 +1144,9 @@ def _validate_prestart_localization_rejected_semantic_log(
             and decision.requires_fresh_localization
             and decision.requires_new_route_certificate
             and decision.automatic_motion_authorized is False
-            and isinstance(details, Mapping)
-            and event.get("stop_reason") == details.get("reason")
+            and prestart_localization_stop_reason_matches(
+                event.get("stop_reason"), details,
+            )
         ):
             matches.append((index, event))
     if len(matches) != 1:

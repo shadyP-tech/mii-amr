@@ -94,6 +94,8 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     StandSurveyRegistry,
     coverage_survey_plan_sha256,
     load_stand_survey_registry,
+    write_stand_survey_registry,
+    stand_survey_registry_sha256,
 )
 from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import (
     REAL_VIEWPOINT_SOURCE,
@@ -141,12 +143,12 @@ from scripts.aufgabe04.stations.candidate_snapshot import (
     load_candidate_snapshot,
     write_candidate_snapshot,
 )
-from scripts.aufgabe04.stations.create_station_identity_registry import (
-    create_registry,
+from scripts.aufgabe04.stations.server_identity_binding import (
+    bind_observed_station_identities, load_server_qr_mapping_evidence,
+    write_observed_identities, load_observed_identities,
 )
 from scripts.aufgabe04.stations.models import Station, StationPose
 from scripts.aufgabe04.stations.station_identity_registry import (
-    StationIdentity,
     load_station_identity_registry,
     station_identity_registry_sha256,
     write_station_identity_registry,
@@ -227,6 +229,11 @@ class CandidateApproachConfig:
     camera_arrival_range_slack_m: float = 0.20
     max_candidate_inspection_views: int = 8
     expected_stand_count: int | None = None
+    server_qr_mapping_evidence_path: Path | None = None
+    server_robot_id: str | None = None
+    calibration_profile_sha256: str | None = None
+    robot_profile_sha256: str | None = None
+    stop_after_camera_candidates: int | None = None
 
 
 @dataclass(frozen=True)
@@ -334,8 +341,8 @@ class _CandidateObservationFrame:
 class CandidateApproachComplete:
     stand_count: int
     visit_order: tuple[str, ...]
-    identity_registry_path: Path
-    identity_registry_sha256: str
+    identity_registry_path: Path | None
+    identity_registry_sha256: str | None
     stand_facing_catalog_path: Path
     stand_facing_catalog_sha256: str
     facing_records: tuple[Mapping[str, object], ...]
@@ -347,13 +354,21 @@ class CandidateApproachComplete:
     candidate_goal_progress_path: Path | None = None
     candidate_goal_progress_sha256: str | None = None
     goal_progress: Mapping[str, object] | None = None
+    observed_identities_path: Path | None = None
+    observed_identities_sha256: str | None = None
+    identity_binding_status: str = "server_binding_pending"
 
     def to_mission_summary_fields(self) -> dict[str, object]:
         return {
             "stand_count": self.stand_count,
             "stand_facing_catalog": str(self.stand_facing_catalog_path),
             "stand_facing_catalog_sha256": self.stand_facing_catalog_sha256,
-            "station_identity_registry": str(self.identity_registry_path),
+            "station_identity_registry": (None if self.identity_registry_path is None
+                                          else str(self.identity_registry_path)),
+            "observed_station_identities": (None if self.observed_identities_path is None
+                                            else str(self.observed_identities_path)),
+            "observed_station_identities_sha256": self.observed_identities_sha256,
+            "identity_binding_status": self.identity_binding_status,
             "station_identity_registry_sha256": (
                 self.identity_registry_sha256
             ),
@@ -378,6 +393,27 @@ class CandidateApproachComplete:
                     "candidate_geometry_unchanged",
                 )
             }),
+        }
+
+
+@dataclass(frozen=True)
+class CandidateCameraCheckpoint:
+    """A stopped pilot observation; the arena discovery goal is unfinished."""
+
+    checkpoint_path: Path
+    checkpoint_sha256: str
+    progress: Mapping[str, object]
+
+    def to_mission_summary_fields(self) -> dict[str, object]:
+        return {
+            **self.progress,
+            "status": "camera_checkpoint_complete",
+            "camera_checkpoint": str(self.checkpoint_path),
+            "camera_checkpoint_sha256": self.checkpoint_sha256,
+            "camera_exploration_complete": False,
+            "exploration_complete": False,
+            "camera_approach_authorized": False,
+            "motion_authorized": False,
         }
 
 
@@ -778,6 +814,9 @@ def validate_facing_pose(request: FacingValidationRequest) -> dict[str, object]:
         "axis_confidence": recommendation.axis_confidence,
         "axis_sample_count": recommendation.axis_sample_count,
         "recommendation_json": str(request.recommendation_path),
+        "camera_recommendation_sha256": _file_sha256(request.recommendation_path),
+        "calibration_profile_sha256": config.calibration_profile_sha256,
+        "robot_profile_sha256": config.robot_profile_sha256,
         "validation_route_csv": str(route_path),
         "validation_diagnostics_json": str(diagnostics_path),
         "active_stand_clearance": clearance_evidence,
@@ -1866,7 +1905,7 @@ def _capture_candidate_camera_result(
 def execute_candidate_approach_phase(
     config: CandidateApproachConfig,
     effects: CandidateApproachEffects,
-) -> CandidateApproachComplete:
+) -> CandidateApproachComplete | CandidateCameraCheckpoint:
     """Execute the post-coverage candidate state machine behind live effects."""
 
     validate_inspection_budget(config.max_candidate_inspection_views)
@@ -1874,6 +1913,15 @@ def execute_candidate_approach_phase(
         configured_count=config.expected_stand_count,
         plan_count=config.plan.config.expected_stand_count,
     )
+    pilot_limit = config.stop_after_camera_candidates
+    if pilot_limit is not None and (type(pilot_limit) is not int or not 1 <= pilot_limit < expected_count):
+        raise ValueError("camera checkpoint limit must be positive and below the unchanged arena goal")
+    if (config.server_qr_mapping_evidence_path is None) != (config.server_robot_id is None):
+        raise ValueError("server QR mapping evidence and explicit server robot ID are required together")
+    mapping_evidence = (None if config.server_qr_mapping_evidence_path is None else
+                        load_server_qr_mapping_evidence(config.server_qr_mapping_evidence_path,
+                                                       robot_id=config.server_robot_id,
+                                                       now_sec=effects.clock()))
     exact_two_support_by_uid = validate_candidate_approach_handoff(config)
     source_registry = (
         None
@@ -1883,6 +1931,14 @@ def execute_candidate_approach_phase(
             config.plan,
         )
     )
+    # Decision commits mutate the survey registry. Preserve the original full
+    # obstacle/geometry source for later checked promotion into logistics.
+    source_registry_path = None
+    source_registry_sha256 = None
+    if source_registry is not None:
+        source_registry_path = config.session_root / "camera_source_stand_registry.json"
+        write_stand_survey_registry(source_registry_path, source_registry, config.plan)
+        source_registry_sha256 = stand_survey_registry_sha256(source_registry)
     unresolved = set(config.snapshot.candidate_uids)
     goal = CandidateQrGoalProgress(
         config.snapshot.candidate_uids,
@@ -1896,7 +1952,7 @@ def execute_candidate_approach_phase(
     goal_store = CandidateQrGoalProgressStore(config.session_root)
     goal_store.write(goal)
     facing_records: list[Mapping[str, object]] = []
-    identities: list[StationIdentity] = []
+    observed_qr_by_candidate: dict[str, str] = {}
     visit_order: list[str] = []
     candidate_index = 0
     observation_ledger = CandidateObservationDeferralLedger(
@@ -2260,6 +2316,8 @@ def execute_candidate_approach_phase(
             )
             goal_store.write(goal)
             unresolved.discard(candidate.candidate_uid)
+            if pilot_limit is not None:
+                raise CandidateQrGoalIncompleteError(goal, attempt_evidence=observation_ledger.attempts) from exc
             candidate_index += 1
             continue
 
@@ -2284,6 +2342,8 @@ def execute_candidate_approach_phase(
             )
         )
         facing["qr_id"] = observation.qr_id
+        if observation_frame.decision_binding is not None:
+            facing.update(observation_frame.decision_binding.to_receipt_fields())
         unique_identity = goal.record_validated_identity(
             candidate.candidate_uid, observation.qr_id,
             recommendation_path=observation.recommendation_path,
@@ -2301,8 +2361,8 @@ def execute_candidate_approach_phase(
             confirmed_uids = set(goal.confirmed_candidate_uids)
             facing_records = [record for record in facing_records
                               if record["candidate_uid"] in confirmed_uids]
-            identities = [identity for identity in identities
-                          if identity.candidate_uid in confirmed_uids]
+            observed_qr_by_candidate = {uid: qr for uid, qr in observed_qr_by_candidate.items()
+                                        if uid in confirmed_uids}
             visit_order = [uid for uid in visit_order if uid in confirmed_uids]
             unresolved.discard(candidate.candidate_uid)
             goal_store.write(goal)
@@ -2312,6 +2372,8 @@ def execute_candidate_approach_phase(
                 "confirmed_candidate_uids": list(goal.confirmed_candidate_uids),
                 "spatial_merge_authorized": False, "motion_authorized": False,
             })
+            if pilot_limit is not None:
+                raise CandidateQrGoalIncompleteError(goal, attempt_evidence=observation_ledger.attempts)
             candidate_index += 1
             continue
         receipt = candidate_root / "candidate_decision.json"
@@ -2361,13 +2423,7 @@ def execute_candidate_approach_phase(
             }
         )
         facing_records.append(facing)
-        identities.append(
-            StationIdentity(
-                candidate.candidate_uid,
-                observation.qr_id,
-                f"station_{observation.qr_id}",
-            )
-        )
+        observed_qr_by_candidate[candidate.candidate_uid] = observation.qr_id
         visit_order.append(candidate.candidate_uid)
         unresolved.discard(candidate.candidate_uid)
         goal_store.write(goal)
@@ -2382,16 +2438,41 @@ def execute_candidate_approach_phase(
             },
         )
         candidate_index += 1
+        if pilot_limit is not None and len(visit_order) >= pilot_limit:
+            # The validated receipt was committed and all motion finished. Do
+            # not finalize the arena goal or emit a logistics-ready catalog.
+            goal_path, goal_sha256 = goal_store.write(goal)
+            checkpoint = {
+                "schema_version": 1, "artifact_kind": "camera_candidate_checkpoint",
+                "session_id": config.session_id,
+                "candidate_snapshot_path": str(config.snapshot_path),
+                "candidate_snapshot_sha256": candidate_snapshot_sha256(config.snapshot),
+                "candidate_goal_progress_path": str(goal_path),
+                "candidate_goal_progress_sha256": goal_sha256,
+                "stop_after_camera_candidates": pilot_limit,
+                "observed_qr_by_candidate": dict(observed_qr_by_candidate),
+                "records": list(facing_records), "progress": goal.to_dict(),
+                "calibration_profile_sha256": config.calibration_profile_sha256,
+                "robot_profile_sha256": config.robot_profile_sha256,
+                "source_registry_path": None if source_registry_path is None else str(source_registry_path),
+                "source_registry_sha256": source_registry_sha256,
+                "exploration_complete": False, "motion_authorized": False,
+            }
+            checkpoint_path = config.session_root / "camera_candidate_checkpoint.json"
+            checkpoint_sha256 = write_content_hashed_json(
+                checkpoint_path, checkpoint, hash_field="camera_candidate_checkpoint_sha256",
+            )
+            return CandidateCameraCheckpoint(checkpoint_path, checkpoint_sha256, goal.to_dict())
 
     if not goal.complete:
         raise CandidateQrGoalIncompleteError(goal, attempt_evidence=observation_ledger.attempts)
     confirmed_uids = set(goal.confirmed_candidate_uids)
     if (
         len(facing_records) != expected_count
-        or len(identities) != expected_count
+        or len(observed_qr_by_candidate) != expected_count
         or len(visit_order) != expected_count
-        or {identity.candidate_uid for identity in identities} != confirmed_uids
-        or len({identity.qr_id for identity in identities}) != expected_count
+        or set(observed_qr_by_candidate) != confirmed_uids
+        or len(set(observed_qr_by_candidate.values())) != expected_count
     ):
         raise RuntimeError(
             "candidate approach completion invariant failed before final "
@@ -2409,17 +2490,25 @@ def execute_candidate_approach_phase(
     confirmed_snapshot_path = config.session_root / "confirmed_candidate_snapshot.json"
     confirmed_snapshot_sha256 = write_candidate_snapshot(confirmed_snapshot_path, confirmed_snapshot)
 
-    identity_registry, _source_sha = create_registry(
-        candidate_snapshot=confirmed_snapshot,
-        mappings=identities,
-        registry_id=f"{config.session_id}_identities",
-        created_unix_sec=effects.clock(),
+    observed_path = config.session_root / "observed_station_identities.json"
+    observed_sha256 = write_observed_identities(
+        observed_path, candidate_snapshot=confirmed_snapshot,
+        observed_qr_by_candidate=observed_qr_by_candidate,
+        session_id=config.session_id, observed_unix_sec=effects.clock(),
     )
-    identity_path = config.session_root / "station_identity_registry.json"
-    identity_sha256 = write_station_identity_registry(
-        identity_path,
-        identity_registry,
-    )
+    identity_path = None
+    identity_sha256 = None
+    binding_status = "server_binding_pending"
+    if mapping_evidence is not None:
+        identity_registry = bind_observed_station_identities(
+            candidate_snapshot=confirmed_snapshot,
+            observed_qr_by_candidate=observed_qr_by_candidate,
+            mapping_evidence=mapping_evidence,
+            registry_id=f"{config.session_id}_identities", now_sec=effects.clock(),
+        )
+        identity_path = config.session_root / "station_identity_registry.json"
+        identity_sha256 = write_station_identity_registry(identity_path, identity_registry)
+        binding_status = "server_bound"
     catalog = {
         "schema_version": 1,
         "catalog_kind": "real_autonomous_stand_facing_poses",
@@ -2435,6 +2524,13 @@ def execute_candidate_approach_phase(
         "expected_stand_count": expected_count,
         "candidate_pool_count": len(config.snapshot.candidates),
         "station_identity_registry_sha256": identity_sha256,
+        "identity_binding_status": binding_status,
+        "observed_station_identities_sha256": observed_sha256,
+        "server_qr_mapping_evidence_sha256": (None if mapping_evidence is None else mapping_evidence.sha256),
+        "calibration_profile_sha256": config.calibration_profile_sha256,
+        "robot_profile_sha256": config.robot_profile_sha256,
+        "source_registry_path": None if source_registry_path is None else str(source_registry_path),
+        "source_registry_sha256": source_registry_sha256,
         "stand_count": len(facing_records),
         "records": sorted(
             facing_records,
@@ -2448,17 +2544,21 @@ def execute_candidate_approach_phase(
         hash_field="stand_facing_catalog_sha256",
     )
     written_confirmed_snapshot = load_candidate_snapshot(confirmed_snapshot_path)
-    written_identity_registry = load_station_identity_registry(
+    written_identity_registry = (None if identity_path is None else load_station_identity_registry(
         identity_path, candidate_snapshot=written_confirmed_snapshot,
-    )
+    ))
+    written_observed = load_observed_identities(observed_path, candidate_snapshot=written_confirmed_snapshot)
+    if payload_sha256(written_observed) != observed_sha256:
+        raise ValueError("written observed identities hash differs from completion evidence")
     if candidate_snapshot_sha256(written_confirmed_snapshot) != confirmed_snapshot_sha256:
         raise ValueError("written confirmed snapshot hash differs from completion evidence")
-    if station_identity_registry_sha256(written_identity_registry) != identity_sha256:
+    if written_identity_registry is not None and station_identity_registry_sha256(written_identity_registry) != identity_sha256:
         raise ValueError("written identity registry hash differs from completion evidence")
     written_progress = validate_candidate_qr_goal_completion(
         goal_path, candidate_snapshot=config.snapshot,
         confirmed_candidate_snapshot=written_confirmed_snapshot,
         identity_registry=written_identity_registry,
+        observed_qr_by_candidate=written_observed["observed_qr_by_candidate"],
         expected_stand_count=expected_count,
     )
     if payload_sha256(written_progress) != goal_sha256:
@@ -2478,11 +2578,15 @@ def execute_candidate_approach_phase(
         candidate_goal_progress_path=goal_path,
         candidate_goal_progress_sha256=goal_sha256,
         goal_progress=goal.to_dict(),
+        observed_identities_path=observed_path,
+        observed_identities_sha256=observed_sha256,
+        identity_binding_status=binding_status,
     )
 
 
 __all__ = [
     "CandidateApproachComplete",
+    "CandidateCameraCheckpoint",
     "CandidateApproachConfig",
     "CandidateApproachEffects",
     "CandidateApproachPoseError",

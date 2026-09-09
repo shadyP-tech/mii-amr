@@ -1,4 +1,5 @@
 import math
+from dataclasses import replace
 import sys
 import unittest
 from pathlib import Path
@@ -15,9 +16,79 @@ from scripts.aufgabe04.perception.stand_axis_lidar_roi import (  # noqa: E402
     PlainLaserScan,
     median_range_in_scan_cone,
 )
+from tests.aufgabe04.test_scan_topology import SCAN_GEOMETRIES
 
 
 class CandidateLidarAssociationTest(unittest.TestCase):
+    def make_circular_scan(self, geometry, indices=None):
+        count, minimum, increment = geometry
+        indices = (count - 1, 0) if indices is None else indices
+        ranges = [5.0] * count
+        for index in indices:
+            ranges[index] = 1.0
+        return PlainLaserScan(tuple(ranges), minimum, increment, .1, 10.0, "base_scan",
+                              angle_max=minimum + (count - 1) * increment,
+                              scan_topology_profile="full_rotation")
+
+    def circular_association(self, scan, *, registered=False, **overrides):
+        count = len(scan.ranges)
+        bearings = (scan.angle_min, scan.angle_min + (count - 1) * scan.angle_increment)
+        bearing = math.atan2(sum(map(math.sin, bearings)), sum(map(math.cos, bearings)))
+        args = dict(map_bearing_rad=bearing, cone_half_angle_rad=math.radians(4),
+                    accepted_range_m=(.9, 1.1), min_cluster_sample_count=2)
+        args.update(overrides)
+        if registered:
+            args["observed_camera_bearing_rad"] = args["map_bearing_rad"]
+            return associate_camera_registered_candidate_lidar_target(scan, **args)
+        return associate_candidate_lidar_target(scan, **args)
+
+    def test_circular_seam_is_one_explicit_cluster_in_both_association_paths(self):
+        for geometry in SCAN_GEOMETRIES:
+            scan = self.make_circular_scan(geometry)
+            for registered in (False, True):
+                with self.subTest(geometry=geometry, registered=registered):
+                    result = self.circular_association(scan, registered=registered)
+                    self.assertTrue(result.associated, result.rejection_reason)
+                    association = result.search_association if registered else result
+                    self.assertEqual(association.eligible_cluster_count, 1)
+                    self.assertEqual(association.selected_cluster_sample_count, 2)
+                    self.assertEqual(association.selected_cluster_source_indices, (len(scan.ranges) - 1, 0))
+                    self.assertTrue(association.selected_cluster_wraps_scan_seam)
+                    self.assertGreater(association.selected_cluster_start_index, association.selected_cluster_end_index)
+                    self.assertTrue(association.scan_topology["circular_adjacency_enabled"])
+
+    def test_linear_profile_preserves_registered_seam_ambiguity(self):
+        scan = replace(self.make_circular_scan(SCAN_GEOMETRIES[1]), scan_topology_profile="linear")
+        result = self.circular_association(scan, registered=True, min_cluster_sample_count=1)
+        self.assertFalse(result.associated)
+        self.assertEqual(result.rejection_reason, "ambiguous_registered_camera_clusters")
+        self.assertEqual(result.search_association.selected_cluster_source_indices, ())
+        self.assertFalse(result.search_association.selected_cluster_wraps_scan_seam)
+
+    def test_circular_association_never_joins_missing_endpoint_or_two_step_gap(self):
+        original = self.make_circular_scan(SCAN_GEOMETRIES[1])
+        for scan in (
+            self.make_circular_scan(SCAN_GEOMETRIES[1], (len(original.ranges) - 2, 0)),
+            self.make_circular_scan(SCAN_GEOMETRIES[1], (len(original.ranges) - 1, 1)),
+            self.make_circular_scan((359, 0.0, math.radians(1))),
+            replace(original, angle_max=original.angle_min + math.pi),
+            replace(original, angle_max=None),
+        ):
+            with self.subTest(count=len(scan.ranges), maximum=scan.angle_max):
+                self.assertFalse(self.circular_association(scan).associated)
+
+    def test_circular_association_preserves_cone_range_jump_and_spatial_gates(self):
+        scan = self.make_circular_scan(SCAN_GEOMETRIES[1])
+        one_outside_range = list(scan.ranges)
+        one_outside_range[-1] = 1.2
+        self.assertFalse(self.circular_association(replace(scan, ranges=tuple(one_outside_range))).associated)
+        self.assertFalse(self.circular_association(scan, map_bearing_rad=scan.angle_min,
+                         cone_half_angle_rad=abs(scan.angle_increment) * .4).associated)
+        self.assertFalse(self.circular_association(scan, max_point_gap_m=.02).associated)
+        jump = list(scan.ranges)
+        jump[-1] = 1.06
+        self.assertFalse(self.circular_association(replace(scan, ranges=tuple(jump)), max_point_gap_m=.1).associated)
+
     def make_scan(
         self,
         ranges,

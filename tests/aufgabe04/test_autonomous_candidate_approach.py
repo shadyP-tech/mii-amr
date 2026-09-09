@@ -97,9 +97,7 @@ from scripts.aufgabe04.stations.candidate_snapshot import (
     new_candidate_snapshot,
     write_candidate_snapshot,
 )
-from scripts.aufgabe04.stations.station_identity_registry import (
-    load_station_identity_registry,
-)
+from scripts.aufgabe04.stations.server_identity_binding import load_observed_identities
 from tests.aufgabe04.test_detected_station_exploration import write_free_map
 from tests.aufgabe04.backside_axis_fixture import backside_axis_payload
 
@@ -788,13 +786,11 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             )
             self.assertEqual(len(initial_motion_calls), 2)
             self.assertEqual(len(replacement_motion_calls), 1)
-            identity = load_station_identity_registry(
-                outcome.identity_registry_path,
-                candidate_snapshot=config.snapshot,
-            ).for_candidate("candidate_a")
-            self.assertIsNotNone(identity)
-            self.assertEqual(identity.qr_id, "QR_A")
-            self.assertEqual(identity.server_station_id, "station_QR_A")
+            identity = load_observed_identities(outcome.observed_identities_path,
+                                                candidate_snapshot=config.snapshot)
+            self.assertEqual(identity["observed_qr_by_candidate"]["candidate_a"], "QR_A")
+            self.assertIsNone(outcome.identity_registry_path)
+            self.assertEqual(outcome.identity_binding_status, "server_binding_pending")
 
     def test_typed_observer_timeout_inspects_same_candidate_before_next_candidate(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1329,7 +1325,8 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             )
             self.assertEqual(outcome.stand_count, 2)
             self.assertFalse(outcome.motion_authorized)
-            self.assertTrue(outcome.identity_registry_path.is_file())
+            self.assertTrue(outcome.observed_identities_path.is_file())
+            self.assertIsNone(outcome.identity_registry_path)
             self.assertTrue(outcome.stand_facing_catalog_path.is_file())
             self.assertEqual(
                 [request.candidate_uid for request in plan_requests],
@@ -2744,9 +2741,10 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             self.assertEqual(result.stand_count, 5)
             self.assertEqual(len(visited), 5)
             self.assertEqual(len(set(visited)), 5)
-            identity = load_station_identity_registry(result.identity_registry_path,
-                                                       candidate_snapshot=config.snapshot)
-            self.assertEqual(len({mapping.qr_id for mapping in identity.mappings}), 5)
+            identity = load_observed_identities(result.observed_identities_path,
+                                                candidate_snapshot=config.snapshot)
+            self.assertEqual(len(set(identity["observed_qr_by_candidate"].values())), 5)
+            self.assertIsNone(result.identity_registry_path)
             self.assertFalse(any(event["event"] == "camera_candidate_observation_retry_pass"
                                  for event in events))
 
@@ -2989,6 +2987,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                 "approach.load_recommendation",
                 return_value=recommendation,
             ):
+                (root / "recommendation.json").write_text("fixture recommendation; decoder mocked")
                 result = validate_facing_pose(
                     FacingValidationRequest(
                         config=config,

@@ -73,6 +73,9 @@ from scripts.aufgabe04.navigation.waypoint_follower.initial_tf_acquisition impor
     TF_EXECUTOR_HEARTBEAT_PERIOD_SEC,
     TfExecutorHeartbeat,
 )
+from scripts.aufgabe04.navigation.waypoint_follower.tf_receipts import (
+    create_receipt_traced_buffer,
+)
 from scripts.aufgabe04.navigation.waypoint_follower.route_admission import (
     certified_startup_join_action,
     dynamic_join_envelope_failure,
@@ -171,7 +174,14 @@ def _create_dedicated_tf_listener(runtime_config: ResolvedRuntimeConfig):
         TF_LISTENER_NODE_NAME,
         namespace=runtime_config.namespace,
     )
-    tf_buffer = Buffer(node=listener_node)
+    tf_buffer = create_receipt_traced_buffer(
+        Buffer, node=listener_node,
+        edges={
+            "execution_pose": (runtime_config.odom_frame, runtime_config.base_frame),
+            "global_consistency": (runtime_config.map_frame, runtime_config.odom_frame),
+        },
+        latest_time_factory=Time,
+    )
     tf_listener = TransformListener(
         tf_buffer,
         listener_node,
@@ -832,11 +842,12 @@ def run_simple_waypoint_follower(
         # its sensor wait/control loop.
         tf_executor_thread.start()
         follower_executor_thread.start()
-        node.initial_tf_executor_health_probe = lambda: (
-            listener_node.initial_tf_heartbeat.snapshot(
+        node.initial_tf_executor_health_probe = lambda: {
+            **listener_node.initial_tf_heartbeat.snapshot(
                 thread_alive=tf_executor_thread.is_alive()
-            )
-        )
+            ),
+            "tf_receipts": tf_buffer.tf_receipt_snapshot(),
+        }
         try:
             return node.run()
         except BaseException:

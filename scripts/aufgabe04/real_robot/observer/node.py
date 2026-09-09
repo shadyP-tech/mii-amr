@@ -117,6 +117,15 @@ from scripts.aufgabe04.real_robot.observer.camera_target_registration import (
     HeadRoiEvaluation,
     select_camera_target_measurement,
 )
+from scripts.aufgabe04.real_robot.observer.camera_publication import (
+    CameraPublicationExpired,
+    camera_source_freshness,
+)
+from scripts.aufgabe04.real_robot.observer.qr_decode_cache import RoiQrDecodeCache
+from scripts.aufgabe04.real_robot.observer.capture_history import (
+    BoundedObserverCapture,
+    sensor_capture_metadata,
+)
 from scripts.aufgabe04.real_robot.observer.qr_target_binding import (
     bind_qr_observations_to_target,
 )
@@ -206,6 +215,8 @@ def _consensus_for_current_axis_source(update, axis_sample_source: str):
 class _StampedMessage:
     stamp_sec: float
     value: object
+    received_ros_sec: float | None = None
+    received_monotonic_sec: float | None = None
 
 
 @dataclass(frozen=True)
@@ -271,7 +282,7 @@ def _pose_is_stationary(
     return translation <= max_translation_m and rotation <= max_rotation_rad
 
 
-def _atomic_json(path: Path, payload: dict[str, object]) -> None:
+def _atomic_json(path: Path, payload: dict[str, object], *, before_commit=None) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -285,6 +296,8 @@ def _atomic_json(path: Path, payload: dict[str, object]) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
+        if before_commit is not None:
+            before_commit()
         os.replace(temporary_name, path)
     finally:
         try:
@@ -379,6 +392,19 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self.tf_listener = TransformListener(self.tf_buffer, self.node)
         self.completed = False
         self.axis_observation_committed = False
+        self._camera_pipeline_counters = {}
+        self._last_camera_publication_freshness = None
+        self.capture_history = None
+        self._capture_pending = None
+        self._capture_error = None
+        if getattr(args, "capture_history_dir", None) is not None:
+            try:
+                self.capture_history = BoundedObserverCapture(
+                    args.capture_history_dir, max_frames=args.capture_max_frames,
+                    max_bytes=args.capture_max_bytes,
+                )
+            except Exception as exc:
+                self._capture_error = f"{type(exc).__name__}: {exc}"[:256]
         # A visible QR marker proves that the stationary viewpoint is not a
         # geometric backside candidate even when OpenCV cannot decode it.
         # Keep that fact latched until the robot starts a new motion epoch.
@@ -416,21 +442,148 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         )
 
     def _on_image(self, message) -> None:
+        self._camera_count("received_images")
         stamp = compressed_msg_stamp_sec(message)
         if stamp is not None and stamp > 0.0:
-            self.images.append(_StampedMessage(stamp, message))
+            self.images.append(self._received_message(stamp, message))
+        else:
+            self._camera_count("invalid_image_headers")
 
     def _on_camera_info(self, message) -> None:
+        self._camera_count("received_camera_infos")
         try:
-            self.camera_infos.append(_StampedMessage(_stamp_sec(message), message))
+            self.camera_infos.append(self._received_message(_stamp_sec(message), message))
         except ValueError:
+            self._camera_count("invalid_camera_info_headers")
             return
 
     def _on_scan(self, message) -> None:
+        self._camera_count("received_scans")
         try:
-            self.scans.append(_StampedMessage(_stamp_sec(message), message))
+            self.scans.append(self._received_message(_stamp_sec(message), message))
         except ValueError:
+            self._camera_count("invalid_scan_headers")
             return
+
+    def _received_message(self, stamp, message):
+        return _StampedMessage(
+            stamp, message, self.node.get_clock().now().nanoseconds / 1e9,
+            time.monotonic(),
+        )
+
+    def _camera_count(self, name):
+        counters = getattr(self, "_camera_pipeline_counters", None)
+        if counters is None:
+            counters = self._camera_pipeline_counters = {}
+        counters[name] = counters.get(name, 0) + 1
+
+    def _stage_camera_capture(self, image, scan, camera_info):
+        if getattr(self, "capture_history", None) is None:
+            return
+        self._capture_pending = {
+            "image": image, "scan": scan, "camera_info": camera_info,
+            "tf_samples": [], "selected_monotonic_sec": time.monotonic(),
+        }
+
+    def _capture_tf_sample(self, transform):
+        pending = getattr(self, "_capture_pending", None)
+        if pending is None:
+            return
+        try:
+            translation, rotation = _transform_values(transform)
+            stamp = transform.header.stamp
+            returned_stamp = float(stamp.sec) + float(stamp.nanosec) / 1e9
+            if not math.isfinite(returned_stamp) or returned_stamp < 0:
+                raise ValueError("invalid captured TF timestamp")
+            pending["tf_samples"].append({
+                **self._active_tf_request,
+                "returned_stamp_sec": returned_stamp,
+                "returned_target_frame": str(transform.header.frame_id),
+                "returned_source_frame": str(transform.child_frame_id),
+                "translation_xyz_m": translation, "rotation_xyzw": rotation,
+            })
+            del pending["tf_samples"][:-16]
+        except Exception as exc:
+            pending["tf_metadata_error"] = f"{type(exc).__name__}: {exc}"[:256]
+
+    def _capture_camera_outcome(self, state, details):
+        capture = getattr(self, "capture_history", None)
+        pending = getattr(self, "_capture_pending", None)
+        if capture is None or pending is None or state == "tf_pending_exact_time":
+            return
+        self._capture_pending = None
+        try:
+            image, scan, info = (pending[name] for name in ("image", "scan", "camera_info"))
+            metadata = {
+                "observer_state": state, "outcome": details,
+                "image_stamp_sec": image.stamp_sec,
+                "image_received_ros_sec": image.received_ros_sec,
+                "image_received_monotonic_sec": image.received_monotonic_sec,
+                "scan_stamp_sec": None if scan is None else scan.stamp_sec,
+                "scan_received_ros_sec": None if scan is None else scan.received_ros_sec,
+                "selected_monotonic_sec": pending["selected_monotonic_sec"],
+                "outcome_monotonic_sec": time.monotonic(),
+                "outcome_ros_sec": self.node.get_clock().now().nanoseconds / 1e9,
+                "tf_samples": pending["tf_samples"],
+                "tf_sample_history_limit": 16,
+                "tf_metadata_error": pending.get("tf_metadata_error"),
+                "detector_metadata": pending.get("detector_metadata"),
+                "robot_profile_sha256": real_robot_profile_sha256(self.profile),
+                "calibration_profile_sha256": camera_calibration_sha256(self.calibration),
+                "stand_model_profile_sha256": self.stand_model_profile.sha256,
+                "publication_freshness": getattr(self, "_last_camera_publication_freshness", None),
+            }
+            try:
+                metadata["sensors"] = sensor_capture_metadata(
+                    image.value, None if info is None else info.value,
+                    None if scan is None else scan.value,
+                )
+            except Exception as exc:
+                # Unpaired/malformed sensor frames still retain their raw pixels.
+                metadata["sensor_metadata_error"] = f"{type(exc).__name__}: {exc}"[:256]
+            capture.submit(bytes(image.value.data), metadata=metadata,
+                           compressed_format=str(getattr(image.value, "format", "")))
+        except Exception as exc:
+            self._capture_error = f"{type(exc).__name__}: {exc}"[:256]
+            self._camera_count("capture_metadata_failures")
+
+    def _capture_snapshot(self):
+        capture = getattr(self, "capture_history", None)
+        if capture is None:
+            return None
+        try:
+            return capture.snapshot()
+        except Exception as exc:
+            return {"diagnostic_only": True, "snapshot_error": f"{type(exc).__name__}: {exc}"[:256]}
+
+    def _source_freshness(self, image_stamp_sec, scan_stamp_sec):
+        return camera_source_freshness(
+            image_stamp_sec=image_stamp_sec, scan_stamp_sec=scan_stamp_sec,
+            now_sec=self.node.get_clock().now().nanoseconds / 1e9,
+            max_age_sec=self.args.max_sensor_age_sec,
+            max_future_sec=self.args.max_future_timestamp_sec,
+        )
+
+    def _commit_sensor_artifact(self, path, payload, *, image_stamp_sec,
+                                scan_stamp_sec, artifact_kind):
+        """Check source ages after debug/association and again after durable serialization."""
+
+        def check():
+            freshness = self._source_freshness(image_stamp_sec, scan_stamp_sec)
+            self._last_camera_publication_freshness = {
+                "artifact_kind": artifact_kind, **freshness.metadata(),
+            }
+            if not freshness.accepted:
+                raise CameraPublicationExpired()
+
+        try:
+            check()
+            _atomic_json(path, payload, before_commit=check)
+        except CameraPublicationExpired:
+            self._camera_count("publication_rejections")
+            return False
+        self._camera_count("committed_artifacts")
+        return True
 
     def _retry_pending_exact_tf(self) -> None:
         """Yield-driven retry for one frozen tuple while TF callbacks advance."""
@@ -553,13 +706,18 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         qr_symbol_count: int | None = None,
     ):
         evidence = self._ensure_observation_evidence(robot_pose)
+        # Association and diagnostic work may outlive detector freshness.
+        # Admission uses a new clock sample, never the earlier detector time.
+        source_freshness = self._source_freshness(image_stamp_sec, scan_stamp_sec)
+        self._last_evidence_source_freshness = source_freshness.metadata()
+        observed_at_sec = source_freshness.checked_at_sec
         update = evidence.record_frame(
             target_key=self._target_evidence_key(),
             pose=self._evidence_pose(robot_pose),
             frame_stamp_sec=image_stamp_sec,
             lidar_stamp_sec=scan_stamp_sec,
             observed_at_sec=observed_at_sec,
-            lidar_associated=lidar_associated,
+            lidar_associated=lidar_associated and source_freshness.accepted,
             axis_yaw_rad=axis_yaw_rad,
             axis_source=axis_source,
             qr_texts=qr_texts,
@@ -570,8 +728,15 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             ),
         )
         self._last_observation_update = update
+        if update.frame_accepted:
+            self._camera_count("associated_frames")
+        if update.axis_sample_accepted:
+            self._camera_count("axis_sample_frames")
+        if update.qr_sample_accepted:
+            self._camera_count("qr_sample_frames")
         self._inspection_frame = {
             "frame_stamp_sec": image_stamp_sec,
+            "scan_stamp_sec": scan_stamp_sec,
             "robot_pose": asdict(robot_pose),
             "frame_accepted": update.frame_accepted,
             "poisoned": update.snapshot.poisoned,
@@ -594,12 +759,14 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             "query_kind": "exact_sensor_time",
             "query_stamp_sec": query_stamp_sec,
         }
-        return self.tf_buffer.lookup_transform(
+        transform = self.tf_buffer.lookup_transform(
             target_frame,
             source_frame,
             query_time,
             timeout=self.Duration(seconds=0.0),
         )
+        self._capture_tf_sample(transform)
+        return transform
 
     def _lookup_static_transform(
         self,
@@ -614,12 +781,14 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             "query_kind": "time_invariant_camera_extrinsic",
             "query_stamp_sec": None,
         }
-        return self.tf_buffer.lookup_transform(
+        transform = self.tf_buffer.lookup_transform(
             target_frame,
             source_frame,
             self.Time(),
             timeout=self.Duration(seconds=0.0),
         )
+        self._capture_tf_sample(transform)
+        return transform
 
     def _next_sensor_tuple(self) -> _SynchronizedSensorTuple | None:
         pending = self.tf_retry_scheduler.pending_frame
@@ -640,7 +809,9 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             stamp_sec=image.stamp_sec,
             tolerance_sec=self.args.camera_info_tolerance_sec,
         )
+        self._stage_camera_capture(image, scan, camera_info)
         if scan is None or camera_info is None:
+            self._camera_count("unpaired_images")
             self.last_processed_image_stamp = image.stamp_sec
             self._note_observation_soft_miss(
                 "awaiting_synchronized_sensors",
@@ -664,6 +835,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         )
         if not accepted:
             raise RuntimeError("new sensor tuple replaced pending TF retry")
+        self._camera_count("synchronized_tuples")
         return sensor_tuple
 
     def _discard_sensor_tuple(
@@ -687,6 +859,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self.tf_retry_scheduler.mark_transform_ready(stamp_sec=stamp_sec)
         self.tf_retry_scheduler.consume(stamp_sec=stamp_sec)
         self.last_processed_image_stamp = stamp_sec
+        self._camera_count("tf_ready_tuples")
 
     def _defer_for_exact_tf(
         self,
@@ -757,6 +930,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             image_age < -self.args.max_future_timestamp_sec
             or image_age > self.args.max_sensor_age_sec
         ):
+            self._camera_count("stale_input_images")
             had_transient_tf_retry = (
                 self.tf_retry_scheduler.evidence.retry_count > 0
             )
@@ -978,6 +1152,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             scan_frame_id=str(scan_message.header.frame_id),
             scan_stamp_sec=scan.stamp_sec,
             receipt_sec=now_sec,
+            angle_max=getattr(scan_message, "angle_max", None),
+            scan_topology_profile=getattr(self.args, "scan_topology_profile", "linear"),
         )
         center_distance = math.hypot(
             robot_pose.x_m - self.args.stand_x,
@@ -1010,6 +1186,9 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             translation_xyz_m=scan_camera_translation,
             rotation_xyzw=scan_camera_rotation,
         )
+        processing_started_monotonic = time.monotonic()
+        processing_started_ros = self.node.get_clock().now().nanoseconds / 1e9
+        self._camera_count("processed_images")
         try:
             frame = compressed_msg_to_bgr_frame(
                 image_message,
@@ -1046,6 +1225,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             profile_sha256=self.stand_model_profile.sha256,
             camera_signature=camera_signature,
         )
+        qr_decode_cache = RoiQrDecodeCache()
 
         def evaluate_roi_attempt(
             attempt: HeadRoiAttempt,
@@ -1056,13 +1236,14 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 attempt_roi.y0 : attempt_roi.y1,
                 attempt_roi.x0 : attempt_roi.x1,
             ]
-            qr_started_sec = time.monotonic()
-            qr_observations = (
-                detect_qr_observations_bgr(attempt_frame, self.cv2)
-                if pose_hint is None
-                else detect_native_qr_observations_bgr(attempt_frame, self.cv2)
+            decoder = (detect_qr_observations_bgr if pose_hint is None
+                       else detect_native_qr_observations_bgr)
+            decoded = qr_decode_cache.decode(
+                roi=(attempt_roi.x0, attempt_roi.y0, attempt_roi.x1, attempt_roi.y1),
+                mode="full" if pose_hint is None else "native",
+                frame=attempt_frame, decoder=lambda crop: decoder(crop, self.cv2),
             )
-            qr_identity_ms = (time.monotonic() - qr_started_sec) * 1000.0
+            qr_observations = decoded.observations
             attempt_estimate, attempt_debug = estimate_stand_axis_from_metric_model(
                 self.cv2,
                 attempt_frame,
@@ -1094,7 +1275,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 attempt_debug,
                 stage_timings_ms={
                     **(attempt_debug.stage_timings_ms or {}),
-                    "qr_identity": qr_identity_ms,
+                    "qr_identity": decoded.elapsed_ms,
                 },
             )
             return HeadRoiEvaluation(
@@ -1103,6 +1284,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 estimate=attempt_estimate,
                 debug=attempt_debug,
                 qr_observations=qr_observations,
+                qr_decode_metadata=decoded.metadata(),
             )
 
         registration = select_camera_target_measurement(
@@ -1122,6 +1304,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         roi = selected_attempt.roi
         # Processing can outlive the tuple's admission-time freshness check.
         now_sec = self.node.get_clock().now().nanoseconds / 1_000_000_000.0
+        processing_completed_monotonic = time.monotonic()
         result_freshness = observation_freshness(
             observed_at_sec=image.stamp_sec,
             now_sec=now_sec,
@@ -1137,6 +1320,10 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             camera_signature=camera_signature,
             result_fresh=result_freshness.accepted,
         )
+        if result_freshness.accepted:
+            self._camera_count("fresh_detector_results")
+        if estimate.usable and estimate.evidence_state == "fresh_refined":
+            self._camera_count("verified_geometry_results")
         model_metadata = {
             "mode": "metric_model_only",
             "profile_id": self.stand_model_profile.profile_id,
@@ -1168,6 +1355,21 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             },
             "tracker_update": asdict(tracker_update),
             "result_freshness": asdict(result_freshness),
+            "processing_timing": {
+                "image_stamp_sec": image.stamp_sec,
+                "image_received_ros_sec": image.received_ros_sec,
+                "image_received_monotonic_sec": image.received_monotonic_sec,
+                "started_ros_sec": processing_started_ros,
+                "started_monotonic_sec": processing_started_monotonic,
+                "detector_completed_ros_sec": now_sec,
+                "detector_completed_monotonic_sec": processing_completed_monotonic,
+                "detector_elapsed_ms": (processing_completed_monotonic - processing_started_monotonic) * 1000,
+                "attempts": [{
+                    "roi": evaluation.attempt.metadata(),
+                    "qr_decode": evaluation.qr_decode_metadata,
+                    "stage_timings_ms": evaluation.debug.stage_timings_ms,
+                } for evaluation in registration.evaluations],
+            },
             "visible_face": getattr(estimate, "visible_face", None),
             "visible_face_confidence": getattr(
                 estimate,
@@ -1201,7 +1403,10 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 preliminary_lidar_association
             ),
         }
+        if getattr(self, "_capture_pending", None) is not None:
+            self._capture_pending["detector_metadata"] = axis_metadata
         if not result_freshness.accepted:
+            self._camera_count("obsolete_detector_results")
             self._note_observation_soft_miss(
                 "obsolete_detector_result", stamp_sec=image.stamp_sec, pose=robot_pose
             )
@@ -1665,6 +1870,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 **lidar_status_details,
             )
             return
+        self._camera_count("consensus_frames")
         camera_heading = optical_heading_from_transform(map_from_camera)
         stand_axis = stand_axis_from_camera_yaw(
             robot_x_m=robot_pose.x_m,
@@ -1779,10 +1985,14 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                     **lidar_status_details,
                 )
                 return
-            _atomic_json(
+            if not self._commit_sensor_artifact(
                 self.args.axis_observation_json,
                 axis_observation,
-            )
+                image_stamp_sec=image.stamp_sec, scan_stamp_sec=scan.stamp_sec,
+                artifact_kind="backside_axis_observation",
+            ):
+                self._write_status("obsolete_publication_evidence", stand_axis_debug=axis_metadata)
+                return
             self.axis_observation_committed = True
             self.completed = True
             self._write_status(
@@ -1811,11 +2021,16 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             expected_qr_id=resolved_qr_id,
             observed_qr_ids=(resolved_qr_id,),
             target_distance_m=self.args.target_distance_m,
+            observation_unix_sec=image.stamp_sec,
         )
-        _atomic_json(
+        if not self._commit_sensor_artifact(
             self.args.recommended_pose_json,
             recommendation_to_dict(recommendation),
-        )
+            image_stamp_sec=image.stamp_sec, scan_stamp_sec=scan.stamp_sec,
+            artifact_kind="recommendation",
+        ):
+            self._write_status("obsolete_publication_evidence", stand_axis_debug=axis_metadata)
+            return
         self.completed = True
         self._write_status(
             "recommendation_committed",
@@ -1880,6 +2095,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             current = dict(current)
             axis_sample_accepted = current.pop("axis_sample_accepted", False)
             qr_sample_accepted = current.pop("qr_sample_accepted", False)
+            scan_stamp_sec = current.pop("scan_stamp_sec", None)
         if state not in {
             "metric_model_measurement_unavailable", "evidence_not_committable",
             "axis_observation_not_committable", "collecting_consensus",
@@ -1925,7 +2141,11 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             stand_model_profile_sha256=self.stand_model_profile.sha256,
             **fields,
         )
-        _atomic_json(output, payload)
+        if not self._commit_sensor_artifact(
+            output, payload, image_stamp_sec=current["frame_stamp_sec"],
+            scan_stamp_sec=scan_stamp_sec, artifact_kind="inspection_observation",
+        ):
+            return None
         self.completed = True
         return payload
 
@@ -1940,6 +2160,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 "preceding_state": state,
             }
             state = "inspection_progress_committed"
+        self._capture_camera_outcome(state, details)
         observation_evidence = getattr(self, "observation_evidence", None)
         stand_model = getattr(self, "stand_model_profile", None)
         if observation_evidence is not None:
@@ -1995,6 +2216,11 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             ),
             "axis_consensus": consensus_status,
             "observation_evidence": observation_status,
+            "camera_pipeline_counts": dict(getattr(self, "_camera_pipeline_counters", {})),
+            "last_evidence_source_freshness": getattr(self, "_last_evidence_source_freshness", None),
+            "publication_freshness": getattr(self, "_last_camera_publication_freshness", None),
+            "capture_history": self._capture_snapshot(),
+            "capture_error": getattr(self, "_capture_error", None),
             "tf_retry": asdict(self.tf_retry_scheduler.evidence),
             "tf_retry_attempt_summary": {
                 "attempted_tuple_count": getattr(
@@ -2128,6 +2354,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--tf-retry-rate-hz", type=float, default=50.0)
     parser.add_argument("--process-rate-hz", type=float, default=5.0)
+    parser.add_argument("--scan-topology-profile", choices=("linear", "full_rotation"), default="linear")
     parser.add_argument("--stationary-translation-m", type=float, default=0.01)
     parser.add_argument("--stationary-rotation-deg", type=float, default=2.0)
     parser.add_argument("--consensus-frames", type=int, default=7)
@@ -2168,11 +2395,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--inspection-progress-frames", type=int, default=7)
     parser.add_argument("--inspection-progress-min-span-sec", type=float, default=2.0)
     parser.add_argument("--debug-dir", type=Path, default=None)
+    parser.add_argument("--capture-history-dir", type=Path, default=None)
+    parser.add_argument("--capture-max-frames", type=int, default=64)
+    parser.add_argument("--capture-max-bytes", type=int, default=33554432)
     parser.add_argument("--once", action="store_true")
     return parser
 
 
 def _validate_args(parser: argparse.ArgumentParser, args) -> None:
+    if args.capture_max_frames <= 0 or args.capture_max_bytes <= 0:
+        parser.error("capture frame and byte limits must be positive")
     try:
         stand_model = load_measured_physical_stand_model(
             args.stand_model_profile
@@ -2323,6 +2555,11 @@ def main(argv=None) -> int:
         parser.exit(2, f"error: {exc}\n")
     finally:
         if adapter is not None:
+            if getattr(adapter, "capture_history", None) is not None:
+                try:
+                    adapter.capture_history.close(timeout_sec=2.0)
+                except Exception:
+                    pass  # Diagnostic cleanup cannot prevent ROS teardown.
             adapter.node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

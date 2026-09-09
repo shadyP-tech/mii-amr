@@ -128,11 +128,25 @@ class InspectionObserverIntegrationTests(unittest.TestCase):
     def make_node(self,path):
         node=PassiveRealViewpointNode.__new__(PassiveRealViewpointNode)
         node.args=SimpleNamespace(inspection_observation_json=path,stand_id="candidate1",stream_id="run_candidate1",
-            stand_x=1.0,stand_y=.2,stationary_translation_m=.02,stationary_rotation_deg=2.0)
+            stand_x=1.0,stand_y=.2,stationary_translation_m=.02,stationary_rotation_deg=2.0,
+            max_sensor_age_sec=.5,max_future_timestamp_sec=.05)
+        node._test_clock_sec=0.0
+        clock=SimpleNamespace(now=lambda: SimpleNamespace(
+            nanoseconds=round(node._test_clock_sec*1_000_000_000),
+        ))
+        node.node=SimpleNamespace(get_clock=lambda: clock)
         node.profile=SimpleNamespace(map_frame="map")
         node.calibration=object();node.stand_model_profile=SimpleNamespace(sha256="c"*64)
         node.completed=False
         return node
+
+    def set_current_frame(self,node,stamp,**overrides):
+        data=frame(stamp,**overrides)
+        data.pop("classification")
+        data["scan_stamp_sec"]=stamp
+        node._inspection_frame=data
+        node._test_clock_sec=stamp
+        return data
 
     def test_node_publishes_advisory_only_from_processed_frames(self):
         with tempfile.TemporaryDirectory() as tmp, \
@@ -140,16 +154,39 @@ class InspectionObserverIntegrationTests(unittest.TestCase):
              patch("scripts.aufgabe04.real_robot.observer.node.camera_calibration_sha256",return_value="b"*64):
             path=Path(tmp)/"progress.json";node=self.make_node(path)
             for i in range(7):
-                node._inspection_frame=frame(10+i/3);node._inspection_frame.pop("classification")
+                self.set_current_frame(node,10+i/3)
                 result=node._maybe_commit_inspection_progress("metric_model_measurement_unavailable",{})
             self.assertIsNotNone(result)
             self.assertFalse(load_candidate_inspection_observation(path)["completion_authorized"])
             self.assertTrue(node.completed)
 
+    def test_delayed_seventh_advisory_frame_cannot_publish_expired_sources(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("scripts.aufgabe04.real_robot.observer.node.real_robot_profile_sha256",return_value="a"*64), \
+             patch("scripts.aufgabe04.real_robot.observer.node.camera_calibration_sha256",return_value="b"*64):
+            path=Path(tmp)/"progress.json";node=self.make_node(path)
+            for i in range(6):
+                self.set_current_frame(node,10+i/3)
+                self.assertIsNone(node._maybe_commit_inspection_progress(
+                    "metric_model_measurement_unavailable",{},
+                ))
+            # This tuple passed ingestion while fresh, but other work consumed
+            # the remaining source-age budget before its advisory publication.
+            self.set_current_frame(node,12.0)
+            node._test_clock_sec=12.5001
+            self.assertIsNone(node._maybe_commit_inspection_progress(
+                "metric_model_measurement_unavailable",{},
+            ))
+            self.assertEqual(len(node._inspection_progress._samples),7)
+            self.assertFalse(node.completed)
+            self.assertFalse(path.exists())
+            self.assertFalse(node._last_camera_publication_freshness["accepted"])
+            self.assertEqual(node._camera_pipeline_counters["publication_rejections"],1)
+
     def test_tf_state_and_completed_stronger_result_cannot_emit_progress(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/"progress.json";node=self.make_node(path)
-            node._inspection_frame=frame(10);node._inspection_frame.pop("classification")
+            self.set_current_frame(node,10)
             self.assertIsNone(node._maybe_commit_inspection_progress("tf_pending_exact_time",{}))
             self.assertIsNone(node._inspection_frame)
             self.assertIsNone(node._maybe_commit_inspection_progress("collecting_consensus",{}))
@@ -160,7 +197,7 @@ class InspectionObserverIntegrationTests(unittest.TestCase):
     def test_consumed_update_cannot_be_reused_by_later_status(self):
         with tempfile.TemporaryDirectory() as tmp:
             node=self.make_node(Path(tmp)/"progress.json")
-            node._inspection_frame=frame(10);node._inspection_frame.pop("classification")
+            self.set_current_frame(node,10)
             self.assertIsNone(node._maybe_commit_inspection_progress("metric_model_measurement_unavailable",{}))
             self.assertIsNone(node._inspection_frame)
             for _ in range(20):
@@ -171,12 +208,10 @@ class InspectionObserverIntegrationTests(unittest.TestCase):
             path=Path(tmp)/"progress.json";node=self.make_node(path)
             # Six failed samples already span more than two seconds.
             for i in range(6):
-                node._inspection_frame=frame(10+i*.5)
-                node._inspection_frame.pop("classification")
+                self.set_current_frame(node,10+i*.5)
                 self.assertIsNone(node._maybe_commit_inspection_progress("metric_model_measurement_unavailable",{}))
             for i in range(6):
-                node._inspection_frame=frame(13+i*.25)
-                node._inspection_frame.pop("classification")
+                self.set_current_frame(node,13+i*.25)
                 node._inspection_frame["axis_sample_accepted"]=True
                 self.assertIsNone(node._maybe_commit_inspection_progress("collecting_consensus",{}))
                 self.assertEqual(node._inspection_progress._samples,{})
@@ -191,31 +226,26 @@ class InspectionObserverIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             node=self.make_node(Path(tmp)/"progress.json")
             for i in range(12):
-                data=frame(10+i/3);data.pop("classification")
+                data=self.set_current_frame(node,10+i/3)
                 data["frame_accepted"]=False
-                node._inspection_frame=data
                 self.assertIsNone(node._maybe_commit_inspection_progress("metric_model_measurement_unavailable",{}))
             for i in range(12):
-                data=frame(20+i/3);data.pop("classification")
+                data=self.set_current_frame(node,20+i/3)
                 data["poisoned"]=i==3
-                node._inspection_frame=data
                 self.assertIsNone(node._maybe_commit_inspection_progress("metric_model_measurement_unavailable",{}))
 
     def test_new_qr_decode_gets_time_to_establish_its_second_sample(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/"progress.json";node=self.make_node(path)
             for i in range(6):
-                node._inspection_frame=frame(10+i*.5)
-                node._inspection_frame.pop("classification")
+                self.set_current_frame(node,10+i*.5)
                 self.assertIsNone(node._maybe_commit_inspection_progress("metric_model_measurement_unavailable",{}))
-            node._inspection_frame=frame(13,current_qr_sample_count=1)
-            node._inspection_frame.pop("classification")
+            self.set_current_frame(node,13,current_qr_sample_count=1)
             node._inspection_frame["qr_sample_accepted"]=True
             self.assertIsNone(node._maybe_commit_inspection_progress("evidence_not_committable",{"qr_texts":["QR_001"]}))
             self.assertFalse(node.completed)
             self.assertEqual(node._inspection_progress._samples,{})
-            node._inspection_frame=frame(13.25,current_qr_id="QR_001",current_qr_sample_count=2)
-            node._inspection_frame.pop("classification")
+            self.set_current_frame(node,13.25,current_qr_id="QR_001",current_qr_sample_count=2)
             node._inspection_frame["qr_sample_accepted"]=True
             self.assertIsNone(node._maybe_commit_inspection_progress("evidence_not_committable",{"qr_texts":["QR_001"]}))
             self.assertFalse(path.exists())
@@ -224,9 +254,8 @@ class InspectionObserverIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/"progress.json";node=self.make_node(path)
             def feed(stamp,qr_id,count,accepted=False):
-                data=frame(stamp,current_qr_id=qr_id,current_qr_sample_count=count)
-                data.pop("classification");data["qr_sample_accepted"]=accepted
-                node._inspection_frame=data
+                data=self.set_current_frame(node,stamp,current_qr_id=qr_id,current_qr_sample_count=count)
+                data["qr_sample_accepted"]=accepted
                 return node._maybe_commit_inspection_progress("evidence_not_committable",{})
             self.assertIsNone(feed(10,"QR_001",2))
             self.assertIsNone(feed(11,None,1,True))

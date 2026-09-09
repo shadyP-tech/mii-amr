@@ -119,6 +119,13 @@ def _initial_tf_report_error(details: Mapping[str, object], *, drift: bool) -> s
                 or edge.get("non_acquisition_failure_seen") is not False
                 or not _positive_count(edge.get("attempt_count"))):
             return "invalid_initial_map_tf_edge_history"
+        counters = ("non_acquisition_failure_count", "waitable_stale_sample_count")
+        # Older schema-2 evidence has neither counter. New evidence must not
+        # conceal a stale-input history behind a contradictory false flag.
+        if any(name in edge for name in counters) and any(
+            type(edge.get(name)) is not int or edge[name] != 0 for name in counters
+        ):
+            return "invalid_initial_map_tf_acquisition_counters"
         successes = edge.get("successful_sample_count")
         if (type(successes) is not int
                 or not 0 <= successes <= edge["attempt_count"]

@@ -265,6 +265,10 @@ class FollowerCallbackServiceTest(unittest.TestCase):
                 created["listener_node_namespace"] = namespace
                 events.append("listener_node.init")
 
+            def get_clock(self):
+                return SimpleNamespace(now=lambda: SimpleNamespace(
+                    nanoseconds=int(created.get("ros_now_sec", 100.1) * 1e9)))
+
             def create_timer(self, period, callback):
                 created["heartbeat_period"] = period
                 created["heartbeat_callback"] = callback
@@ -290,6 +294,14 @@ class FollowerCallbackServiceTest(unittest.TestCase):
                 events.append("node.run")
                 created["health_before_callback"] = self.initial_tf_executor_health_probe()
                 created["heartbeat_callback"]()
+                transform = SimpleNamespace(
+                    header=SimpleNamespace(frame_id="map", stamp=SimpleNamespace(sec=100, nanosec=0)),
+                    child_frame_id="odom",
+                )
+                created["tf_executor"].dispatch_tf(SimpleNamespace(transforms=[transform]))
+                created["ros_now_sec"] = 101.6
+                observed = created["injected_tf_buffer"].lookup_transform_core("map", "odom", 0)
+                created["lookup_age_sec"] = created["ros_now_sec"] - observed.header.stamp.sec
                 created["health_after_callback"] = self.initial_tf_executor_health_probe()
                 return expected_result
 
@@ -302,6 +314,12 @@ class FollowerCallbackServiceTest(unittest.TestCase):
                 created["buffer_node"] = node
                 events.append("buffer.init")
 
+            def set_transform(self, transform, authority):
+                self.latest = transform
+
+            def lookup_transform_core(self, target, source, at_time):
+                return self.latest
+
         class FakeTransformListener:
             def __init__(self, buffer, node, *, spin_thread):
                 created["tf_listener"] = self
@@ -309,6 +327,10 @@ class FollowerCallbackServiceTest(unittest.TestCase):
                 created["tf_listener_node"] = node
                 created["tf_listener_spin_thread"] = spin_thread
                 events.append("tf_listener.init")
+
+            def callback(self, message):
+                for transform in message.transforms:
+                    created["tf_listener_buffer"].set_transform(transform, "default_authority")
 
             def unregister(self):
                 events.append("tf_listener.unregister")
@@ -346,6 +368,9 @@ class FollowerCallbackServiceTest(unittest.TestCase):
 
             def spin(self):
                 events.append("tf_executor.spin")
+
+            def dispatch_tf(self, message):
+                created["tf_listener"].callback(message)
 
             def shutdown(self):
                 events.append("tf_executor.shutdown")
@@ -399,6 +424,10 @@ class FollowerCallbackServiceTest(unittest.TestCase):
             "SingleThreadedExecutor",
             FakeSingleThreadedExecutor,
         ), patch.object(
+            follower,
+            "Time",
+            lambda: 0,
+        ), patch.object(
             follower.threading,
             "Thread",
             FakeThread,
@@ -407,6 +436,7 @@ class FollowerCallbackServiceTest(unittest.TestCase):
                 SimpleNamespace(
                     namespace="/robot1",
                     use_sim_time=True,
+                    map_frame="map", odom_frame="odom", base_frame="base_footprint",
                 ),
                 (),
                 object(),
@@ -449,6 +479,18 @@ class FollowerCallbackServiceTest(unittest.TestCase):
         self.assertTrue(created["health_after_callback"]["ready"])
         self.assertEqual(created["health_after_callback"]["heartbeat_count"], 1)
         self.assertFalse(created["health_after_callback"]["tf_delivery_proven"])
+        before = created["health_before_callback"]["tf_receipts"]
+        after = created["health_after_callback"]["tf_receipts"]
+        self.assertEqual(before["edges"]["global_consistency"]["received_count"], 0)
+        global_edge = after["edges"]["global_consistency"]
+        self.assertEqual(global_edge["received_count"], 1)
+        self.assertEqual(after["edges"]["execution_pose"]["received_count"], 0)
+        receipt = global_edge["last_receipts"][0]
+        self.assertAlmostEqual(receipt["age_at_receipt_sec"], 0.1)
+        self.assertAlmostEqual(created["lookup_age_sec"], 1.6)
+        self.assertEqual(receipt["newest_buffer_stamp_sec"], 100.0)
+        self.assertEqual(receipt["ingestion_call_state"], "returned")
+        self.assertFalse(after["insertion_acceptance_proven"])
         self.assertIs(created["injected_tf_buffer"], created["buffer"])
         threads_by_name = {thread.name: thread for thread in created["threads"]}
         self.assertEqual(

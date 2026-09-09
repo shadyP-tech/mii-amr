@@ -7,6 +7,7 @@ from pathlib import Path
 
 from scripts.aufgabe04.navigation.localization.prestart_localization_reseal import (
     evaluate_prestart_localization_reseal,
+    prestart_localization_stop_reason_matches,
 )
 from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization import (
     STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH,
@@ -33,7 +34,9 @@ class StartupRecoveryMixin:
         prestart_localization_admitted = (
             self.prestart_localization_decision.eligible
             and isinstance(outcome.stop_details, Mapping)
-            and outcome.stop_reason == outcome.stop_details.get("reason")
+            and prestart_localization_stop_reason_matches(
+                outcome.stop_reason, outcome.stop_details,
+            )
         )
         startup_pose_mismatch = replanning.is_resealable_startup_mismatch(
             outcome
@@ -272,9 +275,9 @@ class StartupRecoveryMixin:
                         self.prestart_localization_decision.to_evidence()
                     ),
                     "outcome_stop_reason_matches_details": (
-                        isinstance(outcome.stop_details, Mapping)
-                        and outcome.stop_reason
-                        == outcome.stop_details.get("reason")
+                        prestart_localization_stop_reason_matches(
+                            outcome.stop_reason, outcome.stop_details,
+                        )
                     ),
                     "motion_continues_authorized": False,
                     "fail_closed": True,

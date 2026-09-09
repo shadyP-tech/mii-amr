@@ -34,7 +34,7 @@ from scripts.aufgabe04.real_robot.candidate.qr_goal_progress import (
 from scripts.aufgabe04.stations.candidate_snapshot import (
     candidate_snapshot_sha256, load_candidate_snapshot,
 )
-from scripts.aufgabe04.stations.station_identity_registry import load_station_identity_registry
+from scripts.aufgabe04.stations.server_identity_binding import load_observed_identities
 from tests.aufgabe04 import test_autonomous_candidate_approach as fixtures
 
 
@@ -98,16 +98,18 @@ class CandidateQrGoalExecutionTest(unittest.TestCase):
 
     def assert_bound_artifacts(self, config, result):
         confirmed = load_candidate_snapshot(result.confirmed_candidate_snapshot_path)
-        identity = load_station_identity_registry(result.identity_registry_path,
-                                                   candidate_snapshot=confirmed)
+        self.assertIsNone(result.identity_registry_path)
+        self.assertEqual(result.identity_binding_status, "server_binding_pending")
+        identity = load_observed_identities(result.observed_identities_path,
+                                            candidate_snapshot=confirmed)["observed_qr_by_candidate"]
         progress = validate_candidate_qr_goal_completion(
             result.candidate_goal_progress_path, candidate_snapshot=config.snapshot,
-            confirmed_candidate_snapshot=confirmed, identity_registry=identity,
+            confirmed_candidate_snapshot=confirmed, observed_qr_by_candidate=identity,
             expected_stand_count=5,
         )
         self.assertEqual(result.stand_count, 5)
-        self.assertEqual(len(identity.mappings), 5)
-        self.assertEqual(len({mapping.qr_id for mapping in identity.mappings}), 5)
+        self.assertEqual(len(identity), 5)
+        self.assertEqual(len(set(identity.values())), 5)
         self.assertTrue(all(snapshot == config.snapshot for snapshot in self.planned_snapshots))
         self.assertEqual(progress["keepout_candidate_uids"], list(config.snapshot.candidate_uids))
         self.assertEqual(progress["candidate_snapshot_sha256"], candidate_snapshot_sha256(config.snapshot))
@@ -142,7 +144,7 @@ class CandidateQrGoalExecutionTest(unittest.TestCase):
         progress, _, identity = self.assert_bound_artifacts(config, result)
         self.assertEqual(len(self.visited), 7)
         self.assertEqual(len(result.visit_order), 5)
-        self.assertNotIn("QR_DUPLICATE", [mapping.qr_id for mapping in identity.mappings])
+        self.assertNotIn("QR_DUPLICATE", list(identity.values()))
         self.assertNotIn("candidate_1", self.committed)
         for record in progress["candidate_dispositions"][:2]:
             self.assertEqual(record["disposition"], "ambiguous_duplicate_qr")
@@ -202,7 +204,7 @@ class CandidateQrGoalExecutionTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     validate_candidate_qr_goal_completion(
                         path, candidate_snapshot=config.snapshot, confirmed_candidate_snapshot=confirmed,
-                        identity_registry=identity, expected_stand_count=5,
+                        observed_qr_by_candidate=identity, expected_stand_count=5,
                     )
 
     def test_goal_is_configured_independently_and_pool_bound_is_enforced(self):
@@ -284,5 +286,5 @@ class CandidateQrGoalExecutionTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "perception advisories"):
             validate_candidate_qr_goal_completion(
                 bad_path, candidate_snapshot=config.snapshot,
-                confirmed_candidate_snapshot=confirmed, identity_registry=identity, expected_stand_count=5,
+                confirmed_candidate_snapshot=confirmed, observed_qr_by_candidate=identity, expected_stand_count=5,
             )

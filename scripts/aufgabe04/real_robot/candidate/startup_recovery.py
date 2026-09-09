@@ -25,6 +25,7 @@ from typing import Callable, Generic, TypeVar
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.navigation.localization.prestart_localization_reseal import (
     evaluate_prestart_localization_reseal,
+    prestart_localization_stop_reason_matches,
 )
 from scripts.aufgabe04.navigation.localization.runtime_localization_reseal import (
     evaluate_runtime_localization_reseal,
@@ -332,8 +333,9 @@ def _recovery_source_kind(outcome: MotionLegOutcome) -> str | None:
     )
     if not (
         decision.eligible
-        and isinstance(outcome.stop_details, Mapping)
-        and outcome.stop_reason == outcome.stop_details.get("reason")
+        and prestart_localization_stop_reason_matches(
+            outcome.stop_reason, outcome.stop_details,
+        )
         and decision.motion_published is False
         and decision.requires_fresh_localization
         and decision.requires_new_route_certificate
@@ -497,13 +499,26 @@ def execute_candidate_motion_with_startup_recovery(
             )
         recovery_source_kind = _recovery_source_kind(outcome)
         if recovery_source_kind is None:
+            decision = evaluate_prestart_localization_reseal(
+                status=outcome.status,
+                motion_published=outcome.motion_published,
+                stop_details=outcome.stop_details,
+            )
+            decision_reason = (
+                "prestart_stop_reason_mismatch"
+                if decision.eligible
+                else decision.reason
+            )
             _reject_outcome(
                 config,
                 effects,
                 outcome=outcome,
                 expected_run_id=expected_identity.run_id,
                 reseal_index=completed_reseal_count,
-                reason="outcome is not eligible for startup reseal recovery",
+                reason=(
+                    "outcome is not eligible for startup reseal recovery: "
+                    f"{decision_reason}"
+                ),
                 preserve_child_reason=True,
             )
         if completed_reseal_count >= config.max_startup_reseals:

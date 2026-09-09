@@ -65,6 +65,11 @@ def wait_for_initial_runtime_inputs(node, started_at: float) -> str:
             health = {} if executor_probe is None else executor_probe()
             state.executor_health = dict(health)
             failure = sensor_failure or failure
+            if not sensor_failure and failure:
+                # A stale first global sample may consume only the remaining
+                # cold-acquisition budget. Its already-acquired execution edge
+                # must still be fresh after the failed lookup and live probes.
+                failure = _recheck_ready_edge_ages(node, state) or failure
         if not failure:
             # A lookup can block. Recheck the live admission inputs after both
             # samples/continuity checks and before reporting startup ready.

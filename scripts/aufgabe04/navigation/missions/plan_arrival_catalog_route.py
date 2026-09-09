@@ -91,6 +91,12 @@ from scripts.aufgabe04.artifacts.content_store import (  # noqa: E402
 )
 
 
+from scripts.aufgabe04.navigation.missions.arrival_obstacle_snapshot import (
+    load_bound_obstacle_snapshot, overlay_unconfirmed_obstacles, unconfirmed_obstacle_keepouts,
+)
+from scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint import _validate_known_stand_route_clearance
+
+
 DEFAULT_ROUTE = Path("results/aufgabe04/routes/optimized_arrival_route.csv")
 DEFAULT_DIAGNOSTICS = Path(
     "results/aufgabe04/routes/optimized_arrival_route_diagnostics.json"
@@ -266,6 +272,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--arena-margin-m", type=float, default=ArenaBounds.margin_m)
     parser.add_argument("--map-bundle-json", type=Path, default=None)
     parser.add_argument("--candidate-snapshot", type=Path, default=None)
+    parser.add_argument("--obstacle-candidate-snapshot", type=Path, default=None)
     parser.add_argument("--station-identity-registry", type=Path, default=None)
     parser.add_argument("--survey-manifest", type=Path, default=None)
     parser.add_argument(
@@ -638,6 +645,10 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError(
                     "catalog expected candidate set differs from frozen snapshot"
                 )
+        obstacle_snapshot = load_bound_obstacle_snapshot(
+            args.obstacle_candidate_snapshot, catalog=catalog,
+            confirmed_snapshot=candidate_snapshot, map_bundle_sha256=map_bundle.bundle_sha256,
+        )
         if args.route_purpose == "logistics":
             validated_task = load_validated_task_snapshot(args.task_snapshot)
             if validated_task.robot_id != args.robot_id:
@@ -861,6 +872,18 @@ def main(argv: list[str] | None = None) -> int:
                 "and live LiDAR stop distance along the certified tracking tube"
             )
         costmap = costmap.with_inflation(inflation)
+        obstacle_config = DynamicApproachConfig(
+            robot_radius_m=args.robot_radius_m, tracking_margin_m=args.tracking_margin_m,
+            collision_margin_m=args.collision_margin_m,
+            lidar_stop_distance_m=args.lidar_stop_distance_m,
+            scan_origin_to_base_offset_m=args.scan_origin_to_base_offset_m,
+            lidar_clearance_margin_m=args.lidar_clearance_margin_m,
+        )
+        unresolved_keepouts = unconfirmed_obstacle_keepouts(
+            obstacle_snapshot, set(catalog.expected_candidate_uids), config=obstacle_config,
+        )
+        costmap = overlay_unconfirmed_obstacles(costmap, unresolved_keepouts)
+
         if candidate_snapshot is not None:
             for record in catalog.records:
                 frozen_candidate = candidate_snapshot.candidate_for(
@@ -946,6 +969,10 @@ def main(argv: list[str] | None = None) -> int:
                 exact_station_limit=args.exact_station_limit,
             )
         edges = selected_edges(graph, route_plan.arrival_order)
+        for edge in edges:
+            if edge.result.plan is not None:
+                _validate_known_stand_route_clearance(edge.result.plan, unresolved_keepouts)
+
         planned_candidate_uids = tuple(
             arrival_id.split("::", 1)[0]
             for arrival_id in route_plan.arrival_order
@@ -985,6 +1012,8 @@ def main(argv: list[str] | None = None) -> int:
                 if candidate_snapshot is None
                 else candidate_snapshot_sha256(candidate_snapshot)
             ),
+            "obstacle_candidate_snapshot_sha256": catalog.provenance.obstacle_candidate_snapshot_sha256,
+            "unconfirmed_obstacle_count": len(unresolved_keepouts),
             "station_identity_registry_sha256": (
                 ""
                 if identity_registry is None

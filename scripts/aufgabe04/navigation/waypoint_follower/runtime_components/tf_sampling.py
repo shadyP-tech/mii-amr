@@ -26,6 +26,7 @@ def sample_tf_pose(node, *, target_frame: str, source_frame: str, max_future_sec
     max_age = node.follower_config.max_tf_age_sec
     stamp_sec = None
     age = None
+    structural_validation_passed = False
 
     def failed(reason, exception=None):
         details = tf_lookup_failure_details(
@@ -36,6 +37,7 @@ def sample_tf_pose(node, *, target_frame: str, source_frame: str, max_future_sec
             "stop_reason": f"TF transform unavailable: {target_frame} <- {source_frame}",
             "available": False, "max_future_sec": max_future_sec,
             "validation_passed": False,
+            "structural_validation_passed": structural_validation_passed,
         })
         return PoseLookupResult(None, details, stamp_sec)
 
@@ -46,7 +48,11 @@ def sample_tf_pose(node, *, target_frame: str, source_frame: str, max_future_sec
     except TransformException as exc:
         return failed("lookup_exception", exc)
     try:
-        stamp = Time.from_msg(transform.header.stamp)
+        raw_stamp = transform.header.stamp
+        if (type(raw_stamp.sec) is not int or type(raw_stamp.nanosec) is not int
+                or raw_stamp.sec < 0 or not 0 <= raw_stamp.nanosec < 1_000_000_000):
+            raise ValueError("TF timestamp fields are malformed")
+        stamp = Time.from_msg(raw_stamp)
         stamp_sec = stamp.nanoseconds / 1_000_000_000.0
         age = (node.get_clock().now() - stamp).nanoseconds / 1_000_000_000.0
         if not math.isfinite(stamp_sec) or not math.isfinite(age):
@@ -56,20 +62,24 @@ def sample_tf_pose(node, *, target_frame: str, source_frame: str, max_future_sec
         stamp_sec = None
         age = None
         return failed("malformed_transform_stamp", exc)
-    if age < -max_future_sec:
-        return failed("future_transform")
-    if age > max_age:
-        return failed("stale_transform")
     try:
         pose = validated_planar_pose_from_tf(
             transform, expected_target_frame=target_frame, expected_source_frame=source_frame,
         )
     except (AttributeError, TypeError, ValueError, OverflowError) as exc:
         return failed("malformed_transform_pose", exc)
+    # A stale timestamp alone must not conceal an invalid frame or pose. The
+    # startup waiter may inspect this flag, but never receives a stale pose.
+    structural_validation_passed = True
+    if age < -max_future_sec:
+        return failed("future_transform")
+    if age > max_age:
+        return failed("stale_transform")
     return PoseLookupResult(pose, {
         "source": "tf_lookup", "reason": "fresh_transform",
         "target_frame": target_frame, "source_frame": source_frame,
         "available": True, "validation_passed": True,
+        "structural_validation_passed": True,
         "age_sec": age, "max_age_sec": max_age, "max_future_sec": max_future_sec,
     }, stamp_sec)
 
@@ -120,6 +130,7 @@ def refreshed_tf_sample_details(node, details, stamp_sec) -> dict[str, object]:
     except (AttributeError, KeyError, TypeError, ValueError, OverflowError) as exc:
         reason = "malformed_transform_stamp"
         age = None
+        result["structural_validation_passed"] = False
         result.update(exception_type=type(exc).__name__, exception=str(exc))
     result["age_sec"] = age
     if reason:

@@ -67,6 +67,7 @@ class HeadRoiEvaluation:
     estimate: StandAxisImageEstimate
     debug: StandAxisEdgeDebugArtifacts
     qr_observations: tuple[DecodedQrObservation, ...] | None = None
+    qr_decode_metadata: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)

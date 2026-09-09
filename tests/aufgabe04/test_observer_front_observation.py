@@ -25,6 +25,11 @@ class FrontObservationTest(unittest.TestCase):
         self.temporary = TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.node = PassiveRealViewpointNode.__new__(PassiveRealViewpointNode)
+        self.now_sec = 0.0
+        clock = SimpleNamespace(now=lambda: SimpleNamespace(
+            nanoseconds=round(self.now_sec * 1_000_000_000),
+        ))
+        self.node.node = SimpleNamespace(get_clock=lambda: clock)
         self.node.args = SimpleNamespace(
             inspection_observation_json=Path(self.temporary.name) / "inspection.json",
             stand_id="survey_candidate_0001", stream_id="run_candidate_0001",
@@ -54,6 +59,7 @@ class FrontObservationTest(unittest.TestCase):
     def observe(self, stamp, *, texts=("Start",), associated=True,
                 marker=False, source=BACKSIDE, pose=Pose2D(0, 0, 0),
                 observed_at=None, scan_stamp=None):
+        self.now_sec = stamp if observed_at is None else observed_at
         decision = front_observation_decision(
             qr_texts=texts, qr_marker_detected=marker, estimate_source=source,
             marker_seen_in_stationary_epoch=self.node._qr_marker_seen_in_stationary_epoch,
@@ -179,6 +185,7 @@ class FrontObservationTest(unittest.TestCase):
         pose = Pose2D(0, 0, 0)
         for index in range(8):
             stamp = 10 + 1.4 * index
+            self.now_sec = stamp
             update = self.node._record_observation_frame(
                 robot_pose=pose, image_stamp_sec=stamp, scan_stamp_sec=stamp,
                 observed_at_sec=stamp, lidar_associated=True,
@@ -209,6 +216,7 @@ class FrontObservationTest(unittest.TestCase):
         pose = Pose2D(0, 0, 0)
         for index in range(7):
             texts = ("Start",) if index < 2 else ()
+            self.now_sec = 10 + index / 3
             decision = front_observation_decision(
                 qr_texts=texts, qr_marker_detected=True, estimate_source=FRONT,
                 marker_seen_in_stationary_epoch=self.node._qr_marker_seen_in_stationary_epoch,
