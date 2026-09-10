@@ -1,3 +1,4 @@
+from dataclasses import replace
 import json
 from pathlib import Path
 import tempfile
@@ -12,6 +13,7 @@ from scripts.aufgabe04.real_robot.observer.diagnostics import (
 from scripts.aufgabe04.real_robot.observer.process import (
     PassiveObserverProcessEvidence,
 )
+from tests.aufgabe04.observer_timeout_fixture import recorded_backside_timeout_status
 
 
 class PassiveObserverDiagnosticsTests(unittest.TestCase):
@@ -310,7 +312,9 @@ class PassiveObserverDiagnosticsTests(unittest.TestCase):
                     )
 
     def test_tf_activity_and_soft_misses_alone_do_not_allow_deferral(self):
-        for state in ("tf_pending_exact_time", "tf_retry_exhausted"):
+        for state in (
+            "tf_pending_exact_time", "tf_retry_exhausted", "obsolete_detector_result"
+        ):
             for evidence in (
                 {},
                 {
@@ -365,7 +369,9 @@ class PassiveObserverDiagnosticsTests(unittest.TestCase):
                 )
 
     def test_poisoned_identity_evidence_remains_terminal_at_deadline(self):
-        for state in ("tf_pending_exact_time", "evidence_not_committable"):
+        for state in (
+            "tf_pending_exact_time", "evidence_not_committable", "obsolete_detector_result"
+        ):
             for poison in (
                 {"poisoned": True},
                 {
@@ -416,7 +422,9 @@ class PassiveObserverDiagnosticsTests(unittest.TestCase):
                         field: value,
                     }
                 )
-        for state in ("tf_pending_exact_time", "lidar_target_mismatch"):
+        for state in (
+            "tf_pending_exact_time", "lidar_target_mismatch", "obsolete_detector_result"
+        ):
             for evidence in malformed:
                 with self.subTest(state=state, evidence=evidence):
                     status = self._load_payload(
@@ -438,6 +446,79 @@ class PassiveObserverDiagnosticsTests(unittest.TestCase):
                 self.assertFalse(
                     is_candidate_local_observer_timeout(
                         process=self._process(), status=status
+                    )
+                )
+
+    def test_recorded_obsolete_result_uses_prior_processing_without_admitting_axis(self):
+        status = self._load_payload(recorded_backside_timeout_status())
+
+        self.assertTrue(
+            is_candidate_local_observer_timeout(process=self._process(), status=status)
+        )
+        self.assertEqual(
+            candidate_local_observer_timeout_basis(status),
+            "accumulated_transform_ready_candidate_frames",
+        )
+        self.assertEqual(status.state, "obsolete_detector_result")
+        self.assertEqual(status.accepted_frame_count, 0)
+        self.assertEqual(status.consensus_sample_count, 0)
+        self.assertEqual(status.consensus_required_sample_count, 7)
+        self.assertEqual(status.lidar_rejection_count, 21)
+
+    def test_obsolete_result_requires_explicit_unpoisoned_processing_evidence(self):
+        status = self._load_payload(recorded_backside_timeout_status())
+        for changed in (
+            replace(status, observation_evidence_poisoned=None),
+            replace(status, accepted_frame_count=0, lidar_rejection_count=0),
+            replace(status, accepted_frame_count=None, lidar_rejection_count=None),
+        ):
+            with self.subTest(status=changed):
+                self.assertFalse(
+                    is_candidate_local_observer_timeout(
+                        process=self._process(), status=changed
+                    )
+                )
+
+    def test_crash_racing_deadline_cannot_hide_behind_prior_candidate_processing(self):
+        status = self._load_payload(recorded_backside_timeout_status())
+        for returncode, signals in (
+            (1, ("SIGINT",)),
+            (-11, ("SIGINT",)),
+            (139, ("SIGINT",)),
+            (130, ()),
+            (-2, ()),
+            (137, ("SIGINT",)),
+            (True, ("SIGINT",)),
+        ):
+            with self.subTest(returncode=returncode, signals=signals):
+                process = replace(
+                    self._process(), returncode=returncode, signals_sent=signals
+                )
+                self.assertFalse(
+                    is_candidate_local_observer_timeout(process=process, status=status)
+                )
+
+    def test_only_deadline_with_expected_cleanup_exit_can_defer_recorded_status(self):
+        status = self._load_payload(recorded_backside_timeout_status())
+        for returncode, signals in (
+            (0, ()), (130, ("SIGINT",)), (-2, ("SIGINT",)),
+            (-15, ("SIGINT", "SIGTERM")),
+            (-9, ("SIGINT", "SIGTERM", "SIGKILL")),
+        ):
+            with self.subTest(returncode=returncode, signals=signals):
+                self.assertTrue(
+                    is_candidate_local_observer_timeout(
+                        process=replace(
+                            self._process(), returncode=returncode, signals_sent=signals
+                        ),
+                        status=status,
+                    )
+                )
+        for completion in ("child_exit", "artifact"):
+            with self.subTest(completion=completion):
+                self.assertFalse(
+                    is_candidate_local_observer_timeout(
+                        process=self._process(completion), status=status
                     )
                 )
 

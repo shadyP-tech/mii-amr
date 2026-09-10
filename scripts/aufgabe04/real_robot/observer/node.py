@@ -57,6 +57,7 @@ from scripts.aufgabe04.perception.stand_axis.model_profile import (
 from scripts.aufgabe04.perception.stand_axis.model_pipeline import (
     estimate_stand_axis_from_metric_model,
 )
+from scripts.aufgabe04.perception.stand_axis.model_input_cache import MetricModelInputCache
 from scripts.aufgabe04.perception.stand_axis.pose_tracking import (
     MetricPoseTracker,
 )
@@ -115,7 +116,10 @@ from scripts.aufgabe04.real_robot.observer.evidence import (
 )
 from scripts.aufgabe04.real_robot.observer.camera_target_registration import (
     HeadRoiEvaluation,
-    select_camera_target_measurement,
+)
+from scripts.aufgabe04.real_robot.observer.backside_proposal_reuse import (
+    BacksideProposalContext,
+    BacksideProposalReuse,
 )
 from scripts.aufgabe04.real_robot.observer.camera_publication import (
     CameraPublicationExpired,
@@ -361,6 +365,10 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             args.stand_head_center_height_m,
         )
         self.model_pose_tracker = MetricPoseTracker(prediction_ttl_sec=0.25)
+        self.backside_proposal_reuse = BacksideProposalReuse(
+            max_translation_m=args.stationary_translation_m,
+            max_rotation_rad=math.radians(args.stationary_rotation_deg),
+        )
         self.profile = load_real_robot_profile(args.robot_profile)
         self.calibration = load_camera_calibration(args.camera_calibration)
         if camera_calibration_sha256(self.calibration) != (
@@ -646,6 +654,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         """Drop evidence after a sealed sensor/frame contract violation."""
 
         self.observation_evidence = None
+        if getattr(self, "backside_proposal_reuse", None) is not None:
+            self.backside_proposal_reuse.reset()
         self._last_observation_update = None
         self._inspection_frame = None
         if reset_inspection:
@@ -662,6 +672,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
 
         if decision.marker_observed_now:
             self._qr_marker_seen_in_stationary_epoch = True
+            if getattr(self, "backside_proposal_reuse", None) is not None:
+                self.backside_proposal_reuse.reset()
             if self._qr_marker_stationary_epoch_anchor is None:
                 self._qr_marker_stationary_epoch_anchor = robot_pose
         if decision.marker_seen_in_stationary_epoch and self.observation_evidence is not None:
@@ -1062,6 +1074,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 pose=robot_pose,
             )
             self.model_pose_tracker.reset()
+            self.backside_proposal_reuse.reset()
             self.last_pose = robot_pose
             self._write_status(
                 "robot_not_stationary",
@@ -1226,6 +1239,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             camera_signature=camera_signature,
         )
         qr_decode_cache = RoiQrDecodeCache()
+        model_input_cache = MetricModelInputCache(frame)
 
         def evaluate_roi_attempt(
             attempt: HeadRoiAttempt,
@@ -1270,6 +1284,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 backside_target_crop_horizontal_half_width_ratio=(
                     attempt.backside_target_crop_half_width_ratio
                 ),
+                input_cache=model_input_cache,
+                input_cache_roi=(attempt_roi.x0, attempt_roi.y0, attempt_roi.x1, attempt_roi.y1),
             )
             attempt_debug = replace(
                 attempt_debug,
@@ -1284,11 +1300,27 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 estimate=attempt_estimate,
                 debug=attempt_debug,
                 qr_observations=qr_observations,
-                qr_decode_metadata=decoded.metadata(),
+                qr_decode_metadata={
+                    **decoded.metadata(), "model_inputs": dict(model_input_cache.last_metadata),
+                },
             )
 
-        registration = select_camera_target_measurement(
+        registration = self.backside_proposal_reuse.select(
             roi_attempts,
+            context=BacksideProposalContext(
+                target_key=self._target_evidence_key(),
+                model_sha256=self.stand_model_profile.sha256,
+                camera_signature=(
+                    self.profile.camera_optical_frame, *camera_signature,
+                    *(tuple(getattr(camera_info.value, field, ())) for field in ("k", "d", "r", "p")),
+                    str(getattr(camera_info.value, "distortion_model", "")),
+                    scan_camera_translation, scan_camera_rotation,
+                ),
+                image_shape=tuple(frame.shape),
+            ),
+            observed_at_sec=image.stamp_sec,
+            robot_pose=robot_pose,
+            marker_seen_in_stationary_epoch=self._qr_marker_seen_in_stationary_epoch,
             tracked_pose=prediction.pose,
             evaluate=evaluate_roi_attempt,
             enable_reacquisition=not self.args.disable_backside_reacquisition,
@@ -1339,6 +1371,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             "camera_target_registration": registration.metadata(
                 enabled=not self.args.disable_backside_reacquisition
             ),
+            "backside_proposal_reuse": dict(self.backside_proposal_reuse.last_metadata),
             "evidence_state": estimate.evidence_state,
             "qr_detected": debug.qr_detected,
             "pose_reprojection_rmse_px": (

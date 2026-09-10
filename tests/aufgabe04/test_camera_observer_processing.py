@@ -19,6 +19,8 @@ from scripts.aufgabe04.real_robot.observer.node import (
     PassiveRealViewpointNode, _stand_axis_profile_from_args, build_parser,
 )
 from scripts.aufgabe04.real_robot.observer.tf_retry import PassiveObserverTfRetryScheduler
+from scripts.aufgabe04.real_robot.observer.backside_proposal_reuse import BacksideProposalReuse
+from scripts.aufgabe04.real_robot.observer.contract import BACKSIDE_AXIS_SAMPLE_SOURCE
 
 
 def transform(translation=(0., 0., 0.), rotation=(0., 0., 0., 1.)):
@@ -51,6 +53,7 @@ class CameraObserverProcessingTest(unittest.TestCase):
         adapter.stand_head_center_height_m = .45
         adapter.stand_axis_profile = _stand_axis_profile_from_args(adapter.args)
         adapter.model_pose_tracker = MetricPoseTracker()
+        adapter.backside_proposal_reuse = BacksideProposalReuse()
         adapter.last_pose = Pose2D(0., 0., 0.)
         adapter.observation_evidence = None
         adapter.completed = False
@@ -238,6 +241,78 @@ class CameraObserverProcessingTest(unittest.TestCase):
             self.assertEqual(adapter._last_camera_publication_freshness["artifact_kind"], "recommendation")
             self.assertFalse(adapter._last_camera_publication_freshness["accepted"])
             self.assertFalse(output.exists())
+            self.assertFalse(adapter.completed)
+
+    def test_stale_backside_only_seeds_search_then_current_frame_enters_evidence(self):
+        adapter = self.make_adapter()
+        frame = numpy.zeros((600, 800, 3), dtype=numpy.uint8)
+        metric_calls = []
+
+        def metric(_cv2, crop, **options):
+            metric_calls.append(options)
+            # The nominal crop cannot acquire this displaced head. Wide
+            # acquisition locates it; later strict fits use CURRENT pixels.
+            first = len(metric_calls) == 1
+            u = options["expected_head_center_u_px"]
+            if len(metric_calls) == 2:
+                u -= 10.
+            v = options["expected_head_center_v_px"]
+            corners = None if first else tuple(ImagePoint(u + x, v + y) for x, y in
+                ((-26., -26.), (26., -26.), (26., 26.), (-26., 26.)))
+            estimate = StandAxisImageEstimate(
+                usable=not first,
+                reason=("model_backside_head_and_neck_unavailable" if first
+                        else "axis_estimated_model_backside_current_frame"),
+                mode="face_visible", corners=corners, axis_line=None,
+                left_height_px=52., right_height_px=52., height_ratio=1.,
+                yaw_proxy=0., yaw_deg=2. if len(metric_calls) < 4 else 4.,
+                closer_side="equal", contour_area_px=2704.,
+                source=BACKSIDE_AXIS_SAMPLE_SOURCE, evidence_state="fresh_backside",
+                model_profile_sha256=adapter.stand_model_profile.sha256,
+                model_measurement_status="measured", visible_face="backside_candidate",
+                visible_face_confidence=.99,
+            )
+            debug = StandAxisEdgeDebugArtifacts(
+                edges=None, qr_detected=False, evidence_state="fresh_backside",
+                model_profile_sha256=adapter.stand_model_profile.sha256,
+                head_scale_ratio=1., head_center_error_ratio=0.,
+            )
+            if len(metric_calls) == 3:
+                self.clock_sec = 100.824  # Recorded failure, still no authority.
+            return estimate, debug
+
+        module = "scripts.aufgabe04.real_robot.observer.node."
+        with patch(module + "camera_info_mismatches", return_value=()), \
+             patch(module + "transform_mismatches", return_value=()), \
+             patch(module + "compressed_msg_to_bgr_frame", return_value=frame), \
+             patch(module + "_rectify_bgr_frame", side_effect=lambda value, *_: value), \
+             patch(module + "detect_qr_observations_bgr", return_value=()) as decoder, \
+             patch(module + "estimate_stand_axis_from_metric_model", side_effect=metric):
+            adapter._process_latest()
+            self.assertEqual(len(metric_calls), 3)
+            self.assertEqual(adapter._write_status.call_args.args, ("obsolete_detector_result",))
+            self.assertIsNone(adapter.observation_evidence)
+            self.assertTrue(adapter.backside_proposal_reuse.last_metadata["hint_retained"])
+            sensor_tuple = adapter._next_sensor_tuple.return_value
+            self.clock_sec = 101.1
+            for sample in (sensor_tuple.image, sensor_tuple.scan, sensor_tuple.camera_info):
+                sample.stamp_sec = 101.
+                sample.received_ros_sec = self.clock_sec
+            sensor_tuple.image.value.header.stamp.sec = 101
+            adapter.tf_retry_scheduler.offer(sensor_tuple, stamp_sec=101.)
+            adapter._process_latest()
+            self.assertEqual(len(metric_calls), 4)
+            self.assertEqual(decoder.call_count, 3)  # Two cold crops + new wide crop.
+            update = adapter._last_observation_update
+            self.assertTrue(update.axis_sample_accepted)
+            self.assertEqual(update.snapshot.accepted_frame_count, 1)
+            self.assertEqual(update.snapshot.current_axis_sample_count, 1)
+            self.assertIsNone(update.axis_consensus)
+            axis = adapter._write_status.call_args.kwargs["stand_axis_debug"]
+            self.assertAlmostEqual(axis["advisory_camera_relative_yaw_rad"], numpy.deg2rad(4.))
+            registration = axis["metric_model"]["camera_target_registration"]
+            self.assertTrue(registration["attempted"])
+            self.assertTrue(registration["search_hint_used"])
             self.assertFalse(adapter.completed)
 
 

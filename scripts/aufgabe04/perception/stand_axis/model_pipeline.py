@@ -18,6 +18,10 @@ from scripts.aufgabe04.perception.stand_axis.pose_fit_diagnostics import (
     collect_metric_model_diagnostics,
 )
 from scripts.aufgabe04.perception.stand_axis.model_profile import StandModelProfile
+from scripts.aufgabe04.perception.stand_axis.model_input_cache import (
+    MetricModelInputCache,
+    RoiBounds,
+)
 from scripts.aufgabe04.perception.stand_axis.model_projection import project_stand_model
 from scripts.aufgabe04.perception.stand_axis.model_refinement import (
     model_corridor_half_width_px,
@@ -62,12 +66,16 @@ def estimate_stand_axis_from_metric_model(
     expected_head_height_px: float | None = None,
     backside_target_crop_horizontal_half_width_ratio: float = 1.25,
     qr_observations: tuple[DecodedQrObservation, ...] | None = None,
+    input_cache: MetricModelInputCache | None = None,
+    input_cache_roi: RoiBounds | None = None,
 ) -> tuple[StandAxisImageEstimate, StandAxisEdgeDebugArtifacts]:
     """Acquire from QR/tracking or a gated no-QR backside candidate.
 
     Every successful branch remains bound to current-frame rail support.  The
     no-QR branch is available only with a measured physical model and a full
-    candidate-centred expected-head projection.
+    candidate-centred expected-head projection. An optional per-image cache
+    reuses raw edge/QR inputs for an exact ROI view; projection, acquisition,
+    pose fitting and all acceptance gates still run independently each time.
     """
 
     timing = ModelStageTiming()
@@ -78,14 +86,22 @@ def estimate_stand_axis_from_metric_model(
         float(camera_cy_px),
     )
     camera.validate()
-    raw_edges = _canny_edges_from_frame(
-        cv2,
-        frame,
-        edge_preprocess=edge_preprocess,
-        blur_kernel=blur_kernel,
-        canny_low=canny_low,
-        canny_high=canny_high,
+    if (input_cache is None) != (input_cache_roi is None):
+        raise ValueError("model input cache and exact ROI must be supplied together")
+    cached_inputs = None if input_cache is None else input_cache.begin(
+        frame, roi=input_cache_roi, cv2=cv2, edge_preprocess=edge_preprocess,
+        blur_kernel=blur_kernel, canny_low=canny_low, canny_high=canny_high,
+        pose_hint_present=pose_hint is not None, qr_observations=qr_observations,
     )
+
+    def preprocess_edges():
+        return _canny_edges_from_frame(
+            cv2, frame, edge_preprocess=edge_preprocess, blur_kernel=blur_kernel,
+            canny_low=canny_low, canny_high=canny_high,
+        )
+
+    raw_edges = (preprocess_edges() if cached_inputs is None else
+                 cached_inputs.compute("edge_preprocessing", preprocess_edges))
     timing.mark("edge_preprocessing")
     if qr_observations is not None:
         if any(not isinstance(item, DecodedQrObservation) for item in qr_observations):
@@ -107,13 +123,16 @@ def estimate_stand_axis_from_metric_model(
     # that state, avoid paying for the 4x acquisition pyramid on every frame;
     # a native QR observation may still refresh the seed.  Once tracking
     # expires, the full pyramid reacquires the stand.
-    qr_detection = detect_qr_quad(
-        cv2,
-        frame,
-        scales=((1.0,) if pose_hint is not None else (1.0, 2.0, 4.0)),
-        allow_decode_fallback=(pose_hint is None),
-        **({"decoded_observations": qr_observations} if qr_observations is not None else {}),
-    )
+    def acquire_qr_quad():
+        return detect_qr_quad(
+            cv2, frame,
+            scales=((1.0,) if pose_hint is not None else (1.0, 2.0, 4.0)),
+            allow_decode_fallback=(pose_hint is None),
+            **({"decoded_observations": qr_observations} if qr_observations is not None else {}),
+        )
+
+    qr_detection = (acquire_qr_quad() if cached_inputs is None else
+                    cached_inputs.compute("qr_detection", acquire_qr_quad))
     timing.mark("qr_detection")
     qr_corners = None if qr_detection is None else qr_detection.corners
     qr_marker_detected = qr_corners is not None or bool(qr_observations)

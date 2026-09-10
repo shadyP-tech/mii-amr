@@ -45,4 +45,9 @@ tests/aufgabe04/fixtures/*
 !tests/aufgabe04/fixtures/exact_two_six_candidate_run_20260907.json
 !tests/aufgabe04/fixtures/lidar_morphology_conflict_20260907.json
 !tests/aufgabe04/fixtures/candidate_runtime_prestart_stop_20260908.json
+!tests/aufgabe04/fixtures/recorded_backside_20260910/
+tests/aufgabe04/fixtures/recorded_backside_20260910/*
+!tests/aufgabe04/fixtures/recorded_backside_20260910/inputs.json
+!tests/aufgabe04/fixtures/recorded_backside_20260910/frame_000008.jpg
+!tests/aufgabe04/fixtures/recorded_backside_20260910/frame_000010.jpg
 !tests/test_run_with_bundle.py

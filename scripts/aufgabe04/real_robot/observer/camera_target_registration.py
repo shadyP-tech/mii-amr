@@ -83,6 +83,7 @@ class CameraTargetRegistrationSelection:
     # initial trigger when the wider search discovers a QR.
     reacquisition_mode: str | None
     initial_reacquisition_mode: str | None = None
+    search_hint_used: bool = False
 
     @property
     def registered(self) -> bool:
@@ -93,7 +94,8 @@ class CameraTargetRegistrationSelection:
         strict_retry = self.strict_retry
         return {
             "enabled": bool(enabled),
-            "attempted": proposal is not None,
+            "attempted": proposal is not None or self.search_hint_used,
+            "search_hint_used": self.search_hint_used,
             "reacquisition_mode": self.reacquisition_mode,
             "initial_reacquisition_mode": self.initial_reacquisition_mode,
             "primary_estimator_reason": self.evaluations[0].estimate.reason,

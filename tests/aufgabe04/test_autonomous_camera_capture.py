@@ -12,6 +12,10 @@ from scripts.aufgabe04.perception.stand_axis.model_profile import (
     write_stand_model,
 )
 from scripts.aufgabe04.real_robot.autonomous_runner import runtime
+from scripts.aufgabe04.real_robot.candidate.inspection_execution import (
+    CandidateInspectionEffects,
+    execute_candidate_inspection,
+)
 from scripts.aufgabe04.real_robot.candidate.observation_deferral import (
     CandidateObservationDeferralLedger,
     CandidateObservationUnavailableError,
@@ -20,6 +24,7 @@ from scripts.aufgabe04.real_robot.observer.process import (
     PassiveObserverProcessEvidence,
 )
 from tests.aufgabe04.backside_axis_fixture import backside_axis_payload
+from tests.aufgabe04.observer_timeout_fixture import recorded_backside_timeout_status
 
 
 def _write_measured_model(root: Path) -> Path:
@@ -630,6 +635,72 @@ class AutonomousCameraCaptureTests(unittest.TestCase):
         self.assertTrue(final_state.terminal_incomplete)
         self.assertFalse(final_state.complete)
         self.assertEqual(final_state.unresolved_candidate_uids, (candidate.candidate_uid,))
+
+    @patch.object(runtime.subprocess, "Popen")
+    @patch.object(runtime, "monitor_passive_observer_process")
+    def test_recorded_stale_deadline_records_each_view_and_respects_inspection_budget(
+        self, monitor, _popen
+    ) -> None:
+        def expire(**kwargs):
+            (kwargs["recommendation_path"].parent / "observer_status.json").write_text(
+                json.dumps(recorded_backside_timeout_status()), encoding="utf-8"
+            )
+            return PassiveObserverProcessEvidence(
+                completion_kind="deadline", artifact_kind=None, artifact_path=None,
+                deadline_expired=True, returncode=130,
+                cleanup_actions=("send_sigint", "wait_after_sigint"),
+                signals_sent=("SIGINT",),
+            )
+
+        monitor.side_effect = expire
+        for max_views in (2, 8):
+            with self.subTest(max_views=max_views), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                args = _args(_write_measured_model(root))
+                captures, failures, moves = [], [], []
+
+                def capture(frame, output, index):
+                    captures.append(index)
+                    try:
+                        return runtime._capture_camera_recommendation(
+                            profile=object(), args=args, candidate=_candidate(),
+                            output_dir=output, observation_attempt_index=index,
+                        )
+                    except CandidateObservationUnavailableError as exc:
+                        failures.append(exc)
+                        raise
+
+                def move(frame, normal, output, index, source):
+                    moves.append(index)
+                    return normal
+
+                with self.assertRaises(CandidateObservationUnavailableError) as caught:
+                    execute_candidate_inspection(
+                        candidate_uid=_candidate().candidate_uid, candidate_root=root,
+                        initial_frame=0.0, max_views=max_views,
+                        effects=CandidateInspectionEffects(
+                            capture=capture, canonical_normal=lambda frame: frame,
+                            move_view=move,
+                            move_opposite=lambda *args: self.fail("stale axis authorized opposite view"),
+                            progress_evidence=lambda *args: {},
+                        ),
+                    )
+
+                progress = json.loads((root / "inspection_progress.json").read_text())
+                self.assertEqual(captures, list(range(max_views)))
+                self.assertEqual(len(moves), max_views - 1)
+                self.assertEqual(progress["local_view_count"], max_views)
+                self.assertEqual(progress["termination_reason"], "view_budget_exhausted")
+                self.assertFalse(progress["joint_observation_ready"])
+                self.assertEqual(caught.exception.reason, "candidate_local_inspection_exhausted")
+                for failure in failures:
+                    self.assertEqual(failure.status_evidence["accepted_frame_count"], 0)
+                    self.assertEqual(failure.status_evidence["consensus_sample_count"], 0)
+                    self.assertEqual(
+                        failure.status_evidence["timeout_classification_basis"],
+                        "accumulated_transform_ready_candidate_frames",
+                    )
+                    self.assertFalse(failure.to_failure_fields()["motion_continues_authorized"])
 
     @patch.object(runtime.subprocess, "Popen")
     @patch.object(runtime, "monitor_passive_observer_process")

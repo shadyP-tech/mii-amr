@@ -17,6 +17,12 @@ from typing import Mapping
 from scripts.aufgabe04.real_robot.observer.process import (
     PassiveObserverProcessEvidence,
 )
+from scripts.aufgabe04.real_robot.observer.timeout_policy import (
+    CANDIDATE_LOCAL_OBSERVER_TIMEOUT_STATES,
+    TRANSIENT_TF_OBSERVER_TIMEOUT_STATES,
+    candidate_local_observer_timeout_basis,
+    is_candidate_local_observer_timeout,
+)
 
 
 def _optional_nonnegative_int(value: object) -> int | None:
@@ -236,74 +242,6 @@ def load_passive_observer_status(
             and poison_reason_value.strip()
             else None
         ),
-    )
-
-
-CANDIDATE_LOCAL_OBSERVER_TIMEOUT_STATES = frozenset(
-    {
-        "collecting_consensus",
-        "evidence_not_committable",
-        "head_size_projection_mismatch",
-        "lidar_target_mismatch",
-        "metric_model_measurement_unavailable",
-        "target_outside_camera_gate",
-    }
-)
-TRANSIENT_TF_OBSERVER_TIMEOUT_STATES = frozenset(
-    {
-        "tf_pending_exact_time",
-        "tf_retry_exhausted",
-    }
-)
-
-
-def candidate_local_observer_timeout_basis(
-    status: PassiveObserverStatusEvidence,
-) -> str | None:
-    """Explain why a status snapshot represents candidate-local failure.
-
-    The final status is replaceable and can land on a transient exact-time TF
-    retry just as the parent deadline expires.  Both accepted frames and
-    LiDAR-rejected frames reach ``record_frame`` only after exact-time TF
-    succeeds in the observer node.  Either accumulated count therefore proves
-    that the trailing TF state did not prevent all candidate processing.
-    A LiDAR rejection is evidence of processing, not a usable observation.
-    """
-
-    if (
-        status.load_error is not None
-        or status.observation_evidence_poisoned is True
-        or status.observation_evidence_poison_reason is not None
-    ):
-        return None
-    if status.state in CANDIDATE_LOCAL_OBSERVER_TIMEOUT_STATES:
-        return "final_candidate_local_state"
-    if (
-        status.state in TRANSIENT_TF_OBSERVER_TIMEOUT_STATES
-        and any(
-            count is not None and count > 0
-            for count in (
-                _optional_nonnegative_int(status.accepted_frame_count),
-                _optional_nonnegative_int(status.lidar_rejection_count),
-            )
-        )
-    ):
-        return "accumulated_transform_ready_candidate_frames"
-    return None
-
-
-def is_candidate_local_observer_timeout(
-    *,
-    process: PassiveObserverProcessEvidence,
-    status: PassiveObserverStatusEvidence,
-) -> bool:
-    """Classify only reaped, candidate-local quality deadlines as deferrable."""
-
-    return (
-        process.completion_kind == "deadline"
-        and process.deadline_expired
-        and status.load_error is None
-        and candidate_local_observer_timeout_basis(status) is not None
     )
 
 
