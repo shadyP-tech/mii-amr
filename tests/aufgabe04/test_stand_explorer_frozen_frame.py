@@ -13,6 +13,10 @@ from scripts.aufgabe04.navigation.localization.odom_execution_certificate import
     odom_execution_certificate_sha256,
     write_odom_execution_certificate,
 )
+from scripts.aufgabe04.navigation.foundation.ros_runtime_config import (
+    RuntimeConfig, resolve_runtime_config,
+)
+from scripts.aufgabe04.perception.lidar_observer_runtime import LidarObserverRuntime
 from scripts.aufgabe04.perception.stand_observation import PlanarTransform
 from scripts.aufgabe04.perception import stand_explorer_node
 
@@ -53,9 +57,11 @@ class StandExplorerFrozenFrameTest(unittest.TestCase):
         now = SimpleNamespace(sec=10, nanosec=10_000_000)
         receipt_buffer = []
         warnings = []
+        runtime = resolve_runtime_config(RuntimeConfig())
         node = SimpleNamespace(
             frozen_observer_frame=frozen,
-            runtime=SimpleNamespace(map_frame="map", odom_frame="odom", scan_topic="/scan"),
+            runtime=runtime,
+            observer_runtime=LidarObserverRuntime(runtime),
             get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: now)),
             get_logger=lambda: SimpleNamespace(warn=warnings.append),
             timing_limits=stand_explorer_node.DEFAULT_OBSERVATION_TIMING_LIMITS,
@@ -210,10 +216,12 @@ class StandExplorerFrozenFrameTest(unittest.TestCase):
             certificate=certificate,
             certificate_sha256=odom_execution_certificate_sha256(certificate),
         )
+        runtime = resolve_runtime_config(RuntimeConfig())
         fake_node = SimpleNamespace(
             pending_scans=deque((pending,)),
             tf_buffer=FakeBuffer(),
-            runtime=SimpleNamespace(map_frame="map", odom_frame="odom"),
+            runtime=runtime,
+            observer_runtime=LidarObserverRuntime(runtime),
             frozen_observer_frame=frozen,
             get_logger=lambda: SimpleNamespace(warn=lambda _message: None),
             _process_scan_with_transform=lambda item, transform: processed.append(
@@ -268,15 +276,14 @@ class StandExplorerFrozenFrameTest(unittest.TestCase):
             certificate=certificate,
             certificate_sha256=odom_execution_certificate_sha256(certificate),
         )
+        runtime = resolve_runtime_config(RuntimeConfig())
         node = SimpleNamespace(
             frozen_observer_frame=frozen,
             started_unix_sec=1.0,
             output_jsonl=Path("observations.jsonl"),
             map_bundle=None,
-            runtime=SimpleNamespace(
-                map_frame="map",
-                as_log_dict=lambda: {"map_frame": "map"},
-            ),
+            runtime=runtime,
+            observer_runtime=LidarObserverRuntime(runtime),
             last_scan_pose_map=None,
             last_processed_scan_stamp_sec=None,
             processed_scan_count=0,
@@ -301,7 +308,7 @@ class StandExplorerFrozenFrameTest(unittest.TestCase):
 
     def test_legacy_mode_keeps_map_target_and_existing_observer_version(self):
         args = stand_explorer_node.build_parser().parse_args([])
-        runtime = SimpleNamespace(map_frame="map", odom_frame="odom")
+        runtime = resolve_runtime_config(RuntimeConfig())
 
         self.assertIsNone(args.odom_execution_certificate_json)
         self.assertEqual(

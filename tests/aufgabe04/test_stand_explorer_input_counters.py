@@ -7,6 +7,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 from scripts.aufgabe04.perception import stand_explorer_node as explorer
+from scripts.aufgabe04.navigation.foundation.ros_runtime_config import RuntimeConfig, resolve_runtime_config
+from scripts.aufgabe04.perception.lidar_observer_runtime import LidarObserverRuntime
 
 
 def stamp(value):
@@ -30,7 +32,8 @@ class StandExplorerInputCountersTest(unittest.TestCase):
         self.node.pending_scans = deque()
         self.node.args = SimpleNamespace(pending_scan_limit=1, tf_timeout_sec=.5,
                                          scan_topology_profile="linear")
-        self.node.runtime = SimpleNamespace(map_frame="map", as_log_dict=lambda: {"map_frame": "map"})
+        self.node.runtime = resolve_runtime_config(RuntimeConfig())
+        self.node.observer_runtime = LidarObserverRuntime(self.node.runtime)
         self.node.timing_limits = explorer.DEFAULT_OBSERVATION_TIMING_LIMITS
         self.node.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: stamp(100.0)))
         self.node.get_logger = lambda: SimpleNamespace(warn=Mock(), info=Mock())
@@ -124,6 +127,22 @@ class StandExplorerInputCountersTest(unittest.TestCase):
         self.node._scan_callback(scan())
         self.assertEqual(self.summary()["rejected_scan_counts"], {"invalid_exact_time_tf": 1})
         self.assertEqual(self.node.processed_scan_count, 0)
+
+    def test_detection_uses_captured_profile_after_arguments_change(self):
+        self.node.observer_runtime = LidarObserverRuntime(self.node.runtime, "full_rotation")
+        self.node.args.scan_topology_profile = "linear"
+        self.node.tf_buffer.can_transform.return_value = True
+        with patch.object(
+            explorer, "detect_stand_candidates_from_scan",
+            wraps=explorer.detect_stand_candidates_from_scan,
+        ) as detect:
+            self.node._scan_callback(scan())
+
+        self.assertEqual(self.node.processed_scan_count, 1)
+        self.assertEqual(detect.call_args.kwargs["scan_topology_profile"], "full_rotation")
+        summary = explorer.observer_summary_payload(self.node)
+        self.assertEqual(summary["scan_topology_profile"], "full_rotation")
+        self.assertEqual(summary["runtime_config"]["scan_topology_profile"], "full_rotation")
 
     def test_malformed_wire_timestamp_is_counted_before_tf(self):
         message = scan()

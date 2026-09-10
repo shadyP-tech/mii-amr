@@ -1,4 +1,5 @@
 from collections import deque
+from dataclasses import replace
 from types import SimpleNamespace
 import json
 import math
@@ -13,9 +14,19 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.aufgabe04.perception import stand_explorer_node  # noqa: E402
+from scripts.aufgabe04.navigation.foundation.ros_runtime_config import RuntimeConfig, resolve_runtime_config
+from scripts.aufgabe04.navigation.coverage.coverage_visibility_reporting import validate_coverage_visibility_evidence
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import odom_execution_certificate_sha256
+from scripts.aufgabe04.perception.lidar_observer_runtime import LidarObserverRuntime
+from tests.aufgabe04.test_coverage_visibility_reporting import _plan
+from tests.aufgabe04.test_stand_explorer_frozen_frame import _certificate
 
 
 class StandExplorerTfTest(unittest.TestCase):
+    def setUp(self):
+        self.runtime = resolve_runtime_config(RuntimeConfig())
+        self.observer_runtime = LidarObserverRuntime(self.runtime)
+
     def test_paused_observer_ignores_scans_before_readiness(self):
         fake_node = type(
             "FakeNode",
@@ -126,7 +137,8 @@ class StandExplorerTfTest(unittest.TestCase):
         fake_node = SimpleNamespace(
             pending_scans=deque((pending,)),
             tf_buffer=FakeBuffer(),
-            runtime=SimpleNamespace(map_frame="map"),
+            runtime=self.runtime,
+            observer_runtime=self.observer_runtime,
             get_logger=lambda: SimpleNamespace(warn=lambda _message: None),
             _process_scan_with_transform=lambda item, transform: processed.append(
                 (item, transform)
@@ -164,7 +176,8 @@ class StandExplorerTfTest(unittest.TestCase):
         fake_node = SimpleNamespace(
             pending_scans=deque((pending,)),
             tf_buffer=SimpleNamespace(can_transform=lambda *_args, **_kwargs: False),
-            runtime=SimpleNamespace(map_frame="map"),
+            runtime=self.runtime,
+            observer_runtime=self.observer_runtime,
             get_logger=lambda: SimpleNamespace(warn=lambda _message: None),
         )
         original_duration = stand_explorer_node.Duration
@@ -197,10 +210,8 @@ class StandExplorerTfTest(unittest.TestCase):
             started_unix_sec=10.0,
             output_jsonl=Path("empty_observations.jsonl"),
             map_bundle=SimpleNamespace(bundle_sha256="a" * 64),
-            runtime=SimpleNamespace(
-                map_frame="map",
-                as_log_dict=lambda: {"map_frame": "map"},
-            ),
+            runtime=self.runtime,
+            observer_runtime=self.observer_runtime,
             timing_limits=SimpleNamespace(
                 as_dict=lambda: {"max_scan_age_sec": 1.0}
             ),
@@ -234,10 +245,8 @@ class StandExplorerTfTest(unittest.TestCase):
             started_unix_sec=10.0,
             output_jsonl=Path("observations.jsonl"),
             map_bundle=SimpleNamespace(bundle_sha256="a" * 64),
-            runtime=SimpleNamespace(
-                map_frame="map",
-                as_log_dict=lambda: {"map_frame": "map"},
-            ),
+            runtime=self.runtime,
+            observer_runtime=self.observer_runtime,
             timing_limits=SimpleNamespace(as_dict=lambda: {}),
             last_scan_pose_map=None,
             last_processed_scan_stamp_sec=None,
@@ -272,11 +281,19 @@ class StandExplorerTfTest(unittest.TestCase):
             receipt_path = root / "visibility.jsonl"
             profile = stand_explorer_node.stand_width_profile_from_radius(0.06)
             detector_config = stand_explorer_node.LidarStandDetectorConfig()
-            visibility_session = stand_explorer_node.LidarVisibilitySession.create(
+            certificate = replace(
+                _certificate(),
+                map_from_odom=stand_explorer_node.PlanarTransform2D(0.0, 0.0, 0.0),
+            )
+            frozen = stand_explorer_node.FrozenObserverFrame(
+                certificate_path=root / "certificate.json",
+                certificate=certificate,
+                certificate_sha256=odom_execution_certificate_sha256(certificate),
+            )
+            visibility_session = self.observer_runtime.create_visibility_session(
                 output_path=receipt_path,
                 survey_id="survey_01",
                 viewpoint_id="viewpoint_01",
-                runtime_config={"map_frame": "map", "scan_topic": "/scan"},
                 timing_limits={},
                 map_bundle_sha256="a" * 64,
                 observation_geometry_mode=(
@@ -313,7 +330,7 @@ class StandExplorerTfTest(unittest.TestCase):
                     map_frame="map", odom_frame="odom",
                     map_from_odom=stand_explorer_node.PlanarTransform2D(0.0, 0.0, 0.0),
                     canonical_scan_pose_odom=stand_explorer_node.Pose2D(0.0, 0.0, 0.0),
-                    source_evidence_id="c" * 64,
+                    source_evidence_id=frozen.certificate_sha256,
                 ),
             )
             visibility_session.buffer_receipt(receipt)
@@ -321,10 +338,9 @@ class StandExplorerTfTest(unittest.TestCase):
                 started_unix_sec=1.0,
                 output_jsonl=root / "observations.jsonl",
                 map_bundle=SimpleNamespace(bundle_sha256="a" * 64),
-                runtime=SimpleNamespace(
-                    map_frame="map",
-                    as_log_dict=lambda: {"map_frame": "map"},
-                ),
+                runtime=self.runtime,
+                observer_runtime=self.observer_runtime,
+                frozen_observer_frame=frozen,
                 timing_limits=SimpleNamespace(as_dict=lambda: {}),
                 last_scan_pose_map={"x_m": 0.0, "y_m": 0.0, "yaw_rad": 0.0},
                 last_processed_scan_stamp_sec=1.0,
@@ -343,6 +359,14 @@ class StandExplorerTfTest(unittest.TestCase):
                 fake_node,
             )
             payload = json.loads(summary_path.read_text())
+            evidence = validate_coverage_visibility_evidence(
+                payload, _plan(), "viewpoint_01", required=True,
+            )
+            self.assertEqual(evidence.receipts, (receipt,))
+            self.assertEqual(evidence.observer_config["runtime_config"], self.observer_runtime.as_log_dict())
+            self.assertEqual(payload["detected_candidate_count"], 0)
+            self.assertEqual(payload["accepted_observation_count"], 0)
+            visibility_session.finalize(processed_scan_count=1)
 
             self.assertEqual(
                 payload[stand_explorer_node.VISIBILITY_RECEIPT_COUNT_KEY],

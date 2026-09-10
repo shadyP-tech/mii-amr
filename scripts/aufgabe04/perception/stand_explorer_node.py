@@ -26,6 +26,7 @@ from scripts.aufgabe04.navigation.localization.odom_execution_certificate import
 )
 from scripts.aufgabe04.navigation.foundation.ros_runtime_config import RuntimeConfig, resolve_runtime_config
 from scripts.aufgabe04.perception.lidar_stand_detector import detect_stand_candidates_from_scan
+from scripts.aufgabe04.perception.lidar_observer_runtime import LidarObserverRuntime
 from scripts.aufgabe04.perception.scan_topology import ScanTopology, SCAN_TOPOLOGY_PROFILES
 from scripts.aufgabe04.perception.lidar_stand_morphology import (
     MORPHOLOGY_PROFILE_EVIDENCE_KEY,
@@ -46,7 +47,6 @@ from scripts.aufgabe04.perception.lidar_visibility_evidence import (
 from scripts.aufgabe04.perception.lidar_visibility_session import (
     FROZEN_ODOM_OBSERVATION_GEOMETRY,
     LIVE_MAP_OBSERVATION_GEOMETRY,
-    LidarVisibilitySession,
     disabled_visibility_summary_fields,
     proposal_detector_config_evidence,
 )
@@ -452,6 +452,9 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
                 use_sim_time=args.allow_sim_time,
             )
         )
+        self.observer_runtime = LidarObserverRuntime(
+            self.runtime, getattr(args, "scan_topology_profile", "linear"),
+        )
         certificate_path = getattr(args, "odom_execution_certificate_json", None)
         self.frozen_observer_frame = (
             None
@@ -500,11 +503,10 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
             if survey_candidate_radius_m is None
             else stand_width_profile_from_radius(survey_candidate_radius_m)
         )
-        self.visibility_session = LidarVisibilitySession.create(
+        self.visibility_session = self.observer_runtime.create_visibility_session(
             output_path=getattr(args, "visibility_receipts_jsonl", None),
             survey_id=getattr(args, "visibility_survey_id", ""),
             viewpoint_id=getattr(args, "visibility_viewpoint_id", ""),
-            runtime_config={**self.runtime.as_log_dict(), "scan_topology_profile": getattr(args, "scan_topology_profile", "linear")},
             timing_limits=self.timing_limits.as_dict(),
             map_bundle_sha256=(
                 None
@@ -807,7 +809,7 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
                 ),
             )
             self.visibility_session.buffer_receipt(receipt)
-        topology_profile = getattr(getattr(self, "args", None), "scan_topology_profile", "linear")
+        topology_profile = self.observer_runtime.scan_topology_profile
         angle_max = getattr(msg, "angle_max", None)
         self.last_scan_topology = ScanTopology(
             len(msg.ranges), msg.angle_min, msg.angle_increment, angle_max, topology_profile,
@@ -824,7 +826,7 @@ class StandExplorerNode(Node):  # pragma: no cover - requires ROS runtime.
         if not candidates:
             return
 
-        runtime_config = dict(self.runtime.as_log_dict())
+        runtime_config = self.observer_runtime.as_log_dict()
         runtime_config["lidar_scan_topology"] = dict(self.last_scan_topology)
         runtime_config["lidar_wrapped_clusters"] = [
             {"candidate_id": candidate.candidate_id, "source_indices": list(candidate.source_indices)}
@@ -1059,12 +1061,12 @@ def observer_summary_payload(node: StandExplorerNode) -> dict[str, object]:
         "last_processed_scan_stamp_sec": node.last_processed_scan_stamp_sec,
         "processed_scan_count": node.processed_scan_count,
         "scan_input_diagnostics": _scan_input_summary(node),
-        "scan_topology_profile": getattr(getattr(node, "args", None), "scan_topology_profile", "linear"),
+        "scan_topology_profile": node.observer_runtime.scan_topology_profile,
         "last_scan_topology": getattr(node, "last_scan_topology", None),
         "detected_candidate_count": node.detected_candidate_count,
         "accepted_observation_count": node.accepted_observation_count,
         "confirmed_stand_count": node.last_confirmed_stand_count,
-        "runtime_config": node.runtime.as_log_dict(),
+        "runtime_config": node.observer_runtime.as_log_dict(),
         "timing_limits": node.timing_limits.as_dict(),
         PROPOSAL_DETECTOR_CONFIG_EVIDENCE_KEY: proposal_detector_config_evidence(
             getattr(node, "detector_config", LidarStandDetectorConfig())
