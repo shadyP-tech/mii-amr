@@ -126,6 +126,10 @@ from scripts.aufgabe04.real_robot.observer.camera_publication import (
     camera_source_freshness,
 )
 from scripts.aufgabe04.real_robot.observer.qr_decode_cache import RoiQrDecodeCache
+from scripts.aufgabe04.real_robot.observer.roi_qr_evidence import summarize_roi_qr_evidence
+from scripts.aufgabe04.real_robot.observer.head_proposal_registration import (
+    acquire_registered_head_measurement, unresolved_front_framing_hint,
+)
 from scripts.aufgabe04.real_robot.observer.capture_history import (
     BoundedObserverCapture,
     sensor_capture_metadata,
@@ -654,6 +658,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         """Drop evidence after a sealed sensor/frame contract violation."""
 
         self.observation_evidence = None
+        self._camera_framing = None
         if getattr(self, "backside_proposal_reuse", None) is not None:
             self.backside_proposal_reuse.reset()
         self._last_observation_update = None
@@ -666,6 +671,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
 
         self._qr_marker_seen_in_stationary_epoch = False
         self._qr_marker_stationary_epoch_anchor = None
+        self._camera_framing = None
 
     def _note_front_observation(self, decision, robot_pose: Pose2D) -> None:
         """Veto QR-free axes without resetting target identity evidence."""
@@ -740,6 +746,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             ),
         )
         self._last_observation_update = update
+        if update.snapshot.poisoned or update.motion_epoch_reset:
+            self._camera_framing = None
         if update.frame_accepted:
             self._camera_count("associated_frames")
         if update.axis_sample_accepted:
@@ -1244,6 +1252,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         def evaluate_roi_attempt(
             attempt: HeadRoiAttempt,
             pose_hint,
+            current_head_proposal_corners=None,
         ) -> HeadRoiEvaluation:
             attempt_roi = attempt.roi
             attempt_frame = frame[
@@ -1286,6 +1295,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 ),
                 input_cache=model_input_cache,
                 input_cache_roi=(attempt_roi.x0, attempt_roi.y0, attempt_roi.x1, attempt_roi.y1),
+                current_head_proposal_corners=current_head_proposal_corners,
             )
             attempt_debug = replace(
                 attempt_debug,
@@ -1303,6 +1313,29 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 qr_decode_metadata={
                     **decoded.metadata(), "model_inputs": dict(model_input_cache.last_metadata),
                 },
+            )
+
+        head_acquisition_metadata = {}
+
+        def acquire_registered(attempt, primary):
+            return acquire_registered_head_measurement(
+                self.cv2, frame, attempt, intrinsics=intrinsics,
+                scan_from_camera=scan_from_camera_geometry, scan=plain_scan,
+                map_bearing_rad=scan_bearing,
+                cone_half_angle_rad=math.radians(self.args.lidar_cone_half_angle_deg),
+                accepted_range_m=(lower_surface_bound, upper_surface_bound),
+                now_sec=self.node.get_clock().now().nanoseconds / 1e9,
+                max_scan_age_sec=self.args.max_sensor_age_sec,
+                min_cluster_sample_count=self.args.lidar_min_samples,
+                max_camera_map_bearing_delta_rad=math.radians(
+                    self.args.backside_registration_max_bearing_delta_deg),
+                max_center_offset_ratio=self.args.backside_registration_max_center_offset_ratio,
+                edge_preprocess=resolved_stand_axis_profile.edge_preprocess,
+                canny_low=resolved_stand_axis_profile.canny_low,
+                canny_high=resolved_stand_axis_profile.canny_high,
+                evaluate=lambda selected, corners: evaluate_roi_attempt(selected, None, corners),
+                diagnostics=head_acquisition_metadata,
+                primary=primary,
             )
 
         registration = self.backside_proposal_reuse.select(
@@ -1323,6 +1356,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             marker_seen_in_stationary_epoch=self._qr_marker_seen_in_stationary_epoch,
             tracked_pose=prediction.pose,
             evaluate=evaluate_roi_attempt,
+            acquire_registered=acquire_registered,
             enable_reacquisition=not self.args.disable_backside_reacquisition,
             max_center_offset_ratio=(
                 self.args.backside_registration_max_center_offset_ratio
@@ -1372,8 +1406,11 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 enabled=not self.args.disable_backside_reacquisition
             ),
             "backside_proposal_reuse": dict(self.backside_proposal_reuse.last_metadata),
+            "head_acquisition": head_acquisition_metadata,
             "evidence_state": estimate.evidence_state,
             "qr_detected": debug.qr_detected,
+            "qr_marker_verified": debug.qr_marker_verified,
+            "qr_marker_reason": debug.qr_marker_reason,
             "pose_reprojection_rmse_px": (
                 estimate.pose_reprojection_rmse_px
             ),
@@ -1460,6 +1497,12 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             qr_texts = tuple(sorted({
                 observation.text for observation in selected_qr_observations
             }))
+        # Recentring may remove a previously observed marker from the crop.
+        # Preserve its veto/conflict evidence; target identity still comes
+        # only from the selected symbol's independently bound image ray.
+        roi_qr_evidence = summarize_roi_qr_evidence(registration)
+        qr_texts = tuple(sorted(set(qr_texts) | set(roi_qr_evidence.qr_texts)))
+        axis_metadata["roi_qr_evidence"] = roi_qr_evidence.metadata()
         qr_binding = bind_qr_observations_to_target(
             selected_qr_observations, roi=roi, intrinsics=intrinsics,
             scan_from_camera=scan_from_camera_geometry, scan=plain_scan,
@@ -1475,9 +1518,18 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         )
         qr_evidence_texts = qr_binding.qr_texts_for_evidence
         axis_metadata["decoded_qr_target_binding"] = qr_binding.metadata()
+        # The neutral head can be associated even before a QR ray or axis is
+        # usable. Admit that frame's unresolved progress through the same
+        # current scan gate, without granting its unbound text identity.
+        frame_lidar_associated = (
+            preliminary_lidar_association.associated or qr_binding.accepted
+            or (registration.registered
+                and (registration.head_acquisition or {}).get("candidate_associated") is True)
+        )
         front_decision = front_observation_decision(
             qr_texts=qr_texts,
-            qr_marker_detected=debug.qr_detected,
+            qr_marker_detected=roi_qr_evidence.marker_detected,
+            qr_marker_verified=roi_qr_evidence.marker_verified,
             estimate_source=estimate.source,
             marker_seen_in_stationary_epoch=self._qr_marker_seen_in_stationary_epoch,
         )
@@ -1497,19 +1549,21 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 stand_axis_debug=axis_metadata,
             )
             return
-        if qr_binding.symbol_count > 1:
+        if qr_binding.symbol_count > 1 or roi_qr_evidence.conflict_reason is not None:
+            self._camera_framing = None
             update = self._record_observation_frame(
                 robot_pose=robot_pose,
                 image_stamp_sec=image.stamp_sec, scan_stamp_sec=scan.stamp_sec,
                 observed_at_sec=now_sec,
-                lidar_associated=preliminary_lidar_association.associated,
+                lidar_associated=frame_lidar_associated,
                 axis_yaw_rad=None, axis_source=None, qr_texts=(),
-                qr_symbol_count=qr_binding.symbol_count,
+                qr_symbol_count=max(qr_binding.symbol_count, roi_qr_evidence.symbol_count, 2),
             )
             self._write_debug(frame, roi_frame, debug, metadata=axis_metadata)
             self._write_status(
                 "evidence_not_committable",
                 reason="multiple_qr_symbols_in_candidate_frame",
+                roi_conflict_reason=roi_qr_evidence.conflict_reason,
                 qr_texts=list(qr_texts),
                 observation_evidence=update.snapshot.as_dict(),
                 stand_axis_debug=axis_metadata,
@@ -1520,6 +1574,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             and qr_texts
             and qr_texts != (self.args.expected_qr_id,)
         ):
+            self._camera_framing = None
             update = self._record_observation_frame(
                 robot_pose=robot_pose,
                 image_stamp_sec=image.stamp_sec, scan_stamp_sec=scan.stamp_sec,
@@ -1537,6 +1592,15 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 stand_axis_debug=axis_metadata,
             )
             return
+        framing = unresolved_front_framing_hint(
+            registration, target_key=self.args.stand_id,
+            source_image_stamp_sec=image.stamp_sec,
+            source_fresh=self._source_freshness(image.stamp_sec, scan.stamp_sec).accepted,
+            range_m=center_distance, optical_depth_m=projection.depth_m,
+            intrinsics=intrinsics,
+        )
+        if estimate.usable:
+            self._camera_framing = None
         if front_decision.withhold_backside_axis:
             # Positive QR evidence contradicts this geometry mode, not the
             # identity channel. Retain its ordinary target/sensor gates and
@@ -1547,7 +1611,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 image_stamp_sec=image.stamp_sec,
                 scan_stamp_sec=scan.stamp_sec,
                 observed_at_sec=now_sec,
-                lidar_associated=(preliminary_lidar_association.associated or qr_binding.accepted),
+                lidar_associated=frame_lidar_associated,
                 qr_texts=qr_evidence_texts,
             )
             self._write_debug(frame, roi_frame, debug, metadata=axis_metadata)
@@ -1568,11 +1632,13 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 image_stamp_sec=image.stamp_sec,
                 scan_stamp_sec=scan.stamp_sec,
                 observed_at_sec=now_sec,
-                lidar_associated=(preliminary_lidar_association.associated or qr_binding.accepted),
+                lidar_associated=frame_lidar_associated,
                 axis_yaw_rad=None,
                 axis_source=None,
                 qr_texts=qr_evidence_texts,
             )
+            if framing is not None and update.frame_accepted and not update.snapshot.poisoned:
+                self._camera_framing = framing
             self._write_debug(
                 frame,
                 roi_frame,
@@ -2172,6 +2238,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             robot_profile_sha256=real_robot_profile_sha256(self.profile),
             calibration_profile_sha256=camera_calibration_sha256(self.calibration),
             stand_model_profile_sha256=self.stand_model_profile.sha256,
+            camera_framing=getattr(self, "_camera_framing", None),
             **fields,
         )
         if not self._commit_sensor_artifact(
@@ -2250,6 +2317,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             "axis_consensus": consensus_status,
             "observation_evidence": observation_status,
             "camera_pipeline_counts": dict(getattr(self, "_camera_pipeline_counters", {})),
+            "camera_framing": getattr(self, "_camera_framing", None),
             "last_evidence_source_freshness": getattr(self, "_last_evidence_source_freshness", None),
             "publication_freshness": getattr(self, "_last_camera_publication_freshness", None),
             "capture_history": self._capture_snapshot(),

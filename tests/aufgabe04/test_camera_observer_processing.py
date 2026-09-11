@@ -144,6 +144,7 @@ class CameraObserverProcessingTest(unittest.TestCase):
              patch(module + "_rectify_bgr_frame", side_effect=lambda value, *_: value), \
              patch(module + "detect_qr_observations_bgr", side_effect=decode) as decoder, \
              patch(module + "detect_native_qr_observations_bgr") as native_decoder, \
+             patch(module + "acquire_registered_head_measurement", return_value=None), \
              patch(module + "estimate_stand_axis_from_metric_model", side_effect=metric):
             adapter._process_latest()
 
@@ -287,6 +288,7 @@ class CameraObserverProcessingTest(unittest.TestCase):
              patch(module + "compressed_msg_to_bgr_frame", return_value=frame), \
              patch(module + "_rectify_bgr_frame", side_effect=lambda value, *_: value), \
              patch(module + "detect_qr_observations_bgr", return_value=()) as decoder, \
+             patch(module + "acquire_registered_head_measurement", return_value=None), \
              patch(module + "estimate_stand_axis_from_metric_model", side_effect=metric):
             adapter._process_latest()
             self.assertEqual(len(metric_calls), 3)
@@ -314,6 +316,96 @@ class CameraObserverProcessingTest(unittest.TestCase):
             self.assertTrue(registration["attempted"])
             self.assertTrue(registration["search_hint_used"])
             self.assertFalse(adapter.completed)
+
+    def test_pose_free_recentered_current_fit_and_fresh_framing_recovery(self):
+        from dataclasses import replace
+        from scripts.aufgabe04.perception.candidate_lidar_association import associate_candidate_lidar_target
+        from scripts.aufgabe04.perception.stand_axis.head_proposal import HeadProposal, HeadProposalResult
+
+        for stale, conflict, nominal_miss in (
+            (False, False, False), (True, False, False), (False, True, False),
+            (False, False, True),
+        ):
+            with self.subTest(stale=stale, conflict=conflict, nominal_miss=nominal_miss):
+                adapter = self.make_adapter()
+                frame = numpy.zeros((600, 800, 3), dtype=numpy.uint8)
+                calls = []
+
+                def locate(_cv2, _crop, **options):
+                    u = options["expected_head_center_u_px"] + 10.
+                    v = options["expected_head_center_v_px"]
+                    corners = tuple(ImagePoint(u + x, v + y) for x, y in
+                                    ((-26, -26), (26, -26), (26, 26), (-26, 26)))
+                    return HeadProposalResult(HeadProposal(
+                        corners, (int(u - 34), int(v - 34), int(u + 34), int(v + 55)),
+                        (u - 26, v - 26, u + 26, v + 26), u, v, 52., 1., 10 / 52., .98, .98,
+                    ), "current_head_proposal", 1, 1, "test_locator")
+
+                def metric(_cv2, crop, **options):
+                    calls.append((crop.shape, options))
+                    proposal = options["current_head_proposal_corners"]
+                    strict = proposal is not None
+                    self.assertIsNone(options["pose_hint"])
+                    if strict:
+                        # Same full-image geometry after the crop origin and
+                        # principal point are each adjusted exactly once.
+                        self.assertAlmostEqual(sum(p.u_px for p in proposal) / 4
+                                               - options["camera_cx_px"], 10.)
+                        self.assertEqual(crop.shape[:2], (89, 68))
+                    if strict and stale:
+                        self.clock_sec = 100.6
+                    return StandAxisImageEstimate(
+                        usable=False, reason=("planar_pose_reprojection_error" if strict
+                                              else "model_qr_text_without_geometry"),
+                        mode="face_visible", corners=proposal, axis_line=None,
+                        left_height_px=52., right_height_px=52., height_ratio=1.,
+                        yaw_proxy=0., yaw_deg=None, closer_side="equal", contour_area_px=2704.,
+                        source="model_refined_head" if strict else "model_seed",
+                        model_profile_sha256=adapter.stand_model_profile.sha256,
+                    ), StandAxisEdgeDebugArtifacts(
+                        edges=None, qr_detected=True, qr_marker_verified=True,
+                        model_pose_fit_source="joint_qr_head" if strict else None,
+                    )
+
+                module = "scripts.aufgabe04.real_robot.observer.node."
+                def decode(crop, _cv2):
+                    text = "QR_2" if conflict and crop.shape[1] == 68 else "QR_1"
+                    return (DecodedQrObservation(text, None, "test", 1.),)
+
+                def preliminary(*args, **kwargs):
+                    result = associate_candidate_lidar_target(*args, **kwargs)
+                    return replace(result, associated=False, rejection_reason="nominal_cone_miss") if nominal_miss else result
+
+                with patch(module + "camera_info_mismatches", return_value=()), \
+                     patch(module + "transform_mismatches", return_value=()), \
+                     patch(module + "compressed_msg_to_bgr_frame", return_value=frame), \
+                     patch(module + "_rectify_bgr_frame", side_effect=lambda value, *_: value), \
+                     patch(module + "detect_qr_observations_bgr", side_effect=decode), \
+                     patch(module + "associate_candidate_lidar_target", side_effect=preliminary), \
+                     patch("scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_head_proposal",
+                           side_effect=locate), \
+                     patch(module + "estimate_stand_axis_from_metric_model", side_effect=metric):
+                    adapter._process_latest()
+                self.assertEqual(len(calls), 2)  # No wider-ROI metric/PnP prerequisite.
+                self.assertFalse(adapter.completed)
+                if conflict:
+                    self.assertEqual(adapter._write_status.call_args.args, ("evidence_not_committable",))
+                    self.assertTrue(adapter._last_observation_update.snapshot.poisoned)
+                    self.assertIsNone(adapter._camera_framing)
+                elif stale:
+                    self.assertEqual(adapter._write_status.call_args.args, ("obsolete_detector_result",))
+                    self.assertIsNone(adapter._camera_framing)
+                    self.assertFalse(adapter._qr_marker_seen_in_stationary_epoch)
+                else:
+                    self.assertEqual(adapter._write_status.call_args.args,
+                                     ("metric_model_measurement_unavailable",))
+                    self.assertEqual(adapter._camera_framing["reason"], "head_qr_geometry_mismatch")
+                    self.assertTrue(adapter._camera_framing["candidate_associated"])
+                    self.assertFalse(adapter._camera_framing["motion_authorized"])
+                    self.assertTrue(adapter._last_observation_update.frame_accepted)
+                    self.assertEqual(adapter._last_observation_update.snapshot.current_axis_sample_count, 0)
+                    adapter._reset_qr_marker_epoch()
+                    self.assertIsNone(adapter._camera_framing)
 
 
 if __name__ == "__main__":

@@ -58,11 +58,12 @@ class FrontObservationTest(unittest.TestCase):
 
     def observe(self, stamp, *, texts=("Start",), associated=True,
                 marker=False, source=BACKSIDE, pose=Pose2D(0, 0, 0),
-                observed_at=None, scan_stamp=None):
+                observed_at=None, scan_stamp=None, marker_verified=None):
         self.now_sec = stamp if observed_at is None else observed_at
         decision = front_observation_decision(
             qr_texts=texts, qr_marker_detected=marker, estimate_source=source,
             marker_seen_in_stationary_epoch=self.node._qr_marker_seen_in_stationary_epoch,
+            qr_marker_verified=marker_verified,
         )
         self.node._note_front_observation(decision, pose)
         fields = dict(
@@ -109,6 +110,62 @@ class FrontObservationTest(unittest.TestCase):
             self.assertIsNone(payload)
         self.assertFalse(self.node.completed)
         self.assertFalse(self.node.args.inspection_observation_json.exists())
+
+    def test_tentative_false_quad_vetoes_current_frame_without_latching(self):
+        for index in range(3):
+            update, metadata, _ = self.observe(
+                10 + index / 3, texts=(), marker=True, marker_verified=False,
+            )
+            self.assertFalse(update.axis_sample_accepted)
+            self.assertTrue(metadata["marker_tentative_now"])
+            self.assertFalse(metadata["marker_observed_now"])
+            self.assertFalse(metadata["marker_seen_in_stationary_epoch"])
+            self.assertFalse(self.node._qr_marker_seen_in_stationary_epoch)
+            self.assertIsNone(self.node._qr_marker_stationary_epoch_anchor)
+        next_frame = front_observation_decision(
+            qr_texts=(), qr_marker_detected=False, qr_marker_verified=False,
+            estimate_source=BACKSIDE,
+            marker_seen_in_stationary_epoch=self.node._qr_marker_seen_in_stationary_epoch,
+        )
+        self.assertFalse(next_frame.withhold_backside_axis)
+
+    def test_verified_undecoded_marker_keeps_persistent_backside_veto(self):
+        self.observe(10, texts=(), marker=True, marker_verified=True)
+        self.assertTrue(self.node._qr_marker_seen_in_stationary_epoch)
+        _, metadata, _ = self.observe(
+            10.3, texts=(), marker=False, marker_verified=False,
+        )
+        self.assertTrue(metadata["marker_seen_in_stationary_epoch"])
+        self.assertFalse(metadata["marker_observed_now"])
+        self.assertFalse(metadata["marker_tentative_now"])
+
+    def test_decoded_text_and_conflicts_survive_failed_marker_validation(self):
+        _, metadata, _ = self.observe(10, marker_verified=False)
+        self.assertTrue(metadata["marker_observed_now"])
+        self.assertTrue(self.node._qr_marker_seen_in_stationary_epoch)
+        update, _, _ = self.observe(10.3, texts=("QR_002",), marker_verified=False)
+        self.assertTrue(update.snapshot.poisoned)
+
+    def test_tentative_quad_does_not_discard_previous_backside_samples(self):
+        window = self.node._ensure_observation_evidence(Pose2D(0, 0, 0))
+        window.record_frame(
+            target_key=self.node._target_evidence_key(),
+            pose=self.node._evidence_pose(Pose2D(0, 0, 0)),
+            frame_stamp_sec=10, lidar_stamp_sec=10, observed_at_sec=10,
+            lidar_associated=True, axis_yaw_rad=.1, axis_source=BACKSIDE,
+            qr_texts=(),
+        )
+        update, _, _ = self.observe(10.3, texts=(), marker=True, marker_verified=False)
+        self.assertEqual(update.snapshot.current_axis_sample_count_by_source, {BACKSIDE: 1})
+
+    def test_current_tentative_marker_does_not_withhold_a_front_model_axis(self):
+        decision = front_observation_decision(
+            qr_texts=(), qr_marker_detected=True, qr_marker_verified=False,
+            estimate_source=FRONT, marker_seen_in_stationary_epoch=False,
+        )
+        self.assertFalse(decision.withhold_backside_axis)
+        self.assertTrue(decision.marker_tentative_now)
+        self.assertFalse(decision.marker_seen_in_stationary_epoch)
 
     def test_associated_front_text_latches_without_backside_axis_authority(self):
         updates = []

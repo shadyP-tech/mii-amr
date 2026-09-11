@@ -14,7 +14,9 @@ from pathlib import Path
 from scripts.aufgabe04.artifacts.candidate_inspection_observation import (
     load_candidate_inspection_observation,
 )
-from scripts.aufgabe04.artifacts.content_store import load_content_hashed_json, payload_sha256
+from scripts.aufgabe04.artifacts.content_store import (
+    load_content_hashed_json, payload_sha256, write_content_hashed_json,
+)
 from scripts.aufgabe04.navigation.approach.candidate_inspection_view import (
     write_candidate_inspection_view,
 )
@@ -28,6 +30,9 @@ from scripts.aufgabe04.real_robot.candidate.inspection_execution import (
     execute_candidate_inspection,
 )
 from scripts.aufgabe04.real_robot.candidate.inspection_policy import novel_view
+from scripts.aufgabe04.real_robot.candidate.camera_distance_recovery import (
+    distance_recovery_goal_is_useful, select_camera_distance_recovery,
+)
 from scripts.aufgabe04.real_robot.candidate.inspection_route_search import (
     CandidateInspectionRouteSearch, bounded_inspection_standoffs,
 )
@@ -84,7 +89,7 @@ def execute_local_candidate_inspection(
         return value
 
     def plan_and_move(frame, canonical_normal, root, index, source_path,
-                      *, purpose="diverse_inspection", offset=None):
+                      *, purpose="diverse_inspection", offset=None, camera_recovery=None):
         nonlocal motion_serial
         frame = fresh_frame(root / "planning")
         current = pose(frame)
@@ -137,7 +142,20 @@ def execute_local_candidate_inspection(
                     "quantized inspection goal repeats an observed viewing direction",
                     reason_code="quantized_view_already_observed",
                 )
-        elif frame.planning_frame is not None:
+            if camera_recovery is not None and not distance_recovery_goal_is_useful(
+                start_range_m=math.hypot(current.x_m - frame.candidate.geometry.x_m,
+                                         current.y_m - frame.candidate.geometry.y_m),
+                goal_range_m=math.hypot(goal["x_m"] - frame.candidate.geometry.x_m,
+                                        goal["y_m"] - frame.candidate.geometry.y_m),
+                requested_normal_rad=canonical_normal, achieved_normal_rad=achieved,
+                minimum_range_m=camera_recovery.minimum_range_m,
+                maximum_range_m=camera_recovery.maximum_range_m,
+            ):
+                raise CandidateInspectionRouteUnavailableError(
+                    "quantized framing goal does not preserve bearing and increase useful range",
+                    reason_code="camera_distance_goal_not_useful",
+                )
+        elif frame.planning_frame is not None or camera_recovery is not None:
             raise RuntimeError("inspection route lacks materialized goal evidence")
         motion_serial += 1
         run_id = f"{candidate_run_id}_inspection_{motion_serial:03d}"
@@ -254,6 +272,41 @@ def execute_local_candidate_inspection(
                 raise
             return admit_corrected(root / "corrected_arrival", frame, index)
 
+    def distance_recovery(frame, evidence):
+        current = pose(frame)
+        if current is None:
+            return None
+        return select_camera_distance_recovery(
+            evidence.get("camera_framing"), candidate_uid=candidate_uid,
+            current_range_m=math.hypot(current.x_m - frame.candidate.geometry.x_m,
+                                      current.y_m - frame.candidate.geometry.y_m),
+            preferred_range_m=source_config.approach_offset_m,
+            maximum_allowed_range_m=(source_config.approach_offset_m
+                                     + source_config.camera_arrival_range_slack_m),
+        )
+
+    def move_distance_recovery(frame, recovery, root, index, source_path):
+        requested_normal = normal(frame)
+        if requested_normal is None:
+            raise RuntimeError("camera distance recovery lacks a finite observation pose")
+        hint_path = root / "camera_framing_hint.json"
+        write_content_hashed_json(
+            hint_path, {**recovery.to_dict(), "source_observation_path": (
+                None if source_path is None else str(source_path))},
+            hash_field="camera_framing_recovery_sha256",
+        )
+        planned = route_search.move_direction(
+            requested_normal_rad=requested_normal, standoffs=recovery.standoffs_m,
+            output_root=root,
+            move=lambda offset, proposal_root: plan_and_move(
+                frame, requested_normal, proposal_root, index, hint_path,
+                purpose="camera_distance_recovery", offset=offset, camera_recovery=recovery,
+            ),
+        )
+        # Motion has completed: arrival failures are not no-motion proposal
+        # failures and must not cause another radius attempt or blind orbit.
+        return admit(root / "arrival", planned, index)
+
     def progress(frame, observation):
         evidence = load_candidate_inspection_observation(observation.inspection_observation_path)
         center = evidence["stand_center"]
@@ -281,5 +334,6 @@ def execute_local_candidate_inspection(
                 observation_request_type(frame.candidate, output, index)),
             canonical_normal=normal, move_view=move_view, move_opposite=move_opposite,
             progress_evidence=progress, route_search_evidence=route_search.to_dict,
+            distance_recovery=distance_recovery, move_distance_recovery=move_distance_recovery,
         ),
     )

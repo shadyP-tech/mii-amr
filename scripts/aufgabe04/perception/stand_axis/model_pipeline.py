@@ -14,6 +14,10 @@ from scripts.aufgabe04.perception.stand_axis.geometry import (
 from scripts.aufgabe04.perception.stand_axis.model_backside_acquisition import (
     estimate_stand_axis_from_model_backside,
 )
+from scripts.aufgabe04.perception.stand_axis.head_border_seed import (
+    select_head_border_seed,
+    validate_current_head_proposal,
+)
 from scripts.aufgabe04.perception.stand_axis.pose_fit_diagnostics import (
     collect_metric_model_diagnostics,
 )
@@ -24,11 +28,11 @@ from scripts.aufgabe04.perception.stand_axis.model_input_cache import (
 )
 from scripts.aufgabe04.perception.stand_axis.model_projection import project_stand_model
 from scripts.aufgabe04.perception.stand_axis.model_refinement import (
-    model_corridor_half_width_px,
     refine_projected_head_border,
 )
 from scripts.aufgabe04.perception.stand_axis.model_stage_timing import ModelStageTiming
 from scripts.aufgabe04.perception.stand_axis.models import (
+    ImagePoint,
     StandAxisEdgeDebugArtifacts,
     StandAxisImageEstimate,
 )
@@ -43,6 +47,10 @@ from scripts.aufgabe04.perception.stand_axis.qr_pose_seed import (
     select_temporally_consistent_pose,
 )
 from scripts.aufgabe04.qr_scanning.qr_observation import DecodedQrObservation
+from scripts.aufgabe04.perception.stand_axis.qr_marker_validation import (
+    QrMarkerEvidence,
+    validate_qr_marker,
+)
 
 
 def estimate_stand_axis_from_metric_model(
@@ -68,6 +76,7 @@ def estimate_stand_axis_from_metric_model(
     qr_observations: tuple[DecodedQrObservation, ...] | None = None,
     input_cache: MetricModelInputCache | None = None,
     input_cache_roi: RoiBounds | None = None,
+    current_head_proposal_corners: tuple[ImagePoint, ...] | None = None,
 ) -> tuple[StandAxisImageEstimate, StandAxisEdgeDebugArtifacts]:
     """Acquire from QR/tracking or a gated no-QR backside candidate.
 
@@ -76,6 +85,8 @@ def estimate_stand_axis_from_metric_model(
     candidate-centred expected-head projection. An optional per-image cache
     reuses raw edge/QR inputs for an exact ROI view; projection, acquisition,
     pose fitting and all acceptance gates still run independently each time.
+    A current-image proposal may seed raw border refinement independently of
+    a QR pose, but only verified current QR geometry permits its joint fit.
     """
 
     timing = ModelStageTiming()
@@ -86,6 +97,9 @@ def estimate_stand_axis_from_metric_model(
         float(camera_cy_px),
     )
     camera.validate()
+    head_proposal = validate_current_head_proposal(
+        current_head_proposal_corners, frame_shape=frame.shape,
+    )
     if (input_cache is None) != (input_cache_roi is None):
         raise ValueError("model input cache and exact ROI must be supplied together")
     cached_inputs = None if input_cache is None else input_cache.begin(
@@ -114,6 +128,7 @@ def estimate_stand_axis_from_metric_model(
             )
             return estimate, StandAxisEdgeDebugArtifacts(
                 edges=raw_edges, raw_edges=raw_edges, qr_detected=True,
+                qr_marker_verified=True, qr_marker_reason="multiple_decoded_qr_identities",
                 evidence_state="unobservable", model_reason=estimate.reason,
                 model_profile_sha256=model_profile.sha256,
                 model_measurement_status=model_profile.measurement_status,
@@ -136,6 +151,11 @@ def estimate_stand_axis_from_metric_model(
     timing.mark("qr_detection")
     qr_corners = None if qr_detection is None else qr_detection.corners
     qr_marker_detected = qr_corners is not None or bool(qr_observations)
+    marker = (
+        QrMarkerEvidence(True, "decoded_qr_identity")
+        if qr_observations else validate_qr_marker(cv2, frame, qr_detection)
+    )
+    timing.mark("qr_marker_validation")
     qr_pose = None
     if qr_corners is not None:
         qr_pose = estimate_planar_pose_ippe(
@@ -161,7 +181,11 @@ def estimate_stand_axis_from_metric_model(
         if qr_seed is not None and qr_detection is not None
         else ("tracked_pose" if pose_hint is not None else "none")
     )
-    if seed_pose is None:
+    proposal_can_seed_joint_fit = (
+        head_proposal is not None and qr_corners is not None
+        and marker.verified and model_profile.committable
+    )
+    if seed_pose is None and not proposal_can_seed_joint_fit:
         expected_geometry = (
             expected_head_center_u_px,
             expected_head_center_v_px,
@@ -196,7 +220,10 @@ def estimate_stand_axis_from_metric_model(
                 ),
             )
             timing.mark("backside_acquisition")
-            return estimate, replace(artifacts, stage_timings_ms=timing.snapshot())
+            return estimate, replace(
+                artifacts, stage_timings_ms=timing.snapshot(),
+                qr_marker_verified=False, qr_marker_reason=marker.reason,
+            )
         estimate = replace(
             _unusable(
                 "model_qr_text_without_geometry"
@@ -214,6 +241,8 @@ def estimate_stand_axis_from_metric_model(
             evidence_state="unobservable",
             model_profile_sha256=model_profile.sha256,
             qr_detected=qr_marker_detected,
+            qr_marker_verified=marker.verified,
+            qr_marker_reason=marker.reason,
             qr_detection_scale=(
                 None if qr_detection is None else qr_detection.scale
             ),
@@ -223,17 +252,23 @@ def estimate_stand_axis_from_metric_model(
             stage_timings_ms=timing.snapshot(),
         )
 
-    projected = project_stand_model(cv2, model_profile, seed_pose, camera)
-    corridor_half_width_px = model_corridor_half_width_px(
-        projected.head_corners,
-        model_profile=model_profile,
-        pose_reprojection_rmse_px=seed_pose.reprojection_rmse_px,
+    projected = (
+        None if seed_pose is None else project_stand_model(cv2, model_profile, seed_pose, camera)
     )
+    border_seed = select_head_border_seed(
+        model_profile=model_profile,
+        projected_corners=None if projected is None else projected.head_corners,
+        pose_reprojection_rmse_px=None if seed_pose is None else seed_pose.reprojection_rmse_px,
+        # A proposal never replaces the QR-free branch's ordinary evidence
+        # gates or supplies a directed pose by itself.
+        current_head_proposal_corners=(head_proposal if proposal_can_seed_joint_fit else None),
+    )
+    corridor_half_width_px = border_seed.corridor_half_width_px
     timing.mark("seed_projection")
     refinement = refine_projected_head_border(
         cv2,
         raw_edges,
-        projected.head_corners,
+        border_seed.corners,
         corridor_half_width_px=corridor_half_width_px,
     )
     timing.mark("border_refinement")
@@ -247,7 +282,7 @@ def estimate_stand_axis_from_metric_model(
         edges=raw_edges,
         raw_edges=raw_edges,
         face_mask=refinement.evidence_mask,
-        predicted_corners=projected.head_corners,
+        predicted_corners=border_seed.corners,
         refined_corners=refinement.corners,
         candidate_corners=refinement.candidate_corners,
         corner_arm_support=refinement.corner_arm_support,
@@ -259,16 +294,18 @@ def estimate_stand_axis_from_metric_model(
         model_corridor_half_width_px=corridor_half_width_px,
         model_pose=seed_pose,
         qr_detected=qr_marker_detected,
+        qr_marker_verified=marker.verified,
+        qr_marker_reason=marker.reason,
         qr_detection_scale=(None if qr_detection is None else qr_detection.scale),
-        pose_seed_source=pose_seed_source,
-        projected_landmarks=dict(projected.landmarks),
+        pose_seed_source=(border_seed.source if proposal_can_seed_joint_fit else pose_seed_source),
+        projected_landmarks=None if projected is None else dict(projected.landmarks),
     )
     if not refinement.accepted or refinement.corners is None:
         estimate = replace(
             _unusable(
                 refinement.reason,
-                corners=projected.head_corners,
-                contour_area_px=_polygon_area(projected.head_corners),
+                corners=border_seed.corners,
+                contour_area_px=_polygon_area(border_seed.corners),
                 source="model_projection",
             ),
             evidence_state="predicted_only",

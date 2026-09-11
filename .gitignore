@@ -50,4 +50,9 @@ tests/aufgabe04/fixtures/recorded_backside_20260910/*
 !tests/aufgabe04/fixtures/recorded_backside_20260910/inputs.json
 !tests/aufgabe04/fixtures/recorded_backside_20260910/frame_000008.jpg
 !tests/aufgabe04/fixtures/recorded_backside_20260910/frame_000010.jpg
+!tests/aufgabe04/fixtures/qr_marker_validation/
+tests/aufgabe04/fixtures/qr_marker_validation/*
+!tests/aufgabe04/fixtures/qr_marker_validation/front_000045.jpg
+!tests/aufgabe04/fixtures/qr_marker_validation/backside_000022.jpg
+!tests/aufgabe04/fixtures/qr_marker_validation/manifest.json
 !tests/test_run_with_bundle.py

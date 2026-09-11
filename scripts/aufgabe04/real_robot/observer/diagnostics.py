@@ -17,6 +17,7 @@ from typing import Mapping
 from scripts.aufgabe04.real_robot.observer.process import (
     PassiveObserverProcessEvidence,
 )
+from scripts.aufgabe04.real_robot.observer.camera_framing import validate_camera_framing_hint
 from scripts.aufgabe04.real_robot.observer.timeout_policy import (
     CANDIDATE_LOCAL_OBSERVER_TIMEOUT_STATES,
     TRANSIENT_TF_OBSERVER_TIMEOUT_STATES,
@@ -90,6 +91,7 @@ class PassiveObserverStatusEvidence:
     last_soft_miss_reason: str | None = None
     observation_evidence_poisoned: bool | None = None
     observation_evidence_poison_reason: str | None = None
+    camera_framing: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -119,6 +121,7 @@ class PassiveObserverStatusEvidence:
                 self.observation_evidence_poison_reason
             ),
             "load_error": self.load_error,
+            "camera_framing": self.camera_framing,
         }
 
 
@@ -242,6 +245,7 @@ def load_passive_observer_status(
             and poison_reason_value.strip()
             else None
         ),
+        camera_framing=validate_camera_framing_hint(payload.get("camera_framing")),
     )
 
 

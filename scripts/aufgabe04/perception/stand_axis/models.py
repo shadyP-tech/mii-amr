@@ -96,6 +96,11 @@ class StandAxisEdgeDebugArtifacts:
     corner_arm_support: MetricCornerArmSupport | None = None
     model_diagnostics: MetricModelDiagnostics | None = None
     stage_timings_ms: dict[str, float] | None = None
+    # A native quadrilateral remains a tentative current-frame marker. Only
+    # validated finder pixels or decoded identity may latch a persistent front
+    # observation. None retains compatibility with older debug producers.
+    qr_marker_verified: bool | None = None
+    qr_marker_reason: str | None = None
 
 
 @dataclass(frozen=True)

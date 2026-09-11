@@ -32,6 +32,8 @@ class CandidateInspectionEffects(Generic[Frame, Observation]):
     move_opposite: Callable[[Frame, Observation, Path, int], Frame]
     progress_evidence: Callable[[Frame, Observation], dict[str, object]]
     route_search_evidence: Callable[[], Mapping[str, object]] | None = None
+    distance_recovery: Callable[[Frame, Mapping[str, object]], object | None] | None = None
+    move_distance_recovery: Callable[[Frame, object, Path, int, Path | None], Frame] | None = None
 
 
 def execute_candidate_inspection(
@@ -91,6 +93,7 @@ def execute_candidate_inspection(
             state.record(outcome="inspection_pending", normal=normal, observation=progress)
         except CandidateObservationUnavailableError as exc:
             last_error = exc
+            progress = {"classification": "unobservable", **exc.status_evidence}
             state.record(outcome="observation_unavailable", normal=normal, reason=str(exc),
                          observation={"classification": "unobservable", **exc.to_event_fields()})
         persist()
@@ -110,6 +113,31 @@ def execute_candidate_inspection(
             raise RuntimeError("candidate inspection search lacks a finite observation pose")
         classification = str(progress.get("classification", "unobservable"))
         source_path = None if observation is None else observation.inspection_observation_path
+        if (not state.camera_distance_recovery_attempted
+                and effects.distance_recovery is not None
+                and effects.move_distance_recovery is not None):
+            recovery = effects.distance_recovery(frame, progress)
+            if recovery is not None:
+                # Reserve once before routing, including a rejected/occupied
+                # outward goal. Neither retry nor arrival can reset it.
+                state.camera_distance_recovery_attempted = True
+                persist()
+                try:
+                    frame = effects.move_distance_recovery(
+                        frame, recovery, candidate_root / f"camera_distance_recovery_{index + 1:02d}",
+                        index + 1, source_path,
+                    )
+                    continue
+                except CandidateInspectionRouteUnavailableError as exc:
+                    state.route_failures.append({
+                        "view_kind": "camera_distance_recovery", "reason": str(exc),
+                        "reason_code": exc.reason_code, "proposal_evidence": exc.evidence,
+                    })
+                    if exc.reason_code == "route_proposal_budget_exhausted":
+                        state.termination_reason = "route_proposal_budget_exhausted"
+                        persist()
+                        break
+                    persist()
         selected = False
         for option_index, next_normal in enumerate(candidate_view_options(
             normal, classification=classification, achieved_normals=state.achieved_normals,

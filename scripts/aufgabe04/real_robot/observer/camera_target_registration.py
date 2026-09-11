@@ -9,7 +9,7 @@ consensus or a motion-authorizing receipt.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 from scripts.aufgabe04.qr_scanning.qr_observation import DecodedQrObservation
 
@@ -84,6 +84,7 @@ class CameraTargetRegistrationSelection:
     reacquisition_mode: str | None
     initial_reacquisition_mode: str | None = None
     search_hint_used: bool = False
+    head_acquisition: dict[str, object] | None = None
 
     @property
     def registered(self) -> bool:
@@ -94,8 +95,9 @@ class CameraTargetRegistrationSelection:
         strict_retry = self.strict_retry
         return {
             "enabled": bool(enabled),
-            "attempted": proposal is not None or self.search_hint_used,
+            "attempted": proposal is not None or self.search_hint_used or self.head_acquisition is not None,
             "search_hint_used": self.search_hint_used,
+            "head_acquisition": self.head_acquisition,
             "reacquisition_mode": self.reacquisition_mode,
             "initial_reacquisition_mode": self.initial_reacquisition_mode,
             "primary_estimator_reason": self.evaluations[0].estimate.reason,
@@ -146,7 +148,8 @@ def _reacquisition_mode(
     ):
         return BACKSIDE_REACQUISITION_MODE
     if (
-        estimate.reason in QR_MODEL_REACQUISITION_TRIGGER_REASONS
+        (estimate.reason in QR_MODEL_REACQUISITION_TRIGGER_REASONS
+         or estimate.source in {"model_projection", "model_refined_head"})
         and (
             debug.qr_detected
             or estimate.source == "model_projection"
@@ -195,6 +198,7 @@ def select_camera_target_measurement(
     evaluate: Callable[[HeadRoiAttempt, object | None], HeadRoiEvaluation],
     enable_reacquisition: bool,
     max_center_offset_ratio: float,
+    acquire_registered: Callable[[HeadRoiAttempt, HeadRoiEvaluation], CameraTargetRegistrationSelection | None] | None = None,
 ) -> CameraTargetRegistrationSelection:
     """Select a nominal or strictly reverified registered measurement."""
 
@@ -229,6 +233,14 @@ def select_camera_target_measurement(
             reacquisition_mode=None,
         )
 
+    # Locate and associate current 2D pixels before asking for a metric pose.
+    # This breaks the old cycle where a clipped QR prevented the pose that
+    # was needed to move the crop containing that QR.
+    if acquire_registered is not None:
+        acquired = acquire_registered(roi_attempts[1], primary)
+        if acquired is not None:
+            return replace(acquired, evaluations=(primary, *acquired.evaluations),
+                           initial_reacquisition_mode=reacquisition_mode)
     proposal = evaluate(roi_attempts[1], None)
     evaluations.append(proposal)
     initial_reacquisition_mode = reacquisition_mode

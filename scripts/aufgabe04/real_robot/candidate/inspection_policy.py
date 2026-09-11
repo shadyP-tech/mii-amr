@@ -68,6 +68,7 @@ class CandidateInspectionState:
     termination_reason: str | None = None
     provisional_qr_ids: set[str] = field(default_factory=set)
     route_failures: list[dict[str, object]] = field(default_factory=list)
+    camera_distance_recovery_attempted: bool = False
 
     def __post_init__(self) -> None:
         validate_inspection_budget(self.max_views)
@@ -109,6 +110,7 @@ class CandidateInspectionState:
             },
             "provisional_qr_ids": sorted(self.provisional_qr_ids),
             "route_failures": list(self.route_failures),
+            "camera_distance_recovery_attempted": self.camera_distance_recovery_attempted,
             "joint_observation_ready": bool(self.history and
                                             self.history[-1]["outcome"] == "resolved"),
             "completion_authorized": False, "motion_authorized": False,

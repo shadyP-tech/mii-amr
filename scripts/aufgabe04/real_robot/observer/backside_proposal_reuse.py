@@ -89,6 +89,7 @@ class BacksideProposalReuse:
         tracked_pose: object | None,
         evaluate: Callable[[HeadRoiAttempt, object | None], HeadRoiEvaluation],
         enable_reacquisition: bool, max_center_offset_ratio: float,
+        acquire_registered: Callable[[HeadRoiAttempt, HeadRoiEvaluation], CameraTargetRegistrationSelection | None] | None = None,
     ) -> CameraTargetRegistrationSelection:
         """Try one strict hinted fit, otherwise use ordinary acquisition.
 
@@ -167,6 +168,7 @@ class BacksideProposalReuse:
             roi_attempts, tracked_pose=tracked_pose, evaluate=evaluate,
             enable_reacquisition=enable_reacquisition,
             max_center_offset_ratio=max_center_offset_ratio,
+            acquire_registered=acquire_registered,
         )
         self._remember(selection, context, observed_at_sec, robot_pose,
                        allowed=enable_reacquisition and not marker_seen_in_stationary_epoch)

@@ -1,0 +1,204 @@
+{
+  "provenance": "Original unmodified compressed camera bytes and recorded CameraInfo/ROI; replayed native quadrilaterals are diagnostic detector proposals, not accepted geometry. No sensor freshness or motion authority.",
+  "session_id": "stand_explore_exact2_camera_all5_20260910T145318Z",
+  "samples": {
+    "front_000045": {
+      "source_compressed": "results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260910T145318Z/candidates/001_survey_candidate_0001/camera_lidar_attempt_02/capture_history/frame_000045.compressed",
+      "source_compressed_sha256": "6228b927f42126dfbec79b1f133c4c9308872b72ab9ae2db0dd8091b53bbef70",
+      "source_metadata": "results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260910T145318Z/candidates/001_survey_candidate_0001/camera_lidar_attempt_02/capture_history/frame_000045.json",
+      "source_metadata_sha256": "2cf04a150f32fb2ee675eb251c6d89f28acdd97d79b2c6809287a417344c8ecb",
+      "recorded_camera_info": {
+        "binning_x": 0,
+        "binning_y": 0,
+        "d": [
+          0.22098627234105042,
+          -0.5816953750895016,
+          -0.0014375648979169753,
+          -0.0008374637688387152,
+          0.446372026692927
+        ],
+        "distortion_model": "plumb_bob",
+        "header": {
+          "frame_id": "camera",
+          "stamp_nanosec": 561342567,
+          "stamp_sec": 1789052873
+        },
+        "height": 600,
+        "k": [
+          640.977317007246,
+          0.0,
+          405.8708878028196,
+          0.0,
+          641.1612206204627,
+          300.7059996561025,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "p": [
+          640.977317007246,
+          0.0,
+          405.8708878028196,
+          0.0,
+          0.0,
+          641.1612206204627,
+          300.7059996561025,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        "r": [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "roi": {
+          "do_rectify": false,
+          "height": 0,
+          "width": 0,
+          "x_offset": 0,
+          "y_offset": 0
+        },
+        "width": 800
+      },
+      "file": "front_000045.jpg",
+      "roi": {
+        "expected_size_px": 134.47657604084856,
+        "x0": 101,
+        "x1": 707,
+        "y0": 0,
+        "y1": 588
+      },
+      "quad": {
+        "corners": [
+          {
+            "u_px": 357.0,
+            "v_px": 216.0
+          },
+          {
+            "u_px": 462.0,
+            "v_px": 216.0
+          },
+          {
+            "u_px": 475.9432373046875,
+            "v_px": 327.0262756347656
+          },
+          {
+            "u_px": 360.235107421875,
+            "v_px": 325.9931640625
+          }
+        ],
+        "detector": "opencv_native",
+        "scale": 1.0,
+        "text": null
+      }
+    },
+    "backside_000022": {
+      "source_compressed": "results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260910T145318Z/candidates/001_survey_candidate_0001/camera_lidar_attempt_00/capture_history/frame_000022.compressed",
+      "source_compressed_sha256": "2476c3b76cd358b71d97c9634b3c552df86db20ac318cc4532bfe193019e9ba7",
+      "source_metadata": "results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260910T145318Z/candidates/001_survey_candidate_0001/camera_lidar_attempt_00/capture_history/frame_000022.json",
+      "source_metadata_sha256": "3099ebddc9373a83c15ea28542ceb1c09ffeace2ada39c6a35b1ba74303f31dd",
+      "recorded_camera_info": {
+        "binning_x": 0,
+        "binning_y": 0,
+        "d": [
+          0.22098627234105042,
+          -0.5816953750895016,
+          -0.0014375648979169753,
+          -0.0008374637688387152,
+          0.446372026692927
+        ],
+        "distortion_model": "plumb_bob",
+        "header": {
+          "frame_id": "camera",
+          "stamp_nanosec": 975745567,
+          "stamp_sec": 1789052438
+        },
+        "height": 600,
+        "k": [
+          640.977317007246,
+          0.0,
+          405.8708878028196,
+          0.0,
+          641.1612206204627,
+          300.7059996561025,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "p": [
+          640.977317007246,
+          0.0,
+          405.8708878028196,
+          0.0,
+          0.0,
+          641.1612206204627,
+          300.7059996561025,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        "r": [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "roi": {
+          "do_rectify": false,
+          "height": 0,
+          "width": 0,
+          "x_offset": 0,
+          "y_offset": 0
+        },
+        "width": 800
+      },
+      "file": "backside_000022.jpg",
+      "roi": {
+        "expected_size_px": 75.25498922424268,
+        "x0": 303,
+        "x1": 439,
+        "y0": 251,
+        "y1": 388
+      },
+      "quad": {
+        "corners": [
+          {
+            "u_px": 14.0,
+            "v_px": 59.0
+          },
+          {
+            "u_px": 73.0,
+            "v_px": 27.0
+          },
+          {
+            "u_px": 71.82203674316406,
+            "v_px": 96.5
+          },
+          {
+            "u_px": 42.5,
+            "v_px": 96.5
+          }
+        ],
+        "detector": "opencv_native",
+        "scale": 2.0,
+        "text": null
+      }
+    }
+  }
+}
