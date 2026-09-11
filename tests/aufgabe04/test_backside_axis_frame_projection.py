@@ -15,13 +15,79 @@ from scripts.aufgabe04.artifacts.content_store import (
     load_content_hashed_json,
     write_content_hashed_json,
 )
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
+    map_pose_to_odom,
+    odom_pose_to_map,
+)
 from tests.aufgabe04.backside_axis_fixture import (
     backside_axis_payload,
     write_candidate_frame_projection_fixture,
 )
+from tests.aufgabe04.test_candidate_uncertainty_handoff import (
+    planning_frame as recorded_planning_frame,
+    recorded_fixture,
+)
+from tests.aufgabe04.test_exact_two_camera_decision import (
+    _camera_frame_projection,
+    _fixture,
+)
 
 
 class BacksideAxisFrameProjectionTest(unittest.TestCase):
+    def test_real_preflight_frame_projects_and_reloads_backside_receipt(self):
+        recorded = recorded_fixture()
+        frame = recorded_planning_frame(recorded["preflight"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = _fixture(root, with_frame_provenance=True)
+            uid = "survey_candidate_0003"
+            source = _camera_frame_projection(fixture, root / "source")
+            target = _camera_frame_projection(
+                fixture, root / "target", planning_frame=frame
+            )
+            observed = source.projection.projected_snapshot.candidate_for(uid)
+            expected = target.projection.projected_snapshot.candidate_for(uid)
+            robot = Pose2D(observed.geometry.x_m, observed.geometry.y_m + 0.7)
+            axis_path = root / "axis.json"
+            axis_path.write_text(json.dumps(backside_axis_payload(
+                stand_id=uid,
+                stand_x_m=observed.geometry.x_m,
+                stand_y_m=observed.geometry.y_m,
+                robot_x_m=robot.x_m,
+                robot_y_m=robot.y_m,
+            )))
+            output = root / "axis_projection.json"
+
+            write_backside_axis_frame_projection(
+                output,
+                axis_evidence_path=axis_path,
+                source_candidate_projection_path=source.evidence_path,
+                source_candidate_projection_sha256=source.evidence_sha256,
+                target_candidate_projection_path=target.evidence_path,
+                target_candidate_projection_sha256=target.evidence_sha256,
+                target_candidate_x_m=expected.geometry.x_m,
+                target_candidate_y_m=expected.geometry.y_m,
+            )
+            projected = load_backside_axis_frame_projection(output)
+
+            expected_robot = odom_pose_to_map(
+                map_pose_to_odom(robot, source.projection.planning_frame.map_from_odom),
+                frame.map_from_odom,
+            )
+            self.assertAlmostEqual(projected.stand_x_m, expected.geometry.x_m)
+            self.assertAlmostEqual(projected.stand_y_m, expected.geometry.y_m)
+            self.assertAlmostEqual(projected.robot_x_m, expected_robot.x_m)
+            self.assertAlmostEqual(projected.robot_y_m, expected_robot.y_m)
+            self.assertAlmostEqual(projected.stand_axis_rad, frame.map_from_odom.yaw_rad)
+            self.assertEqual(
+                projected.target_candidate_projection_sha256, target.evidence_sha256
+            )
+            self.assertEqual(
+                json.loads(target.evidence_path.read_text())["planning_frame_admission"],
+                recorded["expected_planning_frame"],
+            )
+
     def _artifacts(self, root: Path):
         axis_path = root / "axis.json"
         axis_path.write_text(

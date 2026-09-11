@@ -41,11 +41,6 @@ from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import (
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     StandSurveyRegistry,
 )
-from scripts.aufgabe04.navigation.foundation.models import Pose2D
-from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
-    PlanarTransform2D,
-    normalize_yaw,
-)
 from scripts.aufgabe04.stations.candidate_snapshot import (
     CandidateSnapshot,
     FrozenCandidate,
@@ -82,10 +77,6 @@ _PROJECTION_FIELDS = frozenset(
         "projected_candidate_snapshot_path",
     }
 )
-_PLANNING_FRAME_FIELDS = frozenset(
-    {"current_pose", "map_from_odom", "map_frame", "odom_frame"}
-)
-_POSE_FIELDS = frozenset({"x_m", "y_m", "yaw_rad"})
 
 
 @dataclass(frozen=True)
@@ -196,7 +187,7 @@ def require_projected_camera_candidate_binding(
     if projection["projected_candidate_snapshot_sha256"] != camera_sha256:
         raise ValueError("frame projection projected snapshot SHA-256 mismatch")
 
-    planning_frame = _planning_frame_from_mapping(
+    planning_frame = CandidatePlanningFrame.from_evidence(
         projection["planning_frame_admission"]
     )
     expected_map_frame = canonical_snapshot.planning_frame.strip("/")
@@ -359,34 +350,6 @@ def _binding_from_receipt(
     )
 
 
-def _planning_frame_from_mapping(value: object) -> CandidatePlanningFrame:
-    payload = _strict_mapping(
-        value,
-        _PLANNING_FRAME_FIELDS,
-        "planning_frame_admission",
-    )
-    pose = _pose_values(payload["current_pose"], "current_pose")
-    transform = _pose_values(payload["map_from_odom"], "map_from_odom")
-    raw_yaw = transform[2]
-    if raw_yaw != normalize_yaw(raw_yaw):
-        raise ValueError("map_from_odom.yaw_rad must be normalized")
-    return CandidatePlanningFrame(
-        current_pose=Pose2D(*pose),
-        map_from_odom=PlanarTransform2D(*transform),
-        map_frame=_frame_id(payload["map_frame"], "map_frame"),
-        odom_frame=_frame_id(payload["odom_frame"], "odom_frame"),
-    )
-
-
-def _pose_values(value: object, name: str) -> tuple[float, float, float]:
-    payload = _strict_mapping(value, _POSE_FIELDS, name)
-    return (
-        _finite(payload["x_m"], f"{name}.x_m"),
-        _finite(payload["y_m"], f"{name}.y_m"),
-        _finite(payload["yaw_rad"], f"{name}.yaw_rad"),
-    )
-
-
 def _strict_mapping(
     value: object,
     expected_fields: frozenset[str],
@@ -395,26 +358,6 @@ def _strict_mapping(
     if not isinstance(value, Mapping) or set(value) != expected_fields:
         raise ValueError(f"{name} fields mismatch")
     return value
-
-
-def _finite(value: object, name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{name} must be finite")
-    result = float(value)
-    if not math.isfinite(result):
-        raise ValueError(f"{name} must be finite")
-    return result
-
-
-def _frame_id(value: object, name: str) -> str:
-    if not isinstance(value, str):
-        raise ValueError(f"{name} must be a frame identifier")
-    normalized = value.strip("/")
-    if not normalized or normalized != value or any(
-        character.isspace() for character in normalized
-    ):
-        raise ValueError(f"{name} must be a non-prefixed frame identifier")
-    return normalized
 
 
 def _paths_match(first: object, second: Path) -> bool:

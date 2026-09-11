@@ -51,10 +51,15 @@ def _observation(evidence: Mapping[str, object], name: str) -> Mapping[str, obje
     return data
 
 
-def _capture(
+def candidate_tf_capture_pose(
     data: Mapping[str, object], target: str, source: str,
 ) -> tuple[float, float, float]:
-    if data.get("available") is not True or any(
+    """Read finite captured coordinates with matching TF frame identities."""
+    target, source = _frame(target), _frame(source)
+    if (
+        not isinstance(data, Mapping) or not target or not source
+        or target == source or data.get("available") is not True
+    ) or any(
         _frame(data.get(key)) != expected
         for key, expected in (
             ("target_frame", target), ("source_frame", source),
@@ -66,6 +71,25 @@ def _capture(
         if _finite(data.get(name), f"TF capture {name}") < 0.0:
             raise ValueError("candidate planning frame TF capture timestamp is invalid")
     return _pose(data, f"{target}<-{source}")
+
+
+def candidate_pose_from_captures(
+    direct: Mapping[str, object], odom: Mapping[str, object], *,
+    map_frame: str, odom_frame: str,
+) -> tuple[Pose2D, PlanarTransform2D]:
+    """Validate and compose saved captures, without refreshing their admission."""
+
+    if not isinstance(direct, Mapping) or not isinstance(odom, Mapping):
+        raise ValueError("candidate planning frame TF capture is malformed")
+    base_frame = _frame(odom.get("source_frame"))
+    map_frame, odom_frame = _frame(map_frame), _frame(odom_frame)
+    if not all((map_frame, odom_frame, base_frame)) or len({
+        map_frame, odom_frame, base_frame,
+    }) != 3:
+        raise ValueError("candidate planning frame requires distinct frame identities")
+    transform = PlanarTransform2D(*candidate_tf_capture_pose(direct, map_frame, odom_frame))
+    odom_pose = Pose2D(*candidate_tf_capture_pose(odom, odom_frame, base_frame))
+    return odom_pose_to_map(odom_pose, transform), transform
 
 
 def admitted_candidate_planning_pose(
@@ -88,13 +112,13 @@ def admitted_candidate_planning_pose(
     if not map_frame or not odom_frame or len({map_frame, odom_frame, base_frame}) != 3:
         raise ValueError("candidate planning frame requires distinct frame identities")
     direct = _observation(evidence, f"tf {map_frame}->{odom_frame}")
-    transform_values = _capture(direct, map_frame, odom_frame)
+    candidate_tf_capture_pose(direct, map_frame, odom_frame)
     transform = evidence.get("map_from_odom")
     if not isinstance(transform, Mapping) or transform != direct:
         raise ValueError("candidate planning frame direct TF capture mismatch")
     _observation(evidence, "odom freshness")
     odom_capture = _observation(evidence, f"tf {odom_frame}->{base_frame}")
-    observed_odom_values = _capture(odom_capture, odom_frame, base_frame)
+    observed_odom_values = candidate_tf_capture_pose(odom_capture, odom_frame, base_frame)
     odom_pose = evidence.get("odom_pose")
     if not isinstance(odom_pose, Mapping):
         raise ValueError("candidate planning frame returned no odom pose")
@@ -106,8 +130,11 @@ def admitted_candidate_planning_pose(
     odom_values = _pose(odom_pose, "odom pose")
     if odom_values != observed_odom_values:
         raise ValueError("candidate planning frame odom pose capture mismatch")
+    pose, _ = candidate_pose_from_captures(
+        direct, odom_capture, map_frame=map_frame, odom_frame=odom_frame,
+    )
     return (
-        odom_pose_to_map(Pose2D(*odom_values), PlanarTransform2D(*transform_values)),
+        pose,
         {
             "pose_basis": "direct_map_from_odom_times_observed_odom_pose",
             "map_from_odom_capture": deepcopy(dict(direct)),
@@ -116,4 +143,7 @@ def admitted_candidate_planning_pose(
     )
 
 
-__all__ = ["admitted_candidate_planning_pose"]
+__all__ = [
+    "admitted_candidate_planning_pose", "candidate_pose_from_captures",
+    "candidate_tf_capture_pose",
+]

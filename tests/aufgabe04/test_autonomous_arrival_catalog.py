@@ -25,22 +25,26 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
 )
 from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds
 from scripts.aufgabe04.navigation.foundation.models import GridCell, Pose2D
-from scripts.aufgabe04.navigation.localization.odom_execution_certificate import PlanarTransform2D
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import PlanarTransform2D, odom_pose_to_map
 from scripts.aufgabe04.navigation.planning.map_io import freeze_map_bundle
 from scripts.aufgabe04.real_robot.configuration.profile import camera_calibration_sha256, real_robot_profile_sha256, write_camera_calibration, write_real_robot_profile
 from scripts.aufgabe04.real_robot.configuration.recommendation import build_real_viewpoint_recommendation
 from scripts.aufgabe04.stations.arrival_pose_catalog import load_arrival_pose_catalog
-from scripts.aufgabe04.stations.autonomous_arrival_catalog import AutonomousCatalogInputs, promote_autonomous_arrival_catalog
+from scripts.aufgabe04.stations.autonomous_arrival_catalog import AutonomousCatalogInputs, _frame, promote_autonomous_arrival_catalog
 from scripts.aufgabe04.stations.candidate_snapshot import candidate_snapshot_sha256, new_candidate_snapshot, write_candidate_snapshot
 from scripts.aufgabe04.stations.server_identity_binding import seal_server_qr_mapping_evidence, write_observed_identities, write_server_qr_mapping_evidence
 from tests.aufgabe04.test_candidate_frame_projection import _registry, _frozen_candidate
 from tests.aufgabe04.test_real_robot_pipeline import calibration, robot_profile
 from tests.aufgabe04.test_server_identity_binding import mapping_payload
+from tests.aufgabe04.test_candidate_uncertainty_handoff import (
+    planning_frame as recorded_planning_frame,
+    recorded_fixture,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def fixture(root, *, obstacle=(4.0, 4.0), now=None):
+def fixture(root, *, obstacle=(4.0, 4.0), now=None, observed_frame=None):
     now = time.time() if now is None else now
     (root / "map.pgm").write_bytes(b"P5\n60 60\n255\n" + bytes([255]) * 3600)
     (root / "map.yaml").write_text("image: map.pgm\nresolution: 0.1\norigin: [0, 0, 0]\nnegate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.2\n")
@@ -66,7 +70,10 @@ def fixture(root, *, obstacle=(4.0, 4.0), now=None):
     write_candidate_snapshot(root / "confirmed.json", confirmed)
     frames = []
     for name, transform in (("observed", PlanarTransform2D(0, 0, 0)), ("target", PlanarTransform2D(0.1, 0.0, 0.0))):
-        frame = CandidatePlanningFrame(Pose2D(2.1, 3.4), transform)
+        frame = (
+            observed_frame if name == "observed" and observed_frame is not None
+            else CandidatePlanningFrame(Pose2D(2.1, 3.4), transform)
+        )
         projection = project_candidate_snapshot_to_planning_frame(source, registry, frame)
         snapshot_path = root / f"{name}_snapshot.json"
         snapshot_sha = write_candidate_snapshot(snapshot_path, projection.projected_snapshot)
@@ -78,7 +85,11 @@ def fixture(root, *, obstacle=(4.0, 4.0), now=None):
     cal_sha = write_camera_calibration(root / "calibration.json", cal)
     profile = robot_profile(cal_sha, hashlib.sha256((root / "arena_real.json").read_bytes()).hexdigest())
     profile_sha = write_real_robot_profile(root / "robot.json", profile)
-    recommendation = build_real_viewpoint_recommendation(stream_id="session_camera", stand_id=confirmed.candidate_uids[0], planning_frame="map", stand_center=Pose2D(2, 2), stand_radius_m=0.06, stand_uncertainty_m=0.02, robot_pose=Pose2D(2.0, 3.4), stand_axis_rad=0, axis_confidence=0.95, axis_sample_count=7, sensor_stamp_sec=now-5, expected_qr_id="qr_Mixed_a", observed_qr_ids=("qr_Mixed_a",), target_distance_m=0.50, observation_unix_sec=now-5)
+    observed_transform = (
+        observed_frame.map_from_odom if observed_frame is not None
+        else PlanarTransform2D(0, 0, 0)
+    )
+    recommendation = build_real_viewpoint_recommendation(stream_id="session_camera", stand_id=confirmed.candidate_uids[0], planning_frame="map", stand_center=odom_pose_to_map(Pose2D(2, 2), observed_transform), stand_radius_m=0.06, stand_uncertainty_m=0.02, robot_pose=odom_pose_to_map(Pose2D(2.0, 3.4), observed_transform), stand_axis_rad=observed_transform.yaw_rad, axis_confidence=0.95, axis_sample_count=7, sensor_stamp_sec=now-5, expected_qr_id="qr_Mixed_a", observed_qr_ids=("qr_Mixed_a",), target_distance_m=0.50, observation_unix_sec=now-5)
     (root / "recommendation.json").write_text(json.dumps(recommendation_to_dict(recommendation)))
     observed_sha = write_observed_identities(root / "observed_identities.json", candidate_snapshot=confirmed, observed_qr_by_candidate={confirmed.candidate_uids[0]: "qr_Mixed_a"}, session_id="session", observed_unix_sec=now-3)
     _, plans = mapping_payload(now)
@@ -104,6 +115,51 @@ def fixture(root, *, obstacle=(4.0, 4.0), now=None):
 
 
 class AutonomousArrivalCatalogTests(unittest.TestCase):
+    def test_real_preflight_observation_frame_reaches_frozen_catalog(self):
+        recorded = recorded_fixture()
+        frame = recorded_planning_frame(recorded["preflight"])
+        with tempfile.TemporaryDirectory() as directory:
+            inputs, now = fixture(Path(directory), observed_frame=frame)
+
+            result = promote_autonomous_arrival_catalog(inputs, now_sec=now)
+
+            catalog = load_arrival_pose_catalog(inputs.output_dir / "arrival_pose_catalog.json")
+            self.assertTrue(catalog.frozen)
+            self.assertEqual(result["stand_count"], 1)
+            self.assertEqual(result["obstacle_count"], 2)
+            self.assertAlmostEqual(catalog.records[0].stand.x_m, 2.1)
+            self.assertAlmostEqual(catalog.records[0].stand.y_m, 2.0)
+            projection = load_content_hashed_json(
+                Path(directory) / "observed_projection.json",
+                hash_field="candidate_frame_projection_sha256",
+            )
+            self.assertEqual(
+                projection["planning_frame_admission"], recorded["expected_planning_frame"]
+            )
+
+    def test_catalog_frame_reader_preserves_real_preflight_pose_provenance(self):
+        recorded = recorded_fixture()
+        produced = recorded_planning_frame(recorded["preflight"])
+        payload = {"planning_frame_admission": produced.to_evidence()}
+
+        loaded = _frame(payload)
+
+        self.assertEqual(loaded.current_pose, produced.current_pose)
+        self.assertEqual(loaded.map_from_odom, produced.map_from_odom)
+        self.assertEqual(loaded.pose_provenance, produced.pose_provenance)
+        self.assertIsNotNone(loaded.pose_provenance)
+        self.assertEqual(loaded.to_evidence(), recorded["expected_planning_frame"])
+
+    def test_catalog_frame_reader_rejects_malformed_optional_provenance(self):
+        for provenance in (None, {}, {"pose_source": "operator_override"}):
+            with self.subTest(provenance=provenance):
+                frame = recorded_planning_frame(recorded_fixture()["preflight"])
+                payload = frame.to_evidence()
+                payload["pose_provenance"] = provenance
+
+                with self.assertRaises(ValueError):
+                    _frame({"planning_frame_admission": payload})
+
     def test_real_validators_transform_freeze_and_preserve_full_obstacle_pool(self):
         with tempfile.TemporaryDirectory() as directory:
             inputs, now = fixture(Path(directory))

@@ -8,14 +8,15 @@ and never authorizes motion.
 
 from __future__ import annotations
 
-from copy import deepcopy
 from dataclasses import dataclass, replace
-import math
 from typing import Mapping
 
 from scripts.aufgabe04.navigation.approach.candidate_frame_reprojection import (
     CandidateFrameReprojectionResult,
     reproject_candidate_point,
+)
+from scripts.aufgabe04.navigation.approach.planning_frame_evidence import (
+    validate_planning_frame_evidence,
 )
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     StandSurveyRegistry,
@@ -64,31 +65,15 @@ class CandidatePlanningFrame:
                 "invalid_planning_frame",
                 "map_from_odom must be a PlanarTransform2D",
             )
-        # Reconstruct both values to run their finite/canonical validation.
-        pose_values = (
-            float(self.current_pose.x_m),
-            float(self.current_pose.y_m),
-            float(self.current_pose.yaw_rad),
-        )
-        if not all(math.isfinite(value) for value in pose_values):
+        try:
+            evidence = validate_planning_frame_evidence(self._evidence())
+        except ValueError as exc:
             raise CandidateFrameProjectionError(
-                "invalid_planning_frame", "current_pose must be finite"
-            )
-        Pose2D(*pose_values)
-        PlanarTransform2D(
-            self.map_from_odom.x_m,
-            self.map_from_odom.y_m,
-            self.map_from_odom.yaw_rad,
-        )
-        map_frame = _frame_id(self.map_frame, "map_frame")
-        odom_frame = _frame_id(self.odom_frame, "odom_frame")
-        if map_frame == odom_frame:
-            raise CandidateFrameProjectionError(
-                "invalid_planning_frame",
-                "map_frame and odom_frame must be distinct",
-            )
+                "invalid_planning_frame", str(exc),
+            ) from exc
+        object.__setattr__(self, "pose_provenance", evidence.get("pose_provenance"))
 
-    def to_evidence(self) -> dict[str, object]:
+    def _evidence(self) -> dict[str, object]:
         evidence: dict[str, object] = {
             "current_pose": {
                 "x_m": self.current_pose.x_m,
@@ -104,8 +89,23 @@ class CandidatePlanningFrame:
             "odom_frame": self.odom_frame,
         }
         if self.pose_provenance is not None:
-            evidence["pose_provenance"] = deepcopy(dict(self.pose_provenance))
+            evidence["pose_provenance"] = self.pose_provenance
         return evidence
+
+    def to_evidence(self) -> dict[str, object]:
+        return validate_planning_frame_evidence(self._evidence())
+
+    @classmethod
+    def from_evidence(cls, value: object) -> CandidatePlanningFrame:
+        """Read the shared historical contract; this grants no motion authority."""
+        payload = validate_planning_frame_evidence(value)
+        return cls(
+            current_pose=Pose2D(**payload["current_pose"]),
+            map_from_odom=PlanarTransform2D(**payload["map_from_odom"]),
+            map_frame=payload["map_frame"],
+            odom_frame=payload["odom_frame"],
+            pose_provenance=payload.get("pose_provenance"),
+        )
 
 
 @dataclass(frozen=True)
@@ -262,22 +262,6 @@ def projection_candidate_points(
         uid: (result.current_map_point.x_m, result.current_map_point.y_m)
         for uid, result in projection.candidate_results
     }
-
-
-def _frame_id(value: object, name: str) -> str:
-    if not isinstance(value, str):
-        raise CandidateFrameProjectionError(
-            "invalid_planning_frame", f"{name} must be a frame identifier"
-        )
-    normalized = value.strip("/")
-    if not normalized or normalized != value or any(
-        character.isspace() for character in normalized
-    ):
-        raise CandidateFrameProjectionError(
-            "invalid_planning_frame",
-            f"{name} must be a non-prefixed frame identifier",
-        )
-    return normalized
 
 
 __all__ = [

@@ -33,7 +33,7 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     coverage_survey_plan_sha256, load_coverage_survey_plan, load_stand_survey_registry, stand_survey_registry_sha256,
 )
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
-from scripts.aufgabe04.navigation.localization.odom_execution_certificate import PlanarTransform2D, map_pose_to_odom, odom_pose_to_map
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import map_pose_to_odom, odom_pose_to_map
 from scripts.aufgabe04.navigation.missions.plan_synchronized_viewpoint import (
     _known_stand_keepout_costmap, _prepend_certified_known_stand_egress, _validate_known_stand_route_clearance,
 )
@@ -83,11 +83,7 @@ def _file_sha(path: Path) -> str:
 
 
 def _frame(payload) -> CandidatePlanningFrame:
-    value = payload["planning_frame_admission"]
-    return CandidatePlanningFrame(
-        Pose2D(**value["current_pose"]), PlanarTransform2D(**value["map_from_odom"]),
-        value["map_frame"], value["odom_frame"],
-    )
+    return CandidatePlanningFrame.from_evidence(payload["planning_frame_admission"])
 
 
 def _project_recommendation(recommendation, source_frame, target_frame):

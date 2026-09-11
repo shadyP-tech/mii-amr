@@ -88,6 +88,10 @@ from scripts.aufgabe04.stations.candidate_snapshot import (
     write_candidate_snapshot,
 )
 from tests.aufgabe04.test_exact_two_camera_admission import _ready_inputs
+from tests.aufgabe04.test_candidate_uncertainty_handoff import (
+    planning_frame as recorded_planning_frame,
+    recorded_fixture,
+)
 
 
 TERMINAL_HASH = "c" * 64
@@ -337,11 +341,12 @@ def _camera_frame_projection(
     *,
     translation_x_m: float = 0.012902,
     translation_y_m: float = -0.047650,
+    planning_frame: CandidatePlanningFrame | None = None,
 ):
     projection = project_candidate_snapshot_to_planning_frame(
         fixture.snapshot,
         fixture.registry,
-        CandidatePlanningFrame(
+        planning_frame if planning_frame is not None else CandidatePlanningFrame(
             current_pose=Pose2D(-0.5, -0.7, 0.0),
             map_from_odom=PlanarTransform2D(
                 translation_x_m,
@@ -414,8 +419,11 @@ def _write_projected_exact_two_receipt(
     candidate_uid: str,
     *,
     recommendation_uses_canonical_geometry: bool = False,
+    planning_frame: CandidatePlanningFrame | None = None,
 ):
-    frame_binding = _camera_frame_projection(fixture, root)
+    frame_binding = _camera_frame_projection(
+        fixture, root, planning_frame=planning_frame
+    )
     camera_candidate = frame_binding.projection.projected_snapshot.candidate_for(
         candidate_uid
     )
@@ -505,6 +513,89 @@ def _record(fixture, receipt_path: Path) -> int:
 
 
 class ExactTwoCameraDecisionTest(unittest.TestCase):
+    def test_real_preflight_frame_commits_through_actual_decision_recorder(self):
+        recorded = recorded_fixture()
+        frame = recorded_planning_frame(recorded["preflight"])
+        self.assertEqual(frame.to_evidence(), recorded["expected_planning_frame"])
+        self.assertIsNotNone(frame.pose_provenance)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = _fixture(root, with_frame_provenance=True)
+            uid = "survey_candidate_0003"
+            decision = _write_projected_exact_two_receipt(
+                fixture, root, uid, planning_frame=frame
+            )
+            original_projection = decision.frame_binding.evidence_path.read_bytes()
+            captured_stdout, captured_stderr = StringIO(), StringIO()
+
+            with redirect_stdout(captured_stdout), redirect_stderr(captured_stderr):
+                result = _record(fixture, decision.receipt_path)
+
+            self.assertEqual(result, 0, captured_stderr.getvalue())
+            registry = load_stand_survey_registry(
+                fixture.survey_root / "stand_registry.json", fixture.plan
+            )
+            self.assertEqual(registry.candidate_for(uid).status, STATUS_CONFIRMED)
+            stored = json.loads(
+                (fixture.survey_root / "decisions" / f"{uid}.json").read_text()
+            )
+            self.assertEqual(stored["schema_version"], 3)
+            self.assertEqual(stored["decision"], STATUS_CONFIRMED)
+            self.assertEqual(
+                stored["candidate_frame_projection_sha256"],
+                decision.frame_binding.evidence_sha256,
+            )
+            self.assertEqual(
+                stored["camera_recommendation_sha256"],
+                _sha256(decision.recommendation_path),
+            )
+            self.assertEqual(
+                decision.frame_binding.evidence_path.read_bytes(), original_projection
+            )
+            self.assertEqual(
+                json.loads(original_projection)["planning_frame_admission"],
+                recorded["expected_planning_frame"],
+            )
+
+    def test_resealed_invalid_pose_provenance_never_commits_decision(self):
+        frame = recorded_planning_frame(recorded_fixture()["preflight"])
+        for failure in ("null", "unknown_field", "inconsistent_capture"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                fixture = _fixture(root, with_frame_provenance=True)
+                uid = "survey_candidate_0003"
+                decision = _write_projected_exact_two_receipt(
+                    fixture, root, uid, planning_frame=frame
+                )
+
+                def mutate(evidence):
+                    admission = evidence["planning_frame_admission"]
+                    if failure == "null":
+                        admission["pose_provenance"] = None
+                    elif failure == "unknown_field":
+                        admission["pose_provenance"]["operator_override"] = True
+                    else:
+                        admission["pose_provenance"]["map_from_odom_capture"]["x_m"] += 0.01
+
+                # Resealing the outer evidence cannot make false capture
+                # provenance valid at the actual publication boundary.
+                _rewrite_projection_evidence(
+                    decision.frame_binding, decision.receipt_path, mutate
+                )
+                registry_before = (fixture.survey_root / "stand_registry.json").read_bytes()
+                with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                    with self.assertRaises(SystemExit) as raised:
+                        _record(fixture, decision.receipt_path)
+
+                self.assertEqual(raised.exception.code, 2)
+                self.assertEqual(
+                    (fixture.survey_root / "stand_registry.json").read_bytes(),
+                    registry_before,
+                )
+                self.assertFalse(
+                    (fixture.survey_root / "decisions" / f"{uid}.json").exists()
+                )
+
     def test_valid_handoff_allows_listed_provisional_camera_decision(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -30,7 +30,6 @@ from scripts.aufgabe04.navigation.approach.candidate_frame_projection import (
 from scripts.aufgabe04.navigation.approach.candidate_frame_reprojection import (
     CandidateFrameReprojectionResult,
 )
-from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
     PlanarTransform2D,
     normalize_yaw,
@@ -92,9 +91,6 @@ _CANDIDATE_PROJECTION_FIELDS = frozenset(
         "source_candidate_snapshot_path",
         "projected_candidate_snapshot_path",
     }
-)
-_PLANNING_FRAME_FIELDS = frozenset(
-    {"current_pose", "map_from_odom", "map_frame", "odom_frame"}
 )
 
 
@@ -592,7 +588,7 @@ def _load_projection_binding(
     if source_snapshot.planning_frame != projected_snapshot.planning_frame:
         raise ValueError("candidate projection snapshot planning frames differ")
 
-    planning_frame = _planning_frame_from_mapping(
+    planning_frame = CandidatePlanningFrame.from_evidence(
         payload["planning_frame_admission"]
     )
     if planning_frame.map_frame != source_snapshot.planning_frame.strip("/"):
@@ -731,29 +727,6 @@ def _transform(value: object, name: str) -> PlanarTransform2D:
 
 def _transform_mapping(value: PlanarTransform2D) -> dict[str, float]:
     return {"x_m": value.x_m, "y_m": value.y_m, "yaw_rad": value.yaw_rad}
-
-
-def _planning_frame_from_mapping(value: object) -> CandidatePlanningFrame:
-    payload = _strict_mapping(
-        value, _PLANNING_FRAME_FIELDS, "planning_frame_admission"
-    )
-    pose = _pose_values(payload["current_pose"], "current_pose")
-    transform = _transform(payload["map_from_odom"], "map_from_odom")
-    return CandidatePlanningFrame(
-        current_pose=Pose2D(*pose),
-        map_from_odom=transform,
-        map_frame=_frame_id(payload["map_frame"], "map_frame"),
-        odom_frame=_frame_id(payload["odom_frame"], "odom_frame"),
-    )
-
-
-def _pose_values(value: object, name: str) -> tuple[float, float, float]:
-    payload = _strict_mapping(value, _POSE_FIELDS, name)
-    return (
-        _finite(payload["x_m"], f"{name}.x_m"),
-        _finite(payload["y_m"], f"{name}.y_m"),
-        _finite(payload["yaw_rad"], f"{name}.yaw_rad"),
-    )
 
 
 def _strict_population_mapping(
