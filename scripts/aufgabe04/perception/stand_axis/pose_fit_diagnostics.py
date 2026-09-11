@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 
+from scripts.aufgabe04.perception.stand_axis.geometry_contract import JointGeometryContract
 from scripts.aufgabe04.perception.stand_axis.model_profile import StandModelProfile
 from scripts.aufgabe04.perception.stand_axis.model_projection import project_stand_model
 from scripts.aufgabe04.perception.stand_axis.models import ImagePoint
@@ -47,6 +48,7 @@ class MetricModelDiagnostics:
     expected_panel_qr_height_ratio: float | None
     qr_only: IndependentPoseDiagnostic | None
     head_only: IndependentPoseDiagnostic | None
+    geometry_contract: JointGeometryContract | None = None
 
 
 def _independent_pose(result: PlanarPoseResult | None) -> IndependentPoseDiagnostic | None:

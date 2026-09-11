@@ -5,10 +5,14 @@ from __future__ import annotations
 from scripts.aufgabe04.qr_scanning.qr_observation import (
     DecodedQrObservation, validated_qr_corners,
 )
+from scripts.aufgabe04.qr_scanning.isolated_qr_views import (
+    ISOLATED_QR_VIEWS, rectify_isolated_qr_view,
+)
 
 
 def decode_isolated_native_quad(
     frame, points, cv2, *, image_shape, scale, border_px,
+    wechat_decoder=None, diagnostics: dict | None = None,
 ) -> DecodedQrObservation | None:
     """Decode exactly one native quad without borrowing a full-crop payload.
 
@@ -16,34 +20,49 @@ def decode_isolated_native_quad(
     instead of localized corners. Native detection supplies geometry; a new
     WeChat decode of only that rectified symbol supplies its own identity.
     Multiple native quads, malformed geometry, and multiple isolated payloads
-    are rejected. The fixed 256-pixel output bounds the additional work.
+    are rejected. At most two views are decoded, each at most 256x256 pixels.
+    A second view preserves a narrow source-pixel quiet margin that recovered
+    the recorded frame 000011 in the deployed OpenCV 4.5.4 runtime. No decoded
+    input-extent rectangle is used as symbol geometry.
     """
     raw = validated_qr_corners(points, image_shape=getattr(frame, "shape", None))
     restored = validated_qr_corners(
         points, image_shape=image_shape, scale=scale, border_px=border_px,
     )
     factory = getattr(cv2, "wechat_qrcode_WeChatQRCode", None)
-    if raw is None or restored is None or factory is None:
+    if diagnostics is not None:
+        diagnostics.update(views=[], ambiguous_texts=[],
+                           reason="native_quad_unavailable")
+    if raw is None or restored is None or (factory is None and wechat_decoder is None):
         return None
     try:
-        import numpy
-
-        transform = cv2.getPerspectiveTransform(
-            numpy.asarray(raw, dtype=numpy.float32),
-            numpy.asarray(((0, 0), (223, 0), (223, 223), (0, 223)), dtype=numpy.float32),
-        )
-        symbol = cv2.warpPerspective(frame, transform, (224, 224))
-        white = 255 if len(symbol.shape) == 2 else (255, 255, 255)
-        isolated = cv2.copyMakeBorder(
-            symbol, 16, 16, 16, 16, cv2.BORDER_CONSTANT, value=white,
-        )
-        result = factory().detectAndDecode(isolated)
-        decoded = result[0]
-        texts = (decoded,) if isinstance(decoded, str) else tuple(decoded)
-        if len(texts) != 1 or not isinstance(texts[0], str) or not texts[0].strip():
-            return None
-        return DecodedQrObservation(
-            texts[0].strip(), restored, "opencv_quad_wechat_rectified", float(scale),
-        )
+        decoder = wechat_decoder if wechat_decoder is not None else factory()
+        for view in ISOLATED_QR_VIEWS:
+            isolated = rectify_isolated_qr_view(frame, raw, cv2, view)
+            result = decoder.detectAndDecode(isolated)
+            decoded = result[0]
+            texts = (decoded,) if isinstance(decoded, str) else tuple(decoded)
+            texts = tuple(text.strip() for text in texts if isinstance(text, str) and text.strip())
+            if diagnostics is not None:
+                diagnostics["views"].append({
+                    "view": view.name, "image_shape": list(isolated.shape),
+                    "source_margin_ratio": view.source_margin_ratio,
+                    "texts": list(texts),
+                })
+            if len(texts) > 1:
+                if diagnostics is not None:
+                    diagnostics.update(reason="multiple_isolated_payloads", ambiguous_texts=list(texts))
+                return None
+            if not texts:
+                continue
+            if diagnostics is not None:
+                diagnostics.update(reason="isolated_payload_confirmed", selected_view=view.name)
+            return DecodedQrObservation(
+                texts[0], restored, "opencv_quad_wechat_rectified", float(scale),
+            )
+        if diagnostics is not None:
+            diagnostics["reason"] = "isolated_payload_unavailable"
     except Exception:
-        return None
+        if diagnostics is not None:
+            diagnostics["reason"] = "isolated_decode_error"
+    return None

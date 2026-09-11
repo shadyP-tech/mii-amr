@@ -60,6 +60,10 @@ class MetricModelDiagnosticsTest(unittest.TestCase):
             Path(__file__).resolve().parents[2]
             / "configs/aufgabe04/stand_models/physical_stand_measured_20260826_v2.json"
         )
+        # These isolate legacy diagnostic mechanics with blank images and
+        # mocked measurements. Physical head admission has separate raw-pixel
+        # rail/corner/neck and uncertainty fixtures.
+        self.profile = replace(self.profile, environment="synthetic")
         self.camera = RectifiedCameraMatrix(800.0, 800.0, 400.0, 300.0)
         self.pose = pose_at(25.0)
         self.projected = project_stand_model(cv2, self.profile, self.pose, self.camera)

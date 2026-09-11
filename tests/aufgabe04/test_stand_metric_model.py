@@ -31,7 +31,9 @@ from scripts.aufgabe04.perception.stand_axis.model_pipeline import (
 )
 from scripts.aufgabe04.perception.stand_axis.model_backside_acquisition import (
     MODEL_BACKSIDE_AXIS_SOURCE,
+    estimate_stand_axis_from_model_backside,
 )
+from scripts.aufgabe04.perception.stand_axis.preprocessing import _canny_edges_from_frame
 from scripts.aufgabe04.perception.stand_axis.model_refinement import (
     model_corridor_half_width_px,
     refine_projected_head_border,
@@ -525,6 +527,7 @@ class StandMetricGeometryTest(unittest.TestCase):
         )
 
     def test_high_level_pipeline_separates_prediction_from_measurement(self):
+        self.camera = RectifiedCameraMatrix(800., 800., 320., 240.)
         projected = project_stand_model(cv2, self.profile, oblique_pose(), self.camera)
         qr_pixels = tuple(
             projected.landmarks[name]
@@ -541,6 +544,7 @@ class StandMetricGeometryTest(unittest.TestCase):
             dtype=numpy.int32,
         )
         cv2.polylines(measured_frame, polygon, True, (255, 255, 255), 2)
+        self._draw_neck(measured_frame, projected.head_corners)
         blank_frame = numpy.zeros_like(measured_frame)
         options = dict(
             model_profile=self.profile,
@@ -565,19 +569,20 @@ class StandMetricGeometryTest(unittest.TestCase):
 
         self.assertTrue(measured.usable, measured.reason)
         self.assertEqual(measured.evidence_state, "fresh_refined")
-        self.assertEqual(measured.source, "model_current_frame_refined")
+        self.assertEqual(measured.source, "model_current_measured_head")
         self.assertFalse(predicted.usable)
-        self.assertEqual(predicted.evidence_state, "predicted_only")
+        self.assertEqual(predicted.evidence_state, "unobservable")
         self.assertIsNotNone(predicted_debug.predicted_corners)
         self.assertEqual(measured_debug.model_profile_sha256, self.profile.sha256)
         self.assertEqual(measured_debug.qr_detection_scale, 4.0)
-        self.assertEqual(measured_debug.pose_seed_source, "qr_pyramid_4x")
+        self.assertEqual(measured_debug.pose_seed_source, "current_head_proposal")
         self.assertIsNotNone(measured_debug.model_corridor_half_width_px)
-        self.assertEqual(measured_debug.model_pose_fit_source, "joint_qr_head")
+        self.assertEqual(measured_debug.model_pose_fit_source, "model_current_measured_head")
         self.assertIn("head_back_top_left", measured_debug.projected_landmarks)
         self.assertNotIn("stem_bottom_left", measured_debug.projected_landmarks)
 
     def test_model_pipeline_recovers_oblique_current_frame_axis(self):
+        self.camera = RectifiedCameraMatrix(800., 800., 320., 240.)
         pose = oblique_pose()
         projected = project_stand_model(cv2, self.profile, pose, self.camera)
         frame = numpy.zeros((480, 640, 3), dtype=numpy.uint8)
@@ -586,6 +591,7 @@ class StandMetricGeometryTest(unittest.TestCase):
             dtype=numpy.int32,
         )
         cv2.polylines(frame, polygon, True, (255, 255, 255), 2)
+        self._draw_neck(frame, projected.head_corners)
         qr_pixels = tuple(
             projected.landmarks[name]
             for name in (
@@ -614,6 +620,15 @@ class StandMetricGeometryTest(unittest.TestCase):
         self.assertAlmostEqual(estimate.yaw_deg, -25.0, delta=3.0)
 
     @staticmethod
+    def _draw_neck(frame, corners):
+        center = (corners[2].u_px + corners[3].u_px) / 2.0
+        bottom = (corners[2].v_px + corners[3].v_px) / 2.0
+        width = abs(corners[2].u_px - corners[3].u_px)
+        for offset in (-0.09 * width, 0.09 * width):
+            cv2.line(frame, (round(center + offset), round(bottom)),
+                     (round(center + offset), round(bottom + 0.4 * width)), (255, 255, 255), 2)
+
+    @staticmethod
     def _synthetic_backside_frame(*, include_neck: bool = True):
         frame = numpy.zeros((240, 320, 3), dtype=numpy.uint8)
         cv2.rectangle(frame, (120, 50), (200, 130), (255, 255, 255), 2)
@@ -639,6 +654,19 @@ class StandMetricGeometryTest(unittest.TestCase):
         options.update(overrides)
         return options
 
+    def _legacy_backside(self, frame, **overrides):
+        """Keep direct compatibility-module checks separate from new admission."""
+        options = self._backside_options(**overrides)
+        blur = options.pop("blur_kernel")
+        width = options.pop("backside_target_crop_horizontal_half_width_ratio", 1.25)
+        edges = _canny_edges_from_frame(cv2, frame, blur_kernel=blur,
+                                       edge_preprocess="channel_union", canny_low=20, canny_high=60)
+        return estimate_stand_axis_from_model_backside(
+            cv2, frame, raw_edges=edges, edge_preprocess="channel_union",
+            min_edge_height_px=8.0, max_reprojection_rmse_px=2.0,
+            target_crop_horizontal_half_width_ratio=width, **options,
+        )
+
     def test_no_qr_measured_model_bootstraps_backside_axis(self):
         frame = self._synthetic_backside_frame()
         with patch(
@@ -653,19 +681,15 @@ class StandMetricGeometryTest(unittest.TestCase):
             )
 
         self.assertTrue(estimate.usable, estimate.reason)
-        self.assertEqual(estimate.source, MODEL_BACKSIDE_AXIS_SOURCE)
-        self.assertEqual(estimate.evidence_state, "fresh_backside")
-        self.assertEqual(estimate.visible_face, "backside_candidate")
-        self.assertGreaterEqual(estimate.visible_face_confidence, 0.70)
+        self.assertEqual(estimate.source, "model_current_measured_head")
+        self.assertEqual(estimate.evidence_state, "fresh_refined")
+        self.assertIsNone(estimate.visible_face)
+        self.assertIsNone(estimate.visible_face_confidence)
         self.assertIsNotNone(estimate.yaw_deg)
         self.assertTrue(math.isfinite(estimate.yaw_deg))
-        self.assertIsNone(estimate.camera_face_normal_xyz)
-        self.assertEqual(
-            debug.visible_face_reason,
-            "qr_absent_model_head_and_neck_supported",
-        )
-        self.assertAlmostEqual(debug.head_scale_ratio, 1.0, delta=0.08)
-        self.assertLess(debug.head_center_error_ratio, 0.05)
+        self.assertIsNotNone(estimate.camera_face_normal_xyz)
+        self.assertIsNone(debug.visible_face_reason)
+        self.assertTrue(debug.head_model_quality.accepted)
         self.assertEqual(debug.model_profile_sha256, self.profile.sha256)
         self.assertIsNotNone(estimate.pose_reprojection_rmse_px)
         self.assertEqual(
@@ -709,7 +733,7 @@ class StandMetricGeometryTest(unittest.TestCase):
             ),
             patch(
                 "scripts.aufgabe04.perception.stand_axis."
-                "model_backside_acquisition.estimate_planar_pose_ippe",
+                "head_model_fit.estimate_planar_pose_ippe",
                 return_value=ambiguous_pose,
             ),
         ):
@@ -722,7 +746,7 @@ class StandMetricGeometryTest(unittest.TestCase):
         self.assertFalse(estimate.usable)
         self.assertEqual(
             estimate.reason,
-            "model_backside_planar_pose_axis_ambiguous",
+            "head_model_planar_axis_ambiguous",
         )
         self.assertEqual(estimate.evidence_state, "unobservable")
         self.assertIsNone(estimate.visible_face)
@@ -730,7 +754,7 @@ class StandMetricGeometryTest(unittest.TestCase):
         self.assertEqual(estimate.pose_ambiguity_gap_px, 0.01)
         self.assertEqual(
             debug.model_pose_fit_source,
-            "head_only_backside_ambiguous",
+            "model_current_measured_head",
         )
         self.assertEqual(debug.pose_reprojection_rmse_px, 0.04)
         self.assertEqual(debug.pose_ambiguity_gap_px, 0.01)
@@ -779,11 +803,7 @@ class StandMetricGeometryTest(unittest.TestCase):
                 "detect_qr_quad",
                 return_value=None,
             ):
-                estimate, _debug = estimate_stand_axis_from_metric_model(
-                    cv2,
-                    frame,
-                    **self._backside_options(**overrides),
-                )
+                estimate, _debug = self._legacy_backside(frame, **overrides)
 
             self.assertFalse(estimate.usable)
             self.assertEqual(estimate.reason, expected_reason)
@@ -797,11 +817,7 @@ class StandMetricGeometryTest(unittest.TestCase):
             "detect_qr_quad",
             return_value=None,
         ):
-            estimate, debug = estimate_stand_axis_from_metric_model(
-                cv2,
-                frame,
-                **self._backside_options(expected_head_center_u_px=110.0),
-            )
+            estimate, debug = self._legacy_backside(frame, expected_head_center_u_px=110.0)
 
         self.assertFalse(estimate.usable)
         self.assertEqual(estimate.reason, "model_backside_target_center_mismatch")
@@ -818,13 +834,9 @@ class StandMetricGeometryTest(unittest.TestCase):
             "detect_qr_quad",
             return_value=None,
         ):
-            proposal, proposal_debug = estimate_stand_axis_from_metric_model(
-                cv2,
-                frame,
-                **self._backside_options(
-                    expected_head_center_u_px=projected_center_u,
-                    backside_target_crop_horizontal_half_width_ratio=2.25,
-                ),
+            proposal, proposal_debug = self._legacy_backside(
+                frame, expected_head_center_u_px=projected_center_u,
+                backside_target_crop_horizontal_half_width_ratio=2.25,
             )
             self.assertFalse(proposal.usable)
             self.assertEqual(
@@ -843,13 +855,9 @@ class StandMetricGeometryTest(unittest.TestCase):
             detected_center_v = sum(
                 point.v_px for point in proposal.corners
             ) / len(proposal.corners)
-            verified, verified_debug = estimate_stand_axis_from_metric_model(
-                cv2,
-                frame,
-                **self._backside_options(
-                    expected_head_center_u_px=detected_center_u,
-                    expected_head_center_v_px=detected_center_v,
-                ),
+            verified, verified_debug = self._legacy_backside(
+                frame, expected_head_center_u_px=detected_center_u,
+                expected_head_center_v_px=detected_center_v,
             )
 
         self.assertTrue(verified.usable, verified.reason)
@@ -892,8 +900,8 @@ class StandMetricGeometryTest(unittest.TestCase):
                 **self._backside_options(),
             )
 
-        self.assertFalse(estimate.usable)
-        self.assertEqual(estimate.reason, "model_pose_seed_unavailable")
+        self.assertTrue(estimate.usable, estimate.reason)
+        self.assertEqual(estimate.reason, "axis_estimated_current_measured_head")
         self.assertNotEqual(estimate.source, MODEL_BACKSIDE_AXIS_SOURCE)
         self.assertTrue(debug.qr_detected)
 

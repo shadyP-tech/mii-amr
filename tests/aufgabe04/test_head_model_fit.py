@@ -1,0 +1,108 @@
+"""Independent angle authority survives QR changes but never lost raw proof."""
+
+from dataclasses import replace
+import unittest
+from unittest.mock import patch
+
+try:
+    import cv2
+    import numpy
+except ImportError:  # pragma: no cover
+    cv2 = numpy = None
+
+from scripts.aufgabe04.perception.stand_axis.head_model_quality import validated_head_model_quality
+from scripts.aufgabe04.perception.stand_axis.model_pipeline import estimate_stand_axis_from_metric_model
+from scripts.aufgabe04.perception.stand_axis.qr_pose_seed import PlanarPoseResult, estimate_planar_pose_ippe
+from scripts.aufgabe04.qr_scanning.qr_observation import DecodedQrObservation
+from tests.aufgabe04 import test_geometry_contract as geometry_fixture
+
+PIPELINE = "scripts.aufgabe04.perception.stand_axis.model_pipeline."
+HEAD_FIT = "scripts.aufgabe04.perception.stand_axis.head_model_fit."
+
+
+@unittest.skipIf(cv2 is None or numpy is None, "OpenCV/numpy required")
+class IndependentHeadFitTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        geometry_fixture.GeometryContractTest.setUpClass()
+        cls.fixture = geometry_fixture.GeometryContractTest
+
+    def run_fit(self, **overrides):
+        options = {**self.fixture.options, **overrides}
+        return estimate_stand_axis_from_metric_model(cv2, self.fixture.crop, **options)
+
+    def assert_same_head(self, estimate, debug):
+        self.assertTrue(estimate.usable, estimate.reason)
+        self.assertEqual(estimate.source, "model_current_measured_head")
+        self.assertTrue(validated_head_model_quality(debug.head_model_quality))
+        self.assertEqual(estimate.corners, self.fixture.estimate.corners)
+        self.assertAlmostEqual(estimate.yaw_deg, self.fixture.estimate.yaw_deg, places=9)
+        self.assertEqual(estimate.camera_face_normal_xyz, self.fixture.estimate.camera_face_normal_xyz)
+        self.assertEqual(debug.model_pose, self.fixture.debug.model_pose)
+        self.assertIsNone(estimate.visible_face)
+
+    def test_qr_payload_geometry_and_model_dimensions_cannot_change_head_angle(self):
+        cases = (
+            {"qr_observations": ()},
+            {"qr_observations": (DecodedQrObservation("different_identity", None, "test"),)},
+            {"qr_observations": (DecodedQrObservation("QR_003", None, "test"),
+                                 DecodedQrObservation("conflict", None, "test"))},
+            {"model_profile": replace(self.fixture.profile, qr_symbol_width_m=0.071,
+                                      qr_symbol_height_m=0.071, qr_center_x_m=0.005)},
+        )
+        for overrides in cases:
+            with self.subTest(overrides=overrides), patch(
+                PIPELINE + "select_temporally_consistent_pose",
+                side_effect=AssertionError("head cannot borrow QR ambiguity resolution"),
+            ):
+                self.assert_same_head(*self.run_fit(**overrides))
+        self.assertEqual(self.fixture.profile.qr_symbol_width_m, 0.062)
+
+    def test_tracked_pose_cannot_donate_angle_or_resolve_current_head(self):
+        wrong_hint = replace(self.fixture.debug.model_pose, yaw_deg=-70.0,
+                             rotation_vector=(0.0, 1.2, 0.0), translation_xyz_m=(0.3, 0.2, 0.9))
+        with patch(PIPELINE + "select_temporally_consistent_pose", side_effect=AssertionError("no history tie-break")):
+            self.assert_same_head(*self.run_fit(pose_hint=wrong_hint))
+
+    def test_failed_qr_and_joint_diagnostics_cannot_replace_head_pose(self):
+        calls = []
+
+        def solve(cv, points, model, camera, **kwargs):
+            calls.append(len(points))
+            if len(calls) == 1:
+                return estimate_planar_pose_ippe(cv, points, model, camera, **kwargs)
+            return PlanarPoseResult(False, "diagnostic_fit_unavailable", (), None)
+
+        with patch(HEAD_FIT + "estimate_planar_pose_ippe", side_effect=solve):
+            self.assert_same_head(*self.run_fit())
+        self.assertEqual(calls, [4, 4, 8])
+
+    def test_current_crop_acquires_neutral_head_before_any_qr_or_pose(self):
+        with patch(PIPELINE + "detect_qr_quad", return_value=None):
+            estimate, debug = self.run_fit(current_head_proposal_corners=None,
+                                           qr_observations=(), pose_hint=None)
+        self.assertIsNotNone(debug.refined_corners)
+        self.assertTrue(estimate.usable, estimate.reason)
+        self.assertTrue(debug.head_neck_junction.accepted)
+        self.assertIsNotNone(debug.model_pose)
+        self.assertEqual(estimate.source, "model_current_measured_head")
+        self.assertTrue(debug.head_model_quality.centered_neck_supported)
+        self.assertIsNone(estimate.visible_face)
+
+    def test_good_qr_and_tracked_pose_cannot_rescue_missing_neck(self):
+        pixels = self.fixture.crop.copy()
+        bottom = int(max(p.v_px for p in self.fixture.debug.refined_corners)) + 2
+        pixels[bottom:, :] = 0
+        estimate, debug = estimate_stand_axis_from_metric_model(
+            cv2, pixels, **self.fixture.options, pose_hint=self.fixture.debug.model_pose,
+        )
+        self.assertFalse(estimate.usable)
+        self.assertEqual(estimate.source, "model_current_measured_head")
+        self.assertIsNone(estimate.yaw_deg)
+        self.assertIsNone(estimate.camera_face_normal_xyz)
+        self.assertIsNone(debug.model_pose)
+        self.assertFalse(debug.head_model_quality.centered_neck_supported)
+
+
+if __name__ == "__main__":
+    unittest.main()

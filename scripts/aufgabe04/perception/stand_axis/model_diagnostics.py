@@ -20,6 +20,18 @@ def metric_fit_diagnostics_payload(
         return None if values is None else [asdict(point) for point in values]
 
     return {
+        "head_model_quality": (
+            None if artifacts is None or artifacts.head_model_quality is None
+            else asdict(artifacts.head_model_quality)
+        ),
+        "head_neck_junction": (
+            None if artifacts is None or artifacts.head_neck_junction is None
+            else asdict(artifacts.head_neck_junction)
+        ),
+        "head_outer_recovery": (
+            None if artifacts is None or artifacts.head_outer_recovery is None
+            else asdict(artifacts.head_outer_recovery)
+        ),
         "fit_diagnostics": (
             None if artifacts is None or artifacts.model_diagnostics is None
             else asdict(artifacts.model_diagnostics)

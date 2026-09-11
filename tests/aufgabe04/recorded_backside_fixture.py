@@ -17,10 +17,11 @@ from scripts.aufgabe04.perception.stand_axis.model_profile import load_measured_
 from scripts.aufgabe04.perception.stand_axis_handoff import RigidTransform, rectified_pixel_bearing_in_scan
 from scripts.aufgabe04.perception.stand_axis_lidar_roi import PlainLaserScan
 from scripts.aufgabe04.qr_scanning.opencv_qr_detector import detect_qr_observations_bgr
-from scripts.aufgabe04.real_robot.configuration.geometry import ImageRoi
+from scripts.aufgabe04.real_robot.configuration.geometry import CameraIntrinsics, ImageRoi
 from scripts.aufgabe04.real_robot.observer.backside_proposal_reuse import BacksideProposalContext
 from scripts.aufgabe04.real_robot.observer.camera_target_registration import HeadRoiEvaluation
 from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import HeadRoiAttempt
+from scripts.aufgabe04.real_robot.observer.head_proposal_registration import acquire_registered_head_measurement
 from scripts.aufgabe04.real_robot.observer.qr_decode_cache import RoiQrDecodeCache
 
 
@@ -60,7 +61,7 @@ class RecordedBacksideFixture:
         )
         calls = []
 
-        def evaluate(attempt, pose_hint):
+        def evaluate(attempt, pose_hint, current_head_proposal_corners=None):
             assert pose_hint is None  # Backside has no directed metric-pose seed.
             roi = attempt.roi
             bounds = (roi.x0, roi.y0, roi.x1, roi.y1)
@@ -84,6 +85,7 @@ class RecordedBacksideFixture:
                 backside_target_crop_horizontal_half_width_ratio=attempt.backside_target_crop_half_width_ratio,
                 input_cache=input_cache,
                 input_cache_roi=bounds if input_cache is not None else None,
+                current_head_proposal_corners=current_head_proposal_corners,
             )
             calls.append({
                 "source": attempt.source, "reason": estimate.reason,
@@ -97,6 +99,36 @@ class RecordedBacksideFixture:
         x, y, _ = transform["translation_xyz_m"]
         qx, qy, qz, qw = transform["rotation_xyzw"]
         pose = Pose2D(x, y, math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz)))
+        scan_tf = record["scan_from_camera"]
+        scan_from_camera = RigidTransform(
+            "base_scan", "camera", tuple(scan_tf["translation_xyz_m"]), tuple(scan_tf["rotation_xyzw"]),
+        )
+        scan = record["scan"]
+        stamp = record["source_clocks"]["scan_stamp_sec"]
+        plain = PlainLaserScan(
+            ranges=tuple(map(float, scan["ranges"])),
+            **{key: scan[key] for key in ("angle_min", "angle_max", "angle_increment", "range_min", "range_max")},
+            scan_stamp_sec=stamp, receipt_sec=stamp, scan_frame_id="base_scan",
+            scan_topology_profile="full_rotation",
+        )
+        prior = record["preliminary_lidar_association"]
+        acquisition = {}
+
+        def acquire_registered(attempt, primary):
+            profile = record["profile"]
+            return acquire_registered_head_measurement(
+                self.cv2, frame, attempt,
+                intrinsics=CameraIntrinsics(frame.shape[1], frame.shape[0], camera[0], camera[5], camera[2], camera[6]),
+                scan_from_camera=scan_from_camera, scan=plain,
+                map_bearing_rad=prior["map_bearing_rad"], cone_half_angle_rad=prior["cone_half_angle_rad"],
+                accepted_range_m=tuple(prior["accepted_range_m"]), now_sec=stamp,
+                max_scan_age_sec=.5, min_cluster_sample_count=prior["min_cluster_sample_count"],
+                max_camera_map_bearing_delta_rad=math.radians(12.), max_center_offset_ratio=1.5,
+                edge_preprocess=profile["edge_preprocess"], canny_low=profile["canny_low"], canny_high=profile["canny_high"],
+                evaluate=lambda current, corners: evaluate(current, None, corners),
+                diagnostics=acquisition, primary=primary,
+            )
+
         selection = reuse.select(
             attempts,
             context=BacksideProposalContext(
@@ -108,10 +140,12 @@ class RecordedBacksideFixture:
             robot_pose=pose, marker_seen_in_stationary_epoch=False,
             tracked_pose=None, evaluate=evaluate, enable_reacquisition=True,
             max_center_offset_ratio=1.5,
+            acquire_registered=acquire_registered,
         )
         return selection, {
             "elapsed_ms": (perf_counter() - started) * 1000.0,
             "calls": calls, "proposal_reuse": deepcopy(reuse.last_metadata),
+            "head_acquisition": acquisition,
         }
 
     def registered_binding(self, name, selection):

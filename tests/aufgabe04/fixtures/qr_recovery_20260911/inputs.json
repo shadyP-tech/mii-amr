@@ -1,0 +1,822 @@
+{
+  "provenance": "Unmodified original compressed JPEG bytes. CameraInfo and ROIs from saved frame metadata; native points and deployed adapter outcomes from read-only OpenCV4.5.4 replay. These are offline fixtures and carry no freshness or motion authority.",
+  "session_id": "stand_explore_exact2_camera_all5_20260911T104837Z",
+  "deployed_opencv_version": "4.5.4",
+  "probe_sha256": "404df215dbc56adffc73342ba61a7bf02ca1dbd8e5a89334cda77d5d043678a9",
+  "frames": [
+    {
+      "frame_index": 11,
+      "image_file": "frame_000011.jpg",
+      "image_sha256": "d4169668b87b98f6e73f031751047322aca5a190538e0a65b441f67f12ea85b8",
+      "source_image_path": "results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260911T104837Z/candidates/000_survey_candidate_0003/camera_lidar_attempt_00/capture_history/frame_000011.compressed",
+      "source_metadata_path": "results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260911T104837Z/candidates/000_survey_candidate_0003/camera_lidar_attempt_00/capture_history/frame_000011.json",
+      "source_metadata_sha256": "21b929e705c491a5f29a8f93ce58569786f9c04ff73c4c0c4639365e65f25fe4",
+      "camera_info": {
+        "binning_x": 0,
+        "binning_y": 0,
+        "d": [
+          0.22098627234105042,
+          -0.5816953750895016,
+          -0.0014375648979169753,
+          -0.0008374637688387152,
+          0.446372026692927
+        ],
+        "distortion_model": "plumb_bob",
+        "header": {
+          "frame_id": "camera",
+          "stamp_nanosec": 825607665,
+          "stamp_sec": 1789124002
+        },
+        "height": 600,
+        "k": [
+          640.977317007246,
+          0.0,
+          405.8708878028196,
+          0.0,
+          641.1612206204627,
+          300.7059996561025,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "p": [
+          640.977317007246,
+          0.0,
+          405.8708878028196,
+          0.0,
+          0.0,
+          641.1612206204627,
+          300.7059996561025,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        "r": [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "roi": {
+          "do_rectify": false,
+          "height": 0,
+          "width": 0,
+          "x_offset": 0,
+          "y_offset": 0
+        },
+        "width": 800
+      },
+      "rois": [
+        {
+          "source": "nominal_projection",
+          "roi": {
+            "expected_size_px": 74.19282204639357,
+            "x0": 298,
+            "x1": 433,
+            "y0": 253,
+            "y1": 388
+          },
+          "old_adapter_observations": [
+            {
+              "text": "QR_003",
+              "corners": null,
+              "detector": "wechat",
+              "scale": 1.0
+            }
+          ],
+          "native_variants": [
+            {
+              "scale": 1.0,
+              "border_px": 0,
+              "multi_points": null,
+              "single_points": [
+                [
+                  [
+                    8.0,
+                    27.0
+                  ],
+                  [
+                    64.0,
+                    30.0
+                  ],
+                  [
+                    69.52112579345703,
+                    132.0
+                  ],
+                  [
+                    9.0,
+                    92.0
+                  ]
+                ]
+              ]
+            },
+            {
+              "scale": 4.0,
+              "border_px": 43,
+              "multi_points": [
+                [
+                  [
+                    71.65806579589844,
+                    151.0
+                  ],
+                  [
+                    302.0,
+                    164.0
+                  ],
+                  [
+                    308.5016784667969,
+                    414.0771179199219
+                  ],
+                  [
+                    75.03852844238281,
+                    412.9861755371094
+                  ]
+                ]
+              ],
+              "single_points": [
+                [
+                  [
+                    73.0,
+                    152.0
+                  ],
+                  [
+                    301.0,
+                    163.0
+                  ],
+                  [
+                    310.02777099609375,
+                    414.0
+                  ],
+                  [
+                    77.0,
+                    413.0
+                  ]
+                ]
+              ]
+            },
+            {
+              "scale": 4.0,
+              "border_px": 43,
+              "multi_points": [
+                [
+                  [
+                    71.65806579589844,
+                    151.0
+                  ],
+                  [
+                    302.0,
+                    164.0
+                  ],
+                  [
+                    308.5016784667969,
+                    414.0771179199219
+                  ],
+                  [
+                    75.03852844238281,
+                    412.9861755371094
+                  ]
+                ]
+              ],
+              "single_points": [
+                [
+                  [
+                    73.0,
+                    152.0
+                  ],
+                  [
+                    301.0,
+                    163.0
+                  ],
+                  [
+                    310.02777099609375,
+                    414.0
+                  ],
+                  [
+                    77.0,
+                    413.0
+                  ]
+                ]
+              ]
+            },
+            {
+              "scale": 4.0,
+              "border_px": 43,
+              "multi_points": null,
+              "single_points": null
+            }
+          ]
+        },
+        {
+          "source": "camera_registered_qr_model_reacquisition",
+          "roi": {
+            "expected_size_px": 74.19282204639357,
+            "x0": 294,
+            "x1": 379,
+            "y0": 268,
+            "y1": 381
+          },
+          "old_adapter_observations": [
+            {
+              "text": "QR_003",
+              "corners": null,
+              "detector": "wechat",
+              "scale": 1.0
+            }
+          ],
+          "native_variants": [
+            {
+              "scale": 1.0,
+              "border_px": 0,
+              "multi_points": [
+                [
+                  [
+                    12.0,
+                    12.0
+                  ],
+                  [
+                    68.0,
+                    15.0
+                  ],
+                  [
+                    74.0,
+                    110.0
+                  ],
+                  [
+                    12.0,
+                    77.0
+                  ]
+                ]
+              ],
+              "single_points": [
+                [
+                  [
+                    12.0,
+                    12.0
+                  ],
+                  [
+                    68.0,
+                    15.0
+                  ],
+                  [
+                    74.0,
+                    110.0
+                  ],
+                  [
+                    12.0,
+                    77.0
+                  ]
+                ]
+              ]
+            },
+            {
+              "scale": 4.0,
+              "border_px": 36,
+              "multi_points": [
+                [
+                  [
+                    82.0,
+                    86.0
+                  ],
+                  [
+                    310.0,
+                    97.0
+                  ],
+                  [
+                    319.1498718261719,
+                    347.2028503417969
+                  ],
+                  [
+                    84.06690979003906,
+                    345.98480224609375
+                  ]
+                ]
+              ],
+              "single_points": [
+                [
+                  [
+                    82.0,
+                    86.0
+                  ],
+                  [
+                    310.0,
+                    97.0
+                  ],
+                  [
+                    319.1498718261719,
+                    347.2028503417969
+                  ],
+                  [
+                    84.06690979003906,
+                    345.98480224609375
+                  ]
+                ]
+              ]
+            },
+            {
+              "scale": 4.0,
+              "border_px": 36,
+              "multi_points": [
+                [
+                  [
+                    82.0,
+                    86.0
+                  ],
+                  [
+                    310.0,
+                    97.0
+                  ],
+                  [
+                    319.1498718261719,
+                    347.2028503417969
+                  ],
+                  [
+                    84.06690979003906,
+                    345.98480224609375
+                  ]
+                ]
+              ],
+              "single_points": [
+                [
+                  [
+                    82.0,
+                    86.0
+                  ],
+                  [
+                    310.0,
+                    97.0
+                  ],
+                  [
+                    319.1498718261719,
+                    347.2028503417969
+                  ],
+                  [
+                    84.06690979003906,
+                    345.98480224609375
+                  ]
+                ]
+              ]
+            },
+            {
+              "scale": 4.0,
+              "border_px": 36,
+              "multi_points": null,
+              "single_points": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "frame_index": 24,
+      "image_file": "frame_000024.jpg",
+      "image_sha256": "49a4687b2d51a20c40fa54d0ea3064b5a20a0bdf65a23f238d8590dd0c38bc37",
+      "source_image_path": "results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260911T104837Z/candidates/000_survey_candidate_0003/camera_lidar_attempt_00/capture_history/frame_000024.compressed",
+      "source_metadata_path": "results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260911T104837Z/candidates/000_survey_candidate_0003/camera_lidar_attempt_00/capture_history/frame_000024.json",
+      "source_metadata_sha256": "470d7f89ff56a472941cc6f23bfacf74f20088b9726b7b678fb794b4fbe1a40f",
+      "camera_info": {
+        "binning_x": 0,
+        "binning_y": 0,
+        "d": [
+          0.22098627234105042,
+          -0.5816953750895016,
+          -0.0014375648979169753,
+          -0.0008374637688387152,
+          0.446372026692927
+        ],
+        "distortion_model": "plumb_bob",
+        "header": {
+          "frame_id": "camera",
+          "stamp_nanosec": 25005665,
+          "stamp_sec": 1789124006
+        },
+        "height": 600,
+        "k": [
+          640.977317007246,
+          0.0,
+          405.8708878028196,
+          0.0,
+          641.1612206204627,
+          300.7059996561025,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "p": [
+          640.977317007246,
+          0.0,
+          405.8708878028196,
+          0.0,
+          0.0,
+          641.1612206204627,
+          300.7059996561025,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        "r": [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "roi": {
+          "do_rectify": false,
+          "height": 0,
+          "width": 0,
+          "x_offset": 0,
+          "y_offset": 0
+        },
+        "width": 800
+      },
+      "rois": [
+        {
+          "source": "nominal_projection",
+          "roi": {
+            "expected_size_px": 74.1913867251085,
+            "x0": 298,
+            "x1": 433,
+            "y0": 253,
+            "y1": 388
+          },
+          "old_adapter_observations": [
+            {
+              "text": "QR_003",
+              "corners": null,
+              "detector": "wechat",
+              "scale": 1.0
+            }
+          ],
+          "native_variants": [
+            {
+              "scale": 1.0,
+              "border_px": 0,
+              "multi_points": null,
+              "single_points": [
+                [
+                  [
+                    8.0,
+                    27.0
+                  ],
+                  [
+                    64.0,
+                    30.0
+                  ],
+                  [
+                    69.52112579345703,
+                    132.0
+                  ],
+                  [
+                    9.0,
+                    92.0
+                  ]
+                ]
+              ]
+            },
+            {
+              "scale": 4.0,
+              "border_px": 43,
+              "multi_points": [
+                [
+                  [
+                    73.0,
+                    150.3235321044922
+                  ],
+                  [
+                    302.0,
+                    164.0
+                  ],
+                  [
+                    308.480224609375,
+                    414.0769958496094
+                  ],
+                  [
+                    76.0,
+                    412.0
+                  ]
+                ]
+              ],
+              "single_points": [
+                [
+                  [
+                    73.0,
+                    152.0
+                  ],
+                  [
+                    301.0,
+                    163.0
+                  ],
+                  [
+                    313.347412109375,
+                    406.8611145019531
+                  ],
+                  [
+                    77.0,
+                    413.0
+                  ]
+                ]
+              ]
+            },
+            {
+              "scale": 4.0,
+              "border_px": 43,
+              "multi_points": [
+                [
+                  [
+                    73.0,
+                    150.3235321044922
+                  ],
+                  [
+                    302.0,
+                    164.0
+                  ],
+                  [
+                    308.480224609375,
+                    414.0769958496094
+                  ],
+                  [
+                    76.0,
+                    412.0
+                  ]
+                ]
+              ],
+              "single_points": [
+                [
+                  [
+                    73.0,
+                    152.0
+                  ],
+                  [
+                    301.0,
+                    163.0
+                  ],
+                  [
+                    313.347412109375,
+                    406.8611145019531
+                  ],
+                  [
+                    77.0,
+                    413.0
+                  ]
+                ]
+              ]
+            },
+            {
+              "scale": 4.0,
+              "border_px": 43,
+              "multi_points": null,
+              "single_points": null
+            }
+          ]
+        },
+        {
+          "source": "camera_registered_qr_model_reacquisition",
+          "roi": {
+            "expected_size_px": 74.1913867251085,
+            "x0": 292,
+            "x1": 376,
+            "y0": 263,
+            "y1": 382
+          },
+          "old_adapter_observations": [
+            {
+              "text": "QR_003",
+              "corners": [
+                [
+                  13.5,
+                  16.94565200805664
+                ],
+                [
+                  70.25,
+                  20.0
+                ],
+                [
+                  73.28797149658203,
+                  82.75
+                ],
+                [
+                  14.75,
+                  82.5
+                ]
+              ],
+              "detector": "opencv_quad_wechat_rectified",
+              "scale": 4.0
+            }
+          ],
+          "native_variants": [
+            {
+              "scale": 1.0,
+              "border_px": 0,
+              "multi_points": null,
+              "single_points": [
+                [
+                  [
+                    14.0,
+                    17.0
+                  ],
+                  [
+                    70.0,
+                    20.0
+                  ],
+                  [
+                    75.60563659667969,
+                    116.0
+                  ],
+                  [
+                    15.0,
+                    82.0
+                  ]
+                ]
+              ]
+            },
+            {
+              "scale": 4.0,
+              "border_px": 38,
+              "multi_points": [
+                [
+                  [
+                    92.0,
+                    105.78260803222656
+                  ],
+                  [
+                    319.0,
+                    118.0
+                  ],
+                  [
+                    331.1518859863281,
+                    369.0
+                  ],
+                  [
+                    97.0,
+                    368.0
+                  ]
+                ]
+              ],
+              "single_points": [
+                [
+                  [
+                    92.0,
+                    105.78260803222656
+                  ],
+                  [
+                    319.0,
+                    118.0
+                  ],
+                  [
+                    331.1518859863281,
+                    369.0
+                  ],
+                  [
+                    97.0,
+                    368.0
+                  ]
+                ]
+              ]
+            },
+            {
+              "scale": 4.0,
+              "border_px": 38,
+              "multi_points": [
+                [
+                  [
+                    92.0,
+                    105.78260803222656
+                  ],
+                  [
+                    319.0,
+                    118.0
+                  ],
+                  [
+                    331.1518859863281,
+                    369.0
+                  ],
+                  [
+                    97.0,
+                    368.0
+                  ]
+                ]
+              ],
+              "single_points": [
+                [
+                  [
+                    92.0,
+                    105.78260803222656
+                  ],
+                  [
+                    319.0,
+                    118.0
+                  ],
+                  [
+                    331.1518859863281,
+                    369.0
+                  ],
+                  [
+                    97.0,
+                    368.0
+                  ]
+                ]
+              ]
+            },
+            {
+              "scale": 4.0,
+              "border_px": 38,
+              "multi_points": null,
+              "single_points": null
+            }
+          ]
+        }
+      ],
+      "model_profile_sha256": "56fe19dcbfc8aa58682ea460e702a499c65cc719423940e6a892ca581e6d0b5f",
+      "stand_axis_profile": {
+        "canny_high": 60,
+        "canny_low": 20,
+        "edge_preprocess": "channel_union",
+        "expected_head_size_px": 74.1913867251085,
+        "min_edge_height_px": 13.354449610519529
+      },
+      "geometry_strict_attempt": {
+        "backside_target_crop_half_width_ratio": 1.25,
+        "expected_center_u_px": 333.83533903443265,
+        "expected_center_v_px": 311.2429606014359,
+        "expected_head_height_px": 74.1913867251085,
+        "padding_scale": 4.5,
+        "roi": {
+          "expected_size_px": 74.1913867251085,
+          "x0": 292,
+          "x1": 376,
+          "y0": 263,
+          "y1": 382
+        },
+        "source": "camera_registered_qr_model_reacquisition"
+      },
+      "geometry_head_proposal_corners": [
+        {
+          "u_px": 9.610721854933303,
+          "v_px": 9.658402616859462
+        },
+        {
+          "u_px": 71.94831514548613,
+          "v_px": 14.45596290033862
+        },
+        {
+          "u_px": 73.96642043370062,
+          "v_px": 83.62179862310151
+        },
+        {
+          "u_px": 11.815898703610571,
+          "v_px": 85.23567826544397
+        }
+      ],
+      "geometry_refined_corners": [
+        {
+          "u_px": 10.353116101798495,
+          "v_px": 9.591495538251124
+        },
+        {
+          "u_px": 72.59420487892798,
+          "v_px": 14.673560828323211
+        },
+        {
+          "u_px": 73.36478035987912,
+          "v_px": 83.65483212110846
+        },
+        {
+          "u_px": 11.198511817952237,
+          "v_px": 85.27061158510335
+        }
+      ],
+      "geometry_qr_corners": [
+        {
+          "u_px": 13.5,
+          "v_px": 16.94565200805664
+        },
+        {
+          "u_px": 70.25,
+          "v_px": 20.0
+        },
+        {
+          "u_px": 73.28797149658203,
+          "v_px": 82.75
+        },
+        {
+          "u_px": 14.75,
+          "v_px": 82.5
+        }
+      ],
+      "geometry_joint_rmse_px": 3.2307608774068477
+    }
+  ]
+}

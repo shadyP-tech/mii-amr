@@ -111,6 +111,23 @@ class ObserverQrDecodeCacheTest(unittest.TestCase):
         self.assertTrue(retained.cache_hit)
         self.assertEqual(decoder.call_count, 5)
 
+    def test_provenance_is_copied_after_decode_and_reused_only_for_exact_cache_hit(self):
+        cache = RoiQrDecodeCache()
+        provenance = {}
+        def decode(_frame):
+            provenance["events"] = [{"stage": "wechat", "reason": "full_input_extent"}]
+            return ()
+        first = cache.decode(roi=ROI, mode="full", frame=None, decoder=decode,
+                             decoder_provenance=provenance)
+        provenance["events"][0]["reason"] = "mutated"
+        metadata = first.metadata()
+        self.assertEqual(metadata["decoder_provenance"]["events"][0]["reason"], "full_input_extent")
+        metadata["decoder_provenance"]["events"].clear()
+        second = cache.decode(roi=ROI, mode="full", frame=None, decoder=Mock(),
+                              decoder_provenance={})
+        self.assertTrue(second.cache_hit)
+        self.assertEqual(second.metadata()["decoder_provenance"]["events"][0]["reason"], "full_input_extent")
+
     def test_decoder_exception_propagates_and_is_not_cached(self):
         cache = RoiQrDecodeCache()
         decoder = Mock(side_effect=(RuntimeError("decode failed"), ()))

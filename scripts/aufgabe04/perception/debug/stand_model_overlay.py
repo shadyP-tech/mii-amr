@@ -6,6 +6,9 @@ import math
 
 from scripts.aufgabe04.perception.debug.text_overlay import OverlayTextCursor
 from scripts.aufgabe04.perception.stand_axis.model_profile import StandModelProfile
+from scripts.aufgabe04.perception.stand_axis.head_model_quality import (
+    MEASURED_HEAD_AXIS_SOURCE,
+)
 from scripts.aufgabe04.perception.stand_axis.models import (
     StandAxisEdgeDebugArtifacts,
     StandAxisImageEstimate,
@@ -134,6 +137,7 @@ def annotate_metric_model_status(
     estimate: StandAxisImageEstimate | None,
     artifacts: StandAxisEdgeDebugArtifacts | None,
     text_cursor: OverlayTextCursor,
+    result_fresh: bool = True,
 ) -> OverlayTextCursor:
     """Keep model acquisition failures visible when edge fallback wins."""
 
@@ -158,8 +162,9 @@ def annotate_metric_model_status(
     scale_text = "n/a"
     if artifacts is not None and artifacts.qr_detection_scale is not None:
         scale_text = f"{artifacts.qr_detection_scale:g}x"
+    display_state = evidence_state if result_fresh else "obsolete_result"
     line1 = (
-        f"model={evidence_state} reason={reason} "
+        f"model={display_state} reason={reason} "
         f"qr={str(qr_detected).lower()} scale={scale_text} seed={seed_source}"
     )
     details = [
@@ -179,9 +184,20 @@ def annotate_metric_model_status(
         )
     if artifacts is not None and artifacts.model_pose_fit_source is not None:
         details.append(f"fit={artifacts.model_pose_fit_source}")
+    quality = None if artifacts is None else artifacts.head_model_quality
+    junction = None if artifacts is None else getattr(artifacts, "head_neck_junction", None)
+    if junction is not None and junction.start_gap_px is not None:
+        details.append(f"neck_gap={junction.start_gap_px}px")
+    if (estimate is not None and estimate.source == MEASURED_HEAD_AXIS_SOURCE
+            and estimate.usable and estimate.yaw_deg is not None and result_fresh):
+        details.append(f"current_head_yaw={estimate.yaw_deg:.1f}deg")
+    if quality is not None:
+        details.append(f"head_quality={quality.reason}")
+        if quality.yaw_std_deg is not None:
+            details.append(f"pixel_model_yaw_std={quality.yaw_std_deg:.2f}deg")
     color = (
         (0, 255, 0)
-        if evidence_state == "fresh_refined"
+        if evidence_state == "fresh_refined" and result_fresh
         else (255, 0, 255)
     )
     for text in (line1, " ".join(details)):

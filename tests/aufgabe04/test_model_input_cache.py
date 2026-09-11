@@ -13,6 +13,7 @@ except ImportError:  # pragma: no cover
     numpy = None
 
 from scripts.aufgabe04.perception.stand_axis.geometry import _unusable
+from scripts.aufgabe04.perception.stand_axis.head_proposal import HeadProposalResult
 from scripts.aufgabe04.perception.stand_axis.model_input_cache import MetricModelInputCache
 from scripts.aufgabe04.perception.stand_axis.model_pipeline import (
     estimate_stand_axis_from_metric_model,
@@ -178,6 +179,8 @@ class ModelInputCacheTest(unittest.TestCase):
         )
         with (
             patch(f"{PIPELINE}._canny_edges_from_frame", return_value=artifacts.edges) as edges,
+            patch(f"{PIPELINE}.acquire_head_proposal",
+                  return_value=HeadProposalResult(None, "head_proposal_unavailable")) as acquisition,
             patch(f"{PIPELINE}.detect_qr_quad", return_value=None) as quad,
             patch(f"{PIPELINE}.estimate_stand_axis_from_model_backside",
                   side_effect=((estimate, artifacts), (replace(estimate, reason="strict"), artifacts))) as backside,
@@ -195,6 +198,7 @@ class ModelInputCacheTest(unittest.TestCase):
         self.assertEqual(edges.call_count, 1)
         self.assertEqual(quad.call_count, 1)
         self.assertEqual(backside.call_count, 2)
+        self.assertEqual(acquisition.call_count, 2)  # Geometry cannot be cached.
         self.assertEqual(backside.call_args.kwargs["expected_head_center_u_px"], 35.)
         self.assertEqual(backside.call_args.kwargs["target_crop_horizontal_half_width_ratio"], 1.25)
         for debug in (first_debug, strict_debug):

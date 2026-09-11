@@ -1,0 +1,321 @@
+{
+  "recording": "recording_20260911_135924_029051962",
+  "frame_index": 0,
+  "source_frame": "source_000000.png",
+  "source_sha256": "50a7cc3d2f0d0049635f9b0cf9b525dce0dbc317ab39faad5cb8d50cc88c226d",
+  "source_metadata_sha256": "66eab94f4832694ed2e062927cdc352a83aaee1834051459815f13df46c0fcb9",
+  "provenance": "Unmodified original decoded-source PNG from viewer recording. Angles are recorded model estimates, not measured ground truth. Camera calibration must be applied before pixel replay.",
+  "recorded_revision": null,
+  "current_remote_commit_at_audit": "41d25b94d66b1a9485002e9663d504d306eb53cc",
+  "camera_calibration": {
+    "camera_matrix": [
+      640.977317007246,
+      0.0,
+      405.8708878028196,
+      0.0,
+      641.1612206204627,
+      300.7059996561025,
+      0.0,
+      0.0,
+      1.0
+    ],
+    "distortion": [
+      0.22098627234105042,
+      -0.5816953750895016,
+      -0.0014375648979169753,
+      -0.0008374637688387152,
+      0.446372026692927
+    ],
+    "frame_id": "camera",
+    "height_px": 600,
+    "projection_matrix": [
+      640.977317007246,
+      0.0,
+      405.8708878028196,
+      0.0,
+      0.0,
+      641.1612206204627,
+      300.7059996561025,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0
+    ],
+    "rectification_matrix": [
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ],
+    "width_px": 800
+  },
+  "processing_intrinsics": {
+    "cx_px": 405.8708878028196,
+    "cy_px": 300.7059996561025,
+    "fx_px": 640.977317007246,
+    "fy_px": 641.1612206204627
+  },
+  "options": {
+    "edge_blur_kernel": 5,
+    "edge_preprocess": "channel-union",
+    "canny_low": 20,
+    "canny_high": 60,
+    "edge_dilate_iterations": 0,
+    "edge_close_iterations": 0
+  },
+  "recorded_display_estimate": {
+    "axis_line": null,
+    "camera_face_center_xyz_m": [
+      0.034980671949508844,
+      0.0003765879410480292,
+      0.512509095594797
+    ],
+    "camera_face_normal_xyz": [
+      0.6953620742532135,
+      0.07316580116816217,
+      0.7149254165503486
+    ],
+    "closer_side": "right",
+    "contour_area_px": 7296.0059675336815,
+    "corners": [
+      {
+        "u_px": 412.3644202073845,
+        "v_px": 261.2268715590476
+      },
+      {
+        "u_px": 486.93326852812356,
+        "v_px": 244.5499015326101
+      },
+      {
+        "u_px": 491.05119606285484,
+        "v_px": 347.20511226716815
+      },
+      {
+        "u_px": 416.0264391713338,
+        "v_px": 352.51680448951976
+      }
+    ],
+    "evidence_state": "fresh_refined",
+    "height_ratio": 0.8892868883833497,
+    "left_height_px": 91.36335281360043,
+    "mode": "face_visible",
+    "model_measurement_status": "measured",
+    "model_profile_sha256": "56fe19dcbfc8aa58682ea460e702a499c65cc719423940e6a892ca581e6d0b5f",
+    "pose_ambiguity_gap_px": 4.513840587117716,
+    "pose_reprojection_rmse_px": 0.5162592962649901,
+    "reason": "axis_estimated_model_current_frame_refined",
+    "right_height_px": 102.73777113670424,
+    "source": "model_current_frame_refined",
+    "usable": true,
+    "visible_face": null,
+    "visible_face_confidence": null,
+    "yaw_deg": -44.20525065657483,
+    "yaw_proxy": -0.05860047634765877
+  },
+  "recorded_model": {
+    "candidate_corners": [
+      {
+        "u_px": 412.3644202073845,
+        "v_px": 261.2268715590476
+      },
+      {
+        "u_px": 486.93326852812356,
+        "v_px": 244.5499015326101
+      },
+      {
+        "u_px": 491.05119606285484,
+        "v_px": 347.20511226716815
+      },
+      {
+        "u_px": 416.0264391713338,
+        "v_px": 352.51680448951976
+      }
+    ],
+    "committable": true,
+    "corner_arm_support": {
+      "accepted": true,
+      "bins_by_corner": {
+        "head_bottom_left": {
+          "bottom": 5,
+          "left": 5
+        },
+        "head_bottom_right": {
+          "bottom": 4,
+          "right": 4
+        },
+        "head_top_left": {
+          "left": 5,
+          "top": 5
+        },
+        "head_top_right": {
+          "right": 4,
+          "top": 4
+        }
+      },
+      "minimum_bins": 2,
+      "radius_px": 6.0
+    },
+    "corridor_half_width_px": 4.273460680131533,
+    "enabled": true,
+    "evidence_state": "fresh_refined",
+    "fit_diagnostics": {
+      "corner_reprojection_error_px": {
+        "head_bottom_left": 0.4751930766134413,
+        "head_bottom_right": 0.5463507415121129,
+        "head_top_left": 0.4868044174317033,
+        "head_top_right": 0.552094656989984
+      },
+      "expected_head_qr_height_ratio": 1.2580645161290323,
+      "expected_head_qr_width_ratio": 1.2580645161290323,
+      "expected_panel_qr_height_ratio": 1.1451612903225805,
+      "expected_panel_qr_width_ratio": 1.1451612903225805,
+      "group_reprojection_rmse_px": {
+        "head": 0.5162592962649901
+      },
+      "head_only": {
+        "accepted": true,
+        "axis_ambiguous": false,
+        "reason": "pose_estimated",
+        "reprojection_rmse_px": 0.5162592962649901,
+        "yaw_deg": -44.20525065657483
+      },
+      "max_corner_error_px": 0.552094656989984,
+      "observed_head_qr_height_ratio": null,
+      "observed_head_qr_width_ratio": null,
+      "observed_qr_corners": null,
+      "qr_only": null
+    },
+    "inputs_ready": true,
+    "measurement_status": "measured",
+    "model_pose": {
+      "face_normal_xyz": [
+        0.6953620742532135,
+        0.07316580116816217,
+        0.7149254165503486
+      ],
+      "positive_depth": true,
+      "reprojection_rmse_px": 0.5162592962649901,
+      "rotation_vector": [
+        -0.11339980402239162,
+        0.7661516272720883,
+        -0.07997144130981808
+      ],
+      "translation_xyz_m": [
+        0.034980671949508844,
+        0.0003765879410480292,
+        0.512509095594797
+      ],
+      "yaw_deg": -44.20525065657483
+    },
+    "pose_ambiguity_gap_px": 4.513840587117716,
+    "pose_fit_source": "head_only_qr_unavailable",
+    "pose_reprojection_rmse_px": 0.5162592962649901,
+    "pose_seed_source": "tracked_pose",
+    "predicted_corners": [
+      {
+        "u_px": 412.6875271492417,
+        "v_px": 260.74632161172207
+      },
+      {
+        "u_px": 486.5815792938507,
+        "v_px": 244.9765587741318
+      },
+      {
+        "u_px": 491.4446125450768,
+        "v_px": 346.9266182941829
+      },
+      {
+        "u_px": 415.6635041465565,
+        "v_px": 352.7693497184842
+      }
+    ],
+    "predicted_corners_available": true,
+    "profile_id": "physical_stand_measured_20260826_v2",
+    "profile_sha256": "56fe19dcbfc8aa58682ea460e702a499c65cc719423940e6a892ca581e6d0b5f",
+    "projected_landmarks": [
+      "head_back_bottom_left",
+      "head_back_bottom_right",
+      "head_back_top_left",
+      "head_back_top_right",
+      "head_bottom_left",
+      "head_bottom_right",
+      "head_top_left",
+      "head_top_right",
+      "qr_bottom_left",
+      "qr_bottom_right",
+      "qr_top_left",
+      "qr_top_right"
+    ],
+    "qr_detected": false,
+    "qr_detection_scale": null,
+    "reason": "axis_estimated_model_current_frame_refined",
+    "refined_corners": [
+      {
+        "u_px": 412.3644202073845,
+        "v_px": 261.2268715590476
+      },
+      {
+        "u_px": 486.93326852812356,
+        "v_px": 244.5499015326101
+      },
+      {
+        "u_px": 491.05119606285484,
+        "v_px": 347.20511226716815
+      },
+      {
+        "u_px": 416.0264391713338,
+        "v_px": 352.51680448951976
+      }
+    ],
+    "refinement_support_mean": 0.9903846153846154,
+    "stage_timings_ms": {
+      "border_refinement": 6.938034000086191,
+      "diagnostics": 0.047431999519176316,
+      "edge_preprocessing": 1.9874180006809183,
+      "pose_fit": 0.13957100054540206,
+      "qr_detection": 24.57358199990267,
+      "qr_marker_validation": 0.003944999662053306,
+      "qr_seed_pose": 0.00037200061342446133,
+      "refined_projection": 0.11539100069057895,
+      "seed_projection": 0.07459899916284485,
+      "total": 34.053312000651204
+    },
+    "usable": true
+  },
+  "result_freshness": {
+    "accepted": true,
+    "age_sec": 0.11019219247737055,
+    "reason": "observation_fresh"
+  },
+  "tracker_prediction": {
+    "age_sec": 0.1760847385139641,
+    "pose": {
+      "face_normal_xyz": [
+        0.6953518815976953,
+        0.0722275667792073,
+        0.7150307261619601
+      ],
+      "positive_depth": true,
+      "reprojection_rmse_px": 0.47415070106698615,
+      "rotation_vector": [
+        -0.11192536920263747,
+        0.7662102713009601,
+        -0.07890679662904926
+      ],
+      "translation_xyz_m": [
+        0.03497824738001537,
+        0.000361732718879556,
+        0.5124873863474101
+      ],
+      "yaw_deg": -44.20061295941185
+    },
+    "reason": "bounded_pose_prediction",
+    "state": "predicted_only"
+  }
+}

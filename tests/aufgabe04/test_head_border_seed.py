@@ -35,6 +35,7 @@ from tests.aufgabe04.test_stand_metric_model import (
 
 
 PIPELINE = "scripts.aufgabe04.perception.stand_axis.model_pipeline."
+HEAD_FIT = "scripts.aufgabe04.perception.stand_axis.head_model_fit."
 
 
 class HeadBorderSeedTest(unittest.TestCase):
@@ -69,7 +70,7 @@ class HeadBorderSeedTest(unittest.TestCase):
 class CurrentHeadProposalPipelineTest(unittest.TestCase):
     def setUp(self):
         self.profile = stand_model_from_payload(profile_payload())
-        self.camera = RectifiedCameraMatrix(400., 400., 320., 240.)
+        self.camera = RectifiedCameraMatrix(800., 800., 320., 240.)
         self.projected = project_stand_model(cv2, self.profile, oblique_pose(), self.camera)
         self.head = self.projected.head_corners
         self.qr = tuple(self.projected.landmarks["qr_" + name] for name in (
@@ -79,6 +80,11 @@ class CurrentHeadProposalPipelineTest(unittest.TestCase):
         cv2.polylines(self.frame, np.asarray([[
             (round(p.u_px), round(p.v_px)) for p in self.head
         ]], dtype=np.int32), True, (255, 255, 255), 2)
+        bottom = (self.head[2].v_px + self.head[3].v_px) / 2.0
+        center = (self.head[2].u_px + self.head[3].u_px) / 2.0
+        for offset in (-6, 6):
+            cv2.line(self.frame, (round(center + offset), round(bottom)),
+                     (round(center + offset), round(bottom + 35)), (255, 255, 255), 2)
 
     def options(self, **overrides):
         result = dict(
@@ -103,15 +109,15 @@ class CurrentHeadProposalPipelineTest(unittest.TestCase):
 
         def solve(cv, image_points, model_points, camera, **kwargs):
             calls.append(len(image_points))
-            if len(calls) == 1:
+            if len(calls) == 2:
                 return PlanarPoseResult(False, "pose_unavailable", (), None)
             return estimate_planar_pose_ippe(cv, image_points, model_points, camera, **kwargs)
 
-        with patch(PIPELINE + "estimate_planar_pose_ippe", side_effect=solve):
+        with patch(HEAD_FIT + "estimate_planar_pose_ippe", side_effect=solve):
             estimate, debug = self.evaluate()
-        self.assertEqual(calls, [4, 8])
+        self.assertEqual(calls, [4, 4, 8])
         self.assertTrue(estimate.usable, estimate.reason)
-        self.assertEqual(debug.model_pose_fit_source, "joint_qr_head")
+        self.assertEqual(debug.model_pose_fit_source, "model_current_measured_head")
         self.assertEqual(debug.pose_seed_source, "current_head_proposal")
         self.assertTrue(debug.qr_marker_verified)
         self.assertAlmostEqual(estimate.yaw_deg, -25., delta=3.)
@@ -137,37 +143,39 @@ class CurrentHeadProposalPipelineTest(unittest.TestCase):
         corrected, debug = run(self.head)
         self.assertFalse(without.usable)
         self.assertTrue(corrected.usable, corrected.reason)
-        self.assertEqual(debug.model_pose_fit_source, "joint_qr_head")
+        self.assertEqual(debug.model_pose_fit_source, "model_current_measured_head")
 
-    def test_joint_inconsistency_remains_rejected_after_raw_head_refinement(self):
+    def test_joint_inconsistency_is_diagnostic_for_independent_current_head(self):
         wrong_qr = tuple(ImagePoint(p.u_px + 18., p.v_px) for p in self.qr)
         estimate, debug = self.evaluate(qr=wrong_qr)
-        self.assertFalse(estimate.usable)
-        self.assertEqual(debug.model_pose_fit_source, "joint_qr_head")
+        self.assertTrue(estimate.usable, estimate.reason)
+        self.assertEqual(debug.model_pose_fit_source, "model_current_measured_head")
         self.assertIsNotNone(debug.refined_corners)
-        self.assertGreater(estimate.pose_reprojection_rmse_px, 2.)
+        self.assertLess(estimate.pose_reprojection_rmse_px, 2.)
+        self.assertGreater(debug.model_diagnostics.geometry_contract.joint_reprojection_rmse_px, 2.)
         self.assertTrue(debug.model_diagnostics.head_only.accepted)
-        self.assertNotEqual(estimate.evidence_state, "fresh_refined")
+        self.assertEqual(estimate.evidence_state, "fresh_refined")
 
     def test_proposal_without_current_raw_borders_is_never_a_measurement(self):
         estimate, debug = self.evaluate(frame=np.zeros_like(self.frame))
         self.assertFalse(estimate.usable)
-        self.assertEqual(estimate.evidence_state, "predicted_only")
+        self.assertEqual(estimate.evidence_state, "unobservable")
         self.assertIsNone(debug.refined_corners)
 
-    def test_text_without_geometry_does_not_bootstrap_directed_pose_or_backside(self):
+    def test_text_without_geometry_cannot_veto_head_or_certify_backside(self):
         with patch(PIPELINE + "estimate_stand_axis_from_model_backside",
                    side_effect=AssertionError("front text is not backside evidence")):
             estimate, debug = estimate_stand_axis_from_metric_model(
                 cv2, self.frame, **self.options(),
                 qr_observations=(DecodedQrObservation("QR_001", None, "wechat"),),
             )
-        self.assertFalse(estimate.usable)
-        self.assertEqual(estimate.reason, "model_qr_text_without_geometry")
-        self.assertIsNone(debug.model_pose)
+        self.assertTrue(estimate.usable, estimate.reason)
+        self.assertEqual(estimate.reason, "axis_estimated_current_measured_head")
+        self.assertIsNotNone(debug.model_pose)
+        self.assertIsNone(estimate.visible_face)
         self.assertTrue(debug.qr_marker_verified)
 
-    def test_no_qr_keeps_ordinary_undirected_backside_and_neck_gates(self):
+    def test_no_qr_keeps_neck_gate_without_assigning_view_side(self):
         head = (ImagePoint(120., 50.), ImagePoint(200., 50.), ImagePoint(200., 130.), ImagePoint(120., 130.))
         for neck in (True, False):
             frame = np.zeros((240, 320, 3), dtype=np.uint8)
@@ -185,14 +193,18 @@ class CurrentHeadProposalPipelineTest(unittest.TestCase):
                 )
                 self.assertEqual(estimate.usable, neck, estimate.reason)
                 if neck:
-                    self.assertEqual(estimate.evidence_state, "fresh_backside")
-                self.assertIsNone(estimate.camera_face_normal_xyz)
-                self.assertIsNone(debug.model_pose)
+                    self.assertEqual(estimate.evidence_state, "fresh_refined")
+                    self.assertIsNotNone(estimate.camera_face_normal_xyz)
+                    self.assertIsNotNone(debug.model_pose)
+                else:
+                    self.assertIsNone(estimate.camera_face_normal_xyz)
+                    self.assertIsNone(debug.model_pose)
+                self.assertIsNone(estimate.visible_face)
                 self.assertFalse(debug.qr_marker_verified)
 
     def test_crop_adjusted_intrinsics_preserve_pose(self):
         full, _ = self.evaluate()
-        x0, y0, x1, y1 = 220, 140, 420, 340
+        x0, y0, x1, y1 = 220, 140, 420, 380
         local = lambda points: tuple(ImagePoint(p.u_px - x0, p.v_px - y0) for p in points)
         cropped, _ = self.evaluate(
             frame=self.frame[y0:y1, x0:x1], qr=local(self.qr),
@@ -215,35 +227,32 @@ class CurrentHeadProposalPipelineTest(unittest.TestCase):
         self.assertFalse(debug.qr_marker_verified)
         self.assertNotEqual(estimate.evidence_state, "fresh_backside")
 
-    def test_unverified_quad_cannot_use_proposal_to_bypass_missing_qr_pose(self):
+    def test_unverified_quad_does_not_veto_independent_current_head(self):
         with (
             patch(PIPELINE + "detect_qr_quad", return_value=QrQuadDetection(self.qr, 1.)),
-            patch(PIPELINE + "estimate_planar_pose_ippe", return_value=PlanarPoseResult(
-                False, "pose_unavailable", (), None,
-            )) as solve,
             patch(PIPELINE + "estimate_stand_axis_from_model_backside",
                   side_effect=AssertionError("tentative QR still vetoes backside now")),
         ):
             estimate, debug = estimate_stand_axis_from_metric_model(
                 cv2, self.frame, **self.options(),
             )
-        solve.assert_called_once()
-        self.assertFalse(estimate.usable)
-        self.assertEqual(estimate.reason, "model_pose_seed_unavailable")
-        self.assertIsNone(debug.model_pose)
+        self.assertTrue(estimate.usable, estimate.reason)
+        self.assertIsNotNone(debug.model_pose)
+        self.assertIsNone(estimate.visible_face)
         self.assertTrue(debug.qr_detected)
         self.assertFalse(debug.qr_marker_verified)
 
-    def test_unverified_quad_with_qr_pose_preserves_legacy_projection(self):
+    def test_qr_pose_cannot_replace_an_unrelated_current_proposal(self):
         unrelated_proposal = tuple(ImagePoint(p.u_px + 20., p.v_px) for p in self.head)
         with patch(PIPELINE + "detect_qr_quad", return_value=QrQuadDetection(self.qr, 1.)):
             estimate, debug = estimate_stand_axis_from_metric_model(
                 cv2, self.frame, **self.options(current_head_proposal_corners=unrelated_proposal),
             )
-        self.assertTrue(estimate.usable, estimate.reason)
+        self.assertFalse(estimate.usable)
         self.assertFalse(debug.qr_marker_verified)
-        self.assertEqual(debug.pose_seed_source, "qr_pyramid_1x")
-        self.assertNotEqual(debug.predicted_corners, unrelated_proposal)
+        self.assertEqual(debug.pose_seed_source, "current_head_proposal")
+        self.assertEqual(debug.predicted_corners, unrelated_proposal)
+        self.assertIsNone(debug.model_pose)
 
     def test_multiple_decoded_markers_remain_ambiguous_and_verified(self):
         observations = (DecodedQrObservation("QR_001", None, "wechat"),
@@ -251,9 +260,10 @@ class CurrentHeadProposalPipelineTest(unittest.TestCase):
         estimate, debug = estimate_stand_axis_from_metric_model(
             cv2, self.frame, **self.options(), qr_observations=observations,
         )
-        self.assertFalse(estimate.usable)
-        self.assertEqual(estimate.reason, "model_qr_identity_ambiguous")
+        self.assertTrue(estimate.usable, estimate.reason)
+        self.assertEqual(debug.qr_marker_reason, "multiple_decoded_qr_identities")
         self.assertTrue(debug.qr_marker_verified)
+        self.assertIsNone(estimate.visible_face)
 
 
 if __name__ == "__main__":

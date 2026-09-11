@@ -83,6 +83,11 @@ class InspectionProgress:
         self._poisoned = False
         self._seen_qr_id = None
 
+    @property
+    def poisoned(self):
+        """Expose epoch conflict state without allowing advisory reset to erase it."""
+        return self._poisoned
+
     def restart_acquisition_window(self):
         """Give new good measurements time without forgetting epoch identity."""
 

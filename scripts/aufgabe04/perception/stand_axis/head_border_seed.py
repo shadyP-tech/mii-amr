@@ -1,8 +1,9 @@
 """Crop-local 2D search seeds for strict current-pixel head refinement.
 
 A proposal carries no pose or measurement authority. It only positions the
-ordinary bounded rail search; the caller must still fit and validate the
-current head and QR together before publishing a directed metric pose.
+ordinary bounded rail search; the caller must still validate the current raw
+head structure, calibrated head fit and observability before using its axis.
+The proposal itself carries neither a view-side label nor QR identity.
 """
 
 from __future__ import annotations

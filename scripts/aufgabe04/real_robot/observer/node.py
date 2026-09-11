@@ -157,6 +157,13 @@ from scripts.aufgabe04.real_robot.observer.inspection_progress import (
     InspectionProgress,
     classify_inspection_progress,
 )
+from scripts.aufgabe04.real_robot.observer.front_view_recovery import (
+    FrontViewRecovery, front_view_failure_kind,
+)
+from scripts.aufgabe04.real_robot.observer.head_model_admission import (
+    MEASURED_HEAD_AXIS_SOURCE, measured_head_front_is_current,
+    measured_head_needs_full_qr_decode, measured_head_lidar_rejection,
+)
 from scripts.aufgabe04.real_robot.observer.front_observation import (
     BACKSIDE_AXIS_SOURCES,
     front_observation_decision,
@@ -645,6 +652,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         pose: Pose2D | None = None,
     ) -> None:
         evidence_pose = self.last_pose if pose is None else pose
+        self._head_qr_tracking_stamp_sec = None
         if evidence_pose is None or self.observation_evidence is None:
             return
         self._last_observation_update = self.observation_evidence.note_soft_miss(
@@ -659,6 +667,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
 
         self.observation_evidence = None
         self._camera_framing = None
+        self._front_view_recovery = None
+        self._head_qr_tracking_stamp_sec = None
         if getattr(self, "backside_proposal_reuse", None) is not None:
             self.backside_proposal_reuse.reset()
         self._last_observation_update = None
@@ -672,6 +682,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self._qr_marker_seen_in_stationary_epoch = False
         self._qr_marker_stationary_epoch_anchor = None
         self._camera_framing = None
+        self._front_view_recovery = None
+        self._head_qr_tracking_stamp_sec = None
 
     def _note_front_observation(self, decision, robot_pose: Pose2D) -> None:
         """Veto QR-free axes without resetting target identity evidence."""
@@ -746,8 +758,20 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             ),
         )
         self._last_observation_update = update
+        self._head_qr_tracking_stamp_sec = (
+            image_stamp_sec
+            if (update.frame_accepted and update.qr_sample_accepted and update.resolved_qr_id
+                and not update.snapshot.poisoned and not update.motion_epoch_reset)
+            else None
+        )
         if update.snapshot.poisoned or update.motion_epoch_reset:
             self._camera_framing = None
+            recovery = getattr(self, "_front_view_recovery", None)
+            if recovery is not None:
+                if update.motion_epoch_reset:
+                    recovery.reset()
+                if update.snapshot.poisoned:
+                    recovery.poison()
         if update.frame_accepted:
             self._camera_count("associated_frames")
         if update.axis_sample_accepted:
@@ -1259,12 +1283,21 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 attempt_roi.y0 : attempt_roi.y1,
                 attempt_roi.x0 : attempt_roi.x1,
             ]
-            decoder = (detect_qr_observations_bgr if pose_hint is None
-                       else detect_native_qr_observations_bgr)
+            decoder_provenance = {}
+            full_qr_decode = pose_hint is None or measured_head_needs_full_qr_decode(
+                previous_axis_source=getattr(self, "_last_metric_axis_source", None),
+                previous_bound_qr_stamp_sec=getattr(self, "_head_qr_tracking_stamp_sec", None),
+                image_stamp_sec=image.stamp_sec, max_age_sec=self.args.max_sensor_age_sec,
+            )
+            decoder = (
+                (lambda crop: detect_qr_observations_bgr(crop, self.cv2, diagnostics=decoder_provenance))
+                if full_qr_decode else
+                (lambda crop: detect_native_qr_observations_bgr(crop, self.cv2))
+            )
             decoded = qr_decode_cache.decode(
                 roi=(attempt_roi.x0, attempt_roi.y0, attempt_roi.x1, attempt_roi.y1),
-                mode="full" if pose_hint is None else "native",
-                frame=attempt_frame, decoder=lambda crop: decoder(crop, self.cv2),
+                mode="full" if full_qr_decode else "native",
+                frame=attempt_frame, decoder=decoder, decoder_provenance=decoder_provenance,
             )
             qr_observations = decoded.observations
             attempt_estimate, attempt_debug = estimate_stand_axis_from_metric_model(
@@ -1367,6 +1400,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         roi_frame = selected.frame
         estimate = selected.estimate
         debug = selected.debug
+        self._last_metric_axis_source = estimate.source
         roi = selected_attempt.roi
         # Processing can outlive the tuple's admission-time freshness check.
         now_sec = self.node.get_clock().now().nanoseconds / 1_000_000_000.0
@@ -1803,6 +1837,18 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 observed_camera_bearing_rad=observed_camera_bearing,
             )
             lidar_target_associated = lidar_association.associated
+        if estimate.source == MEASURED_HEAD_AXIS_SOURCE:
+            head_lidar_rejection = measured_head_lidar_rejection(
+                lidar_association, registered=registration_applied,
+                cone_half_angle_rad=math.radians(self.args.lidar_cone_half_angle_deg),
+            )
+            axis_metadata["measured_head_lidar_admission"] = {
+                "accepted": lidar_target_associated and head_lidar_rejection is None,
+                "reason": head_lidar_rejection or "current_head_unique_lidar_cluster",
+                "unique_eligible_cluster_required": True,
+                "fitted_head_bearing_rad": observed_camera_bearing,
+            }
+            lidar_target_associated = lidar_target_associated and head_lidar_rejection is None
         lidar_status_details = {
             "candidate_lidar_association": asdict(lidar_association),
             "camera_registered_candidate_lidar_association": (
@@ -1829,6 +1875,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 center_distance_m=center_distance,
                 accepted_range_m=[lower_surface_bound, upper_surface_bound],
                 observation_evidence=update.snapshot.as_dict(),
+                stand_axis_debug=axis_metadata,
                 **lidar_status_details,
             )
             return
@@ -1988,6 +2035,24 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 / max(math.radians(self.args.consensus_max_deviation_deg), 1.0e-9),
             ),
         )
+        if (consensus.source == MEASURED_HEAD_AXIS_SOURCE
+                and not measured_head_front_is_current(
+                    qr_binding=qr_binding, marker_verified=roi_qr_evidence.marker_verified,
+                    resolved_qr_id=resolved_qr_id)):
+            # The current head plane is an angle measurement, not a face
+            # classification. Missing QR cannot authorize an opposite-side
+            # route, and an older identity latch cannot declare this face.
+            self._write_status(
+                "axis_observation_not_committable",
+                reason="measured_head_front_identity_unresolved",
+                axis_sample_count=consensus.sample_count,
+                axis_sample_source=consensus.source,
+                qr_texts=list(qr_texts),
+                observation_evidence=update.snapshot.as_dict(),
+                stand_axis_debug=axis_metadata,
+                **lidar_status_details,
+            )
+            return
         if resolved_qr_id is None:
             snapshot = update.snapshot
             try:
@@ -2122,9 +2187,21 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             target_distance_m=self.args.target_distance_m,
             observation_unix_sec=image.stamp_sec,
         )
+        recommendation_payload = recommendation_to_dict(recommendation)
+        recommendation_payload["axis_measurement"] = {
+            "source": consensus.source,
+            "model_profile_sha256": estimate.model_profile_sha256,
+            "model_measurement_status": estimate.model_measurement_status,
+            "head_model_quality": (
+                None if getattr(debug, "head_model_quality", None) is None
+                else asdict(debug.head_model_quality)
+            ),
+            "sample_admission": axis_sample_admission.metadata(),
+            "sensor_stamp_sec": image.stamp_sec,
+        }
         if not self._commit_sensor_artifact(
             self.args.recommended_pose_json,
-            recommendation_to_dict(recommendation),
+            recommendation_payload,
             image_stamp_sec=image.stamp_sec, scan_stamp_sec=scan.stamp_sec,
             artifact_kind="recommendation",
         ):
@@ -2212,10 +2289,35 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 max_rotation_rad=math.radians(self.args.stationary_rotation_deg),
             )
             self._inspection_progress = progress
+        failure_kind = front_view_failure_kind(state, details)
+        # An ambiguous neutral head cannot become a front-view advisory just
+        # because the nominal projected cone contained some LiDAR returns.
+        # This narrows advisory accumulation only; QR/axis admission is unchanged.
+        unassociated_front = failure_kind is None and front_view_failure_kind(
+            state, details, require_candidate_association=False,
+        ) is not None
         fields = progress.record(
-            **current,
+            **{**current, "frame_accepted": current["frame_accepted"] and not unassociated_front},
             classification=classify_inspection_progress(state, details),
         )
+        recovery = getattr(self, "_front_view_recovery", None)
+        if recovery is None and failure_kind is not None:
+            recovery = FrontViewRecovery(
+                max_translation_m=self.args.stationary_translation_m,
+                max_rotation_rad=math.radians(self.args.stationary_rotation_deg),
+            )
+            self._front_view_recovery = recovery
+        defer_front_advisory = False
+        if recovery is not None:
+            fresh = self._source_freshness(current["frame_stamp_sec"], scan_stamp_sec).accepted
+            defer_front_advisory = recovery.observe(
+                target_key=self._target_evidence_key(), now_sec=time.monotonic(),
+                frame_stamp_sec=current["frame_stamp_sec"], robot_pose=current["robot_pose"],
+                frame_accepted=current["frame_accepted"], source_fresh=fresh,
+                poisoned=current["poisoned"] or progress.poisoned,
+                motion_epoch_reset=current.get("motion_epoch_reset", False),
+                failure_kind=failure_kind,
+            )
         if (
             state == "collecting_consensus" and axis_sample_accepted
         ) or (
@@ -2228,6 +2330,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             return None
         if state == "collecting_consensus":
             return None
+        if defer_front_advisory:
+            return None
         if fields is None:
             return None
         payload = build_candidate_inspection_observation(
@@ -2239,6 +2343,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             calibration_profile_sha256=camera_calibration_sha256(self.calibration),
             stand_model_profile_sha256=self.stand_model_profile.sha256,
             camera_framing=getattr(self, "_camera_framing", None),
+            front_view_recovery=(None if recovery is None else recovery.metadata(now_sec=time.monotonic())),
             **fields,
         )
         if not self._commit_sensor_artifact(
@@ -2318,6 +2423,10 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             "observation_evidence": observation_status,
             "camera_pipeline_counts": dict(getattr(self, "_camera_pipeline_counters", {})),
             "camera_framing": getattr(self, "_camera_framing", None),
+            "front_view_recovery": (
+                None if getattr(self, "_front_view_recovery", None) is None
+                else self._front_view_recovery.metadata(now_sec=time.monotonic())
+            ),
             "last_evidence_source_freshness": getattr(self, "_last_evidence_source_freshness", None),
             "publication_freshness": getattr(self, "_last_camera_publication_freshness", None),
             "capture_history": self._capture_snapshot(),

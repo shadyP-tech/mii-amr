@@ -55,4 +55,13 @@ tests/aufgabe04/fixtures/qr_marker_validation/*
 !tests/aufgabe04/fixtures/qr_marker_validation/front_000045.jpg
 !tests/aufgabe04/fixtures/qr_marker_validation/backside_000022.jpg
 !tests/aufgabe04/fixtures/qr_marker_validation/manifest.json
+!tests/aufgabe04/fixtures/qr_recovery_20260911/
+tests/aufgabe04/fixtures/qr_recovery_20260911/*
+!tests/aufgabe04/fixtures/qr_recovery_20260911/frame_000011.jpg
+!tests/aufgabe04/fixtures/qr_recovery_20260911/frame_000024.jpg
+!tests/aufgabe04/fixtures/qr_recovery_20260911/inputs.json
+!tests/aufgabe04/fixtures/head_model_reference_20260911/
+tests/aufgabe04/fixtures/head_model_reference_20260911/*
+!tests/aufgabe04/fixtures/head_model_reference_20260911/source_000000.png
+!tests/aufgabe04/fixtures/head_model_reference_20260911/inputs.json
 !tests/test_run_with_bundle.py

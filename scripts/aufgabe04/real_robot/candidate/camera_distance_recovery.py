@@ -49,10 +49,13 @@ def select_camera_distance_recovery(
     if abs(current_range_m - evidence["range_m"]) > MINIMUM_DISTANCE_CHANGE_M:
         return None
     minimum = max(current_range_m + MINIMUM_DISTANCE_CHANGE_M, evidence["minimum_range_m"])
-    maximum = min(preferred_range_m, maximum_allowed_range_m, evidence["maximum_range_m"])
+    maximum = min(maximum_allowed_range_m, evidence["maximum_range_m"])
     if minimum > maximum + 1.0e-9:
         return None
-    offsets = [maximum]
+    # The preferred approach is an initial goal, not an optical ceiling.
+    # Retain it when useful; otherwise back out within the existing calibrated
+    # camera hint and unchanged stopped-arrival range envelope.
+    offsets = [preferred_range_m if minimum <= preferred_range_m <= maximum else maximum]
     while len(offsets) < MAX_DISTANCE_RECOVERY_PROPOSALS and offsets[-1] - minimum > 1.0e-9:
         offsets.append(max(minimum, offsets[-1] - MINIMUM_DISTANCE_CHANGE_M))
     return CameraDistanceRecovery(tuple(offsets), evidence["minimum_range_m"],

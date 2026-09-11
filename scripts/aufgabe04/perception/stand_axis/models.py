@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from scripts.aufgabe04.perception.stand_axis.head_model_quality import HeadModelQuality
     from scripts.aufgabe04.perception.stand_axis.metric_edge_association import (
         MetricCornerArmSupport,
     )
@@ -101,6 +102,11 @@ class StandAxisEdgeDebugArtifacts:
     # observation. None retains compatibility with older debug producers.
     qr_marker_verified: bool | None = None
     qr_marker_reason: str | None = None
+    # Separate measured-head angle proof. QR/joint residuals cannot supply or
+    # veto this channel's current-pixel fit; face semantics remain independent.
+    head_model_quality: HeadModelQuality | None = None
+    head_neck_junction: object | None = None
+    head_outer_recovery: object | None = None
 
 
 @dataclass(frozen=True)

@@ -42,6 +42,9 @@ from scripts.aufgabe04.navigation.foundation.ros_runtime_config import (
     resolve_topic,
     resolve_runtime_config,
 )
+from scripts.aufgabe04.navigation.foundation.observation_node_lifecycle import (
+    observation_node,
+)
 
 try:  # pragma: no cover - exercised on ROS hosts.
     import rclpy
@@ -2057,8 +2060,9 @@ def run_ros_preflight(
             "preflight_requirements must be a RosPreflightRequirements"
         )
     _require_ros()
-    rclpy.init(args=None)
-    node = RosPreflightNode(
+    with observation_node(
+        rclpy,
+        RosPreflightNode,
         config,
         max_scan_age_sec=max_scan_age_sec,
         max_odom_age_sec=max_odom_age_sec,
@@ -2091,12 +2095,8 @@ def run_ros_preflight(
         execution_pose_owner=execution_pose_owner,
         global_consistency_monitor=global_consistency_monitor,
         frozen_map_transform_certified=frozen_map_transform_certified,
-    )
-    try:
+    ) as node:
         return node.collect()
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
 
 
 def build_parser() -> argparse.ArgumentParser:

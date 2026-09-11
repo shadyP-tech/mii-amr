@@ -14,6 +14,7 @@ except ImportError:  # pragma: no cover
 from scripts.aufgabe04.perception.stand_axis.model_backside_topology import (
     backside_topology_proposal_batches,
 )
+from scripts.aufgabe04.perception.stand_axis.model_backside_acquisition import estimate_stand_axis_from_model_backside
 from scripts.aufgabe04.perception.stand_axis.model_pipeline import (
     estimate_stand_axis_from_metric_model,
 )
@@ -48,20 +49,23 @@ class BacksideTopologyRecoveryTest(unittest.TestCase):
             **options,
         )
 
-    def test_recorded_backside_recovers_outer_head_and_undirected_pose(self):
+    def test_recorded_backside_locator_cannot_bypass_unverified_neck_junction(self):
         estimate, debug = self.estimate()
 
-        self.assertTrue(estimate.usable, estimate.reason)
-        self.assertEqual(estimate.source, "model_backside_current_frame")
-        self.assertEqual(estimate.visible_face, "backside_candidate")
-        self.assertEqual(estimate.evidence_state, "fresh_backside")
+        self.assertFalse(estimate.usable)
+        self.assertEqual(estimate.reason, "head_neck_junction_gap_too_large")
+        self.assertEqual(estimate.source, "model_current_measured_head")
+        self.assertIsNone(estimate.visible_face)
+        self.assertEqual(estimate.evidence_state, "unobservable")
         self.assertFalse(debug.qr_detected)
         self.assertIsNone(estimate.camera_face_normal_xyz)
         self.assertIsNone(estimate.camera_face_center_xyz_m)
-        self.assertAlmostEqual(estimate.yaw_deg, -15.47, delta=1.0)
+        self.assertIsNone(estimate.yaw_deg)
         self.assertLess(estimate.pose_reprojection_rmse_px, 1.0)
-        self.assertGreaterEqual(estimate.visible_face_confidence, 0.85)
-        self.assertAlmostEqual(debug.head_scale_ratio, 0.993, delta=0.02)
+        self.assertIsNone(estimate.visible_face_confidence)
+        self.assertFalse(debug.head_model_quality.accepted)
+        self.assertEqual(debug.head_neck_junction.start_gap_px, 4)
+        self.assertFalse(debug.head_outer_recovery.accepted)
         # The outer head spans x=11..80, y=18..92. The interior Start label
         # must not supply the recovered head's bottom or side measurements.
         self.assertAlmostEqual(min(p.u_px for p in estimate.corners), 11, delta=2)
@@ -96,11 +100,24 @@ class BacksideTopologyRecoveryTest(unittest.TestCase):
             "backside_topology_proposal_batches",
             side_effect=filtered_then_forbidden,
         ):
-            estimate, _debug = self.estimate(
-                frame, expected_head_center_u_px=65,
-                expected_head_center_v_px=55, expected_head_height_px=70,
+            # Exercise retained fallback topology directly. Its historical
+            # backside policy is not the independent head-angle policy.
+            options = {**ROI_CAMERA_OPTIONS, "expected_head_center_u_px": 65,
+                       "expected_head_center_v_px": 55, "expected_head_height_px": 70}
+            estimate, _debug = estimate_stand_axis_from_model_backside(
+                cv2, frame, model_profile=self.profile,
+                raw_edges=_canny_edges_from_frame(cv2, frame, edge_preprocess="channel_union",
+                                                  blur_kernel=5, canny_low=20, canny_high=60),
+                max_reprojection_rmse_px=2.0, **options,
             )
         self.assertTrue(estimate.usable, estimate.reason)
+        current, debug = self.estimate(
+            frame, expected_head_center_u_px=65,
+            expected_head_center_v_px=55, expected_head_height_px=70,
+        )
+        self.assertFalse(current.usable)
+        self.assertEqual(current.reason, "head_neck_junction_gap_too_large")
+        self.assertIsNone(debug.model_pose)
 
     def test_raw_recovery_keeps_metric_scale_and_target_association_gates(self):
         for overrides in (

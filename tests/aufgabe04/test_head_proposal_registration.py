@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from scripts.aufgabe04.perception.stand_axis.head_proposal import HeadProposal, HeadProposalResult
+from scripts.aufgabe04.perception.stand_axis.head_model_quality import MEASURED_HEAD_AXIS_SOURCE
 from scripts.aufgabe04.perception.stand_axis.models import (
     ImagePoint, StandAxisEdgeDebugArtifacts, StandAxisImageEstimate,
 )
@@ -21,6 +22,7 @@ from scripts.aufgabe04.real_robot.observer.head_proposal_registration import (
 from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import (
     HeadRoiAttempt, REGISTERED_BACKSIDE_REACQUISITION_SOURCE,
     REGISTERED_QR_MODEL_REACQUISITION_SOURCE, TARGET_CENTERED_REACQUISITION_SOURCE,
+    REGISTERED_MEASURED_HEAD_REACQUISITION_SOURCE, is_camera_registered_head_roi_attempt,
 )
 
 
@@ -141,6 +143,35 @@ class HeadProposalRegistrationTest(unittest.TestCase):
         selection = self.acquire(debug=replace(self.debug, qr_detected=False, qr_marker_verified=False))
         self.assertEqual(selection.selected.attempt.source, REGISTERED_BACKSIDE_REACQUISITION_SOURCE)
         self.assertFalse(selection.selected.estimate.usable)
+
+    def test_failed_measured_head_reacquires_without_qr_or_pose_and_keeps_distinct_registration(self):
+        self.estimate = replace(self.estimate, source=MEASURED_HEAD_AXIS_SOURCE,
+                                reason="head_proposal_unavailable")
+        self.debug = replace(self.debug, qr_detected=False, qr_marker_verified=False,
+                             model_pose_fit_source=MEASURED_HEAD_AXIS_SOURCE)
+        selection, calls = self.select_with_locator_result(
+            HeadProposalResult(self.proposal, "current_head_proposal", 2, 1),
+        )
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(selection.registered)
+        self.assertEqual(selection.initial_reacquisition_mode, "measured_head")
+        self.assertEqual(selection.reacquisition_mode, "measured_head")
+        self.assertEqual(selection.selected.attempt.source, REGISTERED_MEASURED_HEAD_REACQUISITION_SOURCE)
+        self.assertTrue(is_camera_registered_head_roi_attempt(selection.selected.attempt))
+        self.assertTrue(selection.head_acquisition["candidate_associated"])
+        self.assertFalse(selection.selected.estimate.usable)
+        self.assertIsNone(self.hint(selection))
+
+    def test_unavailable_measured_head_never_falls_through_to_unregistered_wide_pose(self):
+        self.estimate = replace(self.estimate, source=MEASURED_HEAD_AXIS_SOURCE,
+                                reason="head_proposal_unavailable")
+        self.debug = replace(self.debug, qr_detected=False, qr_marker_verified=False)
+        selection, calls = self.select_with_locator_result(
+            HeadProposalResult(None, "head_proposal_unavailable"),
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(selection.registered)
+        self.assertEqual(selection.reacquisition_mode, "measured_head")
 
     def test_wrong_bearing_range_ambiguous_and_stale_scan_reject_before_strict_fit(self):
         cases = (

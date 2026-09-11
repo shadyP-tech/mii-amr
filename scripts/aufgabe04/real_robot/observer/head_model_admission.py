@@ -1,0 +1,49 @@
+"""Observer face binding for an independently measured head plane."""
+
+import math
+
+from scripts.aufgabe04.perception.stand_axis.head_model_admission import (
+    MEASURED_HEAD_AXIS_SOURCE, HeadModelAdmission, admit_measured_head_model,
+)
+
+
+def measured_head_front_is_current(*, qr_binding, marker_verified: bool,
+                                   resolved_qr_id: str | None) -> bool:
+    """A head plane gains front meaning only from its independent live QR path."""
+    return (
+        marker_verified is True and isinstance(resolved_qr_id, str) and bool(resolved_qr_id)
+        and qr_binding.accepted is True and qr_binding.symbol_count == 1
+        and qr_binding.reason == "decoded_qr_target_associated"
+        and qr_binding.qr_texts_for_evidence == (resolved_qr_id,)
+    )
+
+
+def measured_head_needs_full_qr_decode(*, previous_axis_source: str | None,
+                                     previous_bound_qr_stamp_sec: float | None,
+                                     image_stamp_sec: float, max_age_sec: float) -> bool:
+    """A head track cannot replace acquiring this target's QR identity.
+
+    Native tracking is allowed only after the immediately preceding accepted
+    frame refreshed a bound temporal identity. One missing/invalid refresh
+    clears that qualification, so the next image gets the full decoder again.
+    """
+    if previous_axis_source != MEASURED_HEAD_AXIS_SOURCE:
+        return False
+    if (type(previous_bound_qr_stamp_sec) not in (int, float)
+            or not math.isfinite(previous_bound_qr_stamp_sec)):
+        return True
+    return not 0.0 < image_stamp_sec - previous_bound_qr_stamp_sec <= max_age_sec
+
+
+def measured_head_lidar_rejection(association, *, registered: bool,
+                                  cone_half_angle_rad: float) -> str | None:
+    """Require one cluster at the current fitted head's ray in either ROI mode."""
+    if association.associated is not True:
+        return "measured_head_lidar_unassociated"
+    if association.eligible_cluster_count != 1:
+        return "measured_head_lidar_clusters_ambiguous"
+    delta = (association.selected_cluster_bearing_delta_from_map_rad if registered
+             else association.selected_cluster_bearing_delta_from_camera_rad)
+    if type(delta) not in (int, float) or not math.isfinite(delta) or not 0. <= delta <= cone_half_angle_rad:
+        return "measured_head_bearing_outside_target_cluster"
+    return None

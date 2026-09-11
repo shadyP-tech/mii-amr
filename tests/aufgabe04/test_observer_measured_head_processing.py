@@ -1,0 +1,215 @@
+"""Adapter integration with synthetic independent head/QR contracts.
+
+The mocked quality-approved 37.815-degree measurement checks angle admission,
+not the semantic admissibility or ground-truth angle of a recorded image.
+"""
+
+from contextlib import ExitStack
+from dataclasses import replace
+import json
+import math
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+import unittest
+from unittest.mock import Mock, patch
+
+import numpy
+
+from scripts.aufgabe04.perception.stand_axis.models import ImagePoint, StandAxisEdgeDebugArtifacts
+from scripts.aufgabe04.perception.stand_axis.head_proposal import HeadProposal, HeadProposalResult
+from scripts.aufgabe04.perception.stand_axis.head_model_quality import MEASURED_HEAD_AXIS_SOURCE
+from scripts.aufgabe04.perception.stand_axis.qr_pose_seed import PlanarPoseHypothesis
+from scripts.aufgabe04.qr_scanning.qr_observation import DecodedQrObservation
+from tests.aufgabe04 import test_camera_observer_processing as processing_fixtures
+from tests.aufgabe04 import test_head_model_admission as head_fixtures
+
+
+class MeasuredHeadObserverProcessingTests(unittest.TestCase):
+    def run_view(self, scenario):
+        registered = scenario.startswith("registered_")
+        scenario = scenario.removeprefix("registered_")
+        fixture = processing_fixtures.CameraObserverProcessingTest()
+        adapter = fixture.make_adapter()
+        adapter.node.get_logger = lambda: SimpleNamespace(info=lambda _message: None)
+        frame = numpy.zeros((600, 800, 3), dtype=numpy.uint8)
+        current_index = [0]
+        decode_modes = []
+
+        def decode(crop, _cv2, *, diagnostics=None):
+            index = current_index[0]
+            if scenario == "head_only" or scenario == "historical_qr" and index >= 2:
+                return ()
+            u, v = crop.shape[1] / 2., crop.shape[0] / 2.
+            if registered:
+                if crop.shape[1] == 68:
+                    v = 35.  # Same full-image QR center after head/neck recentering.
+                else:
+                    u += 10.
+            corners = tuple((u + x, v + y) for x, y in
+                            ((-15, -15), (15, -15), (15, 15), (-15, 15)))
+            observations = (DecodedQrObservation("QR_003", None if scenario == "unbound_qr" else corners,
+                                                "test_decoder", 1.),)
+            if scenario == "conflicting_qr" and index == 5:
+                return (*observations, DecodedQrObservation("QR_004", corners, "test_decoder", 1.))
+            return observations
+
+        def full_decode(*args, **kwargs):
+            decode_modes.append("full")
+            return decode(*args, **kwargs)
+
+        def native_decode(*args, **kwargs):
+            decode_modes.append("native")
+            if scenario == "native_miss" and current_index[0] == 2:
+                return ()
+            return decode(*args, **kwargs)
+
+        def metric(_cv2, _crop, **options):
+            u, v = options["expected_head_center_u_px"], options["expected_head_center_v_px"]
+            if scenario == "wrong_head_bearing":
+                u += 70.
+            corners = tuple(ImagePoint(u + x, v + y) for x, y in
+                            ((-26, -26), (26, -26), (26, 26), (-26, 26)))
+            quality = head_fixtures.quality(profile_sha256=adapter.stand_model_profile.sha256)
+            if scenario == "uncertain_head":
+                quality = replace(quality, yaw_std_deg=3.1)
+            estimate = head_fixtures.head_estimate(
+                corners=corners, left_height_px=52., right_height_px=52.,
+                model_profile_sha256=adapter.stand_model_profile.sha256,
+            )
+            if registered and options["current_head_proposal_corners"] is None:
+                estimate = replace(estimate, usable=False, yaw_deg=None,
+                                   reason="head_proposal_unavailable")
+            debug = StandAxisEdgeDebugArtifacts(
+                edges=None, model_pose_fit_source=MEASURED_HEAD_AXIS_SOURCE,
+                evidence_state="fresh_refined", model_measurement_status="measured",
+                model_profile_sha256=adapter.stand_model_profile.sha256,
+                head_model_quality=quality, qr_detected=bool(options["qr_observations"]),
+                qr_marker_verified=bool(options["qr_observations"]),
+                model_pose=PlanarPoseHypothesis((0., -.66, 0.), (0., 0., .6),
+                                               (-.61, 0., .79), 37.815, .457, True),
+            )
+            return estimate, debug
+
+        def locate(_cv2, _crop, **options):
+            u, v = options["expected_head_center_u_px"] + 10., options["expected_head_center_v_px"]
+            corners = tuple(ImagePoint(u + x, v + y) for x, y in
+                            ((-26, -26), (26, -26), (26, 26), (-26, 26)))
+            return HeadProposalResult(HeadProposal(
+                corners, (int(u - 34), int(v - 34), int(u + 34), int(v + 55)),
+                (u - 26, v - 26, u + 26, v + 26), u, v, 52., 1., 10 / 52., .98, .98,
+            ), "current_head_proposal", 1, 1, "test_locator")
+
+        def delayed_debug(*_args, **_kwargs):
+            if scenario == "late_publication" and current_index[0] == 6:
+                fixture.clock_sec += .5
+
+        adapter._write_debug.side_effect = delayed_debug
+        module = "scripts.aufgabe04.real_robot.observer.node."
+        with TemporaryDirectory() as directory, ExitStack() as stack:
+            output = adapter.args.recommended_pose_json = Path(directory) / "recommendation.json"
+            adapter.args.axis_observation_json = Path(directory) / "backside.json"
+            patches = {
+                "camera_info_mismatches": {"return_value": ()},
+                "transform_mismatches": {"return_value": ()},
+                "real_robot_profile_sha256": {"return_value": "a" * 64},
+                "camera_calibration_sha256": {"return_value": "b" * 64},
+                "compressed_msg_to_bgr_frame": {"return_value": frame},
+                "_rectify_bgr_frame": {"side_effect": lambda value, *_: value},
+                "detect_qr_observations_bgr": {"side_effect": full_decode},
+                "detect_native_qr_observations_bgr": {"side_effect": native_decode},
+                "estimate_stand_axis_from_metric_model": {"side_effect": metric},
+            }
+            for name, options in patches.items():
+                stack.enter_context(patch(module + name, **options))
+            if registered:
+                stack.enter_context(patch(
+                    "scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_head_proposal",
+                    side_effect=locate,
+                ))
+            backside = stack.enter_context(patch(module + "build_backside_axis_observation"))
+            sensor_tuple = adapter._next_sensor_tuple.return_value
+            if scenario == "wrong_lidar":
+                sensor_tuple.scan.value.ranges = (3.,) * 5
+            if scenario == "ambiguous_lidar":
+                sensor_tuple.scan.value.ranges = (.6, .6, float("inf"), .6, .6)
+            for index in range(7):
+                current_index[0] = index
+                stamp = 100. + index * .2
+                fixture.clock_sec = stamp + .1
+                for sample in (sensor_tuple.image, sensor_tuple.scan, sensor_tuple.camera_info):
+                    sample.stamp_sec = stamp
+                    sample.received_ros_sec = fixture.clock_sec
+                stamp_ns = round(stamp * 1e9)
+                sensor_tuple.image.value.header.stamp.sec = stamp_ns // 1_000_000_000
+                sensor_tuple.image.value.header.stamp.nanosec = stamp_ns % 1_000_000_000
+                if index:
+                    adapter.tf_retry_scheduler.offer(sensor_tuple, stamp_sec=stamp)
+                adapter._process_latest()
+            backside.assert_not_called()
+            self.assertFalse(adapter.args.axis_observation_json.exists())
+            payload = json.loads(output.read_text()) if output.exists() else None
+            adapter._test_decode_modes = decode_modes
+            return adapter, payload
+
+    def test_seven_quality_head_frames_and_independent_bound_qr_commit_above_35_degrees(self):
+        adapter, payload = self.run_view("bound_qr")
+        self.assertTrue(adapter.completed)
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["axis"]["sample_count"], 7)
+        measurement = payload["axis_measurement"]
+        self.assertEqual(measurement["source"], MEASURED_HEAD_AXIS_SOURCE)
+        self.assertEqual(measurement["head_model_quality"]["pose_model"], "measured_head_only")
+        self.assertFalse(measurement["sample_admission"]["qr_bound_model_fallback"])
+        self.assertAlmostEqual(abs(measurement["sample_admission"]["yaw_rad"]), math.radians(37.815))
+        self.assertEqual(adapter._last_observation_update.resolved_qr_id, "QR_003")
+
+    def test_head_axis_cannot_certify_a_face_from_missing_unbound_or_historical_qr(self):
+        for scenario in ("head_only", "unbound_qr", "historical_qr"):
+            with self.subTest(scenario=scenario):
+                adapter, payload = self.run_view(scenario)
+                self.assertIsNone(payload)
+                self.assertFalse(adapter.completed)
+                self.assertEqual(adapter._last_observation_update.axis_consensus.sample_count, 7)
+                self.assertEqual(adapter._write_status.call_args.args, ("axis_observation_not_committable",))
+                self.assertEqual(adapter._write_status.call_args.kwargs["reason"],
+                                 "measured_head_front_identity_unresolved")
+
+    def test_geometry_quality_lidar_conflict_and_publication_freshness_remain_required(self):
+        for scenario in ("uncertain_head", "wrong_lidar", "wrong_head_bearing", "ambiguous_lidar",
+                         "conflicting_qr", "late_publication"):
+            with self.subTest(scenario=scenario):
+                adapter, payload = self.run_view(scenario)
+                self.assertIsNone(payload)
+                self.assertFalse(adapter.completed)
+                if scenario == "late_publication":
+                    self.assertEqual(adapter._write_status.call_args.args, ("obsolete_publication_evidence",))
+                elif scenario == "conflicting_qr":
+                    self.assertTrue(adapter._last_observation_update.snapshot.poisoned)
+                else:
+                    self.assertFalse(adapter._last_observation_update.axis_sample_accepted)
+
+    def test_head_track_does_not_starve_full_identity_decoder(self):
+        head_only, _ = self.run_view("head_only")
+        self.assertEqual(head_only._test_decode_modes, ["full"] * 7)
+        bound, _ = self.run_view("bound_qr")
+        self.assertEqual(bound._test_decode_modes, ["full", "full"] + ["native"] * 5)
+        recovered, payload = self.run_view("native_miss")
+        self.assertIsNotNone(payload)
+        self.assertEqual(recovered._test_decode_modes[:4], ["full", "full", "native", "full"])
+
+    def test_recentered_head_uses_current_fitted_ray_and_unique_lidar_before_consensus(self):
+        accepted, payload = self.run_view("registered_bound_qr")
+        self.assertIsNotNone(payload)
+        registration = accepted._write_status.call_args.kwargs["stand_axis_debug"]["metric_model"]["camera_target_registration"]
+        self.assertTrue(registration["strict_retry_applied"])
+        self.assertEqual(registration["reacquisition_mode"], "measured_head")
+        for scenario in ("registered_wrong_head_bearing", "registered_ambiguous_lidar", "registered_wrong_lidar"):
+            with self.subTest(scenario=scenario):
+                rejected, payload = self.run_view(scenario)
+                self.assertIsNone(payload)
+                self.assertFalse(rejected._last_observation_update.axis_sample_accepted)
+
+
+if __name__ == "__main__":
+    unittest.main()

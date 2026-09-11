@@ -15,16 +15,18 @@ from scripts.aufgabe04.perception.stand_axis.head_proposal import (
     HeadProposal, acquire_head_proposal,
 )
 from scripts.aufgabe04.perception.stand_axis.models import ImagePoint
+from scripts.aufgabe04.perception.stand_axis.head_model_quality import MEASURED_HEAD_AXIS_SOURCE
 from scripts.aufgabe04.perception.stand_axis_handoff import rectified_pixel_bearing_in_scan
 from scripts.aufgabe04.real_robot.configuration.geometry import CameraIntrinsics, ImageRoi
 from scripts.aufgabe04.real_robot.observer.camera_target_registration import (
-    BACKSIDE_REACQUISITION_MODE, QR_MODEL_REACQUISITION_MODE,
+    BACKSIDE_REACQUISITION_MODE, QR_MODEL_REACQUISITION_MODE, MEASURED_HEAD_REACQUISITION_MODE,
     CameraTargetRegistrationSelection, HeadRoiEvaluation,
 )
 from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import (
     HeadRoiAttempt, HeadRoiRegistrationDecision,
     REGISTERED_BACKSIDE_REACQUISITION_SOURCE,
     REGISTERED_QR_MODEL_REACQUISITION_SOURCE, registered_head_roi_attempt,
+    REGISTERED_MEASURED_HEAD_REACQUISITION_SOURCE,
 )
 from scripts.aufgabe04.real_robot.observer.camera_framing import build_camera_framing_hint
 
@@ -152,7 +154,9 @@ def acquire_registered_head_measurement(
     # The current-image proposal is only a raw-border seed. It is never used
     # as a QR pose, temporal pose, accepted normal or cached angle.
     strict = evaluate(registered.attempt, registered.corners)
-    source = (REGISTERED_QR_MODEL_REACQUISITION_SOURCE if strict.debug.qr_detected
+    measured_head = strict.estimate.source == MEASURED_HEAD_AXIS_SOURCE
+    source = (REGISTERED_MEASURED_HEAD_REACQUISITION_SOURCE if measured_head else
+              REGISTERED_QR_MODEL_REACQUISITION_SOURCE if strict.debug.qr_detected
               else REGISTERED_BACKSIDE_REACQUISITION_SOURCE)
     strict = replace(strict, attempt=replace(strict.attempt, source=source))
     decision = replace(registered.decision, attempt=strict.attempt)
@@ -160,7 +164,8 @@ def acquire_registered_head_measurement(
     return CameraTargetRegistrationSelection(
         selected=strict, evaluations=(strict,), proposal=None, decision=decision,
         strict_retry=strict,
-        reacquisition_mode=(QR_MODEL_REACQUISITION_MODE if strict.debug.qr_detected
+        reacquisition_mode=(MEASURED_HEAD_REACQUISITION_MODE if measured_head else
+                            QR_MODEL_REACQUISITION_MODE if strict.debug.qr_detected
                             else BACKSIDE_REACQUISITION_MODE),
         head_acquisition=dict(diagnostics),
     )

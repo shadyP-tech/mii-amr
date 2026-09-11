@@ -103,9 +103,10 @@ class CameraObserverProcessingTest(unittest.TestCase):
         decoded_by_shape = {}
         metric_calls = []
 
-        def decode(crop, _cv2):
+        def decode(crop, _cv2, *, diagnostics=None):
             observations = (DecodedQrObservation("QR_1", None, "test_decoder", 1.),)
             decoded_by_shape[crop.shape] = observations
+            diagnostics["test_crop_shape"] = list(crop.shape)
             return observations
 
         def metric(_cv2, crop, **options):
@@ -164,6 +165,10 @@ class CameraObserverProcessingTest(unittest.TestCase):
         self.assertEqual([attempt["qr_decode"]["cache_hit"]
                           for attempt in metadata["processing_timing"]["attempts"]],
                          [False, False, True])
+        provenance = [attempt["qr_decode"]["decoder_provenance"]
+                      for attempt in metadata["processing_timing"]["attempts"]]
+        self.assertEqual(provenance[1], provenance[2])
+        self.assertNotEqual(provenance[0], provenance[1])
         self.assertFalse(metadata["result_freshness"]["accepted"])
         self.assertFalse(adapter.completed)
 
@@ -172,7 +177,7 @@ class CameraObserverProcessingTest(unittest.TestCase):
         frame = numpy.zeros((600, 800, 3), dtype=numpy.uint8)
         debug_calls = []
 
-        def decode(crop, _cv2):
+        def decode(crop, _cv2, *, diagnostics=None):
             u, v = crop.shape[1] / 2., crop.shape[0] / 2.
             corners = tuple((u + x, v + y) for x, y in
                             ((-20, -20), (20, -20), (20, 20), (-20, 20)))
@@ -368,7 +373,7 @@ class CameraObserverProcessingTest(unittest.TestCase):
                     )
 
                 module = "scripts.aufgabe04.real_robot.observer.node."
-                def decode(crop, _cv2):
+                def decode(crop, _cv2, *, diagnostics=None):
                     text = "QR_2" if conflict and crop.shape[1] == 68 else "QR_1"
                     return (DecodedQrObservation(text, None, "test", 1.),)
 

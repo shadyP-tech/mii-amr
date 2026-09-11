@@ -17,6 +17,7 @@ from scripts.aufgabe04.perception.stand_axis.models import (
     StandAxisEdgeDebugArtifacts,
     StandAxisImageEstimate,
 )
+from scripts.aufgabe04.perception.stand_axis.head_model_quality import MEASURED_HEAD_AXIS_SOURCE
 from scripts.aufgabe04.real_robot.observer.contract import (
     BACKSIDE_AXIS_SAMPLE_SOURCE,
 )
@@ -49,6 +50,7 @@ QR_MODEL_REACQUISITION_TRIGGER_REASONS = frozenset(
 )
 BACKSIDE_REACQUISITION_MODE = "backside"
 QR_MODEL_REACQUISITION_MODE = "qr_model"
+MEASURED_HEAD_REACQUISITION_MODE = "measured_head"
 QR_MODEL_PROPOSAL_SOURCES = frozenset(
     {
         "model_projection",
@@ -140,6 +142,8 @@ def _reacquisition_mode(
 
     estimate = primary.estimate
     debug = primary.debug
+    if estimate.source == MEASURED_HEAD_AXIS_SOURCE and not estimate.usable:
+        return MEASURED_HEAD_REACQUISITION_MODE
     if (
         not debug.qr_detected
         and tracked_pose is None
@@ -241,6 +245,14 @@ def select_camera_target_measurement(
         if acquired is not None:
             return replace(acquired, evaluations=(primary, *acquired.evaluations),
                            initial_reacquisition_mode=reacquisition_mode)
+    if reacquisition_mode == MEASURED_HEAD_REACQUISITION_MODE:
+        # The independent proposal search already tried the wider crop. A
+        # missing proposal must not fall back to QR-seeded geometry or grant
+        # an unregistered wide fit measurement authority.
+        return CameraTargetRegistrationSelection(
+            selected=primary, evaluations=tuple(evaluations), proposal=None,
+            decision=None, strict_retry=None, reacquisition_mode=reacquisition_mode,
+        )
     proposal = evaluate(roi_attempts[1], None)
     evaluations.append(proposal)
     initial_reacquisition_mode = reacquisition_mode

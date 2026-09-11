@@ -103,6 +103,24 @@ class OpenCvQRDetectorTest(unittest.TestCase):
             transformed, image_shape=(30, 100, 3), scale=4, border_px=64,
         ))
 
+    def test_optional_corner_diagnostics_distinguish_extent_from_restore_failure(self):
+        for points, scale, border, expected in (
+            (None, 1, 0, "missing"),
+            (((0, 0), (99, 0), (99, 99), (0, 99)), 1, 0, "full_input_extent"),
+            (((0, 0), (499, 0), (499, 499), (0, 499)), 4, 50, "out_of_bounds"),
+            (((10, 20), (30, 20), (30, 40), (10, 40)), 1, 0, "valid"),
+        ):
+            with self.subTest(expected=expected):
+                diagnostics = {}
+                without = validated_qr_corners(points, image_shape=(100, 100), scale=scale, border_px=border)
+                with_trace = validated_qr_corners(points, image_shape=(100, 100), scale=scale,
+                                                  border_px=border, diagnostics=diagnostics)
+                self.assertEqual(without, with_trace)
+                self.assertEqual(diagnostics["reason"], expected)
+                if points is not None:
+                    self.assertEqual(len(diagnostics["raw_bounds"]), 4)
+                    self.assertEqual(len(diagnostics["normalized_bounds"]), 4)
+
     def test_multiple_same_identity_symbols_remain_distinct(self):
         first = ((2, 2), (12, 2), (12, 12), (2, 12))
         second = tuple((u + 30, v) for u, v in first)

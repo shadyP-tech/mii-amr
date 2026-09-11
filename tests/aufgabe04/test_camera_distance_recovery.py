@@ -96,7 +96,7 @@ class CameraDistancePolicyTest(unittest.TestCase):
     def test_no_global_minimum_distance_or_unbound_target_correction(self):
         self.assertIsNone(self.select(candidate_uid="other"))
         self.assertIsNone(self.select(current_range_m=.7))
-        self.assertIsNone(self.select(preferred_range_m=.50))
+        self.assertIsNone(self.select(maximum_allowed_range_m=.50))
         self.assertIsNone(self.select(hint={}))
         self.assertIsNone(self.select(hint={**framing_hint(), "front_evidence_verified": False}))
 
@@ -105,6 +105,16 @@ class CameraDistancePolicyTest(unittest.TestCase):
         recovery = self.select(maximum_allowed_range_m=.59)
         self.assertEqual(recovery.standoffs_m[0], .59)
         self.assertLessEqual(recovery.maximum_range_m, .59)
+
+    def test_latest_run_can_back_out_beyond_preferred_range_inside_arrival_envelope(self):
+        hint = framing_hint(range_m=.7195028911563787, optical_depth_m=.6740752183766782)
+        recovery = self.select(hint=hint, current_range_m=.7262425167643329)
+        self.assertEqual(len(recovery.standoffs_m), 2)
+        self.assertAlmostEqual(recovery.standoffs_m[0], .9)
+        self.assertAlmostEqual(recovery.standoffs_m[1], .8262425167643329)
+        self.assertLessEqual(recovery.maximum_range_m, .9)
+        self.assertIsNone(self.select(hint=hint, current_range_m=.7262425167643329,
+                                     maximum_allowed_range_m=.82))
 
     def test_identical_bearing_allowed_but_quantized_inward_or_orbit_is_not(self):
         fields = dict(start_range_m=.413, goal_range_m=.68, requested_normal_rad=0.,

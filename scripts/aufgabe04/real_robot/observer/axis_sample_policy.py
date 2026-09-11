@@ -12,9 +12,12 @@ from scripts.aufgabe04.perception.stand_axis.models import (
 from scripts.aufgabe04.perception.stand_axis_consensus import (
     AxisConditioning,
 )
+from scripts.aufgabe04.real_robot.observer.head_model_admission import (
+    MEASURED_HEAD_AXIS_SOURCE, admit_measured_head_model,
+)
 
 
-AXIS_SAMPLE_POLICY_VERSION = "real-camera-axis-sample-v2-qr-bound-35deg"
+AXIS_SAMPLE_POLICY_VERSION = "real-camera-axis-sample-v3-independent-measured-head"
 QR_BOUND_MODEL_AXIS_SAMPLE_SOURCE = "model_current_frame_qr_pose_refined"
 MAX_QR_BOUND_MODEL_OBLIQUENESS_DEG = 35.0
 DEFAULT_QR_BOUND_MODEL_MAX_OBLIQUENESS_DEG = (
@@ -37,6 +40,7 @@ class AxisSampleAdmission:
     source: str | None
     conditioning: AxisConditioning
     qr_bound_model_fallback: bool
+    measured_head_admission: dict | None = None
 
     def metadata(self) -> dict[str, object]:
         return {
@@ -47,6 +51,7 @@ class AxisSampleAdmission:
             "source": self.source,
             "conditioning": asdict(self.conditioning),
             "qr_bound_model_fallback": self.qr_bound_model_fallback,
+            "measured_head_admission": self.measured_head_admission,
         }
 
 
@@ -64,7 +69,8 @@ def admit_axis_sample(
 ) -> AxisSampleAdmission:
     """Decide whether one measured-model observation may enter consensus.
 
-    The normal silhouette path keeps the configured obliqueness gate.  The
+    Current measured-head fits use their independent raw-pixel quality and
+    uncertainty contract. The normal silhouette path keeps its gate. The
     fallback is deliberately narrower: it only admits a current-frame measured
     model pose jointly fit from QR corners and head borders, with a decoded QR
     text in the same frame, and only inside the bounded 30-35 degree band.
@@ -82,6 +88,15 @@ def admit_axis_sample(
             source=None,
             conditioning=conditioning,
             qr_bound_model_fallback=False,
+        )
+    if estimate.source == MEASURED_HEAD_AXIS_SOURCE:
+        head = admit_measured_head_model(estimate=estimate, debug=debug, yaw_rad=yaw_rad)
+        return AxisSampleAdmission(
+            accepted=head.accepted, reason=head.reason,
+            yaw_rad=yaw_rad if head.accepted else None,
+            source=MEASURED_HEAD_AXIS_SOURCE if head.accepted else None,
+            conditioning=conditioning, qr_bound_model_fallback=False,
+            measured_head_admission=head.metadata(),
         )
     if conditioning.accepted:
         return AxisSampleAdmission(

@@ -26,7 +26,8 @@ from scripts.aufgabe04.navigation.approach.dynamic_approach_planner import (
     DynamicApproachConfig, FaceNormalCandidate, minimum_static_obstacle_inflation_m, plan_fixed_approach,
 )
 from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import (
-    REAL_VIEWPOINT_SOURCE, load_recommendation, normalize_angle, validate_recommendation,
+    REAL_VIEWPOINT_SOURCE, load_recommendation, normalize_angle,
+    recommendation_axis_estimator, validate_recommendation,
 )
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     coverage_survey_plan_sha256, load_coverage_survey_plan, load_stand_survey_registry, stand_survey_registry_sha256,
@@ -234,7 +235,7 @@ def promote_autonomous_arrival_catalog(
         converted = arrival_pose_record_from_recommendation(
             recommendation, candidate_uid=uid, map_yaml_sha256=bundle.yaml_sha256, corridor_length_m=config.terminal_corridor_length_m,
             validated_unix_sec=now_sec, axis_sample_count=recommendation.axis_sample_count,
-            estimator="real/measured_metric_model_current_frame_refined", source="real/autonomous_checked_catalog",
+            estimator=recommendation_axis_estimator(recommendation), source="real/autonomous_checked_catalog",
         )
         converted = replace(converted, stand_id=identity.for_candidate(uid).server_station_id)
         target_config = replace(config, stand_radius_m=candidate.geometry.radius_m, stand_position_uncertainty_m=candidate.geometry.uncertainty_m, standoff_distance_m=converted.standoff_m, minimum_non_target_keepout_radius_m=candidate.geometry.keepout_radius_m)

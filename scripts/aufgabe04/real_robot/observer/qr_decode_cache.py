@@ -9,6 +9,7 @@ admission. The caller supplies the same decoder policy for each mode.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from copy import deepcopy
 from time import perf_counter
 from typing import Callable, Literal
 
@@ -29,17 +30,21 @@ class RoiQrDecodeResult:
     cache_hit: bool
     elapsed_ms: float
     decoder_elapsed_ms: float
+    decoder_provenance: dict | None = None
 
     def metadata(self) -> dict[str, object]:
         """Keep this call's work separate from the original decoder cost."""
 
-        return {
+        metadata = {
             "roi": list(self.roi),
             "mode": self.mode,
             "cache_hit": self.cache_hit,
             "elapsed_ms": self.elapsed_ms,
             "decoder_elapsed_ms": self.decoder_elapsed_ms,
         }
+        if self.decoder_provenance:
+            metadata["decoder_provenance"] = deepcopy(self.decoder_provenance)
+        return metadata
 
 
 class RoiQrDecodeCache:
@@ -63,6 +68,7 @@ class RoiQrDecodeCache:
         mode: QrDecodeMode,
         frame: object,
         decoder: Callable[[object], QrObservations],
+        decoder_provenance: dict | None = None,
     ) -> RoiQrDecodeResult:
         if (
             not isinstance(roi, tuple)
@@ -94,6 +100,7 @@ class RoiQrDecodeCache:
             cache_hit=False,
             elapsed_ms=elapsed_ms,
             decoder_elapsed_ms=elapsed_ms,
+            decoder_provenance=deepcopy(decoder_provenance),
         )
         if len(self._results) < self._max_entries:
             self._results[key] = result

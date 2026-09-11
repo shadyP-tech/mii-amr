@@ -69,6 +69,7 @@ from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import (
     MaterialTarget,
     angular_distance,
     load_recommendation,
+    recommendation_axis_estimator,
     recommendation_to_dict,
 )
 from scripts.aufgabe04.perception.arrival_pose_estimator import (
@@ -655,11 +656,7 @@ def _record_survey_arrival(
         # same sensor evidence is an idempotent catalog upsert.
         validated_unix_sec=recommendation.observation_unix_sec,
         axis_sample_count=recommendation.axis_sample_count,
-        estimator=(
-            "simulation/silhouette_head_rectangle"
-            if args.environment == "simulation"
-            else "real/measured_metric_model_current_frame_refined"
-        ),
+        estimator=recommendation_axis_estimator(recommendation),
         source=(
             "simulation/synchronized_viewpoint"
             if args.environment == "simulation"

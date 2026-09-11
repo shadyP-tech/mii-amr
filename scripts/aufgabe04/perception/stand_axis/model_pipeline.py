@@ -1,9 +1,16 @@
-"""Model-seeded acquisition, projection, and current-frame refinement."""
+"""Independent current measured-head angles and separate QR/model diagnostics."""
 
 from __future__ import annotations
 
 from dataclasses import replace
 
+from scripts.aufgabe04.perception.stand_axis.geometry_contract import (
+    classify_joint_geometry_contract,
+)
+from scripts.aufgabe04.perception.stand_axis.head_model_fit import (
+    attach_independent_qr_diagnostics, fit_current_measured_head,
+)
+from scripts.aufgabe04.perception.stand_axis.head_proposal import acquire_head_proposal
 from scripts.aufgabe04.perception.stand_axis.geometry import (
     _debug_rectangle_image,
     _debug_rectangle_overlay_image,
@@ -78,15 +85,16 @@ def estimate_stand_axis_from_metric_model(
     input_cache_roi: RoiBounds | None = None,
     current_head_proposal_corners: tuple[ImagePoint, ...] | None = None,
 ) -> tuple[StandAxisImageEstimate, StandAxisEdgeDebugArtifacts]:
-    """Acquire from QR/tracking or a gated no-QR backside candidate.
+    """Fit physical head angles from current pixels independently of QR.
 
-    Every successful branch remains bound to current-frame rail support.  The
-    no-QR branch is available only with a measured physical model and a full
-    candidate-centred expected-head projection. An optional per-image cache
-    reuses raw edge/QR inputs for an exact ROI view; projection, acquisition,
-    pose fitting and all acceptance gates still run independently each time.
-    A current-image proposal may seed raw border refinement independently of
-    a QR pose, but only verified current QR geometry permits its joint fit.
+    A candidate projection permits bounded QR-neutral head acquisition before
+    any pose exists. QR/tracker seeds may position the legacy viewer search,
+    but every physical angle is refitted from raw head rails/corners and neck,
+    with independent head-only ambiguity and uncertainty gates. QR/joint fits
+    remain separate diagnostics. An exact-image cache reuses preprocessing,
+    never geometry. Legacy backside search can propose current corners when
+    neutral acquisition fails, but physical angle admission still uses the
+    same independent head-only checks and supplies no backside label.
     """
 
     timing = ModelStageTiming()
@@ -117,10 +125,36 @@ def estimate_stand_axis_from_metric_model(
     raw_edges = (preprocess_edges() if cached_inputs is None else
                  cached_inputs.compute("edge_preprocessing", preprocess_edges))
     timing.mark("edge_preprocessing")
+    expected_geometry = (
+        expected_head_center_u_px, expected_head_center_v_px, expected_head_height_px,
+    )
+    independent_head_requested = bool(
+        model_profile.committable and model_profile.environment == "physical"
+        and (head_proposal is not None or all(value is not None for value in expected_geometry))
+    )
+    head_result = None
+    if independent_head_requested:
+        if head_proposal is None:
+            acquisition = acquire_head_proposal(
+                cv2, frame, raw_edges=raw_edges,
+                expected_head_center_u_px=expected_head_center_u_px,
+                expected_head_center_v_px=expected_head_center_v_px,
+                expected_head_height_px=expected_head_height_px,
+            )
+            head_proposal = None if acquisition.proposal is None else acquisition.proposal.corners
+        timing.mark("independent_head_acquisition")
+        if head_proposal is not None:
+            head_result = fit_current_measured_head(
+                cv2, raw_edges, model_profile=model_profile, camera=camera,
+                proposal_corners=head_proposal,
+                max_reprojection_rmse_px=max_reprojection_rmse_px,
+                min_edge_height_px=min_edge_height_px,
+            )
+        timing.mark("independent_head_fit")
     if qr_observations is not None:
         if any(not isinstance(item, DecodedQrObservation) for item in qr_observations):
             raise ValueError("metric model QR observations have an invalid type")
-        if len(qr_observations) > 1:
+        if len(qr_observations) > 1 and not independent_head_requested:
             estimate = replace(
                 _unusable("model_qr_identity_ambiguous", source="model_seed"),
                 evidence_state="unobservable", model_profile_sha256=model_profile.sha256,
@@ -141,8 +175,8 @@ def estimate_stand_axis_from_metric_model(
     def acquire_qr_quad():
         return detect_qr_quad(
             cv2, frame,
-            scales=((1.0,) if pose_hint is not None else (1.0, 2.0, 4.0)),
-            allow_decode_fallback=(pose_hint is None),
+            scales=((1.0,) if pose_hint is not None or independent_head_requested else (1.0, 2.0, 4.0)),
+            allow_decode_fallback=(pose_hint is None and not independent_head_requested),
             **({"decoded_observations": qr_observations} if qr_observations is not None else {}),
         )
 
@@ -156,6 +190,25 @@ def estimate_stand_axis_from_metric_model(
         if qr_observations else validate_qr_marker(cv2, frame, qr_detection)
     )
     timing.mark("qr_marker_validation")
+    def finish_independent_head(result):
+        estimate, artifacts, head_pose = result
+        estimate, artifacts = attach_independent_qr_diagnostics(
+            cv2, estimate=estimate, debug=artifacts, head_pose=head_pose,
+            qr_corners=qr_corners, marker_verified=marker.verified,
+            model_profile=model_profile, camera=camera,
+            max_reprojection_rmse_px=max_reprojection_rmse_px,
+        )
+        timing.mark("independent_qr_diagnostics")
+        return estimate, replace(
+            artifacts, qr_detected=qr_marker_detected,
+            qr_marker_verified=marker.verified,
+            qr_marker_reason=("multiple_decoded_qr_identities"
+                              if qr_observations and len(qr_observations) > 1 else marker.reason),
+            qr_detection_scale=None if qr_detection is None else qr_detection.scale,
+            stage_timings_ms=timing.snapshot(),
+        )
+    if head_result is not None:
+        return finish_independent_head(head_result)
     qr_pose = None
     if qr_corners is not None:
         qr_pose = estimate_planar_pose_ippe(
@@ -220,6 +273,16 @@ def estimate_stand_axis_from_metric_model(
                 ),
             )
             timing.mark("backside_acquisition")
+            if estimate.usable and estimate.corners is not None:
+                # Retain the alternate locator, not its former angle or
+                # absence-based side authority. Refit its current corners
+                # through the one physical measured-head quality contract.
+                return finish_independent_head(fit_current_measured_head(
+                    cv2, raw_edges, model_profile=model_profile, camera=camera,
+                    proposal_corners=estimate.corners,
+                    max_reprojection_rmse_px=max_reprojection_rmse_px,
+                    min_edge_height_px=min_edge_height_px,
+                ))
             return estimate, replace(
                 artifacts, stage_timings_ms=timing.snapshot(),
                 qr_marker_verified=False, qr_marker_reason=marker.reason,
@@ -255,6 +318,16 @@ def estimate_stand_axis_from_metric_model(
     projected = (
         None if seed_pose is None else project_stand_model(cv2, model_profile, seed_pose, camera)
     )
+    if model_profile.committable and model_profile.environment == "physical" and projected is not None:
+        # Viewer/tracker callers may have no candidate projection. A seed can
+        # position current raw-border searches, but it never selects an IPPE
+        # branch or contributes an angle to this independent measurement.
+        return finish_independent_head(fit_current_measured_head(
+            cv2, raw_edges, model_profile=model_profile, camera=camera,
+            proposal_corners=projected.head_corners,
+            max_reprojection_rmse_px=max_reprojection_rmse_px,
+            min_edge_height_px=min_edge_height_px,
+        ))
     border_seed = select_head_border_seed(
         model_profile=model_profile,
         projected_corners=None if projected is None else projected.head_corners,
@@ -388,6 +461,20 @@ def estimate_stand_axis_from_metric_model(
         diagnose_head_only=(pose_rejected and pose_fit_source == "joint_qr_head"),
         max_reprojection_rmse_px=max_reprojection_rmse_px,
     )
+    contract = (
+        classify_joint_geometry_contract(
+            profile=model_profile, diagnostics=diagnostics,
+            joint_reason=refined_pose.reason,
+            joint_reprojection_rmse_px=(None if not refined_pose.hypotheses else
+                                        refined_pose.hypotheses[0].reprojection_rmse_px),
+            max_reprojection_rmse_px=max_reprojection_rmse_px,
+            qr_marker_verified=marker.verified,
+        )
+        if pose_rejected and pose_fit_source == "joint_qr_head"
+        else None
+    )
+    if contract is not None:
+        diagnostics = replace(diagnostics, geometry_contract=contract)
     timing.mark("diagnostics")
     base_artifacts = replace(
         base_artifacts, model_diagnostics=diagnostics,
@@ -397,9 +484,9 @@ def estimate_stand_axis_from_metric_model(
         estimate = replace(
             _unusable(
                 (
-                    "planar_pose_axis_ambiguous"
-                    if refined_axis_ambiguous
-                    else refined_pose.reason
+                    contract.reason if contract is not None else
+                    ("planar_pose_axis_ambiguous"
+                     if refined_axis_ambiguous else refined_pose.reason)
                 ),
                 corners=refinement.corners,
                 contour_area_px=_polygon_area(refinement.corners),
@@ -421,6 +508,9 @@ def estimate_stand_axis_from_metric_model(
             pose_reprojection_rmse_px=estimate.pose_reprojection_rmse_px,
             pose_ambiguity_gap_px=refined_pose.ambiguity_gap_px,
             model_reason=estimate.reason,
+            # Only the accepted joint model may be a directed metric pose.
+            # Independent QR/head fits remain diagnostic after disagreement.
+            model_pose=None if contract is not None else base_artifacts.model_pose,
             stage_timings_ms=timing.snapshot(),
         )
 

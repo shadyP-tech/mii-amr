@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Collection, Mapping, Sequence
@@ -84,6 +85,10 @@ class SynchronizedViewpointRecommendation:
     # Actual stable inlier frames reported by the estimator, not its configured
     # minimum. Legacy payloads decode as zero and cannot complete a sealed survey.
     axis_sample_count: int = 0
+    # Optional observer receipt, retained as audit evidence without deriving
+    # angle or side authority from its diagnostic fields. Older artifacts did
+    # not record which estimator supplied the measured axis.
+    axis_measurement: Mapping[str, object] | None = None
 
 
 def normalize_angle(angle_rad: float) -> float:
@@ -150,6 +155,10 @@ def validate_recommendation(
         or recommendation.axis_sample_count < 0
     ):
         raise ValueError("axis_sample_count must be a non-negative integer")
+    if recommendation.axis_measurement is not None and not isinstance(
+        recommendation.axis_measurement, Mapping
+    ):
+        raise ValueError("axis_measurement must be an object or null")
 
     faces = tuple(recommendation.face_candidates)
     if len(faces) != 2:
@@ -284,6 +293,7 @@ def recommendation_from_payload(
             axis_sample_count=_optional_nonnegative_int(
                 axis_payload, "sample_count"
             ),
+            axis_measurement=deepcopy(payload.get("axis_measurement")),
         )
     except (KeyError, TypeError) as exc:
         raise ValueError(f"malformed viewpoint recommendation: {exc}") from exc
@@ -301,6 +311,9 @@ def recommendation_to_payload(
         "state": payload.pop("axis_state"),
         "sample_count": payload.pop("axis_sample_count"),
     }
+    if payload["axis_measurement"] is None:
+        # Keep the serialization of legacy recommendations unchanged.
+        payload.pop("axis_measurement")
     return payload
 
 
@@ -310,6 +323,30 @@ def recommendation_to_dict(
     """Public spelling used by producers that do not write a file themselves."""
 
     return recommendation_to_payload(recommendation)
+
+
+def recommendation_axis_estimator(
+    recommendation: SynchronizedViewpointRecommendation,
+) -> str:
+    """Name the recorded estimator without guessing a new source for old data.
+
+    The optional receipt is provenance only: missing or unusable source labels
+    neither supply an axis nor change the recommendation's admission policy.
+    """
+
+    environment = "simulation" if recommendation.simulation_only else "real"
+    measurement = recommendation.axis_measurement
+    if isinstance(measurement, Mapping):
+        source = measurement.get("source")
+        if isinstance(source, str) and source:
+            estimator = f"{environment}/{source}"
+            if _SAFE_SOURCE_RE.fullmatch(estimator):
+                return estimator
+    return (
+        "simulation/silhouette_head_rectangle"
+        if recommendation.simulation_only
+        else "real/legacy_axis_source_unrecorded"
+    )
 
 
 def load_viewpoint_recommendation(

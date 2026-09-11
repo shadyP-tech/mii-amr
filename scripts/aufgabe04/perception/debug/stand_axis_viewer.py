@@ -37,6 +37,10 @@ from scripts.aufgabe04.perception.debug.stand_model_overlay import (
 )
 from scripts.aufgabe04.perception.debug.text_overlay import OverlayTextCursor
 from scripts.aufgabe04.perception.debug.viewer_frame_timing import ViewerFrameTiming
+from scripts.aufgabe04.perception.debug.viewer_axis_admission import (
+    current_head_quality_ready, viewer_axis_admission,
+    viewer_color_side_allowed, viewer_face_export_allowed,
+)
 from scripts.aufgabe04.perception.debug.stand_axis_recording import (
     DebugWindowRecorder,
     RECORDING_FILENAMES,
@@ -122,7 +126,6 @@ from scripts.aufgabe04.perception.stand_axis_tracking import (
 )
 from scripts.aufgabe04.perception.stand_axis_consensus import (
     AxisConsensusAccumulator,
-    axis_conditioning,
 )
 from scripts.aufgabe04.perception.stand_axis_handoff import (
     AxialConsensusAccumulator,
@@ -3879,7 +3882,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 qr_texts=qr_texts,
                 color_confidence=color_confidence,
                 min_color_confidence=args.side_color_confidence,
-                allow_color_only=allow_color_only,
+                allow_color_only=viewer_color_side_allowed(estimate, requested=allow_color_only),
             )
             # QR evidence identifies the station/visible side only. Orientation
             # always comes from the same head-silhouette estimate used on the
@@ -3895,6 +3898,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     or estimate.model_profile_sha256
                     == stand_model_profile.sha256
                 )
+                and current_head_quality_ready(estimate, edge_artifacts)
             )
             metric_target_key = None
             if (
@@ -3958,15 +3962,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
             elif args.calibrated_handoff and not head_estimate_held:
                 handoff_axis_consensus.reset()
-            conditioning = (
-                None
-                if consensus is None
-                else axis_conditioning(
-                    consensus.yaw_rad,
-                    max_obliqueness_rad=math.radians(
-                        args.max_observation_obliqueness_deg
-                    ),
-                )
+            conditioning = viewer_axis_admission(
+                consensus=consensus, estimate=estimate, artifacts=edge_artifacts,
+                max_obliqueness_rad=math.radians(args.max_observation_obliqueness_deg),
             )
             handoff_decision = None
             if args.calibrated_handoff:
@@ -4084,9 +4082,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "accepted": conditioning.accepted,
                     "reason": conditioning.reason,
                     "obliqueness_deg": math.degrees(conditioning.obliqueness_rad),
-                    "max_obliqueness_deg": math.degrees(
-                        conditioning.max_obliqueness_rad
+                    "max_obliqueness_deg": (
+                        None if conditioning.max_obliqueness_rad is None
+                        else math.degrees(conditioning.max_obliqueness_rad)
                     ),
+                    "axis_admission_policy": conditioning.policy,
                     "consensus_samples": consensus.sample_count,
                     "consensus_max_deviation_deg": math.degrees(
                         consensus.max_deviation_rad
@@ -4111,6 +4111,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 and conditioning is not None
                 and conditioning.accepted
                 and side.side in ("qr_code_side", "basic_color_side")
+                and viewer_face_export_allowed(estimate, side.side)
                 and side.confidence >= 0.60
                 and observation_robot_x is not None
                 and observation_robot_y is not None
@@ -4188,6 +4189,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 estimate=metric_estimate,
                 artifacts=metric_artifacts,
                 text_cursor=text_cursor,
+                result_fresh=not result_obsolete,
             )
             if (
                 edge_artifacts.predicted_corners is not None
