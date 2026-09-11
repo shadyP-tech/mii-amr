@@ -11,11 +11,14 @@ QR symbol dimensions, decoded quads, pose history, interpolation and morphology
 never supply boundary evidence.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 
 from scripts.aufgabe04.perception.stand_axis.geometry import _distance, order_corners
 from scripts.aufgabe04.perception.stand_axis.head_border_seed import validate_current_head_proposal
+from scripts.aufgabe04.perception.stand_axis.head_neck_connectivity import (
+    RawNeckContinuation, trace_raw_neck_junction,
+)
 
 
 MAX_HEAD_NECK_START_GAP_PX = 2
@@ -35,6 +38,8 @@ class HeadNeckJunction:
     head_vertical_span_px: float | None = None
     measured_panel_inset_m: float | None = None
     pixel_uncertainty_allowance_px: float = HEAD_PANEL_PIXEL_UNCERTAINTY_PX
+    core_start_gap_px: int | None = None
+    raw_continuation: RawNeckContinuation | None = None
 
 
 def measure_head_neck_junction(raw_edges, corners, profile) -> HeadNeckJunction:
@@ -42,8 +47,10 @@ def measure_head_neck_junction(raw_edges, corners, profile) -> HeadNeckJunction:
 
     The start gap counts missing rows after the first pixel row below the
     fitted bottom-edge midpoint. Both rails must then have a simultaneous
-    uninterrupted run; the search never fills missing pixels. The diagnostic
-    minimum is retained even when a distant neck fails admission.
+    uninterrupted core run. A rounded junction may continue backward through
+    adjacent raw pixels within a bounded two-pixel band. The core run's gap,
+    columns and start row remain separate from that connected path's gap.
+    Rejected probes retain the original start gap for outer-border recovery.
 
     For the measured centered paper panel, its per-side physical inset is
     (head height - panel height) / 2. Scaling by the smaller vertical head-side
@@ -119,9 +126,24 @@ def measure_head_neck_junction(raw_edges, corners, profile) -> HeadNeckJunction:
         "head_neck_panel_separation_unresolved" if not resolution_qualified else
         "head_neck_junction_verified" if accepted else "head_neck_junction_gap_too_large"
     )
-    return HeadNeckJunction(
+    junction = HeadNeckJunction(
         accepted, reason,
-        start_gap_px=gap, required_run_px=required_run,
+        start_gap_px=gap, core_start_gap_px=gap, required_run_px=required_run,
         rail_columns_px=(left_column, right_column), run_start_row_px=y0 + gap,
         **resolution_fields,
     )
+    if reason != "head_neck_junction_gap_too_large":
+        return junction
+    continuation = trace_raw_neck_junction(
+        raw_edges,
+        bottom_edge_px=((bottom_left.u_px, bottom_left.v_px),
+                        (bottom_right.u_px, bottom_right.v_px)),
+        rail_columns_px=junction.rail_columns_px, core_start_row_px=junction.run_start_row_px,
+        core_run_length_px=required_run, min_rail_gap_px=min_rail_gap,
+        max_rail_gap_px=max_rail_gap, max_start_gap_px=max_gap,
+    )
+    junction = replace(junction, raw_continuation=continuation)
+    if not continuation.accepted:
+        return junction
+    return replace(junction, accepted=True, reason="head_neck_junction_verified",
+                   start_gap_px=max(continuation.start_gaps_px))

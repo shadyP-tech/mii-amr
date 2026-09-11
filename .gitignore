@@ -69,4 +69,8 @@ tests/aufgabe04/fixtures/qr_recovery_20260911/*
 tests/aufgabe04/fixtures/head_model_reference_20260911/*
 !tests/aufgabe04/fixtures/head_model_reference_20260911/source_000000.png
 !tests/aufgabe04/fixtures/head_model_reference_20260911/inputs.json
+!tests/aufgabe04/fixtures/head_neck_junction_20260911T142702Z/
+tests/aufgabe04/fixtures/head_neck_junction_20260911T142702Z/*
+!tests/aufgabe04/fixtures/head_neck_junction_20260911T142702Z/raw_edges.png
+!tests/aufgabe04/fixtures/head_neck_junction_20260911T142702Z/inputs.json
 !tests/test_run_with_bundle.py

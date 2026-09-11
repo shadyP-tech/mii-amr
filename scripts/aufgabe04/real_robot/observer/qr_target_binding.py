@@ -26,6 +26,7 @@ class QrTargetBinding:
     symbol_count: int = 0
     camera_bearing_rad: float | None = None
     association: dict | None = None
+    current_head_binding: dict | None = None
 
     def metadata(self) -> dict:
         return {**asdict(self), "motion_authorized": False,

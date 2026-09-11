@@ -16,6 +16,32 @@ from scripts.aufgabe04.real_robot.candidate.observation_deferral import Candidat
 
 
 class CandidateInspectionExecutionTest(unittest.TestCase):
+    def test_joint_recommendation_at_first_view_never_requests_another_local_move(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            observation = CandidateObservation(root / "recommendation.json", "QR_003", None)
+            captures = []
+
+            def capture(frame, output, index):
+                captures.append(index)
+                return observation
+
+            result, frame = execute_candidate_inspection(
+                candidate_uid="candidate", candidate_root=root, initial_frame=0., max_views=8,
+                effects=CandidateInspectionEffects(
+                    capture=capture, canonical_normal=lambda frame: frame,
+                    move_view=lambda *args: self.fail("resolved first view requested another local move"),
+                    move_opposite=lambda *args: self.fail("resolved front requested an opposite view"),
+                    progress_evidence=lambda *args: self.fail("resolved view became advisory"),
+                ),
+            )
+            self.assertIs(result, observation)
+            self.assertEqual(frame, 0.)
+            self.assertEqual(captures, [0])
+            progress = json.loads((root / "inspection_progress.json").read_text())
+            self.assertTrue(progress["joint_observation_ready"])
+            self.assertEqual(progress["local_view_count"], 1)
+
     def test_oblique_decoded_qr_is_preserved_until_new_view_has_joint_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

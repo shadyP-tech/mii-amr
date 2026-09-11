@@ -49,28 +49,49 @@ class BacksideTopologyRecoveryTest(unittest.TestCase):
             **options,
         )
 
-    def test_recorded_backside_locator_cannot_bypass_unverified_neck_junction(self):
+    def test_recorded_connected_neck_admits_head_angle_without_face_identity(self):
         estimate, debug = self.estimate()
 
-        self.assertFalse(estimate.usable)
-        self.assertEqual(estimate.reason, "head_neck_junction_gap_too_large")
+        self.assertTrue(estimate.usable, estimate.reason)
+        self.assertEqual(estimate.reason, "axis_estimated_current_measured_head")
         self.assertEqual(estimate.source, "model_current_measured_head")
         self.assertIsNone(estimate.visible_face)
-        self.assertEqual(estimate.evidence_state, "unobservable")
+        self.assertEqual(estimate.evidence_state, "fresh_refined")
         self.assertFalse(debug.qr_detected)
-        self.assertIsNone(estimate.camera_face_normal_xyz)
-        self.assertIsNone(estimate.camera_face_center_xyz_m)
-        self.assertIsNone(estimate.yaw_deg)
+        self.assertIsNotNone(estimate.camera_face_normal_xyz)
+        self.assertIsNotNone(estimate.camera_face_center_xyz_m)
+        self.assertIsNotNone(estimate.yaw_deg)
         self.assertLess(estimate.pose_reprojection_rmse_px, 1.0)
         self.assertIsNone(estimate.visible_face_confidence)
-        self.assertFalse(debug.head_model_quality.accepted)
-        self.assertEqual(debug.head_neck_junction.start_gap_px, 4)
-        self.assertFalse(debug.head_outer_recovery.accepted)
+        self.assertTrue(debug.head_model_quality.accepted)
+        self.assertEqual(debug.head_neck_junction.core_start_gap_px, 4)
+        self.assertEqual(debug.head_neck_junction.start_gap_px, 0)
+        self.assertTrue(debug.head_neck_junction.raw_continuation.accepted)
+        for path in debug.head_neck_junction.raw_continuation.paths_px:
+            self.assertTrue(all(debug.raw_edges[y, x] > 0 for x, y in path))
+        self.assertIsNone(debug.head_outer_recovery)
         # The outer head spans x=11..80, y=18..92. The interior Start label
         # must not supply the recovered head's bottom or side measurements.
         self.assertAlmostEqual(min(p.u_px for p in estimate.corners), 11, delta=2)
         self.assertAlmostEqual(max(p.u_px for p in estimate.corners), 80, delta=2)
         self.assertGreater(min(p.v_px for p in estimate.corners[2:]), 88)
+
+    def test_recorded_neck_with_a_missing_raw_row_remains_rejected(self):
+        _estimate, debug = self.estimate()
+        raw = debug.raw_edges.copy()
+        raw[93, :] = 0
+        with patch(
+            "scripts.aufgabe04.perception.stand_axis.model_pipeline._canny_edges_from_frame",
+            return_value=raw,
+        ):
+            estimate, debug = self.estimate()
+        self.assertFalse(estimate.usable)
+        self.assertEqual(estimate.reason, "head_neck_junction_gap_too_large")
+        self.assertIsNone(estimate.yaw_deg)
+        self.assertIsNone(estimate.visible_face)
+        self.assertFalse(debug.head_neck_junction.raw_continuation.accepted)
+        self.assertEqual(debug.head_neck_junction.start_gap_px,
+                         debug.head_neck_junction.core_start_gap_px)
 
     def test_recorded_frame_reproduces_failure_without_recovery_batch(self):
         def filtered_only(*args, **kwargs):
@@ -116,7 +137,8 @@ class BacksideTopologyRecoveryTest(unittest.TestCase):
             expected_head_center_v_px=55, expected_head_height_px=70,
         )
         self.assertFalse(current.usable)
-        self.assertEqual(current.reason, "head_neck_junction_gap_too_large")
+        self.assertTrue(debug.head_neck_junction.accepted)
+        self.assertEqual(current.reason, "head_model_yaw_uncertainty_too_high")
         self.assertIsNone(debug.model_pose)
 
     def test_raw_recovery_keeps_metric_scale_and_target_association_gates(self):

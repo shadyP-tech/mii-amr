@@ -47,3 +47,33 @@ def measured_head_lidar_rejection(association, *, registered: bool,
     if type(delta) not in (int, float) or not math.isfinite(delta) or not 0. <= delta <= cone_half_angle_rad:
         return "measured_head_bearing_outside_target_cluster"
     return None
+
+
+def head_scale_gate(
+    *,
+    expected_size_px: float,
+    left_height_px: float,
+    right_height_px: float,
+) -> dict[str, object]:
+    """Check that accepted head sides have the calibrated physical scale."""
+
+    expected = float(expected_size_px)
+    heights = (float(left_height_px), float(right_height_px))
+    measured = sum(heights) / 2.0
+    ratio = measured / max(expected, 1.0e-9)
+    balance = min(heights) / max(max(heights), 1.0e-9)
+    accepted = (
+        all(math.isfinite(value) and value > 0.0 for value in (*heights, expected))
+        and 0.60 <= ratio <= 1.35
+        and balance >= 0.65
+    )
+    return {
+        "accepted": accepted,
+        "expected_size_px": expected,
+        "measured_height_px": measured,
+        "left_height_px": heights[0],
+        "right_height_px": heights[1],
+        "height_ratio": ratio,
+        "side_balance": balance,
+        "reason": "ok" if accepted else "head_size_projection_mismatch",
+    }

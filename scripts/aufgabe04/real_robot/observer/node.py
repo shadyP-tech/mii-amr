@@ -162,7 +162,13 @@ from scripts.aufgabe04.real_robot.observer.front_view_recovery import (
 )
 from scripts.aufgabe04.real_robot.observer.head_model_admission import (
     MEASURED_HEAD_AXIS_SOURCE, measured_head_front_is_current,
-    measured_head_needs_full_qr_decode, measured_head_lidar_rejection,
+    measured_head_needs_full_qr_decode, head_scale_gate as _head_scale_gate,
+)
+from scripts.aufgabe04.real_robot.observer.current_head_association import (
+    associate_current_measured_head,
+)
+from scripts.aufgabe04.real_robot.observer.current_head_qr_binding import (
+    bind_qr_to_current_head,
 )
 from scripts.aufgabe04.real_robot.observer.front_observation import (
     BACKSIDE_AXIS_SOURCES,
@@ -181,36 +187,6 @@ from scripts.aufgabe04.real_robot.configuration.recommendation import (
 
 OBSERVER_VERSION = PASSIVE_VIEWPOINT_OBSERVER_VERSION
 AUTO_QR_ID = "auto"
-
-
-def _head_scale_gate(
-    *,
-    expected_size_px: float,
-    left_height_px: float,
-    right_height_px: float,
-) -> dict[str, object]:
-    """Check that accepted head sides have the calibrated physical scale."""
-
-    expected = float(expected_size_px)
-    heights = (float(left_height_px), float(right_height_px))
-    measured = sum(heights) / 2.0
-    ratio = measured / max(expected, 1.0e-9)
-    balance = min(heights) / max(max(heights), 1.0e-9)
-    accepted = (
-        all(math.isfinite(value) and value > 0.0 for value in (*heights, expected))
-        and 0.60 <= ratio <= 1.35
-        and balance >= 0.65
-    )
-    return {
-        "accepted": accepted,
-        "expected_size_px": expected,
-        "measured_height_px": measured,
-        "left_height_px": heights[0],
-        "right_height_px": heights[1],
-        "height_ratio": ratio,
-        "side_balance": balance,
-        "reason": "ok" if accepted else "head_size_projection_mismatch",
-    }
 
 
 def _consensus_for_current_axis_source(update, axis_sample_source: str):
@@ -1522,6 +1498,23 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 stand_axis_debug=axis_metadata,
             )
             return
+        current_head_association = None
+        if estimate.source == MEASURED_HEAD_AXIS_SOURCE and estimate.usable:
+            current_head_association = associate_current_measured_head(
+                estimate=estimate, debug=debug, attempt=selected_attempt,
+                projection=projection, expected_head_height_px=expected_head_height_px,
+                profile_sha256=self.stand_model_profile.sha256,
+                intrinsics=intrinsics, scan_from_camera=scan_from_camera_geometry,
+                scan=plain_scan, map_bearing_rad=scan_bearing,
+                cone_half_angle_rad=math.radians(self.args.lidar_cone_half_angle_deg),
+                accepted_range_m=(lower_surface_bound, upper_surface_bound),
+                now_sec=now_sec, max_scan_age_sec=self.args.max_sensor_age_sec,
+                min_cluster_sample_count=self.args.lidar_min_samples,
+                max_center_offset_ratio=self.args.backside_registration_max_center_offset_ratio,
+                max_camera_map_bearing_delta_rad=math.radians(
+                    self.args.backside_registration_max_bearing_delta_deg),
+            )
+            axis_metadata["current_head_candidate_association"] = current_head_association.metadata()
         selected_qr_observations = getattr(selected, "qr_observations", None)
         if selected_qr_observations is None:
             # Preserve legacy injected evaluations; the operational evaluator
@@ -1545,11 +1538,17 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             accepted_range_m=(lower_surface_bound, upper_surface_bound),
             now_sec=now_sec, max_scan_age_sec=self.args.max_sensor_age_sec,
             min_cluster_sample_count=self.args.lidar_min_samples,
-            camera_registration_accepted=is_camera_registered_head_roi_attempt(selected_attempt),
+            camera_registration_accepted=(is_camera_registered_head_roi_attempt(selected_attempt)
+                or (current_head_association is not None and current_head_association.accepted)),
             max_camera_map_bearing_delta_rad=math.radians(
                 self.args.backside_registration_max_bearing_delta_deg
             ),
         )
+        if current_head_association is not None and current_head_association.accepted:
+            qr_binding = bind_qr_to_current_head(
+                qr_binding, selected_qr_observations, head_corners=estimate.corners,
+                head_association=current_head_association,
+            )
         qr_evidence_texts = qr_binding.qr_texts_for_evidence
         axis_metadata["decoded_qr_target_binding"] = qr_binding.metadata()
         # The neutral head can be associated even before a QR ray or axis is
@@ -1557,6 +1556,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         # current scan gate, without granting its unbound text identity.
         frame_lidar_associated = (
             preliminary_lidar_association.associated or qr_binding.accepted
+            or (current_head_association is not None and current_head_association.accepted)
             or (registration.registered
                 and (registration.head_acquisition or {}).get("candidate_associated") is True)
         )
@@ -1790,7 +1790,18 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             selected_attempt
         )
         registered_lidar_association = None
-        if registration_applied:
+        if current_head_association is not None:
+            registered_lidar_association = current_head_association.lidar_association
+            lidar_association = (
+                registered_lidar_association.search_association
+                if registered_lidar_association is not None
+                and registered_lidar_association.search_association is not None
+                else preliminary_lidar_association
+            )
+            # The nested diagnostic fallback carries no acceptance authority.
+            lidar_target_associated = current_head_association.accepted
+            axis_metadata["measured_head_lidar_admission"] = current_head_association.metadata()
+        elif registration_applied:
             registered_lidar_association = (
                 associate_camera_registered_candidate_lidar_target(
                     plain_scan,
@@ -1837,18 +1848,6 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 observed_camera_bearing_rad=observed_camera_bearing,
             )
             lidar_target_associated = lidar_association.associated
-        if estimate.source == MEASURED_HEAD_AXIS_SOURCE:
-            head_lidar_rejection = measured_head_lidar_rejection(
-                lidar_association, registered=registration_applied,
-                cone_half_angle_rad=math.radians(self.args.lidar_cone_half_angle_deg),
-            )
-            axis_metadata["measured_head_lidar_admission"] = {
-                "accepted": lidar_target_associated and head_lidar_rejection is None,
-                "reason": head_lidar_rejection or "current_head_unique_lidar_cluster",
-                "unique_eligible_cluster_required": True,
-                "fitted_head_bearing_rad": observed_camera_bearing,
-            }
-            lidar_target_associated = lidar_target_associated and head_lidar_rejection is None
         lidar_status_details = {
             "candidate_lidar_association": asdict(lidar_association),
             "camera_registered_candidate_lidar_association": (

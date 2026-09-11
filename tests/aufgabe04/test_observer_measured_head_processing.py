@@ -27,10 +27,16 @@ from tests.aufgabe04 import test_head_model_admission as head_fixtures
 
 class MeasuredHeadObserverProcessingTests(unittest.TestCase):
     def run_view(self, scenario):
+        shifted = scenario.startswith("shifted_")
+        scenario = scenario.removeprefix("shifted_")
         registered = scenario.startswith("registered_")
         scenario = scenario.removeprefix("registered_")
         fixture = processing_fixtures.CameraObserverProcessingTest()
         adapter = fixture.make_adapter()
+        if shifted:
+            # Complete head remains inside this synthetic nominal crop while
+            # its ray lies outside the original map-centered three-degree cone.
+            adapter.args.head_roi_padding_scale = 2.2
         adapter.node.get_logger = lambda: SimpleNamespace(info=lambda _message: None)
         frame = numpy.zeros((600, 800, 3), dtype=numpy.uint8)
         current_index = [0]
@@ -41,6 +47,8 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
             if scenario == "head_only" or scenario == "historical_qr" and index >= 2:
                 return ()
             u, v = crop.shape[1] / 2., crop.shape[0] / 2.
+            if shifted:
+                u -= 28.
             if registered:
                 if crop.shape[1] == 68:
                     v = 35.  # Same full-image QR center after head/neck recentering.
@@ -66,6 +74,8 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
 
         def metric(_cv2, _crop, **options):
             u, v = options["expected_head_center_u_px"], options["expected_head_center_v_px"]
+            if shifted:
+                u -= 28.
             if scenario == "wrong_head_bearing":
                 u += 70.
             corners = tuple(ImagePoint(u + x, v + y) for x, y in
@@ -129,6 +139,9 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
                 ))
             backside = stack.enter_context(patch(module + "build_backside_axis_observation"))
             sensor_tuple = adapter._next_sensor_tuple.return_value
+            if shifted:
+                sensor_tuple.scan.value.angle_min = math.radians(3.5)
+                sensor_tuple.scan.value.angle_increment = math.radians(.2)
             if scenario == "wrong_lidar":
                 sensor_tuple.scan.value.ranges = (3.,) * 5
             if scenario == "ambiguous_lidar":
@@ -209,6 +222,29 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
                 rejected, payload = self.run_view(scenario)
                 self.assertIsNone(payload)
                 self.assertFalse(rejected._last_observation_update.axis_sample_accepted)
+
+    def test_shifted_nominal_head_commits_in_first_view_without_strict_retry(self):
+        adapter, payload = self.run_view("shifted_bound_qr")
+        self.assertTrue(adapter.completed)
+        self.assertEqual(payload["axis"]["sample_count"], 7)
+        metadata = adapter._write_status.call_args.kwargs["stand_axis_debug"]
+        head = metadata["current_head_candidate_association"]
+        self.assertTrue(head["accepted"])
+        self.assertEqual(head["roi_source"], "nominal_projection")
+        self.assertGreater(head["lidar_association"]["camera_map_bearing_delta_rad"], math.radians(3))
+        self.assertFalse(metadata["metric_model"]["camera_target_registration"]["strict_retry_applied"])
+        self.assertEqual(len(metadata["metric_model"]["head_roi_attempts"]), 1)
+        self.assertTrue(metadata["decoded_qr_target_binding"]["current_head_binding"]["accepted"])
+        self.assertEqual(adapter._last_observation_update.resolved_qr_id, "QR_003")
+
+    def test_shifted_nominal_head_preserves_qr_conflicts_and_publication_freshness(self):
+        for scenario in ("conflicting_qr", "unbound_qr", "late_publication", "uncertain_head"):
+            with self.subTest(scenario=scenario):
+                adapter, payload = self.run_view("shifted_" + scenario)
+                self.assertIsNone(payload)
+                self.assertFalse(adapter.completed)
+                if scenario == "conflicting_qr":
+                    self.assertTrue(adapter._last_observation_update.snapshot.poisoned)
 
 
 if __name__ == "__main__":

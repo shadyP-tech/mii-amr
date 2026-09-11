@@ -86,7 +86,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--scan-topology-profile", choices=("linear", "full_rotation"), default="linear",
         help="Explicit scan topology assertion; full_rotation still validates each message's seam geometry.",
     )
-    parser.add_argument("--candidate-approach-offset-m", type=float, default=0.70)
+    parser.add_argument(
+        "--candidate-approach-offset-m", type=float, default=0.50,
+        help=(
+            "Preferred robot-base-to-stand-center distance for camera inspection "
+            "(default: 0.50 m). Also sets the preferred local inspection "
+            "standoff; physical clearance and route admission still apply."
+        ),
+    )
     parser.add_argument("--final-facing-offset-m", type=float, default=0.35)
     parser.add_argument("--axis-sample-count", type=int, default=7)
     parser.add_argument("--camera-timeout-sec", type=float, default=90.0)
