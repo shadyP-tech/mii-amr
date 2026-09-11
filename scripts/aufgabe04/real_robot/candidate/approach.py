@@ -2039,7 +2039,10 @@ def execute_candidate_approach_phase(
             current = planning_frame.current_pose
         if config.require_uncertainty_aware_selection:
             loader = effects.load_route_uncertainty_readiness
-            if loader is None or planning_frame_evidence_path is None:
+            if (
+                loader is None or planning_frame_evidence_path is None
+                or selection_planning_frame is None
+            ):
                 raise RuntimeError(
                     "required candidate route uncertainty readiness effect "
                     "is unavailable"
@@ -2059,6 +2062,7 @@ def execute_candidate_approach_phase(
                     preflight_json=planning_frame_evidence_path,
                     expected_start=current,
                     planning_frame=planning_config.planning_frame,
+                    odom_frame=selection_planning_frame.odom_frame,
                     robot_radius_m=float(robot_radius_m),
                     sigma_multiplier=(
                         planning_config.uncertainty_sigma_multiplier

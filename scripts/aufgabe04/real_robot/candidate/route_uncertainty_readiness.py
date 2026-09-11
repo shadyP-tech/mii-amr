@@ -23,6 +23,7 @@ from scripts.aufgabe04.navigation.execution.route_uncertainty_defaults import (
 )
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.navigation.localization.preflight_route_uncertainty_context import (
+    COMPOSED_CANDIDATE_POSE_BASIS,
     load_preflight_route_uncertainty_context,
 )
 
@@ -34,6 +35,7 @@ class CandidateRouteUncertaintyReadinessRequest:
     preflight_json: Path
     expected_start: Pose2D
     planning_frame: str
+    odom_frame: str
     robot_radius_m: float
     sigma_multiplier: float
 
@@ -51,6 +53,8 @@ def load_candidate_route_uncertainty_readiness(
         preflight_json=request.preflight_json,
         expected_start=request.expected_start,
         planning_frame=request.planning_frame,
+        odom_frame=request.odom_frame,
+        pose_basis=COMPOSED_CANDIDATE_POSE_BASIS,
         robot_radius_m=request.robot_radius_m,
         collision_margin_m=DEFAULT_COLLISION_MARGIN_M,
         tracking_tube_radius_m=DEFAULT_TRACKING_TUBE_RADIUS_M,
@@ -74,6 +78,8 @@ def load_candidate_route_uncertainty_readiness(
                 context.preflight_sha256
             ),
             "planning_frame": context.planning_frame,
+            "pose_basis": context.pose_basis,
+            "pose_provenance": dict(context.pose_provenance),
             "admitted_start_pose": {
                 "x_m": context.expected_start.x_m,
                 "y_m": context.expected_start.y_m,

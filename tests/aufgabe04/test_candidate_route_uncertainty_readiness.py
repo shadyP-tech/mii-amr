@@ -26,8 +26,27 @@ def _preflight_payload(start: Pose2D) -> dict[str, object]:
     covariance[0] = 0.004
     covariance[7] = 0.009
     covariance[35] = 0.01
+    def capture(target, source, x, y, yaw):
+        return {"available": True, "target_frame": target, "source_frame": source,
+                "observed_target_frame": target, "observed_source_frame": source,
+                "stamp_sec": 10.0, "capture_time_sec": 10.1,
+                "x_m": x, "y_m": y, "yaw_rad": yaw}
+    direct = capture("map", "odom", 0.0, 0.0, 0.0)
+    odom = capture("odom", "base_footprint", start.x_m, start.y_m, start.yaw_rad)
     return {
         "ok": True,
+        "failures": [],
+        "runtime_config": {"map_frame": "map", "odom_frame": "odom", "base_frame": "base_footprint"},
+        "odom_pose": {
+            "frame_id": "odom", "child_frame_id": "base_footprint",
+            "x_m": start.x_m, "y_m": start.y_m, "yaw_rad": start.yaw_rad,
+        },
+        "map_from_odom": direct,
+        "observations": [
+            {"name": "tf map->odom", "ok": True, "data": direct},
+            {"name": "tf odom->base_footprint", "ok": True, "data": odom},
+            {"name": "odom freshness", "ok": True, "data": {}},
+        ],
         "route_pose": {
             "frame_id": "map",
             "child_frame_id": "base_footprint",
@@ -54,6 +73,7 @@ class CandidateRouteUncertaintyReadinessTest(unittest.TestCase):
                     preflight_json=preflight,
                     expected_start=start,
                     planning_frame="map",
+                    odom_frame="odom",
                     robot_radius_m=0.105,
                     sigma_multiplier=2.0,
                 )
@@ -121,6 +141,7 @@ class CandidateRouteUncertaintyReadinessTest(unittest.TestCase):
                     preflight_json=preflight,
                     expected_start=start,
                     planning_frame="map",
+                    odom_frame="odom",
                     robot_radius_m=0.105,
                     sigma_multiplier=2.0,
                 )
@@ -137,6 +158,14 @@ class CandidateRouteUncertaintyReadinessTest(unittest.TestCase):
             )
             self.assertEqual(source["planning_frame"], "map")
             self.assertEqual(
+                source["pose_basis"],
+                "direct_map_from_odom_times_observed_odom_pose",
+            )
+            self.assertEqual(
+                source["pose_provenance"]["map_from_odom_capture"],
+                _preflight_payload(start)["map_from_odom"],
+            )
+            self.assertEqual(
                 source["admitted_start_pose"],
                 {"x_m": -0.75, "y_m": 0.20, "yaw_rad": 0.40},
             )
@@ -151,16 +180,18 @@ class CandidateRouteUncertaintyReadinessTest(unittest.TestCase):
                         preflight_json=preflight,
                         expected_start=Pose2D(-0.70, 0.20, 0.40),
                         planning_frame="map",
+                        odom_frame="odom",
                         robot_radius_m=0.105,
                         sigma_multiplier=2.0,
                     )
                 )
-            with self.assertRaisesRegex(ValueError, "frame mismatch"):
+            with self.assertRaisesRegex(ValueError, "frame.*mismatch"):
                 load_candidate_route_uncertainty_readiness(
                     CandidateRouteUncertaintyReadinessRequest(
                         preflight_json=preflight,
                         expected_start=start,
                         planning_frame="odom",
+                        odom_frame="odom",
                         robot_radius_m=0.105,
                         sigma_multiplier=2.0,
                     )

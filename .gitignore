@@ -43,6 +43,7 @@ tests/aufgabe04/*
 !tests/aufgabe04/fixtures/
 tests/aufgabe04/fixtures/*
 !tests/aufgabe04/fixtures/candidate_planning_frame_20260911T124500Z.json
+!tests/aufgabe04/fixtures/candidate_planning_frame_20260911T133125Z.json
 !tests/aufgabe04/fixtures/startup_route_admission_20260911/
 tests/aufgabe04/fixtures/startup_route_admission_20260911/*
 !tests/aufgabe04/fixtures/startup_route_admission_20260911/inputs.json

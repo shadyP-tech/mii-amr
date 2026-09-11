@@ -9,6 +9,7 @@ route and for writing their own decision evidence.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
 import json
@@ -26,6 +27,13 @@ from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.navigation.localization.amcl_covariance_envelope import (
     conservative_amcl_covariance_envelope,
 )
+from scripts.aufgabe04.navigation.localization.candidate_planning_pose import (
+    admitted_candidate_planning_pose,
+)
+
+
+PREFLIGHT_ROUTE_POSE_BASIS = "preflight_route_pose"
+COMPOSED_CANDIDATE_POSE_BASIS = "direct_map_from_odom_times_observed_odom_pose"
 
 
 @dataclass(frozen=True)
@@ -39,6 +47,8 @@ class PreflightRouteUncertaintyContext:
     covariance_evidence: Mapping[str, object]
     admission_config: RouteUncertaintyAdmissionConfig
     covariance: PlanarCovariance
+    pose_basis: str
+    pose_provenance: Mapping[str, object]
 
 
 def load_preflight_route_uncertainty_context(
@@ -53,8 +63,15 @@ def load_preflight_route_uncertainty_context(
     braking_latency_distance_m: float,
     sigma_multiplier: float,
     clearance_sample_spacing_m: float,
+    pose_basis: str = PREFLIGHT_ROUTE_POSE_BASIS,
+    odom_frame: str | None = None,
 ) -> PreflightRouteUncertaintyContext:
-    """Strictly bind persisted preflight evidence to route-admission inputs."""
+    """Strictly bind persisted preflight evidence to route-admission inputs.
+
+    Survey routes retain the recorded route pose by default.  Candidate routes
+    explicitly select the composed basis used by their planning frame; both
+    paths bind the exact start to this one immutable source document.
+    """
 
     preflight_path = Path(preflight_json)
     if preflight_path.is_symlink():
@@ -81,8 +98,14 @@ def load_preflight_route_uncertainty_context(
             "localization preflight"
         )
 
+    admitted_pose, pose_provenance = _admitted_pose_evidence(
+        payload,
+        pose_basis=pose_basis,
+        planning_frame=planning_frame,
+        odom_frame=odom_frame,
+    )
     _validate_preflight_start(
-        payload.get("route_pose"),
+        admitted_pose,
         expected_start=expected_start,
         planning_frame=planning_frame,
     )
@@ -117,7 +140,55 @@ def load_preflight_route_uncertainty_context(
         covariance_evidence=covariance_evidence,
         admission_config=admission_config,
         covariance=covariance,
+        pose_basis=pose_basis,
+        pose_provenance=pose_provenance,
     )
+
+
+def _admitted_pose_evidence(
+    payload: Mapping[str, object],
+    *,
+    pose_basis: str,
+    planning_frame: str,
+    odom_frame: str | None,
+) -> tuple[object, Mapping[str, object]]:
+    if pose_basis == PREFLIGHT_ROUTE_POSE_BASIS:
+        route_pose = payload.get("route_pose")
+        return route_pose, {
+            "pose_basis": pose_basis,
+            "route_pose": deepcopy(route_pose),
+        }
+    if pose_basis != COMPOSED_CANDIDATE_POSE_BASIS:
+        raise ValueError("route uncertainty preflight pose basis is unsupported")
+
+    config = payload.get("runtime_config")
+    if not isinstance(config, Mapping):
+        raise ValueError("route uncertainty preflight has no runtime frame configuration")
+    requested_map_frame = _frame_id(planning_frame, "map_frame")
+    requested_odom_frame = _frame_id(odom_frame, "odom_frame")
+    for requested_frame, name in (
+        (requested_map_frame, "map_frame"),
+        (requested_odom_frame, "odom_frame"),
+    ):
+        if requested_frame != _frame_id(config.get(name), f"runtime_config.{name}"):
+            raise ValueError(f"route uncertainty preflight {name} configuration mismatch")
+
+    pose, provenance = admitted_candidate_planning_pose(
+        payload,
+        map_frame=requested_map_frame,
+        odom_frame=requested_odom_frame,
+    )
+    return {
+        "frame_id": planning_frame,
+        "x_m": pose.x_m,
+        "y_m": pose.y_m,
+        "yaw_rad": pose.yaw_rad,
+    }, provenance
+
+
+def _frame_id(value: object, name: str) -> str:
+    frame = _nonempty_token(value, name).strip().strip("/")
+    return _nonempty_token(frame, name)
 
 
 def _validate_preflight_start(
@@ -181,6 +252,8 @@ def _nonempty_token(value: object, name: str) -> str:
 
 
 __all__ = [
+    "COMPOSED_CANDIDATE_POSE_BASIS",
+    "PREFLIGHT_ROUTE_POSE_BASIS",
     "PreflightRouteUncertaintyContext",
     "load_preflight_route_uncertainty_context",
 ]

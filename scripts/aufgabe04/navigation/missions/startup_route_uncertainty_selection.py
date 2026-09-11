@@ -27,6 +27,7 @@ from scripts.aufgabe04.navigation.execution.route_uncertainty_budget import (
 )
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.navigation.localization.preflight_route_uncertainty_context import (
+    PREFLIGHT_ROUTE_POSE_BASIS,
     load_preflight_route_uncertainty_context,
 )
 from scripts.aufgabe04.navigation.planning.costmap import Costmap
@@ -200,6 +201,7 @@ def load_startup_route_uncertainty_selector(
         preflight_json=preflight_json,
         expected_start=expected_start,
         planning_frame=planning_frame,
+        pose_basis=PREFLIGHT_ROUTE_POSE_BASIS,
         robot_radius_m=robot_radius_m,
         collision_margin_m=collision_margin_m,
         tracking_tube_radius_m=tracking_tube_radius_m,

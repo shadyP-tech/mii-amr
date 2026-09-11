@@ -1,0 +1,877 @@
+{
+  "expected_planning_frame": {
+    "current_pose": {
+      "x_m": 0.38630830346895917,
+      "y_m": -0.03197293366089271,
+      "yaw_rad": -0.02084861665981
+    },
+    "map_frame": "map",
+    "map_from_odom": {
+      "x_m": -1.5903430348697059,
+      "y_m": -0.4373561778779521,
+      "yaw_rad": -0.07502286851423
+    },
+    "odom_frame": "odom",
+    "pose_provenance": {
+      "chained_to_authoritative_translation_delta_m": 0.004112032257420838,
+      "chained_to_authoritative_yaw_delta_rad": 0.0007381477980907062,
+      "diagnostic_chained_map_capture": {
+        "age_sec": 0.062825375,
+        "available": true,
+        "capture_time_sec": 1789133719.1459353,
+        "max_future_sec": 0.25,
+        "observed_source_frame": "base_footprint",
+        "observed_target_frame": "map",
+        "quaternion": {
+          "norm": 1.0,
+          "w": 0.9999494465562178,
+          "x": 0.0,
+          "y": 0.0,
+          "z": -0.01005506498804574
+        },
+        "source_frame": "base_footprint",
+        "stamp_sec": 1789133719.0831099,
+        "target_frame": "map",
+        "x_m": 0.3824413242684872,
+        "y_m": -0.03337124734143321,
+        "yaw_rad": -0.020110468861719293
+      },
+      "diagnostic_chained_map_pose": {
+        "x_m": 0.3824413242684872,
+        "y_m": -0.03337124734143321,
+        "yaw_rad": -0.020110468861719293
+      },
+      "map_from_odom_capture": {
+        "age_sec": -0.890794867,
+        "available": true,
+        "capture_time_sec": 1789133719.1463692,
+        "max_future_sec": 1.1,
+        "observed_source_frame": "odom",
+        "observed_target_frame": "map",
+        "quaternion": {
+          "norm": 0.9999999999999999,
+          "w": 0.999296528644121,
+          "x": 0.0,
+          "y": 0.0,
+          "z": -0.037502637771353396
+        },
+        "source_frame": "odom",
+        "stamp_sec": 1789133720.0371642,
+        "target_frame": "map",
+        "x_m": -1.5903430348697059,
+        "y_m": -0.4373561778779521,
+        "yaw_rad": -0.07502286851422829
+      },
+      "odom_pose_capture": {
+        "age_sec": 0.063058459,
+        "available": true,
+        "capture_time_sec": 1789133719.1461682,
+        "max_future_sec": 0.25,
+        "observed_source_frame": "base_footprint",
+        "observed_target_frame": "odom",
+        "quaternion": {
+          "norm": 0.9999999999999999,
+          "w": 0.9996331662345311,
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.027083813688735504
+        },
+        "source_frame": "base_footprint",
+        "stamp_sec": 1789133719.0831099,
+        "target_frame": "odom",
+        "x_m": 1.940706732063032,
+        "y_m": 0.5523979255692504,
+        "yaw_rad": 0.05417425185441972
+      },
+      "pose_basis": "direct_map_from_odom_times_observed_odom_pose"
+    }
+  },
+  "preflight": {
+    "failures": [],
+    "map_from_odom": {
+      "age_sec": -0.890794867,
+      "available": true,
+      "capture_time_sec": 1789133719.1463692,
+      "max_future_sec": 1.1,
+      "observed_source_frame": "odom",
+      "observed_target_frame": "map",
+      "quaternion": {
+        "norm": 0.9999999999999999,
+        "w": 0.999296528644121,
+        "x": 0.0,
+        "y": 0.0,
+        "z": -0.037502637771353396
+      },
+      "source_frame": "odom",
+      "stamp_sec": 1789133720.0371642,
+      "target_frame": "map",
+      "x_m": -1.5903430348697059,
+      "y_m": -0.4373561778779521,
+      "yaw_rad": -0.07502286851422829
+    },
+    "observations": [
+      {
+        "data": {
+          "header_age_sec": 0.045777943,
+          "max_future_sec": 0.25,
+          "receipt_age_sec": 6.2329e-05,
+          "received": true,
+          "service_requested": true
+        },
+        "detail": "fresh AMCL observed after stationary refresh",
+        "name": "stationary AMCL refresh",
+        "ok": true
+      },
+      {
+        "data": {
+          "direct_tf_cache_rejections": [],
+          "direct_tf_callback_order_coupling_required": false,
+          "direct_tf_capture_mode": "independent_same_stationary_epoch",
+          "map_from_odom_amcl_window_binding": {
+            "accepted": true,
+            "amcl_window": {
+              "first_receipt_time_nanoseconds": 1789133716258742238,
+              "last_receipt_time_nanoseconds": 1789133718605711275,
+              "sample_count": 5
+            },
+            "direct_tf_window": {
+              "first_capture_time_nanoseconds": 1789133718701421115,
+              "last_capture_time_nanoseconds": 1789133719101512267,
+              "sample_count": 5
+            },
+            "reason": "direct_tf_window_overlaps_amcl_window",
+            "reasons": [
+              "direct_tf_window_overlaps_amcl_window"
+            ]
+          },
+          "map_from_odom_candidate_rejections": [],
+          "map_from_odom_pairing_failure_history": [],
+          "map_from_odom_pairing_required": true,
+          "max_allowed_position_spread_m": 0.015,
+          "max_allowed_position_std_m": 0.3,
+          "max_allowed_yaw_spread_rad": 0.03,
+          "max_allowed_yaw_std_rad": 0.35,
+          "maximum_position_spread_m": 0.004509170228082329,
+          "maximum_reported_position_std_m": 0.10078542360355361,
+          "maximum_reported_yaw_std_rad": 0.07383619477021487,
+          "maximum_yaw_spread_rad": 0.00467152616832367,
+          "position_covariance_complete": true,
+          "required_sample_count": 5,
+          "sample_count": 5,
+          "sample_interval_sec": 0.5,
+          "service_failures": [],
+          "service_request_count": 5,
+          "timeout_sec": 15.0,
+          "total_sample_count": 5,
+          "window_start_index": 0,
+          "yaw_covariance_complete": true
+        },
+        "detail": "samples=5/5 position_spread=0.0045m yaw_spread=0.0047rad position_std=0.1008m/0.3000m yaw_std=0.0738rad/0.3500rad",
+        "name": "stationary AMCL stability",
+        "ok": true
+      },
+      {
+        "data": {
+          "amcl_window_binding": {
+            "accepted": true,
+            "amcl_window": {
+              "first_receipt_time_nanoseconds": 1789133716258742238,
+              "last_receipt_time_nanoseconds": 1789133718605711275,
+              "sample_count": 5
+            },
+            "direct_tf_window": {
+              "first_capture_time_nanoseconds": 1789133718701421115,
+              "last_capture_time_nanoseconds": 1789133719101512267,
+              "sample_count": 5
+            },
+            "reason": "direct_tf_window_overlaps_amcl_window",
+            "reasons": [
+              "direct_tf_window_overlaps_amcl_window"
+            ]
+          },
+          "candidate_rejections": [],
+          "capture_failure_history": [],
+          "capture_failures": [],
+          "capture_mode": "independent_same_stationary_epoch",
+          "complete_amcl_window": true,
+          "complete_transform_window": true,
+          "direct_dynamic_tf_required": true,
+          "direct_tf_callback_order_coupling_required": false,
+          "direct_tf_qos_depth": 100,
+          "epoch_start_baseline": {
+            "receipt_time_nanoseconds": 1789133716048183039,
+            "stamp_nanoseconds": 1789133717009929031
+          },
+          "minimum_sample_count": 2,
+          "new_direct_tf_after_each_nomotion_amcl_required": false,
+          "ordering_failure": "",
+          "paired_amcl_sample_count": 5,
+          "required_pair_count": 5,
+          "retained_transform_sample_count": 5,
+          "same_stationary_epoch_amcl_and_direct_tf_windows_required": true,
+          "sample_count": 5,
+          "sample_order": "oldest_to_newest",
+          "strictly_increasing_capture_time_required": true,
+          "strictly_increasing_stamp_receipt_required": true
+        },
+        "detail": "paired_samples=5/5 amcl_samples=5/5 capture_failures=0",
+        "name": "stationary map<-odom transform samples",
+        "ok": true
+      },
+      {
+        "data": {
+          "expected_type": "sensor_msgs/msg/LaserScan"
+        },
+        "detail": "types=['sensor_msgs/msg/LaserScan']",
+        "name": "/scan",
+        "ok": true
+      },
+      {
+        "data": {
+          "expected_type": "nav_msgs/msg/Odometry"
+        },
+        "detail": "types=['nav_msgs/msg/Odometry']",
+        "name": "/odom",
+        "ok": true
+      },
+      {
+        "data": {
+          "expected_type": "geometry_msgs/msg/PoseWithCovarianceStamped"
+        },
+        "detail": "types=['geometry_msgs/msg/PoseWithCovarianceStamped']",
+        "name": "/amcl_pose",
+        "ok": true
+      },
+      {
+        "data": {
+          "header_age_sec": 0.0127688,
+          "max_future_sec": 0.25,
+          "receipt_age_sec": 0.002468987
+        },
+        "detail": "receipt_age=0.002s header_age=0.013s",
+        "name": "scan freshness",
+        "ok": true
+      },
+      {
+        "data": {
+          "header_age_sec": 0.06248726,
+          "max_future_sec": 0.25,
+          "receipt_age_sec": 0.045774692
+        },
+        "detail": "receipt_age=0.046s header_age=0.062s",
+        "name": "odom freshness",
+        "ok": true
+      },
+      {
+        "data": {
+          "header_age_sec": 0.597157636,
+          "max_future_sec": 0.25,
+          "receipt_age_sec": 0.539941802
+        },
+        "detail": "receipt_age=0.540s header_age=0.597s",
+        "name": "amcl freshness",
+        "ok": true
+      },
+      {
+        "data": {
+          "age_sec": 0.062825375,
+          "available": true,
+          "capture_time_sec": 1789133719.1459353,
+          "max_future_sec": 0.25,
+          "observed_source_frame": "base_footprint",
+          "observed_target_frame": "map",
+          "quaternion": {
+            "norm": 1.0,
+            "w": 0.9999494465562178,
+            "x": 0.0,
+            "y": 0.0,
+            "z": -0.01005506498804574
+          },
+          "source_frame": "base_footprint",
+          "stamp_sec": 1789133719.0831099,
+          "target_frame": "map",
+          "x_m": 0.3824413242684872,
+          "y_m": -0.03337124734143321,
+          "yaw_rad": -0.020110468861719293
+        },
+        "detail": "age=0.063s",
+        "name": "tf map->base_footprint",
+        "ok": true
+      },
+      {
+        "data": {
+          "age_sec": 0.063058459,
+          "available": true,
+          "capture_time_sec": 1789133719.1461682,
+          "max_future_sec": 0.25,
+          "observed_source_frame": "base_footprint",
+          "observed_target_frame": "odom",
+          "quaternion": {
+            "norm": 0.9999999999999999,
+            "w": 0.9996331662345311,
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.027083813688735504
+          },
+          "source_frame": "base_footprint",
+          "stamp_sec": 1789133719.0831099,
+          "target_frame": "odom",
+          "x_m": 1.940706732063032,
+          "y_m": 0.5523979255692504,
+          "yaw_rad": 0.05417425185441972
+        },
+        "detail": "age=0.063s",
+        "name": "tf odom->base_footprint",
+        "ok": true
+      },
+      {
+        "data": {
+          "age_sec": -0.890794867,
+          "available": true,
+          "capture_time_sec": 1789133719.1463692,
+          "max_future_sec": 1.1,
+          "observed_source_frame": "odom",
+          "observed_target_frame": "map",
+          "quaternion": {
+            "norm": 0.9999999999999999,
+            "w": 0.999296528644121,
+            "x": 0.0,
+            "y": 0.0,
+            "z": -0.037502637771353396
+          },
+          "source_frame": "odom",
+          "stamp_sec": 1789133720.0371642,
+          "target_frame": "map",
+          "x_m": -1.5903430348697059,
+          "y_m": -0.4373561778779521,
+          "yaw_rad": -0.07502286851422829
+        },
+        "detail": "age=-0.891s",
+        "name": "tf map->odom",
+        "ok": true
+      },
+      {
+        "data": {
+          "ambiguous_owner_evidence": [],
+          "amcl": {
+            "header_age_sec": 0.597942415,
+            "max_future_sec": 0.25,
+            "receipt_age_sec": 0.540726581,
+            "received": true
+          },
+          "amcl_fresh": true,
+          "amcl_topic": "/amcl_pose",
+          "base_frame": "base_footprint",
+          "dynamic_tf_topics": [
+            "/tf"
+          ],
+          "execution_pose_owner": "amcl",
+          "execution_pose_owner_action": "provide_execution_pose",
+          "external_tf_owner_candidates": [],
+          "frozen_map_transform_certified": false,
+          "global_consistency_monitor": "none",
+          "global_consistency_monitor_action": "none",
+          "global_consistency_monitor_allowed_actions": [],
+          "localization_source": "amcl",
+          "map_frame": "map",
+          "map_to_odom_dynamic": {
+            "available": true,
+            "dynamic": true,
+            "future_dated": false,
+            "header_age_sec": -0.89067933,
+            "max_future_sec": 1.1,
+            "receipt_age_sec": 0.044972646
+          },
+          "map_to_odom_dynamic_fresh": true,
+          "odom_frame": "odom",
+          "odom_to_base": {
+            "age_sec": 0.063058459,
+            "available": true,
+            "capture_time_sec": 1789133719.1461682,
+            "max_future_sec": 0.25,
+            "observed_source_frame": "base_footprint",
+            "observed_target_frame": "odom",
+            "quaternion": {
+              "norm": 0.9999999999999999,
+              "w": 0.9996331662345311,
+              "x": 0.0,
+              "y": 0.0,
+              "z": 0.027083813688735504
+            },
+            "source_frame": "base_footprint",
+            "stamp_sec": 1789133719.0831099,
+            "target_frame": "odom",
+            "x_m": 1.940706732063032,
+            "y_m": 0.5523979255692504,
+            "yaw_rad": 0.05417425185441972
+          },
+          "odom_to_base_fresh": true,
+          "route_transform": {
+            "age_sec": 0.062825375,
+            "available": true,
+            "capture_time_sec": 1789133719.1459353,
+            "max_future_sec": 0.25,
+            "observed_source_frame": "base_footprint",
+            "observed_target_frame": "map",
+            "quaternion": {
+              "norm": 1.0,
+              "w": 0.9999494465562178,
+              "x": 0.0,
+              "y": 0.0,
+              "z": -0.01005506498804574
+            },
+            "source_frame": "base_footprint",
+            "stamp_sec": 1789133719.0831099,
+            "target_frame": "map",
+            "x_m": 0.3824413242684872,
+            "y_m": -0.03337124734143321,
+            "yaw_rad": -0.020110468861719293
+          },
+          "route_transform_fresh": true,
+          "route_uses_odom_frame": false
+        },
+        "detail": "ok",
+        "name": "localization transform ownership",
+        "ok": true
+      },
+      {
+        "data": {
+          "value": false
+        },
+        "detail": "False",
+        "name": "use_sim_time",
+        "ok": true
+      },
+      {
+        "data": {
+          "active_nav2_goal": false,
+          "allowed_publishers": [],
+          "cmd_vel_topic": "/cmd_vel",
+          "nav2_status_observed": false,
+          "publishers": []
+        },
+        "detail": "publishers=[] active_nav2=False nav2_status_observed=False",
+        "name": "cmd_vel ownership",
+        "ok": true
+      }
+    ],
+    "odom_pose": {
+      "child_frame_id": "base_footprint",
+      "frame_id": "odom",
+      "x_m": 1.940706732063032,
+      "y_m": 0.5523979255692504,
+      "yaw_rad": 0.05417425185441972
+    },
+    "ok": true,
+    "preflight_requirements": {
+      "stationary_map_from_odom_pairing_requested": true,
+      "stationary_map_from_odom_pairing_required": true
+    },
+    "route_pose": {
+      "child_frame_id": "base_footprint",
+      "frame_id": "map",
+      "x_m": 0.3824413242684872,
+      "y_m": -0.03337124734143321,
+      "yaw_rad": -0.020110468861719293
+    },
+    "runtime_config": {
+      "amcl_topic": "/amcl_pose",
+      "base_frame": "base_footprint",
+      "cmd_vel_topic": "/cmd_vel",
+      "configured": {
+        "amcl_topic": "amcl_pose",
+        "base_frame": "base_footprint",
+        "cmd_vel_topic": "cmd_vel",
+        "localization_source": "amcl",
+        "map_frame": "map",
+        "namespace": "",
+        "odom_frame": "odom",
+        "odom_topic": "odom",
+        "ros_domain_id": "",
+        "scan_topic": "scan",
+        "use_sim_time": false
+      },
+      "localization_source": "amcl",
+      "map_frame": "map",
+      "namespace": "",
+      "odom_frame": "odom",
+      "odom_topic": "/odom",
+      "ros_domain_id": "30",
+      "scan_topic": "/scan",
+      "use_sim_time": false
+    },
+    "stationary_amcl_samples": [
+      {
+        "covariance": [
+          0.010105702917911297,
+          0.000657441685157311,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.000657441685157311,
+          0.0018453855863981596,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.005451783658145105
+        ],
+        "receipt_time_nanoseconds": 1789133716258742238,
+        "x_m": 0.38300049495353855,
+        "y_m": -0.03416397248726639,
+        "yaw_rad": -0.01837677520307984
+      },
+      {
+        "covariance": [
+          0.008510636562728463,
+          0.0005714178758843905,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0005714178758843905,
+          0.0016224546823271186,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.004278235450669207
+        ],
+        "receipt_time_nanoseconds": 1789133716851532365,
+        "x_m": 0.3866913044796246,
+        "y_m": -0.033472577842808604,
+        "yaw_rad": -0.019333988123948275
+      },
+      {
+        "covariance": [
+          0.008602694264949307,
+          0.0006811261862296938,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.000681126186229692,
+          0.0016105760734064503,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0035528352141984874
+        ],
+        "receipt_time_nanoseconds": 1789133717405893254,
+        "x_m": 0.3869227058626517,
+        "y_m": -0.03322111462366828,
+        "yaw_rad": -0.023048301371403415
+      },
+      {
+        "covariance": [
+          0.008757688627691745,
+          0.0005742584934647389,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0005742584934647389,
+          0.0015373255367235514,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.003452249689353267
+        ],
+        "receipt_time_nanoseconds": 1789133718005823552,
+        "x_m": 0.3824160187126759,
+        "y_m": -0.03337073774376299,
+        "yaw_rad": -0.020228461966926025
+      },
+      {
+        "covariance": [
+          0.007983072633006433,
+          0.0005162579446535785,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0005162579446535785,
+          0.0015262981642750583,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.003418574414781331
+        ],
+        "receipt_time_nanoseconds": 1789133718605711275,
+        "x_m": 0.38630830343516326,
+        "y_m": -0.03197293527643674,
+        "yaw_rad": -0.02091373201988867
+      }
+    ],
+    "stationary_map_from_odom_samples": [
+      {
+        "amcl_sample_index": 0,
+        "capture_time_nanoseconds": 1789133718701421115,
+        "capture_time_sec": 1789133718.701421,
+        "header_age_sec": -0.942652118,
+        "max_age_sec": 1.0,
+        "max_future_sec": 1.1,
+        "observed_source_frame": "odom",
+        "observed_target_frame": "map",
+        "quaternion": {
+          "norm": 0.9999999999999999,
+          "w": 0.999296528644121,
+          "x": 0.0,
+          "y": 0.0,
+          "z": -0.037502637771353396
+        },
+        "receipt_age_sec": 0.0,
+        "receipt_time_nanoseconds": 1789133718701421115,
+        "receipt_time_sec": 1789133718.701421,
+        "source": "direct_dynamic_tf",
+        "source_frame": "odom",
+        "stamp_nanoseconds": 1789133719644073233,
+        "stamp_sec": 1789133719.6440732,
+        "stationary_epoch_sample_index": 0,
+        "target_frame": "map",
+        "x_m": -1.5903430348697059,
+        "y_m": -0.4373561778779521,
+        "yaw_rad": -0.07502286851422829
+      },
+      {
+        "amcl_sample_index": 1,
+        "capture_time_nanoseconds": 1789133718800789058,
+        "capture_time_sec": 1789133718.8007889,
+        "header_age_sec": -0.938965722,
+        "max_age_sec": 1.0,
+        "max_future_sec": 1.1,
+        "observed_source_frame": "odom",
+        "observed_target_frame": "map",
+        "quaternion": {
+          "norm": 0.9999999999999999,
+          "w": 0.999296528644121,
+          "x": 0.0,
+          "y": 0.0,
+          "z": -0.037502637771353396
+        },
+        "receipt_age_sec": 0.0,
+        "receipt_time_nanoseconds": 1789133718800789058,
+        "receipt_time_sec": 1789133718.8007889,
+        "source": "direct_dynamic_tf",
+        "source_frame": "odom",
+        "stamp_nanoseconds": 1789133719739754780,
+        "stamp_sec": 1789133719.7397547,
+        "stationary_epoch_sample_index": 1,
+        "target_frame": "map",
+        "x_m": -1.5903430348697059,
+        "y_m": -0.4373561778779521,
+        "yaw_rad": -0.07502286851422829
+      },
+      {
+        "amcl_sample_index": 2,
+        "capture_time_nanoseconds": 1789133718902546508,
+        "capture_time_sec": 1789133718.9025464,
+        "header_age_sec": -0.938142827,
+        "max_age_sec": 1.0,
+        "max_future_sec": 1.1,
+        "observed_source_frame": "odom",
+        "observed_target_frame": "map",
+        "quaternion": {
+          "norm": 0.9999999999999999,
+          "w": 0.999296528644121,
+          "x": 0.0,
+          "y": 0.0,
+          "z": -0.037502637771353396
+        },
+        "receipt_age_sec": 0.0,
+        "receipt_time_nanoseconds": 1789133718902546508,
+        "receipt_time_sec": 1789133718.9025464,
+        "source": "direct_dynamic_tf",
+        "source_frame": "odom",
+        "stamp_nanoseconds": 1789133719840689335,
+        "stamp_sec": 1789133719.8406894,
+        "stationary_epoch_sample_index": 2,
+        "target_frame": "map",
+        "x_m": -1.5903430348697059,
+        "y_m": -0.4373561778779521,
+        "yaw_rad": -0.07502286851422829
+      },
+      {
+        "amcl_sample_index": 3,
+        "capture_time_nanoseconds": 1789133719000824112,
+        "capture_time_sec": 1789133719.000824,
+        "header_age_sec": -0.935880629,
+        "max_age_sec": 1.0,
+        "max_future_sec": 1.1,
+        "observed_source_frame": "odom",
+        "observed_target_frame": "map",
+        "quaternion": {
+          "norm": 0.9999999999999999,
+          "w": 0.999296528644121,
+          "x": 0.0,
+          "y": 0.0,
+          "z": -0.037502637771353396
+        },
+        "receipt_age_sec": 0.0,
+        "receipt_time_nanoseconds": 1789133719000824112,
+        "receipt_time_sec": 1789133719.000824,
+        "source": "direct_dynamic_tf",
+        "source_frame": "odom",
+        "stamp_nanoseconds": 1789133719936704741,
+        "stamp_sec": 1789133719.9367049,
+        "stationary_epoch_sample_index": 3,
+        "target_frame": "map",
+        "x_m": -1.5903430348697059,
+        "y_m": -0.4373561778779521,
+        "yaw_rad": -0.07502286851422829
+      },
+      {
+        "amcl_sample_index": 4,
+        "capture_time_nanoseconds": 1789133719101512267,
+        "capture_time_sec": 1789133719.1015122,
+        "header_age_sec": -0.935651976,
+        "max_age_sec": 1.0,
+        "max_future_sec": 1.1,
+        "observed_source_frame": "odom",
+        "observed_target_frame": "map",
+        "quaternion": {
+          "norm": 0.9999999999999999,
+          "w": 0.999296528644121,
+          "x": 0.0,
+          "y": 0.0,
+          "z": -0.037502637771353396
+        },
+        "receipt_age_sec": 0.0,
+        "receipt_time_nanoseconds": 1789133719101512267,
+        "receipt_time_sec": 1789133719.1015122,
+        "source": "direct_dynamic_tf",
+        "source_frame": "odom",
+        "stamp_nanoseconds": 1789133720037164243,
+        "stamp_sec": 1789133720.0371642,
+        "stationary_epoch_sample_index": 4,
+        "target_frame": "map",
+        "x_m": -1.5903430348697059,
+        "y_m": -0.4373561778779521,
+        "yaw_rad": -0.07502286851422829
+      }
+    ]
+  },
+  "preflight_sha256": "41a329484f6236e77286390d71516021b59405f4df97d8960142099d34082113",
+  "projection_sha256": "659afab7b5d40b0286a67a2c3c01b845b17c15d6ba6277a75944192c2aa4e033",
+  "run_id": "stand_explore_exact2_camera_all5_20260911T133125Z",
+  "source_commit": "b1d1ddf7a5b72a2789a4a814319fb1ccb0c00510"
+}
