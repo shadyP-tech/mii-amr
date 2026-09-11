@@ -23,6 +23,9 @@ from collections.abc import Mapping
 from typing import Callable, Generic, TypeVar
 
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.localization.startup_route_admission import (
+    evaluate_odom_startup_route_rejection,
+)
 from scripts.aufgabe04.navigation.localization.prestart_localization_reseal import (
     evaluate_prestart_localization_reseal,
     prestart_localization_stop_reason_matches,
@@ -33,6 +36,7 @@ from scripts.aufgabe04.navigation.localization.runtime_localization_reseal impor
 from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization import (
     STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH,
     STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY,
+    STARTUP_RESEAL_RECOVERY_SOURCE_ODOM_STARTUP_ROUTE_MISMATCH,
 )
 from scripts.aufgabe04.real_robot.execution.child_runner import MotionLegOutcome
 from scripts.aufgabe04.real_robot.candidate.recovery_dispatch import (
@@ -133,6 +137,7 @@ class CandidateStartupRecoveryAttempt:
     attempt_root: Path
     fresh_localization_evidence_path: Path
     source_root: Path
+    rejected_permit_disposition_path: Path | None = None
 
 
 RequestT = TypeVar("RequestT")
@@ -159,6 +164,9 @@ class CandidateStartupRecoveryEffects(Generic[RequestT]):
     describe_request: Callable[[RequestT], CandidateRoutineIdentity]
     event_sink: EventSink
     clock: Callable[[], float] = time.time
+    retire_rejected_permit: Callable[
+        [MotionLegOutcome, CandidateRoutineIdentity, int, Path], Path
+    ] | None = None
 
 
 def _attempt_paths(
@@ -322,10 +330,18 @@ def _reject_outcome(
 
 
 def _recovery_source_kind(outcome: MotionLegOutcome) -> str | None:
-    """Classify the two authorized no-motion startup recovery sources."""
+    """Classify only explicitly evidenced no-motion startup rejections."""
 
     if is_resealable_startup_mismatch(outcome):
         return STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH
+    admission = evaluate_odom_startup_route_rejection(
+        status=outcome.status,
+        motion_published=outcome.motion_published,
+        stop_reason=outcome.stop_reason,
+        stop_details=outcome.stop_details,
+    )
+    if admission.eligible and outcome.returncode != 0:
+        return STARTUP_RESEAL_RECOVERY_SOURCE_ODOM_STARTUP_ROUTE_MISMATCH
     decision = evaluate_prestart_localization_reseal(
         status=outcome.status,
         motion_published=outcome.motion_published,
@@ -343,6 +359,44 @@ def _recovery_source_kind(outcome: MotionLegOutcome) -> str | None:
     ):
         return None
     return STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY
+
+
+def _close_rejected_authority(
+    config: CandidateStartupRecoveryConfig,
+    effects: CandidateStartupRecoveryEffects[RequestT],
+    *,
+    outcome: MotionLegOutcome,
+    identity: CandidateRoutineIdentity,
+    reseal_index: int,
+    artifact_root: Path,
+    exhausted: bool = False,
+) -> Path:
+    """Close unused authority even when the retry budget prevents replacement."""
+
+    try:
+        if effects.retire_rejected_permit is None:
+            raise RuntimeError("odom startup recovery requires rejected permit disposition")
+        path = effects.retire_rejected_permit(
+            outcome, identity, reseal_index, artifact_root,
+        )
+        if not isinstance(path, Path):
+            raise TypeError("permit disposition effect must return a Path")
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("permit disposition must be a regular evidence file")
+    except Exception as exc:
+        raise _fail_callback(
+            config, effects, phase="rejected_permit_disposition",
+            run_id=identity.run_id, reseal_index=reseal_index, exc=exc,
+        ) from exc
+    _emit(config, effects, {
+        "event": "candidate_startup_rejected_authority_closed",
+        "rejected_run_id": outcome.run_id,
+        "startup_reseal_index": reseal_index,
+        "rejected_permit_disposition_json": str(path),
+        "replacement_budget_exhausted": exhausted,
+        "motion_published": False,
+    })
+    return path
 
 
 def execute_candidate_motion_with_startup_recovery(
@@ -522,6 +576,17 @@ def execute_candidate_motion_with_startup_recovery(
                 preserve_child_reason=True,
             )
         if completed_reseal_count >= config.max_startup_reseals:
+            if (
+                recovery_source_kind
+                == STARTUP_RESEAL_RECOVERY_SOURCE_ODOM_STARTUP_ROUTE_MISMATCH
+            ):
+                _close_rejected_authority(
+                    config, effects, outcome=outcome, identity=expected_identity,
+                    reseal_index=completed_reseal_count + 1,
+                    artifact_root=(Path(config.recovery_root)
+                                   / f"terminal_rejection_{completed_reseal_count:03d}"),
+                    exhausted=True,
+                )
             rejection = RejectedChildFailure.from_outcome(
                 outcome,
                 policy_reason="candidate startup reseal budget exhausted",
@@ -586,6 +651,15 @@ def execute_candidate_motion_with_startup_recovery(
                 ),
             },
         )
+        disposition_path = None
+        if (
+            recovery_source_kind
+            == STARTUP_RESEAL_RECOVERY_SOURCE_ODOM_STARTUP_ROUTE_MISMATCH
+        ):
+            disposition_path = _close_rejected_authority(
+                config, effects, outcome=outcome, identity=expected_identity,
+                reseal_index=reseal_index, artifact_root=attempt_root,
+            )
         try:
             fresh_pose = _validate_pose(
                 effects.admit_fresh_stationary_localization(evidence_path)
@@ -610,6 +684,7 @@ def execute_candidate_motion_with_startup_recovery(
             attempt_root=attempt_root,
             fresh_localization_evidence_path=evidence_path,
             source_root=source_root,
+            rejected_permit_disposition_path=disposition_path,
         )
         _emit(
             config,

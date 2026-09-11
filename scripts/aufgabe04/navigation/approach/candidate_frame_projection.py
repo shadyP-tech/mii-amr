@@ -8,6 +8,7 @@ and never authorizes motion.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, replace
 import math
 from typing import Mapping
@@ -45,12 +46,13 @@ class CandidateFrameProjectionError(ValueError):
 
 @dataclass(frozen=True)
 class CandidatePlanningFrame:
-    """One stationary planning pose and its simultaneous map/odom frame."""
+    """One stationary planning pose and its authoritative map/odom frame."""
 
     current_pose: Pose2D
     map_from_odom: PlanarTransform2D
     map_frame: str = "map"
     odom_frame: str = "odom"
+    pose_provenance: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.current_pose, Pose2D):
@@ -87,7 +89,7 @@ class CandidatePlanningFrame:
             )
 
     def to_evidence(self) -> dict[str, object]:
-        return {
+        evidence: dict[str, object] = {
             "current_pose": {
                 "x_m": self.current_pose.x_m,
                 "y_m": self.current_pose.y_m,
@@ -101,6 +103,9 @@ class CandidatePlanningFrame:
             "map_frame": self.map_frame,
             "odom_frame": self.odom_frame,
         }
+        if self.pose_provenance is not None:
+            evidence["pose_provenance"] = deepcopy(dict(self.pose_provenance))
+        return evidence
 
 
 @dataclass(frozen=True)

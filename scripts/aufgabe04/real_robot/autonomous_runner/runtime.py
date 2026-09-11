@@ -72,6 +72,12 @@ from scripts.aufgabe04.navigation.localization.ros_preflight import (
     RosPreflightRequirements,
     run_ros_preflight,
 )
+from scripts.aufgabe04.navigation.localization.startup_route_admission import (
+    evaluate_odom_startup_route_rejection,
+)
+from scripts.aufgabe04.real_robot.candidate.startup_permit_retirement import (
+    retire_candidate_startup_permit,
+)
 from scripts.aufgabe04.navigation.foundation.ros_runtime_config import resolve_topic
 from scripts.aufgabe04.navigation.execution.runtime_motion_authorization import (
     MISSION_MOTION_AUTHORIZATION_SCOPE,
@@ -764,6 +770,13 @@ def _run_motion_leg(
         except RuntimeError as exc:
             raise RuntimeError(f"dry-run failed for {run_id}: {exc}") from exc
         if is_resealable_startup_mismatch(outcome):
+            return outcome
+        if evaluate_odom_startup_route_rejection(
+            status=outcome.status,
+            stop_reason=outcome.stop_reason,
+            stop_details=outcome.stop_details,
+            motion_published=outcome.motion_published,
+        ).eligible:
             return outcome
         if evaluate_localization_readiness_retry(
             status=outcome.status,
@@ -1715,6 +1728,8 @@ def _run_candidate_startup_reseal_motion_leg(
         diagnostics_json=Path(request.sealed["diagnostics_json"]),
         additional_typed_run_required=False,
         recovery_source_kind=attempt.recovery_source_kind,
+        rejected_permit_disposition_path=attempt.rejected_permit_disposition_path,
+        fresh_start_pose_basis="latest_direct_map_from_odom_composed_with_odom_base",
     )
     permit_context = StartupResealPermitContext(
         mission_authorization_json=Path(
@@ -2869,6 +2884,7 @@ def main(argv=None) -> int:
                         evidence_path=evidence_path,
                     )
                 ),
+                retire_startup_rejected_permit=retire_candidate_startup_permit,
                 run_startup_reseal_motion_leg=(
                     lambda request, attempt: (
                         _run_candidate_startup_reseal_motion_leg(

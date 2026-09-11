@@ -21,6 +21,7 @@ from scripts.aufgabe04.real_robot.candidate.startup_recovery import (
 )
 from scripts.aufgabe04.real_robot.execution.child_runner import MotionLegOutcome
 from tests.aufgabe04.test_initial_map_tf_recovery import initial_map_tf_stop
+from tests.aufgabe04.test_startup_route_admission import recorded_stop_details
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,8 @@ class CandidateRecoveryDispatchTest(unittest.TestCase):
         self.calls, self.admissions, self.events = [], [], []
         self.mutate_outcome = lambda owner, outcome: outcome
         self.mutate_request = lambda owner, request: request
+        self.dispositions, self.effect_order = [], []
+        self.retirement_error = None
 
     def outcome(self, identity, phase, owner):
         reason = "global localization consistency requires zero and reseal"
@@ -68,10 +71,13 @@ class CandidateRecoveryDispatchTest(unittest.TestCase):
         elif phase == "cold_global_tf":
             reason = "TF transform unavailable: map <- odom"
             details = initial_map_tf_stop()
+        elif phase in ("odom_startup_execute", "odom_startup_dry"):
+            details = recorded_stop_details(dry_run=phase == "odom_startup_dry")
+            reason, status = details["reason"], "preflight_failed"
         elif phase != "prestart":
             raise AssertionError(phase)
         fields = {}
-        if phase != "preflight":
+        if phase not in ("preflight", "odom_startup_dry"):
             prefix = {"initial": "mission_leg_motion_permit", "startup": "startup_reseal_motion_permit",
                       "runtime": "motion_authorization_permit"}[owner]
             path = self.root / "permits" / f"{identity.run_id}.json"
@@ -87,20 +93,35 @@ class CandidateRecoveryDispatchTest(unittest.TestCase):
     def execute(self, phases, *, startup_budget=3, runtime_budget=2):
         phases = iter(phases)
         def run(owner, request, attempt=None):
+            self.effect_order.append(("run", owner))
             self.calls.append((owner, request.identity, attempt))
             expected_owner, phase = next(phases)
             self.assertEqual(owner, expected_owner)
             return self.mutate_outcome(owner, self.outcome(request.identity, phase, owner))
         def admit(path):
+            self.effect_order.append(("admit", path))
             self.admissions.append(path)
             path.parent.mkdir(parents=True, exist_ok=False)
             path.write_text('{"accepted":true}')
             return Pose2D(0.1, 0.0, 0.0)
         def replan(owner, attempt):
+            self.effect_order.append(("replan", owner))
             attempt.source_root.mkdir()
             (attempt.source_root / "route.csv").write_text("x,y\n0.1,0.0\n")
             return self.mutate_request(owner, Request(attempt.identity))
         event = lambda path, payload: self.events.append(payload)
+        def retire(outcome, identity, index, artifact_root):
+            self.effect_order.append(("retire", identity.run_id))
+            if self.retirement_error is not None:
+                raise self.retirement_error
+            self.assertEqual(outcome.run_id, identity.run_id)
+            self.assertIs(outcome.motion_published, False)
+            path = self.root / "dispositions" / f"{identity.run_id}.json"
+            path.parent.mkdir(exist_ok=True)
+            with path.open("x") as handle:
+                json.dump({"retired_run": identity.run_id}, handle)
+            self.dispositions.append((identity.run_id, index, path))
+            return path
         startup = CandidateStartupRecoveryConfig(self.identity, self.root / "startup", self.root / "events.jsonl",
             startup_budget, allow_runtime_localization_handoff=bool(runtime_budget))
         runtime = CandidateRuntimeRecoveryConfig(self.identity, self.root / "runtime", self.root / "events.jsonl", runtime_budget)
@@ -111,12 +132,89 @@ class CandidateRecoveryDispatchTest(unittest.TestCase):
                 run_replacement=lambda request, attempt: run("startup", request, attempt),
                 admit_fresh_stationary_localization=admit,
                 replan_same_routine=lambda attempt: replan("startup", attempt),
-                describe_request=lambda request: request.identity, event_sink=event),
+                describe_request=lambda request: request.identity, event_sink=event,
+                retire_rejected_permit=retire),
             runtime_effects=CandidateRuntimeRecoveryEffects(
                 run_replacement=lambda request, attempt: run("runtime", request, attempt),
                 admit_fresh_stationary_localization=admit,
                 replan_same_routine=lambda attempt: replan("runtime", attempt),
                 describe_request=lambda request: request.identity, event_sink=event))
+
+    def test_recorded_odom_rejection_retires_before_fresh_admission_and_replan(self):
+        result = self.execute([("initial", "odom_startup_execute"), ("startup", "completed")])
+        self.assertEqual(result.status, "completed")
+        self.assertEqual([action[0] for action in self.effect_order],
+                         ["run", "retire", "admit", "replan", "run"])
+        attempt = self.calls[-1][2]
+        self.assertEqual(attempt.recovery_source_kind, "odom_startup_route_mismatch")
+        self.assertEqual(attempt.rejected_permit_disposition_path, self.dispositions[0][2])
+        self.assertNotEqual(result.run_id, attempt.rejected_outcome.run_id)
+        self.assertEqual(result.run_id, self.identity.replacement(1).run_id)
+
+    def test_dry_odom_rejection_can_replan_without_an_issued_permit(self):
+        result = self.execute([("initial", "odom_startup_dry"), ("startup", "completed")])
+        self.assertEqual(result.status, "completed")
+        rejected = self.calls[-1][2].rejected_outcome
+        self.assertIsNone(rejected.mission_leg_motion_permit_path)
+        self.assertIsNone(rejected.startup_reseal_motion_permit_path)
+        self.assertEqual(len(self.dispositions), 1)
+
+    def test_repeated_odom_rejections_close_final_permit_when_budget_exhausted(self):
+        with self.assertRaises(CandidateStartupRecoveryError) as caught:
+            self.execute([("initial", "odom_startup_execute"),
+                          ("startup", "odom_startup_execute")], startup_budget=1)
+        self.assertEqual(caught.exception.phase, "budget_exhausted")
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(len(self.admissions), 1)
+        self.assertEqual(len(self.dispositions), 2)
+        closed = [event for event in self.events
+                  if event["event"] == "candidate_startup_rejected_authority_closed"]
+        self.assertIs(closed[-1]["replacement_budget_exhausted"], True)
+
+    def test_retirement_failure_prevents_localization_replan_and_replacement(self):
+        self.retirement_error = FileExistsError("old permit already claimed")
+        with self.assertRaises(CandidateStartupRecoveryError) as caught:
+            self.execute([("initial", "odom_startup_execute")])
+        self.assertEqual(caught.exception.phase, "rejected_permit_disposition")
+        self.assertEqual(len(self.calls), 1)
+        self.assertFalse(self.admissions)
+
+    def test_runtime_execute_admission_rejection_hands_back_to_startup(self):
+        result = self.execute([("initial", "runtime"), ("runtime", "odom_startup_execute"),
+                               ("startup", "completed")], runtime_budget=1)
+        self.assertEqual(result.status, "completed")
+        attempt = self.calls[-1][2]
+        self.assertIsNotNone(attempt.rejected_outcome.motion_authorization_permit_path)
+        self.assertIsNone(attempt.rejected_outcome.startup_reseal_motion_permit_path)
+        self.assertEqual(len(self.dispositions), 1)
+
+    def test_runtime_dry_admission_rejection_handoff_keeps_runtime_budget(self):
+        with self.assertRaises(CandidateRuntimeRecoveryError) as caught:
+            self.execute([("initial", "runtime"), ("runtime", "odom_startup_dry"),
+                          ("startup", "runtime")], runtime_budget=1)
+        self.assertEqual(caught.exception.phase, "budget_exhausted")
+        self.assertEqual([owner for owner, _, _ in self.calls], ["initial", "runtime", "startup"])
+        self.assertEqual(len(self.admissions), 2)
+        self.assertEqual(len(self.dispositions), 1)
+
+    def test_alternating_odom_and_runtime_recovery_keeps_both_budgets(self):
+        with self.assertRaises(CandidateStartupRecoveryError) as caught:
+            self.execute([("initial", "odom_startup_execute"), ("startup", "runtime"),
+                          ("runtime", "odom_startup_execute")], startup_budget=1)
+        self.assertEqual(caught.exception.phase, "budget_exhausted")
+        self.assertEqual([owner for owner, _, _ in self.calls], ["initial", "startup", "runtime"])
+        self.assertEqual(len(self.admissions), 2)
+        self.assertEqual(len(self.dispositions), 2)
+
+    def test_tampered_typed_rejection_does_not_enter_recovery(self):
+        def tamper(owner, outcome):
+            outcome.stop_details["startup_route_admission"]["tracking_tube_radius_m"] = 0.04
+            return outcome
+        self.mutate_outcome = tamper
+        with self.assertRaises(CandidateStartupRecoveryError):
+            self.execute([("initial", "odom_startup_execute")])
+        self.assertFalse(self.dispositions)
+        self.assertFalse(self.admissions)
 
     def test_saved_runtime_replacement_prestart_stop_returns_to_startup(self):
         self.assertTrue(evaluate_prestart_localization_reseal(status="stopped", motion_published=False,

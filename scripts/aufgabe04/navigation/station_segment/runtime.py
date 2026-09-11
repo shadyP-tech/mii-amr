@@ -954,7 +954,17 @@ def main(argv: list[str] | None = None) -> int:
         observations=_observation_log_rows(preflight.observations),
         runtime_config=preflight.runtime_config,
     )
-    startup_rejection = _static_start_preflight_rejection(
+    mission_leg_fields = build_mission_leg_event_fields(args)
+    # Candidate odom admission below validates pose provenance/composition and
+    # checks the actual transformed route. A second chained-map tube decision
+    # can use another localization timestamp and must not mask that decision.
+    candidate_odom_admission = args.execution_pose_frame == "odom" and (
+        mission_leg_fields.get("mission_leg_kind") in {
+            MissionLegKind.CANDIDATE_PREAPPROACH.value,
+            MissionLegKind.OPPOSITE_FACE.value,
+        }
+    )
+    startup_rejection = None if candidate_odom_admission else _static_start_preflight_rejection(
         preflight,
         leg,
         map_frame=resolved.map_frame,
@@ -1045,6 +1055,8 @@ def main(argv: list[str] | None = None) -> int:
                 "odom_execution_admission_failed",
                 run_id=args.run_id,
                 leg_index=leg.leg_index,
+                **mission_leg_fields,
+                dry_run=args.dry_run,
                 status=result.status,
                 stop_reason=stop_reason,
                 motion_published=False,
@@ -1055,6 +1067,8 @@ def main(argv: list[str] | None = None) -> int:
                 "safety_stop",
                 run_id=args.run_id,
                 leg_index=leg.leg_index,
+                **mission_leg_fields,
+                dry_run=args.dry_run,
                 status=result.status,
                 stop_reason=stop_reason,
                 motion_published=False,
@@ -1066,11 +1080,25 @@ def main(argv: list[str] | None = None) -> int:
                 event_logger,
                 "run_finished",
                 run_id=args.run_id,
+                leg_index=leg.leg_index,
+                **mission_leg_fields,
+                dry_run=args.dry_run,
+                status=result.status,
+                motion_published=False,
+                stop_details=stop_details,
                 final_status=result.status,
                 stop_reason=stop_reason,
+                map_route_certificate_json_path=(
+                    str(Path(
+                        args.route_certificate_json
+                        or diagnostics_snapshot.metadata.get("route_certificate_path", "")
+                    ).resolve())
+                    if args.route_certificate_json or diagnostics_snapshot.metadata.get("route_certificate_path")
+                    else ""
+                ),
                 results_csv=str(args.results_csv),
                 semantic_log_path=str(args.semantic_log),
-                preflight_json_path=str(args.preflight_json or ""),
+                preflight_json_path=(str(Path(args.preflight_json).resolve()) if args.preflight_json else ""),
             )
             return 1
         emit_event(

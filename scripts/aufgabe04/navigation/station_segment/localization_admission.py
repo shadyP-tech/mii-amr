@@ -30,6 +30,10 @@ from scripts.aufgabe04.navigation.localization.odom_execution_certificate import
     validate_odom_execution_identity,
     write_odom_execution_certificate,
 )
+from scripts.aufgabe04.navigation.localization.startup_route_admission import (
+    OdomStartupRouteAdmissionRejected,
+    build_odom_startup_route_admission_evidence,
+)
 from scripts.aufgabe04.navigation.localization.odom_route_adapter import (
     OdomExecutionContext,
     adapt_map_route_update_to_odom,
@@ -410,9 +414,36 @@ def _build_odom_execution_admission(
         tracking_tube_radius_m=args.certified_route_tube_radius_m,
     )
     if not startup_decision.ok:
-        raise ValueError(
-            "odom pose is outside the transformed certified startup segment: "
-            + startup_decision.route_check.reason
+        _, map_certificate_sha256 = _resolved_map_execution_certificate(
+            args, diagnostics_snapshot
+        )
+        pose_tf_observations = {}
+        for label, frame in (("map", resolved.map_frame), ("odom", resolved.odom_frame)):
+            matches = [
+                observation.data for observation in preflight.observations
+                if observation.name == f"tf {frame}->{resolved.base_frame}"
+                and observation.ok is True
+            ]
+            if len(matches) != 1:
+                raise ValueError("startup pose has no unique successful TF provenance")
+            pose_tf_observations[label] = matches[0]
+        raise OdomStartupRouteAdmissionRejected(
+            dry_run=args.dry_run,
+            evidence=build_odom_startup_route_admission_evidence(
+                map_route=map_route,
+                odom_pose=preflight.odom_pose,
+                chained_map_pose=preflight.route_pose,
+                map_from_odom=preflight.map_from_odom,
+                pose_tf_observations=pose_tf_observations,
+                map_frame=resolved.map_frame,
+                odom_frame=resolved.odom_frame,
+                base_frame=resolved.base_frame,
+                tracking_tube_radius_m=args.certified_route_tube_radius_m,
+                max_tf_age_sec=args.max_tf_age_sec,
+                max_composition_yaw_error_rad=args.max_stationary_amcl_yaw_spread_rad,
+                source_preflight_sha256=payload_sha256(preflight.to_json_dict()),
+                source_map_execution_certificate_sha256=map_certificate_sha256,
+            ),
         )
 
     covariance, heading_sigma_rad, covariance_evidence = (

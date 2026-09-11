@@ -42,6 +42,10 @@ tests/aufgabe04/*
 !tests/aufgabe04/*.py
 !tests/aufgabe04/fixtures/
 tests/aufgabe04/fixtures/*
+!tests/aufgabe04/fixtures/candidate_planning_frame_20260911T124500Z.json
+!tests/aufgabe04/fixtures/startup_route_admission_20260911/
+tests/aufgabe04/fixtures/startup_route_admission_20260911/*
+!tests/aufgabe04/fixtures/startup_route_admission_20260911/inputs.json
 !tests/aufgabe04/fixtures/exact_two_six_candidate_run_20260907.json
 !tests/aufgabe04/fixtures/lidar_morphology_conflict_20260907.json
 !tests/aufgabe04/fixtures/candidate_runtime_prestart_stop_20260908.json

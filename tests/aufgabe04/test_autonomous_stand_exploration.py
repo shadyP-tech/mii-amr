@@ -1501,67 +1501,14 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             map_frame="map",
             odom_frame="odom",
         )
+        fixture = json.loads(
+            (Path(__file__).parent / "fixtures" /
+             "candidate_planning_frame_20260911T124500Z.json").read_text()
+        )
+        payload = fixture["preflight"]
         preflight = RosPreflightResult(
-            ok=True,
-            failures=[],
-            observations=[
-                RosObservation(
-                    "stationary map<-odom transform samples",
-                    True,
-                    "paired_samples=2/2",
-                    {"required_pair_count": 2},
-                ),
-                RosObservation(
-                    "tf map->odom",
-                    True,
-                    "age=0.010s",
-                    {"target_frame": "map", "source_frame": "odom"},
-                ),
-            ],
-            runtime_config={"localization_source": "amcl"},
-            preflight_requirements={
-                "stationary_map_from_odom_pairing_requested": True,
-                "stationary_map_from_odom_pairing_required": True,
-            },
-            route_pose={
-                "frame_id": "map",
-                "child_frame_id": "base_footprint",
-                "x_m": 1.2,
-                "y_m": 0.3,
-                "yaw_rad": 0.7,
-            },
-            map_from_odom={
-                "target_frame": "map",
-                "source_frame": "odom",
-                "stamp_sec": 1.2e-8,
-                "x_m": -1.638358757,
-                "y_m": -0.437467937,
-                "yaw_rad": -0.108542892,
-            },
-            stationary_map_from_odom_samples=[
-                {
-                    "source": "direct_dynamic_tf",
-                    "target_frame": "map",
-                    "source_frame": "odom",
-                    "amcl_sample_index": 0,
-                    "stamp_nanoseconds": 10,
-                    "receipt_time_nanoseconds": 20,
-                    "x_m": -1.638358757,
-                    "y_m": -0.437467937,
-                    "yaw_rad": -0.108542892,
-                },
-                {
-                    "source": "direct_dynamic_tf",
-                    "target_frame": "map",
-                    "source_frame": "odom",
-                    "amcl_sample_index": 1,
-                    "stamp_nanoseconds": 11,
-                    "receipt_time_nanoseconds": 21,
-                    "x_m": -1.638358757,
-                    "y_m": -0.437467937,
-                    "yaw_rad": -0.108542892,
-                },
-            ],
+            **{key: value for key, value in payload.items() if key != "observations"},
+            observations=[RosObservation(**value) for value in payload["observations"]],
         )
         with tempfile.TemporaryDirectory() as tmp, patch(
             "scripts.aufgabe04.real_robot.autonomous_runner.runtime."
@@ -1576,11 +1523,17 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 Path(tmp) / "preflight/candidate_planning_frame.json"
             ).is_file()
 
-        self.assertEqual(admitted.current_pose, Pose2D(1.2, 0.3, 0.7))
+        self.assertEqual(
+            admitted.current_pose, Pose2D(**fixture["expected_authoritative_pose"]),
+        )
+        self.assertEqual(
+            admitted.to_evidence()["pose_provenance"]["diagnostic_chained_map_pose"],
+            {key: preflight.route_pose[key] for key in ("x_m", "y_m", "yaw_rad")},
+        )
         self.assertEqual(admitted.map_frame, "map")
         self.assertEqual(admitted.odom_frame, "odom")
-        self.assertAlmostEqual(admitted.map_from_odom.x_m, -1.638358757)
-        self.assertAlmostEqual(admitted.map_from_odom.yaw_rad, -0.108542892)
+        self.assertAlmostEqual(admitted.map_from_odom.x_m, -1.6070965415105474)
+        self.assertAlmostEqual(admitted.map_from_odom.yaw_rad, -0.07887870024602)
         self.assertTrue(candidate_evidence_written)
         requirements = run_preflight.call_args.kwargs[
             "preflight_requirements"
@@ -3660,6 +3613,45 @@ class AutonomousStandExplorationTest(unittest.TestCase):
 
             self.assertTrue(is_resealable_startup_mismatch(outcome))
             self.assertEqual(run.call_count, 1)
+
+    def test_typed_dry_odom_rejection_reaches_parent_without_execution(self):
+        from tests.aufgabe04.test_startup_route_admission import recorded_stop_details
+        from scripts.aufgabe04.navigation.localization.startup_route_admission import (
+            evaluate_odom_startup_route_rejection,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "typed_dry_rejected"
+            details = recorded_stop_details(dry_run=True)
+            def reject_dry(command, **kwargs):
+                self.assertIn("--dry-run", command)
+                log = root / "run_events" / f"{run_id}.jsonl"
+                log.parent.mkdir(parents=True)
+                log.write_text(json.dumps({
+                    "event": "safety_stop", "run_id": run_id,
+                    "status": "preflight_failed", "motion_published": False,
+                    "stop_reason": details["reason"], "stop_details": details,
+                }) + "\n")
+                return SimpleNamespace(returncode=1)
+            with patch(
+                "scripts.aufgabe04.real_robot.autonomous_runner.runtime.subprocess.run",
+                side_effect=reject_dry,
+            ) as runner:
+                outcome = _run_motion_leg(
+                    profile=self._profile(), run_id=run_id, session_root=root,
+                    sealed={"route_csv": str(root / "route.csv"),
+                            "diagnostics_json": str(root / "diagnostics.json"),
+                            "route_certificate_json": str(root / "certificate.json")},
+                    execute=True,
+                    uncertainty_map_yaml=root / "map.yaml",
+                    localization_branch_proof_id="test-recorded-branch",
+                )
+            self.assertEqual(runner.call_count, 1)
+            self.assertIsNone(outcome.mission_leg_motion_permit_path)
+            self.assertTrue(evaluate_odom_startup_route_rejection(
+                status=outcome.status, motion_published=outcome.motion_published,
+                stop_reason=outcome.stop_reason, stop_details=outcome.stop_details,
+            ).eligible)
 
     def test_resealed_route_without_permit_stops_without_reprompting(self):
         with tempfile.TemporaryDirectory() as tmp:

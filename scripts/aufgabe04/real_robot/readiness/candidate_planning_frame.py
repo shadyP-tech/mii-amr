@@ -11,6 +11,7 @@ independently inside that epoch.
 
 from __future__ import annotations
 
+from copy import deepcopy
 import math
 from typing import Mapping
 
@@ -18,6 +19,9 @@ from scripts.aufgabe04.navigation.approach.candidate_frame_projection import (
     CandidatePlanningFrame,
 )
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.localization.candidate_planning_pose import (
+    admitted_candidate_planning_pose,
+)
 from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
     PlanarTransform2D,
 )
@@ -142,7 +146,7 @@ def _finite_planar_pose(
         for key in ("x_m", "y_m", "yaw_rad")
     ):
         raise RuntimeError(
-            f"candidate planning frame {name} map<-odom pose is invalid"
+            f"candidate planning frame {name} pose is invalid"
         )
     try:
         x_m = float(value["x_m"])
@@ -150,12 +154,12 @@ def _finite_planar_pose(
         yaw_rad = float(value["yaw_rad"])
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
         raise RuntimeError(
-            f"candidate planning frame {name} map<-odom pose is invalid: "
+            f"candidate planning frame {name} pose is invalid: "
             f"{exc}"
         ) from exc
     if not all(math.isfinite(component) for component in (x_m, y_m, yaw_rad)):
         raise RuntimeError(
-            f"candidate planning frame {name} map<-odom pose contains "
+            f"candidate planning frame {name} pose contains "
             "non-finite values"
         )
     return x_m, y_m, yaw_rad
@@ -256,7 +260,12 @@ def build_candidate_planning_frame(
     map_frame: str,
     odom_frame: str,
 ) -> CandidatePlanningFrame:
-    """Validate stopped transform evidence and bind the planning frame."""
+    """Use one admitted direct transform for the route anchor and candidates.
+
+    ``current_pose`` remains a chained-map diagnostic for API compatibility.
+    It cannot supply the route anchor: that lookup may use an earlier AMCL
+    update than the direct transform used to project the frozen candidates.
+    """
 
     expected_map_frame = _frame_id(map_frame)
     expected_odom_frame = _frame_id(odom_frame)
@@ -298,12 +307,46 @@ def build_candidate_planning_frame(
         last_paired_sample=last_paired_sample,
     )
     transform = PlanarTransform2D(*transform_pose)
+    try:
+        authoritative_pose, provenance = admitted_candidate_planning_pose(
+            preflight.to_json_dict(),
+            map_frame=expected_map_frame,
+            odom_frame=expected_odom_frame,
+        )
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    odom_capture = provenance["odom_pose_capture"]
+    chained_pose = {
+        "x_m": current_pose.x_m,
+        "y_m": current_pose.y_m,
+        "yaw_rad": current_pose.yaw_rad,
+    }
+    _finite_planar_pose(chained_pose, name="diagnostic chained map")
+    chained_observations = [
+        observation for observation in preflight.observations
+        if observation.name == f"tf {expected_map_frame}->{odom_capture['source_frame']}"
+    ]
+    provenance.update({
+        "diagnostic_chained_map_pose": chained_pose,
+        "diagnostic_chained_map_capture": (
+            deepcopy(dict(chained_observations[0].data))
+            if len(chained_observations) == 1 else None
+        ),
+        "chained_to_authoritative_translation_delta_m": math.hypot(
+            authoritative_pose.x_m - current_pose.x_m,
+            authoritative_pose.y_m - current_pose.y_m,
+        ),
+        "chained_to_authoritative_yaw_delta_rad": _shortest_yaw_delta_rad(
+            authoritative_pose.yaw_rad, current_pose.yaw_rad,
+        ),
+    })
 
     return CandidatePlanningFrame(
-        current_pose=current_pose,
+        current_pose=authoritative_pose,
         map_from_odom=transform,
         map_frame=expected_map_frame,
         odom_frame=expected_odom_frame,
+        pose_provenance=provenance,
     )
 
 

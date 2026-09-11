@@ -10,6 +10,9 @@ from typing import Dict, Mapping
 from scripts.aufgabe04.navigation.control.follower_models import FollowerResult
 from scripts.aufgabe04.navigation.foundation.run_events import emit_event
 from scripts.aufgabe04.navigation.foundation.segment_run_logger import append_segment_run
+from scripts.aufgabe04.navigation.localization.startup_route_admission import (
+    OdomStartupRouteAdmissionRejected,
+)
 from scripts.aufgabe04.navigation.execution.route_uncertainty_evidence import (
     RouteUncertaintyAdmissionRejected,
 )
@@ -29,7 +32,7 @@ def build_odom_execution_admission_stop_details(
         "motion_published": False,
         "fail_closed": True,
     }
-    if isinstance(failure, RouteUncertaintyAdmissionRejected):
+    if isinstance(failure, (RouteUncertaintyAdmissionRejected, OdomStartupRouteAdmissionRejected)):
         details.update(failure.to_stop_details())
     return details
 

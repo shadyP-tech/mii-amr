@@ -995,6 +995,9 @@ class CandidateApproachEffects:
         [CandidateMotionLegRequest, CandidateStartupRecoveryAttempt],
         MotionLegOutcome,
     ] | None = None
+    retire_startup_rejected_permit: Callable[
+        [MotionLegOutcome, CandidateRoutineIdentity, int, Path], Path
+    ] | None = None
     admit_runtime_localization: Callable[[Path], Pose2D] | None = None
     run_runtime_localization_reseal_motion_leg: Callable[
         [CandidateMotionLegRequest, CandidateRuntimeRecoveryAttempt],
@@ -1601,6 +1604,7 @@ def _execute_candidate_motion(
             admit_fresh_stationary_localization=admit_localization,
             replan_same_routine=replan_same_routine,
             describe_request=_candidate_routine_identity,
+            retire_rejected_permit=effects.retire_startup_rejected_permit,
             event_sink=lambda path, payload: effects.event_sink(path, payload),
             clock=effects.clock,
         ),

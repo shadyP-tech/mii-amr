@@ -56,10 +56,14 @@ STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH = (
 STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY = (
     "prestart_localization_continuity"
 )
+STARTUP_RESEAL_RECOVERY_SOURCE_ODOM_STARTUP_ROUTE_MISMATCH = (
+    "odom_startup_route_mismatch"
+)
 STARTUP_RESEAL_RECOVERY_SOURCE_KINDS = frozenset(
     {
         STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH,
         STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY,
+        STARTUP_RESEAL_RECOVERY_SOURCE_ODOM_STARTUP_ROUTE_MISMATCH,
     }
 )
 STARTUP_RESEAL_MOTION_AUTHORIZATION_SCOPE = (
@@ -1014,6 +1018,20 @@ def _validate_startup_evidence(permit: StartupResealMotionPermit) -> None:
         == STARTUP_RESEAL_RECOVERY_SOURCE_PRESTART_LOCALIZATION_CONTINUITY
     ):
         _validate_prestart_localization_rejected_semantic_log(permit)
+    elif (
+        permit.recovery_source_kind
+        == STARTUP_RESEAL_RECOVERY_SOURCE_ODOM_STARTUP_ROUTE_MISMATCH
+    ):
+        from scripts.aufgabe04.navigation.execution.startup_route_rejection_evidence import (
+            validate_odom_startup_rejection_log,
+        )
+        validate_odom_startup_rejection_log(
+            Path(permit.rejected_semantic_log_path),
+            rejected_run_id=permit.rejected_run_id,
+            mission_leg_kind=permit.mission_leg_kind.value,
+            mission_leg_index=permit.mission_leg_index,
+            target_id=permit.target_id,
+        )
     else:  # pragma: no cover - guarded by _validate_permit
         raise ValueError(
             "startup reseal motion permit recovery_source_kind is not authorized"
@@ -1022,6 +1040,9 @@ def _validate_startup_evidence(permit: StartupResealMotionPermit) -> None:
     _validate_fresh_stationary_localization_evidence(
         permit,
         expected_route_pose=fresh_start_pose,
+        fresh_start_pose_basis=_load_json_object(Path(permit.startup_reseal_summary_path)).get(
+            "fresh_start_pose_basis", "",
+        ),
     )
     validate_startup_reseal_route_binding(
         route_csv_path=Path(permit.route_csv_path),
@@ -1295,6 +1316,35 @@ def _validate_startup_reseal_summary(
         "additional_typed_run_required",
         "recovery_source_kind",
     }
+    candidate_kind = permit.mission_leg_kind in {
+        MissionLegKind.CANDIDATE_PREAPPROACH, MissionLegKind.OPPOSITE_FACE,
+    }
+    basis = summary.get("fresh_start_pose_basis")
+    if "fresh_start_pose_basis" in summary:
+        if not candidate_kind or basis != "latest_direct_map_from_odom_composed_with_odom_base":
+            raise ValueError("startup reseal summary fresh pose basis is invalid")
+        expected_fields.add("fresh_start_pose_basis")
+    if (
+        candidate_kind
+        and permit.recovery_source_kind == STARTUP_RESEAL_RECOVERY_SOURCE_ODOM_STARTUP_ROUTE_MISMATCH
+        and basis != "latest_direct_map_from_odom_composed_with_odom_base"
+    ):
+        raise ValueError("odom startup candidate reseal requires coherent fresh pose basis")
+    if permit.recovery_source_kind == STARTUP_RESEAL_RECOVERY_SOURCE_ODOM_STARTUP_ROUTE_MISMATCH:
+        from scripts.aufgabe04.navigation.execution.startup_reseal_permit_retirement import (
+            validate_startup_reseal_permit_disposition,
+        )
+        expected_fields.update({
+            "rejected_permit_disposition_path", "rejected_permit_disposition_sha256",
+        })
+        disposition_path = summary.get("rejected_permit_disposition_path")
+        if not isinstance(disposition_path, str) or not disposition_path:
+            raise ValueError("odom startup reseal requires rejected permit disposition")
+        validate_startup_reseal_permit_disposition(
+            Path(disposition_path),
+            expected_sha256=summary.get("rejected_permit_disposition_sha256"),
+            replacement_permit=permit,
+        )
     if frozenset(summary) != expected_fields:
         raise ValueError("startup reseal summary fields mismatch")
     expected = {
@@ -1347,6 +1397,7 @@ def _validate_fresh_stationary_localization_evidence(
     permit: StartupResealMotionPermit,
     *,
     expected_route_pose: tuple[float, float, float],
+    fresh_start_pose_basis: str = "",
 ) -> None:
     evidence = _load_json_object(
         Path(permit.fresh_stationary_localization_evidence_path)
@@ -1382,6 +1433,21 @@ def _validate_fresh_stationary_localization_evidence(
         )
 
     route_pose = evidence.get("route_pose")
+    if (
+        fresh_start_pose_basis == "latest_direct_map_from_odom_composed_with_odom_base"
+    ):
+        from scripts.aufgabe04.navigation.localization.candidate_planning_pose import (
+            admitted_candidate_planning_pose,
+        )
+        fresh_pose, _ = admitted_candidate_planning_pose(
+            evidence, map_frame=runtime_config.get("map_frame"),
+            odom_frame=runtime_config.get("odom_frame"),
+        )
+        route_pose = {
+            "frame_id": runtime_config.get("map_frame"),
+            "child_frame_id": runtime_config.get("base_frame"),
+            "x_m": fresh_pose.x_m, "y_m": fresh_pose.y_m, "yaw_rad": fresh_pose.yaw_rad,
+        }
     if not isinstance(route_pose, Mapping):
         raise ValueError(
             "fresh stationary localization evidence route_pose is missing"

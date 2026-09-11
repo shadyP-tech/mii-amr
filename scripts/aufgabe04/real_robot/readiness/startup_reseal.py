@@ -15,6 +15,7 @@ from pathlib import Path
 from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization import (
     STARTUP_RESEAL_RECOVERY_SOURCE_CERTIFIED_START_POSE_MISMATCH,
     STARTUP_RESEAL_RECOVERY_SOURCE_KINDS,
+    STARTUP_RESEAL_RECOVERY_SOURCE_ODOM_STARTUP_ROUTE_MISMATCH,
     STARTUP_RESEAL_PERMIT_SUMMARY_SCHEMA_VERSION,
     StartupResealMotionPermit,
     file_sha256,
@@ -102,6 +103,8 @@ def write_startup_reseal_permit_summary(
     mission_leg_kind: MissionLegKind | str = MissionLegKind.COVERAGE,
     mission_leg_index: int | None = None,
     target_id: str = "",
+    rejected_permit_disposition_path: Path | None = None,
+    fresh_start_pose_basis: str = "",
 ) -> Path:
     """Write the exact sealed-route summary later bound by the permit."""
 
@@ -161,6 +164,24 @@ def write_startup_reseal_permit_summary(
         "additional_typed_run_required": additional_typed_run_required,
         "recovery_source_kind": recovery_source_kind,
     }
+    if fresh_start_pose_basis:
+        if (
+            fresh_start_pose_basis != "latest_direct_map_from_odom_composed_with_odom_base"
+            or kind not in {MissionLegKind.CANDIDATE_PREAPPROACH, MissionLegKind.OPPOSITE_FACE}
+        ):
+            raise ValueError("startup reseal fresh pose basis requires a coherent candidate pose")
+        payload["fresh_start_pose_basis"] = fresh_start_pose_basis
+    if recovery_source_kind == STARTUP_RESEAL_RECOVERY_SOURCE_ODOM_STARTUP_ROUTE_MISMATCH:
+        if rejected_permit_disposition_path is None:
+            raise ValueError("odom startup reseal requires rejected permit disposition")
+        disposition = resolve_normal_artifact_path(
+            rejected_permit_disposition_path,
+            label="startup rejected permit disposition",
+        )
+        payload["rejected_permit_disposition_path"] = str(disposition)
+        payload["rejected_permit_disposition_sha256"] = file_sha256(disposition)
+    elif rejected_permit_disposition_path is not None:
+        raise ValueError("rejected permit disposition is only valid for odom startup rejection")
     try:
         with destination.open("x", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2, sort_keys=True)

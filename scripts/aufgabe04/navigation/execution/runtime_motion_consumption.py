@@ -416,7 +416,7 @@ def _claim_receipt_exclusively(
     try:
         descriptor = os.open(path, flags, 0o600)
     except FileExistsError as exc:
-        raise ValueError(f"runtime motion permit already consumed: {path}") from exc
+        raise ValueError(f"runtime motion permit already consumed or retired: {path}") from exc
     except OSError as exc:
         raise ValueError(
             f"cannot claim runtime motion consumption receipt: {path}"

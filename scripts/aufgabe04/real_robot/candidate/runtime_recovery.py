@@ -17,6 +17,10 @@ authorize motion.
 
 from __future__ import annotations
 
+from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization import (
+    STARTUP_RESEAL_RECOVERY_SOURCE_ODOM_STARTUP_ROUTE_MISMATCH,
+)
+
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 import math
@@ -886,6 +890,31 @@ def execute_candidate_runtime_localization_recovery(
                 reseal_index=reseal_index,
                 reason=str(exc),
             )
+        typed_startup_handoff = (
+            recovery_state is not None
+            and _recovery_source_kind(replacement_outcome)
+            == STARTUP_RESEAL_RECOVERY_SOURCE_ODOM_STARTUP_ROUTE_MISMATCH
+        )
+        if (
+            typed_startup_handoff
+            and replacement_outcome.stop_details.get("dry_run") is True
+            and not issued_motion_permit_kinds(replacement_outcome)
+        ):
+            # A replacement can fail dry admission before a runtime permit
+            # exists. Count that attempt and let the startup owner validate
+            # its no-permit evidence and replan under the remaining budget.
+            recovery_state.runtime_reseal_count = reseal_index
+            _emit(config, effects, {
+                "event": "candidate_startup_recovery_handoff_ready",
+                "run_id": replacement_outcome.run_id,
+                "completed_startup_reseal_count": recovery_state.startup_reseal_count,
+                "completed_runtime_localization_reseal_count": reseal_index,
+                "source_rejection_stop_reason": replacement_outcome.stop_reason,
+                "source_rejection_stop_details": dict(replacement_outcome.stop_details),
+                "source_rejection_motion_permit_kind": None,
+                "motion_continues_authorized": False,
+            })
+            return CandidateRecoveryHandoff(replacement_outcome, "startup")
         preflight_classification = classify_no_motion_preflight_failure(
             status=replacement_outcome.status,
             stop_reason=replacement_outcome.stop_reason,
@@ -896,7 +925,7 @@ def execute_candidate_runtime_localization_recovery(
             ),
             returncode=replacement_outcome.returncode,
         )
-        if preflight_classification.applies:
+        if preflight_classification.applies and not typed_startup_handoff:
             _raise_replacement_preflight_failure(
                 config,
                 effects,
