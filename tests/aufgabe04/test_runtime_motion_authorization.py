@@ -4,7 +4,18 @@ import unittest
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
-from scripts.aufgabe04.artifacts.content_store import payload_sha256
+from scripts.aufgabe04.artifacts.content_store import payload_sha256, write_content_hashed_json
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.localization.map_odom_drift_reference import RouteDriftAnchor
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
+    OdomExecutionCertificate,
+    PlanarTransform2D,
+    write_odom_execution_certificate,
+)
+from scripts.aufgabe04.navigation.localization.odom_route_adapter import (
+    OdomExecutionContext,
+    evaluate_map_odom_continuity,
+)
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     MissionLegKind,
 )
@@ -40,6 +51,36 @@ def _decision():
         "requires_fresh_typed_run": True,
         "automatic_motion_authorized": False,
     }
+
+
+def _anchored_decision():
+    frozen = PlanarTransform2D(-5.0, 0.0, 0.0)
+    context = OdomExecutionContext(
+        map_frame="map", odom_frame="odom", base_frame="base_footprint",
+        frozen_map_from_odom=frozen, certificate_sha256="a" * 64,
+        max_map_from_odom_translation_drift_m=0.1,
+        max_map_from_odom_yaw_drift_rad=0.1,
+        drift_reference=RouteDriftAnchor.from_route_start(Pose2D(0.0, 0.0, 0.0), frozen),
+    )
+    result = evaluate_map_odom_continuity(context, PlanarTransform2D(-4.8, 0.0, 0.0))
+    return {**_decision(), "schema_version": 2, "continuity_reason": result.reason,
+            "continuity_evidence": result.to_evidence()}
+
+
+def _dry_certificate(*, reference=None, budget_hash="b" * 64):
+    return OdomExecutionCertificate(
+        source_map_route_sha256="1" * 64,
+        source_map_execution_certificate_sha256="2" * 64,
+        transformed_odom_route_sha256="3" * 64,
+        map_frame="map", odom_frame="odom", base_frame="base_footprint",
+        map_from_odom=PlanarTransform2D(0.0, 0.0, 0.0),
+        transform_stamp_sec=10.0, transform_capture_time_sec=10.0,
+        waypoint_count=2, tracking_tube_radius_m=0.15,
+        command_owner="/follower", uncertainty_budget_sha256=budget_hash,
+        ambiguity_evidence_sha256="c" * 64,
+        schema_version=1 if reference is None else 2,
+        drift_reference=reference,
+    )
 
 
 class RuntimeMotionAuthorizationTest(unittest.TestCase):
@@ -81,6 +122,17 @@ class RuntimeMotionAuthorizationTest(unittest.TestCase):
             path = self.root / f"{name}.artifact"
             path.write_text(f"sealed {name}\n", encoding="utf-8")
             self.artifacts[name] = path
+        self.artifacts["dry_odom_certificate"].unlink()
+        self.artifacts["dry_uncertainty_budget"].unlink()
+        legacy_budget_hash = write_content_hashed_json(
+            self.artifacts["dry_uncertainty_budget"],
+            {"schema_version": 1, "runtime_map_odom_continuity_allocation": {}},
+            hash_field="route_uncertainty_artifact_sha256",
+        )
+        write_odom_execution_certificate(
+            self.artifacts["dry_odom_certificate"],
+            _dry_certificate(budget_hash=legacy_budget_hash),
+        )
         decision = _decision()
         self.permit = RuntimeLocalizationMotionPermit(
             master_authorization_sha256=self.master_sha256,
@@ -128,6 +180,33 @@ class RuntimeMotionAuthorizationTest(unittest.TestCase):
     def _write_permit(self):
         return write_runtime_localization_motion_permit(
             self.permit_path, self.permit
+        )
+
+    def _install_anchored_artifacts(self, *, budget_edit=None, certificate_budget_hash=None):
+        reference = RouteDriftAnchor(1.0, 2.0, 1.0, 2.0)
+        budget = {
+            "schema_version": 2,
+            "runtime_map_odom_continuity_allocation": {"drift_reference": reference.to_evidence()},
+            "admission": {"config": {"heading_reference_x_m": 1.0, "heading_reference_y_m": 2.0}},
+        }
+        if budget_edit is not None:
+            budget_edit(budget)
+        self.artifacts["dry_uncertainty_budget"].unlink()
+        budget_hash = write_content_hashed_json(
+            self.artifacts["dry_uncertainty_budget"], budget,
+            hash_field="route_uncertainty_artifact_sha256",
+        )
+        self.artifacts["dry_odom_certificate"].unlink()
+        write_odom_execution_certificate(
+            self.artifacts["dry_odom_certificate"],
+            _dry_certificate(reference=reference, budget_hash=certificate_budget_hash or budget_hash),
+        )
+        decision = _anchored_decision()
+        self.permit = replace(
+            self.permit, runtime_reseal_decision_evidence=decision,
+            runtime_reseal_decision_sha256=payload_sha256(decision),
+            dry_odom_certificate_sha256=self._sha("dry_odom_certificate"),
+            dry_uncertainty_budget_sha256=self._sha("dry_uncertainty_budget"),
         )
 
     def _execution_kwargs(self):
@@ -554,6 +633,117 @@ class RuntimeMotionAuthorizationTest(unittest.TestCase):
         altered.write_text(json.dumps(raw), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "permit fields mismatch"):
             load_runtime_localization_motion_permit(altered)
+
+    def test_anchored_recovery_round_trip_preserves_old_stop_and_new_route_references(self):
+        self._install_anchored_artifacts()
+        self._write_permit()
+        loaded = validate_runtime_localization_motion_permit_for_execution(
+            self.permit_path, **self._execution_kwargs()
+        )
+        decision = loaded.to_payload()["runtime_reseal_decision_evidence"]
+        self.assertEqual(decision, _anchored_decision())
+        # The rejected route started at (0, 0); the recovery starts at (1, 2).
+        self.assertEqual(decision["continuity_evidence"]["drift_reference"]["map_anchor"],
+                         {"x_m": 0.0, "y_m": 0.0})
+        with self.assertRaises(TypeError):
+            loaded.runtime_reseal_decision_evidence["continuity_evidence"]["drift_reference"]["map_anchor"]["x_m"] = 99
+        decision["continuity_evidence"]["drift_reference"]["map_anchor"]["x_m"] = 99
+        self.assertEqual(loaded.to_payload(), self.permit.to_payload())
+
+    def test_anchored_decision_rejects_rehashed_tampered_or_downgraded_continuity(self):
+        edits = (
+            lambda value: value["continuity_evidence"].pop("drift_reference"),
+            lambda value: value["continuity_evidence"].update(schema_version=1),
+            lambda value: value["continuity_evidence"].update(translation_drift_m=0.0),
+            lambda value: value["continuity_evidence"]["drift_reference"]["map_anchor"].update(x_m=10.0),
+            lambda value: value.update(continuity_reason="map_from_odom_yaw_drift"),
+            lambda value: value.update(schema_version=1),
+        )
+        for edit in edits:
+            with self.subTest(edit=edit):
+                decision = _anchored_decision()
+                edit(decision)
+                with self.assertRaises(ValueError):
+                    replace(self.permit, runtime_reseal_decision_evidence=decision,
+                            runtime_reseal_decision_sha256=payload_sha256(decision))
+
+    def test_anchored_recovery_cannot_downgrade_stop_to_legacy_decision(self):
+        self._install_anchored_artifacts()
+        decision = _decision()
+        self.permit = replace(self.permit, runtime_reseal_decision_evidence=decision,
+                              runtime_reseal_decision_sha256=payload_sha256(decision))
+        with self.assertRaisesRegex(ValueError, "requires runtime reseal decision v2"):
+            self._write_permit()
+        # An externally resealed permit must fail the execution boundary too.
+        write_content_hashed_json(self.permit_path, self.permit.to_payload(),
+                                  hash_field="runtime_localization_motion_permit_sha256")
+        with self.assertRaisesRegex(ValueError, "requires runtime reseal decision v2"):
+            validate_runtime_localization_motion_permit_for_execution(
+                self.permit_path, **self._execution_kwargs()
+            )
+
+    def test_anchored_recovery_cannot_use_legacy_dry_certificate(self):
+        decision = _anchored_decision()
+        self.permit = replace(self.permit, runtime_reseal_decision_evidence=decision,
+                              runtime_reseal_decision_sha256=payload_sha256(decision))
+        with self.assertRaisesRegex(ValueError, "cannot use a legacy dry certificate"):
+            self._write_permit()
+
+    def test_anchored_recovery_rejects_changed_budget_reference_even_when_rehashed(self):
+        edits = (
+            (lambda value: value.update(schema_version=1), "versions mismatch"),
+            (lambda value: value["runtime_map_odom_continuity_allocation"].pop("drift_reference"), "drift_reference mismatch"),
+            (lambda value: value["runtime_map_odom_continuity_allocation"]["drift_reference"]["map_anchor"].update(x_m=9.0), "drift_reference mismatch"),
+            (lambda value: value["runtime_map_odom_continuity_allocation"]["drift_reference"]["map_anchor"].update(x_m=True), "drift_reference mismatch"),
+            (lambda value: value["admission"]["config"].update(heading_reference_x_m=9.0), "heading reference mismatch"),
+            (lambda value: value["admission"]["config"].update(heading_reference_x_m=True), "heading reference mismatch"),
+            (lambda value: value["admission"]["config"].pop("heading_reference_y_m"), "heading reference mismatch"),
+        )
+        for edit, message in edits:
+            with self.subTest(message=message):
+                self._install_anchored_artifacts(budget_edit=edit)
+                with self.assertRaisesRegex(ValueError, message):
+                    self._write_permit()
+
+    def test_anchored_recovery_requires_certificate_budget_content_binding(self):
+        self._install_anchored_artifacts(certificate_budget_hash="0" * 64)
+        with self.assertRaisesRegex(ValueError, "uncertainty budget hash mismatch"):
+            self._write_permit()
+
+    def test_legacy_certificate_cannot_authorize_anchored_budget_or_allocation(self):
+        for budget_version in (1, 2):
+            with self.subTest(budget_version=budget_version):
+                self._install_anchored_artifacts(
+                    budget_edit=lambda value: value.update(schema_version=budget_version)
+                )
+                budget = json.loads(self.artifacts["dry_uncertainty_budget"].read_text())
+                budget_hash = budget.pop("route_uncertainty_artifact_sha256")
+                self.artifacts["dry_odom_certificate"].unlink()
+                write_odom_execution_certificate(
+                    self.artifacts["dry_odom_certificate"], _dry_certificate(budget_hash=budget_hash)
+                )
+                decision = _decision()
+                self.permit = replace(
+                    self.permit,
+                    runtime_reseal_decision_evidence=decision,
+                    runtime_reseal_decision_sha256=payload_sha256(decision),
+                    dry_odom_certificate_sha256=self._sha("dry_odom_certificate"),
+                )
+                with self.assertRaisesRegex(ValueError, "versions mismatch|cannot contain drift_reference"):
+                    self._write_permit()
+
+    def test_anchored_certificate_cannot_drop_reference_even_when_rehashed(self):
+        self._install_anchored_artifacts()
+        certificate_path = self.artifacts["dry_odom_certificate"]
+        certificate = json.loads(certificate_path.read_text())
+        certificate.pop("odom_execution_certificate_sha256")
+        certificate.pop("drift_reference")
+        certificate_path.unlink()
+        write_content_hashed_json(certificate_path, certificate,
+                                  hash_field="odom_execution_certificate_sha256")
+        self.permit = replace(self.permit, dry_odom_certificate_sha256=self._sha("dry_odom_certificate"))
+        with self.assertRaisesRegex(ValueError, "certificate fields mismatch"):
+            self._write_permit()
 
 
 if __name__ == "__main__":

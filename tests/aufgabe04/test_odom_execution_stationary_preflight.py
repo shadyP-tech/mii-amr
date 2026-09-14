@@ -1,4 +1,8 @@
+import math
 import unittest
+
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.localization.map_odom_drift_reference import RouteDriftAnchor
 
 from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
     PlanarTransform2D,
@@ -51,6 +55,36 @@ def _preflight(samples: list[dict[str, object]]) -> RosPreflightResult:
 
 
 class OdomExecutionStationaryPreflightTests(unittest.TestCase):
+    def test_stationary_window_measures_fixed_route_anchor_not_remote_odom_origin(self):
+        # Robot is at odom (5, 0), map (1, 1). A small yaw correction
+        # about that same physical anchor moves the odom origin by 20 cm.
+        final = PlanarTransform2D(-4, 1, 0)
+        yaw = .04
+        previous = PlanarTransform2D(1 - 5 * math.cos(yaw), 1 - 5 * math.sin(yaw), yaw)
+        samples = [_sample(0), _sample(1)]
+        for row in samples:
+            row.update(x_m=previous.x_m, y_m=previous.y_m, yaw_rad=previous.yaw_rad)
+        kwargs = dict(
+            map_frame="map", odom_frame="odom", final_map_from_odom=final,
+            final_stamp_sec=12., final_capture_time_sec=22.,
+            max_translation_drift_m=.05, max_yaw_drift_rad=.05,
+        )
+        with self.assertRaisesRegex(ValueError, "window rejected"):
+            _admit_stationary_map_from_odom_window(_preflight(samples), **kwargs)
+        anchor = RouteDriftAnchor.from_route_start(Pose2D(1, 1), final)
+        admitted, evidence = _admit_stationary_map_from_odom_window(
+            _preflight(samples), **kwargs, drift_reference=anchor,
+        )
+        self.assertEqual(admitted, final)
+        self.assertEqual(evidence["drift_reference"], anchor.to_evidence())
+        self.assertLess(evidence["max_observed_translation_drift_m"], 1e-12)
+        displaced = PlanarTransform2D(previous.x_m + .06, previous.y_m, previous.yaw_rad)
+        samples[0].update(x_m=displaced.x_m)
+        with self.assertRaisesRegex(ValueError, "window rejected"):
+            _admit_stationary_map_from_odom_window(
+                _preflight(samples), **kwargs, drift_reference=anchor,
+            )
+
     def test_final_lookup_is_the_exact_admitted_certificate_transform(self):
         final = PlanarTransform2D(0.02, 0.0, 0.01)
 

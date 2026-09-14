@@ -35,6 +35,8 @@ def wait_for_initial_runtime_inputs(node, started_at: float) -> str:
             "max_map_from_odom_translation_drift_m": context.max_map_from_odom_translation_drift_m,
             "max_map_from_odom_yaw_drift_rad": context.max_map_from_odom_yaw_drift_rad,
         }
+        if context.drift_reference is not None:
+            state.execution_context["drift_reference"] = context.drift_reference.to_evidence()
     motion_failure = _motion_contract_failure(node, state)
     if motion_failure:
         return motion_failure

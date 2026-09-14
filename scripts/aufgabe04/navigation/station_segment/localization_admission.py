@@ -30,6 +30,9 @@ from scripts.aufgabe04.navigation.localization.odom_execution_certificate import
     validate_odom_execution_identity,
     write_odom_execution_certificate,
 )
+from scripts.aufgabe04.navigation.localization.map_odom_drift_reference import (
+    RouteDriftAnchor,
+)
 from scripts.aufgabe04.navigation.localization.startup_route_admission import (
     OdomStartupRouteAdmissionRejected,
     build_odom_startup_route_admission_evidence,
@@ -297,6 +300,7 @@ def _admit_stationary_map_from_odom_window(
     final_capture_time_sec: float,
     max_translation_drift_m: float,
     max_yaw_drift_rad: float,
+    drift_reference: RouteDriftAnchor | None = None,
 ) -> tuple[PlanarTransform2D, dict[str, object]]:
     """Bind the final certificate transform to a stable direct-TF window."""
 
@@ -319,6 +323,7 @@ def _admit_stationary_map_from_odom_window(
         (*samples, final_map_from_odom),
         max_translation_drift_m=max_translation_drift_m,
         max_yaw_drift_rad=max_yaw_drift_rad,
+        drift_reference=drift_reference,
     )
     if not stability.accepted:
         raise ValueError(
@@ -401,10 +406,11 @@ def _build_odom_execution_admission(
             f"{composition_yaw_error_rad:.6f} rad"
         )
     odom_route = transform_map_route_to_odom(map_route, map_from_odom)
+    drift_reference = RouteDriftAnchor.from_route_start(map_route[0], map_from_odom)
     route_yaw_lever_arm_m = max(
         math.hypot(
-            pose.x_m - map_route[0].x_m,
-            pose.y_m - map_route[0].y_m,
+            pose.x_m - drift_reference.map_x_m,
+            pose.y_m - drift_reference.map_y_m,
         )
         for pose in map_route
     ) + args.uncertainty_robot_radius_m
@@ -476,6 +482,7 @@ def _build_odom_execution_admission(
             final_capture_time_sec=transform_capture_time_sec,
             max_translation_drift_m=continuity_translation_limit_m,
             max_yaw_drift_rad=continuity_yaw_limit_rad,
+            drift_reference=drift_reference,
         )
     )
     arena_bounds = validate_arena_boundary_evidence(
@@ -505,8 +512,11 @@ def _build_odom_execution_admission(
             else args.uncertainty_heading_lever_arm_m
         ),
         sampling_spacing_m=args.uncertainty_clearance_sample_spacing_m,
-        heading_reference_x_m=map_route[0].x_m,
-        heading_reference_y_m=map_route[0].y_m,
+        heading_reference_x_m=drift_reference.map_x_m,
+        heading_reference_y_m=drift_reference.map_y_m,
+    )
+    route_yaw_lever_arm_m = max(
+        route_yaw_lever_arm_m, admission_config.heading_lever_arm_m,
     )
     admission = evaluate_route_uncertainty_admission(
         base_costmap,
@@ -546,6 +556,7 @@ def _build_odom_execution_admission(
         branch_evidence=branch_evidence,
         composition_position_error_m=composition_position_error_m,
         composition_yaw_error_rad=composition_yaw_error_rad,
+        drift_reference=drift_reference,
     )
     uncertainty_budget_sha256 = publish_route_uncertainty_budget(
         args.uncertainty_budget_json,
@@ -554,6 +565,8 @@ def _build_odom_execution_admission(
     )
 
     odom_certificate = OdomExecutionCertificate(
+        schema_version=2,
+        drift_reference=drift_reference,
         source_map_route_sha256=pose_route_sha256(map_route),
         source_map_execution_certificate_sha256=map_certificate_sha256,
         transformed_odom_route_sha256=pose_route_sha256(odom_route),
@@ -599,11 +612,13 @@ def _build_odom_execution_admission(
             continuity_translation_limit_m
         ),
         max_map_from_odom_yaw_drift_rad=continuity_yaw_limit_rad,
+        drift_reference=drift_reference,
     )
     replacement_route_gate = _OdomRouteUncertaintyGate(
         costmap=base_costmap,
         covariance=covariance,
         config=admission_config,
+        drift_reference=drift_reference,
         evidence_root=(
             None
             if args.coverage_transient_replan_session_root is None
@@ -638,6 +653,7 @@ def _build_odom_execution_admission(
                 "capture_time_sec": transform_capture_time_sec,
             },
             "map_execution_certificate_route_kind": map_certificate.route_kind,
+            "drift_reference": drift_reference.to_evidence(),
         },
         replacement_route_gate,
     )
@@ -658,15 +674,18 @@ def _route_uncertainty_budget_payload(
     branch_evidence: Mapping[str, object],
     composition_position_error_m: float,
     composition_yaw_error_rad: float,
+    drift_reference: RouteDriftAnchor | None = None,
 ) -> dict[str, object]:
     """Build the persisted admission payload for both pass and reject cases."""
 
     return {
-        "schema_version": 1,
+        "schema_version": 1 if drift_reference is None else 2,
         "source": "route_uncertainty_admission",
         "admission": admission.to_evidence_dict(),
         "covariance_envelope": dict(covariance_evidence),
         "runtime_map_odom_continuity_allocation": {
+            **({"drift_reference": drift_reference.to_evidence()}
+               if drift_reference is not None else {}),
             "position_covariance_allocation_m": allocated_translation_drift_m,
             "yaw_covariance_allocation_rad": allocated_yaw_drift_rad,
             "translation_hard_cap_m": translation_hard_cap_m,
@@ -698,11 +717,20 @@ class _OdomRouteUncertaintyGate:
         covariance: PlanarCovariance,
         config: RouteUncertaintyAdmissionConfig,
         evidence_root: Path | None,
+        drift_reference: RouteDriftAnchor,
     ) -> None:
         self._costmap = costmap
         self._covariance = covariance
         self._config = config
         self._evidence_root = evidence_root
+        if not isinstance(drift_reference, RouteDriftAnchor):
+            raise ValueError("replacement route gate requires drift_reference")
+        if (
+            config.heading_reference_x_m != drift_reference.map_x_m
+            or config.heading_reference_y_m != drift_reference.map_y_m
+        ):
+            raise ValueError("replacement route heading reference differs from drift_reference")
+        self._drift_reference = drift_reference
 
     def adapt(
         self,
@@ -711,6 +739,18 @@ class _OdomRouteUncertaintyGate:
     ) -> RouteUpdate:
         if update.kind is not RouteUpdateKind.ADOPT:
             return update
+        if context.drift_reference != self._drift_reference:
+            raise ValueError("replacement route context drift_reference mismatch")
+        self._drift_reference.validate_transform(context.frozen_map_from_odom)
+        if (
+            context.max_map_from_odom_translation_drift_m
+            > self._config.localization_sigma_multiplier * math.sqrt(self._covariance.xx_m2)
+            or context.max_map_from_odom_yaw_drift_rad
+            > self._config.localization_sigma_multiplier * self._config.heading_sigma_rad
+        ):
+            raise ValueError("replacement route continuity limits exceed reserved uncertainty")
+        # Keep the original anchor even when a replacement begins farther
+        # along the route. Its longer lever arms must consume clearance.
         admission = evaluate_route_uncertainty_admission(
             self._costmap,
             update.waypoints,
@@ -745,6 +785,7 @@ class _OdomRouteUncertaintyGate:
                     "replacement route uncertainty evidence hash mismatch"
                 )
         evidence_fields = {
+            "replacement_route_drift_reference": self._drift_reference.to_evidence(),
             "replacement_route_uncertainty_admission_sha256": (
                 evidence_sha256
             ),

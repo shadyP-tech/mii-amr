@@ -7,6 +7,9 @@ from pathlib import Path
 
 from scripts.aufgabe04.artifacts.content_store import payload_sha256
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.localization.map_odom_drift_reference import (
+    RouteDriftAnchor,
+)
 from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
     MAP_FROM_ODOM_CONVENTION,
     OdomExecutionCertificate,
@@ -193,6 +196,88 @@ class PlanarTransform2DTest(unittest.TestCase):
 
 
 class OdomExecutionCertificateTest(unittest.TestCase):
+    def _anchored_certificate(self):
+        legacy, odom_route = certificate_for()
+        return replace(
+            legacy,
+            schema_version=2,
+            drift_reference=RouteDriftAnchor.from_route_start(
+                MAP_ROUTE[0], legacy.map_from_odom,
+            ),
+        ), odom_route
+
+    def test_legacy_representation_and_hash_remain_unchanged(self):
+        certificate, _ = certificate_for()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "legacy.json"
+            digest = write_odom_execution_certificate(path, certificate)
+            payload = json.loads(path.read_text())
+            self.assertEqual(payload["schema_version"], 1)
+            self.assertNotIn("drift_reference", payload)
+            self.assertEqual(load_odom_execution_certificate(path), certificate)
+            self.assertEqual(digest, "a84b4f5f08c426e5ce7f7bc3650b69354ceeb6e62628d545dd0665a0915138f8")
+
+    def test_v2_roundtrip_binds_anchor_and_runtime_route_start(self):
+        certificate, odom_route = self._anchored_certificate()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "anchored.json"
+            digest = write_odom_execution_certificate(path, certificate)
+            self.assertEqual(load_odom_execution_certificate(path), certificate)
+            self.assertEqual(json.loads(path.read_text())["drift_reference"],
+                             certificate.drift_reference.to_evidence())
+            self.assertEqual(digest, odom_execution_certificate_sha256(certificate))
+        kwargs = dict(
+            source_map_route=MAP_ROUTE, transformed_odom_route=odom_route,
+            source_map_execution_certificate_sha256="b" * 64, map_frame="map",
+            odom_frame="odom", base_frame="base_footprint", tracking_tube_radius_m=.03,
+            command_owner="/tb3/aufgabe04_simple_waypoint_follower",
+        )
+        validate_odom_execution_identity(certificate, **kwargs)
+        wrong_start = replace(certificate, drift_reference=RouteDriftAnchor.from_route_start(
+            MAP_ROUTE[1], certificate.map_from_odom,
+        ))
+        self.assertNotEqual(odom_execution_certificate_sha256(wrong_start), digest)
+        with self.assertRaisesRegex(ValueError, "route.*start|anchor"):
+            validate_odom_execution_identity(wrong_start, **kwargs)
+
+    def test_v2_requires_reference_and_rejects_wrong_frozen_transform(self):
+        legacy, _ = certificate_for()
+        with self.assertRaisesRegex(ValueError, "requires drift_reference"):
+            replace(legacy, schema_version=2)
+        anchored, _ = self._anchored_certificate()
+        with self.assertRaisesRegex(ValueError, "legacy"):
+            replace(anchored, schema_version=1)
+        with self.assertRaisesRegex(ValueError, "frozen map_from_odom"):
+            replace(anchored, map_from_odom=PlanarTransform2D(9, 8, .7))
+
+    def test_v2_reference_tamper_and_validly_hashed_malformed_references_reject(self):
+        certificate, _ = self._anchored_certificate()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "anchored.json"
+            write_odom_execution_certificate(path, certificate)
+            original = json.loads(path.read_text())
+            original.pop("odom_execution_certificate_sha256")
+            tampered = json.loads(json.dumps(original))
+            tampered["drift_reference"]["map_anchor"]["x_m"] += .1
+            tampered["odom_execution_certificate_sha256"] = odom_execution_certificate_sha256(certificate)
+            path.write_text(json.dumps(tampered))
+            with self.assertRaisesRegex(ValueError, "hash mismatch"):
+                load_odom_execution_certificate(path)
+            for invalid in (None, {}, {**original["drift_reference"], "metric": "origin"},
+                            {**original["drift_reference"], "unexpected": True},
+                            {**original["drift_reference"], "odom_anchor": {"x_m": 0, "y_m": 0}}):
+                payload = {**original, "drift_reference": invalid}
+                payload["odom_execution_certificate_sha256"] = payload_sha256(payload)
+                path.write_text(json.dumps(payload))
+                with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                    load_odom_execution_certificate(path)
+            payload = dict(original)
+            payload.pop("drift_reference")
+            payload["odom_execution_certificate_sha256"] = payload_sha256(payload)
+            path.write_text(json.dumps(payload))
+            with self.assertRaisesRegex(ValueError, "fields mismatch"):
+                load_odom_execution_certificate(path)
+
     def test_certificate_is_frozen_and_validates_all_runtime_identity(self):
         certificate, odom_route = certificate_for()
 

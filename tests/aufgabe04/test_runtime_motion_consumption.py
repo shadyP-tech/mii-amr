@@ -33,6 +33,11 @@ from scripts.aufgabe04.navigation.execution.runtime_motion_consumption import (
     load_runtime_motion_consumption_receipt,
     runtime_motion_consumption_receipt_sha256,
 )
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
+    OdomExecutionCertificate,
+    PlanarTransform2D,
+    write_odom_execution_certificate,
+)
 
 
 def _decision():
@@ -89,6 +94,34 @@ class RuntimeMotionConsumptionTest(unittest.TestCase):
             path = self.root / f"{name}.artifact"
             path.write_text(f"sealed {name}\n", encoding="utf-8")
             self.artifacts[name] = path
+
+        self.artifacts["dry_uncertainty_budget"].unlink()
+        budget_hash = write_content_hashed_json(
+            self.artifacts["dry_uncertainty_budget"],
+            {"schema_version": 1, "runtime_map_odom_continuity_allocation": {}},
+            hash_field="route_uncertainty_artifact_sha256",
+        )
+        self.artifacts["dry_odom_certificate"].unlink()
+        write_odom_execution_certificate(
+            self.artifacts["dry_odom_certificate"],
+            OdomExecutionCertificate(
+                schema_version=1,
+                source_map_route_sha256="1" * 64,
+                source_map_execution_certificate_sha256="2" * 64,
+                transformed_odom_route_sha256="3" * 64,
+                map_frame="map",
+                odom_frame="odom",
+                base_frame="base_footprint",
+                map_from_odom=PlanarTransform2D(0.0, 0.0, 0.0),
+                transform_stamp_sec=10.0,
+                transform_capture_time_sec=10.0,
+                waypoint_count=2,
+                tracking_tube_radius_m=0.15,
+                command_owner="/follower",
+                uncertainty_budget_sha256=budget_hash,
+                ambiguity_evidence_sha256="c" * 64,
+            ),
+        )
 
         decision = _decision()
         self.permit = RuntimeLocalizationMotionPermit(

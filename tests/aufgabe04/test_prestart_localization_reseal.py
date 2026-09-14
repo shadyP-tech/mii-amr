@@ -9,6 +9,9 @@ from scripts.aufgabe04.navigation.localization.prestart_localization_reseal impo
     TF_WARMUP_RETRY,
     evaluate_prestart_localization_reseal,
 )
+from tests.aufgabe04.test_runtime_localization_reseal import (
+    _anchored_context, _anchored_continuity,
+)
 
 
 _CERTIFICATE_SHA256 = "a" * 64
@@ -85,6 +88,41 @@ def _decision(details: object, *, status: object = "stopped", motion: object = F
 
 
 class PrestartLocalizationResealTest(unittest.TestCase):
+    def test_anchored_drift_requires_recomputed_evidence_without_motion_authority(self):
+        details = _stop_details()
+        details["continuity"] = _anchored_continuity()
+        decision = evaluate_prestart_localization_reseal(
+            status="stopped", motion_published=False, stop_details=details,
+            execution_context=_anchored_context(),
+        )
+        self.assertTrue(decision.eligible, decision.reason)
+        self.assertEqual(decision.recovery_action, FRESH_LOCALIZATION_RESEAL)
+        self.assertFalse(decision.automatic_motion_authorized)
+        # Both forged geometric measurements and a schema downgrade must fail.
+        for field, value in (
+            ("translation_drift_m", 0.30),
+            ("live_map_from_odom", {"x_m": 0.30, "y_m": 0.0, "yaw_rad": 0.0}),
+            ("reason", "map_from_odom_yaw_drift"),
+            ("schema_version", 1), ("schema_version", True),
+            ("drift_reference", None),
+        ):
+            with self.subTest(field=field):
+                changed = deepcopy(details)
+                changed["continuity"][field] = value
+                self.assertFalse(_decision(changed).eligible)
+        del details["continuity"]["drift_reference"]
+        self.assertFalse(_decision(details).eligible)
+        details["continuity"]["schema_version"] = 1
+        self.assertFalse(_decision(details).eligible)
+
+    def test_legacy_evidence_cannot_claim_an_anchored_certificate(self):
+        details = _stop_details()
+        decision = evaluate_prestart_localization_reseal(
+            status="stopped", motion_published=False, stop_details=details,
+            execution_context=_anchored_context(),
+        )
+        self.assertFalse(decision.eligible)
+
     def test_exact_translation_and_yaw_drift_is_eligible_without_motion_authority(self):
         decision = _decision(_stop_details())
 

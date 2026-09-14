@@ -1,4 +1,13 @@
+from copy import deepcopy
+from dataclasses import replace
 import unittest
+
+from scripts.aufgabe04.navigation.localization.map_odom_drift_reference import RouteDriftAnchor
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import PlanarTransform2D
+from scripts.aufgabe04.navigation.localization.odom_route_adapter import (
+    OdomExecutionContext,
+    evaluate_map_odom_continuity,
+)
 
 from scripts.aufgabe04.navigation.localization.runtime_localization_reseal import (
     evaluate_runtime_localization_reseal,
@@ -25,7 +34,82 @@ def _stop_details():
     }
 
 
+def _anchored_context():
+    return OdomExecutionContext(
+        map_frame="map", odom_frame="odom", base_frame="base_footprint",
+        certificate_sha256="a" * 64,
+        frozen_map_from_odom=PlanarTransform2D(0.0, 0.0, 0.0),
+        max_map_from_odom_translation_drift_m=0.10,
+        max_map_from_odom_yaw_drift_rad=0.03,
+        drift_reference=RouteDriftAnchor(2.0, 1.0, 2.0, 1.0),
+    )
+
+
+def _anchored_continuity():
+    return evaluate_map_odom_continuity(
+        _anchored_context(), PlanarTransform2D(0.20, 0.0, 0.0),
+    ).to_evidence()
+
+
 class RuntimeLocalizationResealTest(unittest.TestCase):
+    def test_anchored_stop_preserves_recomputable_evidence_in_recovery_decision(self):
+        details = _stop_details()
+        details["continuity"] = _anchored_continuity()
+        decision = evaluate_runtime_localization_reseal(
+            status="stopped", motion_published=True, stop_details=details,
+            execution_context=_anchored_context(),
+        )
+        self.assertTrue(decision.eligible, decision.reason)
+        self.assertFalse(decision.automatic_motion_authorized)
+        evidence = decision.to_evidence()
+        self.assertEqual(evidence["schema_version"], 2)
+        self.assertEqual(evidence["continuity_evidence"], details["continuity"])
+
+    def test_anchored_stop_rejects_changed_measurement_anchor_or_schema(self):
+        original = _anchored_continuity()
+        for field, value in (
+            ("translation_drift_m", 0.30),
+            ("relative_translation_x_m", 0.30),
+            ("live_map_from_odom", {"x_m": 0.30, "y_m": 0.0, "yaw_rad": 0.0}),
+            ("reason", "map_from_odom_yaw_drift"),
+            ("schema_version", 1), ("schema_version", True),
+            ("drift_reference", None),
+        ):
+            with self.subTest(field=field):
+                details = _stop_details()
+                details["continuity"] = {**deepcopy(original), field: value}
+                self.assertFalse(evaluate_runtime_localization_reseal(
+                    status="stopped", motion_published=True, stop_details=details,
+                ).eligible)
+        details = _stop_details()
+        details["continuity"] = deepcopy(original)
+        del details["continuity"]["drift_reference"]
+        self.assertFalse(evaluate_runtime_localization_reseal(
+            status="stopped", motion_published=True, stop_details=details,
+        ).eligible)
+        # A stripped anchor plus changed version retains the origin diagnostic;
+        # that marker must not enter the genuine schema-1 compatibility path.
+        details["continuity"]["schema_version"] = 1
+        self.assertFalse(evaluate_runtime_localization_reseal(
+            status="stopped", motion_published=True, stop_details=details,
+        ).eligible)
+
+    def test_anchored_stop_binds_supplied_certificate_context(self):
+        details = _stop_details()
+        details["continuity"] = _anchored_continuity()
+        context = _anchored_context()
+        for changed in (
+            replace(context, certificate_sha256="b" * 64),
+            replace(context, drift_reference=RouteDriftAnchor(3.0, 1.0, 3.0, 1.0)),
+            replace(context, drift_reference=None),
+            replace(context, max_map_from_odom_translation_drift_m=0.05),
+        ):
+            with self.subTest(context=changed):
+                self.assertFalse(evaluate_runtime_localization_reseal(
+                    status="stopped", motion_published=True, stop_details=details,
+                    execution_context=changed,
+                ).eligible)
+
     def test_complete_post_motion_stop_is_eligible_but_never_authorizes_motion(self):
         decision = evaluate_runtime_localization_reseal(
             status="stopped",

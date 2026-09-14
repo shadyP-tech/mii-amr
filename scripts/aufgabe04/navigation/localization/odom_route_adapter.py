@@ -8,8 +8,9 @@ already-authorized route.
 
 Continuity threshold semantics are deliberately exact and fail closed:
 
-* translation and absolute normalized relative yaw are accepted when they are
-  less than or equal to their configured limits;
+* displacement at the certificate's fixed route anchor and absolute normalized
+  relative yaw are accepted when they are within their configured limits;
+* legacy contexts without an anchor retain the odom-origin translation metric;
 * a missing or malformed live transform is rejected; and
 * any value above either limit requires a zero-command cycle and resealing.
 
@@ -29,6 +30,9 @@ from scripts.aufgabe04.navigation.execution.dynamic_route_handoff import (
     RouteUpdateKind,
 )
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.localization.map_odom_drift_reference import (
+    RouteDriftAnchor,
+)
 from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
     PlanarTransform2D,
     map_pose_to_odom,
@@ -37,13 +41,13 @@ from scripts.aufgabe04.navigation.localization.odom_execution_certificate import
     pose_route_sha256,
     transform_map_route_to_odom,
 )
-
-
 CONTINUITY_EVIDENCE_SCHEMA_VERSION = 1
+ANCHORED_CONTINUITY_EVIDENCE_SCHEMA_VERSION = 2
 CONTINUITY_ACCEPTED = "continue_odom_execution"
 CONTINUITY_RESEAL = "force_zero_reseal"
 
 STATIONARY_STABILITY_EVIDENCE_SCHEMA_VERSION = 1
+ANCHORED_STATIONARY_STABILITY_EVIDENCE_SCHEMA_VERSION = 2
 STATIONARY_STABILITY_MINIMUM_SAMPLE_COUNT = 2
 STATIONARY_STABILITY_ACCEPTED = "admit_frozen_map_from_odom"
 STATIONARY_STABILITY_REJECTED = "reject_frozen_map_from_odom"
@@ -60,6 +64,7 @@ class OdomExecutionContext:
     certificate_sha256: str
     max_map_from_odom_translation_drift_m: float
     max_map_from_odom_yaw_drift_rad: float
+    drift_reference: RouteDriftAnchor | None = None
 
     def __post_init__(self) -> None:
         frames = (
@@ -81,6 +86,11 @@ class OdomExecutionContext:
         )
         if yaw_limit > math.pi:
             raise ValueError("max_map_from_odom_yaw_drift_rad must be <= pi")
+
+        if self.drift_reference is not None:
+            if not isinstance(self.drift_reference, RouteDriftAnchor):
+                raise ValueError("drift_reference must be a RouteDriftAnchor")
+            self.drift_reference.validate_transform(transform)
 
         object.__setattr__(self, "frozen_map_from_odom", transform)
         object.__setattr__(
@@ -132,6 +142,8 @@ class MapOdomContinuityResult:
     max_translation_drift_m: float
     max_yaw_drift_rad: float
     validation_error: str | None = None
+    drift_reference: RouteDriftAnchor | None = None
+    origin_translation_drift_m: float | None = None
 
     @property
     def requires_zero_reseal(self) -> bool:
@@ -145,7 +157,18 @@ class MapOdomContinuityResult:
         """Return JSON-ready evidence without exposing mutable internal state."""
 
         return {
-            "schema_version": CONTINUITY_EVIDENCE_SCHEMA_VERSION,
+            "schema_version": (
+                ANCHORED_CONTINUITY_EVIDENCE_SCHEMA_VERSION
+                if self.drift_reference is not None
+                else CONTINUITY_EVIDENCE_SCHEMA_VERSION
+            ),
+            **(
+                {
+                    "drift_reference": self.drift_reference.to_evidence(),
+                    "origin_translation_drift_m": self.origin_translation_drift_m,
+                }
+                if self.drift_reference is not None else {}
+            ),
             "accepted": self.accepted,
             "decision": self.decision,
             "reason": self.reason,
@@ -228,6 +251,7 @@ class MapOdomStationaryStabilityResult:
     max_translation_drift_m: float
     max_yaw_drift_rad: float
     validation_error: str | None = None
+    drift_reference: RouteDriftAnchor | None = None
 
     @property
     def frozen_map_from_odom(self) -> PlanarTransform2D | None:
@@ -239,7 +263,15 @@ class MapOdomStationaryStabilityResult:
         """Return deterministic, JSON-ready stationary-admission evidence."""
 
         return {
-            "schema_version": STATIONARY_STABILITY_EVIDENCE_SCHEMA_VERSION,
+            "schema_version": (
+                ANCHORED_STATIONARY_STABILITY_EVIDENCE_SCHEMA_VERSION
+                if self.drift_reference is not None
+                else STATIONARY_STABILITY_EVIDENCE_SCHEMA_VERSION
+            ),
+            **(
+                {"drift_reference": self.drift_reference.to_evidence()}
+                if self.drift_reference is not None else {}
+            ),
             "accepted": self.accepted,
             "decision": self.decision,
             "reason": self.reason,
@@ -295,6 +327,7 @@ def evaluate_map_odom_stationary_stability(
     *,
     max_translation_drift_m: float,
     max_yaw_drift_rad: float,
+    drift_reference: RouteDriftAnchor | None = None,
 ) -> MapOdomStationaryStabilityResult:
     """Admit a final transform only after a stable stopped sample window.
 
@@ -318,6 +351,9 @@ def evaluate_map_odom_stationary_stability(
     if yaw_limit > math.pi:
         raise ValueError("max_yaw_drift_rad must be <= pi")
 
+    if drift_reference is not None and not isinstance(drift_reference, RouteDriftAnchor):
+        raise ValueError("drift_reference must be a RouteDriftAnchor")
+
     if samples is None:
         return _unavailable_stationary_stability_result(
             reason="stationary_map_from_odom_samples_missing",
@@ -325,6 +361,7 @@ def evaluate_map_odom_stationary_stability(
             sample_count=0,
             max_translation_drift_m=translation_limit,
             max_yaw_drift_rad=yaw_limit,
+            drift_reference=drift_reference,
         )
     if isinstance(samples, (str, bytes, bytearray, Mapping)) or not isinstance(
         samples,
@@ -338,6 +375,7 @@ def evaluate_map_odom_stationary_stability(
             sample_count=0,
             max_translation_drift_m=translation_limit,
             max_yaw_drift_rad=yaw_limit,
+            drift_reference=drift_reference,
         )
 
     sample_values = tuple(samples)
@@ -351,6 +389,7 @@ def evaluate_map_odom_stationary_stability(
             sample_count=len(sample_values),
             max_translation_drift_m=translation_limit,
             max_yaw_drift_rad=yaw_limit,
+            drift_reference=drift_reference,
         )
 
     validated_samples: list[PlanarTransform2D] = []
@@ -367,16 +406,20 @@ def evaluate_map_odom_stationary_stability(
                 sample_count=len(sample_values),
                 max_translation_drift_m=translation_limit,
                 max_yaw_drift_rad=yaw_limit,
+                drift_reference=drift_reference,
             )
 
     final_sample_index = len(validated_samples) - 1
     final_map_from_odom = validated_samples[final_sample_index]
+    if drift_reference is not None:
+        drift_reference.validate_transform(final_map_from_odom)
     comparisons: list[MapOdomStationarySampleComparison] = []
     unstable_sample_indices: list[int] = []
     for sample_index, sample in enumerate(validated_samples):
         drift = _map_odom_drift(
             observed_map_from_odom=sample,
             reference_map_from_odom=final_map_from_odom,
+            drift_reference=drift_reference,
         )
         translation_within_limit = (
             drift.translation_drift_m <= translation_limit
@@ -424,6 +467,7 @@ def evaluate_map_odom_stationary_stability(
         ),
         max_translation_drift_m=translation_limit,
         max_yaw_drift_rad=yaw_limit,
+        drift_reference=drift_reference,
     )
 
 
@@ -460,6 +504,7 @@ def evaluate_map_odom_continuity(
     drift = _map_odom_drift(
         observed_map_from_odom=live,
         reference_map_from_odom=frozen,
+        drift_reference=context.drift_reference,
     )
     translation_ok = (
         drift.translation_drift_m
@@ -503,6 +548,10 @@ def evaluate_map_odom_continuity(
             context.max_map_from_odom_translation_drift_m
         ),
         max_yaw_drift_rad=context.max_map_from_odom_yaw_drift_rad,
+        drift_reference=context.drift_reference,
+        origin_translation_drift_m=math.hypot(
+            live.x_m - frozen.x_m, live.y_m - frozen.y_m,
+        ),
     )
 
 
@@ -594,6 +643,7 @@ def _unavailable_continuity_result(
         ),
         max_yaw_drift_rad=context.max_map_from_odom_yaw_drift_rad,
         validation_error=validation_error,
+        drift_reference=context.drift_reference,
     )
 
 
@@ -604,6 +654,7 @@ def _unavailable_stationary_stability_result(
     sample_count: int,
     max_translation_drift_m: float,
     max_yaw_drift_rad: float,
+    drift_reference: RouteDriftAnchor | None = None,
 ) -> MapOdomStationaryStabilityResult:
     return MapOdomStationaryStabilityResult(
         accepted=False,
@@ -619,6 +670,7 @@ def _unavailable_stationary_stability_result(
         max_translation_drift_m=max_translation_drift_m,
         max_yaw_drift_rad=max_yaw_drift_rad,
         validation_error=validation_error,
+        drift_reference=drift_reference,
     )
 
 
@@ -626,13 +678,25 @@ def _map_odom_drift(
     *,
     observed_map_from_odom: PlanarTransform2D,
     reference_map_from_odom: PlanarTransform2D,
+    drift_reference: RouteDriftAnchor | None = None,
 ) -> _MapOdomDrift:
-    """Compute drift using the frozen-reference continuity convention."""
+    """Compare transform action at a fixed anchor (legacy: odom origin)."""
 
     map_delta_x = observed_map_from_odom.x_m - reference_map_from_odom.x_m
     map_delta_y = observed_map_from_odom.y_m - reference_map_from_odom.y_m
     cosine = math.cos(reference_map_from_odom.yaw_rad)
     sine = math.sin(reference_map_from_odom.yaw_rad)
+    if drift_reference is not None:
+        live_cosine = math.cos(observed_map_from_odom.yaw_rad)
+        live_sine = math.sin(observed_map_from_odom.yaw_rad)
+        map_delta_x += (
+            (live_cosine - cosine) * drift_reference.odom_x_m
+            - (live_sine - sine) * drift_reference.odom_y_m
+        )
+        map_delta_y += (
+            (live_sine - sine) * drift_reference.odom_x_m
+            + (live_cosine - cosine) * drift_reference.odom_y_m
+        )
     # Express relative translation in the reference odom basis.  Its norm is
     # rotation-invariant, while components preserve transform direction in
     # persisted evidence.
@@ -668,6 +732,7 @@ def _validated_context(context: OdomExecutionContext) -> OdomExecutionContext:
         max_map_from_odom_yaw_drift_rad=(
             context.max_map_from_odom_yaw_drift_rad
         ),
+        drift_reference=context.drift_reference,
     )
 
 
@@ -722,3 +787,14 @@ def _finite_nonnegative(value: object, name: str) -> float:
 
 def _canonical_zero(value: float) -> float:
     return 0.0 if value == 0.0 else value
+
+
+def validate_map_odom_continuity_evidence(
+    value: object, *, context: OdomExecutionContext | None = None,
+) -> MapOdomContinuityResult:
+    """Recompute persisted continuity without granting new execution authority."""
+    from scripts.aufgabe04.navigation.localization.map_odom_continuity_evidence import (
+        validate_continuity_evidence,
+    )
+
+    return validate_continuity_evidence(value, context=context)

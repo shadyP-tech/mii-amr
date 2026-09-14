@@ -22,6 +22,10 @@ from scripts.aufgabe04.navigation.localization.initial_map_tf_recovery import (
     initial_map_tf_recovery_error,
     initial_tf_drift_report_error,
 )
+from scripts.aufgabe04.navigation.localization.odom_route_adapter import (
+    OdomExecutionContext,
+    validate_map_odom_continuity_evidence,
+)
 
 
 PRESTART_LOCALIZATION_RESEAL_SCHEMA_VERSION = 1
@@ -123,6 +127,7 @@ def evaluate_prestart_localization_reseal(
     status: object,
     motion_published: object,
     stop_details: object,
+    execution_context: OdomExecutionContext | None = None,
 ) -> PrestartLocalizationResealDecision:
     """Classify only exact, complete before-motion localization evidence.
 
@@ -157,7 +162,7 @@ def evaluate_prestart_localization_reseal(
             and acquisition["schema_version"] == 2 and not observed_drift):
         # New typed acquisition evidence cannot fall back to the historical
         # monitor-warning contract when its fields are missing or invalid.
-        error = initial_map_tf_recovery_error(stop_details)
+        error = initial_map_tf_recovery_error(stop_details, context=execution_context)
         if error:
             return _rejected(error, motion_published)
         return _eligible(
@@ -202,7 +207,6 @@ def evaluate_prestart_localization_reseal(
         return _rejected("continuity_not_mapping", motion_published)
 
     common_continuity = (
-        ("schema_version", 1),
         ("accepted", False),
         ("requires_zero_cycle", True),
         ("requires_reseal", True),
@@ -216,10 +220,24 @@ def evaluate_prestart_localization_reseal(
                 f"invalid_continuity_{name}",
                 motion_published,
             )
+    schema_version = continuity.get("schema_version")
+    if type(schema_version) is not int or schema_version not in (1, 2):
+        return _rejected("invalid_continuity_schema_version", motion_published)
+    if schema_version == 1 and any(
+        field in continuity for field in ("drift_reference", "origin_translation_drift_m")
+    ):
+        return _rejected("invalid_continuity_drift_reference", motion_published)
 
     contract_error = _continuity_identity_error(continuity)
     if contract_error:
         return _rejected(contract_error, motion_published)
+    if schema_version == 2 or execution_context is not None:
+        try:
+            validate_map_odom_continuity_evidence(
+                continuity, context=execution_context,
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return _rejected("invalid_continuity_evidence", motion_published)
 
     continuity_reason = continuity.get("reason")
     if not isinstance(continuity_reason, str) or not continuity_reason:
@@ -242,7 +260,7 @@ def evaluate_prestart_localization_reseal(
 
     if continuity_reason in _DRIFT_CONTINUITY_REASONS:
         if isinstance(acquisition, Mapping) and acquisition.get("schema_version") == 2:
-            error = initial_tf_drift_report_error(stop_details)
+            error = initial_tf_drift_report_error(stop_details, context=execution_context)
             if error:
                 return _rejected(error, motion_published)
         if monitor_warning:

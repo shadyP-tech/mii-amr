@@ -1,0 +1,215 @@
+{
+  "schema_version": 1,
+  "source_run_id": "stand_explore_exact2_camera_all5_20260911T153146Z",
+  "source_commit": "a78d94f0211ea6ae8e30641d904742a17045162a",
+  "source_replay_sha256": "9cfd6dfea621ce933f868b1e96f39dc5db6d4a5ae261f522091babe100e2c3e9",
+  "cases": [
+    {
+      "run_suffix": "candidate_000",
+      "stop_timestamp": "2026-09-11T15:36:42.462113+00:00",
+      "recorded_continuity": {
+        "absolute_yaw_drift_rad": 0.03403009150738,
+        "accepted": false,
+        "base_frame": "base_footprint",
+        "certificate_sha256": "d0f2a1ee698f7a9f055f47b7a6a87f3fdca5886e9b0f1da9ba8ea2875b2f262a",
+        "decision": "force_zero_reseal",
+        "fail_closed": true,
+        "frozen_map_from_odom": {
+          "x_m": -4.834387655974082,
+          "y_m": 0.2877511112140414,
+          "yaw_rad": -0.5320627952265
+        },
+        "live_map_from_odom": {
+          "x_m": -4.82673558998261,
+          "y_m": 0.10176781931070966,
+          "yaw_rad": -0.49803270371912
+        },
+        "map_frame": "map",
+        "max_translation_drift_m": 0.15,
+        "max_yaw_drift_rad": 0.09677608415852121,
+        "odom_frame": "odom",
+        "reason": "map_from_odom_translation_drift",
+        "relative_translation_x_m": 0.10094582963453394,
+        "relative_translation_y_m": -0.15639142706853656,
+        "relative_yaw_rad": 0.03403009150738,
+        "requires_reseal": true,
+        "requires_zero_cycle": true,
+        "schema_version": 1,
+        "threshold_semantics": "accept_if_observed_less_than_or_equal_to_limit",
+        "translation_drift_m": 0.18614064301258268,
+        "validation_error": null
+      },
+      "map_route": [
+        {
+          "x_m": 0.3826437742172262,
+          "y_m": -0.04584973110587698,
+          "yaw_rad": null
+        },
+        {
+          "x_m": 0.25500000000000034,
+          "y_m": -0.31499999999999995,
+          "yaw_rad": -1.9829790975687118
+        }
+      ],
+      "expected_anchor_displacement_m": 0.018003231354961024,
+      "expected_maximum_vertex_displacement_m": 0.02813078479534247,
+      "robot_radius_m": 0.105,
+      "source_files": {
+        "route": {
+          "path": "results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260911T153146Z/candidates/000_survey_candidate_0003/preapproach_source/preapproach_execution/route.csv",
+          "sha256": "03e3c3514613242b7ceecc287b5c840b309dffc4a116ecc4fb5efa0ed967287a"
+        },
+        "certificate": {
+          "path": "results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260911T153146Z/odom_execution/stand_explore_exact2_camera_all5_20260911T153146Z_candidate_000_execute_certificate.json",
+          "sha256": "3abb37fb70e609366f6fff50639a8a7b4ee48b0190f3a0d667d3271da2ef5af8"
+        },
+        "events": {
+          "path": "results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260911T153146Z/run_events/stand_explore_exact2_camera_all5_20260911T153146Z_candidate_000.jsonl",
+          "sha256": "c259b4238af1275a975f24dee7477610612d2e86e997d9efeba98ace4eeeafd2"
+        },
+        "uncertainty_budget": {
+          "path": "results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260911T153146Z/odom_execution/stand_explore_exact2_camera_all5_20260911T153146Z_candidate_000_execute_uncertainty_budget.json",
+          "sha256": "02147ddcc89cd9bcf0ba8cb205f726263ab08337e9786707daba8595af63ac86"
+        }
+      }
+    },
+    {
+      "run_suffix": "candidate_000_runtime_localization_reseal_001",
+      "stop_timestamp": "2026-09-11T15:37:16.424892+00:00",
+      "recorded_continuity": {
+        "absolute_yaw_drift_rad": 0.02179751037792,
+        "accepted": false,
+        "base_frame": "base_footprint",
+        "certificate_sha256": "71ce5a57a15b99adaf2dbfd57dc143383df753398ac1b92321614dcfaa5d76e2",
+        "decision": "force_zero_reseal",
+        "fail_closed": true,
+        "frozen_map_from_odom": {
+          "x_m": -4.812848448268167,
+          "y_m": 0.2110700905399805,
+          "yaw_rad": -0.51879646032648
+        },
+        "live_map_from_odom": {
+          "x_m": -4.799544504617217,
+          "y_m": 0.3096323113503243,
+          "yaw_rad": -0.5405939707044
+        },
+        "map_frame": "map",
+        "max_translation_drift_m": 0.07878757148372395,
+        "max_yaw_drift_rad": 0.081704942244964,
+        "odom_frame": "odom",
+        "reason": "map_from_odom_translation_drift",
+        "relative_translation_x_m": -0.03731726557290638,
+        "relative_translation_y_m": 0.09218963053345967,
+        "relative_yaw_rad": -0.02179751037792,
+        "requires_reseal": true,
+        "requires_zero_cycle": true,
+        "schema_version": 1,
+        "threshold_semantics": "accept_if_observed_less_than_or_equal_to_limit",
+        "translation_drift_m": 0.09945605204176679,
+        "validation_error": null
+      },
+      "map_route": [
+        {
+          "x_m": 0.4155283070497644,
+          "y_m": -0.0558557626796925,
+          "yaw_rad": null
+        },
+        {
+          "x_m": 0.30500000000000016,
+          "y_m": -0.31499999999999995,
+          "yaw_rad": -1.9911358357173647
+        }
+      ],
+      "expected_anchor_displacement_m": 0.01655372883538981,
+      "expected_maximum_vertex_displacement_m": 0.01655372883538981,
+      "robot_radius_m": 0.105,
+      "source_files": {
+        "route": {
+          "path": "results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260911T153146Z/candidates/000_survey_candidate_0003/candidate_preapproach_runtime_reseals/runtime_localization_reseal_001/route_source/route/preapproach_execution/route.csv",
+          "sha256": "c5e23a3062850102ed3eabb6b6fcfc0c0b8dc6e0835cd5fce63ec0e9a7e96d0a"
+        },
+        "certificate": {
+          "path": "results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260911T153146Z/odom_execution/stand_explore_exact2_camera_all5_20260911T153146Z_candidate_000_runtime_localization_reseal_001_execute_certificate.json",
+          "sha256": "d28804eaaf60edd913f2d8c9833cc9f12e5d34b42a71de06c83d61ee565453d0"
+        },
+        "events": {
+          "path": "results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260911T153146Z/run_events/stand_explore_exact2_camera_all5_20260911T153146Z_candidate_000_runtime_localization_reseal_001.jsonl",
+          "sha256": "94603a0e5697ac685659ff068d5e8b437fbb67e11bc7ef76868d9d0a5bba46f3"
+        },
+        "uncertainty_budget": {
+          "path": "results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260911T153146Z/odom_execution/stand_explore_exact2_camera_all5_20260911T153146Z_candidate_000_runtime_localization_reseal_001_execute_uncertainty_budget.json",
+          "sha256": "452e172e62aa70bd1b509115f6378bc1ea58e1c9bee1c6b53b15e5d8d5312573"
+        }
+      }
+    },
+    {
+      "run_suffix": "coverage_000",
+      "stop_timestamp": "2026-09-11T15:34:12.966439+00:00",
+      "recorded_continuity": {
+        "absolute_yaw_drift_rad": 0.02810896336295,
+        "accepted": false,
+        "base_frame": "base_footprint",
+        "certificate_sha256": "db8546e44264ab0a6360be94b16b16836bb21e2c3db3dbad5a2e4a02a6beecc2",
+        "decision": "force_zero_reseal",
+        "fail_closed": true,
+        "frozen_map_from_odom": {
+          "x_m": -4.866452693058027,
+          "y_m": 0.04395410757880569,
+          "yaw_rad": -0.47166375673663
+        },
+        "live_map_from_odom": {
+          "x_m": -4.854308411122587,
+          "y_m": 0.15141355158447412,
+          "yaw_rad": -0.49977272009958
+        },
+        "map_frame": "map",
+        "max_translation_drift_m": 0.10082362211055407,
+        "max_yaw_drift_rad": 0.1,
+        "odom_frame": "odom",
+        "reason": "map_from_odom_translation_drift",
+        "relative_translation_x_m": -0.03800795020688243,
+        "relative_translation_y_m": 0.10124431544934252,
+        "relative_yaw_rad": -0.02810896336295,
+        "requires_reseal": true,
+        "requires_zero_cycle": true,
+        "schema_version": 1,
+        "threshold_semantics": "accept_if_observed_less_than_or_equal_to_limit",
+        "translation_drift_m": 0.10814349582723332,
+        "validation_error": null
+      },
+      "map_route": [
+        {
+          "x_m": -1.5835129536034502,
+          "y_m": -0.4585009113423205,
+          "yaw_rad": null
+        },
+        {
+          "x_m": -0.7949999999999999,
+          "y_m": -0.014999999999999902,
+          "yaw_rad": 0.0
+        }
+      ],
+      "expected_anchor_displacement_m": 0.01573448534320801,
+      "expected_maximum_vertex_displacement_m": 0.01573448534320801,
+      "robot_radius_m": 0.105,
+      "source_files": {
+        "route": {
+          "path": "results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260911T153146Z/execution/coverage_leg_000/route.csv",
+          "sha256": "9c8ca42e29bdee622d266e15c0d2060731c45da286934cbfea8cf8ca20d79450"
+        },
+        "certificate": {
+          "path": "results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260911T153146Z/odom_execution/stand_explore_exact2_camera_all5_20260911T153146Z_coverage_000_execute_certificate.json",
+          "sha256": "1e7ab1c277295dc4c9d33b3abc1de24f908a86a57e3fb783d726bf480a4aaa1e"
+        },
+        "events": {
+          "path": "results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260911T153146Z/run_events/stand_explore_exact2_camera_all5_20260911T153146Z_coverage_000.jsonl",
+          "sha256": "8b6eac9cbe54948be47a0fc80d9fb0fe20d558d650f83b086a8263549c9402ee"
+        },
+        "uncertainty_budget": {
+          "path": "results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260911T153146Z/odom_execution/stand_explore_exact2_camera_all5_20260911T153146Z_coverage_000_execute_uncertainty_budget.json",
+          "sha256": "389a6f15bbde9bd857b29dbc7f2c7e310e81073687b66c0ee4096391c630ad91"
+        }
+      }
+    }
+  ]
+}

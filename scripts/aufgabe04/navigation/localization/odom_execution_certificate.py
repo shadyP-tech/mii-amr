@@ -26,8 +26,9 @@ from scripts.aufgabe04.artifacts.content_store import (
 )
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 
+from .map_odom_drift_reference import RouteDriftAnchor
 
-ODOM_EXECUTION_CERTIFICATE_SCHEMA_VERSION = 1
+ODOM_EXECUTION_CERTIFICATE_SCHEMA_VERSION = 2
 POSE_ROUTE_HASH_SCHEMA_VERSION = 1
 
 MAP_FROM_ODOM_CONVENTION = "p_map = R(yaw_rad) * p_odom + (x_m, y_m)"
@@ -124,7 +125,10 @@ class OdomExecutionCertificate:
     command_owner: str
     uncertainty_budget_sha256: str
     ambiguity_evidence_sha256: str
-    schema_version: int = ODOM_EXECUTION_CERTIFICATE_SCHEMA_VERSION
+    # Existing callers and artifacts retain their exact v1 representation.
+    # Motion admission explicitly selects v2 and supplies its route anchor.
+    schema_version: int = 1
+    drift_reference: RouteDriftAnchor | None = None
 
     def __post_init__(self) -> None:
         _validate_certificate(self, canonicalize=True)
@@ -239,7 +243,12 @@ def load_odom_execution_certificate(path: Path) -> OdomExecutionCertificate:
         payload = load_content_hashed_json(path, hash_field=_HASH_FIELD)
     except ContentStoreError as exc:
         raise ValueError(str(exc)) from exc
-    if frozenset(payload) != _CERTIFICATE_FIELDS:
+    version = _integer(payload.get("schema_version"), "schema_version")
+    expected_fields = (
+        _CERTIFICATE_FIELDS | {"drift_reference"}
+        if version == 2 else _CERTIFICATE_FIELDS
+    )
+    if frozenset(payload) != expected_fields:
         raise ValueError("odom execution certificate fields mismatch")
     transform_payload = payload["map_from_odom"]
     if not isinstance(transform_payload, Mapping):
@@ -294,6 +303,10 @@ def load_odom_execution_certificate(path: Path) -> OdomExecutionCertificate:
                 payload["ambiguity_evidence_sha256"],
                 "ambiguity_evidence_sha256",
             ),
+            drift_reference=(
+                RouteDriftAnchor.from_evidence(payload["drift_reference"])
+                if version == 2 else None
+            ),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"invalid odom execution certificate: {exc}") from exc
@@ -322,6 +335,8 @@ def validate_odom_execution_identity(
     _validate_certificate(certificate, canonicalize=False)
     source_route = _validated_route(source_map_route, "source_map_route")
     odom_route = _validated_route(transformed_odom_route, "transformed_odom_route")
+    if certificate.drift_reference is not None:
+        certificate.drift_reference.validate_route_start(source_route[0])
     if len(source_route) != len(odom_route):
         raise ValueError("source and transformed route waypoint counts differ")
 
@@ -472,9 +487,16 @@ def _validate_certificate(
     if (
         not isinstance(certificate.schema_version, int)
         or isinstance(certificate.schema_version, bool)
-        or certificate.schema_version != ODOM_EXECUTION_CERTIFICATE_SCHEMA_VERSION
+        or certificate.schema_version not in (1, ODOM_EXECUTION_CERTIFICATE_SCHEMA_VERSION)
     ):
         raise ValueError("unsupported odom execution certificate schema")
+    if certificate.schema_version == 1:
+        if certificate.drift_reference is not None:
+            raise ValueError("legacy odom execution certificate cannot contain drift_reference")
+    else:
+        if not isinstance(certificate.drift_reference, RouteDriftAnchor):
+            raise ValueError("odom execution certificate v2 requires drift_reference")
+        certificate.drift_reference.validate_transform(certificate.map_from_odom)
 
     if canonicalize:
         object.__setattr__(certificate, "transform_stamp_sec", transform_stamp)
@@ -490,7 +512,7 @@ def _certificate_payload(
     certificate: OdomExecutionCertificate,
 ) -> dict[str, object]:
     _validate_certificate(certificate, canonicalize=False)
-    return {
+    payload = {
         "schema_version": certificate.schema_version,
         "source_map_route_sha256": certificate.source_map_route_sha256,
         "source_map_execution_certificate_sha256": (
@@ -515,6 +537,9 @@ def _certificate_payload(
         "uncertainty_budget_sha256": certificate.uncertainty_budget_sha256,
         "ambiguity_evidence_sha256": certificate.ambiguity_evidence_sha256,
     }
+    if certificate.drift_reference is not None:
+        payload["drift_reference"] = certificate.drift_reference.to_evidence()
+    return payload
 
 
 def _pose_route_payload(route: Sequence[Pose2D]) -> dict[str, object]:

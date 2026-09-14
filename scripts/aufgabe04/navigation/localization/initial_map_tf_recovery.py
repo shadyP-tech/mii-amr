@@ -10,24 +10,35 @@ import math
 from typing import Mapping
 
 from scripts.aufgabe04.navigation.localization.odom_execution_certificate import PlanarTransform2D
-from scripts.aufgabe04.navigation.localization.odom_route_adapter import OdomExecutionContext
+from scripts.aufgabe04.navigation.localization.odom_route_adapter import (
+    OdomExecutionContext,
+    validate_map_odom_continuity_evidence,
+)
+from scripts.aufgabe04.navigation.localization.map_odom_drift_reference import RouteDriftAnchor
 
 
-def initial_map_tf_recovery_error(details: Mapping[str, object]) -> str:
+def initial_map_tf_recovery_error(
+    details: Mapping[str, object], *, context: OdomExecutionContext | None = None,
+) -> str:
     """Return a diagnostic rejection reason, or empty for complete evidence."""
 
     if details.get("continuity") is not None:
         return "unexpected_continuity_for_initial_map_tf"
-    return _initial_tf_report_error(details, drift=False)
+    return _initial_tf_report_error(details, drift=False, execution_context=context)
 
 
-def initial_tf_drift_report_error(details: Mapping[str, object]) -> str:
+def initial_tf_drift_report_error(
+    details: Mapping[str, object], *, context: OdomExecutionContext | None = None,
+) -> str:
     """Require a current-schema drift report to match its sampled context."""
 
-    return _initial_tf_report_error(details, drift=True)
+    return _initial_tf_report_error(details, drift=True, execution_context=context)
 
 
-def _initial_tf_report_error(details: Mapping[str, object], *, drift: bool) -> str:
+def _initial_tf_report_error(
+    details: Mapping[str, object], *, drift: bool,
+    execution_context: OdomExecutionContext | None,
+) -> str:
     expected = {
         "execution_phase": "before_motion", "phase": "initial_runtime_input_wait",
         "motion_published": False, "fail_closed": True,
@@ -71,6 +82,13 @@ def _initial_tf_report_error(details: Mapping[str, object], *, drift: bool) -> s
     identity = state.get("execution_context")
     if not isinstance(identity, Mapping):
         return "initial_map_tf_execution_context_missing"
+    fields = {
+        "map_frame", "odom_frame", "base_frame", "certificate_sha256",
+        "frozen_map_from_odom", "max_map_from_odom_translation_drift_m",
+        "max_map_from_odom_yaw_drift_rad",
+    }
+    if set(identity) not in (fields, fields | {"drift_reference"}):
+        return "invalid_initial_map_tf_execution_context"
     try:
         transform = identity["frozen_map_from_odom"]
         if not isinstance(transform, Mapping):
@@ -81,9 +99,15 @@ def _initial_tf_report_error(details: Mapping[str, object], *, drift: bool) -> s
             frozen_map_from_odom=PlanarTransform2D(**transform),
             max_map_from_odom_translation_drift_m=identity["max_map_from_odom_translation_drift_m"],
             max_map_from_odom_yaw_drift_rad=identity["max_map_from_odom_yaw_drift_rad"],
+            drift_reference=(
+                RouteDriftAnchor.from_evidence(identity["drift_reference"])
+                if "drift_reference" in identity else None
+            ),
         )
     except (KeyError, TypeError, ValueError, OverflowError):
         return "invalid_initial_map_tf_execution_context"
+    if execution_context is not None and context != execution_context:
+        return "initial_map_tf_execution_context_mismatch"
     if drift:
         continuity = details.get("continuity")
         if not isinstance(continuity, Mapping):
@@ -99,6 +123,12 @@ def _initial_tf_report_error(details: Mapping[str, object], *, drift: bool) -> s
                 or continuity.get("max_translation_drift_m") != context.max_map_from_odom_translation_drift_m
                 or continuity.get("max_yaw_drift_rad") != context.max_map_from_odom_yaw_drift_rad):
             return "initial_tf_drift_context_mismatch"
+        if (context.drift_reference is not None or "drift_reference" in continuity
+                or continuity.get("schema_version") != 1):
+            try:
+                validate_map_odom_continuity_evidence(continuity, context=context)
+            except (KeyError, TypeError, ValueError, OverflowError):
+                return "initial_tf_drift_context_mismatch"
     edges = state.get("edges")
     required_edges = state.get("required_edges")
     if (not isinstance(edges, Mapping)

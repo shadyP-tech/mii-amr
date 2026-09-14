@@ -29,6 +29,18 @@ from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     ROUTINE_MISSION_LEG_KINDS,
     MissionLegKind,
 )
+from scripts.aufgabe04.navigation.execution.route_uncertainty_evidence import (
+    ROUTE_UNCERTAINTY_ARTIFACT_HASH_FIELD,
+)
+from scripts.aufgabe04.navigation.localization.map_odom_drift_reference import (
+    RouteDriftAnchor,
+)
+from scripts.aufgabe04.navigation.localization.odom_execution_certificate import (
+    load_odom_execution_certificate,
+)
+from scripts.aufgabe04.navigation.localization.odom_route_adapter import (
+    validate_map_odom_continuity_evidence,
+)
 
 
 MISSION_MOTION_AUTHORIZATION_SCHEMA_VERSION = 2
@@ -104,7 +116,7 @@ _PERMIT_FIELDS_V2 = _PERMIT_FIELDS_V1 | {
     "mission_leg_index",
     "target_id",
 }
-_DECISION_FIELDS = frozenset(
+_DECISION_FIELDS_V1 = frozenset(
     {
         "schema_version",
         "eligible",
@@ -118,6 +130,7 @@ _DECISION_FIELDS = frozenset(
         "automatic_motion_authorized",
     }
 )
+_DECISION_FIELDS_V2 = _DECISION_FIELDS_V1 | {"continuity_evidence"}
 
 
 def _mission_leg_kind(value: object, name: str) -> MissionLegKind:
@@ -280,7 +293,7 @@ class RuntimeLocalizationMotionPermit:
         object.__setattr__(
             self,
             "runtime_reseal_decision_evidence",
-            MappingProxyType(evidence),
+            _freeze_decision_value(evidence),
         )
         _validate_permit(self)
 
@@ -295,7 +308,7 @@ class RuntimeLocalizationMotionPermit:
             "reseal_index": self.reseal_index,
             "max_runtime_reseals_per_leg": self.max_runtime_reseals_per_leg,
             "rejected_run_id": self.rejected_run_id,
-            "runtime_reseal_decision_evidence": dict(
+            "runtime_reseal_decision_evidence": _canonical_decision_copy(
                 self.runtime_reseal_decision_evidence
             ),
             "runtime_reseal_decision_sha256": (
@@ -741,6 +754,7 @@ def validate_runtime_localization_motion_permit(
         permit.fresh_localization_evidence_sha256,
     )
     _validate_budget(permit, authorization)
+    _validate_anchored_recovery_artifacts(permit)
     return permit
 
 
@@ -923,10 +937,14 @@ def _validate_permit(permit: RuntimeLocalizationMotionPermit) -> None:
 def _validate_runtime_reseal_decision(
     evidence: Mapping[str, object], expected_sha256: str
 ) -> None:
-    if frozenset(evidence) != _DECISION_FIELDS:
+    version = evidence.get("schema_version")
+    if type(version) is not int or version not in (1, 2):
+        raise ValueError("runtime reseal decision evidence schema_version mismatch")
+    expected_fields = _DECISION_FIELDS_V1 if version == 1 else _DECISION_FIELDS_V2
+    if frozenset(evidence) != expected_fields:
         raise ValueError("runtime reseal decision evidence fields mismatch")
     expected_values = {
-        "schema_version": 1,
+        "schema_version": version,
         "eligible": True,
         "reason": "runtime_localization_reseal_required",
         "execution_phase": "after_motion",
@@ -942,7 +960,16 @@ def _validate_runtime_reseal_decision(
         ):
             raise ValueError(f"runtime reseal decision evidence {name} mismatch")
     _require_nonempty(evidence.get("continuity_reason"), "continuity_reason")
-    actual_sha256 = payload_sha256(dict(evidence))
+    if version == 2:
+        continuity = evidence["continuity_evidence"]
+        if not isinstance(continuity, Mapping) or continuity.get("schema_version") != 2:
+            raise ValueError("anchored runtime reseal decision requires continuity evidence v2")
+        result = validate_map_odom_continuity_evidence(continuity)
+        if result.accepted or not result.requires_zero_reseal:
+            raise ValueError("runtime reseal decision continuity must require reseal")
+        if evidence["continuity_reason"] != result.reason:
+            raise ValueError("runtime reseal decision continuity reason mismatch")
+    actual_sha256 = payload_sha256(_canonical_decision_copy(evidence))
     if actual_sha256 != expected_sha256:
         raise ValueError("runtime reseal decision evidence hash mismatch")
 
@@ -954,6 +981,64 @@ def _validate_permit_references(permit: RuntimeLocalizationMotionPermit) -> None
     for name, path, digest in _permit_artifacts(permit):
         _validate_bound_artifact(name, path, digest)
     _validate_budget(permit, authorization)
+    _validate_anchored_recovery_artifacts(permit)
+
+
+def _validate_anchored_recovery_artifacts(
+    permit: RuntimeLocalizationMotionPermit,
+) -> None:
+    """Bind the recovery's new certificate and clearance to the same anchor.
+
+    The stop decision belongs to the rejected execution certificate.  Its
+    anchor need not equal the newly admitted route's anchor, but its complete
+    v2 evidence must survive re-admission instead of reverting to v1 semantics.
+    """
+
+    certificate = load_odom_execution_certificate(
+        Path(permit.dry_odom_certificate_path)
+    )
+    decision_version = permit.runtime_reseal_decision_evidence["schema_version"]
+    budget = load_content_hashed_json(
+        Path(permit.dry_uncertainty_budget_path),
+        hash_field=ROUTE_UNCERTAINTY_ARTIFACT_HASH_FIELD,
+    )
+    if (
+        type(budget.get("schema_version")) is not int
+        or budget["schema_version"] != certificate.schema_version
+    ):
+        raise ValueError("runtime recovery certificate and uncertainty budget versions mismatch")
+    if payload_sha256(budget) != certificate.uncertainty_budget_sha256:
+        raise ValueError("runtime recovery dry certificate uncertainty budget hash mismatch")
+    allocation = budget.get("runtime_map_odom_continuity_allocation")
+    if not isinstance(allocation, Mapping):
+        raise ValueError("runtime recovery uncertainty allocation missing")
+    if certificate.schema_version == 1:
+        if "drift_reference" in allocation:
+            raise ValueError("legacy runtime recovery allocation cannot contain drift_reference")
+        if decision_version != 1:
+            raise ValueError("anchored runtime recovery cannot use a legacy dry certificate")
+        return
+    if decision_version != 2:
+        raise ValueError("anchored dry certificate requires runtime reseal decision v2")
+    reference = certificate.drift_reference
+    assert reference is not None  # Required by the strict v2 certificate reader.
+    try:
+        budget_reference = RouteDriftAnchor.from_evidence(
+            allocation.get("drift_reference")
+        )
+    except ValueError as exc:
+        raise ValueError("runtime recovery uncertainty drift_reference mismatch") from exc
+    if budget_reference != reference:
+        raise ValueError("runtime recovery uncertainty drift_reference mismatch")
+    admission = budget.get("admission")
+    config = admission.get("config") if isinstance(admission, Mapping) else None
+    map_anchor = reference.to_evidence()["map_anchor"]
+    if not isinstance(config, Mapping) or any(
+        isinstance(config.get(f"heading_reference_{axis}_m"), bool)
+        or config.get(f"heading_reference_{axis}_m") != map_anchor[f"{axis}_m"]
+        for axis in ("x", "y")
+    ):
+        raise ValueError("runtime recovery uncertainty heading reference mismatch")
 
 
 def _validate_master_reference(
@@ -1072,12 +1157,32 @@ def _canonical_decision_copy(value: Mapping[str, object]) -> dict[str, object]:
     if not isinstance(value, Mapping):
         raise ValueError("runtime_reseal_decision_evidence must be an object")
     try:
-        decoded = json.loads(canonical_json_bytes(dict(value)).decode("utf-8"))
+        decoded = json.loads(
+            canonical_json_bytes(_plain_decision_value(value)).decode("utf-8")
+        )
     except ContentStoreError as exc:
         raise ValueError(f"invalid runtime reseal decision evidence: {exc}") from exc
     if not isinstance(decoded, dict):
         raise ValueError("runtime_reseal_decision_evidence must be an object")
     return decoded
+
+
+def _freeze_decision_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({
+            key: _freeze_decision_value(item) for key, item in value.items()
+        })
+    if isinstance(value, (tuple, list)):
+        return tuple(_freeze_decision_value(item) for item in value)
+    return value
+
+
+def _plain_decision_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _plain_decision_value(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_plain_decision_value(item) for item in value]
+    return value
 
 
 def _require_nonempty(value: object, name: str) -> None:

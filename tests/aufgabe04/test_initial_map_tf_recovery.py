@@ -7,6 +7,9 @@ from scripts.aufgabe04.navigation.localization.prestart_localization_reseal impo
     evaluate_prestart_localization_reseal,
 )
 from tests.aufgabe04.test_prestart_localization_reseal import _stop_details
+from tests.aufgabe04.test_runtime_localization_reseal import (
+    _anchored_context, _anchored_continuity,
+)
 
 
 def initial_map_tf_stop():
@@ -90,6 +93,72 @@ def initial_tf_drift_stop():
 
 
 class InitialMapTfRecoveryTests(unittest.TestCase):
+    def test_anchored_initial_drift_requires_the_same_fixed_context(self):
+        details = initial_tf_drift_stop()
+        context = _anchored_context()
+        details["continuity"] = _anchored_continuity()
+        identity = details["initial_tf_acquisition"]["execution_context"]
+        identity["drift_reference"] = context.drift_reference.to_evidence()
+        decision = evaluate_prestart_localization_reseal(
+            status="stopped", motion_published=False, stop_details=details,
+            execution_context=context,
+        )
+        self.assertTrue(decision.eligible, decision.reason)
+        for replacement in (None, {"metric": "unknown"}):
+            changed = deepcopy(details)
+            changed["initial_tf_acquisition"]["execution_context"]["drift_reference"] = replacement
+            self.assertFalse(decide(changed).eligible)
+        changed = deepcopy(details)
+        del changed["initial_tf_acquisition"]["execution_context"]["drift_reference"]
+        self.assertFalse(decide(changed).eligible)
+        # A different internally valid anchor is still a different authority.
+        changed = deepcopy(details)
+        changed["initial_tf_acquisition"]["execution_context"]["drift_reference"]["map_anchor"]["x_m"] = 3.0
+        changed["initial_tf_acquisition"]["execution_context"]["drift_reference"]["odom_anchor"]["x_m"] = 3.0
+        self.assertFalse(decide(changed).eligible)
+
+    def test_missing_tf_recovery_preserves_and_binds_the_anchored_context(self):
+        details = initial_map_tf_stop()
+        context = _anchored_context()
+        details["initial_tf_acquisition"]["execution_context"].update(
+            frozen_map_from_odom={"x_m": 0.0, "y_m": 0.0, "yaw_rad": 0.0},
+            max_map_from_odom_translation_drift_m=0.10,
+            max_map_from_odom_yaw_drift_rad=0.03,
+            drift_reference=context.drift_reference.to_evidence(),
+        )
+        def bound_decision():
+            return evaluate_prestart_localization_reseal(
+                status="stopped", motion_published=False, stop_details=details,
+                execution_context=context,
+            )
+        self.assertTrue(bound_decision().eligible)
+        del details["initial_tf_acquisition"]["execution_context"]["drift_reference"]
+        self.assertFalse(bound_decision().eligible)
+
+    def test_follower_startup_carries_certificate_anchor_into_terminal_evidence(self):
+        from tests.aufgabe04.test_initial_tf_acquisition import InitialTfAcquisitionTest
+        from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.control_results import initial_runtime_input_stop_details
+
+        harness = InitialTfAcquisitionTest()
+        node, clock = harness.make_sampled_node(map_at=None)
+        node.odom_execution_context = _anchored_context()
+        failure = harness.wait(node, clock)
+        evidence = node.latest_initial_tf_acquisition
+        self.assertEqual(
+            evidence["execution_context"]["drift_reference"],
+            node.odom_execution_context.drift_reference.to_evidence(),
+        )
+        details = initial_runtime_input_stop_details(
+            node.latest_stop_details, reason=failure, motion_published=False,
+        )
+        decision = evaluate_prestart_localization_reseal(
+            status="stopped", motion_published=False, stop_details=details,
+            execution_context=node.odom_execution_context,
+        )
+        self.assertTrue(decision.eligible, decision.reason)
+        self.assertFalse(decision.automatic_motion_authorized)
+        node.publish_zero.assert_called()
+
     def test_missing_global_edge_requests_new_preparation_without_motion_authority(self):
         for exception in ("LookupException", "ConnectivityException"):
             with self.subTest(exception=exception):

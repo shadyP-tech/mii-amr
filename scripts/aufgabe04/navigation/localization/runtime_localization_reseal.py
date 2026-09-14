@@ -13,6 +13,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from scripts.aufgabe04.navigation.localization.odom_route_adapter import (
+    OdomExecutionContext,
+    validate_map_odom_continuity_evidence,
+)
+
 
 RUNTIME_LOCALIZATION_RESEAL_SCHEMA_VERSION = 1
 LOCALIZATION_RESEAL_FAULT_CODE = "localization_reseal_required"
@@ -30,6 +35,7 @@ class RuntimeLocalizationResealDecision:
     execution_phase: str
     motion_published: bool | None
     continuity_reason: str
+    continuity_evidence: Mapping[str, Any] | None = None
 
     @property
     def requires_fresh_localization(self) -> bool:
@@ -48,8 +54,11 @@ class RuntimeLocalizationResealDecision:
         return False
 
     def to_evidence(self) -> dict[str, Any]:
-        return {
-            "schema_version": RUNTIME_LOCALIZATION_RESEAL_SCHEMA_VERSION,
+        evidence = {
+            "schema_version": (
+                2 if self.continuity_evidence is not None
+                else RUNTIME_LOCALIZATION_RESEAL_SCHEMA_VERSION
+            ),
             "eligible": self.eligible,
             "reason": self.reason,
             "execution_phase": self.execution_phase,
@@ -62,6 +71,9 @@ class RuntimeLocalizationResealDecision:
             "requires_fresh_typed_run": self.requires_fresh_typed_run,
             "automatic_motion_authorized": self.automatic_motion_authorized,
         }
+        if self.continuity_evidence is not None:
+            evidence["continuity_evidence"] = dict(self.continuity_evidence)
+        return evidence
 
 
 @dataclass(frozen=True)
@@ -95,6 +107,7 @@ def evaluate_runtime_localization_reseal(
     status: object,
     motion_published: object,
     stop_details: object,
+    execution_context: OdomExecutionContext | None = None,
 ) -> RuntimeLocalizationResealDecision:
     """Accept only the follower's complete zero-and-reseal evidence contract.
 
@@ -152,12 +165,32 @@ def evaluate_runtime_localization_reseal(
     continuity_reason = continuity.get("reason", "")
     if not isinstance(continuity_reason, str) or not continuity_reason.strip():
         return _rejected("invalid_continuity_reason", motion_published)
+    # Anchored evidence must prove the decision from its transforms and limits.
+    # Preserve the historical schema-1 contract, but never let a damaged
+    # current-schema report fall back to that reason-only interpretation.
+    schema_version = continuity.get("schema_version", 1)
+    if type(schema_version) is not int or schema_version not in (1, 2):
+        return _rejected("invalid_continuity_evidence", motion_published)
+    if schema_version == 1 and any(
+        field in continuity for field in ("drift_reference", "origin_translation_drift_m")
+    ):
+        return _rejected("invalid_continuity_evidence", motion_published)
+    if schema_version == 2 or execution_context is not None:
+        try:
+            validated = validate_map_odom_continuity_evidence(
+                continuity, context=execution_context,
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return _rejected("invalid_continuity_evidence", motion_published)
     return RuntimeLocalizationResealDecision(
         eligible=True,
         reason="runtime_localization_reseal_required",
         execution_phase="after_motion",
         motion_published=motion_published,
         continuity_reason=continuity_reason.strip(),
+        continuity_evidence=(
+            validated.to_evidence() if continuity.get("schema_version") == 2 else None
+        ),
     )
 
 
