@@ -12,15 +12,14 @@ from scripts.aufgabe04.perception.stand_axis.head_model_fit import (
 )
 from scripts.aufgabe04.perception.stand_axis.head_proposal import acquire_head_proposal
 from scripts.aufgabe04.perception.stand_axis.head_backside_classification import classify_current_head_backside
+from scripts.aufgabe04.perception.stand_axis.head_outer_border import check_current_head_marker_boundary
+from scripts.aufgabe04.perception.stand_axis.head_model_quality import MEASURED_HEAD_AXIS_SOURCE
 from scripts.aufgabe04.perception.stand_axis.geometry import (
     _debug_rectangle_image,
     _debug_rectangle_overlay_image,
     _polygon_area,
     _unusable,
     estimate_stand_axis_from_corners,
-)
-from scripts.aufgabe04.perception.stand_axis.model_backside_acquisition import (
-    estimate_stand_axis_from_model_backside,
 )
 from scripts.aufgabe04.perception.stand_axis.head_border_seed import (
     select_head_border_seed,
@@ -90,12 +89,11 @@ def estimate_stand_axis_from_metric_model(
 
     A candidate projection permits bounded QR-neutral head acquisition before
     any pose exists. QR/tracker seeds may position the legacy viewer search,
-    but every physical angle is refitted from raw head rails/corners and neck,
+    but every physical angle is refitted from enclosing raw head rails/corners,
     with independent head-only ambiguity and uncertainty gates. QR/joint fits
     remain separate diagnostics. An exact-image cache reuses preprocessing,
-    never geometry. Legacy backside search can propose current corners when
-    neutral acquisition fails, but physical angle admission still uses the
-    same independent head-only checks. A separate structural/marker classifier
+    never geometry. Neck visibility is not required for neutral acquisition,
+    angle fitting or side classification. A separate border/marker classifier
     may attach a backside-candidate label without changing that head angle.
     """
 
@@ -194,6 +192,21 @@ def estimate_stand_axis_from_metric_model(
     timing.mark("qr_marker_validation")
     def finish_independent_head(result):
         estimate, artifacts, head_pose = result
+        artifacts = replace(artifacts, head_pose_hypotheses=(
+            None if head_pose is None else head_pose.hypotheses))
+        boundary = check_current_head_marker_boundary(
+            cv2, head_corners=estimate.corners, qr_corners=qr_corners,
+            marker_verified=marker.verified, model_profile=model_profile)
+        artifacts = replace(artifacts, head_marker_boundary=boundary)
+        if not boundary.accepted and estimate.usable:
+            # Only an identified current inset contradicts the head boundary.
+            # QR never supplies a replacement angle or corners.
+            estimate = replace(estimate, usable=False, yaw_deg=None,
+                               camera_face_normal_xyz=None, camera_face_center_xyz_m=None,
+                               reason=boundary.reason, evidence_state="unobservable")
+            artifacts = replace(artifacts, model_pose=None, evidence_state="unobservable",
+                                head_model_quality=replace(artifacts.head_model_quality,
+                                    accepted=False, reason=boundary.reason))
         estimate, artifacts = attach_independent_qr_diagnostics(
             cv2, estimate=estimate, debug=artifacts, head_pose=head_pose,
             qr_corners=qr_corners, marker_verified=marker.verified,
@@ -247,56 +260,18 @@ def estimate_stand_axis_from_metric_model(
         and marker.verified and model_profile.committable
     )
     if seed_pose is None and not proposal_can_seed_joint_fit:
-        expected_geometry = (
-            expected_head_center_u_px,
-            expected_head_center_v_px,
-            expected_head_height_px,
-        )
-        if (
-            not qr_marker_detected
-            and pose_hint is None
-            and model_profile.committable
-            and model_profile.environment == "physical"
-            and all(value is not None for value in expected_geometry)
-        ):
-            estimate, artifacts = estimate_stand_axis_from_model_backside(
-                cv2,
-                frame,
-                raw_edges=raw_edges,
-                model_profile=model_profile,
-                expected_head_center_u_px=float(expected_head_center_u_px),
-                expected_head_center_v_px=float(expected_head_center_v_px),
-                expected_head_height_px=float(expected_head_height_px),
-                camera_fx_px=camera.fx_px,
-                camera_fy_px=camera.fy_px,
-                camera_cx_px=camera.cx_px,
-                camera_cy_px=camera.cy_px,
-                edge_preprocess=edge_preprocess,
-                canny_low=canny_low,
-                canny_high=canny_high,
-                min_edge_height_px=min_edge_height_px,
-                max_reprojection_rmse_px=max_reprojection_rmse_px,
-                target_crop_horizontal_half_width_ratio=(
-                    backside_target_crop_horizontal_half_width_ratio
-                ),
-            )
-            timing.mark("backside_acquisition")
-            if estimate.corners is not None and (estimate.usable or estimate.reason ==
-                                                 "model_backside_neck_support_insufficient"):
-                # Retain the alternate locator, not its former angle or
-                # side authority. A rejected legacy stem anchor may still
-                # locate corners. The independent physical-head fit rechecks
-                # current raw borders, neck structure and planar ambiguity.
-                return finish_independent_head(fit_current_measured_head(
-                    cv2, raw_edges, model_profile=model_profile, camera=camera,
-                    proposal_corners=estimate.corners,
-                    max_reprojection_rmse_px=max_reprojection_rmse_px,
-                    min_edge_height_px=min_edge_height_px,
-                ))
-            return estimate, replace(
-                artifacts, stage_timings_ms=timing.snapshot(),
-                qr_marker_verified=False, qr_marker_reason=marker.reason,
-            )
+        if independent_head_requested:
+            estimate = replace(
+                _unusable("model_current_head_border_unavailable", source=MEASURED_HEAD_AXIS_SOURCE),
+                evidence_state="unobservable", model_profile_sha256=model_profile.sha256,
+                model_measurement_status=model_profile.measurement_status)
+            return estimate, StandAxisEdgeDebugArtifacts(
+                edges=raw_edges, raw_edges=raw_edges, model_reason=estimate.reason,
+                model_pose_fit_source=MEASURED_HEAD_AXIS_SOURCE, evidence_state="unobservable",
+                model_profile_sha256=model_profile.sha256,
+                model_measurement_status=model_profile.measurement_status,
+                qr_detected=qr_marker_detected, qr_marker_verified=marker.verified,
+                qr_marker_reason=marker.reason, stage_timings_ms=timing.snapshot())
         estimate = replace(
             _unusable(
                 "model_qr_text_without_geometry"

@@ -3,7 +3,9 @@ import math
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
+from scripts.aufgabe04.artifacts.content_store import load_content_hashed_json
 from scripts.aufgabe04.real_robot.candidate.approach import CandidateObservation
 from scripts.aufgabe04.real_robot.candidate.inspection_execution import (
     CandidateInspectionEffects, CandidateInspectionRouteUnavailableError,
@@ -136,6 +138,125 @@ class CandidateInspectionExecutionTest(unittest.TestCase):
                         progress_evidence=lambda *args: {},
                     ),
                 )
+
+    def test_third_view_terminal_failure_is_recorded_without_another_move(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            captures, moves = [], []
+            terminal = RuntimeError("observer terminal failure: " + "x" * 2048)
+
+            def capture(frame, output, index):
+                captures.append(index)
+                if index == 2:
+                    raise terminal
+                return CandidateObservation(None, None, None, output / "inspection.json")
+
+            def move(frame, normal, output, index, source):
+                moves.append(index)
+                return normal
+
+            with self.assertRaises(RuntimeError) as caught:
+                execute_candidate_inspection(
+                    candidate_uid="candidate", candidate_root=root, initial_frame=0., max_views=8,
+                    effects=CandidateInspectionEffects(
+                        capture=capture, canonical_normal=lambda frame: frame, move_view=move,
+                        move_opposite=lambda *args: self.fail("terminal failure authorized opposite motion"),
+                        progress_evidence=lambda *args: {"classification": "unobservable"},
+                    ),
+                )
+
+            self.assertIs(caught.exception, terminal)
+            self.assertNotIsInstance(caught.exception, CandidateObservationUnavailableError)
+            self.assertEqual(captures, [0, 1, 2])
+            self.assertEqual(moves, [1, 2])
+            progress = json.loads((root / "inspection_progress.json").read_text())
+            self.assertEqual(progress["local_view_count"], 3)
+            self.assertEqual(progress["termination_reason"], "observer_terminal_failure")
+            self.assertFalse(progress["view_budget_exhausted"])
+            self.assertFalse(progress["joint_observation_ready"])
+            self.assertFalse(progress["motion_authorized"])
+            failure = progress["view_history"][-1]
+            self.assertEqual(failure["outcome"], "observation_terminal_failure")
+            self.assertEqual(len(failure["reason"]), 1024)
+            self.assertEqual(failure["observation"]["exception_type"], "RuntimeError")
+            self.assertEqual(failure["observation"]["observer_attempt_index"], 2)
+            self.assertEqual(failure["observation"]["observer_output_dir"],
+                             str(root / "camera_lidar_attempt_02"))
+            self.assertFalse(failure["observation"]["completion_authorized"])
+            receipt = load_content_hashed_json(
+                Path(progress["latest_revision_path"]),
+                hash_field="candidate_inspection_progress_sha256",
+            )
+            self.assertEqual(receipt["view_history"], progress["view_history"])
+
+    def test_terminal_identity_conflict_records_attempt_but_no_joint_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(ValueError, "QR identity conflict"):
+                execute_candidate_inspection(
+                    candidate_uid="candidate", candidate_root=root, initial_frame=0., max_views=8,
+                    effects=CandidateInspectionEffects(
+                        capture=lambda frame, output, index: (
+                            CandidateObservation(None, None, None, output / "inspection.json") if index == 0
+                            else CandidateObservation(output / "recommendation.json", "QR_B", None)
+                        ),
+                        canonical_normal=lambda frame: frame,
+                        move_view=lambda frame, normal, output, index, source: normal,
+                        move_opposite=lambda *args: self.fail("identity conflict authorized opposite motion"),
+                        progress_evidence=lambda *args: {"classification": "front_readable", "qr_id": "QR_A"},
+                    ),
+                )
+            progress = json.loads((root / "inspection_progress.json").read_text())
+            self.assertEqual(progress["local_view_count"], 2)
+            self.assertEqual(progress["provisional_qr_ids"], ["QR_A"])
+            self.assertEqual(progress["termination_reason"], "observer_terminal_failure")
+            self.assertFalse(progress["joint_observation_ready"])
+
+    def test_interrupted_capture_is_recorded_and_original_interrupt_propagates(self):
+        for terminal in (KeyboardInterrupt(), SystemExit(130)):
+            with self.subTest(error_type=type(terminal).__name__), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+
+                def capture(*args):
+                    raise terminal
+
+                with self.assertRaises(type(terminal)) as caught:
+                    execute_candidate_inspection(
+                        candidate_uid="candidate", candidate_root=root, initial_frame=0., max_views=8,
+                        effects=CandidateInspectionEffects(
+                            capture=capture, canonical_normal=lambda frame: frame,
+                            move_view=lambda *args: self.fail("interruption resumed motion"),
+                            move_opposite=lambda *args: self.fail("interruption resumed motion"),
+                            progress_evidence=lambda *args: {},
+                        ),
+                    )
+                self.assertIs(caught.exception, terminal)
+                progress = json.loads((root / "inspection_progress.json").read_text())
+                self.assertEqual(progress["local_view_count"], 1)
+                self.assertEqual(progress["termination_reason"], "observer_terminal_failure")
+
+    def test_diagnostic_write_failure_cannot_mask_original_terminal_error(self):
+        terminal = RuntimeError("observer failed")
+        persistence_error = OSError("diagnostic disk unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            def capture(*args):
+                raise terminal
+
+            with patch(
+                "scripts.aufgabe04.real_robot.candidate.inspection_execution.write_content_hashed_json",
+                side_effect=persistence_error,
+            ), self.assertRaises(RuntimeError) as caught:
+                execute_candidate_inspection(
+                    candidate_uid="candidate", candidate_root=Path(directory), initial_frame=0., max_views=8,
+                    effects=CandidateInspectionEffects(
+                        capture=capture, canonical_normal=lambda frame: frame,
+                        move_view=lambda *args: self.fail("failed diagnostics resumed motion"),
+                        move_opposite=lambda *args: self.fail("failed diagnostics resumed motion"),
+                        progress_evidence=lambda *args: {},
+                    ),
+                )
+            self.assertIs(caught.exception, terminal)
+            self.assertIs(caught.exception.__cause__, persistence_error)
 
     def test_qr_conflict_cannot_be_replaced_by_later_joint_observation(self):
         state = CandidateInspectionState("candidate", 4)

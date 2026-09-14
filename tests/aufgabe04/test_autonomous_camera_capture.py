@@ -24,7 +24,7 @@ from scripts.aufgabe04.real_robot.observer.process import (
     PassiveObserverProcessEvidence,
 )
 from tests.aufgabe04.backside_axis_fixture import backside_axis_payload
-from tests.aufgabe04.observer_timeout_fixture import recorded_backside_timeout_status
+from tests.aufgabe04.observer_timeout_fixture import recorded_front_timeout_status
 
 
 def _write_measured_model(root: Path) -> Path:
@@ -643,7 +643,7 @@ class AutonomousCameraCaptureTests(unittest.TestCase):
     ) -> None:
         def expire(**kwargs):
             (kwargs["recommendation_path"].parent / "observer_status.json").write_text(
-                json.dumps(recorded_backside_timeout_status()), encoding="utf-8"
+                json.dumps(recorded_front_timeout_status(event_line)), encoding="utf-8"
             )
             return PassiveObserverProcessEvidence(
                 completion_kind="deadline", artifact_kind=None, artifact_path=None,
@@ -653,8 +653,8 @@ class AutonomousCameraCaptureTests(unittest.TestCase):
             )
 
         monitor.side_effect = expire
-        for max_views in (2, 8):
-            with self.subTest(max_views=max_views), tempfile.TemporaryDirectory() as tmp:
+        for max_views, event_line in ((2, 407), (8, 408)):
+            with self.subTest(max_views=max_views, event_line=event_line), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 args = _args(_write_measured_model(root))
                 captures, failures, moves = [], [], []

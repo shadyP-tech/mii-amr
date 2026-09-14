@@ -127,6 +127,23 @@ class BacksideProposalReuse:
                 wide, local_corners, max_center_offset_ratio=max_center_offset_ratio,
             )
             if search.accepted and search.attempt is not None:
+                if acquire_registered is not None:
+                    # The old image may choose a small first search, but a
+                    # current backside still needs a newly located complete
+                    # head and unique current scan association. A hint is
+                    # never evidence that today's QR/head is inside its crop.
+                    selection = select_camera_target_measurement(
+                        (search.attempt, wide), tracked_pose=None,
+                        evaluate=evaluate, enable_reacquisition=enable_reacquisition,
+                        max_center_offset_ratio=max_center_offset_ratio,
+                        acquire_registered=acquire_registered,
+                    )
+                    selection = replace(selection, search_hint_used=True)
+                    self.last_metadata.update(mode="strict_current_image_hint",
+                                              complete_head_reverified=selection.head_acquisition is not None)
+                    self._remember(selection, context, observed_at_sec, hint.anchor_pose,
+                                   allowed=not marker_seen_in_stationary_epoch)
+                    return selection
                 current = evaluate(search.attempt, None)
                 # Recompute registration from CURRENT fitted corners. The old
                 # image only picked a search centre and supplies no receipt data.

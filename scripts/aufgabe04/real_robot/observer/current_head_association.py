@@ -53,6 +53,7 @@ def associate_current_measured_head(
     intrinsics, scan_from_camera, scan, map_bearing_rad, cone_half_angle_rad,
     accepted_range_m, now_sec, max_scan_age_sec, min_cluster_sample_count,
     max_center_offset_ratio, max_camera_map_bearing_delta_rad,
+    resolve_lidar_association=None,
 ) -> CurrentHeadCandidateAssociation:
     """Require current geometry, original projection bounds and a unique scan target.
 
@@ -119,11 +120,14 @@ def associate_current_measured_head(
         min_cluster_sample_count=min_cluster_sample_count,
         max_camera_map_bearing_delta_rad=max_camera_map_bearing_delta_rad,
     )
+    if resolve_lidar_association is not None:
+        association = resolve_lidar_association(association, scan)
     rejection = association.rejection_reason
     if association.associated:
         rejection = measured_head_lidar_rejection(
             association.search_association, registered=True,
             cone_half_angle_rad=cone_half_angle_rad,
+            registered_association=association,
         )
     accepted = association.associated and not rejection
     return replace(

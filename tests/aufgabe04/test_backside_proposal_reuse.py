@@ -3,13 +3,18 @@
 from dataclasses import replace
 import math
 import unittest
+from unittest.mock import patch
 
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.perception.stand_axis.models import (
     ImagePoint, StandAxisEdgeDebugArtifacts, StandAxisImageEstimate,
 )
+from scripts.aufgabe04.perception.stand_axis.head_proposal import HeadProposal, HeadProposalResult
+from scripts.aufgabe04.perception.stand_axis_handoff import RigidTransform
+from scripts.aufgabe04.perception.stand_axis_lidar_roi import PlainLaserScan
 from scripts.aufgabe04.qr_scanning.qr_observation import DecodedQrObservation
-from scripts.aufgabe04.real_robot.configuration.geometry import ImageRoi
+from scripts.aufgabe04.real_robot.configuration.geometry import CameraIntrinsics, ImageRoi
+from scripts.aufgabe04.real_robot.observer.backside_head_crop import gate_backside_head_crop
 from scripts.aufgabe04.real_robot.observer.backside_proposal_reuse import (
     BacksideProposalContext, BacksideProposalReuse,
 )
@@ -23,6 +28,13 @@ from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import (
     HeadRoiAttempt, REGISTERED_BACKSIDE_REACQUISITION_SOURCE,
     REGISTERED_QR_MODEL_REACQUISITION_SOURCE, TARGET_CENTERED_REACQUISITION_SOURCE,
 )
+from scripts.aufgabe04.real_robot.observer.head_proposal_registration import acquire_registered_head_measurement
+
+
+class _Frame:
+    """Current pixel-stage fixtures do not need an OpenCV image runtime."""
+    def __getitem__(self, _slices):
+        return self
 
 
 class BacksideProposalReuseTest(unittest.TestCase):
@@ -49,10 +61,12 @@ class BacksideProposalReuseTest(unittest.TestCase):
     def observe(self, stamp, *, context=None, pose=None, attempts=None,
                 center=(310.0, 312.0), yaw_deg=-2.0, usable=True,
                 marker_seen=False, tracked_pose=None, enabled=True,
-                qr_detected=False, qr_observations=(), estimate_changes=None):
+                qr_detected=False, qr_observations=(), estimate_changes=None,
+                acquire_current_head=False, proposal_available=True,
+                scan_ranges=(.6,) * 5):
         """A deterministic current-image fit; deliberately no elapsed-time claim."""
         calls = []
-        frame = object()
+        frame = _Frame()
         attempts = (self.nominal, self.wide) if attempts is None else attempts
         context = self.context if context is None else context
 
@@ -77,15 +91,50 @@ class BacksideProposalReuseTest(unittest.TestCase):
                 estimate = replace(estimate, **estimate_changes)
             return HeadRoiEvaluation(
                 attempt=attempt, frame=frame, estimate=estimate,
-                debug=StandAxisEdgeDebugArtifacts(edges=None, qr_detected=qr_detected),
+                debug=StandAxisEdgeDebugArtifacts(edges=None, qr_detected=qr_detected,
+                                                 qr_marker_verified=qr_detected),
                 qr_observations=qr_observations,
             )
+
+        def acquire_registered(search, primary):
+            u, v = center[0] - search.roi.x0, center[1] - search.roi.y0
+            proposal = HeadProposal(
+                tuple(ImagePoint(u + du, v + dv) for du, dv in
+                      ((-40, -40), (40, -40), (40, 40), (-40, 40))),
+                (int(u - 50), int(v - 50), int(u + 50), int(v + 70)),
+                (u - 40, v - 40, u + 40, v + 40), u, v, 80., 1.,
+                abs(center[0] - search.expected_center_u_px) / 80., .99, .99,
+            ) if proposal_available else None
+            with patch(
+                "scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_head_proposal",
+                return_value=HeadProposalResult(proposal, "current_head_proposal" if proposal
+                                               else "head_proposal_unavailable", 1, 1),
+            ):
+                # Only the 2D pixel proposal is supplied by the fixture. Run
+                # real bearing, unique scan binding and crop registration.
+                return acquire_registered_head_measurement(
+                    object(), frame, search,
+                    intrinsics=CameraIntrinsics(640, 480, 600., 600., 320., 240.),
+                    scan_from_camera=RigidTransform("scan", "camera", (0., 0., 0.),
+                                                    (.5, -.5, .5, -.5)),
+                    scan=PlainLaserScan(scan_ranges, -.02, .01, .01, 10., "scan",
+                                       scan_stamp_sec=stamp, receipt_sec=stamp + .01),
+                    map_bearing_rad=-math.atan2(search.expected_center_u_px - 320., 600.),
+                    cone_half_angle_rad=math.radians(3.), accepted_range_m=(.49, .71),
+                    now_sec=stamp + .1, max_scan_age_sec=.5, min_cluster_sample_count=2,
+                    max_camera_map_bearing_delta_rad=math.radians(12.),
+                    max_center_offset_ratio=1.5, edge_preprocess="channel_union",
+                    canny_low=20, canny_high=60,
+                    evaluate=lambda attempt, _corners: evaluate(attempt, None),
+                    diagnostics={}, primary=primary,
+                )
 
         selection = self.reuse.select(
             attempts, context=context, observed_at_sec=stamp,
             robot_pose=self.pose if pose is None else pose,
             marker_seen_in_stationary_epoch=marker_seen, tracked_pose=tracked_pose,
             evaluate=evaluate, enable_reacquisition=enabled, max_center_offset_ratio=1.5,
+            acquire_registered=acquire_registered if acquire_current_head else None,
         )
         return selection, calls
 
@@ -95,6 +144,42 @@ class BacksideProposalReuseTest(unittest.TestCase):
         self.assertTrue(selection.registered)
         self.assertTrue(self.reuse.last_metadata["hint_retained"])
         return selection
+
+    def test_warm_hint_relocates_complete_current_head_before_accepting_current_angle(self):
+        bootstrap, cold_calls = self.observe(10., acquire_current_head=True)
+        self.assertEqual(len(cold_calls), 2)
+        self.assertTrue(gate_backside_head_crop(bootstrap)[1].accepted)
+        self.assertTrue(self.reuse.last_metadata["hint_retained"])
+        current, calls = self.observe(10.3, center=(312., 311.), yaw_deg=-5.,
+                                      acquire_current_head=True)
+        result, review = gate_backside_head_crop(current)
+        self.assertEqual(len(calls), 2)  # Hinted fit, then current proposal's strict fit.
+        self.assertTrue(current.search_hint_used)
+        self.assertTrue(review.accepted)
+        self.assertTrue(result.selected.estimate.usable)
+        self.assertEqual(result.selected.estimate.yaw_deg, -5.)
+        self.assertEqual(current.head_acquisition["head_bounds_full_image"], [272., 271., 352., 351.])
+        self.assertEqual(current.head_acquisition["lidar_association"]["search_association"]
+                         ["eligible_cluster_count"], 1)
+        self.assertNotEqual(current.selected.attempt.roi, bootstrap.selected.attempt.roi)
+        self.assertIsNot(current.selected.frame, bootstrap.selected.frame)
+        self.assertTrue(all(pose_hint is None for _, pose_hint in calls))
+        self.assertFalse(self.reuse.last_metadata["measurement_reused"])
+
+    def test_usable_warm_fit_cannot_replace_missing_current_head_or_unique_scan(self):
+        for failure in ({"proposal_available": False},
+                        {"scan_ranges": (.6, .6, math.inf, .6, .6)}):
+            with self.subTest(failure=failure):
+                self.reuse.reset()
+                self.observe(10., acquire_current_head=True)
+                current, calls = self.observe(10.3, acquire_current_head=True, **failure)
+                self.assertEqual(len(calls), 1)
+                self.assertTrue(current.selected.estimate.usable, "the hinted fit alone looks usable")
+                result, review = gate_backside_head_crop(current)
+                self.assertFalse(review.accepted)
+                self.assertFalse(result.selected.estimate.usable)
+                self.assertIsNone(result.selected.estimate.yaw_deg)
+                self.assertFalse(self.reuse.last_metadata["hint_retained"])
 
     def test_stale_bootstrap_only_locates_one_strict_fit_of_the_next_image(self):
         bootstrap = self.seed()

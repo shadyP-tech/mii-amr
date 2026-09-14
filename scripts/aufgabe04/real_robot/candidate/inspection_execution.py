@@ -81,22 +81,46 @@ def execute_candidate_inspection(
                              observation={"qr_id": observation.qr_id,
                                           "recommendation_path": str(observation.recommendation_path)})
                 state.termination_reason = "joint_observation_ready"
-                persist()
-                return observation, frame
-            if observation.axis_observation_path is not None:
+            elif observation.axis_observation_path is not None:
                 progress = {"classification": "certified_backside",
                             "axis_observation_path": str(observation.axis_observation_path)}
             elif observation.inspection_observation_path is not None:
                 progress = effects.progress_evidence(frame, observation)
             else:
                 raise RuntimeError("observer returned no recommendation, certified axis, or inspection progress")
-            state.record(outcome="inspection_pending", normal=normal, observation=progress)
+            if observation.recommendation_path is None:
+                state.record(outcome="inspection_pending", normal=normal, observation=progress)
         except CandidateObservationUnavailableError as exc:
             last_error = exc
             progress = {"classification": "unobservable", **exc.status_evidence}
             state.record(outcome="observation_unavailable", normal=normal, reason=str(exc),
                          observation={"classification": "unobservable", **exc.to_event_fields()})
+        except BaseException as exc:
+            # Capture/validation was attempted at this actual view. Record its
+            # terminal outcome without converting it into local retry authority.
+            state.record(
+                outcome="observation_terminal_failure", normal=normal,
+                reason=str(exc)[:1024],
+                observation={
+                    "classification": "terminal_failure",
+                    "exception_type": type(exc).__name__[:128],
+                    "observer_attempt_index": index,
+                    "observer_output_dir": str(candidate_root / f"camera_lidar_attempt_{index:02d}"),
+                    "motion_authorized": False,
+                    "completion_authorized": False,
+                },
+            )
+            state.termination_reason = "observer_terminal_failure"
+            try:
+                persist()
+            except Exception as persistence_error:
+                # Preserve the original terminal exception if diagnostic I/O
+                # also fails; the chained error explains the missing receipt.
+                raise exc from persistence_error
+            raise
         persist()
+        if state.termination_reason == "joint_observation_ready":
+            return observation, frame
         if len(state.history) >= max_views:
             state.termination_reason = "view_budget_exhausted"
             break

@@ -37,12 +37,21 @@ def measured_head_needs_full_qr_decode(*, previous_axis_source: str | None,
 
 
 def measured_head_lidar_rejection(association, *, registered: bool,
-                                  cone_half_angle_rad: float) -> str | None:
+                                  cone_half_angle_rad: float, registered_association=None) -> str | None:
     """Require one cluster at the current fitted head's ray in either ROI mode."""
     if association.associated is not True:
         return "measured_head_lidar_unassociated"
+    if registered_association is not None and registered_association.witnessed_fragmentation is not None:
+        from scripts.aufgabe04.real_robot.observer.scan_target_persistence import registered_target_is_unique
+        if (not registered or registered_association.search_association != association
+                or not registered_target_is_unique(registered_association)):
+            return "measured_head_lidar_fragmentation_unverified"
     if association.eligible_cluster_count != 1:
-        return "measured_head_lidar_clusters_ambiguous"
+        from scripts.aufgabe04.real_robot.observer.scan_target_persistence import registered_target_is_unique
+        if (not registered or registered_association is None
+                or registered_association.search_association != association
+                or not registered_target_is_unique(registered_association)):
+            return "measured_head_lidar_clusters_ambiguous"
     delta = (association.selected_cluster_bearing_delta_from_map_rad if registered
              else association.selected_cluster_bearing_delta_from_camera_rad)
     if type(delta) not in (int, float) or not math.isfinite(delta) or not 0. <= delta <= cone_half_angle_rad:

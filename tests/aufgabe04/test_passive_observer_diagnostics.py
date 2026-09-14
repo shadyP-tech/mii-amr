@@ -13,7 +13,9 @@ from scripts.aufgabe04.real_robot.observer.diagnostics import (
 from scripts.aufgabe04.real_robot.observer.process import (
     PassiveObserverProcessEvidence,
 )
-from tests.aufgabe04.observer_timeout_fixture import recorded_backside_timeout_status
+from tests.aufgabe04.observer_timeout_fixture import (
+    recorded_backside_timeout_status, recorded_front_timeout_status,
+)
 
 
 class PassiveObserverDiagnosticsTests(unittest.TestCase):
@@ -313,7 +315,8 @@ class PassiveObserverDiagnosticsTests(unittest.TestCase):
 
     def test_tf_activity_and_soft_misses_alone_do_not_allow_deferral(self):
         for state in (
-            "tf_pending_exact_time", "tf_retry_exhausted", "obsolete_detector_result"
+            "tf_pending_exact_time", "tf_retry_exhausted", "obsolete_detector_result",
+            "stale_sensor_tuple",
         ):
             for evidence in (
                 {},
@@ -370,7 +373,8 @@ class PassiveObserverDiagnosticsTests(unittest.TestCase):
 
     def test_poisoned_identity_evidence_remains_terminal_at_deadline(self):
         for state in (
-            "tf_pending_exact_time", "evidence_not_committable", "obsolete_detector_result"
+            "tf_pending_exact_time", "evidence_not_committable", "obsolete_detector_result",
+            "stale_sensor_tuple",
         ):
             for poison in (
                 {"poisoned": True},
@@ -423,7 +427,8 @@ class PassiveObserverDiagnosticsTests(unittest.TestCase):
                     }
                 )
         for state in (
-            "tf_pending_exact_time", "lidar_target_mismatch", "obsolete_detector_result"
+            "tf_pending_exact_time", "lidar_target_mismatch", "obsolete_detector_result",
+            "stale_sensor_tuple",
         ):
             for evidence in malformed:
                 with self.subTest(state=state, evidence=evidence):
@@ -478,6 +483,60 @@ class PassiveObserverDiagnosticsTests(unittest.TestCase):
                         process=self._process(), status=changed
                     )
                 )
+
+    def test_recorded_front_deadline_is_independent_of_last_stale_frame(self):
+        for event_line in (407, 408):
+            with self.subTest(event_line=event_line):
+                status = self._load_payload(recorded_front_timeout_status(event_line))
+                self.assertTrue(is_candidate_local_observer_timeout(
+                    process=self._process(), status=status,
+                ))
+                self.assertEqual(candidate_local_observer_timeout_basis(status),
+                                 "accumulated_transform_ready_candidate_frames")
+                self.assertIsNone(status.load_error)
+                self.assertEqual(status.accepted_frame_count, 0)
+                self.assertEqual(status.lidar_rejection_count, 23)
+                self.assertEqual(status.consensus_sample_count, 0)
+                self.assertEqual(status.peak_consensus_sample_count, 0)
+                self.assertEqual(status.consensus_required_sample_count, 7)
+                self.assertIs(status.observation_evidence_poisoned, False)
+
+    def test_stale_input_requires_explicit_unpoisoned_prior_processing(self):
+        status = self._load_payload(recorded_front_timeout_status())
+        for changed in (
+            replace(status, observation_evidence_poisoned=None),
+            replace(status, observation_evidence_poisoned=True),
+            replace(status, observation_evidence_poison_reason="conflicting_qr_ids"),
+            replace(status, accepted_frame_count=0, lidar_rejection_count=0),
+            replace(status, accepted_frame_count=None, lidar_rejection_count=None),
+            replace(status, load_error="invalid observation evidence"),
+        ):
+            with self.subTest(status=changed):
+                self.assertIsNone(candidate_local_observer_timeout_basis(changed))
+                self.assertFalse(is_candidate_local_observer_timeout(
+                    process=self._process(), status=changed,
+                ))
+        accepted_frame = replace(status, accepted_frame_count=1, lidar_rejection_count=0)
+        self.assertTrue(is_candidate_local_observer_timeout(
+            process=self._process(), status=accepted_frame,
+        ))
+
+    def test_stale_input_does_not_hide_child_crash_or_unsolicited_signal(self):
+        status = self._load_payload(recorded_front_timeout_status())
+        for returncode, signals in (
+            (1, ("SIGINT",)), (-11, ("SIGINT",)), (139, ("SIGINT",)),
+            (130, ()), (-2, ()), (137, ("SIGINT",)), (True, ("SIGINT",)),
+        ):
+            with self.subTest(returncode=returncode, signals=signals):
+                self.assertFalse(is_candidate_local_observer_timeout(
+                    process=replace(self._process(), returncode=returncode, signals_sent=signals),
+                    status=status,
+                ))
+        for completion in ("child_exit", "artifact"):
+            with self.subTest(completion=completion):
+                self.assertFalse(is_candidate_local_observer_timeout(
+                    process=self._process(completion), status=status,
+                ))
 
     def test_crash_racing_deadline_cannot_hide_behind_prior_candidate_processing(self):
         status = self._load_payload(recorded_backside_timeout_status())

@@ -11,10 +11,11 @@ from dataclasses import dataclass
 import math
 
 from scripts.aufgabe04.perception.stand_axis.geometry import _distance, order_corners
-from scripts.aufgabe04.perception.stand_axis.head_candidates import _short_centered_neck_support
 from scripts.aufgabe04.perception.stand_axis.model_refinement import refine_projected_head_border
 from scripts.aufgabe04.perception.stand_axis.models import ImagePoint
 from scripts.aufgabe04.perception.stand_axis.preprocessing import _canny_edges_from_frame
+from scripts.aufgabe04.perception.stand_axis.joint_head_borders import rank_joint_head_borders
+from scripts.aufgabe04.perception.stand_axis.head_outer_border import _encloses
 
 _MAX_LINES_PER_DIRECTION = 32
 _MAX_RAW_VERIFICATIONS = 12
@@ -43,6 +44,7 @@ class HeadProposalResult:
     considered_proposals: int = 0
     raw_verifications: int = 0
     locator: str | None = None
+    joint_border_diagnostics: dict | None = None
 
 
 def _extent(corners):
@@ -90,6 +92,19 @@ def _line_groups(lines, *, expected_height, expected_center):
 
 def _rough_proposals(groups, *, expected_height, expected_center, max_center_offset):
     ranked = []
+
+    def add(points):
+        corners = order_corners(tuple(ImagePoint(*point) for point in points))
+        width, height, center = _extent(corners)
+        if (not 0.70 <= height / expected_height <= 1.30
+                or not 0.35 <= width / max(height, 1.0) <= 1.35
+                or math.dist(center, expected_center) > max_center_offset * expected_height):
+            return
+        score = abs(math.log(height / expected_height)) + 0.2 * math.dist(center, expected_center) / expected_height
+        if any(max(_distance(a, b) for a, b in zip(corners, existing[1])) < 2.0 for existing in ranked):
+            return
+        ranked.append((score, corners))
+
     for direction, group in enumerate(groups):
         for index, first in enumerate(group):
             for second in group[index + 1:]:
@@ -100,18 +115,21 @@ def _rough_proposals(groups, *, expected_height, expected_center, max_center_off
                 if max(abs(upper[i][direction] - lower[i][direction]) for i in (0, 1)) > 0.25 * expected_height:
                     continue
                 points = (upper[0], upper[1], lower[1], lower[0])
-                corners = order_corners(tuple(ImagePoint(*point) for point in points))
-                width, height, center = _extent(corners)
-                if (
-                    not 0.70 <= height / expected_height <= 1.30
-                    or not 0.35 <= width / max(height, 1.0) <= 1.35
-                    or math.dist(center, expected_center) > max_center_offset * expected_height
-                ):
-                    continue
-                score = abs(math.log(height / expected_height)) + 0.2 * math.dist(center, expected_center) / expected_height
-                if any(max(_distance(a, b) for a, b in zip(corners, existing[1])) < 2.0 for existing in ranked):
-                    continue
-                ranked.append((score, corners))
+                add(points)
+                # A low-contrast rail can have a truncated locator segment
+                # although its original Canny pixels continue to the corner.
+                # One union-extent seed corrects that endpoint bias. These
+                # extrapolated positions are never measurement evidence.
+                start = min(upper[0][direction], lower[0][direction])
+                end = max(upper[1][direction], lower[1][direction])
+                def extended(segment, value):
+                    point = list(segment[0])
+                    fraction = (value-segment[0][direction]) / (segment[1][direction]-segment[0][direction])
+                    point[cross] += fraction*(segment[1][cross]-segment[0][cross])
+                    point[direction] = value
+                    return tuple(point)
+                add((extended(upper, start), extended(upper, end),
+                     extended(lower, end), extended(lower, start)))
     return sorted(ranked, key=lambda item: item[0])
 
 
@@ -121,7 +139,7 @@ def _same_head(first, second):
     _width, height, center = _extent(first.corners)
     _other_width, other_height, other_center = _extent(second.corners)
     minimum = min(height, other_height)
-    return (
+    nearby = (
         math.dist(center, other_center) <= 0.18 * minimum
         and max(height, other_height) <= 1.25 * minimum
         and all(
@@ -129,6 +147,16 @@ def _same_head(first, second):
             for a, b in zip(first.corners, second.corners)
         )
     )
+    if nearby:
+        return True
+    # A complete paper/printed inset is contained by the outer frame, even
+    # when its centre or dimensions differ from the near-duplicate rail case.
+    # Measured paper/symbol insets can be shorter than the physical frame;
+    # an arbitrarily smaller nested stand or background box is not that cue.
+    return (minimum / max(height, other_height) >= .70
+            and math.dist(center, other_center) <= .30 * minimum
+            and (_encloses(tuple(first.corners), tuple(second.corners), tolerance=2.)
+                 or _encloses(tuple(second.corners), tuple(first.corners), tolerance=2.)))
 
 
 def _proposal(measurement, shape, *, expected_height, expected_center):
@@ -174,11 +202,11 @@ def acquire_head_proposal(
 ) -> HeadProposalResult:
     """Find complete head borders within an already bounded candidate ROI.
 
-    Grayscale line segments locate the outer rectangle without interpreting QR
-    texture. If they produce no valid head, one bounded raw-line fallback can
-    recover low-contrast backside rails. Neither line interpolation nor image
-    morphology supplies evidence: all four rails/corner arms and the paired
-    short neck are checked on untouched current-image Canny pixels.
+    Independent grayscale/raw line fragments locate all four sides jointly.
+    Current gradient and raw-support scores rank a bounded set of complete
+    hypotheses, including complementary long-segment endpoint hints. Neither
+    interpolation nor morphology supplies evidence: all four rails and corner
+    arms are checked on current Canny pixels. Neck visibility is not required.
     """
 
     expected_height = float(expected_head_height_px)
@@ -199,48 +227,90 @@ def acquire_head_proposal(
     if raw_edges.ndim != 2 or raw_edges.shape != frame_bgr.shape[:2]:
         raise ValueError("raw_edges must match the candidate search image")
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-    lines = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD).detect(gray)[0]
-    considered = verified = 0
-    for locator in ("grayscale_lines", "raw_lines"):
-        if locator == "raw_lines":
-            if verified >= _MAX_RAW_VERIFICATIONS:
+    locator_lines = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD).detect(gray)[0]
+    endpoint_hints = _rough_proposals(
+        _line_groups(locator_lines, expected_height=expected_height, expected_center=center),
+        expected_height=expected_height, expected_center=center,
+        max_center_offset=max_center_offset_fraction,
+    )[:_MAX_RAW_VERIFICATIONS]
+    hypotheses, diagnostics = rank_joint_head_borders(
+        cv2, frame_bgr, raw_edges, expected_height=expected_height,
+        expected_center=center, max_center_offset=max_center_offset_fraction,
+        locator_lines=locator_lines, hint_corners=tuple(corners for _score, corners in endpoint_hints),
+    )
+    # Round-robin spatial groups keep another complete stand visible to the
+    # ambiguity gate even when one head has many nested border alternatives.
+    groups = []
+    for hypothesis in hypotheses:
+        _width, height, proposed_center = _extent(hypothesis.corners)
+        for group in groups:
+            _other_width, other_height, other_center = _extent(group[0].corners)
+            if math.dist(proposed_center, other_center) <= .18 * min(height, other_height):
+                group.append(hypothesis)
                 break
-            import numpy
-            lines = cv2.HoughLinesP(
-                raw_edges, 1.0, numpy.pi / 180.0,
-                threshold=max(10, round(0.18 * expected_height)),
-                minLineLength=max(8, round(0.55 * expected_height)),
-                maxLineGap=max(2, round(0.08 * expected_height)),
-            )
-        rough = _rough_proposals(
-            _line_groups(lines, expected_height=expected_height, expected_center=center),
-            expected_height=expected_height, expected_center=center,
-            max_center_offset=max_center_offset_fraction,
+        else:
+            groups.append([hypothesis])
+    ordered = [group[index] for index in range(max(map(len, groups), default=0))
+               for group in groups if index < len(group)]
+    hints = [item for item in hypotheses if item.locator == "paired_locator_endpoints"][:4]
+    ordered = ordered[:_MAX_RAW_VERIFICATIONS - len(hints)] + hints
+    accepted, records = [], []
+    for hypothesis in ordered[:_MAX_RAW_VERIFICATIONS]:
+        measurement = refine_projected_head_border(
+            cv2, raw_edges, hypothesis.corners, corridor_half_width_px=8.0,
         )
-        considered += len(rough)
-        accepted = []
-        # Share one budget across both locators; a difficult image cannot
-        # double its number of expensive border fits through the fallback.
-        for _score, corners in rough[:max(0, _MAX_RAW_VERIFICATIONS - verified)]:
-            verified += 1
-            measurement = refine_projected_head_border(
-                cv2, raw_edges, corners, corridor_half_width_px=8.0,
-            )
-            if not measurement.accepted:
+        record = {"score": hypothesis.score, "locator": hypothesis.locator,
+                  "minimum_raw_support": hypothesis.minimum_raw_support,
+                  "mean_raw_support": hypothesis.mean_raw_support, "mean_gradient": hypothesis.mean_gradient,
+                  "reason": measurement.reason, "accepted": measurement.accepted,
+                  "corners": None if measurement.corners is None else
+                      [(p.u_px, p.v_px) for p in measurement.corners],
+                  "candidate_corners": None if measurement.candidate_corners is None else
+                      [(p.u_px, p.v_px) for p in measurement.candidate_corners],
+                  "verified_raw_support": None if measurement.support is None else
+                      measurement.support.mean}
+        records.append(record)
+        if not measurement.accepted:
+            continue
+        proposal = _proposal(measurement, raw_edges.shape, expected_height=expected_height, expected_center=center)
+        if (not .70 <= proposal.expected_height_ratio <= 1.30
+                or proposal.center_offset_head_heights > max_center_offset_fraction):
+            continue
+        accepted.append(proposal)
+    diagnostics = {**diagnostics, "spatial_groups": len(groups), "strict_verifications": records,
+                   "max_raw_verifications": _MAX_RAW_VERIFICATIONS,
+                   "selection": "unavailable"}
+    considered, verified = diagnostics["considered_closed_hypotheses"], len(records)
+    if accepted:
+        selected = max(accepted, key=lambda item: _extent(item.corners)[0] * item.observed_height_px)
+        if any(not _same_head(selected, other) for other in accepted):
+            diagnostics["selection"] = "distinct_current_heads_ambiguous"
+            return HeadProposalResult(None, "head_proposal_ambiguous", considered, verified,
+                                      "joint_current_borders", diagnostics)
+        # Preserve strong larger alternatives whose corner arms failed. They
+        # remain diagnostics, never substitute corners or a preferred pose.
+        # Temporal head consistency handles changes between admitted frames.
+        selected_area = _extent(selected.corners)[0] * selected.observed_height_px
+        unresolved_outer = []
+        for record in records:
+            if (record["reason"] != "model_corner_evidence_insufficient"
+                    or record["candidate_corners"] is None
+                    or record["verified_raw_support"] is None
+                    or record["verified_raw_support"] < .90
+                    or record["minimum_raw_support"] < .80):
                 continue
-            proposal = _proposal(measurement, raw_edges.shape, expected_height=expected_height, expected_center=center)
-            if (
-                not 0.70 <= proposal.expected_height_ratio <= 1.30
-                or proposal.center_offset_head_heights > max_center_offset_fraction
-                or not _short_centered_neck_support(raw_edges, proposal.corners)
-            ):
-                continue
-            if accepted and not all(_same_head(proposal, other) for other in accepted):
-                return HeadProposalResult(None, "head_proposal_ambiguous", considered, verified, locator)
-            accepted.append(proposal)
-        if accepted:
-            # Raw-supported nested borders describe one head. Prefer the
-            # physically outer complete frame rather than its paper/QR inset.
-            selected = max(accepted, key=lambda item: _extent(item.corners)[0] * item.observed_height_px)
-            return HeadProposalResult(selected, "current_head_proposal", considered, verified, locator)
-    return HeadProposalResult(None, "head_proposal_unavailable", considered, verified)
+            corners = tuple(ImagePoint(*point) for point in record["candidate_corners"])
+            width, height, _center = _extent(corners)
+            if (width * height >= 1.03 * selected_area
+                    and _encloses(corners, tuple(selected.corners), tolerance=1.5)):
+                unresolved_outer.append(record["candidate_corners"])
+        if unresolved_outer:
+            diagnostics["competing_outer_corners"] = unresolved_outer
+        # Compare every admitted alternative before choosing the complete
+        # enclosing frame. Projected proximity and solved yaw never rank it.
+        diagnostics["selection"] = "maximal_verified_current_head"
+        diagnostics["selected_corners"] = [(p.u_px, p.v_px) for p in selected.corners]
+        return HeadProposalResult(selected, "current_head_proposal", considered, verified,
+                                  "joint_current_borders", diagnostics)
+    return HeadProposalResult(None, "head_proposal_unavailable", considered, verified,
+                              "joint_current_borders", diagnostics)

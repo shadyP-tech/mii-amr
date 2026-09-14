@@ -31,6 +31,7 @@ def quality(**changes):
         jacobian_condition_number=120., head_size_m=(.078, .078),
         profile_sha256="a" * 64,
         neck_junction_verified=True,
+        outer_border_verified=True,
     )
     return HeadModelQuality(**{**values, **changes})
 
@@ -73,8 +74,7 @@ class HeadModelAdmissionTests(unittest.TestCase):
     def test_every_head_quality_gate_applies_even_below_generic_limit(self):
         for changes in (
             {"accepted": False}, {"raw_border_support_mean": .59},
-            {"raw_corner_support_accepted": False}, {"centered_neck_supported": False},
-            {"neck_junction_verified": False},
+            {"raw_corner_support_accepted": False}, {"outer_border_verified": False},
             {"minimum_edge_length_px": 23.9}, {"reprojection_rmse_px": 2.01},
             {"axis_ambiguous": True}, {"all_corners_positive_depth": False},
             {"yaw_std_deg": 3.01}, {"yaw_std_deg": math.nan},
@@ -86,6 +86,11 @@ class HeadModelAdmissionTests(unittest.TestCase):
                 self.assertFalse(result.accepted)
                 self.assertIsNone(result.source)
                 self.assertIsNone(result.yaw_rad)
+
+    def test_neck_diagnostics_cannot_veto_valid_head_quality(self):
+        result = self.admit(debug=head_debug(head_model_quality=quality(
+            centered_neck_supported=False, neck_junction_verified=False)))
+        self.assertTrue(result.accepted)
 
     def test_source_quality_cannot_be_replaced_by_projection_or_joint_fit(self):
         cases = (

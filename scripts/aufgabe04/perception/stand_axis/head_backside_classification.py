@@ -1,6 +1,6 @@
 """Classify a current measured head without supplying another angle estimate.
 
-The four physical head corners own the angle. Raw outer-border/neck evidence,
+The four physical head corners own the angle. Raw outer-border evidence,
 candidate projection gates and current marker absence can separately label a
 backside *candidate*. The observer still requires repeated fresh, stationary,
 uniquely LiDAR-associated samples and vetoes any marker seen in that epoch.
@@ -18,10 +18,10 @@ from scripts.aufgabe04.perception.stand_axis.geometry import quadrilateral_aspec
 from scripts.aufgabe04.perception.stand_axis.head_model_quality import (
     MEASURED_HEAD_AXIS_SOURCE, validated_head_model_quality,
 )
-from scripts.aufgabe04.perception.stand_axis.head_model_neck import HeadNeckJunction
-
-MIN_NORMALIZED_ASPECT = math.cos(math.radians(70.0))
-MAX_NORMALIZED_ASPECT = 1.35
+from scripts.aufgabe04.perception.stand_axis.head_backside_appearance import (
+    MIN_NORMALIZED_ASPECT, MAX_NORMALIZED_ASPECT,
+    assess_current_head_backside_appearance, head_appearance_confidence as _face_confidence,
+)
 
 
 @dataclass(frozen=True)
@@ -38,22 +38,8 @@ class HeadBacksideClassification:
     angle_source: str = MEASURED_HEAD_AXIS_SOURCE
 
 
-def _gate_score(value, lower, upper):
-    midpoint = (lower + upper) / 2.0
-    return max(0.0, 1.0 - abs(value - midpoint) / ((upper - lower) / 2.0))
-
-
-def _face_confidence(quality, scale, center, aspect):
-    return min(1.0, max(0.0,
-        .50 * quality.raw_border_support_mean
-        + .20 * _gate_score(scale, MINIMUM_HEAD_SCALE_RATIO, MAXIMUM_HEAD_SCALE_RATIO)
-        + .20 * max(0.0, 1.0 - center / MAXIMUM_HEAD_CENTER_ERROR_RATIO)
-        + .10 * _gate_score(aspect, MIN_NORMALIZED_ASPECT, MAX_NORMALIZED_ASPECT)))
-
-
 def _classification_valid(evidence, estimate, debug):
     quality = getattr(debug, "head_model_quality", None)
-    junction = getattr(debug, "head_neck_junction", None)
     if (not isinstance(evidence, HeadBacksideClassification)
             or evidence.accepted is not True
             or evidence.reason != "current_head_geometry_and_marker_absence"
@@ -62,9 +48,7 @@ def _classification_valid(evidence, estimate, debug):
             or evidence.profile_sha256 != estimate.model_profile_sha256
             or not validated_head_model_quality(quality)
             or quality.profile_sha256 != evidence.profile_sha256
-            or debug.qr_detected is not False or debug.qr_marker_verified is not False
-            or not isinstance(junction, HeadNeckJunction) or junction.accepted is not True
-            or junction.reason != "head_neck_junction_verified"):
+            or debug.qr_detected is not False or debug.qr_marker_verified is not False):
         return False
     scale, center, aspect, confidence = (
         evidence.head_scale_ratio, evidence.head_center_error_ratio,
@@ -110,6 +94,12 @@ def classify_current_head_backside(
 
     if estimate.source != MEASURED_HEAD_AXIS_SOURCE:
         return estimate, debug
+    # Appearance remains observable when planar orientation is ambiguous. It
+    # cannot promote that angle or bypass the observer's complete-head checks.
+    debug = replace(debug, head_backside_appearance=assess_current_head_backside_appearance(
+        estimate, debug, model_profile=model_profile, camera=camera,
+        expected_center_u_px=expected_center_u_px,
+        expected_center_v_px=expected_center_v_px, expected_height_px=expected_height_px))
     proof = HeadBacksideClassification(
         False, "backside_current_head_geometry_required", estimate.model_profile_sha256,
         estimate.corners, estimate.yaw_deg,

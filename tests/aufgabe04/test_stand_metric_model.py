@@ -366,7 +366,7 @@ class StandMetricGeometryTest(unittest.TestCase):
     def test_text_without_corners_cannot_bootstrap_qr_free_backside(self):
         frame = numpy.zeros((480, 640, 3), dtype=numpy.uint8)
         with patch(
-            "scripts.aufgabe04.perception.stand_axis.model_pipeline."
+            "scripts.aufgabe04.perception.stand_axis.model_backside_acquisition."
             "estimate_stand_axis_from_model_backside",
             side_effect=AssertionError("decoded front must not become a backside"),
         ):
@@ -378,8 +378,10 @@ class StandMetricGeometryTest(unittest.TestCase):
                 expected_head_height_px=100.,
                 qr_observations=(DecodedQrObservation("Start", None, "wechat"),),
             )
-        self.assertEqual(estimate.reason, "model_qr_text_without_geometry")
+        self.assertEqual(estimate.reason, "model_current_head_border_unavailable")
         self.assertFalse(estimate.usable)
+        self.assertIsNone(estimate.yaw_deg)
+        self.assertIsNone(estimate.visible_face)
         self.assertTrue(debug.qr_detected)
 
     def test_projection_corridor_refines_only_real_current_frame_edges(self):

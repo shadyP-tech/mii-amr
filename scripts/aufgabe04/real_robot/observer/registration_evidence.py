@@ -28,6 +28,7 @@ from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import (
     REGISTERED_BACKSIDE_REACQUISITION_SOURCE,
 )
 from scripts.aufgabe04.real_robot.observer.current_head_association import CurrentHeadCandidateAssociation
+from scripts.aufgabe04.real_robot.observer.scan_target_persistence import registered_target_is_unique
 
 
 def build_backside_target_registration_evidence(
@@ -134,8 +135,8 @@ def build_backside_target_registration_evidence(
         raise ValueError("registered image displacement exceeds its hard bound")
     if not registered_lidar_association.associated:
         raise ValueError("registered LiDAR association is not accepted")
-    if not registered_lidar_association.unique_eligible_cluster_required:
-        raise ValueError("registered LiDAR association did not require uniqueness")
+    if not registered_target_is_unique(registered_lidar_association):
+        raise ValueError("registered LiDAR association did not establish unique target identity")
     if registered_lidar_association.search_bearing_source != (
         TARGET_REGISTRATION_LIDAR_SOURCE_CAMERA
     ):
@@ -144,7 +145,8 @@ def build_backside_target_registration_evidence(
         candidate_lidar_association
     ):
         raise ValueError("registered wrapper is not bound to the accepted scan result")
-    if candidate_lidar_association.eligible_cluster_count != 1:
+    if (candidate_lidar_association.eligible_cluster_count != 1
+            and registered_lidar_association.witnessed_fragmentation is None):
         raise ValueError("registered LiDAR association is not unique")
 
     camera_delta = _finite_nonnegative(
@@ -172,10 +174,12 @@ def build_backside_target_registration_evidence(
         "camera_map_bearing_delta_rad": camera_delta,
         "bearing_delta_limit_rad": bearing_limit,
         "lidar_search_bearing_source": TARGET_REGISTRATION_LIDAR_SOURCE_CAMERA,
-        "unique_eligible_lidar_cluster_required": True,
+        "unique_eligible_lidar_cluster_required": registered_lidar_association.unique_eligible_cluster_required,
         "eligible_lidar_cluster_count": (
             candidate_lidar_association.eligible_cluster_count
         ),
+        **({"witnessed_fragmentation": registered_lidar_association.witnessed_fragmentation}
+           if registered_lidar_association.witnessed_fragmentation is not None else {}),
     }
 
 

@@ -74,8 +74,10 @@ class HeadProposalTests(unittest.TestCase):
             with self.subTest(side=side):
                 self.assertIsNone(self.acquire(_synthetic(missing_side=side)).proposal)
 
-    def test_rectangle_without_centered_paired_neck_is_rejected(self):
-        self.assertIsNone(self.acquire(_synthetic(neck=False)).proposal)
+    def test_complete_rectangle_without_neck_remains_a_neutral_proposal(self):
+        proposal = self.acquire(_synthetic(neck=False)).proposal
+        self.assertIsNotNone(proposal)
+        self.assertEqual(len(proposal.corners), 4)
 
     def test_clipped_head_is_not_expanded_into_a_measurement(self):
         self.assertIsNone(self.acquire(_synthetic()[:, :330]).proposal)
@@ -161,15 +163,19 @@ class HeadProposalTests(unittest.TestCase):
             expected_head_height_px=attempt["expected_head_height_px"],
         )
         self.assertEqual(result.reason, "current_head_proposal")
-        self.assertEqual(result.locator, "raw_lines")
+        self.assertEqual(result.locator, "joint_current_borders")
         self.assertGreater(result.proposal.raw_edge_support, 0.9)
         self.assertGreater(result.proposal.center_offset_head_heights, 1.0)
         self.assertIsNone(getattr(result.proposal, "yaw_deg", None))
 
-    def test_recorded_false_qr_back22_does_not_bypass_raw_neck_requirement(self):
+    def test_recorded_back22_current_head_proposal_has_no_face_or_identity_authority(self):
         result, _metadata, _frame = self.recorded("back22")
-        self.assertIsNone(result.proposal)
-        self.assertEqual(result.reason, "head_proposal_unavailable")
+        self.assertIsNotNone(result.proposal, result.reason)
+        self.assertEqual(result.reason, "current_head_proposal")
+        self.assertGreater(result.proposal.raw_edge_support, .9)
+        self.assertIsNone(getattr(result.proposal, "yaw_deg", None))
+        self.assertIsNone(getattr(result.proposal, "visible_face", None))
+        self.assertIsNone(getattr(result.proposal, "qr_identity", None))
 
 
 if __name__ == "__main__":

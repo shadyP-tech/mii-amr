@@ -96,6 +96,7 @@ class CameraRegisteredCandidateLidarAssociation:
     search_bearing_source: str
     unique_eligible_cluster_required: bool
     search_association: CandidateLidarAssociation | None
+    witnessed_fragmentation: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)

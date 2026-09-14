@@ -110,7 +110,11 @@ from scripts.aufgabe04.real_robot.observer.axis_sample_policy import (
 from scripts.aufgabe04.real_robot.observer.tf_retry import (
     PassiveObserverTfRetryScheduler,
 )
+from scripts.aufgabe04.real_robot.observer.tf_delivery_trace import (
+    ObserverTfDeliveryTrace, create_observer_traced_buffer, traced_observer_lookup,
+)
 from scripts.aufgabe04.real_robot.observer.evidence import (
+    AxisWindowReview,
     EvidencePose,
     PassiveObserverEvidence,
 )
@@ -121,6 +125,16 @@ from scripts.aufgabe04.real_robot.observer.backside_proposal_reuse import (
     BacksideProposalContext,
     BacksideProposalReuse,
 )
+from scripts.aufgabe04.real_robot.observer.backside_head_crop import (
+    gate_backside_head_crop, review_backside_head_crop, review_current_head_crop,
+)
+from scripts.aufgabe04.real_robot.observer.head_observation_confidence import (
+    HeadConfidenceInput, HeadObservationConfidence,
+)
+from scripts.aufgabe04.real_robot.observer.head_observation_window import (
+    MEASURED_HEAD_SOURCES, current_head_window_input, review_current_head_window,
+)
+from scripts.aufgabe04.real_robot.observer.head_temporal_consistency import StationaryHeadConsistency
 from scripts.aufgabe04.real_robot.observer.camera_publication import (
     CameraPublicationExpired,
     camera_source_freshness,
@@ -172,6 +186,13 @@ from scripts.aufgabe04.real_robot.observer.current_head_association import (
 )
 from scripts.aufgabe04.real_robot.observer.current_head_qr_binding import (
     bind_qr_to_current_head,
+)
+from scripts.aufgabe04.real_robot.observer.scan_target_geometry import (
+    scan_target_geometry,
+)
+from scripts.aufgabe04.real_robot.observer.scan_target_persistence import (
+    ScanPersistenceContext, StoppedScanTargetPersistence, scan_pose_in_map,
+    scan_pose_from_camera_extrinsics,
 )
 from scripts.aufgabe04.real_robot.observer.front_observation import (
     BACKSIDE_AXIS_SOURCES,
@@ -386,7 +407,10 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self.last_pose: Pose2D | None = None
         self.observation_evidence: PassiveObserverEvidence | None = None
         self._last_observation_update = None
-        self.tf_buffer = Buffer()
+        self._tf_delivery_trace = ObserverTfDeliveryTrace(
+            ros_now=lambda: self.node.get_clock().now().nanoseconds / 1e9,
+        )
+        self.tf_buffer = create_observer_traced_buffer(Buffer, trace=self._tf_delivery_trace)
         self.tf_listener = TransformListener(self.tf_buffer, self.node)
         self.completed = False
         self.axis_observation_committed = False
@@ -645,6 +669,14 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         """Drop evidence after a sealed sensor/frame contract violation."""
 
         self.observation_evidence = None
+        self._head_observation_confidence = None
+        self._head_confidence_metadata = None
+        self._pending_head_confidence = None
+        self._pending_head_window = None
+        self._pending_head_window_associated = False
+        self._head_window_consistency = None
+        self._head_window_decision = None
+        self._scan_target_persistence = None
         self._camera_framing = None
         self._front_view_recovery = None
         self._head_qr_tracking_stamp_sec = None
@@ -720,6 +752,32 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         source_freshness = self._source_freshness(image_stamp_sec, scan_stamp_sec)
         self._last_evidence_source_freshness = source_freshness.metadata()
         observed_at_sec = source_freshness.checked_at_sec
+        window = getattr(self, "_pending_head_window", None)
+        confidence = getattr(self, "_pending_head_confidence", None)
+        review_axis = None
+        self._head_window_decision = None
+        if (window is not None and window.frame_stamp_sec == image_stamp_sec
+                and (axis_source in MEASURED_HEAD_SOURCES
+                     or getattr(self, "_pending_head_window_associated", False))):
+            if getattr(self, "_head_window_consistency", None) is None:
+                self._head_window_consistency = StationaryHeadConsistency(
+                    required_samples=evidence.required_axis_samples,
+                    max_axis_span_rad=evidence.max_axis_deviation_rad,
+                    window_ttl_sec=evidence.axis_ttl_sec)
+
+            def review_axis(snapshot):
+                review, decision = review_current_head_window(
+                    self._head_window_consistency, window, snapshot=snapshot)
+                self._head_window_decision = decision
+                if confidence is not None:
+                    confidence[1]["head_temporal_consistency"] = decision.metadata()
+                return review
+
+        elif axis_source in MEASURED_HEAD_SOURCES:
+            def review_axis(snapshot):
+                return AxisWindowReview(False, MEASURED_HEAD_SOURCES,
+                                        "current_head_window_input_unavailable")
+
         update = evidence.record_frame(
             target_key=self._target_evidence_key(),
             pose=self._evidence_pose(robot_pose),
@@ -735,7 +793,19 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 None if getattr(self.args, "expected_qr_id", AUTO_QR_ID) == AUTO_QR_ID
                 else self.args.expected_qr_id
             ),
+            axis_window_review=review_axis,
         )
+        pending = getattr(self, "_pending_head_confidence", None)
+        if pending is not None and pending[0].frame_stamp_sec == image_stamp_sec:
+            if getattr(self, "_head_observation_confidence", None) is None:
+                self._head_observation_confidence = HeadObservationConfidence(
+                    required_samples=evidence.required_axis_samples,
+                    ttl_sec=evidence.axis_ttl_sec)
+            self._head_confidence_metadata = self._head_observation_confidence.observe(
+                pending[0], update=update, observed_at_sec=observed_at_sec,
+                angle_temporally_consistent=(self._head_window_decision is not None
+                                            and self._head_window_decision.current_sample_accepted))
+            pending[1]["observation_confidence"] = self._head_confidence_metadata
         self._last_observation_update = update
         self._head_qr_tracking_stamp_sec = (
             image_stamp_sec
@@ -782,11 +852,12 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             "query_kind": "exact_sensor_time",
             "query_stamp_sec": query_stamp_sec,
         }
-        transform = self.tf_buffer.lookup_transform(
-            target_frame,
-            source_frame,
-            query_time,
-            timeout=self.Duration(seconds=0.0),
+        transform = traced_observer_lookup(
+            getattr(self, "_tf_delivery_trace", None), self._active_tf_request,
+            lambda: self.tf_buffer.lookup_transform(
+                target_frame, source_frame, query_time,
+                timeout=self.Duration(seconds=0.0),
+            ),
         )
         self._capture_tf_sample(transform)
         return transform
@@ -804,11 +875,12 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             "query_kind": "time_invariant_camera_extrinsic",
             "query_stamp_sec": None,
         }
-        transform = self.tf_buffer.lookup_transform(
-            target_frame,
-            source_frame,
-            self.Time(),
-            timeout=self.Duration(seconds=0.0),
+        transform = traced_observer_lookup(
+            getattr(self, "_tf_delivery_trace", None), self._active_tf_request,
+            lambda: self.tf_buffer.lookup_transform(
+                target_frame, source_frame, self.Time(),
+                timeout=self.Duration(seconds=0.0),
+            ),
         )
         self._capture_tf_sample(transform)
         return transform
@@ -1166,7 +1238,13 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             translation_xyz=scan_translation,
             rotation_xyzw=scan_rotation,
         )
-        scan_bearing = math.atan2(scan_point[1], scan_point[0])
+        scan_target = scan_target_geometry(
+            scan_point,
+            stand_radius_m=self.args.stand_radius_m,
+            stand_uncertainty_m=self.args.stand_uncertainty_m,
+            lidar_range_tolerance_m=self.args.lidar_range_tolerance_m,
+        )
+        scan_bearing = scan_target.bearing_rad
         plain_scan = PlainLaserScan(
             ranges=tuple(float(value) for value in scan_message.ranges),
             angle_min=float(scan_message.angle_min),
@@ -1175,7 +1253,10 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             range_max=float(scan_message.range_max),
             scan_frame_id=str(scan_message.header.frame_id),
             scan_stamp_sec=scan.stamp_sec,
-            receipt_sec=now_sec,
+            # Retain actual callback receipt time. Legacy injected tuples may
+            # lack it; their source stamp is a conservative freshness basis.
+            receipt_sec=(scan.received_ros_sec if getattr(scan, "received_ros_sec", None) is not None
+                         else scan.stamp_sec),
             angle_max=getattr(scan_message, "angle_max", None),
             scan_topology_profile=getattr(self.args, "scan_topology_profile", "linear"),
         )
@@ -1183,13 +1264,36 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             robot_pose.x_m - self.args.stand_x,
             robot_pose.y_m - self.args.stand_y,
         )
-        lower_surface_bound = (
-            center_distance
-            - 2.0 * self.args.stand_radius_m
-            - self.args.stand_uncertainty_m
-            - self.args.lidar_range_tolerance_m
-        )
-        upper_surface_bound = center_distance + self.args.lidar_range_tolerance_m
+        lower_surface_bound, upper_surface_bound = scan_target.accepted_range_m
+        if getattr(self, "_scan_target_persistence", None) is None:
+            self._scan_target_persistence = StoppedScanTargetPersistence()
+
+        def resolve_lidar_association(association, current_scan):
+            # Use the same exact scan<-map transform that projected this
+            # candidate. A witness never supplies a current beam or a pose.
+            try:
+                scan_pose = scan_pose_in_map(scan_translation, scan_rotation)
+                static_scan_pose = scan_pose_from_camera_extrinsics(
+                    *_transform_values(base_from_camera),
+                    *_transform_values(scan_from_camera_transform))
+                context = ScanPersistenceContext(
+                    target_key=self._target_evidence_key(),
+                    epoch_key=str(0 if self.observation_evidence is None else
+                        self.observation_evidence.snapshot().motion_epoch),
+                    robot_pose=robot_pose, scan_pose_map=scan_pose, image_stamp_sec=image.stamp_sec,
+                    candidate_x_m=self.args.stand_x, candidate_y_m=self.args.stand_y,
+                    stand_radius_m=self.args.stand_radius_m,
+                    stand_uncertainty_m=self.args.stand_uncertainty_m,
+                    lidar_range_tolerance_m=self.args.lidar_range_tolerance_m,
+                    scan_pose_robot=static_scan_pose)
+            except (TypeError, ValueError, ArithmeticError):
+                self._scan_target_persistence.reset()
+                return association
+            return self._scan_target_persistence.resolve(
+                association, current_scan, context=context,
+                now_sec=self.node.get_clock().now().nanoseconds / 1e9,
+                max_scan_age_sec=self.args.max_sensor_age_sec)
+
         preliminary_lidar_association = associate_candidate_lidar_target(
             plain_scan,
             map_bearing_rad=scan_bearing,
@@ -1344,6 +1448,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 evaluate=lambda selected, corners: evaluate_roi_attempt(selected, None, corners),
                 diagnostics=head_acquisition_metadata,
                 primary=primary,
+                resolve_lidar_association=resolve_lidar_association,
             )
 
         registration = self.backside_proposal_reuse.select(
@@ -1370,6 +1475,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 self.args.backside_registration_max_center_offset_ratio
             ),
         )
+        registration, backside_crop_review = gate_backside_head_crop(registration)
         selected = registration.selected
         selected_attempt = selected.attempt
         roi_frame = selected.frame
@@ -1415,6 +1521,9 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 enabled=not self.args.disable_backside_reacquisition
             ),
             "backside_proposal_reuse": dict(self.backside_proposal_reuse.last_metadata),
+            "backside_head_crop": (None if backside_crop_review is None
+                                   else backside_crop_review.metadata()),
+            "scan_target_persistence": dict(self._scan_target_persistence.last_metadata),
             "head_acquisition": head_acquisition_metadata,
             "evidence_state": estimate.evidence_state,
             "qr_detected": debug.qr_detected,
@@ -1513,8 +1622,10 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 max_center_offset_ratio=self.args.backside_registration_max_center_offset_ratio,
                 max_camera_map_bearing_delta_rad=math.radians(
                     self.args.backside_registration_max_bearing_delta_deg),
+                resolve_lidar_association=resolve_lidar_association,
             )
             axis_metadata["current_head_candidate_association"] = current_head_association.metadata()
+            model_metadata["scan_target_persistence"] = dict(self._scan_target_persistence.last_metadata)
         selected_qr_observations = getattr(selected, "qr_observations", None)
         if selected_qr_observations is None:
             # Preserve legacy injected evaluations; the operational evaluator
@@ -1568,6 +1679,28 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             marker_seen_in_stationary_epoch=self._qr_marker_seen_in_stationary_epoch,
         )
         self._note_front_observation(front_decision, robot_pose)
+        # Appearance is independent of angle observability. Complete current
+        # pixels, association and the ordinary evidence update still gate each
+        # repeated sample; this pending value belongs to this image only.
+        appearance_crop = backside_crop_review or review_backside_head_crop(registration)
+        self._pending_head_confidence = (
+            HeadConfidenceInput(
+                image.stamp_sec, getattr(debug, "head_backside_appearance", None),
+                appearance_crop.accepted, front_decision.marker_observed_now,
+                front_decision.marker_seen_in_stationary_epoch,
+                estimate.usable and estimate.yaw_deg is not None, estimate.reason),
+            model_metadata,
+        )
+        model_metadata["backside_head_crop"] = appearance_crop.metadata()
+        self._pending_head_window = current_head_window_input(
+            estimate, debug, frame_stamp_sec=image.stamp_sec,
+            camera_signature=(self.profile.camera_optical_frame, *camera_signature,
+                              intrinsics.width_px, intrinsics.height_px),
+            roi=roi, projected_center_px=(projection.u_px, projection.v_px),
+            expected_head_height_px=expected_head_height_px)
+        current_crop = review_current_head_crop(registration)
+        self._pending_head_window_associated = current_crop.accepted
+        model_metadata["current_head_crop"] = current_crop.metadata()
         if estimate.model_profile_sha256 != self.stand_model_profile.sha256:
             self._reset_observation_evidence()
             self._write_debug(
@@ -2016,6 +2149,15 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 **lidar_status_details,
             )
             return
+        if (consensus.source in BACKSIDE_AXIS_SOURCES
+                and requires_measured_head_admission(estimate, debug)
+                and (getattr(self, "_head_confidence_metadata", None) or {}).get(
+                    "backside", {}).get("state") != "backside_supported"):
+            self._write_status(
+                "collecting_consensus", reason="backside_appearance_not_yet_repeated",
+                observation_evidence=update.snapshot.as_dict(),
+                stand_axis_debug=axis_metadata, **lidar_status_details)
+            return
         self._camera_count("consensus_frames")
         camera_heading = optical_heading_from_transform(map_from_camera)
         stand_axis = stand_axis_from_camera_yaw(
@@ -2432,6 +2574,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             "capture_history": self._capture_snapshot(),
             "capture_error": getattr(self, "_capture_error", None),
             "tf_retry": asdict(self.tf_retry_scheduler.evidence),
+            "tf_delivery": (None if getattr(self, "_tf_delivery_trace", None) is None
+                            else self._tf_delivery_trace.snapshot()),
             "tf_retry_attempt_summary": {
                 "attempted_tuple_count": getattr(
                     self, "_tf_retry_tuple_count", 0
@@ -2702,6 +2846,13 @@ def _validate_args(parser: argparse.ArgumentParser, args) -> None:
         parser.error("--stand-uncertainty-m must be non-negative")
     if args.consensus_frames < 2:
         parser.error("--consensus-frames must be at least two")
+    try:
+        StationaryHeadConsistency(
+            required_samples=args.consensus_frames,
+            max_axis_span_rad=math.radians(args.consensus_max_deviation_deg),
+            window_ttl_sec=args.consensus_axis_ttl_sec)
+    except ValueError as exc:
+        parser.error(f"invalid head consistency configuration: {exc}")
     if args.inspection_progress_frames < 7:
         parser.error("--inspection-progress-frames must be at least seven")
     if (not math.isfinite(args.inspection_progress_min_span_sec)

@@ -50,7 +50,7 @@ class BacksideTopologyRecoveryTest(unittest.TestCase):
             **options,
         )
 
-    def test_recorded_connected_neck_keeps_head_angle_with_separate_backside_evidence(self):
+    def test_recorded_head_keeps_angle_with_neck_independent_side_evidence(self):
         estimate, debug = self.estimate()
 
         self.assertTrue(estimate.usable, estimate.reason)
@@ -70,36 +70,35 @@ class BacksideTopologyRecoveryTest(unittest.TestCase):
         self.assertEqual(debug.head_backside_classification.yaw_deg, estimate.yaw_deg)
         self.assertEqual(debug.model_pose.yaw_deg, estimate.yaw_deg)
         self.assertTrue(debug.head_model_quality.accepted)
-        self.assertEqual(debug.head_neck_junction.core_start_gap_px, 4)
-        self.assertEqual(debug.head_neck_junction.start_gap_px, 0)
-        self.assertTrue(debug.head_neck_junction.raw_continuation.accepted)
-        for path in debug.head_neck_junction.raw_continuation.paths_px:
-            self.assertTrue(all(debug.raw_edges[y, x] > 0 for x, y in path))
-        self.assertIsNone(debug.head_outer_recovery)
+        self.assertIsNone(debug.head_neck_junction)
+        self.assertTrue(debug.head_outer_recovery.accepted)
+        self.assertTrue(debug.head_model_quality.outer_border_verified)
         # The outer head spans x=11..80, y=18..92. The interior Start label
         # must not supply the recovered head's bottom or side measurements.
         self.assertAlmostEqual(min(p.u_px for p in estimate.corners), 11, delta=2)
         self.assertAlmostEqual(max(p.u_px for p in estimate.corners), 80, delta=2)
         self.assertGreater(min(p.v_px for p in estimate.corners[2:]), 88)
 
-    def test_recorded_neck_with_a_missing_raw_row_remains_rejected(self):
-        _estimate, debug = self.estimate()
+    def test_recorded_neck_with_a_missing_raw_row_cannot_veto_the_head(self):
+        proposal, _debug = self.estimate()
+        # Hold the current head proposal fixed to isolate the metric fit;
+        # removing pixels can otherwise change Hough locator endpoints.
+        before, debug = self.estimate(current_head_proposal_corners=proposal.corners)
         raw = debug.raw_edges.copy()
-        raw[93, :] = 0
+        # Stay outside the head corner-arm/refinement corridor itself.
+        raw[101, :] = 0
         with patch(
             "scripts.aufgabe04.perception.stand_axis.model_pipeline._canny_edges_from_frame",
             return_value=raw,
         ):
-            estimate, debug = self.estimate()
-        self.assertFalse(estimate.usable)
-        self.assertEqual(estimate.reason, "head_neck_junction_gap_too_large")
-        self.assertIsNone(estimate.yaw_deg)
-        self.assertIsNone(estimate.visible_face)
-        self.assertFalse(debug.head_neck_junction.raw_continuation.accepted)
-        self.assertEqual(debug.head_neck_junction.start_gap_px,
-                         debug.head_neck_junction.core_start_gap_px)
+            estimate, debug = self.estimate(current_head_proposal_corners=proposal.corners)
+        self.assertTrue(estimate.usable, estimate.reason)
+        self.assertEqual(estimate.corners, before.corners)
+        self.assertAlmostEqual(estimate.yaw_deg, before.yaw_deg, places=8)
+        self.assertEqual(estimate.visible_face, "backside_candidate")
+        self.assertIsNone(debug.head_neck_junction)
 
-    def test_recorded_frame_reproduces_failure_without_recovery_batch(self):
+    def test_recorded_head_does_not_depend_on_legacy_neck_topology_recovery(self):
         def filtered_only(*args, **kwargs):
             yield next(backside_topology_proposal_batches(*args, **kwargs))
 
@@ -110,8 +109,8 @@ class BacksideTopologyRecoveryTest(unittest.TestCase):
         ):
             estimate, _debug = self.estimate()
 
-        self.assertFalse(estimate.usable)
-        self.assertEqual(estimate.reason, "model_backside_head_and_neck_unavailable")
+        self.assertTrue(estimate.usable, estimate.reason)
+        self.assertEqual(estimate.reason, "axis_estimated_current_measured_head_backside")
 
     def test_existing_filtered_head_never_enters_raw_recovery(self):
         frame = numpy.zeros((130, 131, 3), dtype=numpy.uint8)
@@ -143,7 +142,7 @@ class BacksideTopologyRecoveryTest(unittest.TestCase):
             expected_head_center_v_px=55, expected_head_height_px=70,
         )
         self.assertFalse(current.usable)
-        self.assertTrue(debug.head_neck_junction.accepted)
+        self.assertIsNone(debug.head_neck_junction)
         self.assertEqual(current.reason, "head_model_yaw_uncertainty_too_high")
         self.assertIsNone(debug.model_pose)
 
@@ -154,13 +153,14 @@ class BacksideTopologyRecoveryTest(unittest.TestCase):
         ):
             with self.subTest(overrides=overrides):
                 estimate, _debug = self.estimate(**overrides)
-                self.assertFalse(estimate.usable, estimate)
+                # A neutral angle cannot claim side/target authority when
+                # the supplied candidate projection contradicts it.
                 self.assertIsNone(estimate.visible_face)
 
-    def test_recorded_label_and_head_without_neck_cannot_be_a_stand(self):
+    def test_current_head_without_neck_is_valid_but_interior_label_is_not(self):
         original = recorded_backside_roi(cv2, numpy)
         no_neck = original.copy()
-        no_neck[94:, :] = (143, 143, 143)
+        no_neck[103:, :] = (143, 143, 143)
         only_label = numpy.full_like(original, 143)
         only_label[39:69, 28:72] = original[39:69, 28:72]
         for name, frame in (
@@ -169,8 +169,12 @@ class BacksideTopologyRecoveryTest(unittest.TestCase):
         ):
             with self.subTest(name=name):
                 estimate, _debug = self.estimate(frame)
-                self.assertFalse(estimate.usable, estimate)
-                self.assertIsNone(estimate.visible_face)
+                if name == "head_without_neck":
+                    self.assertTrue(estimate.usable, estimate.reason)
+                    self.assertEqual(estimate.visible_face, "backside_candidate")
+                else:
+                    self.assertFalse(estimate.usable, estimate)
+                    self.assertIsNone(estimate.visible_face)
 
     def test_absent_raw_top_border_cannot_be_reconstructed_by_topology(self):
         frame = recorded_backside_roi(cv2, numpy)

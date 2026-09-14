@@ -16,6 +16,7 @@ from scripts.aufgabe04.perception.stand_axis_consensus import (
 from scripts.aufgabe04.real_robot.observer.tf_retry import (
     PassiveObserverTfRetryScheduler,
 )
+from scripts.aufgabe04.real_robot.observer.tf_delivery_trace import ObserverTfDeliveryTrace
 from scripts.aufgabe04.real_robot.observer.node import (
     PassiveRealViewpointNode,
     _StampedMessage,
@@ -157,6 +158,7 @@ class PassiveViewpointTfRetryIntegrationTests(unittest.TestCase):
 
     def test_lookup_is_nonblocking_and_records_exact_request(self):
         adapter = self._adapter()
+        adapter._tf_delivery_trace = ObserverTfDeliveryTrace(ros_now=lambda: 1787663986.5)
         calls = []
 
         class _Time:
@@ -187,9 +189,14 @@ class PassiveViewpointTfRetryIntegrationTests(unittest.TestCase):
                 "query_stamp_sec": 1787663986.244712,
             },
         )
+        trace = adapter._tf_delivery_trace.snapshot()
+        self.assertEqual(trace["recent_lookups"][-1]["query_kind"], "exact_sensor_time")
+        self.assertEqual(trace["recent_lookups"][-1]["query_stamp_sec"], 1787663986.244712)
+        self.assertEqual(trace["counts"]["lookup_returned"], 1)
 
     def test_static_camera_extrinsic_lookup_is_also_nonblocking(self):
         adapter = self._adapter()
+        adapter._tf_delivery_trace = ObserverTfDeliveryTrace(ros_now=lambda: 1787663986.5)
         calls = []
 
         class _Time:
@@ -221,9 +228,13 @@ class PassiveViewpointTfRetryIntegrationTests(unittest.TestCase):
                 "query_stamp_sec": None,
             },
         )
+        trace = adapter._tf_delivery_trace.snapshot()
+        self.assertIsNone(trace["recent_lookups"][-1]["query_stamp_sec"])
+        self.assertEqual(trace["recent_lookups"][-1]["query_kind"], "time_invariant_camera_extrinsic")
 
     def test_status_is_latest_snapshot_plus_append_only_history(self):
         adapter = self._adapter()
+        adapter._tf_delivery_trace = ObserverTfDeliveryTrace(ros_now=lambda: 1787663986.5)
         adapter.consensus = AxisConsensusAccumulator(
             required_samples=3,
             max_deviation_rad=math.radians(5.0),
@@ -272,6 +283,9 @@ class PassiveViewpointTfRetryIntegrationTests(unittest.TestCase):
         self.assertEqual(len(events), 2)
         self.assertEqual(events[0]["state"], "collecting_consensus")
         self.assertEqual(events[1]["state"], "tf_pending_exact_time")
+        self.assertEqual(status["tf_delivery"]["source"], "observer_execution_buffer")
+        self.assertTrue(status["tf_delivery"]["diagnostic_only"])
+        self.assertIn("tf_delivery", events[0])
 
 
 if __name__ == "__main__":

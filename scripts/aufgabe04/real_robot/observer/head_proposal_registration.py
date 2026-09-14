@@ -54,8 +54,8 @@ def recenter_head_proposal(
     if not (0 <= x0 < x1 <= search.roi.x1 - search.roi.x0
             and 0 <= y0 < y1 <= search.roi.y1 - search.roi.y0):
         return None
-    # Require every fitted border inside the crop. The proposal builder also
-    # requires paired neck rails; clipping cannot invent that evidence.
+    # Require every fitted border inside the crop. Neck evidence has no role
+    # in selecting a complete current head or in candidate association.
     if not all(x0 < p.u_px < x1 - 1 and y0 < p.v_px < y1 - 1
                for p in proposal.corners):
         return None
@@ -86,6 +86,7 @@ def acquire_registered_head_measurement(
     evaluate: Callable[[HeadRoiAttempt, tuple[ImagePoint, ...]], HeadRoiEvaluation],
     diagnostics: dict[str, object],
     primary: HeadRoiEvaluation | None = None,
+    resolve_lidar_association=None,
 ) -> CameraTargetRegistrationSelection | None:
     """At most one geometric retry, after unique candidate/LiDAR association."""
     import time
@@ -118,6 +119,8 @@ def acquire_registered_head_measurement(
                        raw_verifications=result.raw_verifications,
                        elapsed_ms=(time.monotonic() - start) * 1000.0,
                        candidate_associated=False)
+    if getattr(result, "joint_border_diagnostics", None) is not None:
+        diagnostics["joint_border_diagnostics"] = result.joint_border_diagnostics
     if result.proposal is None:
         if result.reason == "head_proposal_ambiguous":
             return reject_proposal()
@@ -146,6 +149,8 @@ def acquire_registered_head_measurement(
         min_cluster_sample_count=min_cluster_sample_count,
         max_camera_map_bearing_delta_rad=max_camera_map_bearing_delta_rad,
     )
+    if resolve_lidar_association is not None:
+        association = resolve_lidar_association(association, scan)
     diagnostics.update(registered.metadata, candidate_associated=association.associated,
                        lidar_association=asdict(association))
     if not association.associated:

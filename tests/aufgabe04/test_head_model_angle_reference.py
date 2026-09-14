@@ -19,6 +19,7 @@ except ImportError:
 
 from scripts.aufgabe04.perception.camera_calibration import CameraCalibration, rectify_bgr_frame
 from scripts.aufgabe04.perception.stand_axis.head_model_fit import fit_current_measured_head
+from scripts.aufgabe04.perception.stand_axis.head_outer_border import check_current_head_marker_boundary
 from scripts.aufgabe04.perception.stand_axis.head_model_quality import (
     evaluate_head_model_quality, validated_head_model_quality,
 )
@@ -57,7 +58,8 @@ class HeadModelAngleReferenceTest(unittest.TestCase):
     def quality(self, corners, camera, **evidence):
         pose = estimate_planar_pose_ippe(cv2, corners, self.profile.head_corners, camera)
         settings = dict(raw_border_support_mean=.99, raw_corner_support_accepted=True,
-                        centered_neck_supported=True, neck_junction_verified=True)
+                        centered_neck_supported=True, neck_junction_verified=True,
+                        outer_border_verified=True)
         settings.update(evidence)
         quality = evaluate_head_model_quality(cv2, profile=self.profile, camera=camera,
             corners=corners, pose_result=pose, **settings)
@@ -177,17 +179,28 @@ class HeadModelAngleReferenceTest(unittest.TestCase):
 
     def test_current_structure_is_required_even_for_perfect_projected_corners(self):
         corners, camera = self.projection(45.)
-        for raw in (np.zeros((600, 800), np.uint8), self.raster(corners, include_neck=False)):
+        for raw in (np.zeros((600, 800), np.uint8),):
             estimate, _debug, _pose = fit_current_measured_head(cv2, raw, model_profile=self.profile,
                 camera=camera, proposal_corners=corners)
             self.assertFalse(estimate.usable)
             self.assertIsNone(estimate.yaw_deg)
         for evidence in ({"raw_border_support_mean": .2}, {"raw_corner_support_accepted": False},
-                         {"centered_neck_supported": False}, {"neck_junction_verified": False}):
+                         {"outer_border_verified": False}):
             _pose, quality = self.quality(corners, camera, **evidence)
             self.assertFalse(validated_head_model_quality(quality))
 
-    def test_inner_paper_border_cannot_replace_the_physical_head_at_the_neck(self):
+    def test_complete_current_head_does_not_require_any_neck_pixels(self):
+        for angle in (20., 45., 60., 75.):
+            corners, camera = self.projection(angle)
+            fit = [fit_current_measured_head(cv2, self.raster(corners, include_neck=neck),
+                model_profile=self.profile, camera=camera, proposal_corners=corners)
+                for neck in (False, True)]
+            self.assertTrue(fit[0][0].usable, fit[0][0].reason)
+            self.assertEqual(fit[0][0].corners, fit[1][0].corners)
+            self.assertEqual(fit[0][0].yaw_deg, fit[1][0].yaw_deg)
+            self.assertIsNone(fit[0][1].head_neck_junction)
+
+    def test_enclosing_raw_border_and_verified_symbol_disambiguate_inner_paper(self):
         outer, camera = self.projection(45., distance_m=.35)
         inner, _camera = self.projection(45., distance_m=.35,
                                        physical_size_scale=.071 / .078)
@@ -201,19 +214,30 @@ class HeadModelAngleReferenceTest(unittest.TestCase):
         self.assertTrue(physical.usable, physical.reason)
         self.assertTrue(inner_seed.usable, inner_seed.reason)
         self.assertTrue(recovered_debug.head_outer_recovery.accepted)
+        self.assertTrue(recovered_debug.head_outer_recovery.recovered)
         for expected, actual in zip(outer, inner_seed.corners):
             self.assertLess(math.hypot(expected.u_px - actual.u_px,
                                        expected.v_px - actual.v_px), 1.)
         self.assertAlmostEqual(recovered_pose.best.translation_xyz_m[2], .35, delta=.003)
-        # Without the actual outer rail pixels, neither a neck nor an expanded
-        # search seed can manufacture the missing physical head boundary.
+        # A lone quad has an undirected angle but cannot establish scale. A
+        # current verified symbol supplies independent paper/head evidence.
         missing_outer = raw.copy()
         cv2.polylines(missing_outer, [np.rint([(p.u_px, p.v_px) for p in outer]).astype(np.int32)],
                       True, 0, 3)
         paper_only, _debug, _pose = fit_current_measured_head(cv2, missing_outer,
             model_profile=self.profile, camera=camera, proposal_corners=inner)
-        self.assertFalse(paper_only.usable)
-        self.assertIsNone(paper_only.yaw_deg)
+        self.assertTrue(paper_only.usable, paper_only.reason)
+        self.assertFalse(_debug.head_outer_recovery.recovered)
+        qr, _camera = self.projection(45., distance_m=.35,
+                                      physical_size_scale=.062/.078)
+        rejected = check_current_head_marker_boundary(cv2,
+            head_corners=paper_only.corners, qr_corners=qr, marker_verified=True,
+            model_profile=self.profile)
+        self.assertFalse(rejected.accepted)
+        self.assertEqual(rejected.reason, "current_border_matches_verified_qr_panel")
+        self.assertTrue(check_current_head_marker_boundary(cv2,
+            head_corners=physical.corners, qr_corners=qr, marker_verified=True,
+            model_profile=self.profile).accepted)
 
     def recorded_inputs(self):
         fixture = json.loads((FIXTURE / "inputs.json").read_text())

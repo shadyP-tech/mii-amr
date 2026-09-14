@@ -1,0 +1,502 @@
+{
+  "schema_version": 1,
+  "run_id": "stand_explore_exact2_camera_all5_20260914T123717Z",
+  "recorded_commit": "1cf07084d030e8d26f86f1c1481a5e5803c8af21",
+  "recorded_opencv": "4.5.4",
+  "fixture_preparation": {
+    "opencv": "4.13.0",
+    "numpy": "2.3.5",
+    "python": "3.12.14",
+    "method": "Lossless PNG crops. Backside original compressed images rectified with saved camera_info; front cropped from original already-rectified latest_frame.png."
+  },
+  "scope": "Original saved-pixel geometry regression only. Recorded stamps never authorize freshness or motion. Local OpenCV proposal enumeration and QR backends can differ from deployed4.5.4. Diagnostic proposal corners are current raw-pixel candidates, not angle ground truth or admitted identity.",
+  "model_profile": "configs/aufgabe04/stand_models/physical_stand_measured_20260826_v2.json",
+  "model_file_sha256": "b5f60d3908f0fa24365c37dbedfe5e8e4680931f964a6ab031aa30d64544693d",
+  "records": {
+    "backside_000010": {
+      "image": "backside_000010.png",
+      "image_sha256": "c1dc21aae2730934981a5741be54a2c6d1897c00a7eddfd7b47d367cc30599a6",
+      "pixel_sha256": "4e318a0f8c0b09b893660352cbbca32e754aabdd12ef387169ef21cd4d457917",
+      "source_image": "results/audits/stand_explore_exact2_camera_all5_20260914T123717Z/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260914T123717Z/candidates/001_survey_candidate_0001/camera_lidar_attempt_00/capture_history/frame_000010.compressed",
+      "source_image_sha256": "7fa69619a0246882ea81ffffe88cc881d03f263a2e8e4b154a0b278c1eea88e2",
+      "source_metadata": "results/audits/stand_explore_exact2_camera_all5_20260914T123717Z/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260914T123717Z/candidates/001_survey_candidate_0001/camera_lidar_attempt_00/capture_history/frame_000010.json",
+      "source_metadata_sha256": "1d57c87249840c0f238c025148638ed49b8b7ac8df8fcd904040d20e68cbf38c",
+      "image_stamp_sec": 1789389830.920499,
+      "rectified_full_image_pixel_sha256": "b8c3e4c38cfeaa824d8d39c524ea5fbd734a6730aebfd7908d9dd7c610c4bdcb",
+      "crop_xyxy": [
+        127,
+        76,
+        584,
+        533
+      ],
+      "camera": {
+        "fx_px": 640.977317007246,
+        "fy_px": 641.1612206204627,
+        "cx_px": 278.8708878028196,
+        "cy_px": 224.7059996561025
+      },
+      "original_camera_info": {
+        "binning_x": 0,
+        "binning_y": 0,
+        "d": [
+          0.22098627234105042,
+          -0.5816953750895016,
+          -0.0014375648979169753,
+          -0.0008374637688387152,
+          0.446372026692927
+        ],
+        "distortion_model": "plumb_bob",
+        "header": {
+          "frame_id": "camera",
+          "stamp_nanosec": 920499035,
+          "stamp_sec": 1789389830
+        },
+        "height": 600,
+        "k": [
+          640.977317007246,
+          0.0,
+          405.8708878028196,
+          0.0,
+          641.1612206204627,
+          300.7059996561025,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "p": [
+          640.977317007246,
+          0.0,
+          405.8708878028196,
+          0.0,
+          0.0,
+          641.1612206204627,
+          300.7059996561025,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        "r": [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "roi": {
+          "do_rectify": false,
+          "height": 0,
+          "width": 0,
+          "x_offset": 0,
+          "y_offset": 0
+        },
+        "width": 800
+      },
+      "expected_head": [
+        228.92454136728168,
+        228.74042536977169,
+        101.33480184875364
+      ],
+      "crop_half_width_ratio": 2.25,
+      "profile": {
+        "canny_high": 60,
+        "canny_low": 20,
+        "edge_preprocess": "channel_union",
+        "expected_head_size_px": 101.33480184875364,
+        "min_edge_height_px": 14.0
+      },
+      "diagnostic_proposal_corners": [
+        {
+          "u_px": 129.78122813365042,
+          "v_px": 169.3407806426524
+        },
+        {
+          "u_px": 231.51337833644104,
+          "v_px": 165.96681375682724
+        },
+        {
+          "u_px": 230.53725398677318,
+          "v_px": 263.0
+        },
+        {
+          "u_px": 128.83904486496462,
+          "v_px": 263.0
+        }
+      ],
+      "recorded_reason": "model_backside_head_and_neck_unavailable",
+      "old_neck_replay": {
+        "reason": "raw_neck_paired_continuity_insufficient",
+        "required_run": 12,
+        "paired_run": 7,
+        "start_gap_px": null,
+        "maximum_start_gap_px": 8
+      }
+    },
+    "backside_000012": {
+      "image": "backside_000012.png",
+      "image_sha256": "c30190bfdee208a3c38e7e4da55b3006ee2dbfa6c36e24710eba18b2abf6d199",
+      "pixel_sha256": "cc87b4ac2b158c0d017f67a24b0fd66fe0e779e2da28949f0a46332f8e70242b",
+      "source_image": "results/audits/stand_explore_exact2_camera_all5_20260914T123717Z/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260914T123717Z/candidates/001_survey_candidate_0001/camera_lidar_attempt_00/capture_history/frame_000012.compressed",
+      "source_image_sha256": "e18722743aa7b663518f1ebb48deb310ef3d17072d1ab01e42eb93ef7ebb7eff",
+      "source_metadata": "results/audits/stand_explore_exact2_camera_all5_20260914T123717Z/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260914T123717Z/candidates/001_survey_candidate_0001/camera_lidar_attempt_00/capture_history/frame_000012.json",
+      "source_metadata_sha256": "6e0e5c0509f36a8ddf761fceae6bae51337deffb6883ebfbfb14208facd6776e",
+      "image_stamp_sec": 1789389831.580025,
+      "rectified_full_image_pixel_sha256": "c79b13647e674ef953c3fc2a61175e8e45afc35d451c136b9bb5a8e1d63cb0cf",
+      "crop_xyxy": [
+        127,
+        76,
+        584,
+        533
+      ],
+      "camera": {
+        "fx_px": 640.977317007246,
+        "fy_px": 641.1612206204627,
+        "cx_px": 278.8708878028196,
+        "cy_px": 224.7059996561025
+      },
+      "original_camera_info": {
+        "binning_x": 0,
+        "binning_y": 0,
+        "d": [
+          0.22098627234105042,
+          -0.5816953750895016,
+          -0.0014375648979169753,
+          -0.0008374637688387152,
+          0.446372026692927
+        ],
+        "distortion_model": "plumb_bob",
+        "header": {
+          "frame_id": "camera",
+          "stamp_nanosec": 580025035,
+          "stamp_sec": 1789389831
+        },
+        "height": 600,
+        "k": [
+          640.977317007246,
+          0.0,
+          405.8708878028196,
+          0.0,
+          641.1612206204627,
+          300.7059996561025,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "p": [
+          640.977317007246,
+          0.0,
+          405.8708878028196,
+          0.0,
+          0.0,
+          641.1612206204627,
+          300.7059996561025,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        "r": [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "roi": {
+          "do_rectify": false,
+          "height": 0,
+          "width": 0,
+          "x_offset": 0,
+          "y_offset": 0
+        },
+        "width": 800
+      },
+      "expected_head": [
+        228.97427526108982,
+        228.739946667171,
+        101.33430390129816
+      ],
+      "crop_half_width_ratio": 2.25,
+      "profile": {
+        "canny_high": 60,
+        "canny_low": 20,
+        "edge_preprocess": "channel_union",
+        "expected_head_size_px": 101.33430390129816,
+        "min_edge_height_px": 14.0
+      },
+      "diagnostic_proposal_corners": [
+        {
+          "u_px": 129.0000027973714,
+          "v_px": 169.5036027464248
+        },
+        {
+          "u_px": 226.00000198387272,
+          "v_px": 165.61428338482756
+        },
+        {
+          "u_px": 225.99999755308647,
+          "v_px": 266.97885705765844
+        },
+        {
+          "u_px": 128.99999875044495,
+          "v_px": 262.08648800748387
+        }
+      ],
+      "recorded_reason": "model_backside_head_and_neck_unavailable",
+      "old_neck_replay": {
+        "reason": "raw_neck_start_gap_too_large",
+        "required_run": 12,
+        "paired_run": 12,
+        "start_gap_px": 21,
+        "maximum_start_gap_px": 8
+      }
+    },
+    "front_complete": {
+      "image": "front_complete.png",
+      "image_sha256": "f72d7385a948f573695a369a191ec9c22d6a559743658b7672f35d9eb1e26606",
+      "pixel_sha256": "97e51aa9ce844efaf0d1bbbb0530705cc6da7291084548f174836d91ee191c7c",
+      "source_image": "results/audits/stand_explore_exact2_camera_all5_20260914T123717Z/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260914T123717Z/candidates/001_survey_candidate_0001/camera_lidar_attempt_02/perception_debug/latest_frame.png",
+      "source_image_sha256": "89e4454e1f10b3b1016d42fe003364babb5a8aee6f7f1f4ed76f8a428fad2def",
+      "source_metadata": "results/audits/stand_explore_exact2_camera_all5_20260914T123717Z/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260914T123717Z/candidates/001_survey_candidate_0001/camera_lidar_attempt_02/perception_debug/latest_metadata.json",
+      "source_metadata_sha256": "2741a3a94d2d7de140fb6ca91cee4b070559373566c901a7544c311969a0ca13",
+      "calibration_source": "results/audits/stand_explore_exact2_camera_all5_20260914T123717Z/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260914T123717Z/candidates/001_survey_candidate_0001/camera_lidar_attempt_02/capture_history/frame_000032.json",
+      "calibration_source_sha256": "05db5c3f175220a2ae0944d2a45b9d0fd4504d67419617ec6642ad3cae8b33df",
+      "image_stamp_sec": 1789390170.738862,
+      "rectified_full_image_pixel_sha256": "b2e8730a2574d36a386cde3e98ab1a64e080758ad20b8dbb7fc1e8502e0cf77b",
+      "crop_xyxy": [
+        415,
+        209,
+        552,
+        392
+      ],
+      "camera": {
+        "fx_px": 640.977317007246,
+        "fy_px": 641.1612206204627,
+        "cx_px": -9.129112197180405,
+        "cy_px": 91.7059996561025
+      },
+      "original_camera_info": {
+        "binning_x": 0,
+        "binning_y": 0,
+        "d": [
+          0.22098627234105042,
+          -0.5816953750895016,
+          -0.0014375648979169753,
+          -0.0008374637688387152,
+          0.446372026692927
+        ],
+        "distortion_model": "plumb_bob",
+        "header": {
+          "frame_id": "camera",
+          "stamp_nanosec": 720466035,
+          "stamp_sec": 1789390090
+        },
+        "height": 600,
+        "k": [
+          640.977317007246,
+          0.0,
+          405.8708878028196,
+          0.0,
+          641.1612206204627,
+          300.7059996561025,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "p": [
+          640.977317007246,
+          0.0,
+          405.8708878028196,
+          0.0,
+          0.0,
+          641.1612206204627,
+          300.7059996561025,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        "r": [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "roi": {
+          "do_rectify": false,
+          "height": 0,
+          "width": 0,
+          "x_offset": 0,
+          "y_offset": 0
+        },
+        "width": 800
+      },
+      "expected_head": [
+        67.99771966058495,
+        71.84056170902528,
+        123.35301310793878
+      ],
+      "crop_half_width_ratio": 1.25,
+      "profile": {
+        "canny_high": 60,
+        "canny_low": 20,
+        "edge_preprocess": "channel_union",
+        "expected_head_size_px": 123.35301310793878,
+        "min_edge_height_px": 14.0
+      },
+      "diagnostic_proposal_corners": [
+        {
+          "u_px": 14.025148234265146,
+          "v_px": 16.5105974212361
+        },
+        {
+          "u_px": 119.62095481810968,
+          "v_px": 14.168602256771862
+        },
+        {
+          "u_px": 121.95566278549722,
+          "v_px": 126.46691186457815
+        },
+        {
+          "u_px": 16.389112804467743,
+          "v_px": 130.21613529351492
+        }
+      ],
+      "recorded_reason": "model_backside_head_and_neck_unavailable",
+      "expected_qr_text": "Start",
+      "actual_full_head_bounds": [
+        429.02514823426515,
+        223.16860225677186,
+        536.9556627854972,
+        339.2161352935149
+      ],
+      "complete_head_visible": true
+    },
+    "front_clipped": {
+      "image": "front_clipped.png",
+      "image_sha256": "b38a9d4055633822da790e066caef65580104ce9e41a8724f23fd0f29b9a18e8",
+      "pixel_sha256": "2e20cbbc43a3aff206b30a328c139899fa99cdc3915b5904bf1232b5d9f7fd42",
+      "source_image": "results/audits/stand_explore_exact2_camera_all5_20260914T123717Z/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260914T123717Z/candidates/001_survey_candidate_0001/camera_lidar_attempt_02/perception_debug/latest_frame.png",
+      "source_image_sha256": "89e4454e1f10b3b1016d42fe003364babb5a8aee6f7f1f4ed76f8a428fad2def",
+      "source_metadata": "results/audits/stand_explore_exact2_camera_all5_20260914T123717Z/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260914T123717Z/candidates/001_survey_candidate_0001/camera_lidar_attempt_02/perception_debug/latest_metadata.json",
+      "source_metadata_sha256": "2741a3a94d2d7de140fb6ca91cee4b070559373566c901a7544c311969a0ca13",
+      "calibration_source": "results/audits/stand_explore_exact2_camera_all5_20260914T123717Z/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260914T123717Z/candidates/001_survey_candidate_0001/camera_lidar_attempt_02/capture_history/frame_000032.json",
+      "calibration_source_sha256": "05db5c3f175220a2ae0944d2a45b9d0fd4504d67419617ec6642ad3cae8b33df",
+      "image_stamp_sec": 1789390170.738862,
+      "rectified_full_image_pixel_sha256": "b2e8730a2574d36a386cde3e98ab1a64e080758ad20b8dbb7fc1e8502e0cf77b",
+      "crop_xyxy": [
+        293,
+        180,
+        516,
+        403
+      ],
+      "camera": {
+        "fx_px": 640.977317007246,
+        "fy_px": 641.1612206204627,
+        "cx_px": 112.8708878028196,
+        "cy_px": 120.7059996561025
+      },
+      "original_camera_info": {
+        "binning_x": 0,
+        "binning_y": 0,
+        "d": [
+          0.22098627234105042,
+          -0.5816953750895016,
+          -0.0014375648979169753,
+          -0.0008374637688387152,
+          0.446372026692927
+        ],
+        "distortion_model": "plumb_bob",
+        "header": {
+          "frame_id": "camera",
+          "stamp_nanosec": 720466035,
+          "stamp_sec": 1789390090
+        },
+        "height": 600,
+        "k": [
+          640.977317007246,
+          0.0,
+          405.8708878028196,
+          0.0,
+          641.1612206204627,
+          300.7059996561025,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "p": [
+          640.977317007246,
+          0.0,
+          405.8708878028196,
+          0.0,
+          0.0,
+          641.1612206204627,
+          300.7059996561025,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        "r": [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "roi": {
+          "do_rectify": false,
+          "height": 0,
+          "width": 0,
+          "x_offset": 0,
+          "y_offset": 0
+        },
+        "width": 800
+      },
+      "expected_head": [
+        111.76345036309021,
+        111.14917972837878,
+        123.35301310793878
+      ],
+      "crop_half_width_ratio": 1.25,
+      "profile": {
+        "canny_high": 60,
+        "canny_low": 20,
+        "edge_preprocess": "channel_union",
+        "expected_head_size_px": 123.35301310793878,
+        "min_edge_height_px": 14.0
+      },
+      "diagnostic_proposal_corners": null,
+      "recorded_reason": "model_backside_head_and_neck_unavailable",
+      "expected_qr_text": "Start",
+      "actual_full_head_bounds": [
+        429.02514823426515,
+        223.16860225677186,
+        536.9556627854972,
+        339.2161352935149
+      ],
+      "complete_head_visible": false
+    }
+  }
+}

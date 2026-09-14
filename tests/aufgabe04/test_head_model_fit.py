@@ -83,27 +83,27 @@ class IndependentHeadFitTest(unittest.TestCase):
                                            qr_observations=(), pose_hint=None)
         self.assertIsNotNone(debug.refined_corners)
         self.assertTrue(estimate.usable, estimate.reason)
-        self.assertTrue(debug.head_neck_junction.accepted)
+        self.assertIsNone(debug.head_neck_junction)
         self.assertIsNotNone(debug.model_pose)
         self.assertEqual(estimate.source, "model_backside_current_frame")
         self.assertEqual(debug.model_pose_fit_source, "model_current_measured_head")
-        self.assertTrue(debug.head_model_quality.centered_neck_supported)
+        self.assertTrue(debug.head_model_quality.outer_border_verified)
         self.assertTrue(debug.head_backside_classification.accepted)
         self.assertEqual(estimate.visible_face, "backside_candidate")
 
-    def test_good_qr_and_tracked_pose_cannot_rescue_missing_neck(self):
+    def test_neck_pixels_cannot_determine_current_head_fit(self):
         pixels = self.fixture.crop.copy()
         bottom = int(max(p.v_px for p in self.fixture.debug.refined_corners)) + 2
-        pixels[bottom:, :] = 0
+        # Continue the actual background; do not draw a new artificial bottom
+        # edge through the physical head while removing its neck.
+        pixels[bottom:, :] = pixels[bottom:, :1]
         estimate, debug = estimate_stand_axis_from_metric_model(
             cv2, pixels, **self.fixture.options, pose_hint=self.fixture.debug.model_pose,
         )
-        self.assertFalse(estimate.usable)
-        self.assertEqual(estimate.source, "model_current_measured_head")
-        self.assertIsNone(estimate.yaw_deg)
-        self.assertIsNone(estimate.camera_face_normal_xyz)
-        self.assertIsNone(debug.model_pose)
-        self.assertFalse(debug.head_model_quality.centered_neck_supported)
+        self.assertTrue(estimate.usable, estimate.reason)
+        self.assertAlmostEqual(estimate.yaw_deg, self.fixture.estimate.yaw_deg, places=5)
+        self.assertIsNone(debug.head_neck_junction)
+        self.assertTrue(debug.head_model_quality.outer_border_verified)
 
 
 if __name__ == "__main__":

@@ -76,7 +76,7 @@ class HeadModelNeckTests(unittest.TestCase):
                 self.assertFalse(result.accepted)
                 self.assertIsNone(result.start_gap_px)
 
-    def test_automatic_inner_paper_proposal_cannot_claim_missing_outer_head(self):
+    def test_legacy_neck_diagnostic_does_not_determine_a_lone_quads_scale(self):
         for distance, angle in ((.35, 35.), (.35, 45.), (.35, 60.), (.9, 35.), (.9, 45.)):
             with self.subTest(distance=distance, angle=angle):
                 outer, camera = self.reference.projection(angle, distance_m=distance)
@@ -114,10 +114,13 @@ class HeadModelNeckTests(unittest.TestCase):
                     self.assertEqual(junction.max_start_gap_px, 0)
                 estimate, debug, _pose = fit_current_measured_head(cv2, raw,
                     model_profile=self.profile, camera=camera, proposal_corners=corners)
-                self.assertFalse(estimate.usable, estimate.reason)
-                self.assertIsNone(estimate.yaw_deg)
-                self.assertIsNone(estimate.camera_face_center_xyz_m)
-                self.assertIsNone(debug.model_pose)
+                # A standalone quad has an angle but no independent scale
+                # identity. Its detached neck is not admissibility evidence.
+                self.assertTrue(estimate.usable, estimate.reason)
+                self.assertIsNone(estimate.visible_face)
+                self.assertIsNone(debug.head_neck_junction)
+                self.assertEqual(debug.head_outer_recovery.scale_identifiability,
+                                 "conditional_on_candidate_and_measured_profile")
 
     def test_recorded_junction_gaps_preserve_pixels_without_tuning_to_old_fit(self):
         _fixture, edges, corners, camera = self.reference.recorded_inputs()
@@ -145,9 +148,15 @@ class HeadModelNeckTests(unittest.TestCase):
 
         selection, _metadata = RecordedBacksideFixture(cv2, np).evaluate("frame_000008", BacksideProposalReuse())
         backside = selection.selected.debug
+        before = backside.raw_edges.copy()
         gap = measure_head_neck_junction(backside.raw_edges, backside.refined_corners, self.profile)
-        self.assertTrue(gap.accepted)
-        self.assertEqual(gap.start_gap_px, 0)
+        # Current joint acquisition exposes a larger raw-border hypothesis
+        # whose strict corner test fails. An old zero-gap diagnostic cannot
+        # rescue that current head or supply its missing corners.
+        np.testing.assert_array_equal(backside.raw_edges, before)
+        self.assertFalse(selection.selected.estimate.usable)
+        self.assertIsNone(backside.refined_corners)
+        self.assertFalse(gap.accepted)
 
 
 if __name__ == "__main__":

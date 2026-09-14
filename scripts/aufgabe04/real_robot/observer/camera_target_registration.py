@@ -222,10 +222,19 @@ def select_camera_target_measurement(
         primary,
         tracked_pose=tracked_pose,
     )
+    # A usable nominal backside may be a clipped front. Verify a complete,
+    # current head through the same bounded proposal/scan registration path
+    # before accepting its marker absence. The observer also gates selection
+    # provenance, including disabled or unavailable reacquisition paths.
+    verify_backside = (primary.estimate.usable
+                       and primary.estimate.source == BACKSIDE_AXIS_SAMPLE_SOURCE
+                       and acquire_registered is not None)
+    if verify_backside:
+        reacquisition_mode = MEASURED_HEAD_REACQUISITION_MODE
     if (
         not enable_reacquisition
         or len(roi_attempts) < 2
-        or primary.estimate.usable
+        or (primary.estimate.usable and not verify_backside)
         or reacquisition_mode is None
     ):
         return CameraTargetRegistrationSelection(

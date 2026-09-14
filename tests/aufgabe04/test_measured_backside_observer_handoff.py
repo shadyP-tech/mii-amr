@@ -21,6 +21,9 @@ from scripts.aufgabe04.artifacts.backside_axis_observation import (
     REGISTERED_BACKSIDE_AXIS_SAMPLE_SOURCE, load_backside_axis_observation,
 )
 from scripts.aufgabe04.perception.stand_axis.head_backside_classification import classify_current_head_backside
+from scripts.aufgabe04.perception.stand_axis.head_proposal import HeadProposal, HeadProposalResult
+from scripts.aufgabe04.perception.stand_axis.models import ImagePoint
+from scripts.aufgabe04.perception.stand_axis.qr_pose_seed import PlanarPoseHypothesis
 from scripts.aufgabe04.real_robot.candidate.inspection_execution import (
     CandidateInspectionEffects, execute_candidate_inspection,
 )
@@ -40,9 +43,14 @@ class MeasuredBacksideObserverHandoffTests(unittest.TestCase):
 
         def metric(_cv2, _crop, **options):
             estimate, debug, classification_options = classified_head(
+                yaw_deg=(-11.6 if index[0] == 6 else -2.8) if scenario == "angle_jump" else 37.815,
                 u=options["expected_head_center_u_px"], v=options["expected_head_center_v_px"],
                 height=52., profile_sha256=adapter.stand_model_profile.sha256,
             )
+            debug = replace(debug, head_neck_junction=None,
+                            head_model_quality=replace(debug.head_model_quality,
+                                                       centered_neck_supported=False,
+                                                       neck_junction_verified=False))
             # Preserve a plain measured plane for one marker frame. Earlier
             # classified samples must never complete after this contradiction.
             if scenario in ("verified_marker", "tentative_marker") and index[0] == 6:
@@ -50,6 +58,19 @@ class MeasuredBacksideObserverHandoffTests(unittest.TestCase):
                                 qr_marker_verified=scenario == "verified_marker")
             if scenario == "missing_classification":
                 return estimate, debug
+            if scenario == "ambiguous_front":
+                debug = replace(debug, qr_detected=True, qr_marker_verified=True)
+            if scenario == "border_jump" and index[0] == 6:
+                estimate = replace(estimate, corners=tuple(
+                    ImagePoint(p.u_px + (4 if n in (1, 2) else 0), p.v_px)
+                    for n, p in enumerate(estimate.corners)))
+            if scenario in ("ambiguous_pose", "ambiguous_front") and index[0] == 6:
+                estimate = replace(estimate, usable=False, yaw_deg=None, evidence_state="unobservable")
+                debug = replace(debug,
+                    head_model_quality=replace(debug.head_model_quality, accepted=False, axis_ambiguous=True),
+                    head_pose_hypotheses=tuple(PlanarPoseHypothesis(
+                        (0., 0., 0.), (0., 0., .5), (0., 0., 1.), yaw, residual, True)
+                        for yaw, residual in ((-7., .2), (7., .25))))
             return classify_current_head_backside(estimate, debug, **classification_options)
 
         def delayed_debug(*_args, **_kwargs):
@@ -61,7 +82,21 @@ class MeasuredBacksideObserverHandoffTests(unittest.TestCase):
         if scenario == "ambiguous_lidar":
             sensor.scan.value.ranges = (.6, .6, float("inf"), .6, .6)
         module = "scripts.aufgabe04.real_robot.observer.node."
+        def head_proposal(_cv2, _crop, **options):
+            # Only current pixel localization is injected, like the metric
+            # fit above. Real recentering, scan binding and crop gates run.
+            u, v = options["expected_head_center_u_px"], options["expected_head_center_v_px"]
+            corners = tuple(ImagePoint(x, y) for x, y in (
+                (u - 26, v - 26), (u + 26, v - 26),
+                (u + 26, v + 26), (u - 26, v + 26)))
+            proposal = HeadProposal(corners, (int(u - 33), int(v - 33), int(u + 34), int(v + 50)),
+                                    (u - 26, v - 26, u + 26, v + 26), u, v, 52.,
+                                    52. / options["expected_head_height_px"], 0., .99, .99)
+            return HeadProposalResult(proposal, "current_head_proposal", 1, 1)
         with ExitStack() as stack:
+            stack.enter_context(patch(
+                "scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_head_proposal",
+                side_effect=head_proposal))
             for name, opts in {
                 "camera_info_mismatches": dict(return_value=()),
                 "transform_mismatches": dict(return_value=()),
@@ -76,6 +111,8 @@ class MeasuredBacksideObserverHandoffTests(unittest.TestCase):
                 stack.enter_context(patch(module + name, **opts))
             for count in range(9 if "marker" in scenario else 7):
                 index[0] = count
+                if scenario == "fragmented_scan" and count == 6:
+                    sensor.scan.value.ranges = (.6, .6, math.nan, .6, .6)
                 stamp = 100. + count * .2
                 fixture.clock_sec = stamp + .1
                 for sample in (sensor.image, sensor.scan, sensor.camera_info):
@@ -148,6 +185,38 @@ class MeasuredBacksideObserverHandoffTests(unittest.TestCase):
             self.assertTrue(adapter.completed)
             self.assertFalse(adapter._qr_marker_seen_in_stationary_epoch)
             self.assertTrue(adapter.args.axis_observation_json.exists())
+
+    def test_six_old_angles_plus_an_unstable_current_choice_cannot_commit(self):
+        for scenario in ("angle_jump", "border_jump", "ambiguous_pose", "ambiguous_front"):
+            with self.subTest(scenario=scenario), TemporaryDirectory() as directory:
+                adapter = self.observe(Path(directory), scenario)
+                self.assertFalse(adapter.completed)
+                self.assertFalse(adapter.args.axis_observation_json.exists())
+                update = adapter._last_observation_update
+                self.assertTrue(update.frame_accepted)
+                self.assertFalse(update.axis_sample_accepted)
+                self.assertEqual(update.snapshot.current_axis_sample_count, 0)
+                temporal = adapter._head_window_decision
+                self.assertFalse(temporal.current_sample_accepted)
+                self.assertTrue(temporal.reset_axis_evidence)
+                self.assertEqual(temporal.sample_count, 7)
+                self.assertEqual(adapter._head_confidence_metadata["backside"]["state"],
+                                 "front_marker_veto" if scenario == "ambiguous_front" else "backside_supported")
+
+    def test_real_observer_receipt_preserves_witnessed_current_scan_fragments(self):
+        with TemporaryDirectory() as directory:
+            adapter = self.observe(Path(directory), "fragmented_scan")
+            self.assertTrue(adapter.completed)
+            receipt = json.loads(adapter.args.axis_observation_json.read_text())
+            self.assertEqual(receipt["schema_version"], 4)
+            parsed = load_backside_axis_observation(adapter.args.axis_observation_json)
+            self.assertEqual(parsed.axis_sample_count, 7)
+            registration = receipt["target_registration"]
+            self.assertEqual(registration["eligible_lidar_cluster_count"], 2)
+            self.assertFalse(registration["unique_eligible_lidar_cluster_required"])
+            proof = registration["witnessed_fragmentation"]
+            self.assertEqual(len(proof["witnesses"]), 3)
+            self.assertEqual(proof["persistent_target_count"], 1)
 
 
 if __name__ == "__main__":

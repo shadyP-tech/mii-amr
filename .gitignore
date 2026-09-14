@@ -44,6 +44,8 @@ tests/aufgabe04/*
 tests/aufgabe04/fixtures/*
 !tests/aufgabe04/fixtures/candidate_planning_frame_20260911T124500Z.json
 !tests/aufgabe04/fixtures/candidate_planning_frame_20260911T133125Z.json
+!tests/aufgabe04/fixtures/scan_target_origin_20260914T123717Z.json
+!tests/aufgabe04/fixtures/scan_target_persistence_20260914T123717Z.json
 !tests/aufgabe04/fixtures/map_odom_route_anchor_20260911T153146Z.json
 !tests/aufgabe04/fixtures/startup_route_admission_20260911/
 tests/aufgabe04/fixtures/startup_route_admission_20260911/*
@@ -61,6 +63,13 @@ tests/aufgabe04/fixtures/backside_neck_20260914/*
 !tests/aufgabe04/fixtures/backside_neck_20260914/inputs.json
 !tests/aufgabe04/fixtures/backside_neck_20260914/head_roi.png
 !tests/aufgabe04/fixtures/backside_neck_20260914/raw_edges.png
+!tests/aufgabe04/fixtures/stand_views_20260914_123717/
+tests/aufgabe04/fixtures/stand_views_20260914_123717/*
+!tests/aufgabe04/fixtures/stand_views_20260914_123717/inputs.json
+!tests/aufgabe04/fixtures/stand_views_20260914_123717/backside_000010.png
+!tests/aufgabe04/fixtures/stand_views_20260914_123717/backside_000012.png
+!tests/aufgabe04/fixtures/stand_views_20260914_123717/front_complete.png
+!tests/aufgabe04/fixtures/stand_views_20260914_123717/front_clipped.png
 !tests/aufgabe04/fixtures/qr_marker_validation/
 tests/aufgabe04/fixtures/qr_marker_validation/*
 !tests/aufgabe04/fixtures/qr_marker_validation/front_000045.jpg

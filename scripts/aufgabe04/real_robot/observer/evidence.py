@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 import math
-from typing import Iterable
+from typing import Callable, Iterable
 
 from scripts.aufgabe04.perception.stand_axis_consensus import AxisConsensus
 
@@ -73,6 +73,19 @@ class PassiveObserverEvidenceUpdate:
     axis_only: bool
     motion_epoch_reset: bool
     snapshot: PassiveObserverEvidenceSnapshot
+
+
+@dataclass(frozen=True)
+class AxisWindowReview:
+    """An additional current-pixel veto after the common frame gates.
+
+    Reviewers can withhold the current angle or discard contradicted source
+    buckets. They cannot supply an angle, QR identity, pose or sensor stamp.
+    """
+
+    allow_current_axis: bool
+    discard_sources: tuple[str, ...] = ()
+    reason: str = "current_axis_window_reviewed"
 
 
 class PassiveObserverEvidence:
@@ -447,6 +460,7 @@ class PassiveObserverEvidence:
         qr_texts: Iterable[str] = (),
         qr_symbol_count: int | None = None,
         expected_qr_id: str | None = None,
+        axis_window_review: Callable[[PassiveObserverEvidenceSnapshot], AxisWindowReview] | None = None,
     ) -> PassiveObserverEvidenceUpdate:
         """Record one synchronized frame if its LiDAR association is fresh.
 
@@ -544,9 +558,20 @@ class PassiveObserverEvidence:
                 motion_epoch_reset=reset,
             )
 
+        window_review = None
+        if axis_window_review is not None:
+            window_review = axis_window_review(self.snapshot())
+            if (not isinstance(window_review, AxisWindowReview)
+                    or type(window_review.allow_current_axis) is not bool
+                    or not isinstance(window_review.discard_sources, tuple)
+                    or any(not isinstance(source, str) or not source
+                           for source in window_review.discard_sources)):
+                raise ValueError("axis window review must be a typed veto")
+            self.discard_axis_samples(sources=window_review.discard_sources)
         axis_accepted = False
         axis_requested = axis_yaw_rad is not None or axis_source is not None
-        if axis_yaw_rad is not None and axis_source is not None:
+        if (axis_yaw_rad is not None and axis_source is not None
+                and (window_review is None or window_review.allow_current_axis)):
             axis_accepted = self._record_axis(
                 source=axis_source,
                 stamp=frame_stamp,
@@ -554,7 +579,8 @@ class PassiveObserverEvidence:
             )
         reason = "associated_frame_recorded"
         if axis_requested and not axis_accepted:
-            reason = "invalid_axis_sample"
+            reason = (window_review.reason if window_review is not None
+                      and not window_review.allow_current_axis else "invalid_axis_sample")
         update = self._update(
             frame_accepted=True,
             axis_sample_accepted=axis_accepted,

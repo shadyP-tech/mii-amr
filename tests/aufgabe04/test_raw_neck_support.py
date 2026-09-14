@@ -68,15 +68,13 @@ class RawNeckSupportTest(unittest.TestCase):
         self.assertTrue(estimate.usable, estimate.reason)
         self.assertEqual(estimate.reason, "axis_estimated_current_measured_head")
         self.assertTrue(debug.head_model_quality.accepted)
-        self.assertTrue(debug.head_neck_junction.accepted)
-        self.assertLessEqual(debug.head_neck_junction.start_gap_px,
-                             debug.head_neck_junction.max_start_gap_px)
-        self.assertEqual(debug.head_neck_junction.max_start_gap_px, 2)
+        self.assertIsNone(debug.head_neck_junction)
+        self.assertTrue(debug.head_model_quality.outer_border_verified)
         self.assertIsNone(estimate.visible_face)
         self.assertAlmostEqual(estimate.yaw_deg, -12.93, delta=1.0)  # Replay bound, not metrology.
         self.assertLess(estimate.pose_reprojection_rmse_px, 2.0)
 
-    def test_whole_recorded_image_fits_backside_and_positive_marker_vetoes_it(self):
+    def test_whole_recorded_image_fits_current_head_and_preserves_marker_veto(self):
         frame, _raw = recorded_backside_neck(cv2, np)
         options = dict(model_profile=self.profile,
                        camera_fx_px=CAMERA["fx_px"], camera_fy_px=CAMERA["fy_px"],
@@ -85,14 +83,22 @@ class RawNeckSupportTest(unittest.TestCase):
                        expected_head_center_v_px=EXPECTED_HEAD[1],
                        expected_head_height_px=EXPECTED_HEAD[2], min_edge_height_px=MIN_EDGE_HEIGHT_PX)
         estimate, debug = estimate_stand_axis_from_metric_model(cv2, frame, qr_observations=(), **options)
+        # Joint cold acquisition can select a different complete current
+        # border than the historical two-rail locator. It must still pass the
+        # unchanged independent pose/uncertainty checks without neck evidence.
         self.assertTrue(estimate.usable, estimate.reason)
-        self.assertEqual(estimate.source, "model_backside_current_frame")
         self.assertEqual(debug.model_pose_fit_source, "model_current_measured_head")
-        self.assertTrue(debug.head_backside_classification.accepted)
+        self.assertTrue(debug.head_model_quality.outer_border_verified)
+        self.assertTrue(debug.head_model_quality.accepted)
+        self.assertFalse(debug.head_model_quality.axis_ambiguous)
+        self.assertIsNone(debug.head_neck_junction)
         self.assertIsNone(estimate.camera_face_normal_xyz)
         marked, marked_debug = estimate_stand_axis_from_metric_model(
             cv2, frame, qr_observations=(DecodedQrObservation("QR_001", None, "test_current_identity"),), **options)
         self.assertTrue(marked_debug.qr_detected)
+        self.assertTrue(marked.usable, marked.reason)
+        self.assertEqual(marked.corners, estimate.corners)
+        self.assertAlmostEqual(marked.yaw_deg, estimate.yaw_deg, places=8)
         self.assertNotEqual(marked.visible_face, "backside_candidate")
 
     def test_neck_cue_does_not_authorize_an_inner_rectangle_pose(self):

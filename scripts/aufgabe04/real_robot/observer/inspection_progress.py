@@ -53,6 +53,11 @@ def classify_inspection_progress(state: str, details: dict) -> InspectionClassif
         classification = "front_readable"
     elif model.get("qr_detected") is True:
         classification = "front_unreadable"
+    elif (model.get("observation_confidence") or {}).get("backside", {}).get(
+            "state") == "backside_supported":
+        # Repeated complete-head appearance survives an ambiguous angle, but
+        # cannot attach that rejected angle to a planning observation.
+        return InspectionClassification("backside_unresolved", reason, None)
     elif model.get("visible_face") == "backside_candidate":
         classification = "backside_unresolved"
     else:

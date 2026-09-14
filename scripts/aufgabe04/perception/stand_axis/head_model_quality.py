@@ -22,7 +22,7 @@ class HeadModelQuality:
     reason: str
     raw_border_support_mean: float | None
     raw_corner_support_accepted: bool
-    centered_neck_supported: bool
+    centered_neck_supported: bool  # Compatibility diagnostic; never an admission gate.
     minimum_edge_length_px: float | None
     reprojection_rmse_px: float | None
     ambiguity_gap_px: float | None
@@ -37,7 +37,8 @@ class HeadModelQuality:
     pose_model: str = "measured_head_only"
     face_semantics: str = "undirected_plane"
     uncertainty_policy: str = "local_pixel_noise_model_requires_hardware_validation"
-    neck_junction_verified: bool = False
+    neck_junction_verified: bool = False  # Compatibility diagnostic only.
+    outer_border_verified: bool = False
 
 
 def validated_head_model_quality(quality) -> bool:
@@ -56,8 +57,7 @@ def validated_head_model_quality(quality) -> bool:
         quality.accepted and quality.reason == "current_measured_head_observable"
         and quality.pose_model == "measured_head_only"
         and quality.face_semantics == "undirected_plane"
-        and quality.raw_corner_support_accepted and quality.centered_neck_supported
-        and quality.neck_junction_verified
+        and quality.raw_corner_support_accepted and quality.outer_border_verified
         and quality.all_corners_positive_depth and not quality.axis_ambiguous
         and 0.60 <= quality.raw_border_support_mean <= 1.0
         and quality.minimum_edge_length_px >= MIN_HEAD_EDGE_PX
@@ -120,6 +120,7 @@ def evaluate_head_model_quality(
     cv2, *, profile, camera, corners, pose_result,
     raw_border_support_mean, raw_corner_support_accepted, centered_neck_supported,
     neck_junction_verified=False,
+    outer_border_verified=False,
 ) -> HeadModelQuality:
     """Evaluate one current fit; no QR geometry or historical pose is accepted."""
 
@@ -140,10 +141,8 @@ def evaluate_head_model_quality(
         reason = "head_model_measured_physical_profile_required"
     elif not raw_corner_support_accepted or raw_border_support_mean is None or raw_border_support_mean < 0.60:
         reason = "head_model_raw_border_evidence_insufficient"
-    elif not centered_neck_supported:
-        reason = "head_model_centered_neck_unavailable"
-    elif not neck_junction_verified:
-        reason = "head_model_neck_junction_unverified"
+    elif not outer_border_verified:
+        reason = "head_model_outer_border_unverified"
     elif minimum_edge is None or not math.isfinite(minimum_edge) or minimum_edge < MIN_HEAD_EDGE_PX:
         reason = "head_model_pixel_span_insufficient"
     elif pose is None or residual > MAX_HEAD_REPROJECTION_RMSE_PX:
@@ -170,6 +169,7 @@ def evaluate_head_model_quality(
         ambiguous, depths, std, MAX_HEAD_YAW_STD_DEG, sigma, condition,
         (profile.head_width_m, profile.head_height_m), profile.sha256,
         neck_junction_verified=bool(neck_junction_verified),
+        outer_border_verified=bool(outer_border_verified),
     )
     if quality.accepted and not validated_head_model_quality(quality):
         return replace(quality, accepted=False, reason="head_model_quality_values_invalid")

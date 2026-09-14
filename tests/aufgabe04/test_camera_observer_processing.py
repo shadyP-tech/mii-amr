@@ -251,20 +251,36 @@ class CameraObserverProcessingTest(unittest.TestCase):
             self.assertFalse(adapter.completed)
 
     def test_stale_backside_only_seeds_search_then_current_frame_enters_evidence(self):
+        from scripts.aufgabe04.perception.stand_axis.head_proposal import HeadProposal, HeadProposalResult
+
         adapter = self.make_adapter()
         frame = numpy.zeros((600, 800, 3), dtype=numpy.uint8)
         metric_calls = []
+        proposal_calls = []
+
+        def locate(_cv2, _crop, **options):
+            proposal_calls.append(options)
+            # Only the pixel locator is injected. The actual current scan
+            # association, crop registration and complete-head gate still run.
+            u = options["expected_head_center_u_px"] - 10.
+            v = options["expected_head_center_v_px"]
+            corners = tuple(ImagePoint(u + x, v + y) for x, y in
+                            ((-26, -26), (26, -26), (26, 26), (-26, 26)))
+            return HeadProposalResult(HeadProposal(
+                corners, (int(u - 34), int(v - 34), int(u + 34), int(v + 55)),
+                (u - 26, v - 26, u + 26, v + 26), u, v, 52., 1., 10 / 52., .98, .98,
+            ), "current_head_proposal", 1, 1, "test_locator")
 
         def metric(_cv2, crop, **options):
             metric_calls.append(options)
             # The nominal crop cannot acquire this displaced head. Wide
-            # acquisition locates it; later strict fits use CURRENT pixels.
+            # 2D acquisition locates it before a successful metric fit exists.
             first = len(metric_calls) == 1
             u = options["expected_head_center_u_px"]
-            if len(metric_calls) == 2:
-                u -= 10.
             v = options["expected_head_center_v_px"]
-            corners = None if first else tuple(ImagePoint(u + x, v + y) for x, y in
+            current_proposal = options["current_head_proposal_corners"]
+            self.assertIsNone(options["pose_hint"])
+            corners = None if first else current_proposal or tuple(ImagePoint(u + x, v + y) for x, y in
                 ((-26., -26.), (26., -26.), (26., 26.), (-26., 26.)))
             estimate = StandAxisImageEstimate(
                 usable=not first,
@@ -272,7 +288,7 @@ class CameraObserverProcessingTest(unittest.TestCase):
                         else "axis_estimated_model_backside_current_frame"),
                 mode="face_visible", corners=corners, axis_line=None,
                 left_height_px=52., right_height_px=52., height_ratio=1.,
-                yaw_proxy=0., yaw_deg=2. if len(metric_calls) < 4 else 4.,
+                yaw_proxy=0., yaw_deg=2. if len(proposal_calls) < 2 else 4.,
                 closer_side="equal", contour_area_px=2704.,
                 source=BACKSIDE_AXIS_SAMPLE_SOURCE, evidence_state="fresh_backside",
                 model_profile_sha256=adapter.stand_model_profile.sha256,
@@ -280,11 +296,24 @@ class CameraObserverProcessingTest(unittest.TestCase):
                 visible_face_confidence=.99,
             )
             debug = StandAxisEdgeDebugArtifacts(
-                edges=None, qr_detected=False, evidence_state="fresh_backside",
+                edges=None, qr_detected=False, qr_marker_verified=False,
+                evidence_state="fresh_backside",
                 model_profile_sha256=adapter.stand_model_profile.sha256,
                 head_scale_ratio=1., head_center_error_ratio=0.,
             )
-            if len(metric_calls) == 3:
+            if not first:
+                # Current production angles carry independent measured-head
+                # quality. A legacy source label alone cannot bypass the
+                # temporal border/angle review.
+                from scripts.aufgabe04.perception.stand_axis.head_backside_classification import (
+                    classify_current_head_backside,
+                )
+                from tests.aufgabe04.test_head_backside_classification import classified_head
+                estimate, debug, side_options = classified_head(
+                    yaw_deg=2. if len(proposal_calls) < 2 else 4.,
+                    u=u, v=v, height=52., profile_sha256=adapter.stand_model_profile.sha256)
+                estimate, debug = classify_current_head_backside(estimate, debug, **side_options)
+            if current_proposal is not None and len(proposal_calls) == 1:
                 self.clock_sec = 100.824  # Recorded failure, still no authority.
             return estimate, debug
 
@@ -295,10 +324,12 @@ class CameraObserverProcessingTest(unittest.TestCase):
              patch(module + "_rectify_bgr_frame", side_effect=lambda value, *_: value), \
              patch(module + "detect_qr_observations_bgr", return_value=()) as decoder, \
              patch(module + "detect_native_qr_observations_bgr", return_value=()) as native_decoder, \
-             patch(module + "acquire_registered_head_measurement", return_value=None), \
+             patch("scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_head_proposal",
+                   side_effect=locate), \
              patch(module + "estimate_stand_axis_from_metric_model", side_effect=metric):
             adapter._process_latest()
-            self.assertEqual(len(metric_calls), 3)
+            self.assertEqual(len(metric_calls), 2)
+            self.assertEqual(len(proposal_calls), 1)
             self.assertEqual(adapter._write_status.call_args.args, ("obsolete_detector_result",))
             self.assertIsNone(adapter.observation_evidence)
             self.assertTrue(adapter.backside_proposal_reuse.last_metadata["hint_retained"])
@@ -311,8 +342,9 @@ class CameraObserverProcessingTest(unittest.TestCase):
             adapter.tf_retry_scheduler.offer(sensor_tuple, stamp_sec=101.)
             adapter._process_latest()
             self.assertEqual(len(metric_calls), 4)
-            self.assertEqual(decoder.call_count, 2)  # One bounded full crop per image.
-            self.assertEqual(native_decoder.call_count, 3)  # Both cold crops, then current wide crop.
+            self.assertEqual(len(proposal_calls), 2)
+            self.assertEqual(decoder.call_count, 2)  # Shared acquisition budget per image.
+            self.assertEqual(native_decoder.call_count, 4)  # Current search and recentered crop per image.
             update = adapter._last_observation_update
             self.assertTrue(update.axis_sample_accepted)
             self.assertEqual(update.snapshot.accepted_frame_count, 1)
@@ -323,6 +355,11 @@ class CameraObserverProcessingTest(unittest.TestCase):
             registration = axis["metric_model"]["camera_target_registration"]
             self.assertTrue(registration["attempted"])
             self.assertTrue(registration["search_hint_used"])
+            self.assertTrue(axis["metric_model"]["backside_head_crop"]["accepted"])
+            self.assertTrue(axis["metric_model"]["head_temporal_consistency"]["current_sample_accepted"])
+            self.assertEqual(axis["metric_model"]["head_acquisition"]["lidar_association"]
+                             ["search_association"]["eligible_cluster_count"], 1)
+            self.assertIsNotNone(metric_calls[-1]["current_head_proposal_corners"])
             self.assertFalse(adapter.completed)
 
     def test_pose_free_recentered_current_fit_and_fresh_framing_recovery(self):

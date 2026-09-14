@@ -24,6 +24,7 @@ PASSIVE_VIEWPOINT_OBSERVER_VERSION = (
 )
 LEGACY_BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION = 2
 BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION = 3
+WITNESSED_BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION = 4
 BACKSIDE_AXIS_OBSERVATION_KIND = "real_stand_backside_axis_without_qr"
 REAL_STAND_AXIS_OBSERVATION_KIND = BACKSIDE_AXIS_OBSERVATION_KIND
 BACKSIDE_AXIS_SAMPLE_SOURCE = "model_backside_current_frame"
@@ -133,8 +134,9 @@ def validated_backside_axis_observation(
     if type(schema_version) is not int or schema_version not in (
         LEGACY_BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION,
         BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION,
+        WITNESSED_BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION,
     ):
-        raise ValueError("axis observation schema_version must be exactly 2 or 3")
+        raise ValueError("axis observation schema_version must be exactly 2, 3 or 4")
     is_legacy_receipt = (
         schema_version == LEGACY_BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION
     )
@@ -151,7 +153,10 @@ def validated_backside_axis_observation(
         target_registration = _mapping(
             payload.get("target_registration"), "target_registration"
         )
-        if set(target_registration) != set(TARGET_REGISTRATION_EVIDENCE_KEYS):
+        expected_registration_keys = set(TARGET_REGISTRATION_EVIDENCE_KEYS)
+        if schema_version == WITNESSED_BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION:
+            expected_registration_keys.add("witnessed_fragmentation")
+        if set(target_registration) != expected_registration_keys:
             raise ValueError(
                 "axis observation target_registration has unexpected fields"
             )
@@ -280,7 +285,22 @@ def validated_backside_axis_observation(
         _validate_target_registration(
             target_registration,
             final_head_center_error_ratio=head_center_error_ratio,
+            witnessed=schema_version == WITNESSED_BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION,
         )
+        if schema_version == WITNESSED_BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION:
+            current = target_registration["witnessed_fragmentation"]["current"]
+            stand = _mapping(payload.get("stand_center"), "stand_center")
+            robot = _mapping(payload.get("robot_pose"), "robot_pose")
+            target_key = (f"{payload.get('stream_id')}:{payload.get('stand_id')}:"
+                          f"{_finite_number(stand.get('x_m'), 'stand_center.x_m'):.9f}:"
+                          f"{_finite_number(stand.get('y_m'), 'stand_center.y_m'):.9f}")
+            if (current["context"]["target_key"] != target_key
+                    or current["context"]["candidate_x_m"] != stand.get("x_m")
+                    or current["context"]["candidate_y_m"] != stand.get("y_m")
+                    or current["context"]["image_stamp_sec"] != payload.get("sensor_stamp_sec")
+                    or any(current["context"]["robot_pose"][k] != robot.get(k)
+                           for k in ("x_m", "y_m", "yaw_rad"))):
+                raise ValueError("witnessed target does not match receipt candidate, image or stopped pose")
     for name in ("pose_reprojection_rmse_px", "pose_ambiguity_gap_px"):
         value = payload.get(name)
         if value is not None and _finite_number(value, name) < 0.0:
@@ -390,10 +410,12 @@ def _validate_target_registration(
     evidence: Mapping[str, object],
     *,
     final_head_center_error_ratio: float,
+    witnessed: bool = False,
 ) -> None:
     """Validate the exact camera/map registration evidence carried by v3."""
 
-    if set(evidence) != set(TARGET_REGISTRATION_EVIDENCE_KEYS):
+    expected_keys = set(TARGET_REGISTRATION_EVIDENCE_KEYS) | ({"witnessed_fragmentation"} if witnessed else set())
+    if set(evidence) != expected_keys:
         raise ValueError(
             "axis observation target_registration has unexpected fields"
         )
@@ -504,7 +526,15 @@ def _validate_target_registration(
             raise ValueError(
                 "registered axis observation must use registered_camera_bearing"
             )
-        if unique_required is not True or cluster_count != 1:
+        if witnessed:
+            from scripts.aufgabe04.real_robot.observer.scan_target_persistence import validated_witnessed_fragmentation
+            resolved = validated_witnessed_fragmentation(evidence["witnessed_fragmentation"])
+            if (unique_required is not False or cluster_count != resolved.search_association.eligible_cluster_count
+                    or map_bearing != resolved.map_bearing_rad
+                    or lidar_search_bearing != resolved.registered_search_bearing_rad
+                    or bearing_delta_limit != resolved.max_camera_map_bearing_delta_rad):
+                raise ValueError("registered axis observation differs from its witnessed target proof")
+        elif unique_required is not True or cluster_count != 1:
             raise ValueError(
                 "registered axis observation requires exactly one eligible "
                 "LiDAR cluster"
@@ -520,6 +550,8 @@ def _validate_target_registration(
                 "from camera/map bearing delta"
             )
     else:
+        if witnessed:
+            raise ValueError("witnessed target proof requires camera registration")
         if lidar_source != TARGET_REGISTRATION_LIDAR_SOURCE_MAP:
             raise ValueError(
                 "nominal axis observation must use map_bearing"

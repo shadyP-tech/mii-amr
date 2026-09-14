@@ -67,8 +67,7 @@ class CurrentHeadBacksideClassificationTests(unittest.TestCase):
             (estimate, replace(debug, qr_detected=True), {}),
             (estimate, replace(debug, qr_marker_verified=True), {}),
             (estimate, replace(debug, qr_marker_verified=None), {}),
-            (estimate, replace(debug, head_neck_junction=None), {}),
-            (estimate, replace(debug, head_model_quality=quality(neck_junction_verified=False)), {}),
+            (estimate, replace(debug, head_model_quality=quality(outer_border_verified=False)), {}),
             (estimate, replace(debug, head_model_quality=quality(axis_ambiguous=True)), {}),
             (replace(estimate, usable=False), debug, {}),
             (replace(estimate, evidence_state="predicted_only"), debug, {}),
@@ -81,6 +80,16 @@ class CurrentHeadBacksideClassificationTests(unittest.TestCase):
                 result, diagnostic = classify_current_head_backside(est, dbg, **{**options, **changes})
                 self.assertEqual(result.source, estimate.source)
                 self.assertFalse(diagnostic.head_backside_classification.accepted)
+
+    def test_missing_or_invalid_neck_is_not_a_side_classification_input(self):
+        estimate, debug, options = classified_head()
+        for junction in (None, HeadNeckJunction(False, "missing_neck"), object()):
+            changed = replace(debug, head_neck_junction=junction,
+                              head_model_quality=quality(centered_neck_supported=False,
+                                                         neck_junction_verified=False))
+            side, proof = classify_current_head_backside(estimate, changed, **options)
+            self.assertTrue(is_classified_measured_head_backside(side, proof))
+            self.assertTrue(self.admit(side, proof).accepted)
 
     def test_relabeling_or_mixing_current_proofs_cannot_escape_quality_even_at_10_degrees(self):
         estimate, debug, options = classified_head(yaw_deg=10.)

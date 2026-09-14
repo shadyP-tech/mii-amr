@@ -114,7 +114,8 @@ def build_backside_axis_observation(
         raise ValueError("not every backside axis sample passed the sensor gates")
 
     payload: dict[str, object] = {
-        "schema_version": BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION,
+        "schema_version": (4 if "witnessed_fragmentation" in target_registration
+                           else BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION),
         "observation_kind": BACKSIDE_AXIS_OBSERVATION_KIND,
         "motion_capability": "none",
         "stream_id": stream_id,

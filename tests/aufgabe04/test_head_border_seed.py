@@ -163,7 +163,7 @@ class CurrentHeadProposalPipelineTest(unittest.TestCase):
         self.assertIsNone(debug.refined_corners)
 
     def test_text_without_geometry_cannot_veto_head_or_certify_backside(self):
-        with patch(PIPELINE + "estimate_stand_axis_from_model_backside",
+        with patch("scripts.aufgabe04.perception.stand_axis.model_backside_acquisition.estimate_stand_axis_from_model_backside",
                    side_effect=AssertionError("front text is not backside evidence")):
             estimate, debug = estimate_stand_axis_from_metric_model(
                 cv2, self.frame, **self.options(),
@@ -175,7 +175,7 @@ class CurrentHeadProposalPipelineTest(unittest.TestCase):
         self.assertIsNone(estimate.visible_face)
         self.assertTrue(debug.qr_marker_verified)
 
-    def test_no_qr_requires_current_head_and_neck_for_separate_side_evidence(self):
+    def test_no_qr_current_head_has_side_evidence_independent_of_neck(self):
         head = (ImagePoint(120., 50.), ImagePoint(200., 50.), ImagePoint(200., 130.), ImagePoint(120., 130.))
         for neck in (True, False):
             frame = np.zeros((240, 320, 3), dtype=np.uint8)
@@ -191,17 +191,12 @@ class CurrentHeadProposalPipelineTest(unittest.TestCase):
                         expected_head_height_px=80.,
                     ),
                 )
-                self.assertEqual(estimate.usable, neck, estimate.reason)
-                if neck:
-                    self.assertEqual(estimate.evidence_state, "fresh_backside")
-                    self.assertIsNone(estimate.camera_face_normal_xyz)
-                    self.assertIsNotNone(debug.model_pose)
-                    self.assertEqual(estimate.visible_face, "backside_candidate")
-                    self.assertTrue(debug.head_backside_classification.accepted)
-                else:
-                    self.assertIsNone(estimate.camera_face_normal_xyz)
-                    self.assertIsNone(debug.model_pose)
-                    self.assertIsNone(estimate.visible_face)
+                self.assertTrue(estimate.usable, estimate.reason)
+                self.assertEqual(estimate.evidence_state, "fresh_backside")
+                self.assertIsNone(estimate.camera_face_normal_xyz)
+                self.assertIsNotNone(debug.model_pose)
+                self.assertEqual(estimate.visible_face, "backside_candidate")
+                self.assertTrue(debug.head_backside_classification.accepted)
                 self.assertFalse(debug.qr_marker_verified)
 
     def test_crop_adjusted_intrinsics_preserve_pose(self):
@@ -232,7 +227,7 @@ class CurrentHeadProposalPipelineTest(unittest.TestCase):
     def test_unverified_quad_does_not_veto_independent_current_head(self):
         with (
             patch(PIPELINE + "detect_qr_quad", return_value=QrQuadDetection(self.qr, 1.)),
-            patch(PIPELINE + "estimate_stand_axis_from_model_backside",
+            patch("scripts.aufgabe04.perception.stand_axis.model_backside_acquisition.estimate_stand_axis_from_model_backside",
                   side_effect=AssertionError("tentative QR still vetoes backside now")),
         ):
             estimate, debug = estimate_stand_axis_from_metric_model(

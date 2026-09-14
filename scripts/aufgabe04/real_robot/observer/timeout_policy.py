@@ -49,10 +49,10 @@ def candidate_local_observer_timeout_basis(
 ) -> str | None:
     """Classify the attempt using accumulated evidence, not its last frame.
 
-    The replaceable status may land on a TF retry or obsolete detector result
-    just as the deadline expires. Neither invalidates earlier candidate
+    The replaceable status may land on a TF retry, obsolete detector result
+    or stale input just as the deadline expires. None invalidates earlier candidate
     processing. Missing/malformed evidence and identity conflicts remain
-    terminal. The added obsolete-result case requires an explicit unpoisoned
+    terminal. Stale input and obsolete results require an explicit unpoisoned
     snapshot; it does not infer readiness from detector activity, soft misses
     or the stale frame itself.
     """
@@ -70,7 +70,7 @@ def candidate_local_observer_timeout_basis(
     if status.state in TRANSIENT_TF_OBSERVER_TIMEOUT_STATES:
         return "accumulated_transform_ready_candidate_frames"
     if (
-        status.state == "obsolete_detector_result"
+        status.state in {"obsolete_detector_result", "stale_sensor_tuple"}
         and status.observation_evidence_poisoned is False
     ):
         return "accumulated_transform_ready_candidate_frames"

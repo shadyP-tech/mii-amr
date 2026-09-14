@@ -54,7 +54,7 @@ class CurrentHeadAssociationTests(unittest.TestCase):
     def test_quality_profile_and_scale_cannot_lend_camera_registration(self):
         o=self.options()
         for changes in (
-            {'debug':head_debug(head_model_quality=quality(neck_junction_verified=False))},
+            {'debug':head_debug(head_model_quality=quality(outer_border_verified=False))},
             {'debug':head_debug(head_model_quality=quality(yaw_std_deg=3.1))},
             {'estimate':replace(o['estimate'],evidence_state='predicted_only')},
             {'estimate':replace(o['estimate'],source='model_current_frame_refined')},
