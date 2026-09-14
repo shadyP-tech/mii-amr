@@ -107,6 +107,7 @@ class StandAxisEdgeDebugArtifacts:
     head_model_quality: HeadModelQuality | None = None
     head_neck_junction: object | None = None
     head_outer_recovery: object | None = None
+    head_backside_classification: object | None = None
 
 
 @dataclass(frozen=True)

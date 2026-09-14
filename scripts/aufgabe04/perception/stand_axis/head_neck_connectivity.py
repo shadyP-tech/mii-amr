@@ -1,6 +1,6 @@
 """Bounded raw-pixel continuation of an already measured pair of neck rails.
 
-This is not another neck detector. Long paired column runs remain the anchor;
+This is not another neck detector. Measured paired raw runs remain the anchor;
 only their short, rounded junction with the fitted head may change column. A
 path uses one existing edge in every row, never fills a gap, and never leaves
 its two-pixel anchor band. It supplies boundary evidence, not an angle.
@@ -31,6 +31,7 @@ class RawNeckContinuation:
 def trace_raw_neck_junction(
     raw_edges, *, bottom_edge_px, rail_columns_px, core_start_row_px,
     core_run_length_px, min_rail_gap_px, max_rail_gap_px, max_start_gap_px,
+    core_paths_px=None,
 ) -> RawNeckContinuation:
     """Trace two supported rails backward without relaxing their head gap.
 
@@ -74,9 +75,28 @@ def trace_raw_neck_junction(
         pixel = float(raw_edges[y, x])
         return math.isfinite(pixel) and pixel > 0.0
 
-    if any(not supported(x, y) for x in rail_columns_px
-           for y in range(core_start_row_px, core_start_row_px + core_run_length_px)):
-        return RawNeckContinuation(False, "raw_neck_continuation_core_unavailable")
+    if core_paths_px is None:
+        core_paths_px = tuple(tuple((x, y) for y in range(
+            core_start_row_px, core_start_row_px + core_run_length_px
+        )) for x in rail_columns_px)
+    try:
+        if (len(core_paths_px) != 2
+                or any(len(path) < core_run_length_px for path in core_paths_px)
+                or any(path[0] != (anchor, core_start_row_px)
+                       for path, anchor in zip(core_paths_px, rail_columns_px))):
+            return invalid
+        for index in range(core_run_length_px):
+            for path in core_paths_px:
+                x, y = path[index]
+                if (type(x) is not int or type(y) is not int
+                        or not 0 <= x < shape[1] or y != core_start_row_px + index
+                        or not supported(x, y)
+                        or (index and abs(x - path[index - 1][0]) > MAX_LATERAL_STEP_PX)):
+                    return RawNeckContinuation(False, "raw_neck_continuation_core_unavailable")
+            if not min_rail_gap_px <= core_paths_px[1][index][0] - core_paths_px[0][index][0] <= max_rail_gap_px:
+                return RawNeckContinuation(False, "raw_neck_continuation_core_unavailable")
+    except (TypeError, ValueError, IndexError):
+        return invalid
     if any(core_start_row_px < first_row(x) for x in rail_columns_px):
         return invalid
 

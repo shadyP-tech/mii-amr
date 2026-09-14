@@ -13,6 +13,7 @@ from scripts.aufgabe04.qr_scanning.isolated_qr_views import (
 def decode_isolated_native_quad(
     frame, points, cv2, *, image_shape, scale, border_px,
     wechat_decoder=None, diagnostics: dict | None = None,
+    budget_exhausted=None,
 ) -> DecodedQrObservation | None:
     """Decode exactly one native quad without borrowing a full-crop payload.
 
@@ -24,6 +25,7 @@ def decode_isolated_native_quad(
     A second view preserves a narrow source-pixel quiet margin that recovered
     the recorded frame 000011 in the deployed OpenCV 4.5.4 runtime. No decoded
     input-extent rectangle is used as symbol geometry.
+    An optional cooperative budget is checked before each recovery view.
     """
     raw = validated_qr_corners(points, image_shape=getattr(frame, "shape", None))
     restored = validated_qr_corners(
@@ -38,6 +40,10 @@ def decode_isolated_native_quad(
     try:
         decoder = wechat_decoder if wechat_decoder is not None else factory()
         for view in ISOLATED_QR_VIEWS:
+            if budget_exhausted is not None and budget_exhausted():
+                if diagnostics is not None:
+                    diagnostics["reason"] = "processing_budget_exhausted"
+                return None
             isolated = rectify_isolated_qr_view(frame, raw, cv2, view)
             result = decoder.detectAndDecode(isolated)
             decoded = result[0]

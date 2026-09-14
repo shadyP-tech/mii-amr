@@ -175,7 +175,7 @@ class CurrentHeadProposalPipelineTest(unittest.TestCase):
         self.assertIsNone(estimate.visible_face)
         self.assertTrue(debug.qr_marker_verified)
 
-    def test_no_qr_keeps_neck_gate_without_assigning_view_side(self):
+    def test_no_qr_requires_current_head_and_neck_for_separate_side_evidence(self):
         head = (ImagePoint(120., 50.), ImagePoint(200., 50.), ImagePoint(200., 130.), ImagePoint(120., 130.))
         for neck in (True, False):
             frame = np.zeros((240, 320, 3), dtype=np.uint8)
@@ -193,13 +193,15 @@ class CurrentHeadProposalPipelineTest(unittest.TestCase):
                 )
                 self.assertEqual(estimate.usable, neck, estimate.reason)
                 if neck:
-                    self.assertEqual(estimate.evidence_state, "fresh_refined")
-                    self.assertIsNotNone(estimate.camera_face_normal_xyz)
+                    self.assertEqual(estimate.evidence_state, "fresh_backside")
+                    self.assertIsNone(estimate.camera_face_normal_xyz)
                     self.assertIsNotNone(debug.model_pose)
+                    self.assertEqual(estimate.visible_face, "backside_candidate")
+                    self.assertTrue(debug.head_backside_classification.accepted)
                 else:
                     self.assertIsNone(estimate.camera_face_normal_xyz)
                     self.assertIsNone(debug.model_pose)
-                self.assertIsNone(estimate.visible_face)
+                    self.assertIsNone(estimate.visible_face)
                 self.assertFalse(debug.qr_marker_verified)
 
     def test_crop_adjusted_intrinsics_preserve_pose(self):

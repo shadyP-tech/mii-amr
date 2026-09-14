@@ -13,7 +13,7 @@ from scripts.aufgabe04.perception.stand_axis_consensus import (
     AxisConditioning,
 )
 from scripts.aufgabe04.real_robot.observer.head_model_admission import (
-    MEASURED_HEAD_AXIS_SOURCE, admit_measured_head_model,
+    MEASURED_HEAD_AXIS_SOURCE, admit_measured_head_model, requires_measured_head_admission,
 )
 
 
@@ -89,12 +89,12 @@ def admit_axis_sample(
             conditioning=conditioning,
             qr_bound_model_fallback=False,
         )
-    if estimate.source == MEASURED_HEAD_AXIS_SOURCE:
+    if requires_measured_head_admission(estimate, debug):
         head = admit_measured_head_model(estimate=estimate, debug=debug, yaw_rad=yaw_rad)
         return AxisSampleAdmission(
             accepted=head.accepted, reason=head.reason,
             yaw_rad=yaw_rad if head.accepted else None,
-            source=MEASURED_HEAD_AXIS_SOURCE if head.accepted else None,
+            source=estimate.source if head.accepted else None,
             conditioning=conditioning, qr_bound_model_fallback=False,
             measured_head_admission=head.metadata(),
         )

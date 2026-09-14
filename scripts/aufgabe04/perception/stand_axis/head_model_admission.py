@@ -6,6 +6,9 @@ import math
 from scripts.aufgabe04.perception.stand_axis.head_model_quality import (
     MEASURED_HEAD_AXIS_SOURCE, validated_head_model_quality,
 )
+from scripts.aufgabe04.perception.stand_axis.head_backside_classification import (
+    is_classified_measured_head_backside,
+)
 
 
 @dataclass(frozen=True)
@@ -26,6 +29,13 @@ class HeadModelAdmission:
         }
 
 
+def requires_measured_head_admission(estimate, debug) -> bool:
+    """A relabeled head fit cannot escape its stricter quality contract."""
+    return (estimate.source == MEASURED_HEAD_AXIS_SOURCE
+            or debug.model_pose_fit_source == MEASURED_HEAD_AXIS_SOURCE
+            or getattr(debug, "head_backside_classification", None) is not None)
+
+
 def admit_measured_head_model(*, estimate, debug, yaw_rad: float) -> HeadModelAdmission:
     """Require the new source's complete quality contract even below 30 degrees.
 
@@ -33,11 +43,13 @@ def admit_measured_head_model(*, estimate, debug, yaw_rad: float) -> HeadModelAd
     the legacy silhouette obliqueness limit for this one source. Current head
     bearing association, freshness and stationary consensus remain external.
     """
-    if (estimate.source != MEASURED_HEAD_AXIS_SOURCE
+    classified_backside = is_classified_measured_head_backside(estimate, debug)
+    expected_state = "fresh_backside" if classified_backside else "fresh_refined"
+    if ((estimate.source != MEASURED_HEAD_AXIS_SOURCE and not classified_backside)
             or debug.model_pose_fit_source != MEASURED_HEAD_AXIS_SOURCE
             or estimate.usable is not True
-            or estimate.evidence_state != "fresh_refined"
-            or debug.evidence_state != "fresh_refined"
+            or estimate.evidence_state != expected_state
+            or debug.evidence_state != expected_state
             or estimate.model_measurement_status != "measured"
             or debug.model_measurement_status != "measured"
             or not estimate.model_profile_sha256
@@ -53,4 +65,3 @@ def admit_measured_head_model(*, estimate, debug, yaw_rad: float) -> HeadModelAd
             or quality.profile_sha256 != estimate.model_profile_sha256):
         return HeadModelAdmission(False, "measured_head_quality_rejected")
     return HeadModelAdmission(True, "measured_head_geometry_quality_accepted", quality.yaw_std_deg)
-

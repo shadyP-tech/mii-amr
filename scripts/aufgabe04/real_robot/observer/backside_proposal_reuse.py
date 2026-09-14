@@ -1,8 +1,9 @@
 """Bounded backside search hints, never cached camera measurements.
 
 A slow but geometrically usable result may locate the next image's search.
-Every returned angle is fitted from that next image, with full QR acquisition
-on the ordinary wide ROI and the original projection's registration bound.
+Every returned angle is fitted from that next image, with native current QR
+checks and bounded full acquisition on the ROI, retaining the original
+projection's registration bound.
 Freshness, LiDAR association and consensus remain the observer's responsibility.
 """
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import unittest
 from unittest.mock import patch
+from scripts.aufgabe04.artifacts.backside_axis_observation import MINIMUM_BACKSIDE_FACE_CONFIDENCE
 
 try:
     import cv2
@@ -49,20 +50,25 @@ class BacksideTopologyRecoveryTest(unittest.TestCase):
             **options,
         )
 
-    def test_recorded_connected_neck_admits_head_angle_without_face_identity(self):
+    def test_recorded_connected_neck_keeps_head_angle_with_separate_backside_evidence(self):
         estimate, debug = self.estimate()
 
         self.assertTrue(estimate.usable, estimate.reason)
-        self.assertEqual(estimate.reason, "axis_estimated_current_measured_head")
-        self.assertEqual(estimate.source, "model_current_measured_head")
-        self.assertIsNone(estimate.visible_face)
-        self.assertEqual(estimate.evidence_state, "fresh_refined")
+        self.assertEqual(estimate.reason, "axis_estimated_current_measured_head_backside")
+        self.assertEqual(estimate.source, "model_backside_current_frame")
+        self.assertEqual(estimate.visible_face, "backside_candidate")
+        self.assertEqual(estimate.evidence_state, "fresh_backside")
         self.assertFalse(debug.qr_detected)
-        self.assertIsNotNone(estimate.camera_face_normal_xyz)
-        self.assertIsNotNone(estimate.camera_face_center_xyz_m)
+        self.assertIsNone(estimate.camera_face_normal_xyz)
+        self.assertIsNone(estimate.camera_face_center_xyz_m)
         self.assertIsNotNone(estimate.yaw_deg)
         self.assertLess(estimate.pose_reprojection_rmse_px, 1.0)
-        self.assertIsNone(estimate.visible_face_confidence)
+        self.assertGreaterEqual(estimate.visible_face_confidence, MINIMUM_BACKSIDE_FACE_CONFIDENCE)
+        self.assertEqual(debug.model_pose_fit_source, "model_current_measured_head")
+        self.assertTrue(debug.head_backside_classification.accepted)
+        self.assertEqual(debug.head_backside_classification.confidence, estimate.visible_face_confidence)
+        self.assertEqual(debug.head_backside_classification.yaw_deg, estimate.yaw_deg)
+        self.assertEqual(debug.model_pose.yaw_deg, estimate.yaw_deg)
         self.assertTrue(debug.head_model_quality.accepted)
         self.assertEqual(debug.head_neck_junction.core_start_gap_px, 4)
         self.assertEqual(debug.head_neck_junction.start_gap_px, 0)

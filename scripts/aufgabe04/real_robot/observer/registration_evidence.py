@@ -27,6 +27,7 @@ from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import (
     HeadRoiRegistrationDecision,
     REGISTERED_BACKSIDE_REACQUISITION_SOURCE,
 )
+from scripts.aufgabe04.real_robot.observer.current_head_association import CurrentHeadCandidateAssociation
 
 
 def build_backside_target_registration_evidence(
@@ -37,6 +38,7 @@ def build_backside_target_registration_evidence(
     registered_lidar_association: (
         CameraRegisteredCandidateLidarAssociation | None
     ) = None,
+    current_head_association: CurrentHeadCandidateAssociation | None = None,
 ) -> dict[str, object]:
     """Return the exact schema-v3 registration block or fail closed."""
 
@@ -54,6 +56,8 @@ def build_backside_target_registration_evidence(
         raise ValueError("candidate LiDAR association has no eligible cluster")
 
     if registered_lidar_association is None:
+        if current_head_association is not None:
+            raise ValueError("current head registration requires its accepted camera LiDAR wrapper")
         if registration_decision is not None:
             raise ValueError(
                 "nominal target evidence cannot carry a registration decision"
@@ -94,21 +98,33 @@ def build_backside_target_registration_evidence(
         CameraRegisteredCandidateLidarAssociation,
     ):
         raise TypeError("registered_lidar_association has an unexpected type")
-    if registration_decision is None or not registration_decision.accepted:
-        raise ValueError("registered target evidence has no accepted image decision")
-    if registration_decision.attempt is None or (
-        registration_decision.attempt.source
-        != REGISTERED_BACKSIDE_REACQUISITION_SOURCE
-    ):
-        raise ValueError("registered target evidence has no strict retry attempt")
-    if registration_decision.center_offset_ratio is None:
-        raise ValueError("registered target evidence has no original centre offset")
+    if current_head_association is not None:
+        # A nominal crop can already contain the whole head. Its fitted ray
+        # still passes the same bounded, unique camera/LiDAR registration;
+        # do not invent a second crop or a strict-retry receipt for it.
+        if (not isinstance(current_head_association, CurrentHeadCandidateAssociation)
+                or current_head_association.accepted is not True
+                or current_head_association.head_admission.accepted is not True
+                or current_head_association.lidar_association != registered_lidar_association):
+            raise ValueError("current head registration is not bound to the accepted scan")
+        original_offset = current_head_association.center_offset_ratio
+        offset_limit = current_head_association.max_center_offset_ratio
+    else:
+        if registration_decision is None or not registration_decision.accepted:
+            raise ValueError("registered target evidence has no accepted image decision")
+        if registration_decision.attempt is None or (
+            registration_decision.attempt.source
+            != REGISTERED_BACKSIDE_REACQUISITION_SOURCE
+        ):
+            raise ValueError("registered target evidence has no strict retry attempt")
+        original_offset = registration_decision.center_offset_ratio
+        offset_limit = registration_decision.max_center_offset_ratio
     original_error = _finite_nonnegative(
-        registration_decision.center_offset_ratio,
+        original_offset,
         "original_head_center_error_ratio",
     )
     center_limit = _finite_nonnegative(
-        registration_decision.max_center_offset_ratio,
+        offset_limit,
         "center_offset_limit_ratio",
     )
     if (

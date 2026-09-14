@@ -247,6 +247,7 @@ class GeometryContractTest(unittest.TestCase):
         debug = replace(
             self.debug, evidence_state="fresh_refined", model_pose=fit.best,
             model_pose_fit_source="joint_qr_head", head_model_quality=None,
+            head_backside_classification=None,
             pose_reprojection_rmse_px=fit.best.reprojection_rmse_px,
             pose_ambiguity_gap_px=fit.ambiguity_gap_px,
         )

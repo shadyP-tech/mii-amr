@@ -42,7 +42,7 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
         current_index = [0]
         decode_modes = []
 
-        def decode(crop, _cv2, *, diagnostics=None):
+        def decode(crop, _cv2, *, diagnostics=None, max_elapsed_sec=None):
             index = current_index[0]
             if scenario == "head_only" or scenario == "historical_qr" and index >= 2:
                 return ()
@@ -202,14 +202,14 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
                 else:
                     self.assertFalse(adapter._last_observation_update.axis_sample_accepted)
 
-    def test_head_track_does_not_starve_full_identity_decoder(self):
+    def test_native_head_track_keeps_periodic_empty_search_without_repeated_pyramids(self):
         head_only, _ = self.run_view("head_only")
-        self.assertEqual(head_only._test_decode_modes, ["full"] * 7)
+        self.assertEqual(head_only._test_decode_modes, ["native", "full"] + ["native"] * 6)
         bound, _ = self.run_view("bound_qr")
-        self.assertEqual(bound._test_decode_modes, ["full", "full"] + ["native"] * 5)
+        self.assertEqual(bound._test_decode_modes, ["native"] * 7)
         recovered, payload = self.run_view("native_miss")
         self.assertIsNotNone(payload)
-        self.assertEqual(recovered._test_decode_modes[:4], ["full", "full", "native", "full"])
+        self.assertEqual(recovered._test_decode_modes[:4], ["native", "native", "native", "full"])
 
     def test_recentered_head_uses_current_fitted_ray_and_unique_lidar_before_consensus(self):
         accepted, payload = self.run_view("registered_bound_qr")

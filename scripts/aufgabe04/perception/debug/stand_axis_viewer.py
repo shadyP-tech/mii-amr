@@ -38,7 +38,7 @@ from scripts.aufgabe04.perception.debug.stand_model_overlay import (
 from scripts.aufgabe04.perception.debug.text_overlay import OverlayTextCursor
 from scripts.aufgabe04.perception.debug.viewer_frame_timing import ViewerFrameTiming
 from scripts.aufgabe04.perception.debug.viewer_axis_admission import (
-    current_head_quality_ready, viewer_axis_admission,
+    current_axis_evidence_ready, viewer_axis_admission,
     viewer_color_side_allowed, viewer_face_export_allowed,
 )
 from scripts.aufgabe04.perception.debug.stand_axis_recording import (
@@ -3891,14 +3891,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 None if estimate.yaw_deg is None else math.radians(estimate.yaw_deg)
             )
             estimate_committable = (
-                estimate.evidence_state == "fresh_refined"
+                current_axis_evidence_ready(estimate, edge_artifacts)
                 and estimate.model_measurement_status != "provisional"
                 and (
                     stand_model_profile is None
                     or estimate.model_profile_sha256
                     == stand_model_profile.sha256
                 )
-                and current_head_quality_ready(estimate, edge_artifacts)
             )
             metric_target_key = None
             if (

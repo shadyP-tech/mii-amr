@@ -103,10 +103,11 @@ class CameraObserverProcessingTest(unittest.TestCase):
         decoded_by_shape = {}
         metric_calls = []
 
-        def decode(crop, _cv2, *, diagnostics=None):
+        def decode(crop, _cv2, *, diagnostics=None, max_elapsed_sec=None):
             observations = (DecodedQrObservation("QR_1", None, "test_decoder", 1.),)
             decoded_by_shape[crop.shape] = observations
-            diagnostics["test_crop_shape"] = list(crop.shape)
+            if diagnostics is not None:
+                diagnostics["test_crop_shape"] = list(crop.shape)
             return observations
 
         def metric(_cv2, crop, **options):
@@ -144,13 +145,13 @@ class CameraObserverProcessingTest(unittest.TestCase):
              patch(module + "compressed_msg_to_bgr_frame", return_value=frame), \
              patch(module + "_rectify_bgr_frame", side_effect=lambda value, *_: value), \
              patch(module + "detect_qr_observations_bgr", side_effect=decode) as decoder, \
-             patch(module + "detect_native_qr_observations_bgr") as native_decoder, \
+             patch(module + "detect_native_qr_observations_bgr", side_effect=decode) as native_decoder, \
              patch(module + "acquire_registered_head_measurement", return_value=None), \
              patch(module + "estimate_stand_axis_from_metric_model", side_effect=metric):
             adapter._process_latest()
 
-        self.assertEqual(decoder.call_count, 2)
-        native_decoder.assert_not_called()
+        self.assertEqual(decoder.call_count, 1)
+        self.assertEqual(native_decoder.call_count, 2)
         self.assertEqual(len(metric_calls), 3)
         self.assertNotEqual(metric_calls[0][0], metric_calls[1][0])
         self.assertEqual(metric_calls[1][0], metric_calls[2][0])
@@ -165,10 +166,10 @@ class CameraObserverProcessingTest(unittest.TestCase):
         self.assertEqual([attempt["qr_decode"]["cache_hit"]
                           for attempt in metadata["processing_timing"]["attempts"]],
                          [False, False, True])
-        provenance = [attempt["qr_decode"]["decoder_provenance"]
-                      for attempt in metadata["processing_timing"]["attempts"]]
-        self.assertEqual(provenance[1], provenance[2])
-        self.assertNotEqual(provenance[0], provenance[1])
+        decoding = [attempt["qr_decode"] for attempt in metadata["processing_timing"]["attempts"]]
+        self.assertIn("decoder_provenance", decoding[0])
+        self.assertEqual([item["mode"] for item in decoding], ["full", "native", "native"])
+        self.assertEqual(decoding[1]["acquisition"]["reason"], "one_full_crop_per_image")
         self.assertFalse(metadata["result_freshness"]["accepted"])
         self.assertFalse(adapter.completed)
 
@@ -293,6 +294,7 @@ class CameraObserverProcessingTest(unittest.TestCase):
              patch(module + "compressed_msg_to_bgr_frame", return_value=frame), \
              patch(module + "_rectify_bgr_frame", side_effect=lambda value, *_: value), \
              patch(module + "detect_qr_observations_bgr", return_value=()) as decoder, \
+             patch(module + "detect_native_qr_observations_bgr", return_value=()) as native_decoder, \
              patch(module + "acquire_registered_head_measurement", return_value=None), \
              patch(module + "estimate_stand_axis_from_metric_model", side_effect=metric):
             adapter._process_latest()
@@ -309,7 +311,8 @@ class CameraObserverProcessingTest(unittest.TestCase):
             adapter.tf_retry_scheduler.offer(sensor_tuple, stamp_sec=101.)
             adapter._process_latest()
             self.assertEqual(len(metric_calls), 4)
-            self.assertEqual(decoder.call_count, 3)  # Two cold crops + new wide crop.
+            self.assertEqual(decoder.call_count, 2)  # One bounded full crop per image.
+            self.assertEqual(native_decoder.call_count, 3)  # Both cold crops, then current wide crop.
             update = adapter._last_observation_update
             self.assertTrue(update.axis_sample_accepted)
             self.assertEqual(update.snapshot.accepted_frame_count, 1)
@@ -373,7 +376,7 @@ class CameraObserverProcessingTest(unittest.TestCase):
                     )
 
                 module = "scripts.aufgabe04.real_robot.observer.node."
-                def decode(crop, _cv2, *, diagnostics=None):
+                def decode(crop, _cv2, *, diagnostics=None, max_elapsed_sec=None):
                     text = "QR_2" if conflict and crop.shape[1] == 68 else "QR_1"
                     return (DecodedQrObservation(text, None, "test", 1.),)
 
@@ -386,6 +389,7 @@ class CameraObserverProcessingTest(unittest.TestCase):
                      patch(module + "compressed_msg_to_bgr_frame", return_value=frame), \
                      patch(module + "_rectify_bgr_frame", side_effect=lambda value, *_: value), \
                      patch(module + "detect_qr_observations_bgr", side_effect=decode), \
+                     patch(module + "detect_native_qr_observations_bgr", side_effect=decode), \
                      patch(module + "associate_candidate_lidar_target", side_effect=preliminary), \
                      patch("scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_head_proposal",
                            side_effect=locate), \

@@ -4,6 +4,7 @@ import math
 
 from scripts.aufgabe04.perception.stand_axis.head_model_admission import (
     MEASURED_HEAD_AXIS_SOURCE, HeadModelAdmission, admit_measured_head_model,
+    requires_measured_head_admission,
 )
 
 

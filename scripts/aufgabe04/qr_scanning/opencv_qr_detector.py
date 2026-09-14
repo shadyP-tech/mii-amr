@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import math
+from time import monotonic
+
 from scripts.aufgabe04.qr_scanning.qr_observation import (
     DecodedQrObservation, qr_corner_groups, validated_qr_corners,
 )
@@ -22,55 +25,94 @@ def detect_qr_texts_bgr(frame, cv2) -> tuple[str, ...]:
     return tuple(item.text for item in detect_qr_observations_bgr(frame, cv2))
 
 
-def detect_qr_observations_bgr(frame, cv2, *, diagnostics: dict | None = None) -> tuple[DecodedQrObservation, ...]:
+def detect_qr_observations_bgr(
+    frame, cv2, *, diagnostics: dict | None = None,
+    max_elapsed_sec: float | None = None,
+) -> tuple[DecodedQrObservation, ...]:
     """Share text and corners from the same decoder and bounded preprocessing.
 
     Every corner is restored to the input crop. Multiple returned identities
     remain multiple observations; callers must not pick one as target proof.
+    The optional budget stops between decoder stages and pyramid variants;
+    it cannot preempt one OpenCV call. Callers still enforce source freshness.
     """
+    if max_elapsed_sec is not None and (
+        type(max_elapsed_sec) not in (int, float)
+        or not math.isfinite(max_elapsed_sec) or max_elapsed_sec <= 0.0
+    ):
+        raise ValueError("QR processing budget must be finite and positive")
+    started = monotonic()
+    deadline = None if max_elapsed_sec is None else started + max_elapsed_sec
     runtime = QrDecoderRuntime(cv2, diagnostics)
+
+    def exhausted():
+        if deadline is None:
+            return False
+        elapsed = monotonic() - started
+        if diagnostics is not None:
+            diagnostics["processing_budget"] = {
+                "max_elapsed_sec": max_elapsed_sec, "elapsed_sec": elapsed,
+                "exhausted": elapsed >= max_elapsed_sec,
+                "cooperative_between_backend_calls": True,
+            }
+        return elapsed >= max_elapsed_sec
+
+    def finish(observations):
+        exhausted()
+        return runtime.finish(observations)
+
     provisional = ()
     deferred_single = []
     for candidate, scale, border in _qr_decode_candidates_with_geometry(frame, cv2):
+        if exhausted():
+            return finish(provisional)
         for observations in _candidate_observations(
             candidate, cv2, image_shape=getattr(frame, "shape", None),
             scale=scale, border_px=border, runtime=runtime, deferred_single=deferred_single,
+            budget_exhausted=exhausted,
         ):
             observations = runtime.conservative_observations(observations)
             if not observations:
+                if exhausted():
+                    return finish(provisional)
                 continue
             if len(observations) > 1:
-                return runtime.finish(observations)
+                return finish(observations)
             if provisional and provisional[0].text != observations[0].text:
-                return runtime.finish(provisional + observations)
+                return finish(provisional + observations)
             if observations[0].corners is not None:
-                return runtime.finish(observations)
+                return finish(observations)
             # A text-only decode cannot donate its identity to unrelated
             # native geometry. Continue only to find a decoder that returns
             # both the same unique payload and that symbol's actual corners.
             if not provisional:
                 provisional = observations
+            if exhausted():
+                return finish(provisional)
     # Prefer every normal/multi variant before spending time on native-single
     # isolation. This preserves the measured fast scale-4 path for frame 24.
     # Only these current-image variants are retained, never previous frames.
     if runtime.native_symbol_count > 1:
-        return runtime.finish(provisional)
+        return finish(provisional)
     for candidate, points, scale, border in deferred_single:
+        if exhausted():
+            return finish(provisional)
         observations = _isolated_observations(
             candidate, points, cv2, image_shape=getattr(frame, "shape", None),
             scale=scale, border_px=border, runtime=runtime, source="opencv_single_isolated_deferred",
+            budget_exhausted=exhausted,
         )
         if len(observations) > 1:
-            return runtime.finish(observations)
+            return finish(observations)
         if observations:
             if provisional and provisional[0].text != observations[0].text:
-                return runtime.finish(provisional + observations)
-            return runtime.finish(observations)
-    return runtime.finish(provisional)
+                return finish(provisional + observations)
+            return finish(observations)
+    return finish(provisional)
 
 
 def _candidate_observations(candidate, cv2, *, image_shape, scale, border_px,
-                             runtime=None, deferred_single=None):
+                             runtime=None, deferred_single=None, budget_exhausted=None):
     runtime = runtime if runtime is not None else QrDecoderRuntime(cv2)
     wechat = runtime.decoder("wechat")
     if wechat is not None:
@@ -87,6 +129,8 @@ def _candidate_observations(candidate, cv2, *, image_shape, scale, border_px,
             yield observations
         except Exception:
             runtime.record("wechat", scale=scale, border_px=border_px, reason="decoder_error")
+    if budget_exhausted is not None and budget_exhausted():
+        return
     native = runtime.decoder("native")
     if native is None:
         return
@@ -108,10 +152,12 @@ def _candidate_observations(candidate, cv2, *, image_shape, scale, border_px,
             multi_quad = validated_qr_corners(result[2], image_shape=getattr(candidate, "shape", None))
             yield _isolated_observations(
                 candidate, result[2], cv2, image_shape=image_shape, scale=scale,
-                border_px=border_px, runtime=runtime,
+                border_px=border_px, runtime=runtime, budget_exhausted=budget_exhausted,
             )
     except Exception:
         runtime.record("opencv_multi", scale=scale, border_px=border_px, reason="decoder_error")
+    if budget_exhausted is not None and budget_exhausted():
+        return
     try:
         result = native.detectAndDecode(candidate)
         corner_validation = [] if runtime.diagnostics is not None else None
@@ -135,7 +181,9 @@ def _candidate_observations(candidate, cv2, *, image_shape, scale, border_px,
 
 
 def _isolated_observations(candidate, points, cv2, *, image_shape, scale, border_px,
-                           runtime, source="opencv_multi_isolated"):
+                           runtime, source="opencv_multi_isolated", budget_exhausted=None):
+    if budget_exhausted is not None and budget_exhausted():
+        return ()
     if runtime.native_symbol_count > 1:
         runtime.record(source, scale=scale, border_px=border_px, reason="multiple_native_quads")
         return ()
@@ -147,6 +195,7 @@ def _isolated_observations(candidate, points, cv2, *, image_shape, scale, border
     isolated = decode_isolated_native_quad(
         candidate, points, cv2, image_shape=image_shape, scale=scale,
         border_px=border_px, wechat_decoder=wechat, diagnostics=diagnostics,
+        budget_exhausted=budget_exhausted,
     )
     # Ambiguous isolated decoding remains conservative conflict evidence,
     # including two physical symbols with identical text. It grants no quad.

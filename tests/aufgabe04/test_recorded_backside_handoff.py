@@ -23,8 +23,10 @@ class RecordedBacksideHandoffTests(unittest.TestCase):
         selected = selection.selected
         self.assertTrue(selection.registered)
         self.assertTrue(selected.estimate.usable)
-        self.assertEqual(selected.estimate.evidence_state, "fresh_refined")
-        self.assertEqual(selected.estimate.source, "model_current_measured_head")
+        self.assertEqual(selected.estimate.evidence_state, "fresh_backside")
+        self.assertEqual(selected.estimate.source, "model_backside_current_frame")
+        self.assertEqual(selected.debug.model_pose_fit_source, "model_current_measured_head")
+        self.assertTrue(selected.debug.head_backside_classification.accepted)
         self.assertEqual(selected.qr_observations, ())
         self.assertFalse(selected.debug.qr_detected)
         self.assertIsNotNone(selected.debug.model_pose)
@@ -34,7 +36,8 @@ class RecordedBacksideHandoffTests(unittest.TestCase):
         self.assertAlmostEqual(selected.estimate.yaw_deg, -7.494323, places=4)
         self.assertTrue(validated_head_model_quality(selected.debug.head_model_quality))
         self.assertAlmostEqual(selected.debug.head_model_quality.yaw_std_deg, 2.736567, places=4)
-        self.assertIsNone(selected.estimate.visible_face)
+        self.assertEqual(selected.estimate.visible_face, "backside_candidate")
+        self.assertIsNone(selected.estimate.camera_face_normal_xyz)
         binding = self.fixture.registered_binding("frame_000008", selection)
         self.assertTrue(binding.associated)
         self.assertAlmostEqual(binding.search_association.distance_m, 0.758, places=3)
@@ -55,7 +58,7 @@ class RecordedBacksideHandoffTests(unittest.TestCase):
         self.assertEqual([c["qr_decode"]["cache_hit"] for c in meta["calls"]], [False, False])
         self.assertTrue(meta["head_acquisition"]["candidate_associated"])
 
-    def test_repeated_head_refits_current_pixels_without_reusing_backside_hint(self):
+    def test_repeated_head_refits_current_pixels_using_only_bounded_search_hint(self):
         # Repeated content under a synthetic test clock is a performance/fit
         # regression, never seven independent frames or historical freshness.
         reuse = BacksideProposalReuse()
@@ -64,8 +67,8 @@ class RecordedBacksideHandoffTests(unittest.TestCase):
         self.assert_usable_registered_head(warm)
         self.assertIsNot(warm.selected.frame, cold.selected.frame)
         self.assertIsNot(warm.selected.estimate, cold.selected.estimate)
-        self.assertEqual(len(meta["calls"]), 2)
-        self.assertFalse(meta["proposal_reuse"]["hint_retained"])
+        self.assertEqual(len(meta["calls"]), 1)
+        self.assertTrue(meta["proposal_reuse"]["hint_retained"])
         self.assertFalse(meta["proposal_reuse"]["measurement_reused"])
         self.assertEqual(meta["calls"][0]["qr_decode"]["mode"], "full")
         self.assertFalse(meta["calls"][0]["qr_decode"]["cache_hit"])
@@ -77,7 +80,7 @@ class RecordedBacksideHandoffTests(unittest.TestCase):
         cold, _ = self.fixture.evaluate("frame_000008", reuse)
         self.assertTrue(cold.selected.estimate.usable)
         failed, meta = self.fixture.evaluate("frame_000010", reuse)
-        self.assertEqual(len(meta["calls"]), 2)
+        self.assertEqual(len(meta["calls"]), 1)
         self.assertFalse(meta["proposal_reuse"]["hint_retained"])
         self.assertFalse(failed.selected.estimate.usable)
         self.assertIsNone(failed.selected.estimate.yaw_deg)

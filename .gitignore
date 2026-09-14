@@ -56,6 +56,11 @@ tests/aufgabe04/fixtures/recorded_backside_20260910/*
 !tests/aufgabe04/fixtures/recorded_backside_20260910/inputs.json
 !tests/aufgabe04/fixtures/recorded_backside_20260910/frame_000008.jpg
 !tests/aufgabe04/fixtures/recorded_backside_20260910/frame_000010.jpg
+!tests/aufgabe04/fixtures/backside_neck_20260914/
+tests/aufgabe04/fixtures/backside_neck_20260914/*
+!tests/aufgabe04/fixtures/backside_neck_20260914/inputs.json
+!tests/aufgabe04/fixtures/backside_neck_20260914/head_roi.png
+!tests/aufgabe04/fixtures/backside_neck_20260914/raw_edges.png
 !tests/aufgabe04/fixtures/qr_marker_validation/
 tests/aufgabe04/fixtures/qr_marker_validation/*
 !tests/aufgabe04/fixtures/qr_marker_validation/front_000045.jpg

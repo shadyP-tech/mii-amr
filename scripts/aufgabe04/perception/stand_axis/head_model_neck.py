@@ -19,6 +19,7 @@ from scripts.aufgabe04.perception.stand_axis.head_border_seed import validate_cu
 from scripts.aufgabe04.perception.stand_axis.head_neck_connectivity import (
     RawNeckContinuation, trace_raw_neck_junction,
 )
+from scripts.aufgabe04.perception.stand_axis.raw_neck_support import measure_raw_neck_support
 
 
 MAX_HEAD_NECK_START_GAP_PX = 2
@@ -40,6 +41,7 @@ class HeadNeckJunction:
     pixel_uncertainty_allowance_px: float = HEAD_PANEL_PIXEL_UNCERTAINTY_PX
     core_start_gap_px: int | None = None
     raw_continuation: RawNeckContinuation | None = None
+    core_paths_px: tuple[tuple[tuple[int, int], ...], ...] = ()
 
 
 def measure_head_neck_junction(raw_edges, corners, profile) -> HeadNeckJunction:
@@ -47,7 +49,11 @@ def measure_head_neck_junction(raw_edges, corners, profile) -> HeadNeckJunction:
 
     The start gap counts missing rows after the first pixel row below the
     fitted bottom-edge midpoint. Both rails must then have a simultaneous
-    uninterrupted core run. A rounded junction may continue backward through
+    uninterrupted raw core run. Exact-column cores retain precedence; a
+    bounded perspective-following core is considered only if none exists.
+    ``rail_columns_px`` are the core's starting columns, while ``core_paths_px``
+    records every actual pixel along each possibly slanted rail.
+    A rounded junction may continue backward through
     adjacent raw pixels within a bounded two-pixel band. The core run's gap,
     columns and start row remain separate from that connected path's gap.
     Rejected probes retain the original start gap for outer-border recovery.
@@ -90,37 +96,20 @@ def measure_head_neck_junction(raw_edges, corners, profile) -> HeadNeckJunction:
         max_start_gap_px=max_gap, expected_panel_inset_px=inset_px,
         head_vertical_span_px=vertical_span, measured_panel_inset_m=panel_inset_m,
     )
-    center_x = (bottom_left.u_px + bottom_right.u_px) / 2.0
     bottom_y = (bottom_left.v_px + bottom_right.v_px) / 2.0
-    x_radius = max(3, int(round(0.16 * width)))
-    x0 = max(0, int(math.floor(center_x - x_radius)))
-    x1 = min(shape[1], int(math.ceil(center_x + x_radius)) + 1)
     y0 = max(0, int(math.floor(bottom_y + 1.0)))
-    y1 = min(shape[0], int(math.ceil(bottom_y + 0.42 * height)))
     required_run = max(3, int(math.ceil(0.12 * height)))
-    if y1 - y0 < required_run or x1 <= x0:
-        return HeadNeckJunction(False, "head_neck_junction_rails_unavailable",
-                                required_run_px=required_run, **resolution_fields)
-    neck = raw_edges[y0:y1, x0:x1] > 0
     min_rail_gap = max(3, int(round(0.07 * width)))
     max_rail_gap = max(min_rail_gap + 1, int(round(0.34 * width)))
-    best = None
-    for left_column in range(neck.shape[1]):
-        for right_column in range(left_column + min_rail_gap,
-                                  min(left_column + max_rail_gap + 1, neck.shape[1])):
-            run = 0
-            for row_index, present in enumerate(neck[:, left_column] & neck[:, right_column]):
-                run = run + 1 if present else 0
-                if run >= required_run:
-                    gap = row_index - run + 1
-                    candidate = (gap, left_column + x0, right_column + x0)
-                    if best is None or candidate < best:
-                        best = candidate
-                    break
-    if best is None:
+    core = measure_raw_neck_support(raw_edges, validated)
+    if not core.paths_px or core.start_gap_px is None:
         return HeadNeckJunction(False, "head_neck_junction_rails_unavailable",
                                 required_run_px=required_run, **resolution_fields)
-    gap, left_column, right_column = best
+    # Core discovery retains diagnostic paths even beyond its permissive
+    # locator gap. Physical-head admission still uses the stricter measured
+    # panel-inset and at-most-two-pixel boundary checks below.
+    gap = core.start_gap_px
+    left_column, right_column = (path[0][0] for path in core.paths_px)
     accepted = resolution_qualified and gap <= max_gap
     reason = (
         "head_neck_panel_separation_unresolved" if not resolution_qualified else
@@ -130,6 +119,7 @@ def measure_head_neck_junction(raw_edges, corners, profile) -> HeadNeckJunction:
         accepted, reason,
         start_gap_px=gap, core_start_gap_px=gap, required_run_px=required_run,
         rail_columns_px=(left_column, right_column), run_start_row_px=y0 + gap,
+        core_paths_px=core.paths_px,
         **resolution_fields,
     )
     if reason != "head_neck_junction_gap_too_large":
@@ -141,6 +131,7 @@ def measure_head_neck_junction(raw_edges, corners, profile) -> HeadNeckJunction:
         rail_columns_px=junction.rail_columns_px, core_start_row_px=junction.run_start_row_px,
         core_run_length_px=required_run, min_rail_gap_px=min_rail_gap,
         max_rail_gap_px=max_rail_gap, max_start_gap_px=max_gap,
+        core_paths_px=core.paths_px,
     )
     junction = replace(junction, raw_continuation=continuation)
     if not continuation.accepted:

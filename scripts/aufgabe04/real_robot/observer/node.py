@@ -126,6 +126,9 @@ from scripts.aufgabe04.real_robot.observer.camera_publication import (
     camera_source_freshness,
 )
 from scripts.aufgabe04.real_robot.observer.qr_decode_cache import RoiQrDecodeCache
+from scripts.aufgabe04.real_robot.observer.qr_acquisition_policy import (
+    QrAcquisitionPolicy, evaluate_roi_with_qr_acquisition,
+)
 from scripts.aufgabe04.real_robot.observer.roi_qr_evidence import summarize_roi_qr_evidence
 from scripts.aufgabe04.real_robot.observer.head_proposal_registration import (
     acquire_registered_head_measurement, unresolved_front_framing_hint,
@@ -161,8 +164,8 @@ from scripts.aufgabe04.real_robot.observer.front_view_recovery import (
     FrontViewRecovery, front_view_failure_kind,
 )
 from scripts.aufgabe04.real_robot.observer.head_model_admission import (
-    MEASURED_HEAD_AXIS_SOURCE, measured_head_front_is_current,
-    measured_head_needs_full_qr_decode, head_scale_gate as _head_scale_gate,
+    MEASURED_HEAD_AXIS_SOURCE, measured_head_front_is_current, requires_measured_head_admission,
+    head_scale_gate as _head_scale_gate,
 )
 from scripts.aufgabe04.real_robot.observer.current_head_association import (
     associate_current_measured_head,
@@ -1248,6 +1251,14 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         )
         qr_decode_cache = RoiQrDecodeCache()
         model_input_cache = MetricModelInputCache(frame)
+        if not hasattr(self, "_qr_acquisition_policy"):
+            self._qr_acquisition_policy = QrAcquisitionPolicy()
+        qr_acquisition_budget = self._qr_acquisition_policy.begin_frame(
+            target_key=self._target_evidence_key(), image_stamp_sec=image.stamp_sec,
+            started_ros_sec=processing_started_ros,
+            started_monotonic_sec=processing_started_monotonic,
+            max_sensor_age_sec=self.args.max_sensor_age_sec,
+        )
 
         def evaluate_roi_attempt(
             attempt: HeadRoiAttempt,
@@ -1259,59 +1270,47 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 attempt_roi.y0 : attempt_roi.y1,
                 attempt_roi.x0 : attempt_roi.x1,
             ]
-            decoder_provenance = {}
-            full_qr_decode = pose_hint is None or measured_head_needs_full_qr_decode(
-                previous_axis_source=getattr(self, "_last_metric_axis_source", None),
-                previous_bound_qr_stamp_sec=getattr(self, "_head_qr_tracking_stamp_sec", None),
-                image_stamp_sec=image.stamp_sec, max_age_sec=self.args.max_sensor_age_sec,
-            )
-            decoder = (
-                (lambda crop: detect_qr_observations_bgr(crop, self.cv2, diagnostics=decoder_provenance))
-                if full_qr_decode else
-                (lambda crop: detect_native_qr_observations_bgr(crop, self.cv2))
-            )
-            decoded = qr_decode_cache.decode(
+            def fit(qr_observations):
+                return estimate_stand_axis_from_metric_model(
+                    self.cv2,
+                    attempt_frame,
+                    model_profile=self.stand_model_profile,
+                    camera_fx_px=intrinsics.fx_px,
+                    camera_fy_px=intrinsics.fy_px,
+                    camera_cx_px=intrinsics.cx_px - attempt_roi.x0,
+                    camera_cy_px=intrinsics.cy_px - attempt_roi.y0,
+                    pose_hint=pose_hint,
+                    qr_observations=qr_observations,
+                    edge_preprocess=resolved_stand_axis_profile.edge_preprocess,
+                    canny_low=resolved_stand_axis_profile.canny_low,
+                    canny_high=resolved_stand_axis_profile.canny_high,
+                    min_edge_height_px=(
+                        resolved_stand_axis_profile.min_edge_height_px
+                    ),
+                    expected_head_center_u_px=(
+                        attempt.expected_center_u_px - attempt_roi.x0
+                    ),
+                    expected_head_center_v_px=(
+                        attempt.expected_center_v_px - attempt_roi.y0
+                    ),
+                    expected_head_height_px=attempt.expected_head_height_px,
+                    backside_target_crop_horizontal_half_width_ratio=(
+                        attempt.backside_target_crop_half_width_ratio
+                    ),
+                    input_cache=model_input_cache,
+                    input_cache_roi=(attempt_roi.x0, attempt_roi.y0, attempt_roi.x1, attempt_roi.y1),
+                    current_head_proposal_corners=current_head_proposal_corners,
+                )
+
+            attempt_estimate, attempt_debug, qr_observations, qr_metadata = evaluate_roi_with_qr_acquisition(
+                frame=attempt_frame,
                 roi=(attempt_roi.x0, attempt_roi.y0, attempt_roi.x1, attempt_roi.y1),
-                mode="full" if full_qr_decode else "native",
-                frame=attempt_frame, decoder=decoder, decoder_provenance=decoder_provenance,
-            )
-            qr_observations = decoded.observations
-            attempt_estimate, attempt_debug = estimate_stand_axis_from_metric_model(
-                self.cv2,
-                attempt_frame,
-                model_profile=self.stand_model_profile,
-                camera_fx_px=intrinsics.fx_px,
-                camera_fy_px=intrinsics.fy_px,
-                camera_cx_px=intrinsics.cx_px - attempt_roi.x0,
-                camera_cy_px=intrinsics.cy_px - attempt_roi.y0,
-                pose_hint=pose_hint,
-                qr_observations=qr_observations,
-                edge_preprocess=resolved_stand_axis_profile.edge_preprocess,
-                canny_low=resolved_stand_axis_profile.canny_low,
-                canny_high=resolved_stand_axis_profile.canny_high,
-                min_edge_height_px=(
-                    resolved_stand_axis_profile.min_edge_height_px
+                roi_source=attempt.source, cache=qr_decode_cache, budget=qr_acquisition_budget,
+                native_decoder=lambda crop: detect_native_qr_observations_bgr(crop, self.cv2),
+                full_decoder=lambda crop, limit, provenance: detect_qr_observations_bgr(
+                    crop, self.cv2, diagnostics=provenance, max_elapsed_sec=limit,
                 ),
-                expected_head_center_u_px=(
-                    attempt.expected_center_u_px - attempt_roi.x0
-                ),
-                expected_head_center_v_px=(
-                    attempt.expected_center_v_px - attempt_roi.y0
-                ),
-                expected_head_height_px=attempt.expected_head_height_px,
-                backside_target_crop_horizontal_half_width_ratio=(
-                    attempt.backside_target_crop_half_width_ratio
-                ),
-                input_cache=model_input_cache,
-                input_cache_roi=(attempt_roi.x0, attempt_roi.y0, attempt_roi.x1, attempt_roi.y1),
-                current_head_proposal_corners=current_head_proposal_corners,
-            )
-            attempt_debug = replace(
-                attempt_debug,
-                stage_timings_ms={
-                    **(attempt_debug.stage_timings_ms or {}),
-                    "qr_identity": decoded.elapsed_ms,
-                },
+                estimate=fit, now=time.monotonic,
             )
             return HeadRoiEvaluation(
                 attempt=attempt,
@@ -1320,7 +1319,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 debug=attempt_debug,
                 qr_observations=qr_observations,
                 qr_decode_metadata={
-                    **decoded.metadata(), "model_inputs": dict(model_input_cache.last_metadata),
+                    **qr_metadata, "model_inputs": dict(model_input_cache.last_metadata),
                 },
             )
 
@@ -1398,7 +1397,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         )
         if result_freshness.accepted:
             self._camera_count("fresh_detector_results")
-        if estimate.usable and estimate.evidence_state == "fresh_refined":
+        if estimate.usable and estimate.evidence_state in {"fresh_refined", "fresh_backside"}:
             self._camera_count("verified_geometry_results")
         model_metadata = {
             "mode": "metric_model_only",
@@ -1444,6 +1443,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 "detector_completed_ros_sec": now_sec,
                 "detector_completed_monotonic_sec": processing_completed_monotonic,
                 "detector_elapsed_ms": (processing_completed_monotonic - processing_started_monotonic) * 1000,
+                "qr_acquisition": qr_acquisition_budget.metadata(),
                 "attempts": [{
                     "roi": evaluation.attempt.metadata(),
                     "qr_decode": evaluation.qr_decode_metadata,
@@ -1499,7 +1499,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             )
             return
         current_head_association = None
-        if estimate.source == MEASURED_HEAD_AXIS_SOURCE and estimate.usable:
+        if requires_measured_head_admission(estimate, debug) and estimate.usable:
             current_head_association = associate_current_measured_head(
                 estimate=estimate, debug=debug, attempt=selected_attempt,
                 projection=projection, expected_head_height_px=expected_head_height_px,
@@ -1925,6 +1925,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             try:
                 target_registration = (
                     build_backside_target_registration_evidence(
+                        current_head_association=current_head_association,
                         final_head_center_error_ratio=(
                             debug.head_center_error_ratio
                         ),
@@ -1965,7 +1966,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                     **lidar_status_details,
                 )
                 return
-            if registration_applied:
+            if target_registration["mode"] == "bounded_camera_lidar_registration":
                 axis_sample_source = (
                     REGISTERED_BACKSIDE_AXIS_SAMPLE_SOURCE
                 )

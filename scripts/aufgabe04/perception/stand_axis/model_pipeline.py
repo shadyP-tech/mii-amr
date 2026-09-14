@@ -11,6 +11,7 @@ from scripts.aufgabe04.perception.stand_axis.head_model_fit import (
     attach_independent_qr_diagnostics, fit_current_measured_head,
 )
 from scripts.aufgabe04.perception.stand_axis.head_proposal import acquire_head_proposal
+from scripts.aufgabe04.perception.stand_axis.head_backside_classification import classify_current_head_backside
 from scripts.aufgabe04.perception.stand_axis.geometry import (
     _debug_rectangle_image,
     _debug_rectangle_overlay_image,
@@ -94,7 +95,8 @@ def estimate_stand_axis_from_metric_model(
     remain separate diagnostics. An exact-image cache reuses preprocessing,
     never geometry. Legacy backside search can propose current corners when
     neutral acquisition fails, but physical angle admission still uses the
-    same independent head-only checks and supplies no backside label.
+    same independent head-only checks. A separate structural/marker classifier
+    may attach a backside-candidate label without changing that head angle.
     """
 
     timing = ModelStageTiming()
@@ -199,13 +201,19 @@ def estimate_stand_axis_from_metric_model(
             max_reprojection_rmse_px=max_reprojection_rmse_px,
         )
         timing.mark("independent_qr_diagnostics")
-        return estimate, replace(
+        artifacts = replace(
             artifacts, qr_detected=qr_marker_detected,
             qr_marker_verified=marker.verified,
             qr_marker_reason=("multiple_decoded_qr_identities"
                               if qr_observations and len(qr_observations) > 1 else marker.reason),
             qr_detection_scale=None if qr_detection is None else qr_detection.scale,
             stage_timings_ms=timing.snapshot(),
+        )
+        return classify_current_head_backside(
+            estimate, artifacts, model_profile=model_profile, camera=camera,
+            expected_center_u_px=expected_head_center_u_px,
+            expected_center_v_px=expected_head_center_v_px,
+            expected_height_px=expected_head_height_px,
         )
     if head_result is not None:
         return finish_independent_head(head_result)
@@ -273,10 +281,12 @@ def estimate_stand_axis_from_metric_model(
                 ),
             )
             timing.mark("backside_acquisition")
-            if estimate.usable and estimate.corners is not None:
+            if estimate.corners is not None and (estimate.usable or estimate.reason ==
+                                                 "model_backside_neck_support_insufficient"):
                 # Retain the alternate locator, not its former angle or
-                # absence-based side authority. Refit its current corners
-                # through the one physical measured-head quality contract.
+                # side authority. A rejected legacy stem anchor may still
+                # locate corners. The independent physical-head fit rechecks
+                # current raw borders, neck structure and planar ambiguity.
                 return finish_independent_head(fit_current_measured_head(
                     cv2, raw_edges, model_profile=model_profile, camera=camera,
                     proposal_corners=estimate.corners,

@@ -17,6 +17,7 @@ from scripts.aufgabe04.perception.stand_axis.raw_support import (
     _quadrilateral_edge_support,
     _raw_side_evidence_and_corners,
 )
+from scripts.aufgabe04.perception.stand_axis.raw_neck_support import measure_raw_neck_support
 
 
 # A heater/radiator produces many nearly vertical Hough lines.  The real head
@@ -49,54 +50,9 @@ def _head_first_aspect_bounds(
 
 
 def _short_centered_neck_support(edge_mask, corners) -> bool:
-    """Check for a short post continuation below an already fitted head.
+    """Compatibility adapter for the explicit current raw-rail neck cue."""
 
-    This is intentionally a validation-only signal.  It cannot move a head
-    corner or expand a quadrilateral into the stand stem.
-    """
-
-    import numpy
-
-    top_left, top_right, bottom_right, bottom_left = order_corners(corners)
-    width = (_distance(top_left, top_right) + _distance(bottom_left, bottom_right)) / 2.0
-    height = (_distance(top_left, bottom_left) + _distance(top_right, bottom_right)) / 2.0
-    if width <= 1.0 or height <= 1.0:
-        return False
-    center_x = (bottom_left.u_px + bottom_right.u_px) / 2.0
-    bottom_y = (bottom_left.v_px + bottom_right.v_px) / 2.0
-    x_radius = max(3, int(round(0.16 * width)))
-    y_start = max(0, int(math.floor(bottom_y + 1.0)))
-    y_end = min(edge_mask.shape[0], int(math.ceil(bottom_y + 0.42 * height)))
-    if y_end - y_start < 3:
-        return False
-    x0 = max(0, int(math.floor(center_x - x_radius)))
-    x1 = min(edge_mask.shape[1], int(math.ceil(center_x + x_radius)) + 1)
-    if x1 <= x0:
-        return False
-    neck = edge_mask[y_start:y_end, x0:x1] > 0
-    # A post can be broken by the head/ground junction, but it must retain a
-    # short contiguous run on *both* outer post rails.  Checking merely for a
-    # foreground pixel admits QR modules directly below an inner QR rectangle.
-    required_run = max(3, int(math.ceil(0.12 * height)))
-    # Keep the two rails farther apart than the 1--3 px Canny thickness of a
-    # single line, while still accepting the narrow physical post.
-    min_rail_gap = max(3, int(round(0.07 * width)))
-    max_rail_gap = max(min_rail_gap + 1, int(round(0.34 * width)))
-    maximum_start_gap = max(3, int(math.ceil(0.08 * height)))
-    for left_column in range(neck.shape[1]):
-        for right_column in range(left_column + min_rail_gap, neck.shape[1]):
-            if right_column - left_column > max_rail_gap:
-                break
-            paired_rows = neck[:, left_column] & neck[:, right_column]
-            run = 0
-            for row_index, present in enumerate(paired_rows):
-                run = run + 1 if present else 0
-                if (
-                    run >= required_run
-                    and row_index - run + 1 <= maximum_start_gap
-                ):
-                    return True
-    return False
+    return measure_raw_neck_support(edge_mask, corners).accepted
 
 
 def _head_candidate_from_rough_corners(

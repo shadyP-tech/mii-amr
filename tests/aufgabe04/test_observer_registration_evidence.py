@@ -17,9 +17,34 @@ from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import (
 from scripts.aufgabe04.real_robot.observer.registration_evidence import (
     build_backside_target_registration_evidence,
 )
+from scripts.aufgabe04.real_robot.observer.current_head_association import associate_current_measured_head
+from tests.aufgabe04 import test_current_head_association as current_head_fixture
 
 
 class ObserverRegistrationEvidenceTest(unittest.TestCase):
+    def test_nominal_current_head_registration_requires_its_own_accepted_scan_and_bounds(self):
+        head = associate_current_measured_head(**current_head_fixture.CurrentHeadAssociationTests().options())
+        self.assertTrue(head.accepted)
+        wrapper = head.lidar_association
+        options = dict(final_head_center_error_ratio=head.center_offset_ratio,
+                       current_head_association=head, registered_lidar_association=wrapper,
+                       candidate_lidar_association=wrapper.search_association)
+        evidence = build_backside_target_registration_evidence(**options)
+        self.assertEqual(evidence["mode"], "bounded_camera_lidar_registration")
+        self.assertTrue(evidence["unique_eligible_lidar_cluster_required"])
+        self.assertEqual(evidence["original_head_center_error_ratio"], head.center_offset_ratio)
+        for changes in (
+            {"current_head_association": replace(head, accepted=False)},
+            {"current_head_association": replace(head, center_offset_ratio=1.6)},
+            {"current_head_association": replace(head, max_center_offset_ratio=2.)},
+            {"current_head_association": replace(head, lidar_association=None)},
+            {"registered_lidar_association": None},
+            {"candidate_lidar_association": replace(wrapper.search_association, scan_stamp_sec=9.)},
+            {"registered_lidar_association": replace(wrapper, associated=False)},
+        ):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                build_backside_target_registration_evidence(**{**options, **changes})
+
     @staticmethod
     def _scan() -> PlainLaserScan:
         ranges = [2.0] * 31

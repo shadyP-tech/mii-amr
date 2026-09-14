@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 
 from scripts.aufgabe04.perception.debug.text_overlay import OverlayTextCursor
+from scripts.aufgabe04.perception.debug.viewer_axis_admission import current_axis_evidence_ready
+from scripts.aufgabe04.artifacts.backside_axis_observation import BACKSIDE_AXIS_SAMPLE_SOURCE
 from scripts.aufgabe04.perception.stand_axis.model_profile import StandModelProfile
 from scripts.aufgabe04.perception.stand_axis.head_model_quality import (
     MEASURED_HEAD_AXIS_SOURCE,
@@ -188,7 +190,9 @@ def annotate_metric_model_status(
     junction = None if artifacts is None else getattr(artifacts, "head_neck_junction", None)
     if junction is not None and junction.start_gap_px is not None:
         details.append(f"neck_gap={junction.start_gap_px}px")
-    if (estimate is not None and estimate.source == MEASURED_HEAD_AXIS_SOURCE
+    current_measurement = bool(inputs_ready and current_axis_evidence_ready(estimate, artifacts))
+    if (current_measurement
+            and estimate.source in {MEASURED_HEAD_AXIS_SOURCE, BACKSIDE_AXIS_SAMPLE_SOURCE}
             and estimate.usable and estimate.yaw_deg is not None and result_fresh):
         details.append(f"current_head_yaw={estimate.yaw_deg:.1f}deg")
     if quality is not None:
@@ -197,7 +201,7 @@ def annotate_metric_model_status(
             details.append(f"pixel_model_yaw_std={quality.yaw_std_deg:.2f}deg")
     color = (
         (0, 255, 0)
-        if evidence_state == "fresh_refined" and result_fresh
+        if current_measurement and result_fresh
         else (255, 0, 255)
     )
     for text in (line1, " ".join(details)):

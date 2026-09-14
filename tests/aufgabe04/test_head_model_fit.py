@@ -85,9 +85,11 @@ class IndependentHeadFitTest(unittest.TestCase):
         self.assertTrue(estimate.usable, estimate.reason)
         self.assertTrue(debug.head_neck_junction.accepted)
         self.assertIsNotNone(debug.model_pose)
-        self.assertEqual(estimate.source, "model_current_measured_head")
+        self.assertEqual(estimate.source, "model_backside_current_frame")
+        self.assertEqual(debug.model_pose_fit_source, "model_current_measured_head")
         self.assertTrue(debug.head_model_quality.centered_neck_supported)
-        self.assertIsNone(estimate.visible_face)
+        self.assertTrue(debug.head_backside_classification.accepted)
+        self.assertEqual(estimate.visible_face, "backside_candidate")
 
     def test_good_qr_and_tracked_pose_cannot_rescue_missing_neck(self):
         pixels = self.fixture.crop.copy()

@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "run_id": "stand_explore_exact2_camera_all5_20260914T113458Z",
+  "candidate_uid": "survey_candidate_0001",
+  "camera_attempt_index": 0,
+  "source_subdirectory": "camera_lidar_attempt_00/perception_debug",
+  "source_full_frame_sha256": "61f43df0a60c2bda13f6a6a497a759e1f8f67d8cc0cb2d7f8444d0ec388a68ca",
+  "source_metadata_sha256": "aa0ba34a1b551a919b3a4dcea640a54ea53f9fb26e15ce183728e952d1919e39",
+  "source_raw_edges_sha256": "f16d928f3daf76e13145bbf9b4080a8913192f3f3b730188a5d017bbfd99324c",
+  "crop_xyxy": [
+    320,
+    216,
+    499,
+    395
+  ],
+  "camera": {
+    "fx_px": 640.977317007246,
+    "fy_px": 641.1612206204627,
+    "cx_px": 85.8708878028196,
+    "cy_px": 84.7059996561025
+  },
+  "corners": [
+    [
+      18.536637505816906,
+      36.00217843454983
+    ],
+    [
+      115.77268108825837,
+      32.000038254768356
+    ],
+    [
+      116.66443789452671,
+      133.9961399930136
+    ],
+    [
+      19.38468074315054,
+      132.99847126405757
+    ]
+  ],
+  "expected_head": [
+    89.38412828853285,
+    89.35368797839072,
+    98.86495091261273
+  ],
+  "head_roi_sha256": "2d25b5751edf150edc3644303d4553296a4b0f51eed49c3c2e7413d44fdab1dc",
+  "raw_edges_sha256": "f16d928f3daf76e13145bbf9b4080a8913192f3f3b730188a5d017bbfd99324c",
+  "scope": "Lossless 179x179 rectified RGB crop and unchanged original raw edge PNG. Corners are replayed current-pixel refinements, not angle ground truth. No source timestamp confers freshness or motion authority.",
+  "min_edge_height_px": 14.0
+}
