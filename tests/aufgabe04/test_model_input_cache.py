@@ -13,7 +13,6 @@ except ImportError:  # pragma: no cover
     numpy = None
 
 from scripts.aufgabe04.perception.stand_axis.geometry import _unusable
-from scripts.aufgabe04.perception.stand_axis.head_proposal import HeadProposalResult
 from scripts.aufgabe04.perception.stand_axis.model_input_cache import MetricModelInputCache
 from scripts.aufgabe04.perception.stand_axis.model_pipeline import (
     estimate_stand_axis_from_metric_model,
@@ -166,10 +165,10 @@ class ModelInputCacheTest(unittest.TestCase):
             self.begin().compute("backside_pose", producer)
         producer.assert_not_called()
 
-    def test_pipeline_reuses_only_inputs_and_reruns_strict_backside_geometry(self):
+    def test_pipeline_reuses_only_inputs_and_reruns_current_head_geometry(self):
         profile = load_stand_model(Path(__file__).resolve().parents[2] /
                                    "configs/aufgabe04/stand_models/physical_stand_measured_20260826_v2.json")
-        estimate = _unusable("test_backside", source="model_backside")
+        estimate = _unusable("test_head", source="model_current_measured_head")
         artifacts = StandAxisEdgeDebugArtifacts(edges=numpy.zeros((70, 70), dtype=numpy.uint8))
         common = dict(
             model_profile=profile, camera_fx_px=600., camera_fy_px=600.,
@@ -179,32 +178,25 @@ class ModelInputCacheTest(unittest.TestCase):
         )
         with (
             patch(f"{PIPELINE}._canny_edges_from_frame", return_value=artifacts.edges) as edges,
-            patch(f"{PIPELINE}.acquire_head_proposal",
-                  return_value=HeadProposalResult(None, "head_proposal_unavailable")) as acquisition,
             patch(f"{PIPELINE}.detect_qr_quad", return_value=None) as quad,
-            patch(f"{PIPELINE}.estimate_stand_axis_from_model_backside",
-                  side_effect=((estimate, artifacts), (replace(estimate, reason="strict"), artifacts))) as backside,
+            patch(f"{PIPELINE}.fit_physical_head_in_frame",
+                  side_effect=((estimate, artifacts, None),
+                               (replace(estimate, reason="strict"), artifacts, None))) as head_fit,
         ):
             first, first_debug = estimate_stand_axis_from_metric_model(
-                self.cv2, self.frame[20:90, 10:80], expected_head_center_u_px=45.,
-                backside_target_crop_horizontal_half_width_ratio=4., **common,
-            )
+                self.cv2, self.frame[20:90, 10:80], expected_head_center_u_px=45., **common)
             strict, strict_debug = estimate_stand_axis_from_metric_model(
-                self.cv2, self.frame[20:90, 10:80], expected_head_center_u_px=35.,
-                backside_target_crop_horizontal_half_width_ratio=1.25, **common,
-            )
-        self.assertEqual(first.reason, "test_backside")
+                self.cv2, self.frame[20:90, 10:80], expected_head_center_u_px=35., **common)
+        self.assertEqual(first.reason, "test_head")
         self.assertEqual(strict.reason, "strict")
         self.assertEqual(edges.call_count, 1)
         self.assertEqual(quad.call_count, 1)
-        self.assertEqual(backside.call_count, 2)
-        self.assertEqual(acquisition.call_count, 2)  # Geometry cannot be cached.
-        self.assertEqual(backside.call_args.kwargs["expected_head_center_u_px"], 35.)
-        self.assertEqual(backside.call_args.kwargs["target_crop_horizontal_half_width_ratio"], 1.25)
+        self.assertEqual(head_fit.call_count, 2)  # Geometry cannot be cached.
+        self.assertEqual(head_fit.call_args_list[0].kwargs["expected_head_center_u_px"], 45.)
+        self.assertEqual(head_fit.call_args_list[1].kwargs["expected_head_center_u_px"], 35.)
         for debug in (first_debug, strict_debug):
             self.assertIn("edge_preprocessing", debug.stage_timings_ms)
             self.assertIn("qr_detection", debug.stage_timings_ms)
-            self.assertIn("backside_acquisition", debug.stage_timings_ms)
 
 
 if __name__ == "__main__":

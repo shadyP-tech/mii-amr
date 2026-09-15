@@ -7,7 +7,6 @@ from scripts.aufgabe04.perception.stand_axis.geometry import (
     _debug_rectangle_image, _polygon_area, _unusable,
     estimate_stand_axis_from_corners,
 )
-from scripts.aufgabe04.perception.stand_axis.geometry_contract import classify_joint_geometry_contract
 from scripts.aufgabe04.perception.stand_axis.head_border_seed import (
     select_head_border_seed, validate_current_head_proposal,
 )
@@ -19,7 +18,6 @@ from scripts.aufgabe04.perception.stand_axis.head_outer_border import select_cur
 from scripts.aufgabe04.perception.stand_axis.model_projection import project_stand_model
 from scripts.aufgabe04.perception.stand_axis.model_refinement import refine_projected_head_border
 from scripts.aufgabe04.perception.stand_axis.models import StandAxisEdgeDebugArtifacts
-from scripts.aufgabe04.perception.stand_axis.pose_fit_diagnostics import collect_metric_model_diagnostics
 from scripts.aufgabe04.perception.stand_axis.qr_pose_seed import estimate_planar_pose_ippe
 
 
@@ -137,42 +135,3 @@ def fit_current_measured_head(
         model_pose=best, model_reason=estimate.reason, evidence_state="fresh_refined",
         projected_landmarks=dict(projection.landmarks),
     ), pose
-
-
-def attach_independent_qr_diagnostics(
-    cv2, *, estimate, debug, head_pose, qr_corners, marker_verified,
-    model_profile, camera, max_reprojection_rmse_px,
-):
-    """Explain QR/model disagreement without changing the head estimate/pose."""
-
-    qr_pose = None
-    if qr_corners is not None:
-        qr_pose = estimate_planar_pose_ippe(
-            cv2, qr_corners, model_profile.qr_corners, camera,
-            max_reprojection_rmse_px=max_reprojection_rmse_px,
-        )
-    joint = None
-    if qr_corners is not None and debug.refined_corners is not None:
-        joint = estimate_planar_pose_ippe(
-            cv2, debug.refined_corners + tuple(qr_corners),
-            model_profile.head_corners + model_profile.qr_corners, camera,
-            max_reprojection_rmse_px=max_reprojection_rmse_px,
-        )
-    diagnostic_pose = (None if joint is None or not joint.hypotheses else joint.hypotheses[0])
-    diagnostics = collect_metric_model_diagnostics(
-        cv2, profile=model_profile, camera=camera,
-        head_corners=debug.refined_corners, qr_corners=qr_corners,
-        diagnostic_pose=diagnostic_pose or debug.model_pose,
-        qr_pose=qr_pose, head_pose=head_pose,
-        max_reprojection_rmse_px=max_reprojection_rmse_px,
-    )
-    if joint is not None and not joint.accepted:
-        contract = classify_joint_geometry_contract(
-            profile=model_profile, diagnostics=diagnostics, joint_reason=joint.reason,
-            joint_reprojection_rmse_px=None if diagnostic_pose is None else diagnostic_pose.reprojection_rmse_px,
-            max_reprojection_rmse_px=max_reprojection_rmse_px,
-            qr_marker_verified=marker_verified,
-        )
-        if contract is not None:
-            diagnostics = replace(diagnostics, geometry_contract=contract)
-    return estimate, replace(debug, model_diagnostics=diagnostics)

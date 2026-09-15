@@ -1,13 +1,13 @@
 """Select the enclosing current head rails without neck or pose evidence.
 
-Measured panel/symbol dimensions locate at most two outward searches. Only
+Two bounded search scales locate current enclosing borders. Only
 complete current raw borders and corner arms select a larger rectangle; no
 interpolation, QR pose, neck cue or previous measurement supplies corners.
 A lone quadrilateral cannot identify physical scale by itself. Its angle is
 conditional on the candidate/model association performed by the observer.
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import math
 
 from scripts.aufgabe04.perception.stand_axis.geometry import (
@@ -15,6 +15,11 @@ from scripts.aufgabe04.perception.stand_axis.geometry import (
 )
 from scripts.aufgabe04.perception.stand_axis.model_refinement import refine_projected_head_border
 from scripts.aufgabe04.perception.stand_axis.models import ImagePoint
+
+
+# Search policy, independent of the presence, dimensions or corners of a QR.
+# These factors propose raw-pixel corridors; they never synthesize corners.
+OUTER_HEAD_SEARCH_GROWTH_FACTORS = (1.10, 1.25)
 
 
 @dataclass(frozen=True)
@@ -122,13 +127,14 @@ def validated_current_head_boundary(evidence, *, corners, profile_sha256,
 
 
 def current_head_boundary_eligible(estimate, debug):
-    """Single consumer contract for physical heads, including ambiguous poses."""
+    """Bind physical head pixels independently of every QR/marker diagnostic.
+
+    Marker presence and marker-to-head span belong to side classification and
+    identity only. They cannot reject, repair or promote this boundary proof.
+    """
     evidence = getattr(debug, "head_outer_recovery", None)
-    marker = getattr(debug, "head_marker_boundary", None)
-    reconsider = marker is not None and getattr(marker, "accepted", None) is not True
     if not validated_current_head_boundary(evidence, corners=getattr(estimate, "corners", None),
-            profile_sha256=getattr(estimate, "model_profile_sha256", None),
-            require_independent=reconsider):
+            profile_sha256=getattr(estimate, "model_profile_sha256", None)):
         return False
     predicted = getattr(debug, "predicted_corners", None)
     quality = getattr(debug, "head_model_quality", None)
@@ -154,14 +160,6 @@ def select_current_outer_head_border(cv2, raw_edges, *, model_profile, refinemen
     inward = _inward_shift(original, proposal)
     head_size = (model_profile.head_width_m, model_profile.head_height_m)
     inset_size = (model_profile.qr_panel_width_m, model_profile.qr_panel_height_m)
-    growths = []
-    for width, panel_height in ((model_profile.qr_panel_width_m, model_profile.qr_panel_height_m),
-                                (model_profile.qr_symbol_width_m, model_profile.qr_symbol_height_m)):
-        if width is None or panel_height is None or min(width, panel_height) <= 0:
-            continue
-        growth = max(model_profile.head_width_m/width, model_profile.head_height_m/panel_height)
-        if math.isfinite(growth) and 1.03 <= growth <= 1.30 and growth not in growths:
-            growths.append(growth)
     selected, area = refinement, _polygon_area(original)
     tried, alternatives = [], [original]
     attempted = 0
@@ -179,7 +177,7 @@ def select_current_outer_head_border(cv2, raw_edges, *, model_profile, refinemen
                     and 1.03*area <= _polygon_area(anchored_corners) <= 1.70*area):
                 selected, area = anchored, _polygon_area(anchored_corners)
                 alternatives.append(anchored_corners)
-    for growth in growths[:2]:
+    for growth in OUTER_HEAD_SEARCH_GROWTH_FACTORS:
         proposed = tuple(ImagePoint(center[0]+(p.u_px-center[0])*growth,
                                     center[1]+(p.v_px-center[1])*growth) for p in proposal)
         tried.append(growth)
@@ -228,12 +226,12 @@ class HeadMarkerBoundaryEvidence:
 
 def check_current_head_marker_boundary(cv2, *, head_corners, qr_corners,
                                       marker_verified, model_profile):
-    """Diagnose a possible paper inset, without fitting or replacing an angle.
+    """Describe a marker span for offline diagnostics, never angle admission.
 
-    A verified symbol supplies a current independent size reference. Compare
-    its extent in the observed head quadrilateral to the measured head/paper
-    alternatives; a two-pixel-per-side uncertainty margin prevents borderline
-    geometry from being declared a paper border. Missing QR is not scale proof.
+    This compatibility diagnostic compares measured head/paper proportions;
+    its accepted flag describes only that ratio. Current raw borders, their
+    measured 3D fit and candidate association establish a head independently.
+    Neither a contradictory ratio nor missing QR changes that decision.
     """
     if not marker_verified or qr_corners is None or head_corners is None:
         return HeadMarkerBoundaryEvidence(True, "no_current_verified_symbol_scale_reference")
@@ -259,22 +257,4 @@ def check_current_head_marker_boundary(cv2, *, head_corners, qr_corners,
                 for value, panel, physical in zip(observed, panel_spans, head_spans))
     return HeadMarkerBoundaryEvidence(not inset,
         "current_border_matches_verified_qr_panel" if inset else "current_head_symbol_boundary_not_contradicted",
-        observed, head_spans, panel_spans, margin, requests_reconsideration=inset)
-
-
-def resolve_current_head_boundary(evidence, marker_boundary, *, corners, profile_sha256):
-    """Keep a resolved current outer frame despite a sensitive QR span ratio.
-
-    A lone conditional quadrilateral plus a contradictory marker does not
-    resolve physical scale. It requests reacquisition instead of using QR
-    coordinates to fabricate a head. Recovered enclosing raw rails supply the
-    independent decision and remain subject to all ordinary metric gates.
-    """
-    if not validated_current_head_boundary(evidence, corners=corners,
-                                            profile_sha256=profile_sha256):
-        return evidence
-    if marker_boundary.requests_reconsideration and not validated_current_head_boundary(
-            evidence, corners=corners, profile_sha256=profile_sha256, require_independent=True):
-        return replace(evidence, accepted=False,
-                       reason="current_physical_head_boundary_unresolved")
-    return evidence
+        observed, head_spans, panel_spans, margin)

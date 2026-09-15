@@ -1,4 +1,4 @@
-"""Current outer-frame proof survives QR-size noise, never an inset collapse."""
+"""Raw outer-frame proof remains independent of QR size and identity."""
 
 from dataclasses import replace
 import math
@@ -15,7 +15,7 @@ except ImportError:
 from scripts.aufgabe04.perception.stand_axis.head_model_fit import fit_current_measured_head
 from scripts.aufgabe04.perception.stand_axis.head_outer_border import (
     check_current_head_marker_boundary, current_head_boundary_eligible,
-    resolve_current_head_boundary, select_current_outer_head_border,
+    select_current_outer_head_border,
     validated_current_head_boundary,
 )
 from scripts.aufgabe04.perception.stand_axis.model_pipeline import estimate_stand_axis_from_metric_model
@@ -84,28 +84,59 @@ class HeadBoundaryIndependenceTest(unittest.TestCase):
         raw = self.raw(outer, inner)
         image = cv2.cvtColor(raw, cv2.COLOR_GRAY2BGR)
         results = []
-        for qr_scale in (.062/.078, .068/.078):
-            qr, _ = self.projection(qr_scale)
-            observation = DecodedQrObservation("QR_003", tuple((p.u_px, p.v_px) for p in qr), "fixture")
+        for qr_scale in (None, .062/.078, .068/.078):
+            observations = ()
+            if qr_scale is not None:
+                qr, _ = self.projection(qr_scale)
+                observations = (DecodedQrObservation(
+                    "QR_003", tuple((p.u_px, p.v_px) for p in qr), "fixture"),)
             with patch("scripts.aufgabe04.perception.stand_axis.model_pipeline._canny_edges_from_frame",
                        return_value=raw):
                 result = estimate_stand_axis_from_metric_model(cv2, image,
                     model_profile=self.profile, camera_fx_px=camera.fx_px,
                     camera_fy_px=camera.fy_px, camera_cx_px=camera.cx_px,
                     camera_cy_px=camera.cy_px, current_head_proposal_corners=inner,
-                    qr_observations=(observation,))
+                    qr_observations=observations)
             self.assertTrue(result[0].usable, result[0].reason)
             self.assertTrue(current_head_boundary_eligible(*result))
-            self.assertIsNone(result[0].visible_face)  # QR remains positive frontside evidence.
-            self.assertTrue(result[1].qr_marker_verified)
+            self.assertIsNone(result[0].visible_face)  # This test supplies no candidate side proof.
+            self.assertEqual(result[1].qr_marker_verified, qr_scale is not None)
+            self.assertIsNone(result[1].head_marker_boundary)  # No QR geometry runs on this path.
             results.append(result)
-        self.assertTrue(results[0][1].head_marker_boundary.accepted)
-        self.assertFalse(results[1][1].head_marker_boundary.accepted)
-        self.assertTrue(results[1][1].head_marker_boundary.diagnostic_only)
-        self.assertEqual(results[0][0].corners, results[1][0].corners)
-        self.assertEqual(results[0][0].yaw_deg, results[1][0].yaw_deg)
+        for result in results[1:]:
+            self.assertEqual(results[0][0].corners, result[0].corners)
+            self.assertEqual(results[0][0].yaw_deg, result[0].yaw_deg)
 
-    def test_lone_paper_with_marker_contradiction_remains_unresolved(self):
+    def test_qr_profile_dimensions_cannot_change_current_border_search_or_angle(self):
+        outer, camera = self.projection()
+        inner, _ = self.projection(.071/.078)
+        raw = self.raw(outer, inner)
+        baseline, baseline_debug, _ = fit_current_measured_head(
+            cv2, raw, model_profile=self.profile, camera=camera, proposal_corners=inner)
+        self.assertTrue(baseline.usable, baseline.reason)
+        for fields in (
+            dict(qr_symbol_width_m=.02, qr_symbol_height_m=.03,
+                 qr_panel_width_m=.025, qr_panel_height_m=.04),
+            dict(qr_symbol_width_m=.075, qr_symbol_height_m=.074,
+                 qr_panel_width_m=None, qr_panel_height_m=None),
+            dict(qr_center_x_m=.03, qr_center_y_m=-.03),
+        ):
+            with self.subTest(fields=fields):
+                profile = replace(self.profile, **fields)
+                current, debug, _ = fit_current_measured_head(
+                    cv2, raw, model_profile=profile, camera=camera, proposal_corners=inner)
+                self.assertTrue(current.usable, current.reason)
+                self.assertEqual(current.corners, baseline.corners)
+                self.assertEqual(current.yaw_deg, baseline.yaw_deg)
+                self.assertEqual(debug.head_outer_recovery.attempted_growth_factors,
+                                 baseline_debug.head_outer_recovery.attempted_growth_factors)
+                self.assertEqual(debug.head_outer_recovery.current_raw_alternatives,
+                                 baseline_debug.head_outer_recovery.current_raw_alternatives)
+
+    def test_lone_quad_scale_remains_conditional_on_candidate_not_qr(self):
+        # A single raw rectangle has no independent physical-scale reference.
+        # The pipeline must leave candidate/model association to the observer;
+        # a decoded marker's measured size can no longer decide this angle.
         paper, camera = self.projection(.071/.078)
         qr, _ = self.projection(.062/.078)
         estimate, debug, _ = fit_current_measured_head(cv2, self.raw(paper),
@@ -114,11 +145,10 @@ class HeadBoundaryIndependenceTest(unittest.TestCase):
         boundary = check_current_head_marker_boundary(cv2, head_corners=estimate.corners,
             qr_corners=qr, marker_verified=True, model_profile=self.profile)
         self.assertFalse(boundary.accepted)
-        resolved = resolve_current_head_boundary(debug.head_outer_recovery, boundary,
-            corners=estimate.corners, profile_sha256=self.profile.sha256)
-        self.assertFalse(resolved.accepted)
-        self.assertFalse(current_head_boundary_eligible(estimate,
-            replace(debug, head_marker_boundary=boundary, head_outer_recovery=resolved)))
+        self.assertTrue(boundary.diagnostic_only)
+        self.assertFalse(boundary.requests_reconsideration)
+        self.assertTrue(current_head_boundary_eligible(estimate,
+            replace(debug, head_marker_boundary=boundary)))
 
         raw = self.raw(paper)
         observation = DecodedQrObservation("QR_003", tuple((p.u_px, p.v_px) for p in qr), "fixture")
@@ -129,11 +159,11 @@ class HeadBoundaryIndependenceTest(unittest.TestCase):
                 camera_fx_px=camera.fx_px, camera_fy_px=camera.fy_px,
                 camera_cx_px=camera.cx_px, camera_cy_px=camera.cy_px,
                 current_head_proposal_corners=paper, qr_observations=(observation,))
-        self.assertFalse(result.usable)
-        self.assertIsNone(result.yaw_deg)
-        self.assertEqual(result.reason, "current_physical_head_boundary_unresolved")
-        self.assertFalse(artifacts.head_model_quality.outer_border_verified)
-        self.assertFalse(current_head_boundary_eligible(result, artifacts))
+        self.assertTrue(result.usable, result.reason)
+        self.assertEqual(result.corners, estimate.corners)
+        self.assertEqual(result.yaw_deg, estimate.yaw_deg)
+        self.assertTrue(artifacts.head_model_quality.outer_border_verified)
+        self.assertTrue(current_head_boundary_eligible(result, artifacts))
         self.assertTrue(artifacts.qr_marker_verified)  # Identity/front evidence is retained.
 
     def test_independent_flag_cannot_replace_bound_raw_recovery(self):
@@ -149,7 +179,7 @@ class HeadBoundaryIndependenceTest(unittest.TestCase):
                           replace(evidence, recovered_corners=evidence.original_corners)):
             self.assertFalse(check(corrupted))
 
-    def test_thick_paper_stroke_does_not_count_as_independent_outer_frame(self):
+    def test_marker_diagnostic_cannot_modify_angle_gate_across_stroke_widths(self):
         for angle in (20., 35., 45., 60.):
             for distance in (.25, .35, .5, .7):
                 paper, camera = self.projection(.071/.078, angle_deg=angle, distance_m=distance)
@@ -164,12 +194,10 @@ class HeadBoundaryIndependenceTest(unittest.TestCase):
                         boundary = check_current_head_marker_boundary(cv2,
                             head_corners=estimate.corners, qr_corners=qr, marker_verified=True,
                             model_profile=self.profile)
-                        resolved = resolve_current_head_boundary(debug.head_outer_recovery, boundary,
-                            corners=estimate.corners, profile_sha256=self.profile.sha256)
-                        if not boundary.accepted:
-                            self.assertFalse(resolved.accepted)
-                            self.assertFalse(current_head_boundary_eligible(estimate, replace(debug,
-                                head_outer_recovery=resolved, head_marker_boundary=boundary)))
+                        self.assertFalse(boundary.requests_reconsideration)
+                        self.assertEqual(current_head_boundary_eligible(estimate, debug),
+                            current_head_boundary_eligible(estimate,
+                                replace(debug, head_marker_boundary=boundary)))
 
 
 if __name__ == "__main__":

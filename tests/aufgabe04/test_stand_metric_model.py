@@ -340,7 +340,7 @@ class StandMetricGeometryTest(unittest.TestCase):
                     self.assertEqual(result.detector, "wechat")
                     self.assertEqual(result.scale, 2.)
 
-    def test_multiple_same_text_symbols_reject_even_with_good_tracked_pose(self):
+    def test_multiple_symbols_do_not_replace_the_head_geometry_decision(self):
         projected = project_stand_model(cv2, self.profile, frontal_pose(), self.camera)
         frame = numpy.zeros((480, 640, 3), dtype=numpy.uint8)
         polygon = numpy.asarray([[
@@ -359,9 +359,13 @@ class StandMetricGeometryTest(unittest.TestCase):
             pose_hint=frontal_pose(), qr_observations=observations,
         )
         self.assertFalse(estimate.usable)
-        self.assertEqual(estimate.reason, "model_qr_identity_ambiguous")
+        # This distant frontal head has insufficient angular precision even
+        # without QR. Multiple identities remain a separate decoding conflict.
+        self.assertEqual(estimate.reason, "head_model_yaw_uncertainty_too_high")
         self.assertIsNone(debug.model_pose)
         self.assertTrue(debug.qr_detected)
+        self.assertEqual(debug.qr_marker_reason, "multiple_decoded_qr_identities")
+        self.assertIsNone(estimate.visible_face)
 
     def test_text_without_corners_cannot_bootstrap_qr_free_backside(self):
         frame = numpy.zeros((480, 640, 3), dtype=numpy.uint8)
@@ -574,7 +578,8 @@ class StandMetricGeometryTest(unittest.TestCase):
         self.assertEqual(measured.source, "model_current_measured_head")
         self.assertFalse(predicted.usable)
         self.assertEqual(predicted.evidence_state, "unobservable")
-        self.assertIsNotNone(predicted_debug.predicted_corners)
+        # QR corners no longer manufacture a head proposal on a blank image.
+        self.assertIsNone(predicted_debug.predicted_corners)
         self.assertEqual(measured_debug.model_profile_sha256, self.profile.sha256)
         self.assertEqual(measured_debug.qr_detection_scale, 4.0)
         self.assertEqual(measured_debug.pose_seed_source, "current_head_proposal")
@@ -762,7 +767,7 @@ class StandMetricGeometryTest(unittest.TestCase):
         self.assertEqual(debug.pose_reprojection_rmse_px, 0.04)
         self.assertEqual(debug.pose_ambiguity_gap_px, 0.01)
 
-    def test_absent_expected_geometry_preserves_seed_unavailable_contract(self):
+    def test_absent_expected_geometry_cold_acquires_current_head_without_side_authority(self):
         frame = self._synthetic_backside_frame()
         with patch(
             "scripts.aufgabe04.perception.stand_axis.model_pipeline."
@@ -780,10 +785,11 @@ class StandMetricGeometryTest(unittest.TestCase):
                 blur_kernel=1,
             )
 
-        self.assertFalse(estimate.usable)
-        self.assertEqual(estimate.reason, "model_pose_seed_unavailable")
-        self.assertEqual(estimate.source, "model_seed")
-        self.assertEqual(debug.pose_seed_source, "none")
+        self.assertTrue(estimate.usable, estimate.reason)
+        self.assertEqual(estimate.source, "model_current_measured_head")
+        self.assertIsNone(estimate.visible_face)
+        self.assertIsNotNone(debug.projected_landmarks)
+        self.assertEqual(debug.head_acquisition_diagnostics["source"], "cold_current_head_search")
 
     def test_backside_bootstrap_rejects_wrong_scale_and_no_neck(self):
         cases = (

@@ -111,6 +111,7 @@ class StandAxisEdgeDebugArtifacts:
     head_backside_classification: object | None = None
     head_backside_appearance: object | None = None
     head_pose_hypotheses: tuple | None = None
+    head_acquisition_diagnostics: dict | None = None
 
 
 @dataclass(frozen=True)

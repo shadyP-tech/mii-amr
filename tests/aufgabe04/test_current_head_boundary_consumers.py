@@ -119,19 +119,20 @@ class CurrentHeadBoundaryConsumerTests(unittest.TestCase):
             with self.subTest(case=case):
                 self.assert_all_reject(current, artifact, options)
 
-    def test_unresolved_marker_disagreement_does_not_enter_any_head_consumer(self):
+    def test_marker_ratio_disagreement_cannot_reject_a_current_head(self):
         estimate, debug, options = classified_head()
         diagnostic = HeadMarkerBoundaryEvidence(
             False, "current_border_matches_verified_qr_panel", requests_reconsideration=True,
         )
-        self.assert_all_reject(estimate, replace(debug, head_marker_boundary=diagnostic), options)
+        self.assertTrue(all(self.decisions(
+            estimate, replace(debug, head_marker_boundary=diagnostic), options).values()))
 
     def test_independently_recovered_head_is_accepted_by_all_consumers(self):
         estimate, debug, options = self.recovered_head()
         self.assertTrue(all(self.decisions(estimate, debug, options).values()))
 
-    def test_ratio_disagreement_is_supporting_but_current_marker_still_vetoes_backside(self):
-        estimate, debug, options = self.recovered_head()
+    def test_ratio_disagreement_is_diagnostic_but_current_marker_still_vetoes_backside(self):
+        estimate, debug, options = classified_head()
         diagnostic = HeadMarkerBoundaryEvidence(
             False, "current_border_matches_verified_qr_panel", requests_reconsideration=True,
         )
@@ -147,14 +148,15 @@ class CurrentHeadBoundaryConsumerTests(unittest.TestCase):
                 self.assertEqual(self.window(estimate, current).yaw_rad,
                                  math.radians(estimate.yaw_deg))
 
-    def test_thick_paper_or_unproved_growth_cannot_override_ratio_disagreement(self):
+    def test_optional_recovery_diagnostics_cannot_change_qualified_head_admission(self):
         estimate, debug, options = self.recovered_head()
         proof = debug.head_outer_recovery
         diagnostic = HeadMarkerBoundaryEvidence(
             False, "current_border_matches_verified_qr_panel", requests_reconsideration=True,
         )
-        # Two pixels between a rail's inner and outer strokes can have enough
-        # area growth for a rectangle detector, but not physical frame evidence.
+        # Physical scale remains conditional on candidate/model association.
+        # Optional enclosing-contour diagnostics cannot reintroduce a QR veto
+        # for an otherwise bound, raw-supported and qualified current frame.
         near_inner = tuple(ImagePoint(80. + (p.u_px - 80.) * 88./90.,
                                       80. + (p.v_px - 80.) * 88./90.) for p in estimate.corners)
         one_axis_inner = tuple(ImagePoint(80. + (p.u_px - 80.) * 88./90.,
@@ -170,9 +172,9 @@ class CurrentHeadBoundaryConsumerTests(unittest.TestCase):
         )
         for boundary in unproved:
             with self.subTest(boundary=boundary):
-                self.assert_all_reject(estimate, replace(
+                self.assertTrue(all(self.decisions(estimate, replace(
                     debug, head_outer_recovery=boundary, head_marker_boundary=diagnostic,
-                ), options)
+                ), options).values()))
 
     def test_angle_ambiguity_does_not_destroy_independent_backside_appearance(self):
         estimate, debug, options = classified_head()

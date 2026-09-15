@@ -219,8 +219,9 @@ class HeadModelAngleReferenceTest(unittest.TestCase):
             self.assertLess(math.hypot(expected.u_px - actual.u_px,
                                        expected.v_px - actual.v_px), 1.)
         self.assertAlmostEqual(recovered_pose.best.translation_xyz_m[2], .35, delta=.003)
-        # A lone quad has an undirected angle but cannot establish scale. A
-        # current verified symbol supplies independent paper/head evidence.
+        # A lone quad has an undirected angle but cannot establish scale.
+        # Marker proportions are diagnostic only; candidate/model association
+        # must establish physical scale independently of the decoded symbol.
         missing_outer = raw.copy()
         cv2.polylines(missing_outer, [np.rint([(p.u_px, p.v_px) for p in outer]).astype(np.int32)],
                       True, 0, 3)
@@ -234,6 +235,8 @@ class HeadModelAngleReferenceTest(unittest.TestCase):
             head_corners=paper_only.corners, qr_corners=qr, marker_verified=True,
             model_profile=self.profile)
         self.assertFalse(rejected.accepted)
+        self.assertTrue(rejected.diagnostic_only)
+        self.assertFalse(rejected.requests_reconsideration)
         self.assertEqual(rejected.reason, "current_border_matches_verified_qr_panel")
         self.assertTrue(check_current_head_marker_boundary(cv2,
             head_corners=physical.corners, qr_corners=qr, marker_verified=True,

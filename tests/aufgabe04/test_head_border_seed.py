@@ -1,6 +1,5 @@
 """Independent 2D proposals never bypass current metric evidence gates."""
 
-from dataclasses import replace
 import math
 import unittest
 from unittest.mock import patch
@@ -18,11 +17,11 @@ from scripts.aufgabe04.perception.stand_axis.head_border_seed import (
 from scripts.aufgabe04.perception.stand_axis.model_pipeline import (
     estimate_stand_axis_from_metric_model,
 )
+from scripts.aufgabe04.perception.stand_axis.head_model_quality import validated_head_model_quality
 from scripts.aufgabe04.perception.stand_axis.model_profile import stand_model_from_payload
 from scripts.aufgabe04.perception.stand_axis.model_projection import project_stand_model
 from scripts.aufgabe04.perception.stand_axis.models import ImagePoint
 from scripts.aufgabe04.perception.stand_axis.qr_pose_seed import (
-    PlanarPoseResult,
     QrQuadDetection,
     RectifiedCameraMatrix,
     estimate_planar_pose_ippe,
@@ -104,57 +103,68 @@ class CurrentHeadProposalPipelineTest(unittest.TestCase):
                 cv2, self.frame if frame is None else frame, **self.options(**options),
             )
 
-    def test_current_qr_and_head_can_fit_without_initial_qr_pose(self):
+    def test_current_head_fits_once_without_any_qr_or_joint_pose(self):
         calls = []
 
         def solve(cv, image_points, model_points, camera, **kwargs):
             calls.append(len(image_points))
-            if len(calls) == 2:
-                return PlanarPoseResult(False, "pose_unavailable", (), None)
+            self.assertEqual(tuple(model_points), self.profile.head_corners)
             return estimate_planar_pose_ippe(cv, image_points, model_points, camera, **kwargs)
 
-        with patch(HEAD_FIT + "estimate_planar_pose_ippe", side_effect=solve):
+        with (
+            patch(HEAD_FIT + "estimate_planar_pose_ippe", side_effect=solve),
+            patch(PIPELINE + "estimate_planar_pose_ippe", side_effect=AssertionError("QR/joint pose forbidden")),
+            patch(PIPELINE + "collect_metric_model_diagnostics", side_effect=AssertionError("QR geometry forbidden")),
+        ):
             estimate, debug = self.evaluate()
-        self.assertEqual(calls, [4, 4, 8])
+        self.assertEqual(calls, [4])
         self.assertTrue(estimate.usable, estimate.reason)
         self.assertEqual(debug.model_pose_fit_source, "model_current_measured_head")
         self.assertEqual(debug.pose_seed_source, "current_head_proposal")
         self.assertTrue(debug.qr_marker_verified)
         self.assertAlmostEqual(estimate.yaw_deg, -25., delta=3.)
 
-    def test_current_head_seed_recovers_misaligned_qr_projection(self):
-        true_qr_pose = estimate_planar_pose_ippe(cv2, self.qr, self.profile.qr_corners, self.camera)
-        wrong_seed = replace(true_qr_pose.best, translation_xyz_m=(0.02, 0.0, 0.4))
-
-        def run(proposal):
-            first = True
-
-            def solve(cv, image_points, model_points, camera, **kwargs):
-                nonlocal first
-                if first:
-                    first = False
-                    return replace(true_qr_pose, hypotheses=(wrong_seed,))
-                return estimate_planar_pose_ippe(cv, image_points, model_points, camera, **kwargs)
-
-            with patch(PIPELINE + "estimate_planar_pose_ippe", side_effect=solve):
-                return self.evaluate(current_head_proposal_corners=proposal)
-
-        without, _ = run(None)
-        corrected, debug = run(self.head)
-        self.assertFalse(without.usable)
-        self.assertTrue(corrected.usable, corrected.reason)
-        self.assertEqual(debug.model_pose_fit_source, "model_current_measured_head")
-
-    def test_joint_inconsistency_is_diagnostic_for_independent_current_head(self):
+    def test_cold_and_proposed_heads_ignore_misaligned_qr_pixels(self):
         wrong_qr = tuple(ImagePoint(p.u_px + 18., p.v_px) for p in self.qr)
-        estimate, debug = self.evaluate(qr=wrong_qr)
-        self.assertTrue(estimate.usable, estimate.reason)
-        self.assertEqual(debug.model_pose_fit_source, "model_current_measured_head")
-        self.assertIsNotNone(debug.refined_corners)
-        self.assertLess(estimate.pose_reprojection_rmse_px, 2.)
-        self.assertGreater(debug.model_diagnostics.geometry_contract.joint_reprojection_rmse_px, 2.)
-        self.assertTrue(debug.model_diagnostics.head_only.accepted)
-        self.assertEqual(estimate.evidence_state, "fresh_refined")
+        for proposal in (None, self.head):
+            with (
+                self.subTest(proposal=proposal),
+                patch(PIPELINE + "estimate_planar_pose_ippe", side_effect=AssertionError("QR seed forbidden")),
+            ):
+                baseline, baseline_debug = self.evaluate(current_head_proposal_corners=proposal)
+                current, debug = self.evaluate(qr=wrong_qr, current_head_proposal_corners=proposal)
+                self.assertTrue(baseline.usable, baseline.reason)
+                self.assertTrue(current.usable, current.reason)
+                self.assertEqual(current.corners, baseline.corners)
+                self.assertEqual(current.yaw_deg, baseline.yaw_deg)
+                self.assertEqual(debug.model_pose, baseline_debug.model_pose)
+                self.assertEqual(debug.head_acquisition_diagnostics["source"],
+                                 "cold_current_head_search" if proposal is None else "current_candidate_proposal")
+
+    def test_qr_size_and_translation_do_not_trigger_joint_geometric_fitting(self):
+        baseline, _ = self.evaluate()
+        center = tuple(sum(getattr(p, field) for p in self.qr) / 4.
+                       for field in ("u_px", "v_px"))
+        for scale, du, dv in ((1., 18., 0.), (1.2, 0., 0.), (.8, -12., 9.)):
+            wrong_qr = tuple(ImagePoint(center[0] + (p.u_px-center[0])*scale + du,
+                                       center[1] + (p.v_px-center[1])*scale + dv) for p in self.qr)
+            with (
+                self.subTest(scale=scale, du=du, dv=dv),
+                patch(PIPELINE + "estimate_planar_pose_ippe", side_effect=AssertionError("QR/joint pose forbidden")),
+                patch(PIPELINE + "collect_metric_model_diagnostics", side_effect=AssertionError("QR geometry forbidden")),
+                patch(PIPELINE + "classify_joint_geometry_contract", side_effect=AssertionError("joint agreement forbidden")),
+            ):
+                estimate, debug = self.evaluate(qr=wrong_qr)
+                self.assertTrue(estimate.usable, estimate.reason)
+                self.assertEqual(estimate.corners, baseline.corners)
+                self.assertEqual(estimate.yaw_deg, baseline.yaw_deg)
+                self.assertTrue(validated_head_model_quality(debug.head_model_quality))
+                self.assertTrue(debug.head_model_quality.raw_corner_support_accepted)
+                self.assertTrue(debug.head_model_quality.outer_border_verified)
+                self.assertLess(estimate.pose_reprojection_rmse_px, 2.)
+                self.assertIsNone(debug.model_diagnostics)
+                self.assertIsNone(debug.head_marker_boundary)
+                self.assertEqual(estimate.evidence_state, "fresh_refined")
 
     def test_proposal_without_current_raw_borders_is_never_a_measurement(self):
         estimate, debug = self.evaluate(frame=np.zeros_like(self.frame))

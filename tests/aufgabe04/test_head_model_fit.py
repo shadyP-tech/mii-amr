@@ -12,7 +12,7 @@ except ImportError:  # pragma: no cover
 
 from scripts.aufgabe04.perception.stand_axis.head_model_quality import validated_head_model_quality
 from scripts.aufgabe04.perception.stand_axis.model_pipeline import estimate_stand_axis_from_metric_model
-from scripts.aufgabe04.perception.stand_axis.qr_pose_seed import PlanarPoseResult, estimate_planar_pose_ippe
+from scripts.aufgabe04.perception.stand_axis.qr_pose_seed import estimate_planar_pose_ippe
 from scripts.aufgabe04.qr_scanning.qr_observation import DecodedQrObservation
 from tests.aufgabe04 import test_geometry_contract as geometry_fixture
 
@@ -64,18 +64,25 @@ class IndependentHeadFitTest(unittest.TestCase):
         with patch(PIPELINE + "select_temporally_consistent_pose", side_effect=AssertionError("no history tie-break")):
             self.assert_same_head(*self.run_fit(pose_hint=wrong_hint))
 
-    def test_failed_qr_and_joint_diagnostics_cannot_replace_head_pose(self):
+    def test_only_current_head_points_are_solved_without_qr_or_joint_diagnostics(self):
         calls = []
 
         def solve(cv, points, model, camera, **kwargs):
             calls.append(len(points))
-            if len(calls) == 1:
-                return estimate_planar_pose_ippe(cv, points, model, camera, **kwargs)
-            return PlanarPoseResult(False, "diagnostic_fit_unavailable", (), None)
+            self.assertEqual(tuple(model), self.fixture.profile.head_corners)
+            return estimate_planar_pose_ippe(cv, points, model, camera, **kwargs)
 
-        with patch(HEAD_FIT + "estimate_planar_pose_ippe", side_effect=solve):
-            self.assert_same_head(*self.run_fit())
-        self.assertEqual(calls, [4, 4, 8])
+        with (
+            patch(HEAD_FIT + "estimate_planar_pose_ippe", side_effect=solve),
+            patch(PIPELINE + "estimate_planar_pose_ippe", side_effect=AssertionError("QR/joint pose forbidden")),
+            patch(PIPELINE + "collect_metric_model_diagnostics", side_effect=AssertionError("QR geometry forbidden")),
+            patch(PIPELINE + "classify_joint_geometry_contract", side_effect=AssertionError("joint agreement forbidden")),
+        ):
+            estimate, debug = self.run_fit()
+            self.assert_same_head(estimate, debug)
+            self.assertIsNone(debug.model_diagnostics)
+            self.assertIsNone(debug.head_marker_boundary)
+        self.assertEqual(calls, [4])
 
     def test_current_crop_acquires_neutral_head_before_any_qr_or_pose(self):
         with patch(PIPELINE + "detect_qr_quad", return_value=None):

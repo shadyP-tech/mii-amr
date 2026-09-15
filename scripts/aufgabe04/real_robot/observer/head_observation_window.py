@@ -71,8 +71,7 @@ def current_head_window_input(estimate, debug, *, frame_stamp_sec, camera_signat
         return None
     if not current_head_boundary_eligible(estimate, debug):
         return None
-    if estimate.reason in {"current_border_matches_verified_qr_panel",
-                           "current_physical_head_boundary_unresolved"}:
+    if estimate.reason == "current_physical_head_boundary_unresolved":
         return None
     hypotheses = tuple(h for h in (getattr(debug, "head_pose_hypotheses", None) or ())
                        if h.positive_depth and math.isfinite(h.reprojection_rmse_px)
