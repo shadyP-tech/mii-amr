@@ -15,7 +15,10 @@ from scripts.aufgabe04.perception.stand_axis.geometry import (
 )
 from scripts.aufgabe04.perception.stand_axis.head_model_quality import MIN_HEAD_EDGE_PX
 from scripts.aufgabe04.perception.stand_axis.head_proposal import (
-    HeadProposalResult, _extent, _proposal, _same_head,
+    HeadProposalResult, _extent, _proposal,
+)
+from scripts.aufgabe04.perception.stand_axis.head_proposal_selection import (
+    rank_current_head_hypotheses, select_verified_head, uncovered_head_hypotheses,
 )
 from scripts.aufgabe04.perception.stand_axis.model_refinement import refine_projected_head_border
 from scripts.aufgabe04.perception.stand_axis.models import ImagePoint
@@ -27,6 +30,7 @@ MAX_RAILS_PER_DIRECTION = 24
 MAX_LOCATOR_HYPOTHESES = 256
 MAX_RAW_VERIFICATIONS = 12
 MAX_HEAD_IMAGE_AREA_FRACTION = .80
+MIN_LOCATOR_BORDER_SUPPORT = .80
 _LOCATOR = "cold_current_borders"
 
 
@@ -129,12 +133,6 @@ def _rail_endpoint_hints(cv2, gray, raw_edges):
     return tuple(hints), tuple(map(len, groups))
 
 
-def _nested(first, second):
-    # Only near-duplicate rails or measured-size inset alternatives can be one
-    # head. Arbitrary containment could let a room panel swallow a real stand.
-    return _same_head(first, second)
-
-
 def acquire_cold_head_proposal(
     cv2, frame_bgr, *, raw_edges=None, edge_preprocess="channel_union",
     canny_low=20, canny_high=60,
@@ -143,8 +141,8 @@ def acquire_cold_head_proposal(
 
     Contours and line hints locate, but never certify, boundaries. A clipped or
     open rectangle cannot become a measurement through locator interpolation.
-    Work-budget exhaustion remains unresolved rather than selecting a first or
-    largest stand before competing current hypotheses have been verified.
+    Current corner evidence and border families allocate the fixed work budget.
+    Unverified independent families remain unresolved on budget exhaustion.
     """
     import numpy as np
 
@@ -154,6 +152,7 @@ def acquire_cold_head_proposal(
         "max_locator_hypotheses": MAX_LOCATOR_HYPOTHESES,
         "max_raw_verifications": MAX_RAW_VERIFICATIONS,
         "max_head_image_area_fraction": MAX_HEAD_IMAGE_AREA_FRACTION,
+        "min_locator_border_support": MIN_LOCATOR_BORDER_SUPPORT,
         "angle_authorized": False, "motion_authorized": False,
         "selection": "unavailable", "strict_verifications": [],
     }
@@ -204,7 +203,10 @@ def acquire_cold_head_proposal(
         pixels = np.rint(points[:, None, :] + fractions[None, :, None]
                          * (np.roll(points, -1, axis=0) - points)[:, None, :]).astype(np.int32)
         support = np.mean(distance[pixels[:, :, 1], pixels[:, :, 0]] <= 4., axis=1)
-        if min(support) < .50:
+        # Long paired hints can bridge separate texture boxes. Each of the
+        # four borders must already be substantially present, rather than
+        # relying on the downstream mean support to hide a missing interval.
+        if min(support) < MIN_LOCATOR_BORDER_SUPPORT:
             continue
         key = tuple(round(value / 2.) for value in points.ravel())
         score = .70 * float(min(support)) + .30 * float(np.mean(support))
@@ -222,11 +224,11 @@ def acquire_cold_head_proposal(
     for item in ranked:
         if not any(max(_distance(a, b) for a, b in zip(item[1], other[1])) < 3. for other in unique):
             unique.append(item)
-    if len(unique) > MAX_RAW_VERIFICATIONS:
-        diagnostics["distinct_locator_hypotheses"] = len(unique)
-        return result("head_cold_acquisition_verification_budget_exceeded")
+    diagnostics["distinct_locator_hypotheses"] = len(unique)
+    ordered, ranking = rank_current_head_hypotheses(cv2, raw_edges, unique)
+    diagnostics.update(ranking)
     accepted = []
-    for score, corners, locator in unique:
+    for score, corners, locator in ordered[:MAX_RAW_VERIFICATIONS]:
         measured = refine_projected_head_border(cv2, raw_edges, corners, corridor_half_width_px=4.)
         diagnostics["strict_verifications"].append({
             "locator": locator, "score": score, "accepted": measured.accepted,
@@ -238,12 +240,10 @@ def acquire_cold_head_proposal(
         if measured.accepted:
             _width, height, center = _extent(measured.corners)
             accepted.append(_proposal(measured, raw_edges.shape, expected_height=height, expected_center=center))
-    if not accepted:
-        return result("head_proposal_unavailable")
-    selected = max(accepted, key=lambda proposal: _polygon_area(proposal.corners))
-    if any(not _nested(selected, other) for other in accepted):
-        diagnostics["selection"] = "distinct_current_heads_ambiguous"
-        return result("head_proposal_ambiguous")
-    diagnostics["selection"] = "maximal_verified_current_head"
-    diagnostics["selected_corners"] = [(p.u_px, p.v_px) for p in selected.corners]
-    return result("current_head_proposal", selected)
+    uncovered = uncovered_head_hypotheses(ordered[MAX_RAW_VERIFICATIONS:], accepted)
+    diagnostics["unverified_independent_hypotheses"] = len(uncovered)
+    if uncovered:
+        return result("head_cold_acquisition_verification_budget_exceeded")
+    selected, reason, selection = select_verified_head(cv2, accepted)
+    diagnostics.update(selection)
+    return result(reason, selected)

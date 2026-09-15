@@ -58,6 +58,7 @@ from scripts.aufgabe04.perception.stand_axis.model_pipeline import (
     estimate_stand_axis_from_metric_model,
 )
 from scripts.aufgabe04.perception.stand_axis.model_input_cache import MetricModelInputCache
+from scripts.aufgabe04.perception.stand_axis.current_image_head_fit import CurrentImageHeadFit
 from scripts.aufgabe04.perception.stand_axis.pose_tracking import (
     MetricPoseTracker,
 )
@@ -1374,6 +1375,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 attempt_roi.y0 : attempt_roi.y1,
                 attempt_roi.x0 : attempt_roi.x1,
             ]
+            current_image_head_fit = CurrentImageHeadFit()
             def fit(qr_observations):
                 return estimate_stand_axis_from_metric_model(
                     self.cv2,
@@ -1404,6 +1406,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                     input_cache=model_input_cache,
                     input_cache_roi=(attempt_roi.x0, attempt_roi.y0, attempt_roi.x1, attempt_roi.y1),
                     current_head_proposal_corners=current_head_proposal_corners,
+                    current_image_head_fit=current_image_head_fit,
                 )
 
             attempt_estimate, attempt_debug, qr_observations, qr_metadata = evaluate_roi_with_qr_acquisition(
@@ -1414,7 +1417,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 full_decoder=lambda crop, limit, provenance: detect_qr_observations_bgr(
                     crop, self.cv2, diagnostics=provenance, max_elapsed_sec=limit,
                 ),
-                estimate=fit, now=time.monotonic,
+                estimate=fit, now=time.monotonic, current_image_head_fit=current_image_head_fit,
             )
             return HeadRoiEvaluation(
                 attempt=attempt,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from scripts.aufgabe04.perception.stand_axis.current_image_head_fit import CurrentImageHeadFit
 from scripts.aufgabe04.perception.stand_axis.geometry_contract import (
     classify_joint_geometry_contract,
 )
@@ -79,6 +80,7 @@ def estimate_stand_axis_from_metric_model(
     input_cache: MetricModelInputCache | None = None,
     input_cache_roi: RoiBounds | None = None,
     current_head_proposal_corners: tuple[ImagePoint, ...] | None = None,
+    current_image_head_fit: CurrentImageHeadFit | None = None,
 ) -> tuple[StandAxisImageEstimate, StandAxisEdgeDebugArtifacts]:
     """Fit physical head angles from current pixels independently of QR.
 
@@ -87,7 +89,9 @@ def estimate_stand_axis_from_metric_model(
     from current head borders with independent ambiguity and uncertainty gates.
     QR is used only for identity and front/back marker evidence in this path.
     The noncommittable/provisional legacy diagnostic path remains separate.
-    An exact-image cache reuses preprocessing, never geometry or old angles.
+    An exact-image cache reuses preprocessing. The optional one-use physical
+    fit holder lets QR recovery redecorate this exact crop's current geometry;
+    it never retains a classified result or supplies an angle to another image.
     """
 
     timing = ModelStageTiming()
@@ -115,20 +119,42 @@ def estimate_stand_axis_from_metric_model(
             canny_low=canny_low, canny_high=canny_high,
         )
 
-    raw_edges = (preprocess_edges() if cached_inputs is None else
+    def current_edges():
+        edges = (preprocess_edges() if cached_inputs is None else
                  cached_inputs.compute("edge_preprocessing", preprocess_edges))
-    timing.mark("edge_preprocessing")
+        timing.mark("edge_preprocessing")
+        return edges
+
     physical_head = bool(model_profile.committable and model_profile.environment == "physical")
     head_result = None
     if physical_head:
-        head_result = fit_physical_head_in_frame(
-            cv2, frame, raw_edges, model_profile=model_profile, camera=camera, timing=timing,
-            current_head_proposal_corners=head_proposal, pose_hint=pose_hint,
-            expected_head_center_u_px=expected_head_center_u_px,
-            expected_head_center_v_px=expected_head_center_v_px,
-            expected_head_height_px=expected_head_height_px,
-            max_reprojection_rmse_px=max_reprojection_rmse_px,
-            min_edge_height_px=min_edge_height_px)
+        def fit_current_head():
+            edges = current_edges()
+            result = fit_physical_head_in_frame(
+                cv2, frame, edges, model_profile=model_profile, camera=camera, timing=timing,
+                current_head_proposal_corners=head_proposal, pose_hint=pose_hint,
+                expected_head_center_u_px=expected_head_center_u_px,
+                expected_head_center_v_px=expected_head_center_v_px,
+                expected_head_height_px=expected_head_height_px,
+                max_reprojection_rmse_px=max_reprojection_rmse_px,
+                min_edge_height_px=min_edge_height_px)
+            return edges, result
+
+        if current_image_head_fit is None:
+            raw_edges, head_result = fit_current_head()
+        else:
+            raw_edges, head_result = current_image_head_fit.compute(
+                frame, context=(
+                    id(cv2), model_profile, camera, pose_hint, head_proposal, input_cache_roi,
+                    edge_preprocess, blur_kernel, canny_low, canny_high,
+                    expected_head_center_u_px, expected_head_center_v_px,
+                    expected_head_height_px, max_reprojection_rmse_px, min_edge_height_px,
+                    backside_target_crop_horizontal_half_width_ratio,
+                ), producer=fit_current_head)
+            if current_image_head_fit.reused:
+                timing.mark("current_image_head_geometry_reuse")
+    else:
+        raw_edges = current_edges()
     if qr_observations is not None:
         if any(not isinstance(item, DecodedQrObservation) for item in qr_observations):
             raise ValueError("metric model QR observations have an invalid type")

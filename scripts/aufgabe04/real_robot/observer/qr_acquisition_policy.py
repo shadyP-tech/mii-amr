@@ -135,19 +135,21 @@ def merge_current_qr_observations(native, acquired):
 
 def evaluate_roi_with_qr_acquisition(
     *, frame, roi, roi_source, cache, budget, native_decoder, full_decoder,
-    estimate, now,
+    estimate, now, current_image_head_fit=None,
 ):
     """Keep current geometry fast, then recover this frame's own QR if needed.
 
     Decoder callbacks and the metric estimator are injected. The estimator is
-    rerun on these same pixels only when acquisition adds new QR evidence;
-    geometry and QR identity never migrate between images or crop coordinates.
+    refreshed on these same pixels only when acquisition adds new QR evidence.
+    A one-use physical-head holder can preserve its undecorated geometry while
+    marker and side evidence are refreshed; legacy estimators still rerun.
     """
     native = cache.decode(roi=roi, mode="native", frame=frame, decoder=native_decoder)
     native_observations = native.observations
     started = now()
     result, debug = estimate(native_observations)
     first_fit_ms = (now() - started) * 1000.
+    first_timings = dict(debug.stage_timings_ms or {})
     decision = budget.request(
         roi=roi, roi_source=roi_source, now_monotonic_sec=now(),
         current_qr_signal=bool(native_observations) or debug.qr_detected or debug.qr_marker_verified,
@@ -159,6 +161,8 @@ def evaluate_roi_with_qr_acquisition(
     metadata = native.metadata()
     qr_elapsed_ms = native.elapsed_ms
     repeated_fit = False
+    geometry_reused = False
+    refreshed = False
     if decision.allowed:
         provenance = {}
         if decision.cache_only and budget._full_result is not None:
@@ -177,12 +181,19 @@ def evaluate_roi_with_qr_acquisition(
         qr_elapsed_ms += acquired.elapsed_ms
         if observations != native_observations:
             result, debug = estimate(observations)
-            repeated_fit = True
+            refreshed = True
+            geometry_reused = bool(current_image_head_fit is not None and current_image_head_fit.reused)
+            repeated_fit = not geometry_reused
     timings = dict(debug.stage_timings_ms or {})
-    if repeated_fit:
+    if geometry_reused:
+        # Keep the current head's acquisition diagnostics while charging its
+        # work once and the subsequent marker refresh at its actual duration.
+        timings = {**first_timings, **timings}
+    if refreshed:
         timings["initial_geometry_pass_ms"] = first_fit_ms
         timings["total"] = timings.get("total", 0.) + first_fit_ms
     timings["qr_identity"] = qr_elapsed_ms
     metadata.update(elapsed_ms=qr_elapsed_ms, acquisition=decision.metadata(),
-                    current_image_geometry_refit=repeated_fit)
+                    current_image_geometry_refit=repeated_fit,
+                    current_image_geometry_reused=geometry_reused)
     return result, replace(debug, stage_timings_ms=timings), observations, metadata
