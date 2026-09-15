@@ -15,7 +15,7 @@ from scripts.aufgabe04.perception.stand_axis.models import ImagePoint, StandAxis
 from scripts.aufgabe04.perception.stand_axis.qr_pose_seed import RectifiedCameraMatrix
 from scripts.aufgabe04.perception.stand_axis_consensus import axis_conditioning
 from scripts.aufgabe04.real_robot.observer.axis_sample_policy import admit_axis_sample
-from tests.aufgabe04.test_head_model_admission import head_estimate, quality
+from tests.aufgabe04.test_head_model_admission import head_estimate, quality, outer_boundary
 
 
 def classified_head(*, yaw_deg=37.815, u=80., v=80., height=90., profile_sha256="a" * 64,
@@ -28,6 +28,7 @@ def classified_head(*, yaw_deg=37.815, u=80., v=80., height=90., profile_sha256=
         edges=None, model_pose_fit_source=estimate.source, evidence_state="fresh_refined",
         model_measurement_status="measured", model_profile_sha256=profile_sha256,
         head_model_quality=quality(profile_sha256=profile_sha256),
+        head_outer_recovery=outer_boundary(corners, profile_sha256),
         head_neck_junction=HeadNeckJunction(True, "head_neck_junction_verified"),
         qr_detected=qr_detected, qr_marker_verified=qr_marker_verified,
     )

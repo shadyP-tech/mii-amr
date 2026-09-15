@@ -95,10 +95,22 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
                 evidence_state="fresh_refined", model_measurement_status="measured",
                 model_profile_sha256=adapter.stand_model_profile.sha256,
                 head_model_quality=quality, qr_detected=bool(options["qr_observations"]),
+                head_outer_recovery=head_fixtures.outer_boundary(
+                    corners, adapter.stand_model_profile.sha256),
                 qr_marker_verified=bool(options["qr_observations"]),
                 model_pose=PlanarPoseHypothesis((0., -.66, 0.), (0., 0., .6),
                                                (-.61, 0., .79), 37.815, .457, True),
             )
+            if scenario == "panel_then_recovery" and current_index[0] == 6:
+                estimate = replace(estimate, usable=False, yaw_deg=None,
+                    evidence_state="unobservable", reason="current_physical_head_boundary_unresolved")
+                debug = replace(debug, model_pose=None,
+                    head_outer_recovery=replace(debug.head_outer_recovery, accepted=False,
+                        reason="current_physical_head_boundary_unresolved"),
+                    head_model_quality=replace(quality, accepted=False, outer_border_verified=False,
+                        reason="current_physical_head_boundary_unresolved"),
+                    head_pose_hypotheses=(PlanarPoseHypothesis(
+                        (0., 0., 0.), (0., 0., .5), (0., 0., 1.), -16.121, .2, True),))
             return estimate, debug
 
         def locate(_cv2, _crop, **options):
@@ -137,6 +149,10 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
                     "scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_head_proposal",
                     side_effect=locate,
                 ))
+            if scenario == "panel_then_recovery":
+                stack.enter_context(patch(
+                    "scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_head_proposal",
+                    return_value=HeadProposalResult(None, "head_proposal_unavailable")))
             backside = stack.enter_context(patch(module + "build_backside_axis_observation"))
             sensor_tuple = adapter._next_sensor_tuple.return_value
             if shifted:
@@ -146,7 +162,7 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
                 sensor_tuple.scan.value.ranges = (3.,) * 5
             if scenario == "ambiguous_lidar":
                 sensor_tuple.scan.value.ranges = (.6, .6, float("inf"), .6, .6)
-            for index in range(7):
+            for index in range(8 if scenario == "panel_then_recovery" else 7):
                 current_index[0] = index
                 stamp = 100. + index * .2
                 fixture.clock_sec = stamp + .1
@@ -159,6 +175,11 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
                 if index:
                     adapter.tf_retry_scheduler.offer(sensor_tuple, stamp_sec=stamp)
                 adapter._process_latest()
+                if scenario == "panel_then_recovery" and index == 6:
+                    self.assertFalse(adapter.completed)
+                    self.assertFalse(output.exists())
+                    self.assertEqual(adapter._last_observation_update.snapshot.current_axis_sample_count, 6)
+                    self.assertIsNone(adapter._head_window_decision)
             backside.assert_not_called()
             self.assertFalse(adapter.args.axis_observation_json.exists())
             payload = json.loads(output.read_text()) if output.exists() else None
@@ -175,6 +196,15 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
         self.assertEqual(measurement["head_model_quality"]["pose_model"], "measured_head_only")
         self.assertFalse(measurement["sample_admission"]["qr_bound_model_fallback"])
         self.assertAlmostEqual(abs(measurement["sample_admission"]["yaw_rad"]), math.radians(37.815))
+        self.assertEqual(adapter._last_observation_update.resolved_qr_id, "QR_003")
+
+    def test_qr_front_head_survives_rejected_panel_and_commits_on_fresh_seventh_fit(self):
+        adapter, payload = self.run_view("panel_then_recovery")
+        self.assertTrue(adapter.completed)
+        self.assertEqual(payload["axis"]["sample_count"], 7)
+        self.assertEqual(payload["axis_measurement"]["source"], MEASURED_HEAD_AXIS_SOURCE)
+        self.assertEqual(adapter._head_window_decision.sample_count, 7)
+        self.assertNotIn(101.2, adapter._head_window_decision.window_stamps_sec)
         self.assertEqual(adapter._last_observation_update.resolved_qr_id, "QR_003")
 
     def test_head_axis_cannot_certify_a_face_from_missing_unbound_or_historical_qr(self):

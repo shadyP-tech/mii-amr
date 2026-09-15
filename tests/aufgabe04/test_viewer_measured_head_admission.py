@@ -59,7 +59,7 @@ class MeasuredHeadViewerTests(unittest.TestCase):
             self.assertFalse(current_head_quality_ready(head, debug))
             self.assertFalse(self.admission(head, debug).accepted)
 
-    def test_overlay_labels_obsolete_fit_without_changing_purple_model_style(self):
+    def test_overlay_labels_current_single_fit_and_gray_obsolete_result(self):
         profile = load_stand_model(Path("configs/aufgabe04/stand_models/physical_stand_measured_20260826_v2.json"))
         for fresh in (True, False):
             rows = []
@@ -71,13 +71,15 @@ class MeasuredHeadViewerTests(unittest.TestCase):
             )
             joined = " ".join(row[0] for row in rows)
             self.assertIn("pixel_model_yaw_std=1.46deg", joined)
+            self.assertIn("scope=single_frame_fit", joined)
             if fresh:
+                self.assertIn("overlay=current_head_fit", joined)
                 self.assertIn("current_head_yaw=44.2deg", joined)
                 self.assertEqual(rows[0][1]["color"], (0, 255, 0))
             else:
                 self.assertIn("model=obsolete_result", joined)
                 self.assertNotIn("current_head_yaw=", joined)
-                self.assertEqual(rows[0][1]["color"], (255, 0, 255))
+                self.assertEqual(rows[0][1]["color"], (150, 150, 150))
 
     def test_classified_backside_displays_high_angle_without_face_export(self):
         for yaw in (44.2, 60.):
@@ -135,7 +137,8 @@ class MeasuredHeadViewerTests(unittest.TestCase):
             joined = " ".join(row[0] for row in rows)
             self.assertEqual("current_head_yaw=44.2deg" in joined, expected_current)
             self.assertEqual(rows[0][1]["color"],
-                             (0, 255, 0) if expected_current else (255, 0, 255))
+                             (0, 255, 0) if expected_current else
+                             (150, 150, 150) if not fresh else (0, 120, 255))
             self.assertIn("model=fresh_backside" if fresh else "model=obsolete_result", joined)
 
 

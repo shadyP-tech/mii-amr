@@ -29,6 +29,7 @@ from scripts.aufgabe04.real_robot.candidate.inspection_execution import (
 )
 from tests.aufgabe04 import test_camera_observer_processing as processing_fixture
 from tests.aufgabe04.test_head_backside_classification import classified_head
+from tests.aufgabe04.test_head_model_admission import outer_boundary
 
 
 class MeasuredBacksideObserverHandoffTests(unittest.TestCase):
@@ -64,13 +65,29 @@ class MeasuredBacksideObserverHandoffTests(unittest.TestCase):
                 estimate = replace(estimate, corners=tuple(
                     ImagePoint(p.u_px + (4 if n in (1, 2) else 0), p.v_px)
                     for n, p in enumerate(estimate.corners)))
-            if scenario in ("ambiguous_pose", "ambiguous_front") and index[0] == 6:
-                estimate = replace(estimate, usable=False, yaw_deg=None, evidence_state="unobservable")
+                debug = replace(debug, head_outer_recovery=outer_boundary(
+                    estimate.corners, estimate.model_profile_sha256))
+            if scenario in ("rejected_panel", "panel_then_recovery", "verified_panel_marker") and index[0] == 6:
+                estimate = replace(estimate, usable=False, yaw_deg=None, evidence_state="unobservable",
+                    reason="current_physical_head_boundary_unresolved")
                 debug = replace(debug,
-                    head_model_quality=replace(debug.head_model_quality, accepted=False, axis_ambiguous=True),
+                    head_outer_recovery=replace(debug.head_outer_recovery, accepted=False,
+                        reason="current_physical_head_boundary_unresolved"),
+                    head_model_quality=replace(debug.head_model_quality, accepted=False,
+                        reason="current_physical_head_boundary_unresolved"),
+                    head_pose_hypotheses=(PlanarPoseHypothesis(
+                        (0., 0., 0.), (0., 0., .5), (0., 0., 1.), -16.121, .2, True),),
+                    qr_detected=scenario == "verified_panel_marker",
+                    qr_marker_verified=scenario == "verified_panel_marker")
+            if scenario in ("ambiguous_pose", "ambiguous_front") and index[0] == 6:
+                estimate = replace(estimate, usable=False, yaw_deg=None, evidence_state="unobservable",
+                                   reason="head_model_planar_axis_ambiguous")
+                debug = replace(debug,
+                    head_model_quality=replace(debug.head_model_quality, accepted=False, axis_ambiguous=True,
+                                               reason="head_model_planar_axis_ambiguous"),
                     head_pose_hypotheses=tuple(PlanarPoseHypothesis(
                         (0., 0., 0.), (0., 0., .5), (0., 0., 1.), yaw, residual, True)
-                        for yaw, residual in ((-7., .2), (7., .25))))
+                        for yaw, residual in ((-7., .2), (7., .6))))
             return classify_current_head_backside(estimate, debug, **classification_options)
 
         def delayed_debug(*_args, **_kwargs):
@@ -109,7 +126,8 @@ class MeasuredBacksideObserverHandoffTests(unittest.TestCase):
                 "estimate_stand_axis_from_metric_model": dict(side_effect=metric),
             }.items():
                 stack.enter_context(patch(module + name, **opts))
-            for count in range(9 if "marker" in scenario else 7):
+            frame_count = 8 if scenario == "panel_then_recovery" else 9 if "marker" in scenario else 7
+            for count in range(frame_count):
                 index[0] = count
                 if scenario == "fragmented_scan" and count == 6:
                     sensor.scan.value.ranges = (.6, .6, math.nan, .6, .6)
@@ -217,6 +235,32 @@ class MeasuredBacksideObserverHandoffTests(unittest.TestCase):
             proof = registration["witnessed_fragmentation"]
             self.assertEqual(len(proof["witnesses"]), 3)
             self.assertEqual(proof["persistent_target_count"], 1)
+
+    def test_rejected_panel_preserves_six_samples_but_needs_a_new_valid_seventh(self):
+        with TemporaryDirectory() as directory:
+            adapter = self.observe(Path(directory), "rejected_panel")
+            self.assertFalse(adapter.completed)
+            self.assertFalse(adapter.args.axis_observation_json.exists())
+            update = adapter._last_observation_update
+            self.assertFalse(update.axis_sample_accepted)
+            self.assertEqual(update.snapshot.current_axis_sample_count, 6)
+            self.assertIsNone(adapter._head_window_decision)  # No review of non-head pixels.
+        with TemporaryDirectory() as directory:
+            adapter = self.observe(Path(directory), "panel_then_recovery")
+            self.assertTrue(adapter.completed)
+            receipt = load_backside_axis_observation(adapter.args.axis_observation_json)
+            self.assertEqual(receipt.axis_sample_count, 7)
+            self.assertEqual(adapter._head_window_decision.sample_count, 7)
+            self.assertNotIn(101.2, adapter._head_window_decision.window_stamps_sec)
+
+    def test_verified_marker_on_rejected_panel_still_poisons_backside_epoch(self):
+        with TemporaryDirectory() as directory:
+            adapter = self.observe(Path(directory), "verified_panel_marker")
+            self.assertFalse(adapter.completed)
+            self.assertTrue(adapter._qr_marker_seen_in_stationary_epoch)
+            self.assertFalse(adapter.args.axis_observation_json.exists())
+            self.assertEqual(adapter._last_observation_update.snapshot.current_axis_sample_count_by_source.get(
+                REGISTERED_BACKSIDE_AXIS_SAMPLE_SOURCE, 0), 0)
 
 
 if __name__ == "__main__":

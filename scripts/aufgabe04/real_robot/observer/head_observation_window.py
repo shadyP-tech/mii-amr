@@ -3,7 +3,11 @@
 from dataclasses import dataclass
 import math
 
-from scripts.aufgabe04.perception.stand_axis.head_model_quality import MEASURED_HEAD_AXIS_SOURCE
+from scripts.aufgabe04.perception.stand_axis.head_model_quality import (
+    HeadModelQuality, MEASURED_HEAD_AXIS_SOURCE, MIN_HEAD_EDGE_PX,
+    MAX_HEAD_REPROJECTION_RMSE_PX, MIN_HEAD_CORNER_SIGMA_PX, validated_head_model_quality,
+)
+from scripts.aufgabe04.perception.stand_axis.head_outer_border import current_head_boundary_eligible
 from scripts.aufgabe04.real_robot.observer.contract import (
     BACKSIDE_AXIS_SAMPLE_SOURCE, REGISTERED_BACKSIDE_AXIS_SAMPLE_SOURCE,
 )
@@ -29,27 +33,62 @@ class CurrentHeadWindowInput:
 
 def current_head_window_input(estimate, debug, *, frame_stamp_sec, camera_signature,
                               roi, projected_center_px, expected_head_height_px):
-    """Keep all independently plausible current IPPE solutions as veto input."""
-    quality = debug.head_model_quality
+    """Compare eligible physical heads, including their planar ambiguity.
+
+    Raw-supported paper/panel corners are not alternative measurements of the
+    physical head. Retained diagnostic IPPE poses cannot promote those rejected
+    boundaries into this window or clear earlier valid head-angle evidence.
+    """
+    quality = getattr(debug, "head_model_quality", None)
     if (debug.model_pose_fit_source != MEASURED_HEAD_AXIS_SOURCE
-            or quality is None or quality.raw_corner_support_accepted is not True
+            or estimate.source not in MEASURED_HEAD_SOURCES
+            or estimate.evidence_state == "predicted_only"
+            or debug.evidence_state == "predicted_only"
+            or estimate.model_measurement_status != "measured"
+            or debug.model_measurement_status != "measured"
+            or not isinstance(quality, HeadModelQuality)
+            or not estimate.model_profile_sha256
+            or quality.profile_sha256 != estimate.model_profile_sha256
+            or debug.model_profile_sha256 != estimate.model_profile_sha256
+            or quality.raw_corner_support_accepted is not True
             or quality.outer_border_verified is not True
             or quality.raw_border_support_mean is None
             or not .60 <= quality.raw_border_support_mean <= 1.
             or estimate.corners is None or len(estimate.corners) != 4):
         return None
-    hypotheses = tuple(h for h in (debug.head_pose_hypotheses or ())
+    accepted_head = validated_head_model_quality(quality)
+    ambiguous_head = bool(
+        quality.accepted is False and quality.axis_ambiguous is True
+        and quality.reason == "head_model_planar_axis_ambiguous"
+        and quality.pose_model == "measured_head_only"
+        and quality.face_semantics == "undirected_plane"
+        and quality.minimum_edge_length_px is not None
+        and math.isfinite(quality.minimum_edge_length_px)
+        and quality.minimum_edge_length_px >= MIN_HEAD_EDGE_PX
+        and quality.reprojection_rmse_px is not None
+        and 0. <= quality.reprojection_rmse_px <= MAX_HEAD_REPROJECTION_RMSE_PX)
+    if not accepted_head and not ambiguous_head:
+        return None
+    if not current_head_boundary_eligible(estimate, debug):
+        return None
+    if estimate.reason in {"current_border_matches_verified_qr_panel",
+                           "current_physical_head_boundary_unresolved"}:
+        return None
+    hypotheses = tuple(h for h in (getattr(debug, "head_pose_hypotheses", None) or ())
                        if h.positive_depth and math.isfinite(h.reprojection_rmse_px)
                        and 0 <= h.reprojection_rmse_px <= 2. and math.isfinite(h.yaw_deg))
     best_residual = min((h.reprojection_rmse_px for h in hypotheses), default=math.inf)
+    # Match the producer's ambiguity neighborhood. Diagnostic alternatives
+    # may veto older head angles; they never authorize a current measurement.
+    residual_gap = max(MIN_HEAD_CORNER_SIGMA_PX, quality.reprojection_rmse_px) if ambiguous_head else .10
     plausible = tuple(math.radians(h.yaw_deg) for h in hypotheses
-                      if h.reprojection_rmse_px <= best_residual + .10)
+                      if h.reprojection_rmse_px <= best_residual + residual_gap)
     yaw = estimate.yaw_deg
     if type(yaw) in (int, float) and math.isfinite(yaw) and estimate.usable:
         current = math.radians(yaw)
-    elif plausible:
-        # A rejected pose remains diagnostic only; its alternatives can veto
-        # old angles, but the caller still records no current axis for it.
+    elif ambiguous_head and plausible:
+        # Only ambiguity of a physical head may veto old angles. It remains
+        # diagnostic and the caller still records no current axis for it.
         current = plausible[0]
     else:
         return None

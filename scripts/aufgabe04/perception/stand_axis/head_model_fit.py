@@ -65,6 +65,7 @@ def fit_current_measured_head(
     refinement, outer_recovery = select_current_outer_head_border(
         cv2, raw_edges, model_profile=model_profile, refinement=refinement,
         corridor_half_width_px=seed.corridor_half_width_px,
+        neutral_proposal_corners=seed.corners,
     )
     corners = refinement.corners
     pose = None
@@ -81,7 +82,8 @@ def fit_current_measured_head(
         centered_neck_supported=False, neck_junction_verified=False,
         outer_border_verified=outer_recovery.accepted,
     )
-    reason = quality.reason if refinement.accepted else refinement.reason
+    reason = (refinement.reason if not refinement.accepted else
+              outer_recovery.reason if not outer_recovery.accepted else quality.reason)
     estimate = replace(
         _unusable(reason, corners=corners,
                   contour_area_px=0.0 if corners is None else _polygon_area(corners),

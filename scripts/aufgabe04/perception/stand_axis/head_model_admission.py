@@ -6,6 +6,7 @@ import math
 from scripts.aufgabe04.perception.stand_axis.head_model_quality import (
     MEASURED_HEAD_AXIS_SOURCE, validated_head_model_quality,
 )
+from scripts.aufgabe04.perception.stand_axis.head_outer_border import current_head_boundary_eligible
 from scripts.aufgabe04.perception.stand_axis.head_backside_classification import (
     is_classified_measured_head_backside,
 )
@@ -64,4 +65,6 @@ def admit_measured_head_model(*, estimate, debug, yaw_rad: float) -> HeadModelAd
     if (not validated_head_model_quality(quality)
             or quality.profile_sha256 != estimate.model_profile_sha256):
         return HeadModelAdmission(False, "measured_head_quality_rejected")
+    if not current_head_boundary_eligible(estimate, debug):
+        return HeadModelAdmission(False, "measured_head_physical_boundary_rejected")
     return HeadModelAdmission(True, "measured_head_geometry_quality_accepted", quality.yaw_std_deg)

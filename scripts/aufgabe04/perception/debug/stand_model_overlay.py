@@ -5,7 +5,9 @@ from __future__ import annotations
 import math
 
 from scripts.aufgabe04.perception.debug.text_overlay import OverlayTextCursor
-from scripts.aufgabe04.perception.debug.viewer_axis_admission import current_axis_evidence_ready
+from scripts.aufgabe04.perception.debug.viewer_model_overlay_policy import (
+    ModelOverlayState, current_model_overlay_state,
+)
 from scripts.aufgabe04.artifacts.backside_axis_observation import BACKSIDE_AXIS_SAMPLE_SOURCE
 from scripts.aufgabe04.perception.stand_axis.model_profile import StandModelProfile
 from scripts.aufgabe04.perception.stand_axis.head_model_quality import (
@@ -55,7 +57,14 @@ def annotate_model_prediction(
         (round(point.u_px + x_offset), round(point.v_px + y_offset))
         for point in corners
     ]
-    draw_dashed_polygon(cv2, frame, points, (255, 0, 255), 1)
+    # A locator prediction is not the current measured model. Keep its color
+    # distinct even if an accepted fit is also drawn in this same image.
+    color = (0, 190, 255)
+    draw_dashed_polygon(cv2, frame, points, color, 1)
+    cv2.putText(
+        frame, "proposal", (points[0][0], max(12, points[0][1] - 5)),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1,
+    )
 
 
 def annotate_projected_model_landmarks(
@@ -65,8 +74,13 @@ def annotate_projected_model_landmarks(
     *,
     x_offset: int = 0,
     y_offset: int = 0,
+    color: tuple[int, int, int] = (150, 150, 150),
 ) -> None:
-    """Draw non-measured head-depth and stem geometry as dashed predictions."""
+    """Draw depth/stem projections; callers must supply admitted-fit purple.
+
+    Missing admission defaults to gray diagnostic geometry. Depth lines are
+    always predictions, including when the measured front border is valid.
+    """
 
     if not landmarks:
         return
@@ -95,7 +109,7 @@ def annotate_projected_model_landmarks(
     front = [pixel(name) for name in front_names]
     back = [pixel(name) for name in back_names]
     if all(point is not None for point in back):
-        draw_dashed_polygon(cv2, frame, back, (180, 0, 180), 1)
+        draw_dashed_polygon(cv2, frame, back, color, 1)
     if all(point is not None for point in (*front, *back)):
         for front_point, back_point in zip(front, back):
             draw_dashed_segment(
@@ -103,7 +117,7 @@ def annotate_projected_model_landmarks(
                 frame,
                 front_point,
                 back_point,
-                (180, 0, 180),
+                color,
                 1,
             )
 
@@ -116,7 +130,7 @@ def annotate_projected_model_landmarks(
                 frame,
                 start,
                 end,
-                (255, 0, 255),
+                color,
                 1,
             )
     if stem_left[1] is not None and stem_right[1] is not None:
@@ -125,7 +139,7 @@ def annotate_projected_model_landmarks(
             frame,
             stem_left[1],
             stem_right[1],
-            (255, 0, 255),
+            color,
             1,
         )
 
@@ -140,20 +154,20 @@ def annotate_metric_model_status(
     artifacts: StandAxisEdgeDebugArtifacts | None,
     text_cursor: OverlayTextCursor,
     result_fresh: bool = True,
+    overlay_state: ModelOverlayState | None = None,
 ) -> OverlayTextCursor:
     """Keep model acquisition failures visible when edge fallback wins."""
 
     if profile is None:
         return text_cursor
+    overlay_state = overlay_state or current_model_overlay_state(
+        inputs_ready=inputs_ready, estimate=estimate, artifacts=artifacts,
+        result_fresh=result_fresh,
+    )
     evidence_state = (
         "inputs_unavailable"
         if not inputs_ready or estimate is None
         else estimate.evidence_state
-    )
-    reason = (
-        "metric_inputs_unavailable"
-        if not inputs_ready or estimate is None
-        else estimate.reason
     )
     qr_detected = bool(artifacts is not None and artifacts.qr_detected)
     seed_source = (
@@ -166,10 +180,12 @@ def annotate_metric_model_status(
         scale_text = f"{artifacts.qr_detection_scale:g}x"
     display_state = evidence_state if result_fresh else "obsolete_result"
     line1 = (
-        f"model={display_state} reason={reason} "
+        f"model={display_state} overlay={overlay_state.state} "
+        f"reason={overlay_state.reason} "
         f"qr={str(qr_detected).lower()} scale={scale_text} seed={seed_source}"
     )
     details = [
+        "scope=single_frame_fit",
         f"profile={profile.measurement_status}",
         f"committable={str(profile.committable).lower()}",
     ]
@@ -190,7 +206,7 @@ def annotate_metric_model_status(
     junction = None if artifacts is None else getattr(artifacts, "head_neck_junction", None)
     if junction is not None and junction.start_gap_px is not None:
         details.append(f"neck_gap={junction.start_gap_px}px")
-    current_measurement = bool(inputs_ready and current_axis_evidence_ready(estimate, artifacts))
+    current_measurement = overlay_state.current_fit_accepted
     if (current_measurement
             and estimate.source in {MEASURED_HEAD_AXIS_SOURCE, BACKSIDE_AXIS_SAMPLE_SOURCE}
             and estimate.usable and estimate.yaw_deg is not None and result_fresh):
@@ -199,11 +215,7 @@ def annotate_metric_model_status(
         details.append(f"head_quality={quality.reason}")
         if quality.yaw_std_deg is not None:
             details.append(f"pixel_model_yaw_std={quality.yaw_std_deg:.2f}deg")
-    color = (
-        (0, 255, 0)
-        if current_measurement and result_fresh
-        else (255, 0, 255)
-    )
+    color = overlay_state.status_color
     for text in (line1, " ".join(details)):
         text_cursor.draw(
             cv2,

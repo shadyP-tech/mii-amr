@@ -12,7 +12,9 @@ from scripts.aufgabe04.perception.stand_axis.head_model_fit import (
 )
 from scripts.aufgabe04.perception.stand_axis.head_proposal import acquire_head_proposal
 from scripts.aufgabe04.perception.stand_axis.head_backside_classification import classify_current_head_backside
-from scripts.aufgabe04.perception.stand_axis.head_outer_border import check_current_head_marker_boundary
+from scripts.aufgabe04.perception.stand_axis.head_outer_border import (
+    check_current_head_marker_boundary, resolve_current_head_boundary,
+)
 from scripts.aufgabe04.perception.stand_axis.head_model_quality import MEASURED_HEAD_AXIS_SOURCE
 from scripts.aufgabe04.perception.stand_axis.geometry import (
     _debug_rectangle_image,
@@ -197,16 +199,25 @@ def estimate_stand_axis_from_metric_model(
         boundary = check_current_head_marker_boundary(
             cv2, head_corners=estimate.corners, qr_corners=qr_corners,
             marker_verified=marker.verified, model_profile=model_profile)
-        artifacts = replace(artifacts, head_marker_boundary=boundary)
-        if not boundary.accepted and estimate.usable:
-            # Only an identified current inset contradicts the head boundary.
-            # QR never supplies a replacement angle or corners.
+        outer_boundary = resolve_current_head_boundary(
+            artifacts.head_outer_recovery, boundary, corners=estimate.corners,
+            profile_sha256=model_profile.sha256)
+        boundary_reconsidered = bool(outer_boundary is not None and not outer_boundary.accepted
+                                     and artifacts.head_outer_recovery.accepted)
+        artifacts = replace(artifacts, head_marker_boundary=boundary,
+                            head_outer_recovery=outer_boundary)
+        if boundary_reconsidered:
+            # QR size only requests reconsideration. A recovered enclosing raw
+            # frame remains authoritative; an unresolved conditional quad does
+            # not become a head measurement or poison the temporal head window.
             estimate = replace(estimate, usable=False, yaw_deg=None,
                                camera_face_normal_xyz=None, camera_face_center_xyz_m=None,
-                               reason=boundary.reason, evidence_state="unobservable")
+                               reason=outer_boundary.reason, evidence_state="unobservable")
             artifacts = replace(artifacts, model_pose=None, evidence_state="unobservable",
+                                model_reason=outer_boundary.reason,
                                 head_model_quality=replace(artifacts.head_model_quality,
-                                    accepted=False, reason=boundary.reason))
+                                    accepted=False, outer_border_verified=False,
+                                    reason=outer_boundary.reason))
         estimate, artifacts = attach_independent_qr_diagnostics(
             cv2, estimate=estimate, debug=artifacts, head_pose=head_pose,
             qr_corners=qr_corners, marker_verified=marker.verified,

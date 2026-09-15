@@ -19,6 +19,7 @@ from scripts.aufgabe04.perception.stand_axis.geometry import quadrilateral_aspec
 from scripts.aufgabe04.perception.stand_axis.head_model_quality import (
     HeadModelQuality, MEASURED_HEAD_AXIS_SOURCE, MIN_HEAD_EDGE_PX,
 )
+from scripts.aufgabe04.perception.stand_axis.head_outer_border import current_head_boundary_eligible
 
 MIN_NORMALIZED_ASPECT = math.cos(math.radians(70.0))
 MAX_NORMALIZED_ASPECT = 1.35
@@ -81,8 +82,7 @@ def assess_current_head_backside_appearance(
         return replace(result, reason="backside_measured_physical_profile_required")
     if debug.qr_detected is not False or debug.qr_marker_verified is not False:
         return replace(result, reason="backside_current_marker_absence_required")
-    boundary = getattr(debug, "head_marker_boundary", None)
-    if boundary is not None and boundary.accepted is not True:
+    if not current_head_boundary_eligible(estimate, debug):
         return replace(result, reason="backside_head_boundary_contradicted")
     expected = (expected_center_u_px, expected_center_v_px, expected_height_px)
     if (any(type(v) not in (int, float) or not math.isfinite(v) for v in expected)

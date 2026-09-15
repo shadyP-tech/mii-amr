@@ -8,6 +8,7 @@ import unittest
 from scripts.aufgabe04.perception.stand_axis.head_model_quality import (
     HeadModelQuality, MEASURED_HEAD_AXIS_SOURCE,
 )
+from scripts.aufgabe04.perception.stand_axis.head_outer_border import HeadOuterBorderEvidence
 from scripts.aufgabe04.perception.stand_axis_consensus import axis_conditioning
 from scripts.aufgabe04.real_robot.observer.axis_sample_policy import admit_axis_sample
 from scripts.aufgabe04.real_robot.observer.evidence import EvidencePose, PassiveObserverEvidence
@@ -45,11 +46,23 @@ def head_estimate(yaw_deg=37.815, **changes):
     })
 
 
+def outer_boundary(corners, profile_sha256="a" * 64, **changes):
+    """Synthetic current-pixel proof for consumer tests, not recording evidence."""
+    values = dict(accepted=True, reason="maximal_current_head_border",
+                  original_corners=corners, recovered_corners=corners,
+                  neutral_proposal_corners=corners, current_raw_alternatives=(corners,),
+                  head_size_m=(.078, .078), largest_inset_size_m=(.071, .071),
+                  model_tolerance_m=.002,
+                  profile_sha256=profile_sha256)
+    return HeadOuterBorderEvidence(**{**values, **changes})
+
+
 def head_debug(**changes):
     # Keep the admission fixture independent of image-producing constructors.
     values = dict(vars(fixtures.debug()))
     values.update(model_pose_fit_source=MEASURED_HEAD_AXIS_SOURCE,
-                  head_model_quality=quality(), qr_detected=False)
+                  head_model_quality=quality(), qr_detected=False,
+                  head_outer_recovery=outer_boundary(head_estimate().corners))
     return SimpleNamespace(**{**values, **changes})
 
 

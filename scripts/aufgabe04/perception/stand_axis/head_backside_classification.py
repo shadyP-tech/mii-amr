@@ -18,6 +18,7 @@ from scripts.aufgabe04.perception.stand_axis.geometry import quadrilateral_aspec
 from scripts.aufgabe04.perception.stand_axis.head_model_quality import (
     MEASURED_HEAD_AXIS_SOURCE, validated_head_model_quality,
 )
+from scripts.aufgabe04.perception.stand_axis.head_outer_border import current_head_boundary_eligible
 from scripts.aufgabe04.perception.stand_axis.head_backside_appearance import (
     MIN_NORMALIZED_ASPECT, MAX_NORMALIZED_ASPECT,
     assess_current_head_backside_appearance, head_appearance_confidence as _face_confidence,
@@ -48,6 +49,7 @@ def _classification_valid(evidence, estimate, debug):
             or evidence.profile_sha256 != estimate.model_profile_sha256
             or not validated_head_model_quality(quality)
             or quality.profile_sha256 != evidence.profile_sha256
+            or not current_head_boundary_eligible(estimate, debug)
             or debug.qr_detected is not False or debug.qr_marker_verified is not False):
         return False
     scale, center, aspect, confidence = (

@@ -37,6 +37,9 @@ from scripts.aufgabe04.perception.debug.stand_model_overlay import (
 )
 from scripts.aufgabe04.perception.debug.text_overlay import OverlayTextCursor
 from scripts.aufgabe04.perception.debug.viewer_frame_timing import ViewerFrameTiming
+from scripts.aufgabe04.perception.debug.viewer_model_overlay_policy import (
+    current_crop_head_estimate, current_model_overlay_state, estimate_in_full_image,
+)
 from scripts.aufgabe04.perception.debug.viewer_axis_admission import (
     current_axis_evidence_ready, viewer_axis_admission,
     viewer_color_side_allowed, viewer_face_export_allowed,
@@ -1841,7 +1844,7 @@ def annotate_frame(
         corners = estimate.corners
         int_points = [(int(round(point.u_px)), int(round(point.v_px))) for point in corners]
         if estimate.evidence_state == "predicted_only":
-            _draw_dashed_polygon(cv2, frame, int_points, (255, 0, 255), 1)
+            annotate_model_prediction(cv2, frame, corners)
         else:
             for start, end in zip(int_points, int_points[1:] + int_points[:1]):
                 cv2.line(frame, start, end, (0, 255, 255), 2)
@@ -3450,17 +3453,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 face_mask = None
                 rectangle_mask = None
                 rectangle_overlay = None
-            if estimate.corners is not None and target_roi is not None:
-                estimate = replace(
-                    estimate,
-                    corners=tuple(
-                        ImagePoint(
-                            point.u_px + target_roi.x0,
-                            point.v_px + target_roi.y0,
-                        )
-                        for point in estimate.corners
-                    ),
-                )
+            # Boundary proofs and intrinsics belong to the processing crop.
+            # Display/association coordinates are a separate translated copy.
+            detector_crop_estimate = estimate
+            estimate = estimate_in_full_image(detector_crop_estimate, target_roi)
             raw_proposal_overlay = rectangle_overlay
             detector_estimate = estimate
             if simulation_full_frame_edges:
@@ -3890,8 +3886,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             orientation_yaw_rad = (
                 None if estimate.yaw_deg is None else math.radians(estimate.yaw_deg)
             )
+            admission_estimate = (
+                current_crop_head_estimate(
+                    crop_estimate=detector_crop_estimate, displayed_estimate=estimate,
+                    roi=target_roi, current_accepted=head_measurement_fresh,
+                    held=head_estimate_held,
+                ) if metric_inputs_ready else estimate
+            )
             estimate_committable = (
-                current_axis_evidence_ready(estimate, edge_artifacts)
+                current_axis_evidence_ready(admission_estimate, edge_artifacts)
                 and estimate.model_measurement_status != "provisional"
                 and (
                     stand_model_profile is None
@@ -3962,7 +3965,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             elif args.calibrated_handoff and not head_estimate_held:
                 handoff_axis_consensus.reset()
             conditioning = viewer_axis_admission(
-                consensus=consensus, estimate=estimate, artifacts=edge_artifacts,
+                consensus=consensus, estimate=admission_estimate, artifacts=edge_artifacts,
                 max_obliqueness_rad=math.radians(args.max_observation_obliqueness_deg),
             )
             handoff_decision = None
@@ -4163,11 +4166,46 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else frame_timing.source_age_sec(rendered_monotonic_sec)
             )
             age_ms = None if source_age_sec is None else source_age_sec * 1000.0
+            # Decoding, association and handoff diagnostics can consume time
+            # after detector completion. Render the source's age now, without
+            # renewing an accepted fit's timestamp or changing observer state.
+            render_result_freshness = frame_timing.assess(
+                now_sec=rendered_monotonic_sec,
+                max_result_age_sec=args.max_result_age_sec,
+                max_frame_age_sec=args.max_frame_age_sec,
+            ) if not args.sim_raw_image_topic else None
+            render_result_fresh = not (
+                result_obsolete or (
+                    args.axis_source == "edges"
+                    and render_result_freshness is not None
+                    and not render_result_freshness.accepted
+                )
+            )
+            model_overlay = current_model_overlay_state(
+                inputs_ready=metric_inputs_ready,
+                estimate=(admission_estimate if edge_artifacts is metric_artifacts
+                          else metric_estimate),
+                artifacts=metric_artifacts,
+                result_fresh=render_result_fresh,
+                freshness_reason=(
+                    None if render_result_freshness is None
+                    else render_result_freshness.reason
+                ),
+            )
+            geometry_overlay = current_model_overlay_state(
+                inputs_ready=metric_inputs_ready,
+                estimate=admission_estimate, artifacts=edge_artifacts,
+                result_fresh=render_result_fresh,
+            )
+            rendered_estimate = (
+                estimate if render_result_fresh
+                else _unavailable_target_estimate("obsolete_detector_result")
+            )
             annotated = display_frame.copy()
             text_cursor = annotate_frame(
                 cv2,
                 annotated,
-                estimate,
+                rendered_estimate,
                 side,
                 filtered_ratio,
                 filtered_proxy,
@@ -4188,7 +4226,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 estimate=metric_estimate,
                 artifacts=metric_artifacts,
                 text_cursor=text_cursor,
-                result_fresh=not result_obsolete,
+                result_fresh=render_result_fresh,
+                overlay_state=model_overlay,
             )
             if (
                 edge_artifacts.predicted_corners is not None
@@ -4208,6 +4247,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     edge_artifacts.projected_landmarks,
                     x_offset=(0 if target_roi is None else target_roi.x0),
                     y_offset=(0 if target_roi is None else target_roi.y0),
+                    color=geometry_overlay.geometry_color,
                 )
             if handoff_decision is not None:
                 annotate_axis_handoff(
@@ -4455,7 +4495,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "rendered_monotonic_sec": rendered_monotonic_sec,
                         "render_source_age_ms": age_ms,
                         "result_freshness": result_freshness,
-                        "display_estimate": estimate,
+                        "render_result_freshness": render_result_freshness,
+                        "model_overlay": model_overlay,
+                        "geometry_overlay": geometry_overlay,
+                        "display_estimate": rendered_estimate,
                         "model": _metric_model_status_payload(
                             profile=stand_model_profile, inputs_ready=metric_inputs_ready,
                             estimate=metric_estimate, artifacts=metric_artifacts,

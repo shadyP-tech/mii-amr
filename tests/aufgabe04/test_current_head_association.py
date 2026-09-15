@@ -13,7 +13,7 @@ from scripts.aufgabe04.real_robot.observer.current_head_association import assoc
 from scripts.aufgabe04.real_robot.observer.current_head_qr_binding import bind_qr_to_current_head
 from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import HeadRoiAttempt
 from scripts.aufgabe04.real_robot.observer.qr_target_binding import bind_qr_observations_to_target
-from tests.aufgabe04.test_head_model_admission import head_estimate, head_debug, quality
+from tests.aufgabe04.test_head_model_admission import head_estimate, head_debug, quality, outer_boundary
 
 
 class CurrentHeadAssociationTests(unittest.TestCase):
@@ -21,7 +21,7 @@ class CurrentHeadAssociationTests(unittest.TestCase):
         corners = tuple(ImagePoint(80+x, 80+y) for x,y in ((-45,-45),(45,-45),(45,45),(-45,45)))
         return dict(
             estimate=head_estimate(corners=corners, left_height_px=90., right_height_px=90.),
-            debug=head_debug(), profile_sha256='a'*64,
+            debug=head_debug(head_outer_recovery=outer_boundary(corners)), profile_sha256='a'*64,
             attempt=HeadRoiAttempt(ImageRoi(280,220,440,380,90.), 'nominal_projection', 1.8,400.,300.,90.),
             projection=OpticalProjection(400.,300.,.5,90.,True), expected_head_height_px=90.,
             intrinsics=CameraIntrinsics(800,600,640.,640.,400.,300.),
@@ -42,7 +42,8 @@ class CurrentHeadAssociationTests(unittest.TestCase):
                         source='camera_registered_measured_head_reacquisition',
                         expected_center_u_px=360.,expected_center_v_px=300.)
         estimate=replace(o['estimate'],corners=tuple(ImagePoint(p.u_px-20,p.v_px-10) for p in o['estimate'].corners))
-        reacquired=associate_current_measured_head(**{**o,'estimate':estimate,'attempt':shifted})
+        reacquired=associate_current_measured_head(**{**o,'estimate':estimate,'attempt':shifted,
+            'debug':head_debug(head_outer_recovery=outer_boundary(estimate.corners))})
         self.assertTrue(reacquired.accepted)
         self.assertEqual(nominal.lidar_association,reacquired.lidar_association)
         self.assertEqual(nominal.center_offset_ratio,reacquired.center_offset_ratio)
