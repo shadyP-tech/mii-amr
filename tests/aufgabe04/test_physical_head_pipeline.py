@@ -122,6 +122,109 @@ def test_named_candidate_cannot_escape_its_projection_via_cold_search(profile):
     assert incomplete.reason == "head_candidate_projection_incomplete"
 
 
+def test_named_candidate_uses_associated_hint_and_refits_crop_adjusted_current_pixels(profile):
+    image, _ = head_image(profile, angle=45.)
+    initial, initial_debug = estimate(profile, image)
+    assert initial.usable
+    current, _ = head_image(profile, angle=47.)
+    x0, y0, x1, y1 = 260, 180, 540, 420
+    # An associated camera pose remains camera-relative across changed crops.
+    # Both acquisition alternatives are prohibited on this bounded current fit.
+    with patch(COLD, side_effect=AssertionError("candidate escaped globally")), \
+         patch("scripts.aufgabe04.perception.stand_axis.physical_head_pipeline.acquire_head_proposal",
+               side_effect=AssertionError("candidate ignored associated pose")):
+        fitted, debug = estimate(profile, current[y0:y1, x0:x1], pose_hint=initial_debug.model_pose,
+            camera_cx_px=400.-x0, camera_cy_px=300.-y0,
+            expected_head_center_u_px=400.-x0, expected_head_center_v_px=300.-y0,
+            expected_head_height_px=140.)
+    assert fitted.usable, fitted.reason
+    assert abs(fitted.yaw_deg + 47.) < 3.
+    assert fitted.corners != initial.corners
+    assert debug.head_acquisition_diagnostics["source"] == "candidate_tracked_head_search"
+    assert debug.head_acquisition_diagnostics["acquisition"] is None
+    uncropped, _ = estimate(profile, current, pose_hint=initial_debug.model_pose)
+    assert abs(fitted.yaw_deg - uncropped.yaw_deg) < 1e-3
+    assert np.allclose([(p.u_px+x0, p.v_px+y0) for p in fitted.corners],
+                       [(p.u_px, p.v_px) for p in uncropped.corners])
+
+
+def test_named_tracked_candidate_head_loss_does_not_retry_acquisition(profile):
+    image, _ = head_image(profile)
+    initial, debug = estimate(profile, image)
+    assert initial.usable
+    with patch(COLD, side_effect=AssertionError("lost candidate escaped")), \
+         patch("scripts.aufgabe04.perception.stand_axis.physical_head_pipeline.acquire_head_proposal",
+               side_effect=AssertionError("lost candidate retried on same image")):
+        missing, missing_debug = estimate(profile, np.zeros_like(image), pose_hint=debug.model_pose,
+            expected_head_center_u_px=400., expected_head_center_v_px=300., expected_head_height_px=140.)
+    assert not missing.usable
+    assert missing.yaw_deg is None
+    assert missing_debug.model_pose is None
+
+
+def test_named_tracked_candidate_ambiguity_keeps_current_rejection(profile):
+    image, corners = head_image(profile, angle=0., distance=.7)
+    uncertain, debug = estimate(profile, image, current_head_proposal_corners=corners)
+    assert not uncertain.usable
+    with patch(COLD, side_effect=AssertionError("ambiguous candidate escaped")), \
+         patch("scripts.aufgabe04.perception.stand_axis.physical_head_pipeline.acquire_head_proposal",
+               side_effect=AssertionError("ambiguous angle tried another locator")):
+        tracked, _ = estimate(profile, image, pose_hint=debug.head_pose_hypotheses[0],
+            expected_head_center_u_px=400., expected_head_center_v_px=300., expected_head_height_px=70.)
+    assert not tracked.usable
+    assert tracked.yaw_deg is None
+
+
+def test_off_center_tracked_backside_classifies_using_current_verified_head_center(profile):
+    image, corners = head_image(profile, angle=45.)
+    initial, initial_debug = estimate(profile, image)
+    assert initial.usable
+    # The map projection may be offset within the observer's 1.5-head
+    # association window. Reapplying the .25-head classification crop gate to
+    # that nominal point used to drop an already registered backside.
+    expected = dict(expected_head_center_u_px=510., expected_head_center_v_px=300.,
+                    expected_head_height_px=145.)
+    nominal, _ = estimate(profile, image, current_head_proposal_corners=corners, **expected)
+    assert nominal.usable
+    assert nominal.visible_face is None
+    tracked, debug = estimate(profile, image, pose_hint=initial_debug.model_pose, **expected)
+    assert tracked.usable
+    assert tracked.evidence_state == "fresh_backside"
+    assert tracked.visible_face == "backside_candidate"
+    assert debug.head_center_error_ratio == 0.
+    assert debug.head_acquisition_diagnostics["side_projection_source"] == "current_verified_head_pixels"
+    assert debug.head_acquisition_diagnostics["original_candidate_association_required"] is True
+    assert debug.head_acquisition_diagnostics["side_projection_center_px"] == (
+        sum(p.u_px for p in tracked.corners)/4, sum(p.v_px for p in tracked.corners)/4)
+    assert abs(tracked.yaw_deg-initial.yaw_deg) < .1
+
+
+@pytest.mark.parametrize("decoded", (False, True))
+def test_off_center_current_front_marker_vetoes_backside_even_with_backside_hint(profile, decoded):
+    image, corners = head_image(profile, angle=45.)
+    seed, seed_debug = estimate(profile, image, expected_head_center_u_px=400.,
+                                expected_head_center_v_px=300., expected_head_height_px=145.)
+    assert seed.evidence_state == "fresh_backside"
+    quad = tuple((400. + .65*(p.u_px-400.), 300. + .65*(p.v_px-300.)) for p in corners)
+    if decoded:
+        current, debug = estimate(profile, image, pose_hint=seed_debug.model_pose,
+            expected_head_center_u_px=510., expected_head_center_v_px=300., expected_head_height_px=145.,
+            qr_observations=(DecodedQrObservation("QR_003", quad, "test"),))
+    else:
+        # A current native quadrilateral alone also prevents committing absence;
+        # the test deliberately grants no decoded identity or historical marker.
+        from scripts.aufgabe04.perception.stand_axis.qr_pose_seed import QrQuadDetection
+        with patch(f"{PIPELINE}.detect_qr_quad", return_value=QrQuadDetection(
+                tuple(ImagePoint(u, v) for u, v in quad), 1.)):
+            current, debug = estimate(profile, image, pose_hint=seed_debug.model_pose,
+                expected_head_center_u_px=510., expected_head_center_v_px=300., expected_head_height_px=145.)
+    assert current.usable
+    assert current.evidence_state == "fresh_refined"
+    assert current.visible_face is None
+    assert debug.qr_detected
+    assert not debug.head_backside_classification.accepted
+
+
 def test_verified_current_borders_with_uncertain_angle_cannot_use_cold_retry(profile):
     image, corners = head_image(profile, angle=0., distance=.7)
     uncertain, debug = estimate(profile, image, current_head_proposal_corners=corners)

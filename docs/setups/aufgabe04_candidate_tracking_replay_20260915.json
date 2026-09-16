@@ -1,0 +1,207 @@
+{
+  "frames": 50,
+  "cv2": "4.5.4",
+  "overlaid_sources": {
+    "scripts.aufgabe04.perception.stand_axis.model_pipeline": "f730a7dd76599781da3525a207216e3633a4f3de3f18fd642601c4f05d8f72fc",
+    "scripts.aufgabe04.perception.stand_axis.physical_head_pipeline": "152258a90de448626424d593c0d93465fe878e0d8e15fb0274177d8110ebed9b",
+    "scripts.aufgabe04.real_robot.observer.backside_head_crop": "2716f1f4524e6dd53ae3dd8031f4965eaa98dd3a20d6d457311b0c9060e674b6",
+    "scripts.aufgabe04.real_robot.observer.camera_target_registration": "f347787b8d428d91714921eaef8c351e0a9c13ff4921d54473fbc9698337369c",
+    "scripts.aufgabe04.real_robot.observer.candidate_head_tracking": "02d11014e587c92175d11ea2f13056866807bc1cc59fbd734184e613ff3c9623",
+    "scripts.aufgabe04.real_robot.observer.node": "4ea088bc8323ba68aeeb23425b0187f20ac8a918bfdae44450c5301679cc6869",
+    "scripts.aufgabe04.real_robot.observer.scan_target_persistence": "a5ba1e8af76da16703473aeec2413d7d7f252f999c90ae9dc95ce7e11fabcb8d",
+    "scripts.aufgabe04.real_robot.observer.scan_witness_buffer": "04788741f281ca91ebc6a6d9cc2ffb82aa62d910f5833c3052f7c6e229f00531",
+    "scripts.aufgabe04.real_robot.observer.scan_witness_collection": "371f14ce8543b6b64995652ca3e23ab55e5c6f98b4490d480501dc05c3a8eac3",
+    "scripts.aufgabe04.real_robot.observer.tracked_head_registration": "ec47fb740a73bf8b4c3c7a1885f2ad0dff77fe202cb0c45af1bc498262fca7af"
+  },
+  "first_commit": {
+    "frame": "frame_000017",
+    "stamp": 1789483279.5437717,
+    "window": [
+      1789483276.3597739,
+      1789483276.960528,
+      1789483277.3209808,
+      1789483277.9217348,
+      1789483278.5224888,
+      1789483278.9430199,
+      1789483279.5437717
+    ],
+    "qr": "QR_003"
+  },
+  "limits": {
+    "clock": "recorded ROS processing start + actual replay elapsed; excludes live DDS and diagnostic artifact writes",
+    "scan_witnesses": "only actual selected camera scans feed normal association history; independent unrecorded scan callbacks not fabricated",
+    "completed_continuation": "completed flag cleared after each frame only to inspect remaining captures; first commit is primary endpoint"
+  },
+  "errors": [],
+  "run_id": "stand_explore_exact2_camera_all5_20260915T143600Z",
+  "candidate": "survey_candidate_0003",
+  "first_admission_samples": [
+    {
+      "frame": "frame_000010",
+      "stamp": 1789483276.3597739,
+      "state": "collecting_consensus",
+      "reason": null,
+      "elapsed_ms": 352.3893969995697,
+      "geometry": true,
+      "yaw_rad": 0.4135666108816265,
+      "head_associated": true,
+      "association_reason": "current_head_unique_lidar_cluster",
+      "qr_bound": true,
+      "qr_reason": "decoded_qr_target_associated",
+      "qr_texts": [
+        "QR_003"
+      ],
+      "hint_used": false,
+      "tracking": "current_associated_head_retained",
+      "fresh": true,
+      "axis_sample_count": 1,
+      "axis_sample_accepted": true,
+      "temporal_reason": "current_head_window_consistent",
+      "projection_error_px": 4.5399936473461207e-07
+    },
+    {
+      "frame": "frame_000011",
+      "stamp": 1789483276.960528,
+      "state": "collecting_consensus",
+      "reason": null,
+      "elapsed_ms": 24.59694299977855,
+      "geometry": true,
+      "yaw_rad": 0.4163712807127378,
+      "head_associated": true,
+      "association_reason": "current_head_unique_lidar_cluster",
+      "qr_bound": true,
+      "qr_reason": "decoded_qr_target_associated",
+      "qr_texts": [
+        "QR_003"
+      ],
+      "hint_used": true,
+      "tracking": "current_associated_head_retained",
+      "fresh": true,
+      "axis_sample_count": 2,
+      "axis_sample_accepted": true,
+      "temporal_reason": "current_head_window_consistent",
+      "projection_error_px": 4.539948440312105e-07
+    },
+    {
+      "frame": "frame_000012",
+      "stamp": 1789483277.3209808,
+      "state": "collecting_consensus",
+      "reason": null,
+      "elapsed_ms": 24.006517998714116,
+      "geometry": true,
+      "yaw_rad": 0.4179821167613865,
+      "head_associated": true,
+      "association_reason": "current_head_unique_lidar_cluster",
+      "qr_bound": true,
+      "qr_reason": "decoded_qr_target_associated",
+      "qr_texts": [
+        "QR_003"
+      ],
+      "hint_used": true,
+      "tracking": "current_associated_head_retained",
+      "fresh": true,
+      "axis_sample_count": 3,
+      "axis_sample_accepted": true,
+      "temporal_reason": "current_head_window_consistent",
+      "projection_error_px": 4.539895358799674e-07
+    },
+    {
+      "frame": "frame_000013",
+      "stamp": 1789483277.9217348,
+      "state": "collecting_consensus",
+      "reason": null,
+      "elapsed_ms": 24.750171000050614,
+      "geometry": true,
+      "yaw_rad": 0.41934477779338264,
+      "head_associated": true,
+      "association_reason": "current_head_unique_lidar_cluster",
+      "qr_bound": true,
+      "qr_reason": "decoded_qr_target_associated",
+      "qr_texts": [
+        "QR_003"
+      ],
+      "hint_used": true,
+      "tracking": "current_associated_head_retained",
+      "fresh": true,
+      "axis_sample_count": 4,
+      "axis_sample_accepted": true,
+      "temporal_reason": "current_head_window_consistent",
+      "projection_error_px": 4.5397605157328356e-07
+    },
+    {
+      "frame": "frame_000014",
+      "stamp": 1789483278.5224888,
+      "state": "collecting_consensus",
+      "reason": null,
+      "elapsed_ms": 24.79096899878641,
+      "geometry": true,
+      "yaw_rad": 0.4224110171217542,
+      "head_associated": true,
+      "association_reason": "current_head_unique_lidar_cluster",
+      "qr_bound": true,
+      "qr_reason": "decoded_qr_target_associated",
+      "qr_texts": [
+        "QR_003"
+      ],
+      "hint_used": true,
+      "tracking": "current_associated_head_retained",
+      "fresh": true,
+      "axis_sample_count": 5,
+      "axis_sample_accepted": true,
+      "temporal_reason": "current_head_window_consistent",
+      "projection_error_px": 4.539688264790494e-07
+    },
+    {
+      "frame": "frame_000015",
+      "stamp": 1789483278.9430199,
+      "state": "collecting_consensus",
+      "reason": null,
+      "elapsed_ms": 24.840826001309324,
+      "geometry": true,
+      "yaw_rad": 0.42439137132590754,
+      "head_associated": true,
+      "association_reason": "current_head_unique_lidar_cluster",
+      "qr_bound": true,
+      "qr_reason": "decoded_qr_target_associated",
+      "qr_texts": [
+        "QR_003"
+      ],
+      "hint_used": true,
+      "tracking": "current_associated_head_retained",
+      "fresh": true,
+      "axis_sample_count": 6,
+      "axis_sample_accepted": true,
+      "temporal_reason": "current_head_window_consistent",
+      "projection_error_px": 4.5396857868482377e-07
+    },
+    {
+      "frame": "frame_000017",
+      "stamp": 1789483279.5437717,
+      "state": "recommendation_committed",
+      "reason": null,
+      "elapsed_ms": 24.94011999988288,
+      "geometry": true,
+      "yaw_rad": 0.4259258903158364,
+      "head_associated": true,
+      "association_reason": "current_head_unique_lidar_cluster",
+      "qr_bound": true,
+      "qr_reason": "decoded_qr_target_associated",
+      "qr_texts": [
+        "QR_003"
+      ],
+      "hint_used": true,
+      "tracking": "current_associated_head_retained",
+      "fresh": true,
+      "axis_sample_count": 7,
+      "axis_sample_accepted": true,
+      "temporal_reason": "current_head_window_consistent",
+      "projection_error_px": 4.5396493780172435e-07
+    }
+  ],
+  "offline_tests": {
+    "passed": 417,
+    "subtests_passed": 670,
+    "suites": 40
+  },
+  "live_robot_run": false
+}

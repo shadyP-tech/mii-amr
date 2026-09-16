@@ -64,6 +64,13 @@ class ScanTargetPersistenceTest(unittest.TestCase):
         for stamp in (10., 10.2, 10.4):
             self.assertTrue(self.observe(stamp)[0].associated)
 
+    def ingest(self, stamp, **changes):
+        # Construct the raw source/context without delivering any camera result
+        # to the persistence state under test.
+        _, _, scan, context = self.observe(stamp, state=StoppedScanTargetPersistence(), **changes)
+        return self.state.ingest_scan(scan, context=context,
+            now_sec=changes.get("now", stamp + .1), max_scan_age_sec=.5)
+
     @staticmethod
     def fragmented():
         return (math.inf, math.inf, math.inf, .6, .601, math.nan, .603, math.inf, math.inf)
@@ -91,6 +98,89 @@ class ScanTargetPersistenceTest(unittest.TestCase):
         for _ in range(4):
             self.observe(10.)
         self.assertFalse(self.observe(10.2, ranges=self.fragmented())[0].associated)
+
+    def test_scan_only_witnesses_support_first_head_after_camera_misses(self):
+        for stamp in (10., 10.2, 10.4):
+            self.assertTrue(self.ingest(stamp))
+        result = self.observe(10.6, ranges=self.fragmented())[0]
+        self.assertTrue(registered_target_is_unique(result), self.state.last_metadata)
+        witnesses = result.witnessed_fragmentation["witnesses"]
+        self.assertEqual([w["scan"]["scan_stamp_sec"] for w in witnesses], [10., 10.2, 10.4])
+        self.assertTrue(all(w["input_source"] == "independent_stopped_scan" for w in witnesses))
+        self.assertEqual(result.search_association.selected_cluster_source_indices, (3, 4, 6))
+        self.assertEqual(result.search_association.eligible_cluster_count, 2)
+        self.assertTrue(validated_witnessed_fragmentation(
+            json.loads(json.dumps(result.witnessed_fragmentation, allow_nan=False))).associated)
+
+    def test_scan_only_duplicate_and_camera_scan_cannot_double_count(self):
+        for _ in range(4):
+            self.assertTrue(self.ingest(10.))
+        self.assertTrue(self.observe(10.)[0].associated)
+        self.assertFalse(self.observe(10.2, ranges=self.fragmented())[0].associated)
+
+    def test_scan_only_motion_staleness_target_and_epoch_withhold_old_witnesses(self):
+        for changes in ({"pose": Pose2D(.82, -.2, math.pi)},
+                        {"context_changes": {"epoch_key": "stationary-2"}},
+                        {"context_changes": {"target_key": "other"}},
+                        {"now": 11.1},
+                        {"context_changes": {"image_stamp_sec": 10.49}}):
+            with self.subTest(changes=changes):
+                self.state.reset()
+                for stamp in (10., 10.2, 10.4):
+                    self.ingest(stamp)
+                self.ingest(10.5, **changes)
+                self.assertFalse(self.observe(10.6, ranges=self.fragmented())[0].associated)
+
+    def test_scan_only_competing_targets_and_nonbridging_scans_do_not_supply_proof(self):
+        for ranges in (self.fragmented(),
+                       (math.inf,) * 3 + (.6, .601) + (math.inf,) * 4,
+                       (math.inf,) * 3 + (.6, .601, .9, .603) + (math.inf,) * 2):
+            with self.subTest(ranges=ranges):
+                self.state.reset()
+                for stamp in (10., 10.2, 10.4):
+                    self.ingest(stamp, ranges=ranges)
+                self.assertFalse(self.observe(10.6, ranges=self.fragmented())[0].associated)
+        self.state.reset()
+        for stamp in (10., 10.2, 10.4):
+            self.ingest(stamp)
+        self.ingest(10.5, ranges=(math.inf,) * 9)
+        self.assertFalse(self.observe(10.6, ranges=self.fragmented())[0].associated)
+
+    def test_scan_only_evidence_expires_without_refreshing_from_camera_results(self):
+        for stamp in (10., 10.2, 10.4):
+            self.ingest(stamp)
+        self.assertFalse(self.observe(13., ranges=self.fragmented())[0].associated)
+
+    def test_three_later_scan_only_returns_recover_after_a_contradiction(self):
+        self.ingest(9.8, ranges=(math.inf,) * 9)
+        for stamp in (10., 10.2, 10.4):
+            self.ingest(stamp)
+        self.assertTrue(registered_target_is_unique(self.observe(10.6, ranges=self.fragmented())[0]),
+                        self.state.last_metadata)
+
+    def test_scan_only_proof_binds_historical_search_to_current_head_ray(self):
+        for stamp in (10., 10.2, 10.4):
+            self.ingest(stamp)
+        result, _, scan, context = self.observe(10.6, ranges=self.fragmented())
+        # A slightly different valid current head bearing must re-register the
+        # same raw witnesses, not reuse the previous image's camera bearing.
+        raw = associate_camera_registered_candidate_lidar_target(scan,
+            map_bearing_rad=0., observed_camera_bearing_rad=.001,
+            cone_half_angle_rad=math.radians(3), accepted_range_m=(.42, .64),
+            now_sec=10.71, max_scan_age_sec=.5, min_cluster_sample_count=1)
+        changed = self.state.resolve(raw, scan, context=context, now_sec=10.71, max_scan_age_sec=.5)
+        self.assertTrue(registered_target_is_unique(changed), self.state.last_metadata)
+        self.assertAlmostEqual(changed.witnessed_fragmentation["witnesses"][0]["parameters"]
+            ["observed_camera_bearing_rad"], .001)
+        for mutate in (
+            lambda p: p["witnesses"][0]["parameters"].update(observed_camera_bearing_rad=.01),
+            lambda p: p["witnesses"][0].update(input_source="camera"),
+            lambda p: p["current"].update(input_source="independent_stopped_scan"),
+        ):
+            proof = copy.deepcopy(result.witnessed_fragmentation)
+            mutate(proof)
+            with self.assertRaises(ValueError):
+                validated_witnessed_fragmentation(proof)
 
     def test_same_frame_different_camera_searches_do_not_count_as_new_scans(self):
         _, _, scan, context = self.observe(10.)

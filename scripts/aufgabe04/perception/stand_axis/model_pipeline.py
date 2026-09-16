@@ -8,8 +8,9 @@ from scripts.aufgabe04.perception.stand_axis.current_image_head_fit import Curre
 from scripts.aufgabe04.perception.stand_axis.geometry_contract import (
     classify_joint_geometry_contract,
 )
-from scripts.aufgabe04.perception.stand_axis.physical_head_pipeline import fit_physical_head_in_frame
-from scripts.aufgabe04.perception.stand_axis.head_backside_classification import classify_current_head_backside
+from scripts.aufgabe04.perception.stand_axis.physical_head_pipeline import (
+    classify_physical_head_in_frame, fit_physical_head_in_frame,
+)
 from scripts.aufgabe04.perception.stand_axis.geometry import (
     _debug_rectangle_image,
     _debug_rectangle_overlay_image,
@@ -205,7 +206,7 @@ def estimate_stand_axis_from_metric_model(
                               if qr_observations and len(qr_observations) > 1 else marker.reason),
             qr_detection_scale=None if qr_detection is None else qr_detection.scale,
             stage_timings_ms=timing.snapshot())
-        return classify_current_head_backside(
+        return classify_physical_head_in_frame(
             estimate, artifacts, model_profile=model_profile, camera=camera,
             expected_center_u_px=expected_head_center_u_px,
             expected_center_v_px=expected_head_center_v_px,

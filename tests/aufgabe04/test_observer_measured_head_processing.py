@@ -41,19 +41,18 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
         frame = numpy.zeros((600, 800, 3), dtype=numpy.uint8)
         current_index = [0]
         decode_modes = []
+        pose_hints = []
 
         def decode(crop, _cv2, *, diagnostics=None, max_elapsed_sec=None):
             index = current_index[0]
             if scenario == "head_only" or scenario == "historical_qr" and index >= 2:
                 return ()
-            u, v = crop.shape[1] / 2., crop.shape[0] / 2.
-            if shifted:
-                u -= 28.
-            if registered:
-                if crop.shape[1] == 68:
-                    v = 35.  # Same full-image QR center after head/neck recentering.
-                else:
-                    u += 10.
+            # The same physical symbol stays at a full-image position as the
+            # candidate search recenters its crop and adjusts intrinsics.
+            pixel_offset = (crop.ctypes.data - frame.ctypes.data) // 3
+            origin_y, origin_x = divmod(pixel_offset, frame.shape[1])
+            u = 400. - origin_x - (28. if shifted else 0.) + (10. if registered else 0.)
+            v = 300. - origin_y
             corners = tuple((u + x, v + y) for x, y in
                             ((-15, -15), (15, -15), (15, 15), (-15, 15)))
             observations = (DecodedQrObservation("QR_003", None if scenario == "unbound_qr" else corners,
@@ -73,9 +72,12 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
             return decode(*args, **kwargs)
 
         def metric(_cv2, _crop, **options):
+            pose_hints.append(options["pose_hint"])
             u, v = options["expected_head_center_u_px"], options["expected_head_center_v_px"]
             if shifted:
                 u -= 28.
+            if registered and options["pose_hint"] is not None:
+                u += 10.
             if scenario == "wrong_head_bearing":
                 u += 70.
             corners = tuple(ImagePoint(u + x, v + y) for x, y in
@@ -87,7 +89,8 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
                 corners=corners, left_height_px=52., right_height_px=52.,
                 model_profile_sha256=adapter.stand_model_profile.sha256,
             )
-            if registered and options["current_head_proposal_corners"] is None:
+            if (registered and options["current_head_proposal_corners"] is None
+                    and options["pose_hint"] is None):
                 estimate = replace(estimate, usable=False, yaw_deg=None,
                                    reason="head_proposal_unavailable")
             debug = StandAxisEdgeDebugArtifacts(
@@ -164,8 +167,8 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
                 sensor_tuple.scan.value.ranges = (.6, .6, float("inf"), .6, .6)
             for index in range(8 if scenario == "panel_then_recovery" else 7):
                 current_index[0] = index
-                stamp = 100. + index * .2
-                fixture.clock_sec = stamp + .1
+                stamp = 100. + index * (.6 if scenario == "slow_bootstrap" else .2)
+                fixture.clock_sec = stamp + (.4 if scenario == "slow_bootstrap" else .1)
                 for sample in (sensor_tuple.image, sensor_tuple.scan, sensor_tuple.camera_info):
                     sample.stamp_sec = stamp
                     sample.received_ros_sec = fixture.clock_sec
@@ -184,6 +187,7 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
             self.assertFalse(adapter.args.axis_observation_json.exists())
             payload = json.loads(output.read_text()) if output.exists() else None
             adapter._test_decode_modes = decode_modes
+            adapter._test_pose_hints = pose_hints
             return adapter, payload
 
     def test_seven_quality_head_frames_and_independent_bound_qr_commit_above_35_degrees(self):
@@ -197,6 +201,15 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
         self.assertFalse(measurement["sample_admission"]["qr_bound_model_fallback"])
         self.assertAlmostEqual(abs(measurement["sample_admission"]["yaw_rad"]), math.radians(37.815))
         self.assertEqual(adapter._last_observation_update.resolved_qr_id, "QR_003")
+
+    def test_observer_fresh_slow_seed_tracks_seven_front_frames_despite_legacy_ttl(self):
+        adapter, payload = self.run_view("slow_bootstrap")
+        self.assertTrue(adapter.completed)
+        self.assertEqual(payload["axis"]["sample_count"], 7)
+        self.assertIsNone(adapter._test_pose_hints[0])
+        self.assertTrue(all(hint is not None for hint in adapter._test_pose_hints[1:]))
+        self.assertEqual(adapter._candidate_search().last_metadata["reason"],
+                         "current_associated_head_retained")
 
     def test_qr_front_head_survives_rejected_panel_and_commits_on_fresh_seventh_fit(self):
         adapter, payload = self.run_view("panel_then_recovery")
@@ -234,19 +247,24 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
 
     def test_native_head_track_keeps_periodic_empty_search_without_repeated_pyramids(self):
         head_only, _ = self.run_view("head_only")
-        self.assertEqual(head_only._test_decode_modes, ["native", "full"] + ["native"] * 6)
+        self.assertEqual(head_only._test_decode_modes.count("native"), 7)
+        # Empty-symbol checks remain periodic after the crop changes.
+        self.assertLessEqual(head_only._test_decode_modes.count("full"), 2)
         bound, _ = self.run_view("bound_qr")
         self.assertEqual(bound._test_decode_modes, ["native"] * 7)
         recovered, payload = self.run_view("native_miss")
         self.assertIsNotNone(payload)
-        self.assertEqual(recovered._test_decode_modes[:4], ["native", "native", "native", "full"])
+        self.assertEqual(recovered._test_decode_modes.count("native"), 7)
+        self.assertEqual(recovered._last_observation_update.resolved_qr_id, "QR_003")
 
     def test_recentered_head_uses_current_fitted_ray_and_unique_lidar_before_consensus(self):
         accepted, payload = self.run_view("registered_bound_qr")
         self.assertIsNotNone(payload)
         registration = accepted._write_status.call_args.kwargs["stand_axis_debug"]["metric_model"]["camera_target_registration"]
-        self.assertTrue(registration["strict_retry_applied"])
-        self.assertEqual(registration["reacquisition_mode"], "measured_head")
+        self.assertFalse(registration["strict_retry_applied"])
+        self.assertTrue(registration["current_measured_head_registration"]["accepted"])
+        first = accepted._write_status.call_args_list[0].kwargs["stand_axis_debug"]["metric_model"]
+        self.assertTrue(first["camera_target_registration"]["strict_retry_applied"])
         for scenario in ("registered_wrong_head_bearing", "registered_ambiguous_lidar", "registered_wrong_lidar"):
             with self.subTest(scenario=scenario):
                 rejected, payload = self.run_view(scenario)
@@ -260,7 +278,7 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
         metadata = adapter._write_status.call_args.kwargs["stand_axis_debug"]
         head = metadata["current_head_candidate_association"]
         self.assertTrue(head["accepted"])
-        self.assertEqual(head["roi_source"], "nominal_projection")
+        self.assertEqual(head["roi_source"], "candidate_tracked_head_search")
         self.assertGreater(head["lidar_association"]["camera_map_bearing_delta_rad"], math.radians(3))
         self.assertFalse(metadata["metric_model"]["camera_target_registration"]["strict_retry_applied"])
         self.assertEqual(len(metadata["metric_model"]["head_roi_attempts"]), 1)

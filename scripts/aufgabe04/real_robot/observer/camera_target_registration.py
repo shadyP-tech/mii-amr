@@ -10,7 +10,7 @@ consensus or a motion-authorizing receipt.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 from scripts.aufgabe04.qr_scanning.qr_observation import DecodedQrObservation
 
 from scripts.aufgabe04.perception.stand_axis.models import (
@@ -29,6 +29,9 @@ from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import (
     registered_head_roi_attempt,
     validate_backside_registration_center_offset_ratio,
 )
+
+if TYPE_CHECKING:
+    from scripts.aufgabe04.real_robot.observer.tracked_head_registration import CurrentMeasuredHeadRegistration
 
 
 BACKSIDE_REACQUISITION_TRIGGER_REASONS = frozenset(
@@ -87,6 +90,7 @@ class CameraTargetRegistrationSelection:
     initial_reacquisition_mode: str | None = None
     search_hint_used: bool = False
     head_acquisition: dict[str, object] | None = None
+    current_measured_head_registration: CurrentMeasuredHeadRegistration | None = None
 
     @property
     def registered(self) -> bool:
@@ -100,13 +104,21 @@ class CameraTargetRegistrationSelection:
             "attempted": proposal is not None or self.search_hint_used or self.head_acquisition is not None,
             "search_hint_used": self.search_hint_used,
             "head_acquisition": self.head_acquisition,
+            "current_measured_head_registration": (
+                None if self.current_measured_head_registration is None
+                else self.current_measured_head_registration.metadata()
+            ),
             "reacquisition_mode": self.reacquisition_mode,
             "initial_reacquisition_mode": self.initial_reacquisition_mode,
             "primary_estimator_reason": self.evaluations[0].estimate.reason,
             "primary_qr_detected": self.evaluations[0].debug.qr_detected,
             "strict_retry_applied": self.registered,
             "measurement_accepted": (
-                self.registered and self.selected.estimate.usable
+                (self.registered or (
+                    self.current_measured_head_registration is not None
+                    and self.current_measured_head_registration.accepted
+                    and self.current_measured_head_registration.evaluation is self.selected
+                )) and self.selected.estimate.usable
             ),
             "proposal_estimator_reason": (
                 None if proposal is None else proposal.estimate.reason

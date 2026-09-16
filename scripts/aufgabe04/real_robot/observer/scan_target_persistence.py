@@ -16,6 +16,7 @@ from scripts.aufgabe04.perception.scan_topology import ScanTopology
 from scripts.aufgabe04.perception.stand_axis_lidar_roi import PlainLaserScan
 from scripts.aufgabe04.perception.stand_axis_handoff.geometry import rotate_vector
 from scripts.aufgabe04.real_robot.observer.scan_target_geometry import scan_target_geometry
+from scripts.aufgabe04.real_robot.observer.scan_witness_buffer import StoppedScanWitnessBuffer
 
 
 MIN_WITNESS_SCANS = 3
@@ -117,15 +118,19 @@ def _same_extrinsic(left, right):
             and abs(_angle(left.yaw_rad - right.yaw_rad)) <= 1e-6)
 
 
-def _entry(association, scan, context, now_sec, max_scan_age_sec):
-    search = association.search_association
-    if search is None:
-        raise ValueError("no current camera cone")
+def _scan_entry(scan, context, now_sec, max_scan_age_sec):
     raw = asdict(scan)
     raw["ranges"] = [float(v) if v is not None and math.isfinite(float(v)) else None
                      for v in scan.ranges]
     return dict(scan=raw, context=asdict(context), now_sec=now_sec,
-                max_scan_age_sec=max_scan_age_sec,
+                max_scan_age_sec=max_scan_age_sec)
+
+
+def _entry(association, scan, context, now_sec, max_scan_age_sec):
+    search = association.search_association
+    if search is None:
+        raise ValueError("no current camera cone")
+    return dict(**_scan_entry(scan, context, now_sec, max_scan_age_sec),
                 parameters=dict(map_bearing_rad=association.map_bearing_rad,
                     observed_camera_bearing_rad=association.registered_search_bearing_rad,
                     cone_half_angle_rad=search.cone_half_angle_rad,
@@ -135,9 +140,8 @@ def _entry(association, scan, context, now_sec, max_scan_age_sec):
                     max_camera_map_bearing_delta_rad=association.max_camera_map_bearing_delta_rad))
 
 
-def _read_entry(entry):
-    if not isinstance(entry, dict) or set(entry) != {"scan", "context", "now_sec", "max_scan_age_sec", "parameters"}:
-        raise ValueError("scan persistence entry is malformed")
+def _read_scan_context(entry):
+    """Validate source-time scan/pose evidence before camera acquisition exists."""
     raw, context = entry["scan"], entry["context"]
     if not isinstance(raw, dict) or set(raw) != set(PlainLaserScan.__dataclass_fields__):
         raise ValueError("scan persistence scan is malformed")
@@ -171,6 +175,40 @@ def _read_entry(entry):
     if any(not -MAX_FUTURE_SEC <= now - _number(value) <= age_limit
            for value in (stamp, scan.receipt_sec, context["image_stamp_sec"])):
         raise ValueError("scan persistence sources are not fresh")
+    if "input_source" in entry:
+        if (entry["input_source"] != "independent_stopped_scan"
+                or context["image_stamp_sec"] != stamp):
+            raise ValueError("independent scan witness requires its exact scan-time pose")
+    return scan, robot, scan_pose, now, age_limit
+
+
+def _target_for_context(context):
+    pose = _pose(context["scan_pose_map"])
+    dx, dy = context["candidate_x_m"] - pose.x_m, context["candidate_y_m"] - pose.y_m
+    c, s = math.cos(pose.yaw_rad), math.sin(pose.yaw_rad)
+    return scan_target_geometry((c * dx + s * dy, -s * dx + c * dy, 0.),
+        stand_radius_m=context["stand_radius_m"], stand_uncertainty_m=context["stand_uncertainty_m"],
+        lidar_range_tolerance_m=context["lidar_range_tolerance_m"])
+
+
+def _historical_search_bearing(current, historical):
+    """Transfer the current head ray only inside an already verified stopped pose."""
+    pose = _pose(current["context"]["scan_pose_map"])
+    old_pose = _pose(historical["context"]["scan_pose_map"])
+    distance = _target_for_context(current["context"]).center_range_m
+    direction = pose.yaw_rad + current["parameters"]["observed_camera_bearing_rad"]
+    x = pose.x_m + distance * math.cos(direction)
+    y = pose.y_m + distance * math.sin(direction)
+    return _angle(math.atan2(y - old_pose.y_m, x - old_pose.x_m) - old_pose.yaw_rad)
+
+
+def _read_entry(entry):
+    expected_fields = {"scan", "context", "now_sec", "max_scan_age_sec", "parameters"}
+    if (not isinstance(entry, dict)
+            or set(entry) not in (expected_fields, expected_fields | {"input_source"})):
+        raise ValueError("scan persistence entry is malformed")
+    scan, robot, scan_pose, now, age_limit = _read_scan_context(entry)
+    context = entry["context"]
     parameters = entry["parameters"]
     expected = {"map_bearing_rad", "observed_camera_bearing_rad", "cone_half_angle_rad",
                 "accepted_range_m", "min_cluster_sample_count", "max_range_jump_m",
@@ -183,11 +221,7 @@ def _read_entry(entry):
         _number(parameters[key])
     if parameters["max_range_jump_m"] > .05 or parameters["max_point_gap_m"] > .04:
         raise ValueError("scan persistence cannot enlarge spatial gates")
-    dx, dy = context["candidate_x_m"] - scan_pose.x_m, context["candidate_y_m"] - scan_pose.y_m
-    c, s = math.cos(scan_pose.yaw_rad), math.sin(scan_pose.yaw_rad)
-    target = scan_target_geometry((c * dx + s * dy, -s * dx + c * dy, 0.),
-        stand_radius_m=context["stand_radius_m"], stand_uncertainty_m=context["stand_uncertainty_m"],
-        lidar_range_tolerance_m=context["lidar_range_tolerance_m"])
+    target = _target_for_context(context)
     if (abs(_angle(target.bearing_rad - parameters["map_bearing_rad"])) > 1e-9
             or len(parameters["accepted_range_m"]) != 2
             or any(not math.isclose(_number(value), expected_value, rel_tol=1e-9, abs_tol=1e-9)
@@ -219,6 +253,8 @@ def _xy(sample, pose):
 
 def _resolved(current, witnesses):
     scan, robot, pose, association, clusters = _read_entry(current)
+    if "input_source" in current:
+        raise ValueError("current target requires current camera registration")
     if association.rejection_reason != "ambiguous_registered_camera_clusters" or len(clusters) != 2:
         raise ValueError("witnessed fragmentation requires exactly two current fragments")
     left, right = sorted(clusters, key=lambda c: c.start_index)
@@ -261,6 +297,10 @@ def _resolved(current, witnesses):
             raise ValueError("scan witness candidate, epoch or beam geometry changed")
         if entry is current:
             continue
+        if (entry.get("input_source") == "independent_stopped_scan"
+                and abs(_angle(entry["parameters"]["observed_camera_bearing_rad"]
+                    - _historical_search_bearing(current, entry))) > 1e-9):
+            raise ValueError("independent witness is not bound to the current head ray")
         if (not old_association.associated or len(old_clusters) != 1
                 or old_clusters[0].start_index > old_clusters[0].end_index):
             raise ValueError("a witness contains competing targets or crosses the scan boundary")
@@ -348,15 +388,94 @@ class StoppedScanTargetPersistence:
         self.reset()
 
     def reset(self):
+        self._reset_resolution()
+        self._pending_scans = StoppedScanWitnessBuffer()
+
+    def _reset_resolution(self):
         self._history = []
         self._anchor = None
         self._last_stamp = None
         self.last_metadata = {}
 
+    def ingest_scan(self, scan, *, context, now_sec, max_scan_age_sec):
+        """Retain a fresh exact-time stopped scan even when camera fitting fails.
+
+        For this scan-only input, ``context.image_stamp_sec`` names the robot
+        pose timestamp and must equal the scan timestamp. No camera observation
+        is implied. Only a later current head bearing can select its witnesses.
+        """
+        try:
+            entry = dict(**_scan_entry(scan, context, now_sec, max_scan_age_sec),
+                         input_source="independent_stopped_scan")
+            _read_scan_context(entry)
+            _target_for_context(entry["context"])
+            if self._pending_scans.ingest(entry):
+                self._reset_resolution()
+            return True
+        except (TypeError, ValueError, ArithmeticError, KeyError, AttributeError) as exc:
+            self.reset()
+            self.last_metadata = dict(accepted=False, reason=str(exc), input_source="independent_stopped_scan")
+            return False
+
+    @staticmethod
+    def _register_scan_witness(entry, current):
+        """Apply the current cone to historical raw returns, never to an angle."""
+        old, new = entry["context"], current["context"]
+        if (any(old[k] != new[k] for k in ("target_key", "epoch_key", *_CANDIDATE_GEOMETRY_FIELDS))
+                or not _stationary(_pose(old["robot_pose"]), _pose(new["robot_pose"]))
+                or not _stationary(_pose(old["scan_pose_map"]), _pose(new["scan_pose_map"]))
+                or not _same_extrinsic(_pose(old["scan_pose_robot"]), _pose(new["scan_pose_robot"]))
+                or entry["scan"]["scan_frame_id"] != current["scan"]["scan_frame_id"]):
+            raise ValueError("independent scan witness does not share the current stopped candidate")
+        target = _target_for_context(old)
+        return dict(entry, parameters=dict(current["parameters"],
+            map_bearing_rad=target.bearing_rad, accepted_range_m=list(target.accepted_range_m),
+            observed_camera_bearing_rad=_historical_search_bearing(current, entry)))
+
     def resolve(self, association, scan, *, context, now_sec, max_scan_age_sec):
+        """Register scan-only inputs using this frame, then recompute the proof."""
+        try:
+            current = _entry(association, scan, context, now_sec, max_scan_age_sec)
+            _read_scan_context(current)
+            # Rebind previously retained scan-only witnesses too: an earlier
+            # image's head bearing cannot become this image's search authority.
+            refreshed = []
+            for old in self._history:
+                if old.get("input_source") == "independent_stopped_scan":
+                    try:
+                        old = self._register_scan_witness(old, current)
+                        if not _read_entry(old)[3].associated:
+                            raise ValueError("independent scan witness is no longer unique in the current cone")
+                    except (TypeError, ValueError, ArithmeticError, KeyError):
+                        refreshed = []
+                        break
+                refreshed.append(old)
+            self._history = refreshed
+            for pending in self._pending_scans.take_before(scan.scan_stamp_sec, after_stamp=self._last_stamp):
+                try:
+                    old = self._register_scan_witness(pending, current)
+                    old_scan, _, _, old_association, _ = _read_entry(old)
+                    old_context = ScanPersistenceContext(**{**old["context"],
+                        **{key: _pose(old["context"][key]) for key in
+                           ("robot_pose", "scan_pose_map", "scan_pose_robot")}})
+                    self._resolve(old_association, old_scan, context=old_context,
+                        now_sec=old["now_sec"], max_scan_age_sec=old["max_scan_age_sec"],
+                        input_source="independent_stopped_scan")
+                except (TypeError, ValueError, ArithmeticError, KeyError):
+                    # A contradiction consumes prior proof. Three later real
+                    # scans may independently establish a new target again.
+                    self._reset_resolution()
+        except (TypeError, ValueError, ArithmeticError, KeyError, AttributeError):
+            self.reset()
+        return self._resolve(association, scan, context=context,
+            now_sec=now_sec, max_scan_age_sec=max_scan_age_sec)
+
+    def _resolve(self, association, scan, *, context, now_sec, max_scan_age_sec, input_source=None):
         """Return unchanged raw evidence unless the narrow proof recomputes."""
         try:
             entry = _entry(association, scan, context, now_sec, max_scan_age_sec)
+            if input_source is not None:
+                entry["input_source"] = input_source
             current_scan, robot, pose, recomputed, clusters = _read_entry(entry)
             # The resolver's clock read may be slightly later than the raw
             # association call. Re-evaluate freshness; compare every other gate.

@@ -1,9 +1,10 @@
 """Require a current, candidate-associated complete head before backside use.
 
 Negative QR evidence from a nominal projection may merely mean that the crop
-cut off the QR. A current 2D head proposal must locate the complete head, bind
-it to a unique scan cluster, and select the crop used by the strict fit/QR
-checks. This is acquisition evidence, never an angle or motion authority.
+cut off the QR. A current 2D proposal/retry or a freshly refitted tracked head
+must locate the complete head, bind it to a unique scan cluster, and prove the
+crop used by the strict fit/QR checks contains all borders. This is acquisition
+evidence, never an angle or motion authority.
 """
 
 from dataclasses import asdict, dataclass, replace
@@ -19,9 +20,10 @@ class BacksideHeadCropReview:
     reason: str
     crop_xyxy: tuple | None = None
     head_bounds_full_image: tuple | None = None
+    basis: str = "current_candidate_head_proposal"
 
     def metadata(self):
-        return {**asdict(self), "basis": "current_candidate_head_proposal",
+        return {**asdict(self),
                 "neck_required": False, "motion_authorized": False}
 
 
@@ -31,6 +33,9 @@ def review_current_head_crop(selection, *, require_marker_absence=False):
     Geometric completeness is meaningful for either face. Backside consumers
     additionally require explicit marker absence through the wrapper below.
     """
+    if selection.current_measured_head_registration is not None:
+        from scripts.aufgabe04.real_robot.observer.tracked_head_registration import review_current_tracked_head_crop
+        return review_current_tracked_head_crop(selection, require_marker_absence=require_marker_absence)
     result = BacksideHeadCropReview(False, "current_complete_head_crop_required")
     acquisition = selection.head_acquisition or {}
     if (not selection.registered
