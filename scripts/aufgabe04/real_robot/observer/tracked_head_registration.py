@@ -11,12 +11,12 @@ from dataclasses import dataclass, field, replace
 import math
 
 from scripts.aufgabe04.perception.stand_axis.head_border_seed import validate_current_head_proposal
-from scripts.aufgabe04.perception.stand_axis.head_model_admission import admit_measured_head_model
 from scripts.aufgabe04.perception.stand_axis.observation_freshness import observation_freshness
 from scripts.aufgabe04.real_robot.observer.camera_target_registration import (
     CameraTargetRegistrationSelection, HeadRoiEvaluation,
 )
 from scripts.aufgabe04.real_robot.observer.current_head_association import CurrentHeadCandidateAssociation
+from scripts.aufgabe04.real_robot.observer.current_head_detection import current_head_detection_admission
 from scripts.aufgabe04.real_robot.observer.scan_target_persistence import registered_target_is_unique
 
 
@@ -69,12 +69,9 @@ def _current_geometry_bounds(proof):
                 observed_at_sec=proof.observed_at_sec, now_sec=proof.checked_at_sec,
                 max_age_sec=proof.max_age_sec).accepted):
         return "current_tracked_head_freshness_required", None
-    yaw = estimate.yaw_deg
-    admission = admit_measured_head_model(
-        estimate=estimate, debug=debug,
-        yaw_rad=math.radians(yaw) if type(yaw) in (int, float) else math.nan,
-    )
-    if not admission.accepted:
+    admission, bounds = current_head_detection_admission(
+        estimate, debug, profile_sha256=proof.expected_model_sha256)
+    if not admission.accepted and bounds is None:
         return admission.reason, None
     if estimate.model_profile_sha256 != proof.expected_model_sha256:
         return "current_tracked_head_profile_mismatch", None
@@ -83,6 +80,7 @@ def _current_geometry_bounds(proof):
             or association.accepted is not True
             or association.reason != "current_head_unique_lidar_cluster"
             or association.head_admission != admission
+            or association.head_orientation_bounds != bounds
             or association.roi_source != current.attempt.source
             or not association.scale_gate
             or association.scale_gate.get("accepted") is not True

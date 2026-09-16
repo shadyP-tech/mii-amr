@@ -7,6 +7,8 @@ selection evidence before creating the output directory.
 
 from __future__ import annotations
 
+from scripts.aufgabe04.artifacts.bounded_orientation import validate_bounded_endpoint
+
 import json
 import math
 from pathlib import Path
@@ -154,6 +156,19 @@ def materialize_candidate_preapproach_plan(
         candidate_y_m=candidate.geometry.y_m,
         approach_normal_rad=approach_normal_rad,
     )
+    bounded_view = None
+    if axis_observation is not None and axis_observation.bounded_orientation is not None:
+        bounded_view = validate_bounded_endpoint(
+            axis_observation.bounded_orientation,
+            selected_normal_rad=axis_observation.opposite_face_normal_rad,
+            stand_x_m=candidate.geometry.x_m, stand_y_m=candidate.geometry.y_m,
+            stand_uncertainty_m=candidate.geometry.uncertainty_m,
+            target_x_m=prepared.selected_approach_pose.x_m,
+            target_y_m=prepared.selected_approach_pose.y_m,
+            expected_sample_count=axis_observation.axis_sample_count,
+            observing_robot_x_m=axis_observation.robot_x_m,
+            observing_robot_y_m=axis_observation.robot_y_m,
+        )
 
     output_dir.mkdir(parents=True, exist_ok=False)
     route_csv = output_dir / "route.csv"
@@ -233,6 +248,8 @@ def materialize_candidate_preapproach_plan(
     )
     if selection_evidence is not None:
         metadata["camera_candidate_selection"] = dict(selection_evidence)
+    if bounded_view is not None:
+        metadata["bounded_orientation_view"] = bounded_view
     if inspection_view_path is not None:
         local_view = output_dir / "inspection_view.json"
         shutil.copyfile(inspection_view_path, local_view)

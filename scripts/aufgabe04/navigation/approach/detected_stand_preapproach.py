@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from scripts.aufgabe04.artifacts.bounded_orientation import validate_bounded_endpoint, endpoint_evidence_matches
+
 import csv
 import json
 import math
@@ -228,9 +230,22 @@ def validate_detected_stand_preapproach_binding(
                     metadata.get("approach_offset_m"), "approach_offset_m"
                 )
                 observed_normal = axis_observation.opposite_face_normal_rad
+                bounded_view = None
+                if axis_observation.bounded_orientation is not None:
+                    bounded_view = validate_bounded_endpoint(
+                        axis_observation.bounded_orientation, selected_normal_rad=observed_normal,
+                        stand_x_m=selected.geometry.x_m, stand_y_m=selected.geometry.y_m,
+                        stand_uncertainty_m=selected.geometry.uncertainty_m,
+                        target_x_m=final.pose.x_m, target_y_m=final.pose.y_m,
+                        expected_sample_count=axis_observation.axis_sample_count,
+                        observing_robot_x_m=axis_observation.robot_x_m,
+                        observing_robot_y_m=axis_observation.robot_y_m,
+                    )
             except (OSError, json.JSONDecodeError, ValueError) as exc:
                 failures.append(f"axis observation validation failed: {exc}")
             else:
+                if not endpoint_evidence_matches(metadata.get("bounded_orientation_view"), bounded_view):
+                    failures.append("bounded orientation viewing evidence differs from actual route endpoint")
                 if metadata.get("axis_observation_sha256") != axis_digest:
                     failures.append("axis observation SHA-256 does not match")
                 if isinstance(

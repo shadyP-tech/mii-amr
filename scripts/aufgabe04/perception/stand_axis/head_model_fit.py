@@ -15,6 +15,7 @@ from scripts.aufgabe04.perception.stand_axis.head_model_quality import (
     evaluate_head_model_quality, validated_head_model_quality,
 )
 from scripts.aufgabe04.perception.stand_axis.head_outer_border import select_current_outer_head_border
+from scripts.aufgabe04.perception.stand_axis.head_orientation_bounds import evaluate_current_head_orientation_bounds
 from scripts.aufgabe04.perception.stand_axis.model_projection import project_stand_model
 from scripts.aufgabe04.perception.stand_axis.model_refinement import refine_projected_head_border
 from scripts.aufgabe04.perception.stand_axis.models import StandAxisEdgeDebugArtifacts
@@ -80,6 +81,14 @@ def fit_current_measured_head(
         centered_neck_supported=False, neck_junction_verified=False,
         outer_border_verified=outer_recovery.accepted,
     )
+    orientation_bounds = evaluate_current_head_orientation_bounds(
+        cv2, profile=model_profile, camera=camera, corners=corners, pose_result=pose,
+        frame_shape=raw_edges.shape,
+        raw_border_support_mean=None if refinement.support is None else refinement.support.mean,
+        raw_corner_support_accepted=bool(refinement.accepted and refinement.corner_arm_support is not None
+                                         and refinement.corner_arm_support.accepted),
+        outer_border_verified=outer_recovery.accepted,
+    )
     reason = (refinement.reason if not refinement.accepted else
               outer_recovery.reason if not outer_recovery.accepted else quality.reason)
     estimate = replace(
@@ -101,6 +110,7 @@ def fit_current_measured_head(
         model_pose_fit_source=MEASURED_HEAD_AXIS_SOURCE,
         pose_seed_source="current_head_proposal", model_reason=reason,
         evidence_state="unobservable", head_model_quality=quality,
+        head_orientation_bounds=orientation_bounds,
         head_neck_junction=None,
         head_outer_recovery=outer_recovery,
         refinement_support_mean=quality.raw_border_support_mean,

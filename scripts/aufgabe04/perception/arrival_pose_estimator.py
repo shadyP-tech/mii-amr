@@ -43,6 +43,8 @@ def arrival_pose_record_from_recommendation(
     """Build one explicit record from a committed synchronized estimate."""
 
     validate_recommendation(recommendation)
+    if recommendation.bounded_orientation is not None:
+        raise ValueError("legacy arrival catalog cannot discard bounded orientation; use its checked candidate route")
     if recommendation.axis_state not in COMMITTED_AXIS_STATES:
         raise ValueError(
             "arrival pose can only be recorded from a committed stand axis"

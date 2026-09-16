@@ -18,6 +18,7 @@ from scripts.aufgabe04.artifacts import (
     ARTIFACT_MANIFEST_SCHEMA_VERSION, SurveyManifest, artifact_reference, write_survey_manifest,
 )
 from scripts.aufgabe04.artifacts.content_store import load_content_hashed_json, payload_sha256, write_content_hashed_json
+from scripts.aufgabe04.artifacts.bounded_orientation import validated_bounded_orientation
 from scripts.aufgabe04.navigation.approach.camera_decision_geometry_binding import (
     require_camera_recommendation_binding, require_projected_camera_candidate_binding,
 )
@@ -96,6 +97,8 @@ def _project_recommendation(recommendation, source_frame, target_frame):
         robot_pose=pose(recommendation.robot_pose),
         face_candidates=tuple(replace(face, pose=pose(face.pose), outward_normal_rad=normalize_angle(face.outward_normal_rad + rotation)) for face in recommendation.face_candidates),
         material_target=replace(recommendation.material_target, pose=pose(recommendation.material_target.pose)),
+        bounded_orientation=(None if recommendation.bounded_orientation is None else
+                             validated_bounded_orientation(recommendation.bounded_orientation).rotated(rotation).payload()),
     )
     validate_recommendation(projected)
     return projected

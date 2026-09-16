@@ -12,11 +12,11 @@ import math
 
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.perception.stand_axis.head_border_seed import validate_current_head_proposal
-from scripts.aufgabe04.perception.stand_axis.head_model_admission import admit_measured_head_model
 from scripts.aufgabe04.perception.stand_axis.models import ImagePoint
 from scripts.aufgabe04.perception.stand_axis.observation_freshness import observation_freshness
 from scripts.aufgabe04.real_robot.configuration.geometry import ImageRoi
 from scripts.aufgabe04.real_robot.observer.camera_target_registration import HeadRoiEvaluation
+from scripts.aufgabe04.real_robot.observer.current_head_detection import current_head_search_pose
 from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import (
     HeadRoiAttempt, validate_backside_registration_center_offset_ratio,
 )
@@ -93,6 +93,7 @@ class CandidateHeadTracking:
         freshness = observation_freshness(observed_at_sec=observed_at_sec,
                                          now_sec=now_sec, max_age_sec=max_age_sec)
         estimate, debug = evaluation.estimate, evaluation.debug
+        search_pose = current_head_search_pose(estimate, debug, profile_sha256=context.model_sha256)
         old = self._hint
         reason = None
         if not freshness.accepted:
@@ -101,10 +102,7 @@ class CandidateHeadTracking:
             reason = "candidate_head_seed_unassociated"
         elif not self._finite_pose(robot_pose):
             reason = "candidate_head_seed_pose_invalid"
-        elif (debug.model_pose is None or not admit_measured_head_model(
-                estimate=estimate, debug=debug,
-                yaw_rad=(math.radians(estimate.yaw_deg)
-                         if type(estimate.yaw_deg) in (int, float) else math.nan)).accepted):
+        elif search_pose is None:
             reason = "candidate_head_seed_geometry_unverified"
         elif (estimate.model_profile_sha256 != context.model_sha256
               or debug.model_profile_sha256 != context.model_sha256
@@ -131,7 +129,7 @@ class CandidateHeadTracking:
                        and 2 <= p.v_px <= roi.y1 - roi.y0 - 2 for p in corners):
                 raise ValueError("head is clipped")
             full = tuple(ImagePoint(p.u_px + roi.x0, p.v_px + roi.y0) for p in corners)
-            pose = debug.model_pose
+            pose = search_pose
             if (not pose.positive_depth or not all(math.isfinite(v) for v in
                     (*pose.rotation_vector, *pose.translation_xyz_m, *pose.face_normal_xyz))):
                 raise ValueError("invalid camera pose")

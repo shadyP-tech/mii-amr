@@ -17,9 +17,11 @@ from pathlib import Path
 from typing import Collection, Mapping, Sequence
 
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.artifacts.bounded_orientation import validate_bounded_endpoint, validated_bounded_orientation
 
 
 RECOMMENDATION_SCHEMA_VERSION = 1
+BOUNDED_RECOMMENDATION_SCHEMA_VERSION = 2
 REAL_VIEWPOINT_SOURCE = "synchronized_lidar_camera_viewpoint"
 
 _FACE_GEOMETRY_TOLERANCE_RAD = 1.0e-6
@@ -89,6 +91,7 @@ class SynchronizedViewpointRecommendation:
     # angle or side authority from its diagnostic fields. Older artifacts did
     # not record which estimator supplied the measured axis.
     axis_measurement: Mapping[str, object] | None = None
+    bounded_orientation: Mapping[str, object] | None = None
 
 
 def normalize_angle(angle_rad: float) -> float:
@@ -108,11 +111,17 @@ def validate_recommendation(
 ) -> None:
     """Validate structure and provenance, but intentionally not wall-clock age."""
 
-    if recommendation.schema_version != RECOMMENDATION_SCHEMA_VERSION:
+    if type(recommendation.schema_version) is not int or recommendation.schema_version not in (
+        RECOMMENDATION_SCHEMA_VERSION, BOUNDED_RECOMMENDATION_SCHEMA_VERSION,
+    ):
         raise ValueError(
             "unsupported viewpoint recommendation schema_version: "
             f"{recommendation.schema_version!r}"
         )
+    if recommendation.schema_version == RECOMMENDATION_SCHEMA_VERSION and recommendation.bounded_orientation is not None:
+        raise ValueError("schema-1 viewpoint recommendation cannot contain bounded orientation")
+    if recommendation.schema_version == BOUNDED_RECOMMENDATION_SCHEMA_VERSION and recommendation.bounded_orientation is None:
+        raise ValueError("schema-2 viewpoint recommendation requires bounded orientation")
     if type(recommendation.simulation_only) is not bool:
         raise ValueError("viewpoint recommendation simulation_only must be boolean")
     if (
@@ -221,6 +230,32 @@ def validate_recommendation(
             )
         if not matching_face.identity_resolved:
             raise ValueError("hard side evidence requires a resolved physical face identity")
+    if recommendation.bounded_orientation is not None:
+        if (recommendation.simulation_only or recommendation.source != REAL_VIEWPOINT_SOURCE
+                or recommendation.axis_state != "target_committed"
+                or not recommendation.side_evidence.hard or not recommendation.side_evidence.valid
+                or recommendation.side_evidence.kind != "qr_consensus"
+                or recommendation.side_evidence.provenance != "real/onboard_camera_qr_consensus"
+                or not matching_face.identity_resolved):
+            raise ValueError("bounded orientation requires committed real onboard QR face evidence")
+        validate_bounded_endpoint(
+            recommendation.bounded_orientation,
+            selected_normal_rad=matching_face.outward_normal_rad,
+            stand_x_m=recommendation.stand.center.x_m, stand_y_m=recommendation.stand.center.y_m,
+            stand_uncertainty_m=recommendation.stand.uncertainty_m,
+            target_x_m=target.pose.x_m, target_y_m=target.pose.y_m,
+            expected_sample_count=recommendation.axis_sample_count,
+        )
+        bounded = validated_bounded_orientation(recommendation.bounded_orientation)
+        observed_side = math.atan2(recommendation.robot_pose.y_m - recommendation.stand.center.y_m,
+                                   recommendation.robot_pose.x_m - recommendation.stand.center.x_m)
+        observed_distance = math.hypot(recommendation.robot_pose.y_m - recommendation.stand.center.y_m,
+                                       recommendation.robot_pose.x_m - recommendation.stand.center.x_m)
+        if observed_distance <= recommendation.stand.uncertainty_m:
+            raise ValueError("bounded orientation observing side is unresolved")
+        observed_side_reserve = math.asin(recommendation.stand.uncertainty_m / observed_distance)
+        if angular_distance(matching_face.outward_normal_rad, observed_side) + bounded.half_width_rad + observed_side_reserve >= math.pi / 2:
+            raise ValueError("bounded orientation does not preserve observed QR face for every angle")
 
 
 def validate_recommendation_freshness(
@@ -245,6 +280,8 @@ def validate_recommendation_freshness(
 def recommendation_from_payload(
     payload: Mapping[str, object],
 ) -> SynchronizedViewpointRecommendation:
+    if payload.get("schema_version") == RECOMMENDATION_SCHEMA_VERSION and "bounded_orientation" in payload:
+        raise ValueError("schema-1 viewpoint recommendation cannot contain bounded orientation")
     try:
         stand_payload = _require_mapping(payload, "stand")
         axis_payload = _require_mapping(payload, "axis")
@@ -294,6 +331,7 @@ def recommendation_from_payload(
                 axis_payload, "sample_count"
             ),
             axis_measurement=deepcopy(payload.get("axis_measurement")),
+            bounded_orientation=deepcopy(payload.get("bounded_orientation")),
         )
     except (KeyError, TypeError) as exc:
         raise ValueError(f"malformed viewpoint recommendation: {exc}") from exc
@@ -314,6 +352,8 @@ def recommendation_to_payload(
     if payload["axis_measurement"] is None:
         # Keep the serialization of legacy recommendations unchanged.
         payload.pop("axis_measurement")
+    if payload["bounded_orientation"] is None:
+        payload.pop("bounded_orientation")
     return payload
 
 

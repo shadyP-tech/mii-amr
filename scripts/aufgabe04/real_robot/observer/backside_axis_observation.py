@@ -61,6 +61,7 @@ def build_backside_axis_observation(
     robot_profile_sha256: str,
     calibration_profile_sha256: str,
     target_registration: Mapping[str, object],
+    bounded_orientation: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Build schema 3 from repeated, registered current-frame evidence."""
 
@@ -152,6 +153,10 @@ def build_backside_axis_observation(
         "calibration_profile_sha256": calibration_profile_sha256,
         "target_registration": dict(target_registration),
     }
+    if bounded_orientation is not None:
+        # This variant supplies an interval, never a precise axis confidence.
+        # Navigation must validate the whole interval at its selected endpoint.
+        payload["bounded_orientation"] = dict(bounded_orientation)
     validate_backside_axis_observation(payload)
     return payload
 

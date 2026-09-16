@@ -2900,6 +2900,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             config = self._config(root, (candidate,))
             recommendation = SimpleNamespace(
                 stand_id=candidate.candidate_uid,
+                bounded_orientation=None,
                 material_target=SimpleNamespace(
                     face_id="qr_face",
                     pose=Pose2D(0.31, 0.0, math.pi),
@@ -2968,6 +2969,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             target = Pose2D(-0.35, 0.0, 0.0)
             recommendation = SimpleNamespace(
                 stand_id=candidate.candidate_uid,
+                bounded_orientation=None,
                 material_target=SimpleNamespace(
                     face_id="qr_face",
                     pose=target,
@@ -3059,6 +3061,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             )
             recommendation = SimpleNamespace(
                 stand_id=candidate.candidate_uid,
+                bounded_orientation=None,
                 material_target=SimpleNamespace(
                     face_id="qr_face",
                     pose=target,

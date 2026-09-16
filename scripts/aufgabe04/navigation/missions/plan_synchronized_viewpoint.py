@@ -1478,6 +1478,8 @@ def main(argv=None) -> int:
                 )
                 if recommendation.stream_id != args.stream_id:
                     raise ValueError("viewpoint recommendation stream_id mismatch")
+                if recommendation.bounded_orientation is not None:
+                    raise ValueError("bounded orientation requires the candidate planner with whole-interval endpoint validation")
                 if recommendation.axis_state.startswith("invalid_"):
                     raise ValueError(recommendation.axis_state)
                 route_kind = route_kind_for_axis_state(

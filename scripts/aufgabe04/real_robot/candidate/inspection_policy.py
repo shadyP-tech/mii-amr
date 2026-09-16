@@ -22,7 +22,7 @@ def validate_inspection_budget(value: int) -> None:
 
 def novel_view(normal: float, previous: list[float]) -> bool:
     return all(abs(math.remainder(normal - old, 2.0 * math.pi)) >=
-               MINIMUM_VIEW_SEPARATION_RAD for old in previous)
+               MINIMUM_VIEW_SEPARATION_RAD - 1e-12 for old in previous)
 
 
 def candidate_view_options(
@@ -41,10 +41,20 @@ def candidate_view_options(
         offsets = (90, -90, 180, 45, -45, 135, -135)
     hypotheses = [math.radians(degrees) for degrees in offsets]
     if classification in {"oblique", "front_readable", "front_unreadable"} and (
-        advisory_yaw_rad is not None and math.isfinite(advisory_yaw_rad)
+        type(advisory_yaw_rad) in (int, float) and math.isfinite(advisory_yaw_rad)
     ):
         angle = min(math.pi / 2, max(MINIMUM_VIEW_SEPARATION_RAD, abs(advisory_yaw_rad)))
         hypotheses = [angle, -angle, *hypotheses]
+    if classification == "certified_backside" or (
+        classification == "backside_unresolved"
+        and type(advisory_yaw_rad) in (int, float) and math.isfinite(advisory_yaw_rad)
+        and abs(advisory_yaw_rad) <= math.pi
+    ):
+        # A bounded current head suggests resolving orientation locally. A
+        # certified opposite route that proved infeasible also benefits from
+        # a small view change before a quarter-turn search. Both signs remain
+        # hypotheses and every resulting route still needs normal admission.
+        hypotheses = [MINIMUM_VIEW_SEPARATION_RAD, -MINIMUM_VIEW_SEPARATION_RAD, *hypotheses]
     # Legacy callers supply fully attempted directions. The live controller
     # separately tracks pose proposals and only excludes a failed direction
     # once all its bounded standoffs have been considered.

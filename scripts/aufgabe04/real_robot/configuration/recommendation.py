@@ -13,6 +13,8 @@ from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import (
     StandGeometry,
     SynchronizedViewpointRecommendation,
     REAL_VIEWPOINT_SOURCE,
+    RECOMMENDATION_SCHEMA_VERSION,
+    BOUNDED_RECOMMENDATION_SCHEMA_VERSION,
     angular_distance,
     normalize_angle,
     validate_recommendation,
@@ -36,6 +38,7 @@ def build_real_viewpoint_recommendation(
     observed_qr_ids: tuple[str, ...],
     target_distance_m: float,
     observation_unix_sec: float | None = None,
+    bounded_orientation: dict[str, object] | None = None,
 ) -> SynchronizedViewpointRecommendation:
     """Create one committed, robot-facing real arrival recommendation.
 
@@ -80,7 +83,8 @@ def build_real_viewpoint_recommendation(
         faces.append(FaceCandidate(face_id, normal, pose, True))
     selected = faces[selected_index]
     recommendation = SynchronizedViewpointRecommendation(
-        schema_version=1,
+        schema_version=(RECOMMENDATION_SCHEMA_VERSION if bounded_orientation is None
+                        else BOUNDED_RECOMMENDATION_SCHEMA_VERSION),
         simulation_only=False,
         stream_id=stream_id,
         stand_id=stand_id,
@@ -114,6 +118,7 @@ def build_real_viewpoint_recommendation(
             evidence_state="hard_qr",
         ),
         axis_sample_count=axis_sample_count,
+        bounded_orientation=bounded_orientation,
     )
     validate_recommendation(
         recommendation,

@@ -92,6 +92,7 @@ class FrontViewRecovery:
         self._kind = None
         self._qualified_frames = 0
         self._deferred = False
+        self._current_frame_status = None
         self._reason = "no_qualified_front_observation"
 
     def poison(self):
@@ -100,11 +101,27 @@ class FrontViewRecovery:
         self._deferred = False
         self._reason = "poisoned_observation_epoch"
 
+    def _defer_within_budget(self, now_sec: float, frame_status: str) -> bool:
+        """A missed tuple can spend an existing budget, never create one."""
+        self._current_frame_status = frame_status
+        self._deferred = self._deadline is not None and now_sec < self._deadline
+        if self._deadline is None:
+            self._reason = frame_status
+        else:
+            self._reason = ("stopped_front_reacquisition" if self._deferred
+                            else "front_recovery_budget_exhausted")
+        return self._deferred
+
     def observe(self, *, target_key: str, now_sec: float, frame_stamp_sec: float,
                 robot_pose: Mapping[str, float], frame_accepted: bool,
                 source_fresh: bool, poisoned: bool, motion_epoch_reset: bool,
                 failure_kind: str | None) -> bool:
-        """Return whether this fresh tuple should keep observing while stopped."""
+        """Keep a qualified view's fixed stopped window through ordinary misses.
+
+        This return value delays advisory exit only. A missed, stale or repeated
+        tuple contributes no evidence, and a stronger successful admission can
+        complete independently without waiting for this deadline.
+        """
         if (not isinstance(target_key, str) or not target_key
                 or any(type(v) not in (int, float) or not math.isfinite(v) or v < 0
                        for v in (now_sec, frame_stamp_sec))):
@@ -125,15 +142,12 @@ class FrontViewRecovery:
         if self._poisoned:
             return False
         if frame_accepted is not True or source_fresh is not True:
-            self._reason = "current_frame_not_fresh_and_associated"
-            return False
+            return self._defer_within_budget(now_sec, "current_frame_not_fresh_and_associated")
         if self._last_frame_stamp is not None and frame_stamp_sec <= self._last_frame_stamp:
-            self._reason = "repeated_or_out_of_order_frame"
-            return False
+            return self._defer_within_budget(now_sec, "repeated_or_out_of_order_frame")
         self._last_frame_stamp = frame_stamp_sec
         if failure_kind not in {CORNER_REACQUISITION, GEOMETRY_REACQUISITION, HEAD_GEOMETRY_REACQUISITION}:
-            self._reason = "current_frame_does_not_need_front_recovery"
-            return False
+            return self._defer_within_budget(now_sec, "no_current_qualified_front_failure")
         self._kind = failure_kind
         self._last_qualified_frame_stamp = frame_stamp_sec
         self._qualified_frames += 1
@@ -142,15 +156,14 @@ class FrontViewRecovery:
             self._deadline = now_sec + self.duration_sec
         # New QR samples, changing failure reasons and ordinary soft misses
         # cannot change either timestamp. The outer process keeps its own cap.
-        self._deferred = now_sec < self._deadline
-        self._reason = "stopped_front_reacquisition" if self._deferred else "front_recovery_budget_exhausted"
-        return self._deferred
+        return self._defer_within_budget(now_sec, "qualified_front_observation")
 
     def metadata(self, *, now_sec: float) -> dict[str, object]:
         remaining = None if self._deadline is None else max(0., self._deadline - now_sec)
         return {
             "schema_version": 1, "target_key": self._target_key,
             "phase": self._kind, "reason": self._reason,
+            "current_frame_status": self._current_frame_status,
             "duration_sec": self.duration_sec,
             "started_monotonic_sec": self._started, "deadline_monotonic_sec": self._deadline,
             "remaining_sec": remaining,

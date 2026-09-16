@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from scripts.aufgabe04.perception.stand_axis.head_model_quality import HeadModelQuality
+    from scripts.aufgabe04.perception.stand_axis.head_orientation_bounds import CurrentHeadOrientationBounds
     from scripts.aufgabe04.perception.stand_axis.metric_edge_association import (
         MetricCornerArmSupport,
     )
@@ -105,6 +106,9 @@ class StandAxisEdgeDebugArtifacts:
     # Separate measured-head angle proof. QR/joint residuals cannot supply or
     # veto this channel's current-pixel fit; face semantics remain independent.
     head_model_quality: HeadModelQuality | None = None
+    # Complete current head detection may retain multiple plausible angles.
+    # This does not change strict quality/estimate.usable or authorize motion.
+    head_orientation_bounds: CurrentHeadOrientationBounds | None = None
     head_neck_junction: object | None = None
     head_outer_recovery: object | None = None
     head_marker_boundary: object | None = None

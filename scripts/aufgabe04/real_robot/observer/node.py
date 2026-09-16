@@ -144,6 +144,11 @@ from scripts.aufgabe04.real_robot.observer.head_observation_window import (
     MEASURED_HEAD_SOURCES, current_head_window_input, review_current_head_window,
 )
 from scripts.aufgabe04.real_robot.observer.head_temporal_consistency import StationaryHeadConsistency
+from scripts.aufgabe04.perception.stand_axis.head_orientation_bounds import validated_current_head_orientation_bounds
+from scripts.aufgabe04.real_robot.observer.bounded_head_observation import (
+    prepare_bounded_head, record_bounded_head, commit_bounded_head,
+)
+from scripts.aufgabe04.artifacts.backside_axis_observation import MINIMUM_BACKSIDE_AXIS_CONFIDENCE
 from scripts.aufgabe04.real_robot.observer.camera_publication import (
     CameraPublicationExpired,
     camera_source_freshness,
@@ -749,6 +754,9 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self._pending_head_window_associated = False
         self._head_window_consistency = None
         self._head_window_decision = None
+        self._pending_bounded_head = None
+        self._bounded_head_window = None
+        self._bounded_head_ready = None
         self._scan_target_persistence = None
         self._reset_scan_witnesses()
         self._reset_candidate_search("observation_evidence_reset")
@@ -893,6 +901,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 angle_temporally_consistent=(self._head_window_decision is not None
                                             and self._head_window_decision.current_sample_accepted))
             pending[1]["observation_confidence"] = self._head_confidence_metadata
+        record_bounded_head(self, update=update, image_stamp_sec=image_stamp_sec,
+                            observed_at_sec=observed_at_sec)
         self._last_observation_update = update
         self._head_qr_tracking_stamp_sec = (
             image_stamp_sec
@@ -1102,6 +1112,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
     def _process_latest(self) -> None:
         if self.completed:
             return
+        self._pending_bounded_head = None
+        self._bounded_head_ready = None
         sensor_tuple = self._next_sensor_tuple()
         if sensor_tuple is None:
             return
@@ -1602,7 +1614,9 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         current = registration.selected
         estimate, debug, selected_attempt = current.estimate, current.debug, current.attempt
         now_sec = self.node.get_clock().now().nanoseconds / 1e9
-        if (requires_measured_head_admission(estimate, debug) and estimate.usable
+        if (requires_measured_head_admission(estimate, debug)
+                and (estimate.usable or validated_current_head_orientation_bounds(
+                    getattr(debug, "head_orientation_bounds", None), estimate=estimate, debug=debug))
                 and self._source_freshness(image.stamp_sec, scan.stamp_sec).accepted):
             current_head_association = associate_current_measured_head(
                 estimate=estimate, debug=debug, attempt=selected_attempt,
@@ -1840,6 +1854,25 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         current_crop = review_current_head_crop(registration)
         self._pending_head_window_associated = current_crop.accepted
         model_metadata["current_head_crop"] = current_crop.metadata()
+        self._pending_bounded_head = prepare_bounded_head(
+            estimate=estimate, debug=debug, association=current_head_association,
+            crop=current_crop, appearance_crop=appearance_crop, qr_binding=qr_binding,
+            marker_verified=roi_qr_evidence.marker_verified,
+            marker_seen_in_epoch=self._qr_marker_seen_in_stationary_epoch,
+            image_stamp_sec=image.stamp_sec, scan_stamp_sec=scan.stamp_sec,
+            robot_pose=robot_pose, camera_heading_rad=optical_heading_from_transform(map_from_camera),
+            stand_x_m=self.args.stand_x, stand_y_m=self.args.stand_y,
+            camera_signature=candidate_context.camera_signature, roi=roi, metadata=model_metadata,
+            projected_center_px=(projection.u_px, projection.v_px),
+            expected_head_height_px=expected_head_height_px)
+        if self._pending_bounded_head is not None:
+            proof = self._pending_bounded_head.proof
+            axis_metadata["bounded_head_view_hint"] = {
+                "camera_relative_yaw_rad": proof.center_rad,
+                "orientation_half_width_rad": proof.half_width_rad,
+                "purpose": "orientation_disambiguation", "candidate_associated": True,
+                "source_fresh": self._source_freshness(image.stamp_sec, scan.stamp_sec).accepted,
+            }
         if estimate.model_profile_sha256 != self.stand_model_profile.sha256:
             self._reset_observation_evidence()
             self._write_debug(
@@ -2277,6 +2310,18 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             debug,
             metadata=axis_metadata,
         )
+        if getattr(self, "_pending_bounded_head", None) is not None:
+            # A measured interval must never be erased by the older precise-
+            # axis writer. Its receipt is attempted first in _write_status.
+            window = getattr(self, "_bounded_head_window", None)
+            reason = "collecting_bounded_orientation" if window is None else window.metadata["reason"]
+            state = ("collecting_consensus" if reason in {
+                "collecting_bounded_orientation", "bounded_orientation_ready"
+            } else "evidence_not_committable")
+            self._write_status(state, reason=reason, qr_texts=list(qr_texts),
+                observation_evidence=update.snapshot.as_dict(), stand_axis_debug=axis_metadata,
+                **lidar_status_details)
+            return
         if update.snapshot.poisoned:
             self._write_status(
                 "evidence_not_committable",
@@ -2327,6 +2372,15 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 / max(math.radians(self.args.consensus_max_deviation_deg), 1.0e-9),
             ),
         )
+        if consensus.source in BACKSIDE_AXIS_SOURCES and confidence < MINIMUM_BACKSIDE_AXIS_CONFIDENCE:
+            # Readiness and receipt validation use the same threshold. The
+            # separate bounded path can still supply an honest interval.
+            self._write_status(
+                "collecting_consensus", reason="backside_axis_confidence_below_receipt_minimum",
+                axis_confidence=confidence, required_axis_confidence=MINIMUM_BACKSIDE_AXIS_CONFIDENCE,
+                observation_evidence=update.snapshot.as_dict(), stand_axis_debug=axis_metadata,
+                **lidar_status_details)
+            return
         if (consensus.source == MEASURED_HEAD_AXIS_SOURCE
                 and not measured_head_front_is_current(
                     qr_binding=qr_binding, marker_verified=roi_qr_evidence.marker_verified,
@@ -2647,6 +2701,18 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         return payload
 
     def _write_status(self, state: str, **details) -> None:
+        bounded = commit_bounded_head(self)
+        if bounded is not None:
+            state, bounded_details = bounded
+            details = {**details, **bounded_details}
+        elif not getattr(self, "completed", False):
+            current = getattr(self, "_pending_bounded_head", None)
+            rejection = None if current is None else current.metadata.get("bounded_orientation_rejection")
+            if rejection is not None and state == "collecting_consensus":
+                # A ready interval with no feasible viewing pose is not an
+                # invitation to wait forever or publish a legacy point angle.
+                state = "evidence_not_committable"
+                details = {**details, "reason": rejection}
         progress = self._maybe_commit_inspection_progress(state, details)
         if progress is not None:
             details = {

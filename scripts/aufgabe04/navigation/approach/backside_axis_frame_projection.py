@@ -8,6 +8,8 @@ and axial heading in the latter frame.
 
 from __future__ import annotations
 
+from scripts.aufgabe04.artifacts.bounded_orientation import validated_bounded_orientation
+
 from dataclasses import dataclass, replace
 import hashlib
 import math
@@ -163,6 +165,15 @@ class BacksideAxisFrameProjection:
         return self.source_observation.stand_model_profile_sha256
 
     @property
+    def bounded_orientation(self):
+        source = self.source_observation.bounded_orientation
+        if source is None:
+            return None
+        return validated_bounded_orientation(source).rotated(
+            self.stand_axis_rad - self.source_observation.stand_axis_rad
+        ).payload()
+
+    @property
     def opposite_face_normal_rad(self) -> float:
         projected = BacksideAxisObservation(
             stand_id=self.stand_id,
@@ -176,6 +187,7 @@ class BacksideAxisFrameProjection:
             axis_confidence=self.axis_confidence,
             axis_sample_count=self.axis_sample_count,
             stand_model_profile_sha256=self.stand_model_profile_sha256,
+            bounded_orientation=self.bounded_orientation,
         )
         return projected.opposite_face_normal_rad
 

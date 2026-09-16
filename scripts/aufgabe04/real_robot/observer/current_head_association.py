@@ -14,9 +14,8 @@ from scripts.aufgabe04.perception.candidate_lidar_association import (
     associate_camera_registered_candidate_lidar_target,
 )
 from scripts.aufgabe04.perception.stand_axis.head_border_seed import validate_current_head_proposal
-from scripts.aufgabe04.perception.stand_axis.head_model_admission import (
-    HeadModelAdmission, admit_measured_head_model,
-)
+from scripts.aufgabe04.perception.stand_axis.head_model_admission import HeadModelAdmission
+from scripts.aufgabe04.perception.stand_axis.head_orientation_bounds import CurrentHeadOrientationBounds
 from scripts.aufgabe04.perception.stand_axis_handoff import rectified_pixel_bearing_in_scan
 from scripts.aufgabe04.real_robot.configuration.geometry import validate_intrinsics
 from scripts.aufgabe04.real_robot.observer.head_model_admission import (
@@ -25,6 +24,7 @@ from scripts.aufgabe04.real_robot.observer.head_model_admission import (
 from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import (
     validate_backside_registration_center_offset_ratio,
 )
+from scripts.aufgabe04.real_robot.observer.current_head_detection import current_head_detection_admission
 
 
 @dataclass(frozen=True)
@@ -40,10 +40,13 @@ class CurrentHeadCandidateAssociation:
     center_offset_ratio: float | None = None
     fitted_head_bearing_rad: float | None = None
     lidar_association: CameraRegisteredCandidateLidarAssociation | None = None
+    head_orientation_bounds: CurrentHeadOrientationBounds | None = None
 
     def metadata(self) -> dict:
         return {**asdict(self), "schema_version": 1,
                 "association_source": "current_measured_head",
+                "single_angle_admitted": self.head_admission.accepted,
+                "bounded_head_detection": self.head_orientation_bounds is not None,
                 "unique_eligible_cluster_required": True,
                 "motion_authorized": False, "completion_authorized": False}
 
@@ -63,23 +66,29 @@ def associate_current_measured_head(
     The caller checks image freshness before this call and again at publication.
     """
     limit = validate_backside_registration_center_offset_ratio(max_center_offset_ratio)
-    yaw = estimate.yaw_deg
-    admission = admit_measured_head_model(
-        estimate=estimate, debug=debug,
-        yaw_rad=math.radians(yaw) if type(yaw) in (int, float) else math.nan,
-    )
+    admission, bounds = current_head_detection_admission(
+        estimate, debug, profile_sha256=profile_sha256)
     result = CurrentHeadCandidateAssociation(
         False, admission.reason, attempt.source, admission,
         (projection.u_px, projection.v_px), limit,
+        head_orientation_bounds=bounds,
     )
-    if not admission.accepted:
+    if not admission.accepted and bounds is None:
         return result
     if estimate.model_profile_sha256 != profile_sha256:
         return replace(result, reason="current_head_profile_mismatch")
     try:
+        # Unusable single-angle estimates deliberately have zero edge-height
+        # fields. A bounded detection uses its bound current corners instead.
+        left, right = estimate.left_height_px, estimate.right_height_px
+        if not admission.accepted:
+            corners = bounds.corners
+            left = math.hypot(corners[3].u_px - corners[0].u_px,
+                              corners[3].v_px - corners[0].v_px)
+            right = math.hypot(corners[2].u_px - corners[1].u_px,
+                               corners[2].v_px - corners[1].v_px)
         scale = head_scale_gate(expected_size_px=expected_head_height_px,
-                                left_height_px=estimate.left_height_px,
-                                right_height_px=estimate.right_height_px)
+                                left_height_px=left, right_height_px=right)
     except (TypeError, ValueError, ArithmeticError):
         return replace(result, reason="current_head_scale_invalid")
     result = replace(result, scale_gate=scale)
@@ -92,6 +101,13 @@ def associate_current_measured_head(
                 or not 0 <= roi.x0 < roi.x1 <= intrinsics.width_px
                 or not 0 <= roi.y0 < roi.y1 <= intrinsics.height_px):
             raise ValueError("ROI must lie inside the full image")
+        if bounds is not None and (
+                bounds.frame_shape != (roi.y1 - roi.y0, roi.x1 - roi.x0)
+                or any(not math.isclose(a, b, rel_tol=0., abs_tol=1e-9)
+                       for a, b in zip(bounds.camera_matrix, (
+                           intrinsics.fx_px, intrinsics.fy_px,
+                           intrinsics.cx_px - roi.x0, intrinsics.cy_px - roi.y0)))):
+            raise ValueError("bounded head proof must use this crop's adjusted intrinsics")
         corners = validate_current_head_proposal(
             estimate.corners, frame_shape=(roi.y1 - roi.y0, roi.x1 - roi.x0),
         )

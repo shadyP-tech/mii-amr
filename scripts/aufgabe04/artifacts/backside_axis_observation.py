@@ -15,6 +15,10 @@ import math
 from pathlib import Path
 import re
 
+from scripts.aufgabe04.artifacts.bounded_orientation import (
+    validated_bounded_orientation, validate_opposite_orientation,
+)
+
 
 LEGACY_PASSIVE_VIEWPOINT_OBSERVER_VERSION = (
     "aufgabe04-real-passive-viewpoint-v6-backside-model-evidence"
@@ -94,6 +98,7 @@ class BacksideAxisObservation:
     axis_confidence: float
     axis_sample_count: int
     stand_model_profile_sha256: str
+    bounded_orientation: Mapping[str, object] | None = None
 
     @property
     def opposite_face_normal_rad(self) -> float:
@@ -120,6 +125,12 @@ class BacksideAxisObservation:
                 "stand axis does not resolve a sufficiently opposite "
                 "inspection face"
             )
+        if self.bounded_orientation is not None:
+            bounded = validated_bounded_orientation(
+                self.bounded_orientation, expected_axis_rad=self.stand_axis_rad,
+                expected_sample_count=self.axis_sample_count,
+            )
+            validate_opposite_orientation(bounded, selected_normal_rad=selected, robot_side_rad=robot_side)
         return selected
 
 
@@ -218,7 +229,9 @@ def validated_backside_axis_observation(
     axis_confidence = _finite_number(
         payload.get("axis_confidence"), "axis_confidence"
     )
-    if not MINIMUM_BACKSIDE_AXIS_CONFIDENCE <= axis_confidence <= 1.0:
+    bounded_payload = payload.get("bounded_orientation")
+    minimum_axis_confidence = MINIMUM_BACKSIDE_AXIS_CONFIDENCE if bounded_payload is None else 0.0
+    if not minimum_axis_confidence <= axis_confidence <= 1.0:
         raise ValueError(
             "axis observation axis_confidence must be in [0.60, 1]"
         )
@@ -229,6 +242,13 @@ def validated_backside_axis_observation(
     ):
         raise ValueError(
             "axis observation axis_sample_count must be an integer >= 2"
+        )
+    if bounded_payload is not None:
+        if is_legacy_receipt:
+            raise ValueError("legacy backside receipt cannot contain bounded orientation")
+        validated_bounded_orientation(
+            bounded_payload, expected_axis_rad=payload.get("stand_axis_rad"),
+            expected_sample_count=axis_sample_count,
         )
     qr_absent_sample_count = payload.get("qr_absent_sample_count")
     if (
@@ -330,6 +350,7 @@ def validated_backside_axis_observation(
         axis_confidence=axis_confidence,
         axis_sample_count=axis_sample_count,
         stand_model_profile_sha256=model_sha256,
+        bounded_orientation=None if bounded_payload is None else dict(bounded_payload),
     )
 
 

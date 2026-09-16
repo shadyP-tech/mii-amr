@@ -29,6 +29,9 @@ from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import (
 )
 from scripts.aufgabe04.real_robot.observer.current_head_association import CurrentHeadCandidateAssociation
 from scripts.aufgabe04.real_robot.observer.scan_target_persistence import registered_target_is_unique
+from scripts.aufgabe04.perception.stand_axis.head_orientation_bounds import (
+    validated_current_head_orientation_bounds,
+)
 
 
 def build_backside_target_registration_evidence(
@@ -40,8 +43,15 @@ def build_backside_target_registration_evidence(
         CameraRegisteredCandidateLidarAssociation | None
     ) = None,
     current_head_association: CurrentHeadCandidateAssociation | None = None,
+    allow_bounded_orientation: bool = False,
+    head_orientation_bounds=None,
 ) -> dict[str, object]:
-    """Return the exact schema-v3 registration block or fail closed."""
+    """Return registration evidence, preserving the strict legacy contract.
+
+    A separate bounded-orientation receipt may explicitly request the current
+    detection proof. It must supply that same proof independently of the
+    association; an accepted flag cannot replace the proof or scan binding.
+    """
 
     final_error = _finite_nonnegative(
         final_head_center_error_ratio,
@@ -103,9 +113,14 @@ def build_backside_target_registration_evidence(
         # A nominal crop can already contain the whole head. Its fitted ray
         # still passes the same bounded, unique camera/LiDAR registration;
         # do not invent a second crop or a strict-retry receipt for it.
+        bounded_detection = bool(
+            allow_bounded_orientation is True
+            and isinstance(current_head_association, CurrentHeadCandidateAssociation)
+            and head_orientation_bounds == current_head_association.head_orientation_bounds
+            and validated_current_head_orientation_bounds(head_orientation_bounds))
         if (not isinstance(current_head_association, CurrentHeadCandidateAssociation)
                 or current_head_association.accepted is not True
-                or current_head_association.head_admission.accepted is not True
+                or not (current_head_association.head_admission.accepted is True or bounded_detection)
                 or current_head_association.lidar_association != registered_lidar_association):
             raise ValueError("current head registration is not bound to the accepted scan")
         original_offset = current_head_association.center_offset_ratio

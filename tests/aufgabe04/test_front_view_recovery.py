@@ -98,15 +98,21 @@ class FrontRecoveryPolicyTests(unittest.TestCase):
         self.assertFalse(metadata["extends_parent_deadline"])
         self.assertFalse(metadata["motion_authorized"])
 
-    def test_invalid_freshness_association_or_marker_cannot_start_or_prolong_hold(self):
+    def test_soft_misses_spend_existing_budget_without_starting_or_renewing_it(self):
         for changes in ({"source_fresh": False}, {"frame_accepted": False}, {"failure_kind": None}):
             with self.subTest(changes=changes):
                 policy = FrontViewRecovery()
                 self.assertFalse(self.observe(policy, 10, **changes))
                 self.assertIsNone(policy.metadata(now_sec=10.)["deadline_monotonic_sec"])
                 self.assertTrue(self.observe(policy, 11))
-                self.assertFalse(self.observe(policy, 20, **changes))
-                self.assertEqual(policy.metadata(now_sec=20.)["deadline_monotonic_sec"], 41.)
+                self.assertTrue(self.observe(policy, 23, **changes))
+                metadata = policy.metadata(now_sec=23.)
+                self.assertEqual(metadata["remaining_sec"], 18.)
+                self.assertEqual(metadata["deadline_monotonic_sec"], 41.)
+                self.assertEqual(metadata["qualified_frame_count"], 1)
+                self.assertEqual(metadata["last_qualified_source_stamp_sec"], 11.)
+                self.assertTrue(metadata["current_advisory_deferred"])
+                self.assertFalse(self.observe(policy, 41, **changes))
                 self.assertFalse(self.observe(policy, 42))
 
     def test_duplicate_sensor_frame_cannot_start_or_recount_a_recovery(self):
@@ -115,9 +121,11 @@ class FrontRecoveryPolicyTests(unittest.TestCase):
         self.assertFalse(self.observe(policy, 11, frame_stamp_sec=10.))
         self.assertIsNone(policy.metadata(now_sec=11.)["deadline_monotonic_sec"])
         self.assertTrue(self.observe(policy, 12))
-        self.assertFalse(self.observe(policy, 20, frame_stamp_sec=12.))
-        self.assertFalse(self.observe(policy, 21, frame_stamp_sec=11.))
+        self.assertTrue(self.observe(policy, 20, frame_stamp_sec=12.))
+        self.assertTrue(self.observe(policy, 21, frame_stamp_sec=11.))
         self.assertEqual(policy.metadata(now_sec=21.)["qualified_frame_count"], 1)
+        self.assertEqual(policy.metadata(now_sec=21.)["deadline_monotonic_sec"], 42.)
+        self.assertFalse(self.observe(policy, 42, frame_stamp_sec=12.))
 
     def test_conflict_disables_same_epoch_even_when_later_frame_is_not_poisoned(self):
         policy = FrontViewRecovery()
@@ -138,13 +146,25 @@ class FrontRecoveryPolicyTests(unittest.TestCase):
                                      robot_pose={"x_m": .1, "y_m": 0., "yaw_rad": 0.}))
         self.assertEqual(policy.metadata(now_sec=80.)["deadline_monotonic_sec"], 110.)
 
-    def test_good_measurement_is_not_held_and_does_not_reset_prior_recovery_budget(self):
+    def test_missing_failure_kind_does_not_abandon_or_reset_prior_recovery_budget(self):
         policy = FrontViewRecovery()
         self.observe(policy, 10)
-        self.assertFalse(self.observe(policy, 15, failure_kind=None))
+        self.assertTrue(self.observe(policy, 15, failure_kind=None))
         self.assertEqual(policy.metadata(now_sec=15.)["deadline_monotonic_sec"], 40.)
         self.assertTrue(self.observe(policy, 20))
         self.assertFalse(self.observe(policy, 40))
+
+    def test_motion_or_target_change_drops_hold_until_new_qualified_observation(self):
+        for change in ({"motion_epoch_reset": True}, {"target_key": "other-target"},
+                       {"robot_pose": {"x_m": .1, "y_m": 0., "yaw_rad": 0.}},
+                       {"robot_pose": {"x_m": 0., "y_m": 0., "yaw_rad": .1}}):
+            with self.subTest(change=change):
+                policy = FrontViewRecovery()
+                self.assertTrue(self.observe(policy, 10))
+                self.assertFalse(self.observe(policy, 15, failure_kind=None, **change))
+                metadata = policy.metadata(now_sec=15.)
+                self.assertIsNone(metadata["deadline_monotonic_sec"])
+                self.assertEqual(metadata["qualified_frame_count"], 0)
 
     def test_duration_has_a_hard_thirty_second_cap(self):
         for value in (0, -1, 30.01, 90, float("nan"), float("inf"), True):
@@ -224,6 +244,33 @@ class FrontRecoveryNodeTests(unittest.TestCase):
                                     current_qr_sample_count=1, qr_sample_accepted=True))
         self.assertEqual(self.node._front_view_recovery.metadata(now_sec=30.)["deadline_monotonic_sec"], 40.)
         self.assertEqual(self.node._front_view_recovery.metadata(now_sec=30.)["phase"], GEOMETRY_REACQUISITION)
+
+    def test_proposal_miss_cannot_exit_with_eighteen_seconds_of_recovery_remaining(self):
+        # The latest third-candidate view had enough failed-view history for
+        # an advisory, then one proposal/association miss lost its current
+        # front marker while the stopped recovery still had 18 seconds left.
+        for stamp in range(10, 22):
+            self.assertIsNone(self.feed(float(stamp)))
+        for stamp in range(22, 40):
+            self.fixture.set_current_frame(self.node, float(stamp))
+            with patch("scripts.aufgabe04.real_robot.observer.node.time.monotonic",
+                       return_value=float(stamp)):
+                self.assertIsNone(self.node._maybe_commit_inspection_progress(
+                    "metric_model_measurement_unavailable", {},
+                ))
+            metadata = self.node._front_view_recovery.metadata(now_sec=float(stamp))
+            self.assertEqual(metadata["remaining_sec"], 40. - stamp)
+            self.assertEqual(metadata["qualified_frame_count"], 12)
+            self.assertFalse(self.node.completed)
+            self.assertFalse(self.path.exists())
+        self.fixture.set_current_frame(self.node, 40.)
+        with patch("scripts.aufgabe04.real_robot.observer.node.time.monotonic", return_value=40.):
+            result = self.node._maybe_commit_inspection_progress(
+                "metric_model_measurement_unavailable", {},
+            )
+        self.assertIsNotNone(result)
+        self.assertTrue(result["front_view_recovery"]["budget_exhausted"])
+        self.assertFalse(result["completion_authorized"])
 
     def test_good_measured_head_does_not_abandon_current_readable_unbound_qr_early(self):
         payload = details("axis_estimated_current_measured_head")

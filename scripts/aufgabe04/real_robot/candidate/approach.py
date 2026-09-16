@@ -31,6 +31,9 @@ from scripts.aufgabe04.real_robot.candidate.inspection_policy import (
 )
 
 from scripts.aufgabe04.artifacts.content_store import payload_sha256, write_content_hashed_json
+from scripts.aufgabe04.artifacts.bounded_orientation import (
+    BoundedOrientationViewUnavailableError, validate_bounded_endpoint,
+)
 from scripts.aufgabe04.navigation.approach.backside_axis_frame_projection import (
     load_backside_axis_planning_observation,
     write_backside_axis_frame_projection,
@@ -675,6 +678,18 @@ def validate_facing_pose(request: FacingValidationRequest) -> dict[str, object]:
             f"got {recommendation.stand_id!r}"
         )
     target = recommendation.material_target.pose
+    bounded_view = None
+    if recommendation.bounded_orientation is not None:
+        selected_face = next(face for face in recommendation.face_candidates
+                             if face.face_id == recommendation.material_target.face_id)
+        bounded_view = validate_bounded_endpoint(
+            recommendation.bounded_orientation,
+            selected_normal_rad=selected_face.outward_normal_rad,
+            stand_x_m=candidate.geometry.x_m, stand_y_m=candidate.geometry.y_m,
+            stand_uncertainty_m=candidate.geometry.uncertainty_m,
+            target_x_m=target.x_m, target_y_m=target.y_m,
+            expected_sample_count=recommendation.axis_sample_count,
+        )
     minimum_active_standoff_m = _required_positive_clearance(
         config.physical_clearance,
         "minimum_active_standoff_m",
@@ -785,6 +800,7 @@ def validate_facing_pose(request: FacingValidationRequest) -> dict[str, object]:
             "arena_bounds": config.plan.arena_bounds.to_metadata(),
             "inflation_radius_m": config.inflation_radius_m,
             "active_stand_clearance": clearance_evidence,
+            "bounded_orientation_view": bounded_view,
         },
     )
     qr_face = next(
@@ -813,6 +829,8 @@ def validate_facing_pose(request: FacingValidationRequest) -> dict[str, object]:
         },
         "axis_confidence": recommendation.axis_confidence,
         "axis_sample_count": recommendation.axis_sample_count,
+        "bounded_orientation": recommendation.bounded_orientation,
+        "bounded_orientation_view": bounded_view,
         "recommendation_json": str(request.recommendation_path),
         "camera_recommendation_sha256": _file_sha256(request.recommendation_path),
         "calibration_profile_sha256": config.calibration_profile_sha256,
@@ -1646,7 +1664,10 @@ def _move_certified_opposite_face(
     """Execute the unchanged certified backside-to-opposite-face motion contract."""
 
     source_axis_evidence_path = observation.axis_observation_path
-    opposite_normal = opposite_face_normal(source_axis_evidence_path)
+    try:
+        opposite_normal = opposite_face_normal(source_axis_evidence_path)
+    except BoundedOrientationViewUnavailableError as exc:
+        raise CandidateInspectionRouteUnavailableError(str(exc)) from exc
     (
         opposite_config,
         candidate,
@@ -1755,6 +1776,8 @@ def _move_certified_opposite_face(
                     raise CandidateInspectionRouteUnavailableError(
                         "quantized opposite-face goal repeats an observed view"
                     )
+        except BoundedOrientationViewUnavailableError as exc:
+            raise CandidateInspectionRouteUnavailableError(str(exc)) from exc
         except ValueError as exc:
             if not is_approach_feasibility_failure(exc):
                 raise

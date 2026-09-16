@@ -24,6 +24,29 @@ class InspectionClassification:
     camera_relative_yaw_rad: float | None = None
 
 
+def _bounded_head_view_yaw(axis: dict) -> float | None:
+    """Read a current associated detection hint, never an admitted normal.
+
+    The observer creates this only from the current bounded-head proof. The
+    remaining explicit flags prevent stale or unassociated diagnostics from
+    supplying even an advisory direction for the next search.
+    """
+
+    hint = axis.get("bounded_head_view_hint")
+    if not isinstance(hint, dict) or not (
+        hint.get("purpose") == "orientation_disambiguation"
+        and hint.get("candidate_associated") is True
+        and hint.get("source_fresh") is True
+    ):
+        return None
+    yaw, half_width = hint.get("camera_relative_yaw_rad"), hint.get("orientation_half_width_rad")
+    if any(type(value) not in (int, float) or not math.isfinite(value) for value in (yaw, half_width)):
+        return None
+    if not -math.pi / 2 <= yaw < math.pi / 2 or not 0 <= half_width < math.pi / 2:
+        return None
+    return yaw
+
+
 def classify_inspection_progress(state: str, details: dict) -> InspectionClassification:
     """Describe a current view without promoting rejected geometry to a pose."""
 
@@ -33,13 +56,18 @@ def classify_inspection_progress(state: str, details: dict) -> InspectionClassif
     yaw = axis.get("advisory_camera_relative_yaw_rad")
     if isinstance(yaw, bool) or not isinstance(yaw, (int, float)) or not math.isfinite(yaw):
         yaw = None
+    bounded_yaw = _bounded_head_view_yaw(axis)
+    if bounded_yaw is not None:
+        yaw = bounded_yaw
+        reason = "bounded_head_orientation_disambiguation"
     front = details.get("front_observation") or {}
     if front.get("axis_state") == "unresolved" and front.get("classification") in {
         "front_readable", "front_unreadable",
     }:
-        # A contradicted QR-free estimate cannot supply even the advisory
-        # angle of an observed front marker.
-        return InspectionClassification(front["classification"], reason, None)
+        # A contradicted legacy QR-free estimate cannot supply this angle.
+        # A distinct current bounded-head proof can still guide an undirected
+        # search while front semantics remain supplied by the marker evidence.
+        return InspectionClassification(front["classification"], reason, bounded_yaw)
     model_edge_view = (
         axis.get("estimator_usable") is True
         and yaw is not None
@@ -55,9 +83,9 @@ def classify_inspection_progress(state: str, details: dict) -> InspectionClassif
         classification = "front_unreadable"
     elif (model.get("observation_confidence") or {}).get("backside", {}).get(
             "state") == "backside_supported":
-        # Repeated complete-head appearance survives an ambiguous angle, but
-        # cannot attach that rejected angle to a planning observation.
-        return InspectionClassification("backside_unresolved", reason, None)
+        # Repeated appearance and an interval center may prioritize a small
+        # search adjustment. Neither supplies a directed opposite-side normal.
+        return InspectionClassification("backside_unresolved", reason, bounded_yaw)
     elif model.get("visible_face") == "backside_candidate":
         classification = "backside_unresolved"
     else:
