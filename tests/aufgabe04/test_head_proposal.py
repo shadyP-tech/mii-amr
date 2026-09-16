@@ -2,6 +2,7 @@
 
 from dataclasses import fields
 import unittest
+from unittest import mock
 
 try:
     import cv2
@@ -86,6 +87,66 @@ class HeadProposalTests(unittest.TestCase):
         result = self.acquire(_synthetic(heads=(50, 270)), expected_head_center_u_px=210)
         self.assertIsNone(result.proposal)
         self.assertEqual(result.reason, "head_proposal_ambiguous")
+
+    def test_candidate_association_filters_before_competing_head_selection(self):
+        result = self.acquire(_synthetic(heads=(50, 270)), expected_head_center_u_px=210,
+                              proposal_filter=lambda head: head.center_u_px > 250.)
+        self.assertIsNotNone(result.proposal, result.reason)
+        self.assertAlmostEqual(result.proposal.center_u_px, 320., delta=3.)
+        self.assertTrue(result.joint_border_diagnostics["association_filtered_heads"])
+        self.assertIsNone(self.acquire(
+            _synthetic(heads=(50, 270)), expected_head_center_u_px=210,
+            proposal_filter=lambda _head: True).proposal)
+
+    def test_no_candidate_association_is_not_an_invalid_head(self):
+        result = self.acquire(_synthetic(), proposal_filter=lambda _head: False)
+        self.assertIsNone(result.proposal)
+        self.assertEqual(result.reason, "head_proposal_candidate_association_rejected")
+        self.assertTrue(result.joint_border_diagnostics["association_filtered_heads"])
+
+    def test_vertical_search_bound_excludes_background_without_forcing_horizontal_center(self):
+        frame = numpy.zeros((420, 560, 3), numpy.uint8)
+        # A large horizontal acquisition window remains necessary for the
+        # audited head. The similarly sized upper box is outside its search
+        # height, and must not spend the strict verification budget.
+        for first, last in (((160, 45), (260, 145)), ((320, 200), (420, 300))):
+            cv2.rectangle(frame, first, last, (200, 200, 200), 2)
+        result = acquire_head_proposal(
+            cv2, frame, expected_head_center_u_px=250., expected_head_center_v_px=225.,
+            expected_head_height_px=110., max_vertical_center_offset_fraction=.75)
+        self.assertIsNotNone(result.proposal, result.reason)
+        self.assertAlmostEqual(result.proposal.center_u_px, 370., delta=3.)
+        self.assertGreater(result.proposal.center_offset_head_heights, 1.)
+        verified = result.joint_border_diagnostics["strict_verifications"]
+        self.assertTrue(all(record["corners"] is None or
+            sum(p[1] for p in record["corners"]) / 4 > 180. for record in verified))
+
+    def test_expired_deadline_does_not_start_image_processing(self):
+        with mock.patch("scripts.aufgabe04.perception.stand_axis.head_acquisition_budget.time.monotonic", return_value=2.), \
+                mock.patch("scripts.aufgabe04.perception.stand_axis.head_proposal._canny_edges_from_frame") as canny:
+            result = self.acquire(_synthetic(), deadline_monotonic_sec=1.)
+        self.assertEqual(result.reason, "head_acquisition_deadline_exceeded")
+        self.assertIsNone(result.proposal)
+        canny.assert_not_called()
+
+    def test_deadline_cannot_accept_first_proposal_before_comparison_finishes(self):
+        from scripts.aufgabe04.perception.stand_axis.model_refinement import refine_projected_head_border
+        clock = [0.]
+
+        def refine(*args, **kwargs):
+            measured = refine_projected_head_border(*args, **kwargs)
+            if measured.accepted:
+                clock[0] = 2.
+            return measured
+
+        with mock.patch("scripts.aufgabe04.perception.stand_axis.head_acquisition_budget.time.monotonic", side_effect=lambda: clock[0]), \
+                mock.patch("scripts.aufgabe04.perception.stand_axis.head_proposal.refine_projected_head_border", side_effect=refine):
+            result = self.acquire(_synthetic(heads=(50, 270)),
+                                  expected_head_center_u_px=210., deadline_monotonic_sec=1.)
+        self.assertEqual(result.reason, "head_acquisition_deadline_exceeded")
+        self.assertIsNone(result.proposal)
+        self.assertGreater(result.raw_verifications, 0)
+        self.assertFalse(result.joint_border_diagnostics["comparison_complete"])
 
     def test_projection_size_and_displacement_remain_bounded(self):
         self.assertIsNone(self.acquire(_synthetic(), expected_head_height_px=50).proposal)

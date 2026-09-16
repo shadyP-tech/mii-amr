@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 import unittest
 
 from scripts.aufgabe04.real_robot.observer.node import _StampedMessage
+from scripts.aufgabe04.real_robot.observer.ingestion_runtime import BoundedSensorIngress
 from tests.aufgabe04 import test_camera_observer_processing as fixtures
 
 transform = fixtures.transform
@@ -16,6 +17,10 @@ class ObserverScanWitnessCollectionTests(unittest.TestCase):
         self.fixture = fixtures.CameraObserverProcessingTest()
         self.adapter = self.fixture.make_adapter()
         self.adapter.scans = deque(maxlen=20)
+        self.adapter.images = deque(maxlen=8)
+        self.adapter.camera_infos = deque(maxlen=8)
+        self.adapter._sensor_ingress = BoundedSensorIngress()
+        self.adapter._camera_pipeline_counters = {}
         self.adapter._scan_target_persistence = Mock()
         self.lookups = []
 
@@ -42,10 +47,13 @@ class ObserverScanWitnessCollectionTests(unittest.TestCase):
         return SimpleNamespace(header=header, ranges=(.6,) * 5, angle_min=-.02,
             angle_increment=.01, range_min=.01, range_max=10., angle_max=.02)
 
-    def test_callback_ingests_exact_scan_time_without_running_camera(self):
+    def test_callback_receipt_is_ingested_by_owner_without_running_camera(self):
         message = self.sample()
         self.adapter._process_latest = Mock()
         self.adapter._on_scan(message)
+        self.adapter._scan_target_persistence.ingest_scan.assert_not_called()
+        self.adapter._drain_received_sensors()
+        self.adapter._collect_scan_witnesses()
         self.adapter._process_latest.assert_not_called()
         call = self.adapter._scan_target_persistence.ingest_scan.call_args
         self.assertIsNotNone(call)
@@ -64,6 +72,8 @@ class ObserverScanWitnessCollectionTests(unittest.TestCase):
         self.adapter._lookup_scan_witness = Mock(side_effect=RuntimeError("TF pending"))
         self.adapter._on_scan(self.sample(99.9))
         self.adapter._on_scan(self.sample(100.))
+        self.adapter._drain_received_sensors()
+        self.adapter._collect_scan_witnesses()
         self.adapter._scan_target_persistence.ingest_scan.assert_not_called()
         self.assertEqual([s.stamp_sec for s in self.adapter._pending_scan_witnesses], [99.9, 100.])
         self.adapter._lookup_scan_witness = original
@@ -75,6 +85,8 @@ class ObserverScanWitnessCollectionTests(unittest.TestCase):
     def test_stale_tf_pending_scan_cannot_seed_history(self):
         self.adapter._lookup_scan_witness = Mock(side_effect=RuntimeError("TF pending"))
         self.adapter._on_scan(self.sample())
+        self.adapter._drain_received_sensors()
+        self.adapter._collect_scan_witnesses()
         self.fixture.clock_sec = 100.6
         self.adapter._collect_scan_witnesses()
         self.adapter._scan_target_persistence.ingest_scan.assert_not_called()

@@ -28,6 +28,7 @@ def detect_qr_texts_bgr(frame, cv2) -> tuple[str, ...]:
 def detect_qr_observations_bgr(
     frame, cv2, *, diagnostics: dict | None = None,
     max_elapsed_sec: float | None = None,
+    prefer_native_geometry: bool = False,
 ) -> tuple[DecodedQrObservation, ...]:
     """Share text and corners from the same decoder and bounded preprocessing.
 
@@ -35,6 +36,10 @@ def detect_qr_observations_bgr(
     remain multiple observations; callers must not pick one as target proof.
     The optional budget stops between decoder stages and pyramid variants;
     it cannot preempt one OpenCV call. Callers still enforce source freshness.
+    For an already localized current-head crop, ``prefer_native_geometry``
+    tries native symbol geometry and isolated identity recovery before the
+    whole-crop decoder or enlarged variants. This prioritizes spatial identity
+    binding; it never substitutes the head rectangle for QR corners.
     """
     if max_elapsed_sec is not None and (
         type(max_elapsed_sec) not in (int, float)
@@ -44,6 +49,10 @@ def detect_qr_observations_bgr(
     started = monotonic()
     deadline = None if max_elapsed_sec is None else started + max_elapsed_sec
     runtime = QrDecoderRuntime(cv2, diagnostics)
+    if diagnostics is not None:
+        diagnostics["search_policy"] = (
+            "current_head_native_geometry_first" if prefer_native_geometry else "default"
+        )
 
     def exhausted():
         if deadline is None:
@@ -70,6 +79,7 @@ def detect_qr_observations_bgr(
             candidate, cv2, image_shape=getattr(frame, "shape", None),
             scale=scale, border_px=border, runtime=runtime, deferred_single=deferred_single,
             budget_exhausted=exhausted,
+            prefer_native_geometry=prefer_native_geometry,
         ):
             observations = runtime.conservative_observations(observations)
             if not observations:
@@ -112,8 +122,22 @@ def detect_qr_observations_bgr(
 
 
 def _candidate_observations(candidate, cv2, *, image_shape, scale, border_px,
-                             runtime=None, deferred_single=None, budget_exhausted=None):
+                             runtime=None, deferred_single=None, budget_exhausted=None,
+                             prefer_native_geometry=False):
     runtime = runtime if runtime is not None else QrDecoderRuntime(cv2)
+    stages = ((_native_observations, _wechat_observations) if prefer_native_geometry
+              else (_wechat_observations, _native_observations))
+    for stage in stages:
+        if budget_exhausted is not None and budget_exhausted():
+            return
+        yield from stage(
+            candidate, cv2, image_shape=image_shape, scale=scale, border_px=border_px,
+            runtime=runtime, deferred_single=deferred_single,
+            budget_exhausted=budget_exhausted, prefer_native_geometry=prefer_native_geometry,
+        )
+
+
+def _wechat_observations(candidate, cv2, *, image_shape, scale, border_px, runtime, **_kwargs):
     wechat = runtime.decoder("wechat")
     if wechat is not None:
         try:
@@ -129,6 +153,10 @@ def _candidate_observations(candidate, cv2, *, image_shape, scale, border_px,
             yield observations
         except Exception:
             runtime.record("wechat", scale=scale, border_px=border_px, reason="decoder_error")
+
+
+def _native_observations(candidate, cv2, *, image_shape, scale, border_px, runtime,
+                         deferred_single, budget_exhausted, prefer_native_geometry):
     if budget_exhausted is not None and budget_exhausted():
         return
     native = runtime.decoder("native")
@@ -169,13 +197,22 @@ def _candidate_observations(candidate, cv2, *, image_shape, scale, border_px,
         runtime.record("opencv_single", scale=scale, border_px=border_px, observations=observations,
                        corner_validation=corner_validation)
         yield observations
-        if result and len(result) > 1 and deferred_single is not None:
+        if result and len(result) > 1:
             # Validation copies native output into immutable tuples: a later
             # backend call must not overwrite points retained for recovery.
             single_quad = validated_qr_corners(result[1], image_shape=getattr(candidate, "shape", None))
-            if (runtime.native_symbol_count <= 1 and single_quad is not None and single_quad != multi_quad
-                    and len(deferred_single) < MAX_DEFERRED_SINGLE_QUADS):
-                deferred_single.append((candidate, single_quad, scale, border_px))
+            if runtime.native_symbol_count <= 1 and single_quad is not None and single_quad != multi_quad:
+                if prefer_native_geometry:
+                    # In a current-head crop, spend the remaining budget on
+                    # this symbol before enlarging/redecoding the whole crop.
+                    yield _isolated_observations(
+                        candidate, single_quad, cv2, image_shape=image_shape,
+                        scale=scale, border_px=border_px, runtime=runtime,
+                        source="opencv_single_isolated_current_head",
+                        budget_exhausted=budget_exhausted,
+                    )
+                elif deferred_single is not None and len(deferred_single) < MAX_DEFERRED_SINGLE_QUADS:
+                    deferred_single.append((candidate, single_quad, scale, border_px))
     except Exception:
         runtime.record("opencv_single", scale=scale, border_px=border_px, reason="decoder_error")
 

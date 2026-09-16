@@ -11,9 +11,11 @@ from types import SimpleNamespace
 from scripts.aufgabe04.perception.stand_axis.geometry import _distance, _polygon_area
 from scripts.aufgabe04.perception.stand_axis.head_proposal import _same_head
 from scripts.aufgabe04.perception.stand_axis.metric_edge_association import metric_corner_arm_support
+from scripts.aufgabe04.perception.stand_axis.head_acquisition_budget import check_head_acquisition_deadline
 
 
-def rank_current_head_hypotheses(cv2, raw_edges, hypotheses, *, corridor_half_width_px=4.):
+def rank_current_head_hypotheses(cv2, raw_edges, hypotheses, *, corridor_half_width_px=4.,
+                                 deadline_monotonic_sec=None):
     """Cover spatial/border families before spending spare work on variants.
 
     The inexpensive locator asks for one current pixel bin on each corner arm;
@@ -23,6 +25,7 @@ def rank_current_head_hypotheses(cv2, raw_edges, hypotheses, *, corridor_half_wi
     """
     directly_supported = []
     for item in hypotheses:
+        check_head_acquisition_deadline(deadline_monotonic_sec, "cold_corner_support")
         evidence = metric_corner_arm_support(cv2, raw_edges, item[1])
         if all(count >= 1 for arms in evidence.bins_by_corner.values() for count in arms.values()):
             directly_supported.append(item)
@@ -41,6 +44,7 @@ def rank_current_head_hypotheses(cv2, raw_edges, hypotheses, *, corridor_half_wi
                                     tuple((p.u_px, p.v_px) for p in item[1])))
     groups = []
     for item in supported:
+        check_head_acquisition_deadline(deadline_monotonic_sec, "cold_border_families")
         for group in groups:
             if _same_head(SimpleNamespace(corners=item[1]), SimpleNamespace(corners=group[0][1])):
                 group.append(item)

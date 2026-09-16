@@ -7,6 +7,7 @@ nearest-cluster preference, range relaxation or angle authority is introduced.
 """
 
 from dataclasses import asdict, dataclass, replace
+import copy
 import json
 import math
 
@@ -396,6 +397,27 @@ class StoppedScanTargetPersistence:
         self._anchor = None
         self._last_stamp = None
         self.last_metadata = {}
+
+    def preview(self, association, scan, *, context, now_sec, max_scan_age_sec):
+        """Compare a proposed head without consuming another head's witnesses.
+
+        Resolution mutates only these bounded owner containers. Raw scan and
+        context records are read-only: witness registration creates a new dict
+        and new parameters. Copy the lists/deque rather than every raw beam for
+        each competing proposal. Commit the final selected head through resolve.
+        """
+        candidate = copy.copy(self)
+        candidate._history = list(self._history)
+        candidate.last_metadata = dict(self.last_metadata)
+        candidate._pending_scans = copy.copy(self._pending_scans)
+        candidate._pending_scans._entries = self._pending_scans._entries.copy()
+        result = candidate.resolve(association, scan, context=context,
+            now_sec=now_sec, max_scan_age_sec=max_scan_age_sec)
+        # A caller may retain or annotate a preview proof. Its three witnesses
+        # must not expose shared live records through the returned diagnostic.
+        if result.witnessed_fragmentation is not None:
+            result = replace(result, witnessed_fragmentation=copy.deepcopy(result.witnessed_fragmentation))
+        return result
 
     def ingest_scan(self, scan, *, context, now_sec, max_scan_age_sec):
         """Retain a fresh exact-time stopped scan even when camera fitting fails.

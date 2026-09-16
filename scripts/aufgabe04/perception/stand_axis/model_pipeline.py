@@ -82,6 +82,7 @@ def estimate_stand_axis_from_metric_model(
     input_cache_roi: RoiBounds | None = None,
     current_head_proposal_corners: tuple[ImagePoint, ...] | None = None,
     current_image_head_fit: CurrentImageHeadFit | None = None,
+    deadline_monotonic_sec: float | None = None,
 ) -> tuple[StandAxisImageEstimate, StandAxisEdgeDebugArtifacts]:
     """Fit physical head angles from current pixels independently of QR.
 
@@ -138,7 +139,8 @@ def estimate_stand_axis_from_metric_model(
                 expected_head_center_v_px=expected_head_center_v_px,
                 expected_head_height_px=expected_head_height_px,
                 max_reprojection_rmse_px=max_reprojection_rmse_px,
-                min_edge_height_px=min_edge_height_px)
+                min_edge_height_px=min_edge_height_px,
+                deadline_monotonic_sec=deadline_monotonic_sec)
             return edges, result
 
         if current_image_head_fit is None:

@@ -87,6 +87,9 @@ def acquire_registered_head_measurement(
     diagnostics: dict[str, object],
     primary: HeadRoiEvaluation | None = None,
     resolve_lidar_association=None,
+    preview_lidar_association=None,
+    deadline_monotonic_sec: float | None = None,
+    current_ros_sec=None,
 ) -> CameraTargetRegistrationSelection | None:
     """At most one geometric retry, after unique candidate/LiDAR association."""
     import time
@@ -106,7 +109,45 @@ def acquire_registered_head_measurement(
             head_acquisition=dict(diagnostics),
         )
 
+    def expired():
+        return deadline_monotonic_sec is not None and time.monotonic() >= deadline_monotonic_sec
+
     roi = search.roi
+    associations = []
+
+    def associate(proposal, *, preview=False):
+        try:
+            bearing = rectified_pixel_bearing_in_scan(
+                u_px=proposal.center_u_px + roi.x0, v_px=proposal.center_v_px + roi.y0,
+                fx_px=intrinsics.fx_px, fy_px=intrinsics.fy_px,
+                cx_px=intrinsics.cx_px, cy_px=intrinsics.cy_px,
+                scan_from_camera=scan_from_camera)
+        except ValueError:
+            return None
+        association = associate_camera_registered_candidate_lidar_target(
+            scan, map_bearing_rad=map_bearing_rad, observed_camera_bearing_rad=bearing,
+            cone_half_angle_rad=cone_half_angle_rad, accepted_range_m=accepted_range_m,
+            now_sec=now_sec if current_ros_sec is None else current_ros_sec(),
+            max_scan_age_sec=max_scan_age_sec,
+            min_cluster_sample_count=min_cluster_sample_count,
+            max_camera_map_bearing_delta_rad=max_camera_map_bearing_delta_rad)
+        resolver = preview_lidar_association if preview else resolve_lidar_association
+        if resolver is not None:
+            association = resolver(association, scan)
+        return association
+
+    def eligible(proposal):
+        # A stateful caller without an explicit preview cannot filter competing
+        # hypotheses safely. Preserve them for ambiguity comparison instead.
+        if resolve_lidar_association is not None and preview_lidar_association is None:
+            return True
+        association = None if expired() else associate(proposal, preview=True)
+        accepted = association is not None and association.associated
+        associations.append(dict(center_full_image_px=(proposal.center_u_px + roi.x0,
+            proposal.center_v_px + roi.y0), associated=accepted,
+            reason=None if association is None else association.rejection_reason))
+        return accepted
+
     result = acquire_head_proposal(
         cv2, frame[roi.y0:roi.y1, roi.x0:roi.x1],
         expected_head_center_u_px=search.expected_center_u_px - roi.x0,
@@ -114,14 +155,24 @@ def acquire_registered_head_measurement(
         expected_head_height_px=search.expected_head_height_px,
         edge_preprocess=edge_preprocess, canny_low=canny_low, canny_high=canny_high,
         max_center_offset_fraction=max_center_offset_ratio,
+        max_vertical_center_offset_fraction=min(.75, max_center_offset_ratio),
+        proposal_filter=eligible,
+        deadline_monotonic_sec=deadline_monotonic_sec,
     )
     diagnostics.update(reason=result.reason, considered_proposals=result.considered_proposals,
                        raw_verifications=result.raw_verifications,
                        elapsed_ms=(time.monotonic() - start) * 1000.0,
                        candidate_associated=False)
+    diagnostics["proposal_associations"] = associations
+    diagnostics["vertical_search_half_height_ratio"] = min(.75, max_center_offset_ratio)
+    if expired() or result.reason == "head_acquisition_deadline_exceeded":
+        diagnostics["reason"] = "head_acquisition_deadline_exceeded"
+        return reject_proposal()
     if getattr(result, "joint_border_diagnostics", None) is not None:
         diagnostics["joint_border_diagnostics"] = result.joint_border_diagnostics
     if result.proposal is None:
+        if associations and not any(item["associated"] for item in associations):
+            diagnostics["reason"] = "head_proposal_candidate_association_rejected"
         if result.reason == "head_proposal_ambiguous":
             return reject_proposal()
         return None
@@ -131,30 +182,19 @@ def acquire_registered_head_measurement(
     if registered is None:
         diagnostics["reason"] = "head_proposal_crop_registration_rejected"
         return reject_proposal()
-    try:
-        bearing = rectified_pixel_bearing_in_scan(
-            u_px=result.proposal.center_u_px + roi.x0,
-            v_px=result.proposal.center_v_px + roi.y0,
-            fx_px=intrinsics.fx_px, fy_px=intrinsics.fy_px,
-            cx_px=intrinsics.cx_px, cy_px=intrinsics.cy_px,
-            scan_from_camera=scan_from_camera,
-        )
-    except ValueError:
+    # Recheck at selection time; comparing other hypotheses can consume the
+    # scan's remaining age. Earlier proposal eligibility is never a receipt.
+    association = associate(result.proposal)
+    if association is None:
         diagnostics["reason"] = "head_proposal_camera_bearing_unavailable"
         return reject_proposal()
-    association = associate_camera_registered_candidate_lidar_target(
-        scan, map_bearing_rad=map_bearing_rad, observed_camera_bearing_rad=bearing,
-        cone_half_angle_rad=cone_half_angle_rad, accepted_range_m=accepted_range_m,
-        now_sec=now_sec, max_scan_age_sec=max_scan_age_sec,
-        min_cluster_sample_count=min_cluster_sample_count,
-        max_camera_map_bearing_delta_rad=max_camera_map_bearing_delta_rad,
-    )
-    if resolve_lidar_association is not None:
-        association = resolve_lidar_association(association, scan)
     diagnostics.update(registered.metadata, candidate_associated=association.associated,
                        lidar_association=asdict(association))
     if not association.associated:
         diagnostics["reason"] = "head_proposal_candidate_association_rejected"
+        return reject_proposal()
+    if expired():
+        diagnostics["reason"] = "head_acquisition_deadline_exceeded"
         return reject_proposal()
     # The current-image proposal is only a raw-border seed. It is never used
     # as a QR pose, temporal pose, accepted normal or cached angle.

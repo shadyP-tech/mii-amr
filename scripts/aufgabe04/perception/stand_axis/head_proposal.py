@@ -16,6 +16,9 @@ from scripts.aufgabe04.perception.stand_axis.models import ImagePoint
 from scripts.aufgabe04.perception.stand_axis.preprocessing import _canny_edges_from_frame
 from scripts.aufgabe04.perception.stand_axis.joint_head_borders import rank_joint_head_borders
 from scripts.aufgabe04.perception.stand_axis.head_outer_border import _encloses
+from scripts.aufgabe04.perception.stand_axis.head_acquisition_budget import (
+    bounded_head_acquisition, check_head_acquisition_deadline,
+)
 
 _MAX_LINES_PER_DIRECTION = 32
 _MAX_RAW_VERIFICATIONS = 12
@@ -90,7 +93,8 @@ def _line_groups(lines, *, expected_height, expected_center):
     return groups
 
 
-def _rough_proposals(groups, *, expected_height, expected_center, max_center_offset):
+def _rough_proposals(groups, *, expected_height, expected_center, max_center_offset,
+                     max_vertical_center_offset=None, deadline_monotonic_sec=None):
     ranked = []
 
     def add(points):
@@ -100,6 +104,9 @@ def _rough_proposals(groups, *, expected_height, expected_center, max_center_off
                 or not 0.35 <= width / max(height, 1.0) <= 1.35
                 or math.dist(center, expected_center) > max_center_offset * expected_height):
             return
+        if (max_vertical_center_offset is not None
+                and abs(center[1] - expected_center[1]) > max_vertical_center_offset * expected_height):
+            return
         score = abs(math.log(height / expected_height)) + 0.2 * math.dist(center, expected_center) / expected_height
         if any(max(_distance(a, b) for a, b in zip(corners, existing[1])) < 2.0 for existing in ranked):
             return
@@ -107,6 +114,7 @@ def _rough_proposals(groups, *, expected_height, expected_center, max_center_off
 
     for direction, group in enumerate(groups):
         for index, first in enumerate(group):
+            check_head_acquisition_deadline(deadline_monotonic_sec, "endpoint_hypotheses")
             for second in group[index + 1:]:
                 cross = 1 - direction
                 first_mean = (first[0][cross] + first[1][cross]) / 2.0
@@ -187,6 +195,7 @@ def _proposal(measurement, shape, *, expected_height, expected_center):
     )
 
 
+@bounded_head_acquisition
 def acquire_head_proposal(
     cv2,
     frame_bgr,
@@ -199,6 +208,9 @@ def acquire_head_proposal(
     canny_low: int = 20,
     canny_high: int = 60,
     max_center_offset_fraction: float = 1.5,
+    max_vertical_center_offset_fraction: float | None = None,
+    proposal_filter=None,
+    deadline_monotonic_sec: float | None = None,
 ) -> HeadProposalResult:
     """Find complete head borders within an already bounded candidate ROI.
 
@@ -207,6 +219,11 @@ def acquire_head_proposal(
     hypotheses, including complementary long-segment endpoint hints. Neither
     interpolation nor morphology supplies evidence: all four rails and corner
     arms are checked on current Canny pixels. Neck visibility is not required.
+
+    The optional vertical band bounds only the locator's search area. A fresh
+    candidate association callback may exclude independently verified heads
+    before comparing alternatives; two qualifying heads remain ambiguous.
+    Neither projection nor association supplies a fitted corner or angle.
     """
 
     expected_height = float(expected_head_height_px)
@@ -215,10 +232,14 @@ def acquire_head_proposal(
         not all(math.isfinite(value) for value in (*center, expected_height, max_center_offset_fraction))
         or expected_height < 12.0
         or not 0.0 < max_center_offset_fraction <= 1.5
+        or (max_vertical_center_offset_fraction is not None
+            and (not math.isfinite(max_vertical_center_offset_fraction)
+                 or not 0.0 < max_vertical_center_offset_fraction <= max_center_offset_fraction))
         or frame_bgr is None or frame_bgr.ndim != 3 or frame_bgr.shape[2] != 3
         or min(frame_bgr.shape[:2]) < 12
     ):
         return HeadProposalResult(None, "head_proposal_input_invalid")
+    check_head_acquisition_deadline(deadline_monotonic_sec, "preprocessing")
     if raw_edges is None:
         raw_edges = _canny_edges_from_frame(
             cv2, frame_bgr, edge_preprocess=edge_preprocess, blur_kernel=5,
@@ -226,17 +247,22 @@ def acquire_head_proposal(
         )
     if raw_edges.ndim != 2 or raw_edges.shape != frame_bgr.shape[:2]:
         raise ValueError("raw_edges must match the candidate search image")
+    check_head_acquisition_deadline(deadline_monotonic_sec, "line_detection")
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
     locator_lines = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD).detect(gray)[0]
     endpoint_hints = _rough_proposals(
         _line_groups(locator_lines, expected_height=expected_height, expected_center=center),
         expected_height=expected_height, expected_center=center,
         max_center_offset=max_center_offset_fraction,
+        max_vertical_center_offset=max_vertical_center_offset_fraction,
+        deadline_monotonic_sec=deadline_monotonic_sec,
     )[:_MAX_RAW_VERIFICATIONS]
     hypotheses, diagnostics = rank_joint_head_borders(
         cv2, frame_bgr, raw_edges, expected_height=expected_height,
         expected_center=center, max_center_offset=max_center_offset_fraction,
         locator_lines=locator_lines, hint_corners=tuple(corners for _score, corners in endpoint_hints),
+        max_vertical_center_offset=max_vertical_center_offset_fraction,
+        deadline_monotonic_sec=deadline_monotonic_sec,
     )
     # Round-robin spatial groups keep another complete stand visible to the
     # ambiguity gate even when one head has many nested border alternatives.
@@ -255,7 +281,11 @@ def acquire_head_proposal(
     hints = [item for item in hypotheses if item.locator == "paired_locator_endpoints"][:4]
     ordered = ordered[:_MAX_RAW_VERIFICATIONS - len(hints)] + hints
     accepted, records = [], []
+    association_rejections = []
     for hypothesis in ordered[:_MAX_RAW_VERIFICATIONS]:
+        check_head_acquisition_deadline(
+            deadline_monotonic_sec, "strict_verification",
+            considered_proposals=diagnostics["considered_closed_hypotheses"], raw_verifications=len(records))
         measurement = refine_projected_head_border(
             cv2, raw_edges, hypothesis.corners, corridor_half_width_px=8.0,
         )
@@ -274,13 +304,25 @@ def acquire_head_proposal(
             continue
         proposal = _proposal(measurement, raw_edges.shape, expected_height=expected_height, expected_center=center)
         if (not .70 <= proposal.expected_height_ratio <= 1.30
-                or proposal.center_offset_head_heights > max_center_offset_fraction):
+                or proposal.center_offset_head_heights > max_center_offset_fraction
+                or (max_vertical_center_offset_fraction is not None
+                    and abs(proposal.center_v_px - center[1]) > max_vertical_center_offset_fraction * expected_height)):
+            continue
+        check_head_acquisition_deadline(deadline_monotonic_sec, "candidate_association",
+            considered_proposals=diagnostics["considered_closed_hypotheses"], raw_verifications=len(records))
+        if proposal_filter is not None and not proposal_filter(proposal):
+            association_rejections.append([(p.u_px, p.v_px) for p in proposal.corners])
             continue
         accepted.append(proposal)
     diagnostics = {**diagnostics, "spatial_groups": len(groups), "strict_verifications": records,
                    "max_raw_verifications": _MAX_RAW_VERIFICATIONS,
-                   "selection": "unavailable"}
+                   "selection": "unavailable",
+                   "max_vertical_center_offset_fraction": max_vertical_center_offset_fraction,
+                   "association_filtered_heads": association_rejections,
+                   "proposal_filter_applied": proposal_filter is not None}
     considered, verified = diagnostics["considered_closed_hypotheses"], len(records)
+    check_head_acquisition_deadline(deadline_monotonic_sec, "head_selection",
+        considered_proposals=considered, raw_verifications=verified)
     if accepted:
         selected = max(accepted, key=lambda item: _extent(item.corners)[0] * item.observed_height_px)
         if any(not _same_head(selected, other) for other in accepted):
@@ -310,7 +352,10 @@ def acquire_head_proposal(
         # enclosing frame. Projected proximity and solved yaw never rank it.
         diagnostics["selection"] = "maximal_verified_current_head"
         diagnostics["selected_corners"] = [(p.u_px, p.v_px) for p in selected.corners]
+        check_head_acquisition_deadline(deadline_monotonic_sec, "complete_head_selection",
+            considered_proposals=considered, raw_verifications=verified)
         return HeadProposalResult(selected, "current_head_proposal", considered, verified,
                                   "joint_current_borders", diagnostics)
-    return HeadProposalResult(None, "head_proposal_unavailable", considered, verified,
+    return HeadProposalResult(None, "head_proposal_candidate_association_rejected" if association_rejections
+                              else "head_proposal_unavailable", considered, verified,
                               "joint_current_borders", diagnostics)

@@ -3,7 +3,7 @@
 from dataclasses import replace
 import math
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from scripts.aufgabe04.perception.stand_axis.head_proposal import HeadProposal, HeadProposalResult
 from scripts.aufgabe04.perception.stand_axis.head_model_quality import MEASURED_HEAD_AXIS_SOURCE
@@ -71,7 +71,7 @@ class HeadProposalRegistrationTest(unittest.TestCase):
         )
         self.diagnostics, self.calls = {}, []
 
-    def acquire(self, *, scan=None, proposal=None, debug=None, estimate=None, **overrides):
+    def acquire(self, *, scan=None, proposal=None, debug=None, estimate=None, locator=None, **overrides):
         def evaluate(attempt, corners):
             self.assertTrue(self.diagnostics["candidate_associated"], "strict fit preceded LiDAR binding")
             self.calls.append((attempt, corners))
@@ -90,11 +90,39 @@ class HeadProposalRegistrationTest(unittest.TestCase):
             return_value=HeadProposalResult(self.proposal if proposal is None else proposal,
                                            "current_head_proposal", 2, 1),
         ) as locate:
+            if locator is not None:
+                locate.side_effect = locator
             result = acquire_registered_head_measurement(object(), _Frame(), self.search,
                                                         **{**kwargs, **overrides})
             self.assertEqual(locate.call_count, 1)
             self.assertEqual(locate.call_args.kwargs["expected_head_center_u_px"], 140.)
         return result
+
+    def test_competing_head_eligibility_previews_and_only_selected_head_commits(self):
+        preview = Mock(side_effect=lambda association, _scan: association)
+        commit = Mock(side_effect=lambda association, _scan: association)
+        def locate(_cv2, _frame, **options):
+            self.assertFalse(options["proposal_filter"](replace(self.proposal, center_u_px=310.)))
+            self.assertTrue(options["proposal_filter"](self.proposal))
+            commit.assert_not_called()
+            return HeadProposalResult(self.proposal, "current_head_proposal", 2, 2)
+        result = self.acquire(locator=locate, preview_lidar_association=preview,
+                              resolve_lidar_association=commit)
+        self.assertEqual(preview.call_count, 2)
+        commit.assert_called_once()
+        self.assertTrue(result.registered)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_stateful_resolver_without_preview_never_consumes_competing_proposals(self):
+        commit = Mock(side_effect=lambda association, _scan: association)
+        def locate(_cv2, _frame, **options):
+            # No preview means comparison cannot discard targets using mutable
+            # historical evidence. The ordinary ambiguity gate still applies.
+            self.assertTrue(options["proposal_filter"](self.proposal))
+            commit.assert_not_called()
+            return HeadProposalResult(None, "head_proposal_ambiguous", 2, 2)
+        self.assertIsNone(self.acquire(locator=locate, resolve_lidar_association=commit))
+        commit.assert_not_called()
 
     def test_recenter_keeps_complete_head_neck_bounds_and_offsets_exactly_once(self):
         result = recenter_head_proposal(self.proposal, self.search, max_center_offset_ratio=1.5)

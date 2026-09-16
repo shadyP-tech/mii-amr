@@ -110,6 +110,9 @@ from scripts.aufgabe04.real_robot.observer.axis_sample_policy import (
 from scripts.aufgabe04.real_robot.observer.tf_retry import (
     PassiveObserverTfRetryScheduler,
 )
+from scripts.aufgabe04.real_robot.observer.ingestion_runtime import (
+    BoundedSensorIngress, ObserverIngestionLoop, ObserverWorkSchedule,
+)
 from scripts.aufgabe04.real_robot.observer.tf_delivery_trace import (
     ObserverTfDeliveryTrace, create_observer_traced_buffer, traced_observer_lookup,
 )
@@ -152,6 +155,9 @@ from scripts.aufgabe04.real_robot.observer.qr_acquisition_policy import (
 from scripts.aufgabe04.real_robot.observer.roi_qr_evidence import summarize_roi_qr_evidence
 from scripts.aufgabe04.real_robot.observer.head_proposal_registration import (
     acquire_registered_head_measurement, unresolved_front_framing_hint,
+)
+from scripts.aufgabe04.real_robot.observer.head_acquisition_schedule import (
+    HeadProcessingDeadline, select_cold_candidate_head, unavailable_head_evaluation,
 )
 from scripts.aufgabe04.real_robot.observer.capture_history import (
     BoundedObserverCapture,
@@ -405,6 +411,10 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self.images: deque[_StampedMessage] = deque(maxlen=8)
         self.scans: deque[_StampedMessage] = deque(maxlen=20)
         self.camera_infos: deque[_StampedMessage] = deque(maxlen=8)
+        self._sensor_ingress = BoundedSensorIngress()
+        self._work_schedule = ObserverWorkSchedule(
+            process_rate_hz=args.process_rate_hz,
+            tf_retry_rate_hz=args.tf_retry_rate_hz)
         self.last_processed_image_stamp = -math.inf
         self.tf_retry_scheduler = (
             PassiveObserverTfRetryScheduler[_SynchronizedSensorTuple]()
@@ -459,49 +469,59 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             self._on_scan,
             qos_profile_sensor_data,
         )
-        self.node.create_timer(0.1, self._collect_scan_witnesses)
-        self.node.create_timer(
-            1.0 / max(args.process_rate_hz, 0.5),
-            self._process_latest,
-        )
-        self.node.create_timer(
-            1.0 / max(args.tf_retry_rate_hz, 1.0),
-            self._retry_pending_exact_tf,
-        )
+        # The ROS executor only ingests sensor/TF receipts. All detector,
+        # evidence and scan-persistence work stays on the main owner thread.
         self._write_status(
             "waiting_for_sensors",
             resolved_runtime=self.runtime.as_log_dict(),
         )
 
     def _on_image(self, message) -> None:
-        self._camera_count("received_images")
         stamp = compressed_msg_stamp_sec(message)
-        if stamp is not None and stamp > 0.0:
-            self.images.append(self._received_message(stamp, message))
-        else:
-            self._camera_count("invalid_image_headers")
+        sample = (self._received_message(stamp, message)
+                  if stamp is not None and stamp > 0.0 else None)
+        self._sensor_ingress.offer("images", sample)
 
     def _on_camera_info(self, message) -> None:
-        self._camera_count("received_camera_infos")
-        try:
-            self.camera_infos.append(self._received_message(_stamp_sec(message), message))
-        except ValueError:
-            self._camera_count("invalid_camera_info_headers")
-            return
-
-    def _on_scan(self, message) -> None:
-        self._camera_count("received_scans")
         try:
             sample = self._received_message(_stamp_sec(message), message)
-            self.scans.append(sample)
-            if getattr(self, "_pending_scan_witnesses", None) is None:
-                self._pending_scan_witnesses = deque(maxlen=20)
-            self._pending_scan_witnesses.append(sample)
         except ValueError:
-            self._camera_count("invalid_scan_headers")
-            return
+            sample = None
+        self._sensor_ingress.offer("camera_infos", sample)
 
-        self._collect_scan_witnesses()
+    def _on_scan(self, message) -> None:
+        try:
+            sample = self._received_message(_stamp_sec(message), message)
+        except ValueError:
+            sample = None
+        self._sensor_ingress.offer("scans", sample)
+
+    def _drain_received_sensors(self) -> None:
+        """Move immutable callback receipts into this owner's sensor histories."""
+        batch = self._sensor_ingress.drain()
+        self.images.extend(batch.images)
+        self.camera_infos.extend(batch.camera_infos)
+        self.scans.extend(batch.scans)
+        if getattr(self, "_pending_scan_witnesses", None) is None:
+            self._pending_scan_witnesses = deque(maxlen=20)
+        if len(self._pending_scan_witnesses) + len(batch.scans) > 20 or (
+                batch.counts.get("ingress_overwritten_scans", 0)):
+            # Missing intervening scans cannot preserve consecutive witnesses.
+            persistence = getattr(self, "_scan_target_persistence", None)
+            if persistence is not None:
+                persistence.reset()
+            self._camera_count("scan_witness_ingress_gap")
+        self._pending_scan_witnesses.extend(batch.scans)
+        for name, count in batch.counts.items():
+            self._camera_pipeline_counters[name] = (
+                self._camera_pipeline_counters.get(name, 0) + count)
+
+    def process_pending_work(self) -> None:
+        self._work_schedule.run_due(
+            drain=self._drain_received_sensors,
+            collect_witnesses=self._collect_scan_witnesses,
+            process=self._process_latest,
+            retry=self._retry_pending_exact_tf)
 
     def _reset_scan_witnesses(self):
         self._pending_scan_witnesses = deque(maxlen=20)
@@ -1326,7 +1346,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         if getattr(self, "_scan_target_persistence", None) is None:
             self._scan_target_persistence = StoppedScanTargetPersistence()
 
-        def resolve_lidar_association(association, current_scan):
+        def resolve_lidar_association(association, current_scan, *, preview=False):
             # Use the same exact scan<-map transform that projected this
             # candidate. A witness never supplies a current beam or a pose.
             try:
@@ -1345,9 +1365,12 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                     lidar_range_tolerance_m=self.args.lidar_range_tolerance_m,
                     scan_pose_robot=static_scan_pose)
             except (TypeError, ValueError, ArithmeticError):
-                self._scan_target_persistence.reset()
+                if not preview:
+                    self._scan_target_persistence.reset()
                 return association
-            return self._scan_target_persistence.resolve(
+            resolver = (self._scan_target_persistence.preview if preview
+                        else self._scan_target_persistence.resolve)
+            return resolver(
                 association, current_scan, context=context,
                 now_sec=self.node.get_clock().now().nanoseconds / 1e9,
                 max_scan_age_sec=self.args.max_sensor_age_sec)
@@ -1374,6 +1397,11 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         )
         processing_started_monotonic = time.monotonic()
         processing_started_ros = self.node.get_clock().now().nanoseconds / 1e9
+        head_budget = HeadProcessingDeadline(
+            image_stamp_sec=image.stamp_sec, scan_stamp_sec=scan.stamp_sec,
+            started_ros_sec=processing_started_ros,
+            started_monotonic_sec=processing_started_monotonic,
+            max_sensor_age_sec=self.args.max_sensor_age_sec)
         self._camera_count("processed_images")
         try:
             frame = compressed_msg_to_bgr_frame(
@@ -1420,6 +1448,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             started_ros_sec=processing_started_ros,
             started_monotonic_sec=processing_started_monotonic,
             max_sensor_age_sec=self.args.max_sensor_age_sec,
+            work_deadline_monotonic_sec=head_budget.deadline_monotonic_sec,
         )
 
         def evaluate_roi_attempt(
@@ -1427,6 +1456,9 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             pose_hint,
             current_head_proposal_corners=None,
         ) -> HeadRoiEvaluation:
+            if not head_budget.allow("current_head_fit"):
+                return unavailable_head_evaluation(attempt, frame, self.stand_model_profile,
+                    "head_acquisition_deadline_exceeded", diagnostics=head_budget.metadata())
             attempt_roi = attempt.roi
             attempt_frame = frame[
                 attempt_roi.y0 : attempt_roi.y1,
@@ -1464,6 +1496,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                     input_cache_roi=(attempt_roi.x0, attempt_roi.y0, attempt_roi.x1, attempt_roi.y1),
                     current_head_proposal_corners=current_head_proposal_corners,
                     current_image_head_fit=current_image_head_fit,
+                    deadline_monotonic_sec=head_budget.deadline_monotonic_sec,
                 )
 
             attempt_estimate, attempt_debug, qr_observations, qr_metadata = evaluate_roi_with_qr_acquisition(
@@ -1473,6 +1506,9 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 native_decoder=lambda crop: detect_native_qr_observations_bgr(crop, self.cv2),
                 full_decoder=lambda crop, limit, provenance: detect_qr_observations_bgr(
                     crop, self.cv2, diagnostics=provenance, max_elapsed_sec=limit,
+                    **({"prefer_native_geometry": True} if (
+                        current_head_proposal_corners is not None
+                        or attempt.source == "candidate_tracked_head_search") else {}),
                 ),
                 estimate=fit, now=time.monotonic, current_image_head_fit=current_image_head_fit,
             )
@@ -1509,6 +1545,10 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 diagnostics=head_acquisition_metadata,
                 primary=primary,
                 resolve_lidar_association=resolve_lidar_association,
+                preview_lidar_association=lambda association, current_scan:
+                    resolve_lidar_association(association, current_scan, preview=True),
+                deadline_monotonic_sec=head_budget.deadline_monotonic_sec,
+                current_ros_sec=lambda: self.node.get_clock().now().nanoseconds / 1e9,
             )
 
         candidate_context = CandidateHeadContext(
@@ -1532,6 +1572,13 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             # current-border fit, with no alternate-border retry on ambiguity.
             registration = tracked_head_selection(
                 evaluate_roi_attempt(search_hint.attempt, search_hint.pose_hint))
+        elif (getattr(self.stand_model_profile, "committable", False)
+                and self.stand_model_profile.environment == "physical"
+                and not self.args.disable_backside_reacquisition):
+            registration = select_cold_candidate_head(
+                roi_attempts, frame=frame, model_profile=self.stand_model_profile,
+                acquire_registered=acquire_registered,
+                diagnostics=head_acquisition_metadata, budget=head_budget)
         else:
             registration = self.backside_proposal_reuse.select(
                 roi_attempts,
@@ -1657,6 +1704,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 "detector_completed_monotonic_sec": processing_completed_monotonic,
                 "detector_elapsed_ms": (processing_completed_monotonic - processing_started_monotonic) * 1000,
                 "qr_acquisition": qr_acquisition_budget.metadata(),
+                "head_processing_budget": head_budget.metadata(),
                 "attempts": [{
                     "roi": evaluation.attempt.metadata(),
                     "qr_decode": evaluation.qr_decode_metadata,
@@ -1716,13 +1764,15 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             axis_metadata["current_head_candidate_association"] = current_head_association.metadata()
             model_metadata["scan_target_persistence"] = dict(self._scan_target_persistence.last_metadata)
         selected_qr_observations = getattr(selected, "qr_observations", None)
-        if selected_qr_observations is None:
+        if selected_qr_observations is None and selected.qr_decode_metadata is None:
             # Preserve legacy injected evaluations; the operational evaluator
-            # always carries the same observations used by metric fitting.
+            # carries the same observations used by metric fitting, or an
+            # explicit not-performed result. A spent head budget must not
+            # trigger an unbudgeted legacy decode of the wider search image.
             qr_texts = tuple(sorted(set(detect_qr_texts_bgr(roi_frame, self.cv2))))
         else:
             qr_texts = tuple(sorted({
-                observation.text for observation in selected_qr_observations
+                observation.text for observation in (selected_qr_observations or ())
             }))
         # Recentring may remove a previously observed marker from the crop.
         # Preserve its veto/conflict evidence; target identity still comes
@@ -2996,14 +3046,26 @@ def main(argv=None) -> int:
     _validate_args(parser, args)
     try:
         import rclpy
+        from rclpy.executors import SingleThreadedExecutor
     except ImportError as exc:
         parser.exit(2, f"error: ROS 2 Python packages are required: {exc}\n")
     rclpy.init(args=None)
     adapter = None
+    ingestion = None
+    executor = None
     try:
         adapter = PassiveRealViewpointNode(args)
+        executor = SingleThreadedExecutor()
+        executor.add_node(adapter.node)
+        ingestion = ObserverIngestionLoop(
+            spin_once=lambda: executor.spin_once(timeout_sec=0.05),
+            wake=executor.wake, ok=rclpy.ok)
+        ingestion.start()
         while rclpy.ok() and not (args.once and adapter.completed):
-            rclpy.spin_once(adapter.node, timeout_sec=0.1)
+            ingestion.raise_if_failed()
+            adapter.process_pending_work()
+            ingestion.wait()
+        ingestion.raise_if_failed()
         return 0 if adapter.completed or not args.once else 2
     except KeyboardInterrupt:
         return (
@@ -3015,6 +3077,11 @@ def main(argv=None) -> int:
     except (OSError, RuntimeError, ValueError) as exc:
         parser.exit(2, f"error: {exc}\n")
     finally:
+        # No callback may still reference the node or clock during teardown.
+        if ingestion is not None:
+            ingestion.close()
+        if executor is not None:
+            executor.shutdown(timeout_sec=2.0)
         if adapter is not None:
             if getattr(adapter, "capture_history", None) is not None:
                 try:

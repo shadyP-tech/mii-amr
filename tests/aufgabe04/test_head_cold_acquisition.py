@@ -137,6 +137,31 @@ class ColdHeadAcquisitionTests(unittest.TestCase):
         self.assertEqual(acquire_cold_head_proposal(cv2, oversized).reason,
                          "head_cold_acquisition_image_budget_exceeded")
 
+    def test_expired_deadline_does_not_start_cold_contour_search(self):
+        with mock.patch("scripts.aufgabe04.perception.stand_axis.head_acquisition_budget.time.monotonic", return_value=2.), \
+                mock.patch.object(cv2, "findContours") as contours:
+            result = acquire_cold_head_proposal(cv2, frame_with_heads(), deadline_monotonic_sec=1.)
+        self.assertEqual(result.reason, "head_acquisition_deadline_exceeded")
+        self.assertIsNone(result.proposal)
+        contours.assert_not_called()
+
+    def test_expiry_during_cold_verification_does_not_select_partial_winner(self):
+        from scripts.aufgabe04.perception.stand_axis.model_refinement import refine_projected_head_border
+        clock = [0.]
+
+        def refine(*args, **kwargs):
+            measured = refine_projected_head_border(*args, **kwargs)
+            if measured.accepted:
+                clock[0] = 2.
+            return measured
+
+        with mock.patch("scripts.aufgabe04.perception.stand_axis.head_acquisition_budget.time.monotonic", side_effect=lambda: clock[0]), \
+                mock.patch("scripts.aufgabe04.perception.stand_axis.head_cold_acquisition.refine_projected_head_border", side_effect=refine):
+            result = acquire_cold_head_proposal(cv2, frame_with_heads(), deadline_monotonic_sec=1.)
+        self.assertEqual(result.reason, "head_acquisition_deadline_exceeded")
+        self.assertIsNone(result.proposal)
+        self.assertGreater(result.raw_verifications, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

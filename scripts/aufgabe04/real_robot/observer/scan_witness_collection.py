@@ -37,8 +37,9 @@ def collect_pending_scan_witnesses(pending, persistence, *, now_sec, lookup,
                                    args, profile, calibration, target_key, epoch_key,
                                    transform_error, count):
     """Drain in source order; False asks the owner to clear invalid context."""
-    # Scan callbacks and this short TF retry timer run independently of
-    # successful camera fitting. Each witness owns its exact scan-time pose.
+    # The camera owner drains callback receipts independently of successful
+    # fitting. Each witness owns its exact scan-time pose; TF ingestion can
+    # continue while the owner is processing an image.
     for _ in range(len(pending)):
         sample = pending.popleft()
         now = now_sec()

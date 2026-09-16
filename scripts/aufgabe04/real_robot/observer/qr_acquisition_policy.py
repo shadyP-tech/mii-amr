@@ -39,7 +39,8 @@ class QrAcquisitionPolicy:
         self._last_probe_bucket = None
 
     def begin_frame(self, *, target_key, image_stamp_sec, started_ros_sec,
-                    started_monotonic_sec, max_sensor_age_sec):
+                    started_monotonic_sec, max_sensor_age_sec,
+                    work_deadline_monotonic_sec=None):
         values = (image_stamp_sec, started_ros_sec, started_monotonic_sec, max_sensor_age_sec)
         if (not isinstance(target_key, str) or not target_key
                 or any(type(value) not in (int, float) or not math.isfinite(value)
@@ -52,8 +53,15 @@ class QrAcquisitionPolicy:
         self._last_stamp = image_stamp_sec
         bucket = int((image_stamp_sec - self._epoch_stamp) / QR_REACQUISITION_INTERVAL_SEC)
         remaining = max(0., max_sensor_age_sec - max(0., started_ros_sec - image_stamp_sec))
+        deadline = started_monotonic_sec + remaining
+        if work_deadline_monotonic_sec is not None:
+            if not math.isfinite(work_deadline_monotonic_sec):
+                raise ValueError("QR work deadline must be finite")
+            # The caller's work deadline already reserves publication time and
+            # may be constrained by an older synchronized scan than the image.
+            deadline = min(deadline, work_deadline_monotonic_sec + QR_PUBLICATION_RESERVE_SEC)
         return QrFrameAcquisitionBudget(
-            self, bucket=bucket, deadline_monotonic_sec=started_monotonic_sec + remaining,
+            self, bucket=bucket, deadline_monotonic_sec=deadline,
         )
 
 

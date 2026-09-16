@@ -111,6 +111,23 @@ class ObserverQrAcquisitionPolicyTests(unittest.TestCase):
         self.assertEqual(decision.reason, "image_processing_budget_exhausted")
         self.assertIsNone(budget._full_roi)
 
+    def test_older_scan_work_deadline_bounds_qr_without_double_reserve(self):
+        budget = QrAcquisitionPolicy().begin_frame(
+            target_key="candidate", image_stamp_sec=100., started_ros_sec=100.1,
+            started_monotonic_sec=10., max_sensor_age_sec=.5,
+            work_deadline_monotonic_sec=10.08)
+        decision = self.request(budget, now=10.02, signal=True)
+        self.assertTrue(decision.allowed)
+        self.assertAlmostEqual(decision.max_elapsed_sec, .06)
+        self.assertFalse(self.request(budget, roi=WIDE, now=10.07, signal=True).allowed)
+
+    def test_work_deadline_cannot_extend_image_freshness(self):
+        budget = QrAcquisitionPolicy().begin_frame(
+            target_key="candidate", image_stamp_sec=100., started_ros_sec=100.4,
+            started_monotonic_sec=10., max_sensor_age_sec=.5,
+            work_deadline_monotonic_sec=11.)
+        self.assertFalse(self.request(budget, now=10.02, signal=True).allowed)
+
     def test_saturated_native_cache_cannot_repeat_the_one_allowed_full_decode(self):
         budget, cache = self.frame_budget(), RoiQrDecodeCache()
         frame = object()

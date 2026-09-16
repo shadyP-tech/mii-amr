@@ -7,6 +7,7 @@ Identity and view-side evidence are attached separately by the caller.
 
 from dataclasses import asdict, replace
 import math
+import time
 
 from scripts.aufgabe04.perception.stand_axis.geometry import _unusable
 from scripts.aufgabe04.perception.stand_axis.head_model_fit import fit_current_measured_head
@@ -54,6 +55,7 @@ def fit_physical_head_in_frame(
     current_head_proposal_corners=None, pose_hint=None,
     expected_head_center_u_px=None, expected_head_center_v_px=None,
     expected_head_height_px=None, max_reprojection_rmse_px=2., min_edge_height_px=8.,
+    deadline_monotonic_sec=None,
 ):
     """Return a current head fit without consulting any QR observation.
 
@@ -68,11 +70,18 @@ def fit_physical_head_in_frame(
                    "tracked_fit_reason": None}
 
     def fitted(corners):
+        if expired():
+            return unavailable("head_acquisition_deadline_exceeded")
         result = fit_current_measured_head(
             cv2, raw_edges, model_profile=model_profile, camera=camera, proposal_corners=corners,
             max_reprojection_rmse_px=max_reprojection_rmse_px, min_edge_height_px=min_edge_height_px)
         timing.mark("independent_head_fit")
+        if expired():
+            return unavailable("head_acquisition_deadline_exceeded")
         return result
+
+    def expired():
+        return deadline_monotonic_sec is not None and time.monotonic() >= deadline_monotonic_sec
 
     def finished(result):
         estimate, artifacts, pose = result
@@ -88,6 +97,8 @@ def fit_physical_head_in_frame(
             model_profile_sha256=model_profile.sha256,
             model_measurement_status=model_profile.measurement_status), None))
 
+    if expired():
+        return unavailable("head_acquisition_deadline_exceeded")
     if current_head_proposal_corners is not None:
         diagnostics["source"] = "current_candidate_proposal"
         return finished(fitted(current_head_proposal_corners))
@@ -112,13 +123,17 @@ def fit_physical_head_in_frame(
             cv2, frame, raw_edges=raw_edges,
             expected_head_center_u_px=expected_head_center_u_px,
             expected_head_center_v_px=expected_head_center_v_px,
-            expected_head_height_px=expected_head_height_px)
+            expected_head_height_px=expected_head_height_px,
+            deadline_monotonic_sec=deadline_monotonic_sec)
     else:
         from scripts.aufgabe04.perception.stand_axis.head_cold_acquisition import acquire_cold_head_proposal
         diagnostics["source"] = "cold_current_head_search"
-        acquisition = acquire_cold_head_proposal(cv2, frame, raw_edges=raw_edges)
+        acquisition = acquire_cold_head_proposal(cv2, frame, raw_edges=raw_edges,
+                                               deadline_monotonic_sec=deadline_monotonic_sec)
     diagnostics["acquisition"] = asdict(acquisition)
     timing.mark("independent_head_acquisition")
+    if expired() or acquisition.reason == "head_acquisition_deadline_exceeded":
+        return unavailable("head_acquisition_deadline_exceeded")
     if acquisition.proposal is None:
         # Keep the producer detail alongside the stable observer-facing reason.
         return unavailable("head_proposal_ambiguous" if "ambiguous" in acquisition.reason

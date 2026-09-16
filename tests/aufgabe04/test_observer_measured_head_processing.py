@@ -27,12 +27,21 @@ from tests.aufgabe04 import test_head_model_admission as head_fixtures
 
 class MeasuredHeadObserverProcessingTests(unittest.TestCase):
     def run_view(self, scenario):
+        physical = scenario.startswith("physical_")
+        scenario = scenario.removeprefix("physical_")
         shifted = scenario.startswith("shifted_")
         scenario = scenario.removeprefix("shifted_")
         registered = scenario.startswith("registered_")
         scenario = scenario.removeprefix("registered_")
+        registered = registered or physical
         fixture = processing_fixtures.CameraObserverProcessingTest()
         adapter = fixture.make_adapter()
+        if physical:
+            adapter.stand_model_profile.environment = "physical"
+            adapter.stand_model_profile.committable = True
+            # The map crop clips the off-center head. Acquisition must locate
+            # its complete borders before either QR decoding or metric fit.
+            adapter.args.head_roi_padding_scale = 1.0
         if shifted:
             # Complete head remains inside this synthetic nominal crop while
             # its ray lies outside the original map-centered three-degree cone.
@@ -42,8 +51,13 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
         current_index = [0]
         decode_modes = []
         pose_hints = []
+        head_calls = []
+        qr_geometry_priorities = []
+        metric_options = []
+        metric_frame_indices = []
 
-        def decode(crop, _cv2, *, diagnostics=None, max_elapsed_sec=None):
+        def decode(crop, _cv2, *, diagnostics=None, max_elapsed_sec=None,
+                   prefer_native_geometry=False):
             index = current_index[0]
             if scenario == "head_only" or scenario == "historical_qr" and index >= 2:
                 return ()
@@ -63,15 +77,22 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
 
         def full_decode(*args, **kwargs):
             decode_modes.append("full")
+            qr_geometry_priorities.append(kwargs.get("prefer_native_geometry", False))
             return decode(*args, **kwargs)
 
         def native_decode(*args, **kwargs):
             decode_modes.append("native")
             if scenario == "native_miss" and current_index[0] == 2:
                 return ()
-            return decode(*args, **kwargs)
+            decoded = decode(*args, **kwargs)
+            if scenario == "recover_qr":
+                return tuple(replace(item, corners=None) for item in decoded)
+            return decoded
 
         def metric(_cv2, _crop, **options):
+            head_calls.append("fit")
+            metric_options.append(options)
+            metric_frame_indices.append(current_index[0])
             pose_hints.append(options["pose_hint"])
             u, v = options["expected_head_center_u_px"], options["expected_head_center_v_px"]
             if shifted:
@@ -114,16 +135,27 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
                         reason="current_physical_head_boundary_unresolved"),
                     head_pose_hypotheses=(PlanarPoseHypothesis(
                         (0., 0., 0.), (0., 0., .5), (0., 0., 1.), -16.121, .2, True),))
+            if scenario == "late_fit":
+                fixture.clock_sec += .5
             return estimate, debug
 
         def locate(_cv2, _crop, **options):
+            head_calls.append("locate")
             u, v = options["expected_head_center_u_px"] + 10., options["expected_head_center_v_px"]
             corners = tuple(ImagePoint(u + x, v + y) for x, y in
                             ((-26, -26), (26, -26), (26, 26), (-26, 26)))
-            return HeadProposalResult(HeadProposal(
+            proposal = HeadProposal(
                 corners, (int(u - 34), int(v - 34), int(u + 34), int(v + 55)),
                 (u - 26, v - 26, u + 26, v + 26), u, v, 52., 1., 10 / 52., .98, .98,
-            ), "current_head_proposal", 1, 1, "test_locator")
+            )
+            if physical:
+                self.assertNotIn(current_index[0], metric_frame_indices,
+                                 "Cold proposal must precede this frame's head fit")
+                eligible = options["proposal_filter"](proposal)
+                if not eligible:
+                    return HeadProposalResult(None, "head_proposal_unavailable", 1, 1,
+                                              "test_locator")
+            return HeadProposalResult(proposal, "current_head_proposal", 1, 1, "test_locator")
 
         def delayed_debug(*_args, **_kwargs):
             if scenario == "late_publication" and current_index[0] == 6:
@@ -188,6 +220,9 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
             payload = json.loads(output.read_text()) if output.exists() else None
             adapter._test_decode_modes = decode_modes
             adapter._test_pose_hints = pose_hints
+            adapter._test_head_calls = head_calls
+            adapter._test_metric_options = metric_options
+            adapter._test_qr_geometry_priorities = qr_geometry_priorities
             return adapter, payload
 
     def test_seven_quality_head_frames_and_independent_bound_qr_commit_above_35_degrees(self):
@@ -293,6 +328,69 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
                 self.assertFalse(adapter.completed)
                 if scenario == "conflicting_qr":
                     self.assertTrue(adapter._last_observation_update.snapshot.poisoned)
+
+    def test_physical_cold_acquisition_recenters_before_one_fit_then_tracks_seven_samples(self):
+        adapter, payload = self.run_view("physical_bound_qr")
+        self.assertTrue(adapter.completed)
+        self.assertEqual(payload["axis"]["sample_count"], 7)
+        self.assertEqual(adapter._test_head_calls, ["locate"] + ["fit"] * 7)
+        first, *tracked = adapter._test_metric_options
+        self.assertIsNone(first["pose_hint"])
+        self.assertIsNotNone(first["current_head_proposal_corners"])
+        x0, y0, x1, y1 = first["input_cache_roi"]
+        self.assertTrue(all(0 < point.u_px < x1 - x0 - 1
+                            and 0 < point.v_px < y1 - y0 - 1
+                            for point in first["current_head_proposal_corners"]))
+        self.assertEqual(first["camera_cx_px"], 400. - x0)
+        self.assertEqual(first["camera_cy_px"], 300. - y0)
+        self.assertTrue(all(item["pose_hint"] is not None for item in tracked))
+        self.assertTrue(all(item["current_head_proposal_corners"] is None for item in tracked))
+        first_metadata = adapter._write_status.call_args_list[0].kwargs["stand_axis_debug"]
+        self.assertTrue(first_metadata["current_head_candidate_association"]["accepted"])
+        first_model = first_metadata["metric_model"]
+        self.assertEqual(len(first_model["head_roi_attempts"]), 1)
+        self.assertTrue(first_model["camera_target_registration"]["strict_retry_applied"])
+        self.assertEqual(adapter._last_observation_update.resolved_qr_id, "QR_003")
+
+    def test_physical_registered_and_tracked_crop_prioritize_native_qr_geometry(self):
+        adapter, payload = self.run_view("physical_recover_qr")
+        self.assertIsNotNone(payload)
+        self.assertTrue(adapter._test_qr_geometry_priorities)
+        self.assertTrue(all(adapter._test_qr_geometry_priorities))
+
+    def test_physical_cold_acquisition_preserves_identity_and_publication_gates(self):
+        for scenario in ("unbound_qr", "conflicting_qr", "late_publication"):
+            with self.subTest(scenario=scenario):
+                adapter, payload = self.run_view("physical_" + scenario)
+                self.assertIsNone(payload)
+                self.assertFalse(adapter.completed)
+                self.assertEqual(adapter._test_head_calls.count("fit"), 7)
+                if scenario == "conflicting_qr":
+                    self.assertTrue(adapter._last_observation_update.snapshot.poisoned)
+                    self.assertEqual(adapter._test_head_calls.count("locate"), 2)
+                elif scenario == "late_publication":
+                    self.assertEqual(adapter._write_status.call_args.args,
+                                     ("obsolete_publication_evidence",))
+                else:
+                    self.assertEqual(adapter._write_status.call_args.kwargs["reason"],
+                                     "measured_head_front_identity_unresolved")
+
+    def test_physical_atomic_fit_overrun_never_seeds_tracking_or_axis_evidence(self):
+        adapter, payload = self.run_view("physical_late_fit")
+        self.assertIsNone(payload)
+        self.assertFalse(adapter.completed)
+        self.assertEqual(adapter._test_head_calls, ["locate", "fit"] * 7)
+        self.assertTrue(all(call.args == ("obsolete_detector_result",)
+                            for call in adapter._write_status.call_args_list))
+
+    def test_physical_proposal_must_associate_before_any_metric_or_qr_work(self):
+        for scenario in ("wrong_lidar", "ambiguous_lidar"):
+            with self.subTest(scenario=scenario):
+                adapter, payload = self.run_view("physical_" + scenario)
+                self.assertIsNone(payload)
+                self.assertFalse(adapter.completed)
+                self.assertEqual(adapter._test_head_calls, ["locate"] * 7)
+                self.assertEqual(adapter._test_decode_modes, [])
 
 
 if __name__ == "__main__":

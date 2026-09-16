@@ -112,6 +112,49 @@ class ScanTargetPersistenceTest(unittest.TestCase):
         self.assertTrue(validated_witnessed_fragmentation(
             json.loads(json.dumps(result.witnessed_fragmentation, allow_nan=False))).associated)
 
+    def test_off_target_proposal_preview_preserves_witnesses_for_actual_head(self):
+        for stamp in (10., 10.2, 10.4):
+            self.assertTrue(self.ingest(stamp))
+        _, actual, scan, context = self.observe(
+            10.6, ranges=self.fragmented(), state=StoppedScanTargetPersistence())
+        background = associate_camera_registered_candidate_lidar_target(
+            scan, map_bearing_rad=0., observed_camera_bearing_rad=.12,
+            cone_half_angle_rad=math.radians(3), accepted_range_m=(.42, .64),
+            now_sec=10.7, max_scan_age_sec=.5, min_cluster_sample_count=1)
+        original_pending = copy.deepcopy(list(self.state._pending_scans._entries))
+        original_metadata = dict(self.state.last_metadata)
+        rejected = self.state.preview(background, scan, context=context,
+            now_sec=10.7, max_scan_age_sec=.5)
+        self.assertFalse(rejected.associated)
+        self.assertEqual(list(self.state._pending_scans._entries), original_pending)
+        self.assertEqual(self.state.last_metadata, original_metadata)
+        self.assertIsNone(self.state._last_stamp)
+
+        accepted = self.state.preview(actual, scan, context=context,
+            now_sec=10.7, max_scan_age_sec=.5)
+        self.assertTrue(registered_target_is_unique(accepted), accepted.rejection_reason)
+        self.assertEqual(list(self.state._pending_scans._entries), original_pending)
+        self.assertIsNone(self.state._last_stamp)
+        # Returned metadata must not let a caller mutate the live input proof.
+        accepted.witnessed_fragmentation["witnesses"][0]["scan"]["ranges"][3] = .9
+        committed = self.state.resolve(actual, scan, context=context,
+            now_sec=10.7, max_scan_age_sec=.5)
+        self.assertTrue(registered_target_is_unique(committed), self.state.last_metadata)
+        self.assertEqual([w["scan"]["scan_stamp_sec"] for w in
+            committed.witnessed_fragmentation["witnesses"]], [10., 10.2, 10.4])
+
+    def test_rejected_preview_does_not_clear_already_registered_history(self):
+        self.seed()
+        _, actual, scan, context = self.observe(
+            10.6, ranges=self.fragmented(), state=StoppedScanTargetPersistence())
+        before = copy.deepcopy(self.state._history)
+        self.assertFalse(self.state.preview(actual, scan, context=context,
+            now_sec=11.7, max_scan_age_sec=.5).associated)
+        self.assertEqual(self.state._history, before)
+        self.assertEqual(self.state._last_stamp, 10.4)
+        self.assertTrue(self.state.preview(actual, scan, context=context,
+            now_sec=10.7, max_scan_age_sec=.5).associated)
+
     def test_scan_only_duplicate_and_camera_scan_cannot_double_count(self):
         for _ in range(4):
             self.assertTrue(self.ingest(10.))

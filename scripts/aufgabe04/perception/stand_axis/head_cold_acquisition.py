@@ -23,6 +23,9 @@ from scripts.aufgabe04.perception.stand_axis.head_proposal_selection import (
 from scripts.aufgabe04.perception.stand_axis.model_refinement import refine_projected_head_border
 from scripts.aufgabe04.perception.stand_axis.models import ImagePoint
 from scripts.aufgabe04.perception.stand_axis.preprocessing import _canny_edges_from_frame
+from scripts.aufgabe04.perception.stand_axis.head_acquisition_budget import (
+    bounded_head_acquisition, check_head_acquisition_deadline,
+)
 
 MAX_IMAGE_PIXELS = 1920 * 1080
 MAX_CONTOURS = 1024
@@ -52,11 +55,12 @@ def _bounded_quad(points, shape):
     return corners
 
 
-def _rail_endpoint_hints(cv2, gray, raw_edges):
+def _rail_endpoint_hints(cv2, gray, raw_edges, *, deadline_monotonic_sec=None):
     """Pair bounded opposite current line segments, independent of head scale."""
     import numpy as np
 
     detected = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD).detect(gray)[0]
+    check_head_acquisition_deadline(deadline_monotonic_sec, "cold_hough")
     # Equal-luminance colour boundaries can be absent from grayscale LSD while
     # the caller's channel-union Canny has complete current evidence.
     raw_lines = cv2.HoughLinesP(raw_edges, 1., np.pi / 180., threshold=8,
@@ -65,6 +69,7 @@ def _rail_endpoint_hints(cv2, gray, raw_edges):
     segments = [segment for lines in (detected, raw_lines) if lines is not None
                 for segment in lines.reshape(-1, 4)]
     for x0, y0, x1, y1 in segments:
+        check_head_acquisition_deadline(deadline_monotonic_sec, "cold_rails")
         dx, dy = float(x1 - x0), float(y1 - y0)
         length = math.hypot(dx, dy)
         if length < MIN_HEAD_EDGE_PX * .70:
@@ -83,6 +88,7 @@ def _rail_endpoint_hints(cv2, gray, raw_edges):
         # the retained longest fragment still supplies only a locator line.
         distinct = []
         for item in sorted(group, key=lambda item: (-item[0], item[1:])):
+            check_head_acquisition_deadline(deadline_monotonic_sec, "cold_rail_merge")
             length, a, b = item
             delta = (b[0] - a[0], b[1] - a[1])
             if any(
@@ -107,6 +113,7 @@ def _rail_endpoint_hints(cv2, gray, raw_edges):
         group = groups[direction]
         cross = 1 - direction
         for index, (length, first, last) in enumerate(group):
+            check_head_acquisition_deadline(deadline_monotonic_sec, "cold_endpoint_hypotheses")
             for other_length, other_first, other_last in group[index + 1:]:
                 if min(length, other_length) < .20 * max(length, other_length):
                     continue
@@ -133,9 +140,11 @@ def _rail_endpoint_hints(cv2, gray, raw_edges):
     return tuple(hints), tuple(map(len, groups))
 
 
+@bounded_head_acquisition
 def acquire_cold_head_proposal(
     cv2, frame_bgr, *, raw_edges=None, edge_preprocess="channel_union",
     canny_low=20, canny_high=60,
+    deadline_monotonic_sec=None,
 ) -> HeadProposalResult:
     """Locate a unique complete head in a bounded image without a prior pose.
 
@@ -168,6 +177,7 @@ def acquire_cold_head_proposal(
         return result("head_proposal_input_invalid")
     if frame_bgr.shape[0] * frame_bgr.shape[1] > MAX_IMAGE_PIXELS:
         return result("head_cold_acquisition_image_budget_exceeded")
+    check_head_acquisition_deadline(deadline_monotonic_sec, "cold_preprocessing")
     if raw_edges is None:
         raw_edges = _canny_edges_from_frame(
             cv2, frame_bgr, edge_preprocess=edge_preprocess, blur_kernel=5,
@@ -175,12 +185,14 @@ def acquire_cold_head_proposal(
         )
     if raw_edges.ndim != 2 or raw_edges.shape != frame_bgr.shape[:2]:
         raise ValueError("raw_edges must match the cold search image")
+    check_head_acquisition_deadline(deadline_monotonic_sec, "cold_contours")
     contours = cv2.findContours(raw_edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)[-2]
     diagnostics["contours"] = len(contours)
     if len(contours) > MAX_CONTOURS:
         return result("head_cold_acquisition_contour_budget_exceeded")
     seeds = []
     for contour in contours:
+        check_head_acquisition_deadline(deadline_monotonic_sec, "cold_contour_hypotheses")
         perimeter = cv2.arcLength(contour, True)
         if perimeter < 4 * MIN_HEAD_EDGE_PX:
             continue
@@ -189,13 +201,16 @@ def acquire_cold_head_proposal(
             if len(quad) == 4 and cv2.isContourConvex(quad):
                 seeds.append((quad.reshape(-1, 2), "closed_contour"))
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-    hints, rail_counts = _rail_endpoint_hints(cv2, gray, raw_edges)
+    check_head_acquisition_deadline(deadline_monotonic_sec, "cold_line_detection")
+    hints, rail_counts = _rail_endpoint_hints(cv2, gray, raw_edges,
+                                            deadline_monotonic_sec=deadline_monotonic_sec)
     diagnostics["horizontal_rails"], diagnostics["vertical_rails"] = rail_counts
     seeds.extend((hint, "paired_current_rails") for hint in hints)
     distance = cv2.distanceTransform(np.where(raw_edges > 0, 0, 255).astype(np.uint8), cv2.DIST_L2, 3)
     fractions = np.linspace(.10, .90, 24)
     hypotheses = {}
     for points, locator in seeds:
+        check_head_acquisition_deadline(deadline_monotonic_sec, "cold_hypothesis_support")
         corners = _bounded_quad(points, raw_edges.shape)
         if corners is None:
             continue
@@ -222,13 +237,17 @@ def acquire_cold_head_proposal(
                                                          tuple((p.u_px, p.v_px) for p in item[1])))
     unique = []
     for item in ranked:
+        check_head_acquisition_deadline(deadline_monotonic_sec, "cold_hypothesis_deduplication")
         if not any(max(_distance(a, b) for a, b in zip(item[1], other[1])) < 3. for other in unique):
             unique.append(item)
     diagnostics["distinct_locator_hypotheses"] = len(unique)
-    ordered, ranking = rank_current_head_hypotheses(cv2, raw_edges, unique)
+    ordered, ranking = rank_current_head_hypotheses(cv2, raw_edges, unique,
+                                                  deadline_monotonic_sec=deadline_monotonic_sec)
     diagnostics.update(ranking)
     accepted = []
     for score, corners, locator in ordered[:MAX_RAW_VERIFICATIONS]:
+        check_head_acquisition_deadline(deadline_monotonic_sec, "cold_strict_verification",
+            considered_proposals=len(hypotheses), raw_verifications=len(diagnostics["strict_verifications"]))
         measured = refine_projected_head_border(cv2, raw_edges, corners, corridor_half_width_px=4.)
         diagnostics["strict_verifications"].append({
             "locator": locator, "score": score, "accepted": measured.accepted,
@@ -241,9 +260,13 @@ def acquire_cold_head_proposal(
             _width, height, center = _extent(measured.corners)
             accepted.append(_proposal(measured, raw_edges.shape, expected_height=height, expected_center=center))
     uncovered = uncovered_head_hypotheses(ordered[MAX_RAW_VERIFICATIONS:], accepted)
+    check_head_acquisition_deadline(deadline_monotonic_sec, "cold_head_selection",
+        considered_proposals=len(hypotheses), raw_verifications=len(diagnostics["strict_verifications"]))
     diagnostics["unverified_independent_hypotheses"] = len(uncovered)
     if uncovered:
         return result("head_cold_acquisition_verification_budget_exceeded")
     selected, reason, selection = select_verified_head(cv2, accepted)
     diagnostics.update(selection)
+    check_head_acquisition_deadline(deadline_monotonic_sec, "cold_complete_head_selection",
+        considered_proposals=len(hypotheses), raw_verifications=len(diagnostics["strict_verifications"]))
     return result(reason, selected)
