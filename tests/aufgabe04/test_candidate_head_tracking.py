@@ -186,10 +186,63 @@ def test_current_projection_bound_and_crop_extent_still_apply():
     assert tracker.hint((clipped,), context=CONTEXT, observed_at_sec=10.6, robot_pose=ROBOT) is None
 
 
-def test_current_head_loss_removes_old_search_evidence():
+def test_brief_current_head_loss_preserves_only_old_search_location():
     tracker = CandidateHeadTracking()
     assert seed(tracker)
     evaluation = measured_head()
     assert not seed(tracker, replace(evaluation, estimate=replace(evaluation.estimate, usable=False)),
                     observed_at_sec=10.6, now_sec=10.7)
+    metadata = tracker.last_metadata
+    assert metadata["current_measurement_accepted"] is False
+    assert metadata["source_stamp_refreshed"] is False
+    assert metadata["source_stamp_sec"] == 10.
+    assert search(tracker, observed_at_sec=11.2) is not None
+    assert search(tracker, observed_at_sec=12.01) is None
+
+
+def test_misses_do_not_refresh_ttl_and_repeated_failure_returns_to_cold_search():
+    tracker = CandidateHeadTracking()
+    assert seed(tracker)
+    failed = replace(measured_head(), estimate=replace(measured_head().estimate, usable=False))
+    for stamp in (10.6, 10.8):
+        assert not seed(tracker, failed, observed_at_sec=stamp, now_sec=stamp+.1,
+                        candidate_associated=False)
+        assert tracker.last_metadata["hint_retained"] is True
+        assert tracker.last_metadata["source_stamp_sec"] == 10.
+        assert search(tracker, observed_at_sec=stamp+.2) is not None
+    assert not seed(tracker, failed, observed_at_sec=11., now_sec=11.1,
+                    candidate_associated=False)
     assert search(tracker, observed_at_sec=11.2) is None
+
+
+@pytest.mark.parametrize("changes", (
+    {"robot_pose": Pose2D(.02, 0.)},
+    {"context": replace(CONTEXT, target_key="different")},
+    {"now_sec": 11.2},  # Current miss is itself stale.
+    {"observed_at_sec": 10., "now_sec": 10.1},
+))
+def test_miss_cannot_preserve_hint_across_motion_context_staleness_or_replay(changes):
+    tracker = CandidateHeadTracking()
+    assert seed(tracker)
+    failed = replace(measured_head(), estimate=replace(measured_head().estimate, usable=False))
+    assert not seed(tracker, failed, **{
+        "observed_at_sec": 10.6, "now_sec": 10.7, "candidate_associated": False, **changes})
+    assert search(tracker, observed_at_sec=11.3) is None
+
+
+def test_verified_recovery_refreshes_locator_and_clears_miss_count():
+    tracker = CandidateHeadTracking()
+    assert seed(tracker)
+    assert not seed(tracker, observed_at_sec=10.4, now_sec=10.5, candidate_associated=False)
+    assert seed(tracker, observed_at_sec=10.6, now_sec=10.7)
+    assert search(tracker, observed_at_sec=12.5) is not None
+    assert tracker.last_metadata["consecutive_soft_misses"] == 0
+
+
+def test_old_success_cannot_renew_locator_after_newer_missed_image():
+    tracker = CandidateHeadTracking()
+    assert seed(tracker)
+    assert not seed(tracker, observed_at_sec=10.6, now_sec=10.7, candidate_associated=False)
+    assert not seed(tracker, observed_at_sec=10.4, now_sec=10.8)
+    assert tracker.last_metadata["reason"] == "candidate_head_seed_nonadvancing_image"
+    assert search(tracker, observed_at_sec=11.) is None

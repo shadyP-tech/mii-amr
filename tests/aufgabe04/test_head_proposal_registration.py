@@ -71,7 +71,8 @@ class HeadProposalRegistrationTest(unittest.TestCase):
         )
         self.diagnostics, self.calls = {}, []
 
-    def acquire(self, *, scan=None, proposal=None, debug=None, estimate=None, locator=None, **overrides):
+    def acquire(self, *, scan=None, proposal=None, debug=None, estimate=None, locator=None,
+                **overrides):
         def evaluate(attempt, corners):
             self.assertTrue(self.diagnostics["candidate_associated"], "strict fit preceded LiDAR binding")
             self.calls.append((attempt, corners))
@@ -86,7 +87,7 @@ class HeadProposalRegistrationTest(unittest.TestCase):
             evaluate=evaluate, diagnostics=self.diagnostics,
         )
         with patch(
-            "scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_head_proposal",
+            "scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_viewer_candidate_head",
             return_value=HeadProposalResult(self.proposal if proposal is None else proposal,
                                            "current_head_proposal", 2, 1),
         ) as locate:
@@ -95,8 +96,40 @@ class HeadProposalRegistrationTest(unittest.TestCase):
             result = acquire_registered_head_measurement(object(), _Frame(), self.search,
                                                         **{**kwargs, **overrides})
             self.assertEqual(locate.call_count, 1)
-            self.assertEqual(locate.call_args.kwargs["expected_head_center_u_px"], 140.)
+            self.assertEqual(locate.call_args.kwargs["expected_center"], (140., 180.))
+            self.assertEqual(locate.call_args.kwargs["expected_height"], 100.)
         return result
+
+    def test_shared_proposal_runs_one_locator_before_strict_fit(self):
+        result = self.acquire()
+        self.assertTrue(result.registered)
+        self.assertTrue(self.diagnostics["candidate_associated"])
+        self.assertEqual(self.diagnostics["acquisition_policy"], "shared_candidate_current_borders")
+        self.assertFalse(self.diagnostics["projected_search_performed"])
+        self.assertEqual(len(self.calls), 1)
+
+    def test_shared_proposal_still_requires_unique_current_lidar_target(self):
+        result = self.acquire(accepted_range_m=(.8, 1.))
+        self.assertIsNone(result)
+        self.assertFalse(self.diagnostics["candidate_associated"])
+        self.assertEqual(self.calls, [])
+
+    def test_ambiguous_comparison_cannot_choose_another_locator(self):
+        result = self.acquire(locator=lambda *_args, **_kwargs:
+            HeadProposalResult(None, "head_proposal_ambiguous", 4, 3))
+        self.assertIsNone(result)
+        self.assertEqual(self.calls, [])
+
+    def test_deadline_stage_diagnostics_survive_registration_exit(self):
+        detail = {"deadline_exceeded": True, "deadline_stage": "strict_verification",
+                  "comparison_complete": False, "angle_authorized": False}
+        def timed_out(*_args, **_kwargs):
+            return HeadProposalResult(None, "head_acquisition_deadline_exceeded", 17, 4,
+                                      joint_border_diagnostics=detail)
+        self.assertIsNone(self.acquire(locator=timed_out))
+        self.assertEqual(self.diagnostics["joint_border_diagnostics"], detail)
+        self.assertEqual(self.diagnostics["considered_proposals"], 17)
+        self.assertEqual(self.calls, [])
 
     def test_competing_head_eligibility_previews_and_only_selected_head_commits(self):
         preview = Mock(side_effect=lambda association, _scan: association)
@@ -218,7 +251,7 @@ class HeadProposalRegistrationTest(unittest.TestCase):
                 self.assertEqual(self.diagnostics["reason"], "head_proposal_candidate_association_rejected")
 
     def test_unavailable_proposal_and_invalid_crop_never_call_strict_fit(self):
-        with patch("scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_head_proposal",
+        with patch("scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_viewer_candidate_head",
                    return_value=HeadProposalResult(None, "head_proposal_unavailable")):
             # Call directly so the acquisition wrapper does not replace this result.
             selection = acquire_registered_head_measurement(
@@ -275,7 +308,7 @@ class HeadProposalRegistrationTest(unittest.TestCase):
                 edge_preprocess="channel_union", canny_low=20, canny_high=60,
                 evaluate=evaluate, diagnostics=self.diagnostics, primary=primary,
             )
-        with patch("scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_head_proposal",
+        with patch("scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_viewer_candidate_head",
                    return_value=result):
             selection = select_camera_target_measurement(
                 (nominal, self.search), tracked_pose=None, evaluate=evaluate,

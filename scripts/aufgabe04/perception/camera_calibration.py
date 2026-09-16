@@ -90,6 +90,8 @@ def rectify_bgr_frame(
     calibration_or_info: object,
     cv2_module: object,
     numpy_module: object,
+    *,
+    map_cache: RectificationMapCache | None = None,
 ) -> object:
     """Rectify a raw BGR image into the pixel geometry described by ``P``."""
 
@@ -106,6 +108,38 @@ def rectify_bgr_frame(
             f"image={width}x{height}, "
             f"info={calibration.width_px}x{calibration.height_px}"
         )
+    def build_maps():
+        return _rectification_maps(calibration, cv2_module, numpy_module)
+    map_x, map_y = (build_maps() if map_cache is None else
+                    map_cache.maps(calibration, cv2_module, numpy_module, build_maps))
+    return cv2_module.remap(
+        frame,
+        map_x,
+        map_y,
+        interpolation=cv2_module.INTER_LINEAR,
+        borderMode=cv2_module.BORDER_CONSTANT,
+    )
+
+
+class RectificationMapCache:
+    """One calibration's coordinate maps; never retains camera image pixels.
+
+    Own one per processing stream. Any calibration or OpenCV/backend change
+    rebuilds the maps. Validation and dimension checks still run every frame.
+    """
+
+    def __init__(self):
+        self._key = self._value = None
+
+    def maps(self, calibration, cv2_module, numpy_module, build):
+        key = (calibration, id(cv2_module), id(numpy_module))
+        if key != self._key:
+            value = build()
+            self._key, self._value = key, value
+        return self._value
+
+
+def _rectification_maps(calibration, cv2_module, numpy_module):
     camera_matrix = numpy_module.asarray(
         calibration.camera_matrix, dtype=float
     ).reshape(3, 3)
@@ -116,18 +150,11 @@ def rectify_bgr_frame(
     projection = numpy_module.asarray(
         calibration.projection_matrix, dtype=float
     ).reshape(3, 4)
-    map_x, map_y = cv2_module.initUndistortRectifyMap(
+    return cv2_module.initUndistortRectifyMap(
         camera_matrix,
         distortion,
         rectification,
         projection[:, :3],
-        (width, height),
+        (calibration.width_px, calibration.height_px),
         cv2_module.CV_32FC1,
-    )
-    return cv2_module.remap(
-        frame,
-        map_x,
-        map_y,
-        interpolation=cv2_module.INTER_LINEAR,
-        borderMode=cv2_module.BORDER_CONSTANT,
     )

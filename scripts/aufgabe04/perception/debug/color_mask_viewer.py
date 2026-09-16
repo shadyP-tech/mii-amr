@@ -181,6 +181,8 @@ class RosCompressedImageTopicFrameSource:
         self._lock = threading.Lock()
         self._running = False
         self._spin_thread = None
+        from scripts.aufgabe04.perception.debug.frame_receipt_diagnostics import FrameReceiptDiagnostics
+        self._receipt_diagnostics = FrameReceiptDiagnostics()
 
         try:
             import rclpy
@@ -219,11 +221,15 @@ class RosCompressedImageTopicFrameSource:
         stamp_sec = compressed_msg_stamp_sec(msg)
         now = time.time()
         now_monotonic = time.monotonic()
-        if (
+        age_rejected = (
             self.max_frame_age_sec > 0.0
             and stamp_sec is not None
             and now - stamp_sec > self.max_frame_age_sec
-        ):
+        )
+        with self._lock:
+            self._receipt_diagnostics.record(stamp_sec=stamp_sec, received_wall_sec=now,
+                                             age_rejected=age_rejected)
+        if age_rejected:
             return
         data = bytes(msg.data)
         image_format = str(getattr(msg, "format", ""))
@@ -247,6 +253,10 @@ class RosCompressedImageTopicFrameSource:
 
     def is_opened(self) -> bool:
         return True
+
+    def receipt_diagnostics(self) -> dict:
+        with self._lock:
+            return self._receipt_diagnostics.snapshot()
 
     def start(self) -> None:
         if self._running:

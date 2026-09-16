@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class QrMarkerEvidence:
-    verified: bool
+    verified: bool | None
     reason: str
     finder_count: int = 0
     minimum_finder_score: float | None = None

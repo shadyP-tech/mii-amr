@@ -9,6 +9,7 @@ the same current raw four-border and corner-arm checks as seeded acquisition.
 from __future__ import annotations
 
 import math
+from types import SimpleNamespace
 
 from scripts.aufgabe04.perception.stand_axis.geometry import (
     _distance, _polygon_area, _well_formed_quadrilateral, order_corners,
@@ -22,6 +23,10 @@ from scripts.aufgabe04.perception.stand_axis.head_proposal_selection import (
 )
 from scripts.aufgabe04.perception.stand_axis.model_refinement import refine_projected_head_border
 from scripts.aufgabe04.perception.stand_axis.models import ImagePoint
+from scripts.aufgabe04.perception.stand_axis.head_search_bounds import HeadSearchBounds
+from scripts.aufgabe04.perception.stand_axis.head_border_families import CurrentBorderFamilies
+from scripts.aufgabe04.perception.stand_axis.head_rail_intersections import candidate_rail_intersections
+from scripts.aufgabe04.perception.stand_axis.metric_edge_association import metric_corner_arm_support
 from scripts.aufgabe04.perception.stand_axis.preprocessing import _canny_edges_from_frame
 from scripts.aufgabe04.perception.stand_axis.head_acquisition_budget import (
     bounded_head_acquisition, check_head_acquisition_deadline,
@@ -55,7 +60,8 @@ def _bounded_quad(points, shape):
     return corners
 
 
-def _rail_endpoint_hints(cv2, gray, raw_edges, *, deadline_monotonic_sec=None):
+def _rail_endpoint_hints(cv2, gray, raw_edges, *, deadline_monotonic_sec=None,
+                         search_bounds=None, rail_groups_out=None):
     """Pair bounded opposite current line segments, independent of head scale."""
     import numpy as np
 
@@ -78,6 +84,15 @@ def _rail_endpoint_hints(cv2, gray, raw_edges, *, deadline_monotonic_sec=None):
         if direction is None:
             continue
         first, last = (float(x0), float(y0)), (float(x1), float(y1))
+        if search_bounds is not None:
+            # Before the fixed rail quota: remote room boundaries cannot displace
+            # the selected candidate's rails simply by being longer.
+            x0_bound, y0_bound, x1_bound, y1_bound = search_bounds.image_bounds(gray.shape)
+            midpoint = ((first[0] + last[0]) / 2., (first[1] + last[1]) / 2.)
+            if (not x0_bound <= midpoint[0] < x1_bound
+                    or not y0_bound <= midpoint[1] < y1_bound
+                    or length > 1.8 * search_bounds.height * (1. + search_bounds.height_tolerance_ratio)):
+                continue
         if first[direction] > last[direction]:
             first, last = last, first
         groups[direction].append((length, first, last))
@@ -137,6 +152,8 @@ def _rail_endpoint_hints(cv2, gray, raw_edges, *, deadline_monotonic_sec=None):
                     return tuple(point)
                 hints.append((extended(first, last, start), extended(first, last, end),
                               extended(other_first, other_last, end), extended(other_first, other_last, start)))
+    if rail_groups_out is not None:
+        rail_groups_out.extend(tuple(group) for group in groups)
     return tuple(hints), tuple(map(len, groups))
 
 
@@ -145,6 +162,9 @@ def acquire_cold_head_proposal(
     cv2, frame_bgr, *, raw_edges=None, edge_preprocess="channel_union",
     canny_low=20, canny_high=60,
     deadline_monotonic_sec=None,
+    expected_head_center_u_px=None, expected_head_center_v_px=None,
+    expected_head_height_px=None, max_center_offset_ratio=.70,
+    expected_head_height_tolerance_ratio=.35, proposal_filter=None,
 ) -> HeadProposalResult:
     """Locate a unique complete head in a bounded image without a prior pose.
 
@@ -164,6 +184,8 @@ def acquire_cold_head_proposal(
         "min_locator_border_support": MIN_LOCATOR_BORDER_SUPPORT,
         "angle_authorized": False, "motion_authorized": False,
         "selection": "unavailable", "strict_verifications": [],
+        "candidate_bounds_rejections": 0, "candidate_association_rejections": 0,
+        "candidate_association_previews": 0, "candidate_association_preview_rejections": 0,
     }
 
     def result(reason, proposal=None):
@@ -175,6 +197,13 @@ def acquire_cold_head_proposal(
     if (frame_bgr is None or frame_bgr.ndim != 3 or frame_bgr.shape[2] != 3
             or min(frame_bgr.shape[:2]) < MIN_HEAD_EDGE_PX + 6):
         return result("head_proposal_input_invalid")
+    try:
+        search_bounds = HeadSearchBounds.optional(
+            expected_head_center_u_px, expected_head_center_v_px, expected_head_height_px,
+            max_center_offset_ratio, expected_head_height_tolerance_ratio)
+    except (TypeError, ValueError):
+        return result("head_proposal_input_invalid")
+    diagnostics["candidate_search_bounds"] = None if search_bounds is None else search_bounds.diagnostics()
     if frame_bgr.shape[0] * frame_bgr.shape[1] > MAX_IMAGE_PIXELS:
         return result("head_cold_acquisition_image_budget_exceeded")
     check_head_acquisition_deadline(deadline_monotonic_sec, "cold_preprocessing")
@@ -187,6 +216,15 @@ def acquire_cold_head_proposal(
         raise ValueError("raw_edges must match the cold search image")
     check_head_acquisition_deadline(deadline_monotonic_sec, "cold_contours")
     contours = cv2.findContours(raw_edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)[-2]
+    diagnostics["input_contours"] = len(contours)
+    if search_bounds is not None:
+        x0, y0, x1, y1 = search_bounds.image_bounds(raw_edges.shape)
+        def relevant(contour):
+            if not len(contour):
+                return False
+            x, y, width, height = cv2.boundingRect(contour)
+            return x >= x0 and y >= y0 and x + width <= x1 and y + height <= y1
+        contours = [contour for contour in contours if relevant(contour)]
     diagnostics["contours"] = len(contours)
     if len(contours) > MAX_CONTOURS:
         return result("head_cold_acquisition_contour_budget_exceeded")
@@ -202,18 +240,33 @@ def acquire_cold_head_proposal(
                 seeds.append((quad.reshape(-1, 2), "closed_contour"))
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
     check_head_acquisition_deadline(deadline_monotonic_sec, "cold_line_detection")
+    rail_groups = []
     hints, rail_counts = _rail_endpoint_hints(cv2, gray, raw_edges,
-                                            deadline_monotonic_sec=deadline_monotonic_sec)
+                                            deadline_monotonic_sec=deadline_monotonic_sec,
+                                            search_bounds=search_bounds, rail_groups_out=rail_groups)
     diagnostics["horizontal_rails"], diagnostics["vertical_rails"] = rail_counts
     seeds.extend((hint, "paired_current_rails") for hint in hints)
     distance = cv2.distanceTransform(np.where(raw_edges > 0, 0, 255).astype(np.uint8), cv2.DIST_L2, 3)
     fractions = np.linspace(.10, .90, 24)
     hypotheses = {}
+    texture_hints = {}
+    association_previews = {}
     for points, locator in seeds:
         check_head_acquisition_deadline(deadline_monotonic_sec, "cold_hypothesis_support")
         corners = _bounded_quad(points, raw_edges.shape)
         if corners is None:
             continue
+        texture_only = False
+        if search_bounds is not None and not search_bounds.accepts(corners):
+            diagnostics["candidate_bounds_rejections"] += 1
+            _width, height, center = _extent(corners)
+            # Small closed texture boxes still explain cross-paired internal
+            # rails, but never spend a strict physical-head verification slot.
+            texture_only = (locator == "closed_contour" and height < .65 * search_bounds.height
+                and math.dist(center, search_bounds.center)
+                    <= (search_bounds.center_offset_ratio + .5) * search_bounds.height)
+            if not texture_only:
+                continue
         points = np.asarray([(p.u_px, p.v_px) for p in corners])
         pixels = np.rint(points[:, None, :] + fractions[None, :, None]
                          * (np.roll(points, -1, axis=0) - points)[:, None, :]).astype(np.int32)
@@ -223,10 +276,32 @@ def acquire_cold_head_proposal(
         # relying on the downstream mean support to hide a missing interval.
         if min(support) < MIN_LOCATOR_BORDER_SUPPORT:
             continue
-        key = tuple(round(value / 2.) for value in points.ravel())
+        key = tuple(round(float(value), 2) for value in points.ravel())
         score = .70 * float(min(support)) + .30 * float(np.mean(support))
-        if key not in hypotheses or score > hypotheses[key][0]:
-            hypotheses[key] = (score, corners, locator)
+        if proposal_filter is not None and not texture_only:
+            if key not in association_previews:
+                if len(association_previews) >= MAX_LOCATOR_HYPOTHESES:
+                    return result("head_cold_acquisition_locator_budget_exceeded")
+                _width, height, center = _extent(corners)
+                # The callback sees a current supported 2D locator, with no
+                # pose/angle authority. It is rechecked on measured corners
+                # after strict refinement; projection never certifies pixels.
+                preview = _proposal(SimpleNamespace(corners=corners,
+                    support=SimpleNamespace(mean=float(np.mean(support)))), raw_edges.shape,
+                    expected_height=height if search_bounds is None else search_bounds.height,
+                    expected_center=center if search_bounds is None else search_bounds.center)
+                association_previews[key] = bool(proposal_filter(preview))
+                diagnostics["candidate_association_previews"] += 1
+            if not association_previews[key]:
+                diagnostics["candidate_association_preview_rejections"] += 1
+                diagnostics["candidate_association_rejections"] += 1
+                continue
+        destination = texture_hints if texture_only else hypotheses
+        if key not in destination or score > destination[key][0]:
+            destination[key] = (score, corners, locator)
+    diagnostics["texture_only_hypotheses"] = len(texture_hints)
+    if len(texture_hints) > MAX_LOCATOR_HYPOTHESES:
+        return result("head_cold_acquisition_locator_budget_exceeded")
     diagnostics["considered_proposals"] = len(hypotheses)
     if len(hypotheses) > MAX_LOCATOR_HYPOTHESES:
         return result("head_cold_acquisition_locator_budget_exceeded")
@@ -236,36 +311,101 @@ def acquire_cold_head_proposal(
     ranked = sorted(hypotheses.values(), key=lambda item: (-item[0], -_polygon_area(item[1]),
                                                          tuple((p.u_px, p.v_px) for p in item[1])))
     unique = []
+    border_families = CurrentBorderFamilies(raw_edges, frame_bgr)
     for item in ranked:
         check_head_acquisition_deadline(deadline_monotonic_sec, "cold_hypothesis_deduplication")
-        if not any(max(_distance(a, b) for a, b in zip(item[1], other[1])) < 3. for other in unique):
+        if not any(max(_distance(a, b) for a, b in zip(item[1], other[1])) < 3.
+                   and border_families.same(item[1], other[1])
+                   for other in unique):
             unique.append(item)
     diagnostics["distinct_locator_hypotheses"] = len(unique)
     ordered, ranking = rank_current_head_hypotheses(cv2, raw_edges, unique,
-                                                  deadline_monotonic_sec=deadline_monotonic_sec)
+        frame_bgr=frame_bgr, border_families=border_families,
+        deadline_monotonic_sec=deadline_monotonic_sec)
     diagnostics.update(ranking)
+    texture_pool = ordered + list(texture_hints.values())
     accepted = []
-    for score, corners, locator in ordered[:MAX_RAW_VERIFICATIONS]:
-        check_head_acquisition_deadline(deadline_monotonic_sec, "cold_strict_verification",
-            considered_proposals=len(hypotheses), raw_verifications=len(diagnostics["strict_verifications"]))
-        measured = refine_projected_head_border(cv2, raw_edges, corners, corridor_half_width_px=4.)
-        diagnostics["strict_verifications"].append({
-            "locator": locator, "score": score, "accepted": measured.accepted,
-            "reason": measured.reason,
-            "locator_corners": [(p.u_px, p.v_px) for p in corners],
-            "corners": None if measured.corners is None else
-                [(p.u_px, p.v_px) for p in measured.corners],
-        })
-        if measured.accepted:
-            _width, height, center = _extent(measured.corners)
-            accepted.append(_proposal(measured, raw_edges.shape, expected_height=height, expected_center=center))
-    uncovered = uncovered_head_hypotheses(ordered[MAX_RAW_VERIFICATIONS:], accepted)
+    verified_proposals = []
+    def verify(items):
+        for score, corners, locator in items:
+            check_head_acquisition_deadline(deadline_monotonic_sec, "cold_strict_verification",
+                considered_proposals=len(hypotheses), raw_verifications=len(diagnostics["strict_verifications"]))
+            measured = refine_projected_head_border(cv2, raw_edges, corners, corridor_half_width_px=4.)
+            diagnostics["strict_verifications"].append({
+                "locator": locator, "score": score, "accepted": measured.accepted,
+                "reason": measured.reason,
+                "locator_corners": [(p.u_px, p.v_px) for p in corners],
+                "corners": None if measured.corners is None else
+                    [(p.u_px, p.v_px) for p in measured.corners],
+            })
+            if measured.accepted:
+                _width, height, center = _extent(measured.corners)
+                if search_bounds is not None and not search_bounds.accepts(measured.corners):
+                    diagnostics["candidate_bounds_rejections"] += 1
+                    continue
+                proposal = _proposal(measured, raw_edges.shape,
+                    expected_height=height if search_bounds is None else search_bounds.height,
+                    expected_center=center if search_bounds is None else search_bounds.center)
+                verified_proposals.append(proposal)
+                if proposal_filter is not None and not proposal_filter(proposal):
+                    diagnostics["candidate_association_rejections"] += 1
+                    continue
+                accepted.append(proposal)
+    verify(ordered[:MAX_RAW_VERIFICATIONS])
+    used = len(diagnostics["strict_verifications"])
+    # Fragment rescue cannot replace an already accepted/ambiguous physical
+    # head and shares the original twelve strict checks, never a fresh budget.
+    if not verified_proposals and search_bounds is not None and rail_groups and used < MAX_RAW_VERIFICATIONS:
+        rescue = []
+        diagnostics["four_rail_rescue_attempted"] = True
+        hints = candidate_rail_intersections(cv2, raw_edges, rail_groups, search_bounds,
+                                             deadline_monotonic_sec=deadline_monotonic_sec)
+        diagnostics["four_rail_rescue_raw_hypotheses"] = len(hints)
+        for points in hints:
+            check_head_acquisition_deadline(deadline_monotonic_sec, "cold_fragment_corner_support")
+            corners = _bounded_quad(points, raw_edges.shape)
+            if corners is None or not search_bounds.accepts(corners):
+                continue
+            # Exact intersections need both current arms, without the endpoint
+            # locator's ten-pixel proximity rescue to another proposal.
+            if not metric_corner_arm_support(cv2, raw_edges, corners).accepted:
+                continue
+            if any(border_families.same(corners, other[1]) for other in rescue):
+                continue
+            if proposal_filter is not None:
+                if diagnostics["candidate_association_previews"] >= MAX_LOCATOR_HYPOTHESES:
+                    return result("head_cold_acquisition_locator_budget_exceeded")
+                preview = _proposal(SimpleNamespace(corners=corners,
+                    support=SimpleNamespace(mean=.80)), raw_edges.shape,
+                    expected_height=search_bounds.height, expected_center=search_bounds.center)
+                diagnostics["candidate_association_previews"] += 1
+                if not proposal_filter(preview):
+                    diagnostics["candidate_association_preview_rejections"] += 1
+                    diagnostics["candidate_association_rejections"] += 1
+                    continue
+            rescue.append((.80, corners, "four_current_rails"))
+            if len(rescue) > MAX_LOCATOR_HYPOTHESES:
+                return result("head_cold_acquisition_locator_budget_exceeded")
+        rescue.sort(key=lambda item: (-_polygon_area(item[1]),
+            tuple((point.u_px, point.v_px) for point in item[1])))
+        diagnostics["four_rail_rescue_hypotheses"] = len(rescue)
+        ordered.extend(rescue)
+        texture_pool.extend(rescue)
+        diagnostics["considered_proposals"] += len(rescue)
+        verify(rescue[:MAX_RAW_VERIFICATIONS-used])
+    uncovered = uncovered_head_hypotheses(ordered[MAX_RAW_VERIFICATIONS:], verified_proposals,
+        cv2=cv2, raw_edges=raw_edges, frame_bgr=frame_bgr, all_hypotheses=texture_pool,
+        border_families=border_families, deadline_monotonic_sec=deadline_monotonic_sec)
     check_head_acquisition_deadline(deadline_monotonic_sec, "cold_head_selection",
         considered_proposals=len(hypotheses), raw_verifications=len(diagnostics["strict_verifications"]))
     diagnostics["unverified_independent_hypotheses"] = len(uncovered)
     if uncovered:
         return result("head_cold_acquisition_verification_budget_exceeded")
-    selected, reason, selection = select_verified_head(cv2, accepted)
+    selected, reason, selection = select_verified_head(cv2, accepted,
+        raw_edges=raw_edges, frame_bgr=frame_bgr, texture_hypotheses=texture_pool,
+        border_families=border_families, deadline_monotonic_sec=deadline_monotonic_sec)
+    if selected is None and not accepted and diagnostics["candidate_association_rejections"]:
+        reason = "head_proposal_candidate_association_rejected"
     diagnostics.update(selection)
     check_head_acquisition_deadline(deadline_monotonic_sec, "cold_complete_head_selection",
         considered_proposals=len(hypotheses), raw_verifications=len(diagnostics["strict_verifications"]))

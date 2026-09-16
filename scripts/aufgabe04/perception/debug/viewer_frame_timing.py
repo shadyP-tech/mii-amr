@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 from scripts.aufgabe04.perception.stand_axis.observation_freshness import (
     ObservationFreshness,
@@ -33,6 +34,14 @@ class ViewerFrameTiming:
             now_sec=now_sec,
             max_age_sec=0.0,
         ).age_sec
+
+    def work_deadline(self, *, max_result_age_sec, max_frame_age_sec):
+        """Preserve both original freshness limits while scheduling work."""
+        deadlines = [stamp + limit for stamp, limit in (
+            (self.received_monotonic_sec, max_result_age_sec),
+            (self.observed_monotonic_sec, max_frame_age_sec),
+        ) if stamp is not None and math.isfinite(stamp) and math.isfinite(limit) and limit > 0.]
+        return min(deadlines) if deadlines else None
 
     def assess(
         self, *, now_sec: float, max_result_age_sec: float, max_frame_age_sec: float

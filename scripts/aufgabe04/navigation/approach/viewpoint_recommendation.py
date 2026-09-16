@@ -18,10 +18,14 @@ from typing import Collection, Mapping, Sequence
 
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.artifacts.bounded_orientation import validate_bounded_endpoint, validated_bounded_orientation
+from scripts.aufgabe04.artifacts.current_head_front_observation import (
+    CURRENT_HEAD_FRONT_POLICY, validated_current_head_front_evidence,
+)
 
 
 RECOMMENDATION_SCHEMA_VERSION = 1
 BOUNDED_RECOMMENDATION_SCHEMA_VERSION = 2
+CURRENT_HEAD_FRONT_RECOMMENDATION_SCHEMA_VERSION = 3
 REAL_VIEWPOINT_SOURCE = "synchronized_lidar_camera_viewpoint"
 
 _FACE_GEOMETRY_TOLERANCE_RAD = 1.0e-6
@@ -84,12 +88,11 @@ class SynchronizedViewpointRecommendation:
     face_candidates: tuple[FaceCandidate, FaceCandidate]
     side_evidence: SideEvidence
     material_target: MaterialTarget
-    # Actual stable inlier frames reported by the estimator, not its configured
-    # minimum. Legacy payloads decode as zero and cannot complete a sealed survey.
+    # Actual current fits or temporal inliers, not the configured minimum.
+    # Schema 3 reports one fit; legacy payloads without a count decode as zero.
     axis_sample_count: int = 0
-    # Optional observer receipt, retained as audit evidence without deriving
-    # angle or side authority from its diagnostic fields. Older artifacts did
-    # not record which estimator supplied the measured axis.
+    # Legacy receipts are audit evidence. Schema 3 separately validates the
+    # entire current-head/QR receipt before allowing its one-frame policy.
     axis_measurement: Mapping[str, object] | None = None
     bounded_orientation: Mapping[str, object] | None = None
 
@@ -113,6 +116,7 @@ def validate_recommendation(
 
     if type(recommendation.schema_version) is not int or recommendation.schema_version not in (
         RECOMMENDATION_SCHEMA_VERSION, BOUNDED_RECOMMENDATION_SCHEMA_VERSION,
+        CURRENT_HEAD_FRONT_RECOMMENDATION_SCHEMA_VERSION,
     ):
         raise ValueError(
             "unsupported viewpoint recommendation schema_version: "
@@ -122,6 +126,12 @@ def validate_recommendation(
         raise ValueError("schema-1 viewpoint recommendation cannot contain bounded orientation")
     if recommendation.schema_version == BOUNDED_RECOMMENDATION_SCHEMA_VERSION and recommendation.bounded_orientation is None:
         raise ValueError("schema-2 viewpoint recommendation requires bounded orientation")
+    immediate = recommendation.schema_version == CURRENT_HEAD_FRONT_RECOMMENDATION_SCHEMA_VERSION
+    if immediate and recommendation.bounded_orientation is not None:
+        raise ValueError("schema-3 current head front cannot contain bounded orientation")
+    if (not immediate and isinstance(recommendation.axis_measurement, Mapping)
+            and recommendation.axis_measurement.get("policy") == CURRENT_HEAD_FRONT_POLICY):
+        raise ValueError("current head front evidence requires schema-3 recommendation")
     if type(recommendation.simulation_only) is not bool:
         raise ValueError("viewpoint recommendation simulation_only must be boolean")
     if (
@@ -230,6 +240,21 @@ def validate_recommendation(
             )
         if not matching_face.identity_resolved:
             raise ValueError("hard side evidence requires a resolved physical face identity")
+    if immediate:
+        if (recommendation.simulation_only or recommendation.source != REAL_VIEWPOINT_SOURCE
+                or recommendation.axis_state != "target_committed"
+                or recommendation.axis_sample_count != 1 or confidence != 0.
+                or recommendation.side_evidence.kind != "qr_observation"
+                or recommendation.side_evidence.provenance != "real/onboard_camera_qr_observation"
+                or not recommendation.side_evidence.hard or not recommendation.side_evidence.valid
+                or target.evidence_state != "hard_qr" or not matching_face.identity_resolved):
+            raise ValueError("current head front requires one measured frame and real bound QR observation")
+        evidence = validated_current_head_front_evidence(
+            recommendation.axis_measurement,
+            expected_sensor_stamp_sec=recommendation.sensor_stamp_sec,
+            expected_stand_axis_rad=matching_face.outward_normal_rad - math.pi / 2.)
+        if not evidence["target_key"].startswith(f"{recommendation.stream_id}:{recommendation.stand_id}:"):
+            raise ValueError("current head front target differs from recommendation")
     if recommendation.bounded_orientation is not None:
         if (recommendation.simulation_only or recommendation.source != REAL_VIEWPOINT_SOURCE
                 or recommendation.axis_state != "target_committed"
@@ -370,8 +395,8 @@ def recommendation_axis_estimator(
 ) -> str:
     """Name the recorded estimator without guessing a new source for old data.
 
-    The optional receipt is provenance only: missing or unusable source labels
-    neither supply an axis nor change the recommendation's admission policy.
+    This label neither supplies an axis nor changes admission. Schema 3's
+    one-frame policy is checked independently by validate_recommendation.
     """
 
     environment = "simulation" if recommendation.simulation_only else "real"
@@ -387,6 +412,12 @@ def recommendation_axis_estimator(
         if recommendation.simulation_only
         else "real/legacy_axis_source_unrecorded"
     )
+
+
+def recommendation_uses_current_head_front(recommendation: SynchronizedViewpointRecommendation) -> bool:
+    """Allow the one-frame exception only through its fully validated schema."""
+    validate_recommendation(recommendation)
+    return recommendation.schema_version == CURRENT_HEAD_FRONT_RECOMMENDATION_SCHEMA_VERSION
 
 
 def load_viewpoint_recommendation(

@@ -21,12 +21,14 @@ from scripts.aufgabe04.perception.stand_axis.head_proposal import HeadProposal, 
 from scripts.aufgabe04.perception.stand_axis.head_model_quality import MEASURED_HEAD_AXIS_SOURCE
 from scripts.aufgabe04.perception.stand_axis.qr_pose_seed import PlanarPoseHypothesis
 from scripts.aufgabe04.qr_scanning.qr_observation import DecodedQrObservation
+from scripts.aufgabe04.real_robot.observer.node import PassiveRealViewpointNode
+from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import load_recommendation
 from tests.aufgabe04 import test_camera_observer_processing as processing_fixtures
 from tests.aufgabe04 import test_head_model_admission as head_fixtures
 
 
 class MeasuredHeadObserverProcessingTests(unittest.TestCase):
-    def run_view(self, scenario):
+    def run_view(self, scenario, *, publish_immediate=False):
         physical = scenario.startswith("physical_")
         scenario = scenario.removeprefix("physical_")
         shifted = scenario.startswith("shifted_")
@@ -89,7 +91,7 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
                 return tuple(replace(item, corners=None) for item in decoded)
             return decoded
 
-        def metric(_cv2, _crop, **options):
+        def metric_geometry(_cv2, _crop, **options):
             head_calls.append("fit")
             metric_options.append(options)
             metric_frame_indices.append(current_index[0])
@@ -139,9 +141,24 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
                 fixture.clock_sec += .5
             return estimate, debug
 
+        def metric(_cv2, _crop, **options):
+            if not physical:
+                return metric_geometry(_cv2, _crop, **options)
+            # Model the real exact-image holder, so marker decoration does not
+            # count as another physical fit or repeat simulated fit latency.
+            holder = options["current_image_head_fit"]
+            estimate, debug = holder.compute(_crop,
+                context=(options["input_cache_roi"], options["pose_hint"],
+                         options["current_head_proposal_corners"]),
+                producer=lambda: metric_geometry(_cv2, _crop, **options))
+            signal = (None if options["qr_marker_policy"] == "disabled" else
+                      bool(options["qr_observations"]))
+            return estimate, replace(debug, qr_detected=signal, qr_marker_verified=signal)
+
         def locate(_cv2, _crop, **options):
             head_calls.append("locate")
-            u, v = options["expected_head_center_u_px"] + 10., options["expected_head_center_v_px"]
+            u, v = options["expected_center"]
+            u += 10.
             corners = tuple(ImagePoint(u + x, v + y) for x, y in
                             ((-26, -26), (26, -26), (26, 26), (-26, 26)))
             proposal = HeadProposal(
@@ -166,27 +183,33 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
         with TemporaryDirectory() as directory, ExitStack() as stack:
             output = adapter.args.recommended_pose_json = Path(directory) / "recommendation.json"
             adapter.args.axis_observation_json = Path(directory) / "backside.json"
+            adapter.args.status_json = Path(directory) / "status.json"
+            if publish_immediate:
+                adapter._write_status = Mock(side_effect=lambda *args, **kwargs:
+                    PassiveRealViewpointNode._write_status(adapter, *args, **kwargs))
             patches = {
                 "camera_info_mismatches": {"return_value": ()},
                 "transform_mismatches": {"return_value": ()},
                 "real_robot_profile_sha256": {"return_value": "a" * 64},
                 "camera_calibration_sha256": {"return_value": "b" * 64},
                 "compressed_msg_to_bgr_frame": {"return_value": frame},
-                "_rectify_bgr_frame": {"side_effect": lambda value, *_: value},
+                "_rectify_bgr_frame": {"side_effect": lambda value, *_, **_kwargs: value},
                 "detect_qr_observations_bgr": {"side_effect": full_decode},
                 "detect_native_qr_observations_bgr": {"side_effect": native_decode},
                 "estimate_stand_axis_from_metric_model": {"side_effect": metric},
             }
             for name, options in patches.items():
                 stack.enter_context(patch(module + name, **options))
+            # Synthetic OpenCV fixture injects the shared current-head locator;
+            # its pixel acquisition and border comparison have dedicated tests.
             if registered:
                 stack.enter_context(patch(
-                    "scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_head_proposal",
+                    "scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_viewer_candidate_head",
                     side_effect=locate,
                 ))
             if scenario == "panel_then_recovery":
                 stack.enter_context(patch(
-                    "scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_head_proposal",
+                    "scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_viewer_candidate_head",
                     return_value=HeadProposalResult(None, "head_proposal_unavailable")))
             backside = stack.enter_context(patch(module + "build_backside_axis_observation"))
             sensor_tuple = adapter._next_sensor_tuple.return_value
@@ -224,6 +247,27 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
             adapter._test_metric_options = metric_options
             adapter._test_qr_geometry_priorities = qr_geometry_priorities
             return adapter, payload
+
+    def test_first_physical_head_fit_and_bound_qr_use_real_immediate_status_path(self):
+        adapter, payload = self.run_view("physical_bound_qr", publish_immediate=True)
+        self.assertTrue(adapter.completed)
+        self.assertIsNotNone(payload)
+        recommendation = load_recommendation(payload)
+        self.assertEqual(recommendation.schema_version, 3)
+        self.assertEqual(recommendation.axis_sample_count, 1)
+        self.assertEqual(recommendation.sensor_stamp_sec, 100.)
+        self.assertEqual(recommendation.axis_measurement["qr_id"], "QR_003")
+        self.assertEqual(recommendation.axis_measurement["camera_signature"][0], "camera")
+        self.assertIsNone(adapter._last_observation_update.axis_consensus)
+        self.assertIsNone(adapter._last_observation_update.resolved_qr_id)
+        self.assertEqual(adapter._test_head_calls, ["locate", "fit"])
+
+    def test_real_immediate_status_path_preserves_quality_association_and_no_qr_gates(self):
+        for scenario in ("head_only", "unbound_qr", "uncertain_head", "wrong_lidar", "ambiguous_lidar", "late_fit"):
+            with self.subTest(scenario=scenario):
+                adapter, payload = self.run_view("physical_" + scenario, publish_immediate=True)
+                self.assertIsNone(payload)
+                self.assertFalse(adapter.completed)
 
     def test_seven_quality_head_frames_and_independent_bound_qr_commit_above_35_degrees(self):
         adapter, payload = self.run_view("bound_qr")
@@ -383,14 +427,16 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
         self.assertTrue(all(call.args == ("obsolete_detector_result",)
                             for call in adapter._write_status.call_args_list))
 
-    def test_physical_proposal_must_associate_before_any_metric_or_qr_work(self):
+    def test_physical_proposal_must_associate_before_metric_but_identity_can_probe(self):
         for scenario in ("wrong_lidar", "ambiguous_lidar"):
             with self.subTest(scenario=scenario):
                 adapter, payload = self.run_view("physical_" + scenario)
                 self.assertIsNone(payload)
                 self.assertFalse(adapter.completed)
                 self.assertEqual(adapter._test_head_calls, ["locate"] * 7)
-                self.assertEqual(adapter._test_decode_modes, [])
+                self.assertTrue(adapter._test_decode_modes)
+                self.assertLessEqual(len(adapter._test_decode_modes), 2)
+                self.assertTrue(all(mode == "full" for mode in adapter._test_decode_modes))
 
 
 if __name__ == "__main__":

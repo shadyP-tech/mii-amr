@@ -106,7 +106,7 @@ class BacksideProposalReuseTest(unittest.TestCase):
                 abs(center[0] - search.expected_center_u_px) / 80., .99, .99,
             ) if proposal_available else None
             with patch(
-                "scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_head_proposal",
+                "scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_viewer_candidate_head",
                 return_value=HeadProposalResult(proposal, "current_head_proposal" if proposal
                                                else "head_proposal_unavailable", 1, 1),
             ):

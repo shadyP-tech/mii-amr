@@ -56,19 +56,26 @@ class CandidateHeadTracking:
     """
 
     def __init__(self, *, ttl_sec: float = 2.0, max_translation_m: float = .01,
-                 max_rotation_rad: float = math.radians(2.0)) -> None:
+                 max_rotation_rad: float = math.radians(2.0), max_soft_misses: int = 2) -> None:
         if not math.isfinite(ttl_sec) or not 0 < ttl_sec <= 2.0:
             raise ValueError("candidate head search TTL must be within (0, 2] seconds")
         if any(not math.isfinite(v) or v < 0 for v in (max_translation_m, max_rotation_rad)):
             raise ValueError("candidate head motion limits must be finite and nonnegative")
+        if type(max_soft_misses) is not int or not 0 <= max_soft_misses <= 3:
+            raise ValueError("candidate head search permits at most three soft misses")
         self.ttl_sec = ttl_sec
         self.max_translation_m = max_translation_m
         self.max_rotation_rad = max_rotation_rad
+        self.max_soft_misses = max_soft_misses
+        self._soft_misses = 0
+        self._last_miss_stamp = -math.inf
         self._hint: _Hint | None = None
         self.last_metadata: dict[str, object] = {}
 
     def reset(self, reason: str = "candidate_head_search_reset") -> None:
         self._hint = None
+        self._soft_misses = 0
+        self._last_miss_stamp = -math.inf
         self.last_metadata = {"reason": reason, "hint_retained": False,
                               "measurement_reused": False, "motion_authorized": False}
 
@@ -81,14 +88,43 @@ class CandidateHeadTracking:
     def _finite_pose(pose: Pose2D) -> bool:
         return all(math.isfinite(v) for v in (pose.x_m, pose.y_m, pose.yaw_rad))
 
+    def _retain_search_after_miss(self, reason, *, context, observed_at_sec, now_sec, robot_pose):
+        """A missed current fit may keep a locator, never renew its evidence.
+
+        The caller still receives False and must reject the current frame.
+        Repeated misses return to cold acquisition, and the original source
+        stamp and stopped anchor bound the retained locator throughout.
+        """
+        old = self._hint
+        if (reason not in {"candidate_head_seed_unassociated", "candidate_head_seed_geometry_unverified"}
+                or old is None or old.context != context
+                or self._soft_misses >= self.max_soft_misses
+                or not all(math.isfinite(v) for v in (observed_at_sec, now_sec))
+                or observed_at_sec <= max(old.observed_at_sec, self._last_miss_stamp)
+                or not 0 < now_sec - old.observed_at_sec <= self.ttl_sec
+                or not self._finite_pose(robot_pose) or self._moved(old.anchor_pose, robot_pose)):
+            return False
+        self._soft_misses += 1
+        self._last_miss_stamp = observed_at_sec
+        self.last_metadata = {
+            "reason": "candidate_head_search_retained_after_miss", "current_failure": reason,
+            "hint_retained": True, "current_measurement_accepted": False,
+            "consecutive_soft_misses": self._soft_misses, "max_soft_misses": self.max_soft_misses,
+            "source_stamp_sec": old.observed_at_sec, "age_sec": now_sec - old.observed_at_sec,
+            "ttl_sec": self.ttl_sec, "source_stamp_refreshed": False,
+            "measurement_reused": False, "motion_authorized": False,
+        }
+        return True
+
     def remember(self, evaluation: HeadRoiEvaluation, *, context: CandidateHeadContext,
                  observed_at_sec: float, now_sec: float, max_age_sec: float,
                  robot_pose: Pose2D, candidate_associated: bool) -> bool:
         """Remember current verified pixels only after unique target association.
 
         QR presence, decoded identity and visible-face labels do not participate.
-        A miss clears search state; callers never refresh its timestamp by merely
-        looking up a hint or by replaying the same sensor image.
+        A small number of fresh misses may retain the previous search locator;
+        they cannot refresh its timestamp, supply a measurement or admit an
+        unassociated candidate. Context changes and motion clear it immediately.
         """
         freshness = observation_freshness(observed_at_sec=observed_at_sec,
                                          now_sec=now_sec, max_age_sec=max_age_sec)
@@ -98,23 +134,26 @@ class CandidateHeadTracking:
         reason = None
         if not freshness.accepted:
             reason = "candidate_head_seed_stale"
-        elif not candidate_associated:
-            reason = "candidate_head_seed_unassociated"
         elif not self._finite_pose(robot_pose):
             reason = "candidate_head_seed_pose_invalid"
-        elif search_pose is None:
-            reason = "candidate_head_seed_geometry_unverified"
         elif (estimate.model_profile_sha256 != context.model_sha256
               or debug.model_profile_sha256 != context.model_sha256
-              or debug.head_model_quality.profile_sha256 != context.model_sha256):
+              or (debug.head_model_quality is not None
+                  and debug.head_model_quality.profile_sha256 != context.model_sha256)):
             reason = "candidate_head_seed_model_mismatch"
         elif old is not None and old.context == context:
-            if observed_at_sec <= old.observed_at_sec:
+            if observed_at_sec <= max(old.observed_at_sec, self._last_miss_stamp):
                 reason = "candidate_head_seed_nonadvancing_image"
             elif self._moved(old.anchor_pose, robot_pose):
                 reason = "candidate_head_anchor_moved"
+        if reason is None and not candidate_associated:
+            reason = "candidate_head_seed_unassociated"
+        if reason is None and search_pose is None:
+            reason = "candidate_head_seed_geometry_unverified"
         if reason is not None:
-            self.reset(reason)
+            if not self._retain_search_after_miss(reason, context=context,
+                    observed_at_sec=observed_at_sec, now_sec=now_sec, robot_pose=robot_pose):
+                self.reset(reason)
             return False
         roi = evaluation.attempt.roi
         try:
@@ -138,6 +177,8 @@ class CandidateHeadTracking:
             return False
         anchor = old.anchor_pose if old is not None and old.context == context else robot_pose
         self._hint = _Hint(context, observed_at_sec, anchor, pose, full)
+        self._soft_misses = 0
+        self._last_miss_stamp = -math.inf
         self.last_metadata = {"reason": "current_associated_head_retained", "hint_retained": True,
                               "seed_age_sec": freshness.age_sec, "ttl_sec": self.ttl_sec,
                               "source_stamp_sec": observed_at_sec, "measurement_reused": False,
@@ -194,6 +235,8 @@ class CandidateHeadTracking:
                               "age_sec": observed_at_sec - old.observed_at_sec,
                               "ttl_sec": self.ttl_sec,
                               "crop_xyxy": (crop.x0, crop.y0, crop.x1, crop.y1),
+                              "consecutive_soft_misses": self._soft_misses,
+                              "current_measurement_accepted": False,
                               "measurement_reused": False, "motion_authorized": False}
         return CandidateHeadSearch(replace(nominal, roi=crop, source="candidate_tracked_head_search"),
                                    old.pose, old.corners)

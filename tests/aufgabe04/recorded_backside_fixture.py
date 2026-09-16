@@ -5,7 +5,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
-from time import perf_counter
+from time import perf_counter, monotonic
 from types import SimpleNamespace
 
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
@@ -86,6 +86,7 @@ class RecordedBacksideFixture:
                 input_cache=input_cache,
                 input_cache_roi=bounds if input_cache is not None else None,
                 current_head_proposal_corners=current_head_proposal_corners,
+                current_head_proposal_verified=current_head_proposal_corners is not None,
             )
             calls.append({
                 "source": attempt.source, "reason": estimate.reason,
@@ -127,6 +128,10 @@ class RecordedBacksideFixture:
                 edge_preprocess=profile["edge_preprocess"], canny_low=profile["canny_low"], canny_high=profile["canny_high"],
                 evaluate=lambda current, corners: evaluate(current, None, corners),
                 diagnostics=acquisition, primary=primary,
+                # This fixture tests historical pixel geometry, not hardware
+                # timing or live freshness. Production supplies a finite source
+                # deadline; shared-test CPU contention must not change its fit.
+                deadline_monotonic_sec=monotonic() + 10.,
             )
 
         selection = reuse.select(

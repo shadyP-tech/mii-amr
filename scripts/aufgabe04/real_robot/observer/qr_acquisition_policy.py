@@ -1,10 +1,10 @@
-"""Schedule QR acquisition without starving current head geometry.
+"""Bound identity acquisition independently of physical-head fitting.
 
-Every evaluated crop still receives a current native QR check and the metric
-pipeline's current marker/finder validation. Expensive payload recovery is
-limited to one crop per image. Positive current QR evidence takes priority;
-otherwise a periodic probe alternates nominal and wider acquisition crops.
-Only scheduling state crosses frames, never pixels, identity or geometry.
+Expensive payload recovery is limited to one crop per image. Positive current
+QR evidence takes priority; otherwise periodic probes search one selected crop
+or alternate legacy nominal/wider crops. Physical geometry runs first and can
+skip decoding when source freshness leaves insufficient time. Skipped checks
+remain unknown side. Only scheduling state crosses frames, never image pixels.
 """
 
 from dataclasses import dataclass, replace
@@ -76,8 +76,20 @@ class QrFrameAcquisitionBudget:
         self._full_result = None  # Exact crop of this image; never held by the cross-frame policy.
         self._decisions = []
 
+    def remaining_work_sec(self, now_monotonic_sec):
+        return max(0., self._deadline - now_monotonic_sec - QR_PUBLICATION_RESERVE_SEC)
+
+    def head_deadline_with_identity_reserve(self, *, now_monotonic_sec, previous_head_miss):
+        """Let a periodic decode progress even during repeated locator misses."""
+        deadline = self._deadline - QR_PUBLICATION_RESERVE_SEC
+        if (previous_head_miss and self._policy._last_probe_bucket != self._bucket
+                and self.remaining_work_sec(now_monotonic_sec) >= .12):
+            return deadline - .08
+        return deadline
+
     def request(self, *, roi, roi_source, now_monotonic_sec,
-                current_qr_signal, identity_geometry_available):
+                current_qr_signal, identity_geometry_available,
+                complete_head_available=False, selected_crop=False):
         if (type(now_monotonic_sec) not in (int, float)
                 or not math.isfinite(now_monotonic_sec)):
             raise ValueError("QR acquisition clock must be finite")
@@ -90,7 +102,8 @@ class QrFrameAcquisitionBudget:
             decision = QrAcquisitionDecision(False, "one_full_crop_per_image", 0.)
         elif not current_qr_signal and (
             self._policy._last_probe_bucket == self._bucket
-            or (roi_source == "nominal_projection") != (self._bucket % 2 == 0)
+            or (not complete_head_available and not selected_crop
+                and (roi_source == "nominal_projection") != (self._bucket % 2 == 0))
         ):
             decision = QrAcquisitionDecision(False, "periodic_empty_search_deferred", 0.)
         else:
@@ -111,14 +124,16 @@ class QrFrameAcquisitionBudget:
 
     def metadata(self):
         return {
-            "policy": "native_each_crop_bounded_full_reacquisition_v1",
+            "policy": "independent_geometry_bounded_identity_v2",
             "reacquisition_interval_sec": QR_REACQUISITION_INTERVAL_SEC,
             "maximum_full_crops_per_image": 1,
             "maximum_full_work_sec": MAX_FULL_QR_WORK_SEC,
             "publication_reserve_sec": QR_PUBLICATION_RESERVE_SEC,
             "periodic_roi_scope": "nominal" if self._bucket % 2 == 0 else "expanded",
             "deadline_monotonic_sec": self._deadline,
-            "native_current_image_checks_required": True,
+            "native_current_image_checks_required": False,
+            "skipped_marker_checks_mean": "unknown_side",
+            "identity_probe_head_miss_reserve_sec": .08,
             "cached_measurement_reuse": False,
             "cooperative_backend_budget": True,
             "decisions": list(self._decisions),

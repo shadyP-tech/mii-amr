@@ -133,8 +133,21 @@ class CurrentHeadProposalPipelineTest(unittest.TestCase):
             ):
                 baseline, baseline_debug = self.evaluate(current_head_proposal_corners=proposal)
                 current, debug = self.evaluate(qr=wrong_qr, current_head_proposal_corners=proposal)
-                self.assertTrue(baseline.usable, baseline.reason)
-                self.assertTrue(current.usable, current.reason)
+                if proposal is None:
+                    # The thick rendered rail supplies a mixed horizontal top
+                    # and a different oblique top; their current pixel families
+                    # do not agree. A shifted QR cannot settle this boundary.
+                    self.assertFalse(baseline.usable)
+                    self.assertEqual(baseline.reason, "head_proposal_ambiguous")
+                    self.assertEqual(current.reason, baseline.reason)
+                    acquisition = baseline_debug.head_acquisition_diagnostics["acquisition"]
+                    records = acquisition["joint_border_diagnostics"]["strict_verifications"]
+                    top_slopes = [(record["corners"][1][1] - record["corners"][0][1])
+                                  for record in records if record["accepted"]]
+                    self.assertGreater(max(top_slopes) - min(top_slopes), 5.)
+                else:
+                    self.assertTrue(baseline.usable, baseline.reason)
+                    self.assertTrue(current.usable, current.reason)
                 self.assertEqual(current.corners, baseline.corners)
                 self.assertEqual(current.yaw_deg, baseline.yaw_deg)
                 self.assertEqual(debug.model_pose, baseline_debug.model_pose)

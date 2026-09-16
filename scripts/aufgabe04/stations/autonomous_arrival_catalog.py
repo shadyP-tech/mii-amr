@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
@@ -28,7 +29,7 @@ from scripts.aufgabe04.navigation.approach.dynamic_approach_planner import (
 )
 from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import (
     REAL_VIEWPOINT_SOURCE, load_recommendation, normalize_angle,
-    recommendation_axis_estimator, validate_recommendation,
+    recommendation_axis_estimator, recommendation_uses_current_head_front, validate_recommendation,
 )
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     coverage_survey_plan_sha256, load_coverage_survey_plan, load_stand_survey_registry, stand_survey_registry_sha256,
@@ -91,6 +92,13 @@ def _project_recommendation(recommendation, source_frame, target_frame):
     def pose(value):
         return odom_pose_to_map(map_pose_to_odom(value, source_frame.map_from_odom), target_frame.map_from_odom)
     rotation = target_frame.map_from_odom.yaw_rad - source_frame.map_from_odom.yaw_rad
+    measurement = recommendation.axis_measurement
+    if recommendation_uses_current_head_front(recommendation):
+        measurement = deepcopy(measurement)
+        # These two fields are map-frame angles. Pixel geometry and the
+        # camera-relative measurement retain their original sensor evidence.
+        for field in ("stand_axis_rad", "camera_heading_rad"):
+            measurement[field] = normalize_angle(measurement[field] + rotation)
     projected = replace(
         recommendation,
         stand=replace(recommendation.stand, center=pose(recommendation.stand.center)),
@@ -99,6 +107,7 @@ def _project_recommendation(recommendation, source_frame, target_frame):
         material_target=replace(recommendation.material_target, pose=pose(recommendation.material_target.pose)),
         bounded_orientation=(None if recommendation.bounded_orientation is None else
                              validated_bounded_orientation(recommendation.bounded_orientation).rotated(rotation).payload()),
+        axis_measurement=measurement,
     )
     validate_recommendation(projected)
     return projected
@@ -217,11 +226,21 @@ def promote_autonomous_arrival_catalog(
         recommendation = load_recommendation(Path(record["recommendation_json"]), expected_frame=profile.map_frame, expected_source=REAL_VIEWPOINT_SOURCE, expected_simulation_only=False, now_unix_sec=now_sec, max_age_sec=max_recommendation_age_sec)
         selected_face = next(face for face in recommendation.face_candidates if face.face_id == recommendation.material_target.face_id)
         side = recommendation.side_evidence
-        if (recommendation.axis_sample_count < 7 or not side.hard or not side.valid
-                or side.kind != "qr_consensus" or side.provenance != "real/onboard_camera_qr_consensus"
+        current_head_front = recommendation_uses_current_head_front(recommendation)
+        if current_head_front and recommendation.axis_measurement["qr_id"] != record["qr_id"]:
+            raise ValueError("current-head QR identity differs from the observed facing record")
+        admitted_qr_policy = (
+            current_head_front and side.kind == "qr_observation"
+            and side.provenance == "real/onboard_camera_qr_observation"
+        ) or (
+            not current_head_front and recommendation.axis_sample_count >= 7
+            and side.kind == "qr_consensus"
+            and side.provenance == "real/onboard_camera_qr_consensus"
+        )
+        if (not admitted_qr_policy or not side.hard or not side.valid
                 or side.face_id != selected_face.face_id or not selected_face.identity_resolved
                 or recommendation.material_target.evidence_state != "hard_qr"):
-            raise ValueError("catalog promotion requires the existing seven-frame committed onboard QR face evidence")
+            raise ValueError("catalog promotion requires validated current-head or seven-frame committed onboard QR face evidence")
         sensor_age_sec = now_sec - recommendation.sensor_stamp_sec
         if sensor_age_sec < 0 or sensor_age_sec > max_recommendation_age_sec:
             raise ValueError("original recommendation sensor stamp is stale or in the future")
@@ -251,9 +270,21 @@ def promote_autonomous_arrival_catalog(
         result = _prepend_certified_known_stand_egress(result, source_start=target_frame.current_pose, overlay=overlay, target_stand=recommendation.stand.center, target_keepout_radius_m=target_config.stand_keepout_radius_m)
         clearances = _validate_known_stand_route_clearance(result.plan, overlay.keepouts)
         checked_records.append(converted)
-        checks.append({"candidate_uid": uid, "camera_recommendation_sha256": record["camera_recommendation_sha256"], "candidate_frame_projection_sha256": record["candidate_frame_projection_sha256"], "known_stand_clearances": clearances, "fixed_target_and_corridor_validated": True})
+        checks.append({"candidate_uid": uid, "camera_recommendation_sha256": record["camera_recommendation_sha256"], "candidate_frame_projection_sha256": record["candidate_frame_projection_sha256"], "known_stand_clearances": clearances, "fixed_target_and_corridor_validated": True,
+                       "admission_policy": "current_head_and_bound_qr" if current_head_front else "seven_frame_qr_consensus",
+                       "axis_sample_count": recommendation.axis_sample_count})
 
     survey_config = {"schema_version": 1, "config_kind": "checked_autonomous_arrival_catalog", "arena_bounds": plan.arena_bounds.to_metadata(), "dynamic_approach_config": asdict(config), "inflation_radius_m": inflation, "axis_sample_count": 7, "max_recommendation_age_sec": max_recommendation_age_sec, "motion_authorized": False}
+    if any(check["admission_policy"] == "current_head_and_bound_qr" for check in checks):
+        # Mixed receipt policies retain their real counts, rather than claiming
+        # that a single current fit supplied seven temporal measurements.
+        survey_config.pop("axis_sample_count")
+        survey_config["axis_sample_counts_by_candidate"] = {
+            check["candidate_uid"]: check["axis_sample_count"] for check in checks
+        }
+        survey_config["admission_policies_by_candidate"] = {
+            check["candidate_uid"]: check["admission_policy"] for check in checks
+        }
     config_sha = payload_sha256(survey_config)
     binding = {
         "schema_version": 1, "binding_kind": "checked_autonomous_arrival_catalog", "session_id": facing["session_id"],

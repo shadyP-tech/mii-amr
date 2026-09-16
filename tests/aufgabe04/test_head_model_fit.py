@@ -84,19 +84,25 @@ class IndependentHeadFitTest(unittest.TestCase):
             self.assertIsNone(debug.head_marker_boundary)
         self.assertEqual(calls, [4])
 
-    def test_current_crop_acquires_neutral_head_before_any_qr_or_pose(self):
+    def test_current_crop_preserves_unresolved_physical_borders_before_any_qr_or_pose(self):
         with patch(PIPELINE + "detect_qr_quad", return_value=None):
             estimate, debug = self.run_fit(current_head_proposal_corners=None,
                                            qr_observations=(), pose_hint=None)
-        self.assertIsNotNone(debug.refined_corners)
-        self.assertTrue(estimate.usable, estimate.reason)
+        # This crop contains complete current alternatives at left x≈6 and
+        # x≈13. The former size-based grouping silently merged them. Without a
+        # resolved physical boundary, QR absence cannot select one as backside.
+        acquisition = debug.head_acquisition_diagnostics["acquisition"]
+        self.assertEqual(acquisition["reason"], "head_cold_acquisition_verification_budget_exceeded")
+        diagnostics = acquisition["joint_border_diagnostics"]
+        self.assertGreater(diagnostics["unverified_independent_hypotheses"], 0)
+        lefts = [item["corners"][0][0] for item in diagnostics["strict_verifications"]
+                 if item["accepted"]]
+        self.assertGreater(max(lefts) - min(lefts), 5.)
+        self.assertIsNone(debug.refined_corners)
+        self.assertFalse(estimate.usable)
         self.assertIsNone(debug.head_neck_junction)
-        self.assertIsNotNone(debug.model_pose)
-        self.assertEqual(estimate.source, "model_backside_current_frame")
-        self.assertEqual(debug.model_pose_fit_source, "model_current_measured_head")
-        self.assertTrue(debug.head_model_quality.outer_border_verified)
-        self.assertTrue(debug.head_backside_classification.accepted)
-        self.assertEqual(estimate.visible_face, "backside_candidate")
+        self.assertIsNone(debug.model_pose)
+        self.assertIsNone(estimate.visible_face)
 
     def test_neck_pixels_cannot_determine_current_head_fit(self):
         pixels = self.fixture.crop.copy()

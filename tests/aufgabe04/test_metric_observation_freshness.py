@@ -117,3 +117,55 @@ class MetricObservationFreshnessTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class MetricSearchHintLifetimeTest(MetricObservationFreshnessTest):
+    """A longer search lifetime never makes an old angle a current result."""
+
+    def setUp(self):
+        super().setUp()
+        self.tracker = MetricPoseTracker(prediction_ttl_sec=.25,
+            search_hint_ttl_sec=2., max_soft_misses=2)
+
+    # Existing base-class tests deliberately require the legacy .25-second
+    # search policy, so exercise this explicit opt-in independently below.
+    def test_success_is_dated_at_capture_not_processing_completion(self):
+        self.assertTrue(self.update().accepted)
+        hint = self.prediction(10.8)
+        self.assertEqual(hint.state, "predicted_only")
+        self.assertAlmostEqual(hint.age_sec, .8)
+        self.assertIsNone(self.prediction(12.01).pose)
+
+    def test_qr_only_failed_seed_does_not_replace_pose_or_extend_lifetime(self):
+        self.assertTrue(self.update().accepted)
+        failed = replace(self.estimate, usable=False)
+        for stamp in (10.4, 10.8):
+            result = self.update(stamp, stamp+.05, estimate=failed)
+            self.assertFalse(result.accepted)
+            self.assertEqual(self.prediction(stamp+.1).pose, self.pose)
+            self.assertAlmostEqual(self.prediction(stamp+.1).age_sec, stamp+.1-10.)
+        self.assertIsNone(self.prediction(12.01).pose)
+
+    def test_three_distinct_failed_observations_force_cold_search(self):
+        self.assertTrue(self.update().accepted)
+        for stamp in (10.4, 10.8, 11.2):
+            self.update(stamp, stamp+.05, estimate=replace(self.estimate, usable=False))
+        self.assertIsNone(self.prediction(11.3).pose)
+
+    def test_repeated_failure_of_same_source_is_one_miss(self):
+        self.assertTrue(self.update().accepted)
+        for _ in range(4):
+            self.update(10.4, 10.45, estimate=replace(self.estimate, usable=False))
+        self.assertEqual(self.prediction(10.5).pose, self.pose)
+
+    def test_long_search_lifetime_does_not_accept_stale_current_geometry(self):
+        self.assertTrue(self.update().accepted)
+        result = self.update(10.1, 10.6)
+        self.assertEqual(result.reason, "pose_observation_stale")
+        self.assertAlmostEqual(self.prediction(10.7).age_sec, .7)
+
+    def test_changed_camera_context_invalidates_before_rejected_update(self):
+        self.assertTrue(self.update().accepted)
+        self.tracker.update_from_observation(None, None, observed_at_sec=10.1,
+            completed_at_sec=10.2, profile_sha256=self.profile,
+            camera_signature=(400., 400., 310., 240.))
+        self.assertIsNone(self.prediction(10.25).pose)

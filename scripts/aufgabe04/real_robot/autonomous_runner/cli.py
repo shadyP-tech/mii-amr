@@ -95,7 +95,8 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--final-facing-offset-m", type=float, default=0.35)
-    parser.add_argument("--axis-sample-count", type=int, default=7)
+    parser.add_argument("--axis-sample-count", type=int, default=7,
+        help="Samples for bounded/backside and legacy consensus; current head plus bound QR uses one validated fit.")
     parser.add_argument("--camera-timeout-sec", type=float, default=90.0)
     parser.add_argument(
         "--stop-after-camera-candidates", type=int,

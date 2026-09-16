@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import time
+
+from scripts.aufgabe04.perception.stand_axis.marker_work_schedule import (
+    current_head_available_for_markers, schedule_marker_work,
+)
 
 from scripts.aufgabe04.perception.stand_axis.current_image_head_fit import CurrentImageHeadFit
 from scripts.aufgabe04.perception.stand_axis.geometry_contract import (
@@ -49,6 +54,7 @@ from scripts.aufgabe04.perception.stand_axis.qr_pose_seed import (
     detect_qr_quad,
     estimate_planar_pose_ippe,
     select_temporally_consistent_pose,
+    qr_quad_from_decoded_observations,
 )
 from scripts.aufgabe04.qr_scanning.qr_observation import DecodedQrObservation
 from scripts.aufgabe04.perception.stand_axis.qr_marker_validation import (
@@ -81,8 +87,10 @@ def estimate_stand_axis_from_metric_model(
     input_cache: MetricModelInputCache | None = None,
     input_cache_roi: RoiBounds | None = None,
     current_head_proposal_corners: tuple[ImagePoint, ...] | None = None,
+    current_head_proposal_verified: bool = False,
     current_image_head_fit: CurrentImageHeadFit | None = None,
     deadline_monotonic_sec: float | None = None,
+    qr_marker_policy: str = "auto",
 ) -> tuple[StandAxisImageEstimate, StandAxisEdgeDebugArtifacts]:
     """Fit physical head angles from current pixels independently of QR.
 
@@ -94,9 +102,16 @@ def estimate_stand_axis_from_metric_model(
     An exact-image cache reuses preprocessing. The optional one-use physical
     fit holder lets QR recovery redecorate this exact crop's current geometry;
     it never retains a classified result or supplies an angle to another image.
+    ``disabled``/``supplied_only`` avoid native marker work. Unchecked marker
+    absence remains unknown and cannot label a backside. Positive supplied
+    decoder observations never require a second native acquisition.
     """
 
     timing = ModelStageTiming()
+    if qr_marker_policy not in {"auto", "disabled", "supplied_only"}:
+        raise ValueError("QR marker policy must be auto, disabled, or supplied_only")
+    if type(current_head_proposal_verified) is not bool:
+        raise ValueError("current head proposal verification must be a boolean")
     camera = RectifiedCameraMatrix(
         float(camera_fx_px),
         float(camera_fy_px),
@@ -134,7 +149,9 @@ def estimate_stand_axis_from_metric_model(
             edges = current_edges()
             result = fit_physical_head_in_frame(
                 cv2, frame, edges, model_profile=model_profile, camera=camera, timing=timing,
-                current_head_proposal_corners=head_proposal, pose_hint=pose_hint,
+                current_head_proposal_corners=head_proposal,
+                current_head_proposal_verified=current_head_proposal_verified,
+                pose_hint=pose_hint,
                 expected_head_center_u_px=expected_head_center_u_px,
                 expected_head_center_v_px=expected_head_center_v_px,
                 expected_head_height_px=expected_head_height_px,
@@ -149,6 +166,7 @@ def estimate_stand_axis_from_metric_model(
             raw_edges, head_result = current_image_head_fit.compute(
                 frame, context=(
                     id(cv2), model_profile, camera, pose_hint, head_proposal, input_cache_roi,
+                    current_head_proposal_verified,
                     edge_preprocess, blur_kernel, canny_low, canny_high,
                     expected_head_center_u_px, expected_head_center_v_px,
                     expected_head_height_px, max_reprojection_rmse_px, min_edge_height_px,
@@ -184,18 +202,38 @@ def estimate_stand_axis_from_metric_model(
             cv2, frame,
             scales=((1.0,) if pose_hint is not None or physical_head else (1.0, 2.0, 4.0)),
             allow_decode_fallback=(pose_hint is None and not physical_head),
+            allow_native_decode_fallback=not physical_head,
             **({"decoded_observations": qr_observations} if qr_observations is not None else {}),
         )
 
-    qr_detection = (acquire_qr_quad() if cached_inputs is None else
-                    cached_inputs.compute("qr_detection", acquire_qr_quad))
+    marker_work = schedule_marker_work(
+        policy=qr_marker_policy, positive_observations=bool(qr_observations),
+        physical_head=physical_head,
+        head_available=current_head_available_for_markers(head_result),
+        now_monotonic_sec=time.monotonic(), deadline_monotonic_sec=deadline_monotonic_sec,
+    )
+    if marker_work.action == "supplied":
+        qr_detection = qr_quad_from_decoded_observations(qr_observations)
+    elif marker_work.action == "native":
+        qr_detection = (acquire_qr_quad() if cached_inputs is None else
+                        cached_inputs.compute("qr_detection", acquire_qr_quad))
+    else:
+        qr_detection = None
     timing.mark("qr_detection")
     qr_corners = None if qr_detection is None else qr_detection.corners
     qr_marker_detected = qr_corners is not None or bool(qr_observations)
     marker = (
         QrMarkerEvidence(True, "decoded_qr_identity")
-        if qr_observations else validate_qr_marker(cv2, frame, qr_detection)
+        if qr_observations else (
+            QrMarkerEvidence(None, marker_work.reason)
+            if marker_work.action == "skip" else validate_qr_marker(cv2, frame, qr_detection)
+        )
     )
+    if (marker_work.action == "native" and deadline_monotonic_sec is not None
+            and time.monotonic() >= deadline_monotonic_sec):
+        # An atomic native call may overrun its cooperative allowance. Do not
+        # turn its late miss into current backside evidence.
+        marker = QrMarkerEvidence(None, "qr_marker_completion_deadline_exceeded")
     timing.mark("qr_marker_validation")
     if head_result is not None:
         estimate, artifacts, head_pose = head_result

@@ -163,6 +163,7 @@ def _qr_quad_candidates(points) -> tuple[tuple[ImagePoint, ...], ...]:
 def _detect_qr_quad_corners_native(
     cv2,
     frame,
+    *, allow_decode_fallback: bool = True,
 ) -> tuple[ImagePoint, ImagePoint, ImagePoint, ImagePoint] | None:
     """Run OpenCV's QR detector once in the supplied pixel domain."""
 
@@ -183,6 +184,8 @@ def _detect_qr_quad_corners_native(
     if candidates:
         return _largest_qr_quad(candidates)
 
+    if not allow_decode_fallback:
+        return None
     try:
         multi_result = detector.detectAndDecodeMulti(frame)
     except Exception:
@@ -198,6 +201,7 @@ def detect_qr_quad(
     scales: Sequence[float] = (1.0, 2.0, 4.0),
     decoded_observations: tuple[DecodedQrObservation, ...] | None = None,
     allow_decode_fallback: bool = True,
+    allow_native_decode_fallback: bool = True,
 ) -> QrQuadDetection | None:
     """Acquire QR corners through a bounded image pyramid.
 
@@ -230,7 +234,9 @@ def detect_qr_quad(
                 fy=scale,
                 interpolation=cv2.INTER_CUBIC,
             )
-        corners = _detect_qr_quad_corners_native(cv2, scaled)
+        corners = (_detect_qr_quad_corners_native(cv2, scaled)
+                   if allow_native_decode_fallback else
+                   _detect_qr_quad_corners_native(cv2, scaled, allow_decode_fallback=False))
         if corners is None:
             continue
         restored = tuple(

@@ -11,6 +11,7 @@ from scripts.aufgabe04.real_robot.observer.head_acquisition_schedule import (
     HeadProcessingDeadline, select_cold_candidate_head,
 )
 from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import HeadRoiAttempt
+from scripts.aufgabe04.real_robot.observer.qr_acquisition_policy import QrAcquisitionDecision
 from scripts.aufgabe04.real_robot.configuration.geometry import ImageRoi
 from scripts.aufgabe04.perception.stand_axis.physical_head_pipeline import fit_physical_head_in_frame
 from scripts.aufgabe04.real_robot.observer import node as observer_node
@@ -79,7 +80,7 @@ class AcquisitionScheduleTests(unittest.TestCase):
         prefix = "scripts.aufgabe04.perception.stand_axis.physical_head_pipeline."
         with patch(prefix + "time.monotonic", return_value=10.), \
              patch(prefix + "fit_current_measured_head") as fit, \
-             patch(prefix + "acquire_head_proposal") as locate:
+             patch(prefix + "acquire_cold_head_proposal") as locate:
             estimate, debug, pose = fit_physical_head_in_frame(
                 object(), Frame(), None, model_profile=self.profile, camera=object(),
                 timing=Mock(), deadline_monotonic_sec=9.)
@@ -91,7 +92,7 @@ class AcquisitionScheduleTests(unittest.TestCase):
 
 
 class AcquisitionFailureObserverTests(unittest.TestCase):
-    def test_failed_or_expired_search_never_invokes_legacy_qr_decoder(self):
+    def test_head_miss_permits_bounded_identity_probe_but_expired_budget_skips_it(self):
         for failure in ("head_proposal_ambiguous", "head_acquisition_deadline_exceeded"):
             with self.subTest(failure=failure), ExitStack() as stack:
                 fixture = processing_fixtures.CameraObserverProcessingTest()
@@ -103,8 +104,8 @@ class AcquisitionFailureObserverTests(unittest.TestCase):
                 for name in ("camera_info_mismatches", "transform_mismatches"):
                     stack.enter_context(patch(module + name, return_value=()))
                 stack.enter_context(patch(module + "compressed_msg_to_bgr_frame", return_value=frame))
-                stack.enter_context(patch(module + "_rectify_bgr_frame", side_effect=lambda value, *_: value))
-                decoders = [stack.enter_context(patch(module + name)) for name in (
+                stack.enter_context(patch(module + "_rectify_bgr_frame", side_effect=lambda value, *_, **_kwargs: value))
+                decoders = [stack.enter_context(patch(module + name, return_value=())) for name in (
                     "detect_qr_texts_bgr", "detect_qr_observations_bgr",
                     "detect_native_qr_observations_bgr")]
                 fit = stack.enter_context(patch(module + "estimate_stand_axis_from_metric_model"))
@@ -121,9 +122,19 @@ class AcquisitionFailureObserverTests(unittest.TestCase):
                     stack.enter_context(patch(
                         "scripts.aufgabe04.real_robot.observer.head_acquisition_schedule."
                         "HeadProcessingDeadline.allow", return_value=False))
+                    stack.enter_context(patch(
+                        "scripts.aufgabe04.real_robot.observer.qr_acquisition_policy."
+                        "QrFrameAcquisitionBudget.request",
+                        return_value=QrAcquisitionDecision(
+                            False, "image_processing_budget_exhausted", 0.)))
                 adapter._process_latest()
-                for decoder in decoders:
-                    decoder.assert_not_called()
+                decoders[0].assert_not_called()  # Legacy unbounded text fallback.
+                decoders[2].assert_not_called()
+                if failure == "head_acquisition_deadline_exceeded":
+                    decoders[1].assert_not_called()
+                else:
+                    decoders[1].assert_called_once()
+                    self.assertLessEqual(decoders[1].call_args.kwargs["max_elapsed_sec"], .12)
                 fit.assert_not_called()
                 if failure == "head_acquisition_deadline_exceeded":
                     acquire.assert_not_called()
@@ -134,10 +145,10 @@ class AcquisitionFailureObserverTests(unittest.TestCase):
                 self.assertEqual(status.args, ("metric_model_measurement_unavailable",))
                 self.assertEqual(status.kwargs["estimator_reason"], failure)
                 timing = status.kwargs["stand_axis_debug"]["metric_model"]["processing_timing"]
-                self.assertEqual(timing["attempts"][0]["qr_decode"],
-                                 {"performed": False, "reason": failure})
+                metadata = timing["attempts"][0]["qr_decode"]
+                self.assertEqual(metadata["performed"], failure != "head_acquisition_deadline_exceeded")
                 # Skipped decoding remains unknown and supplies no identity or angle.
-                self.assertIsNone(bind.call_args.args[0])
+                self.assertIn(bind.call_args.args[0], (None, ()))
                 self.assertIsNone(adapter._last_observation_update.resolved_qr_id)
                 self.assertEqual(adapter._last_observation_update.snapshot.current_qr_sample_count, 0)
                 self.assertEqual(adapter._last_observation_update.snapshot.current_axis_sample_count, 0)

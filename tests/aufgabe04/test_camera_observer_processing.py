@@ -143,7 +143,7 @@ class CameraObserverProcessingTest(unittest.TestCase):
         with patch(module + "camera_info_mismatches", return_value=()), \
              patch(module + "transform_mismatches", return_value=()), \
              patch(module + "compressed_msg_to_bgr_frame", return_value=frame), \
-             patch(module + "_rectify_bgr_frame", side_effect=lambda value, *_: value), \
+             patch(module + "_rectify_bgr_frame", side_effect=lambda value, *_, **_kwargs: value), \
              patch(module + "detect_qr_observations_bgr", side_effect=decode) as decoder, \
              patch(module + "detect_native_qr_observations_bgr", side_effect=decode) as native_decoder, \
              patch(module + "acquire_registered_head_measurement", return_value=None), \
@@ -218,7 +218,7 @@ class CameraObserverProcessingTest(unittest.TestCase):
              patch(module + "real_robot_profile_sha256", return_value="a" * 64), \
              patch(module + "camera_calibration_sha256", return_value="b" * 64), \
              patch(module + "compressed_msg_to_bgr_frame", return_value=frame), \
-             patch(module + "_rectify_bgr_frame", side_effect=lambda value, *_: value), \
+             patch(module + "_rectify_bgr_frame", side_effect=lambda value, *_, **_kwargs: value), \
              patch(module + "detect_qr_observations_bgr", side_effect=decode), \
              patch(module + "detect_native_qr_observations_bgr", side_effect=decode), \
              patch(module + "estimate_stand_axis_from_metric_model", side_effect=metric) as estimator:
@@ -262,8 +262,8 @@ class CameraObserverProcessingTest(unittest.TestCase):
             proposal_calls.append(options)
             # Only the pixel locator is injected. The actual current scan
             # association, crop registration and complete-head gate still run.
-            u = options["expected_head_center_u_px"] - 10.
-            v = options["expected_head_center_v_px"]
+            u = options["expected_center"][0] - 10.
+            v = options["expected_center"][1]
             corners = tuple(ImagePoint(u + x, v + y) for x, y in
                             ((-26, -26), (26, -26), (26, 26), (-26, 26)))
             return HeadProposalResult(HeadProposal(
@@ -321,10 +321,10 @@ class CameraObserverProcessingTest(unittest.TestCase):
         with patch(module + "camera_info_mismatches", return_value=()), \
              patch(module + "transform_mismatches", return_value=()), \
              patch(module + "compressed_msg_to_bgr_frame", return_value=frame), \
-             patch(module + "_rectify_bgr_frame", side_effect=lambda value, *_: value), \
+             patch(module + "_rectify_bgr_frame", side_effect=lambda value, *_, **_kwargs: value), \
              patch(module + "detect_qr_observations_bgr", return_value=()) as decoder, \
              patch(module + "detect_native_qr_observations_bgr", return_value=()) as native_decoder, \
-             patch("scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_head_proposal",
+             patch("scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_viewer_candidate_head",
                    side_effect=locate), \
              patch(module + "estimate_stand_axis_from_metric_model", side_effect=metric):
             adapter._process_latest()
@@ -377,8 +377,8 @@ class CameraObserverProcessingTest(unittest.TestCase):
                 calls = []
 
                 def locate(_cv2, _crop, **options):
-                    u = options["expected_head_center_u_px"] + 10.
-                    v = options["expected_head_center_v_px"]
+                    u = options["expected_center"][0] + 10.
+                    v = options["expected_center"][1]
                     corners = tuple(ImagePoint(u + x, v + y) for x, y in
                                     ((-26, -26), (26, -26), (26, 26), (-26, 26)))
                     return HeadProposalResult(HeadProposal(
@@ -424,11 +424,11 @@ class CameraObserverProcessingTest(unittest.TestCase):
                 with patch(module + "camera_info_mismatches", return_value=()), \
                      patch(module + "transform_mismatches", return_value=()), \
                      patch(module + "compressed_msg_to_bgr_frame", return_value=frame), \
-                     patch(module + "_rectify_bgr_frame", side_effect=lambda value, *_: value), \
+                     patch(module + "_rectify_bgr_frame", side_effect=lambda value, *_, **_kwargs: value), \
                      patch(module + "detect_qr_observations_bgr", side_effect=decode), \
                      patch(module + "detect_native_qr_observations_bgr", side_effect=decode), \
                      patch(module + "associate_candidate_lidar_target", side_effect=preliminary), \
-                     patch("scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_head_proposal",
+                     patch("scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_viewer_candidate_head",
                            side_effect=locate), \
                      patch(module + "estimate_stand_axis_from_metric_model", side_effect=metric):
                     adapter._process_latest()

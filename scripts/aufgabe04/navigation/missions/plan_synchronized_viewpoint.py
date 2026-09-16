@@ -70,6 +70,7 @@ from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import (
     angular_distance,
     load_recommendation,
     recommendation_axis_estimator,
+    recommendation_uses_current_head_front,
     recommendation_to_dict,
 )
 from scripts.aufgabe04.perception.arrival_pose_estimator import (
@@ -642,7 +643,8 @@ def _record_survey_arrival(
             expected_candidate_uids=args.expected_candidate_uid,
             created_unix_sec=now,
         )
-    if recommendation.axis_sample_count < args.axis_sample_count:
+    if (not recommendation_uses_current_head_front(recommendation)
+            and recommendation.axis_sample_count < args.axis_sample_count):
         raise ValueError(
             "measured axis evidence has fewer stable inlier samples than "
             f"required: {recommendation.axis_sample_count} < {args.axis_sample_count}"

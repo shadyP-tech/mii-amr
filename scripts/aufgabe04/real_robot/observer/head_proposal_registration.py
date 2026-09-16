@@ -12,7 +12,7 @@ from scripts.aufgabe04.perception.candidate_lidar_association import (
     associate_camera_registered_candidate_lidar_target,
 )
 from scripts.aufgabe04.perception.stand_axis.head_proposal import (
-    HeadProposal, acquire_head_proposal,
+    HeadProposal,
 )
 from scripts.aufgabe04.perception.stand_axis.models import ImagePoint
 from scripts.aufgabe04.perception.stand_axis.head_model_quality import MEASURED_HEAD_AXIS_SOURCE
@@ -29,6 +29,7 @@ from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import (
     REGISTERED_MEASURED_HEAD_REACQUISITION_SOURCE,
 )
 from scripts.aufgabe04.real_robot.observer.camera_framing import build_camera_framing_hint
+from scripts.aufgabe04.real_robot.observer.head_acquisition_parity import acquire_viewer_candidate_head
 
 
 @dataclass(frozen=True)
@@ -148,28 +149,35 @@ def acquire_registered_head_measurement(
             reason=None if association is None else association.rejection_reason))
         return accepted
 
-    result = acquire_head_proposal(
-        cv2, frame[roi.y0:roi.y1, roi.x0:roi.x1],
-        expected_head_center_u_px=search.expected_center_u_px - roi.x0,
-        expected_head_center_v_px=search.expected_center_v_px - roi.y0,
-        expected_head_height_px=search.expected_head_height_px,
+    search_frame = frame[roi.y0:roi.y1, roi.x0:roi.x1]
+    viewer_trial = {}
+    result = acquire_viewer_candidate_head(
+        cv2, search_frame,
+        expected_center=(search.expected_center_u_px - roi.x0, search.expected_center_v_px - roi.y0),
+        expected_height=search.expected_head_height_px, max_center_offset_ratio=max_center_offset_ratio,
         edge_preprocess=edge_preprocess, canny_low=canny_low, canny_high=canny_high,
-        max_center_offset_fraction=max_center_offset_ratio,
-        max_vertical_center_offset_fraction=min(.75, max_center_offset_ratio),
         proposal_filter=eligible,
-        deadline_monotonic_sec=deadline_monotonic_sec,
-    )
+        deadline_monotonic_sec=deadline_monotonic_sec, diagnostics=viewer_trial)
+    diagnostics["viewer_candidate_trial"] = viewer_trial
+    diagnostics["acquisition_policy"] = "shared_candidate_current_borders"
+    diagnostics["projected_search_performed"] = False
+    if result is None:
+        diagnostics.update(reason="head_acquisition_deadline_exceeded", candidate_associated=False)
+        return reject_proposal()
     diagnostics.update(reason=result.reason, considered_proposals=result.considered_proposals,
                        raw_verifications=result.raw_verifications,
                        elapsed_ms=(time.monotonic() - start) * 1000.0,
                        candidate_associated=False)
     diagnostics["proposal_associations"] = associations
     diagnostics["vertical_search_half_height_ratio"] = min(.75, max_center_offset_ratio)
+    # The locator carries stage and comparison-completeness evidence even
+    # when its cooperative deadline expires. Preserve that evidence before
+    # returning; deadline failures must not erase what consumed the budget.
+    if getattr(result, "joint_border_diagnostics", None) is not None:
+        diagnostics["joint_border_diagnostics"] = result.joint_border_diagnostics
     if expired() or result.reason == "head_acquisition_deadline_exceeded":
         diagnostics["reason"] = "head_acquisition_deadline_exceeded"
         return reject_proposal()
-    if getattr(result, "joint_border_diagnostics", None) is not None:
-        diagnostics["joint_border_diagnostics"] = result.joint_border_diagnostics
     if result.proposal is None:
         if associations and not any(item["associated"] for item in associations):
             diagnostics["reason"] = "head_proposal_candidate_association_rejected"

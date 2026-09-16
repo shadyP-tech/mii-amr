@@ -97,7 +97,7 @@ def test_refresh_restores_undecorated_front_geometry_after_backside_classificati
 
 
 @pytest.mark.parametrize("change", ("new_image", "mutated_pixels", "intrinsics", "projection",
-    "settings", "new_roi", "profile", "seed", "proposal"))
+    "settings", "new_roi", "profile", "seed", "proposal", "proposal_verified"))
 def test_different_geometry_context_cannot_reuse_even_identical_head_pixels(profile, change):
     image, corners = head_image(profile)
     holder = CurrentImageHeadFit()
@@ -124,6 +124,8 @@ def test_different_geometry_context_cannot_reuse_even_identical_head_pixels(prof
         elif change == "proposal":
             options["current_head_proposal_corners"] = tuple(
                 replace(point, u_px=point.u_px + 1.) for point in corners)
+        elif change == "proposal_verified":
+            options["current_head_proposal_verified"] = True
         fit(profile, image, holder, (DecodedQrObservation("QR_003", None, "recovered"),), **options)
     assert geometry.call_count == 2
     assert not holder.reused
@@ -143,6 +145,16 @@ def test_qr_refresh_cannot_promote_missing_head_geometry(profile):
     assert qr.yaw_deg is None
     assert qr.reason == missing.reason
     assert debug.qr_marker_verified
+
+
+def test_proposal_verification_context_requires_boolean_to_avoid_equal_numeric_keys(profile):
+    image, corners = head_image(profile)
+    holder = CurrentImageHeadFit()
+    # In Python True == 1. A non-boolean verification state must never alias
+    # a verified cache context while skipping the producer's `is True` guard.
+    with pytest.raises(ValueError, match="verification must be a boolean"):
+        fit(profile, image, holder, current_head_proposal_corners=corners,
+            current_head_proposal_verified=1)
 
 
 def test_only_one_refresh_is_retained_and_geometry_exceptions_are_not_cached():

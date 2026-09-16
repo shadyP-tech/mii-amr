@@ -15,6 +15,7 @@ from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import (
     REAL_VIEWPOINT_SOURCE,
     RECOMMENDATION_SCHEMA_VERSION,
     BOUNDED_RECOMMENDATION_SCHEMA_VERSION,
+    CURRENT_HEAD_FRONT_RECOMMENDATION_SCHEMA_VERSION,
     angular_distance,
     normalize_angle,
     validate_recommendation,
@@ -39,6 +40,7 @@ def build_real_viewpoint_recommendation(
     target_distance_m: float,
     observation_unix_sec: float | None = None,
     bounded_orientation: dict[str, object] | None = None,
+    current_head_evidence: dict[str, object] | None = None,
 ) -> SynchronizedViewpointRecommendation:
     """Create one committed, robot-facing real arrival recommendation.
 
@@ -55,8 +57,16 @@ def build_real_viewpoint_recommendation(
         raise ValueError("stand_axis_rad must be finite")
     if not 0.0 <= axis_confidence <= 1.0:
         raise ValueError("axis_confidence must be in [0, 1]")
-    if type(axis_sample_count) is not int or axis_sample_count < 2:
+    if current_head_evidence is not None and bounded_orientation is not None:
+        raise ValueError("current head front and bounded orientation are distinct admission policies")
+    minimum_samples = 1 if current_head_evidence is not None else 2
+    if type(axis_sample_count) is not int or axis_sample_count < minimum_samples:
         raise ValueError("axis_sample_count must be at least two")
+    if current_head_evidence is not None:
+        from scripts.aufgabe04.artifacts.current_head_front_observation import validated_current_head_front_evidence
+        current_head_evidence = validated_current_head_front_evidence(
+            current_head_evidence, expected_sensor_stamp_sec=sensor_stamp_sec,
+            expected_stand_axis_rad=stand_axis_rad, expected_qr_id=expected_qr_id)
     if not math.isfinite(target_distance_m) or target_distance_m <= 0.0:
         raise ValueError("target_distance_m must be finite and positive")
 
@@ -83,7 +93,8 @@ def build_real_viewpoint_recommendation(
         faces.append(FaceCandidate(face_id, normal, pose, True))
     selected = faces[selected_index]
     recommendation = SynchronizedViewpointRecommendation(
-        schema_version=(RECOMMENDATION_SCHEMA_VERSION if bounded_orientation is None
+        schema_version=(CURRENT_HEAD_FRONT_RECOMMENDATION_SCHEMA_VERSION if current_head_evidence is not None
+                        else RECOMMENDATION_SCHEMA_VERSION if bounded_orientation is None
                         else BOUNDED_RECOMMENDATION_SCHEMA_VERSION),
         simulation_only=False,
         stream_id=stream_id,
@@ -105,12 +116,13 @@ def build_real_viewpoint_recommendation(
         axis_state="target_committed",
         face_candidates=(faces[0], faces[1]),
         side_evidence=SideEvidence(
-            kind="qr_consensus",
+            kind="qr_observation" if current_head_evidence is not None else "qr_consensus",
             confidence=1.0,
             hard=True,
             valid=True,
             face_id=selected.face_id,
-            provenance="real/onboard_camera_qr_consensus",
+            provenance=("real/onboard_camera_qr_observation" if current_head_evidence is not None
+                        else "real/onboard_camera_qr_consensus"),
         ),
         material_target=MaterialTarget(
             face_id=selected.face_id,
@@ -119,6 +131,7 @@ def build_real_viewpoint_recommendation(
         ),
         axis_sample_count=axis_sample_count,
         bounded_orientation=bounded_orientation,
+        axis_measurement=current_head_evidence,
     )
     validate_recommendation(
         recommendation,

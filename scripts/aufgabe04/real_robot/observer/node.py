@@ -34,6 +34,7 @@ from scripts.aufgabe04.perception.camera_stand_observation import (
     stand_axis_from_camera_yaw,
 )
 from scripts.aufgabe04.perception.camera_calibration import (
+    RectificationMapCache,
     rectify_bgr_frame as _rectify_bgr_frame,
 )
 from scripts.aufgabe04.perception.ros_image_adapter import (
@@ -148,12 +149,18 @@ from scripts.aufgabe04.perception.stand_axis.head_orientation_bounds import vali
 from scripts.aufgabe04.real_robot.observer.bounded_head_observation import (
     prepare_bounded_head, record_bounded_head, commit_bounded_head,
 )
+from scripts.aufgabe04.real_robot.observer.immediate_front_observation import (
+    prepare_immediate_front, record_immediate_front, commit_immediate_front,
+)
 from scripts.aufgabe04.artifacts.backside_axis_observation import MINIMUM_BACKSIDE_AXIS_CONFIDENCE
 from scripts.aufgabe04.real_robot.observer.camera_publication import (
     CameraPublicationExpired,
     camera_source_freshness,
 )
 from scripts.aufgabe04.real_robot.observer.qr_decode_cache import RoiQrDecodeCache
+from scripts.aufgabe04.real_robot.observer.independent_qr_acquisition import (
+    evaluate_geometry_then_identity, probe_identity_after_head_miss,
+)
 from scripts.aufgabe04.real_robot.observer.qr_acquisition_policy import (
     QrAcquisitionPolicy, evaluate_roi_with_qr_acquisition,
 )
@@ -665,7 +672,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         )
 
     def _commit_sensor_artifact(self, path, payload, *, image_stamp_sec,
-                                scan_stamp_sec, artifact_kind):
+                                scan_stamp_sec, artifact_kind, additional_check=None):
         """Check source ages after debug/association and again after durable serialization."""
 
         def check():
@@ -673,7 +680,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             self._last_camera_publication_freshness = {
                 "artifact_kind": artifact_kind, **freshness.metadata(),
             }
-            if not freshness.accepted:
+            if not freshness.accepted or (additional_check is not None and not additional_check()):
                 raise CameraPublicationExpired()
 
         try:
@@ -757,6 +764,9 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self._pending_bounded_head = None
         self._bounded_head_window = None
         self._bounded_head_ready = None
+        self._pending_immediate_front = None
+        self._immediate_front_admission = None
+        self._immediate_front_ready = None
         self._scan_target_persistence = None
         self._reset_scan_witnesses()
         self._reset_candidate_search("observation_evidence_reset")
@@ -790,6 +800,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self._camera_framing = None
         self._front_view_recovery = None
         self._head_qr_tracking_stamp_sec = None
+        self._immediate_front_admission = None
+        self._immediate_front_ready = None
 
     def _note_front_observation(self, decision, robot_pose: Pose2D) -> None:
         """Veto QR-free axes without resetting target identity evidence."""
@@ -901,6 +913,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 angle_temporally_consistent=(self._head_window_decision is not None
                                             and self._head_window_decision.current_sample_accepted))
             pending[1]["observation_confidence"] = self._head_confidence_metadata
+        record_immediate_front(self, update=update, image_stamp_sec=image_stamp_sec,
+                               observed_at_sec=observed_at_sec)
         record_bounded_head(self, update=update, image_stamp_sec=image_stamp_sec,
                             observed_at_sec=observed_at_sec)
         self._last_observation_update = update
@@ -1114,6 +1128,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             return
         self._pending_bounded_head = None
         self._bounded_head_ready = None
+        self._pending_immediate_front = None
+        self._immediate_front_ready = None
         sensor_tuple = self._next_sensor_tuple()
         if sensor_tuple is None:
             return
@@ -1416,6 +1432,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             max_sensor_age_sec=self.args.max_sensor_age_sec)
         self._camera_count("processed_images")
         try:
+            if not hasattr(self, "_rectification_map_cache"):
+                self._rectification_map_cache = RectificationMapCache()
             frame = compressed_msg_to_bgr_frame(
                 image_message,
                 self.cv2,
@@ -1426,6 +1444,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 camera_info.value,
                 self.cv2,
                 self.numpy,
+                map_cache=self._rectification_map_cache,
             )
         except (TypeError, ValueError) as exc:
             self._note_observation_soft_miss(
@@ -1462,6 +1481,12 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             max_sensor_age_sec=self.args.max_sensor_age_sec,
             work_deadline_monotonic_sec=head_budget.deadline_monotonic_sec,
         )
+        head_budget.deadline_monotonic_sec = min(
+            head_budget.deadline_monotonic_sec,
+            qr_acquisition_budget.head_deadline_with_identity_reserve(
+                now_monotonic_sec=time.monotonic(),
+                previous_head_miss=(getattr(self, "_last_head_miss_target", None)
+                                    == self._target_evidence_key())))
 
         def evaluate_roi_attempt(
             attempt: HeadRoiAttempt,
@@ -1477,7 +1502,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 attempt_roi.x0 : attempt_roi.x1,
             ]
             current_image_head_fit = CurrentImageHeadFit()
-            def fit(qr_observations):
+            def fit(qr_observations, *, marker_policy="auto"):
                 return estimate_stand_axis_from_metric_model(
                     self.cv2,
                     attempt_frame,
@@ -1488,6 +1513,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                     camera_cy_px=intrinsics.cy_px - attempt_roi.y0,
                     pose_hint=pose_hint,
                     qr_observations=qr_observations,
+                    qr_marker_policy=marker_policy,
                     edge_preprocess=resolved_stand_axis_profile.edge_preprocess,
                     canny_low=resolved_stand_axis_profile.canny_low,
                     canny_high=resolved_stand_axis_profile.canny_high,
@@ -1507,11 +1533,18 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                     input_cache=model_input_cache,
                     input_cache_roi=(attempt_roi.x0, attempt_roi.y0, attempt_roi.x1, attempt_roi.y1),
                     current_head_proposal_corners=current_head_proposal_corners,
+                    current_head_proposal_verified=current_head_proposal_corners is not None,
                     current_image_head_fit=current_image_head_fit,
                     deadline_monotonic_sec=head_budget.deadline_monotonic_sec,
                 )
 
-            attempt_estimate, attempt_debug, qr_observations, qr_metadata = evaluate_roi_with_qr_acquisition(
+            physical_geometry = (getattr(self.stand_model_profile, "committable", False)
+                                 and self.stand_model_profile.environment == "physical")
+            evaluator = (evaluate_geometry_then_identity if physical_geometry
+                         else evaluate_roi_with_qr_acquisition)
+            scheduling = ({"geometry_only": lambda: fit(None, marker_policy="disabled"),
+                           "decorate": fit} if physical_geometry else {"estimate": fit})
+            attempt_estimate, attempt_debug, qr_observations, qr_metadata = evaluator(
                 frame=attempt_frame,
                 roi=(attempt_roi.x0, attempt_roi.y0, attempt_roi.x1, attempt_roi.y1),
                 roi_source=attempt.source, cache=qr_decode_cache, budget=qr_acquisition_budget,
@@ -1522,7 +1555,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                         current_head_proposal_corners is not None
                         or attempt.source == "candidate_tracked_head_search") else {}),
                 ),
-                estimate=fit, now=time.monotonic, current_image_head_fit=current_image_head_fit,
+                **scheduling, now=time.monotonic, current_image_head_fit=current_image_head_fit,
             )
             return HeadRoiEvaluation(
                 attempt=attempt,
@@ -1610,6 +1643,13 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                     self.args.backside_registration_max_center_offset_ratio
                 ),
             )
+        self._last_head_miss_target = (None if registration.selected.estimate.usable
+                                      else self._target_evidence_key())
+        registration = probe_identity_after_head_miss(
+            registration, cache=qr_decode_cache, budget=qr_acquisition_budget,
+            full_decoder=lambda crop, limit, provenance: detect_qr_observations_bgr(
+                crop, self.cv2, diagnostics=provenance, max_elapsed_sec=limit,
+                prefer_native_geometry=True), now=time.monotonic)
         current_head_association = None
         current = registration.selected
         estimate, debug, selected_attempt = current.estimate, current.debug, current.attempt
@@ -1854,6 +1894,14 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         current_crop = review_current_head_crop(registration)
         self._pending_head_window_associated = current_crop.accepted
         model_metadata["current_head_crop"] = current_crop.metadata()
+        self._pending_immediate_front = prepare_immediate_front(
+            estimate=estimate, debug=debug, association=current_head_association,
+            crop=current_crop, qr_binding=qr_binding,
+            qr_observations=selected_qr_observations, observed_qr_texts=qr_texts,
+            image_stamp_sec=image.stamp_sec, scan_stamp_sec=scan.stamp_sec,
+            robot_pose=robot_pose, camera_heading_rad=optical_heading_from_transform(map_from_camera),
+            target_key=self._target_evidence_key(), camera_signature=candidate_context.camera_signature,
+            image_shape=frame.shape, roi=roi, metadata=model_metadata)
         self._pending_bounded_head = prepare_bounded_head(
             estimate=estimate, debug=debug, association=current_head_association,
             crop=current_crop, appearance_crop=appearance_crop, qr_binding=qr_binding,
@@ -2701,10 +2749,10 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         return payload
 
     def _write_status(self, state: str, **details) -> None:
-        bounded = commit_bounded_head(self)
-        if bounded is not None:
-            state, bounded_details = bounded
-            details = {**details, **bounded_details}
+        committed = commit_immediate_front(self) or commit_bounded_head(self)
+        if committed is not None:
+            state, committed_details = committed
+            details = {**details, **committed_details}
         elif not getattr(self, "completed", False):
             current = getattr(self, "_pending_bounded_head", None)
             rejection = None if current is None else current.metadata.get("bounded_orientation_rejection")
@@ -2927,7 +2975,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scan-topology-profile", choices=("linear", "full_rotation"), default="linear")
     parser.add_argument("--stationary-translation-m", type=float, default=0.01)
     parser.add_argument("--stationary-rotation-deg", type=float, default=2.0)
-    parser.add_argument("--consensus-frames", type=int, default=7)
+    parser.add_argument("--consensus-frames", type=int, default=7,
+        help="Samples for bounded/backside and legacy consensus; a strict current head fit with bound QR admits immediately.")
     parser.add_argument("--consensus-max-deviation-deg", type=float, default=8.0)
     parser.add_argument(
         "--consensus-axis-ttl-sec",

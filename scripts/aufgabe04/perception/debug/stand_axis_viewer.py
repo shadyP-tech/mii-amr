@@ -58,7 +58,7 @@ from scripts.aufgabe04.perception.camera_stand_observation import (
     stand_axis_from_camera_yaw,
     write_camera_observation,
 )
-from scripts.aufgabe04.perception.camera_calibration import rectify_bgr_frame
+from scripts.aufgabe04.perception.camera_calibration import RectificationMapCache, rectify_bgr_frame
 from scripts.aufgabe04.perception.debug.calibrated_handoff_runtime import (
     CalibrationRuntimeSnapshot,
     RosCameraCalibrationTfSource,
@@ -458,7 +458,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-qr-decode",
         action="store_true",
-        help="Disable QR decoding in this debug viewer; color side classification still runs.",
+        help=("Disable QR identity and native marker work; 3D geometry still runs, "
+              "but unchecked marker absence cannot classify the backside."),
     )
     parser.add_argument(
         "--front-face-to-qr-width-ratio",
@@ -2648,6 +2649,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         image_topic = args.compressed_image_topic
     frame_source.start()
+    rectification_map_cache = RectificationMapCache()
     calibration_source = None
     if args.calibrated_handoff:
         calibration_source = RosCameraCalibrationTfSource(
@@ -2736,7 +2738,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_deviation_rad=math.radians(args.axis_consensus_max_deviation_deg),
     )
     model_pose_tracker = (
-        None if stand_model_profile is None else MetricPoseTracker(prediction_ttl_sec=0.25)
+        None if stand_model_profile is None else MetricPoseTracker(
+            prediction_ttl_sec=0.25, search_hint_ttl_sec=2.0, max_soft_misses=2)
     )
     head_candidate_temporal_gate = HeadCandidateTemporalGate(
         # The model path draws its bounded prediction on the current frame.
@@ -2832,6 +2835,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"WARNING: {exc}")
                 continue
             decode_duration_sec = time.monotonic() - decode_started_monotonic
+            rectification_duration_sec = 0.
             decoded_source_frame = frame.copy()
             camera_fx_px = configured_camera_fx_px
             camera_fy_px = configured_camera_fy_px
@@ -2863,12 +2867,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                             ),
                         )
                     else:
+                        rectification_started_monotonic = time.monotonic()
                         try:
                             frame = rectify_bgr_frame(
                                 frame,
                                 calibration,
                                 cv2,
                                 numpy,
+                                map_cache=rectification_map_cache,
                             )
                         except ValueError as exc:
                             calibration_snapshot = CalibrationRuntimeSnapshot(
@@ -2887,6 +2893,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                             camera_fy_px = calibration.fy_px
                             camera_cx_px = calibration.cx_px
                             camera_cy_px = calibration.cy_px
+                        rectification_duration_sec = time.monotonic() - rectification_started_monotonic
                 if not calibration_snapshot.ready:
                     camera_fx_px = None
                     camera_fy_px = None
@@ -3354,6 +3361,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                             canny_low=args.canny_low,
                             canny_high=args.canny_high,
                             min_edge_height_px=args.min_edge_height_px,
+                            qr_marker_policy=("disabled" if args.no_qr_decode else "auto"),
+                            deadline_monotonic_sec=frame_timing.work_deadline(
+                                max_result_age_sec=args.max_result_age_sec,
+                                max_frame_age_sec=args.max_frame_age_sec),
                         )
                     )
 
@@ -4489,8 +4500,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "source_frame_id": read.frame_id,
                         "received_wall_sec": read.received_wall_sec,
                         "received_monotonic_sec": read.received_monotonic_sec,
+                        "frame_receipt_diagnostics": (
+                            frame_source.receipt_diagnostics()
+                            if hasattr(frame_source, "receipt_diagnostics") else None),
                         "observed_monotonic_sec": frame_timing.observed_monotonic_sec,
                         "detector_started_monotonic_sec": detector_started_monotonic,
+                        "preparation_timings_ms": {
+                            "image_decode": decode_duration_sec * 1000.,
+                            "rectification": rectification_duration_sec * 1000.,
+                            "receipt_to_detector_start": (
+                                None if read.received_monotonic_sec is None else
+                                (detector_started_monotonic - read.received_monotonic_sec) * 1000.),
+                        },
                         "detector_completed_monotonic_sec": detector_completed_monotonic,
                         "rendered_monotonic_sec": rendered_monotonic_sec,
                         "render_source_age_ms": age_ms,

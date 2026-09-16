@@ -561,6 +561,9 @@ class StandMetricGeometryTest(unittest.TestCase):
             blur_kernel=1,
             canny_low=20,
             canny_high=60,
+            # This test isolates measurement from prediction. The separate
+            # cold-acquisition suite checks physical rail identity/ambiguity.
+            current_head_proposal_corners=projected.head_corners,
         )
         with patch(
             "scripts.aufgabe04.perception.stand_axis.model_pipeline.detect_qr_quad",
@@ -570,7 +573,7 @@ class StandMetricGeometryTest(unittest.TestCase):
                 cv2, measured_frame, **options
             )
             predicted, predicted_debug = estimate_stand_axis_from_metric_model(
-                cv2, blank_frame, **options
+                cv2, blank_frame, **{**options, "current_head_proposal_corners": None}
             )
 
         self.assertTrue(measured.usable, measured.reason)
@@ -621,6 +624,7 @@ class StandMetricGeometryTest(unittest.TestCase):
                 camera_cx_px=self.camera.cx_px,
                 camera_cy_px=self.camera.cy_px,
                 blur_kernel=1,
+                current_head_proposal_corners=projected.head_corners,
             )
 
         self.assertTrue(estimate.usable, estimate.reason)

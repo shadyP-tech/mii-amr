@@ -150,13 +150,16 @@ class HeadModelNeckTests(unittest.TestCase):
         backside = selection.selected.debug
         before = backside.raw_edges.copy()
         gap = measure_head_neck_junction(backside.raw_edges, backside.refined_corners, self.profile)
-        # Current joint acquisition exposes a larger raw-border hypothesis
-        # whose strict corner test fails. An old zero-gap diagnostic cannot
-        # rescue that current head or supply its missing corners.
+        # Shared current-border acquisition now selects a complete bound head.
+        # The legacy neck diagnostic remains independent: it neither selects
+        # these rails nor supplies angle, identity, or backside admission proof.
         np.testing.assert_array_equal(backside.raw_edges, before)
-        self.assertFalse(selection.selected.estimate.usable)
-        self.assertIsNone(backside.refined_corners)
-        self.assertFalse(gap.accepted)
+        self.assertTrue(selection.selected.estimate.usable)
+        self.assertEqual(len(backside.refined_corners), 4)
+        self.assertIsNone(backside.head_neck_junction)
+        self.assertTrue(backside.head_acquisition_diagnostics["selected_border_binding"]["accepted"])
+        self.assertTrue(gap.accepted)
+        self.assertEqual(gap.start_gap_px, 0)
 
 
 if __name__ == "__main__":

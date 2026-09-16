@@ -102,17 +102,17 @@ class MeasuredBacksideObserverHandoffTests(unittest.TestCase):
         def head_proposal(_cv2, _crop, **options):
             # Only current pixel localization is injected, like the metric
             # fit above. Real recentering, scan binding and crop gates run.
-            u, v = options["expected_head_center_u_px"], options["expected_head_center_v_px"]
+            u, v = options["expected_center"]
             corners = tuple(ImagePoint(x, y) for x, y in (
                 (u - 26, v - 26), (u + 26, v - 26),
                 (u + 26, v + 26), (u - 26, v + 26)))
             proposal = HeadProposal(corners, (int(u - 33), int(v - 33), int(u + 34), int(v + 50)),
                                     (u - 26, v - 26, u + 26, v + 26), u, v, 52.,
-                                    52. / options["expected_head_height_px"], 0., .99, .99)
+                                    52. / options["expected_height"], 0., .99, .99)
             return HeadProposalResult(proposal, "current_head_proposal", 1, 1)
         with ExitStack() as stack:
             stack.enter_context(patch(
-                "scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_head_proposal",
+                "scripts.aufgabe04.real_robot.observer.head_proposal_registration.acquire_viewer_candidate_head",
                 side_effect=head_proposal))
             for name, opts in {
                 "camera_info_mismatches": dict(return_value=()),
@@ -120,7 +120,7 @@ class MeasuredBacksideObserverHandoffTests(unittest.TestCase):
                 "real_robot_profile_sha256": dict(return_value="a" * 64),
                 "camera_calibration_sha256": dict(return_value="b" * 64),
                 "compressed_msg_to_bgr_frame": dict(return_value=frame),
-                "_rectify_bgr_frame": dict(side_effect=lambda value, *_: value),
+                "_rectify_bgr_frame": dict(side_effect=lambda value, *_, **_kwargs: value),
                 "detect_qr_observations_bgr": dict(return_value=()),
                 "detect_native_qr_observations_bgr": dict(return_value=()),
                 "estimate_stand_axis_from_metric_model": dict(side_effect=metric),

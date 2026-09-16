@@ -24,7 +24,7 @@ from tests.aufgabe04.recorded_head_proposal_fixture import (
 
 ROOT = Path(__file__).resolve().parents[2]
 PIPELINE = "scripts.aufgabe04.perception.stand_axis.model_pipeline"
-COLD = "scripts.aufgabe04.perception.stand_axis.head_cold_acquisition.acquire_cold_head_proposal"
+COLD = "scripts.aufgabe04.perception.stand_axis.physical_head_pipeline.acquire_cold_head_proposal"
 
 
 @pytest.fixture
@@ -109,17 +109,24 @@ def test_qr_or_tracked_pose_cannot_replace_current_head_pixels(profile):
         assert missing_debug.projected_landmarks is None
 
 
-def test_named_candidate_cannot_escape_its_projection_via_cold_search(profile):
+def test_named_candidate_uses_bounded_shared_locator_and_valid_projection(profile):
+    from scripts.aufgabe04.perception.stand_axis.head_cold_acquisition import acquire_cold_head_proposal
     image, _ = head_image(profile)
-    with patch(COLD, side_effect=AssertionError("unassociated global search")):
+    with patch(COLD, wraps=acquire_cold_head_proposal) as locate:
         missing, debug = estimate(profile, image, expected_head_center_u_px=70.,
             expected_head_center_v_px=70., expected_head_height_px=60.)
     assert not missing.usable
     assert debug.head_acquisition_diagnostics["source"] == "candidate_projection"
     assert debug.head_acquisition_diagnostics["acquisition"]["proposal"] is None
+    assert locate.call_args.kwargs["expected_head_center_u_px"] == 70.
+    assert locate.call_args.kwargs["expected_head_height_px"] == 60.
     with patch(COLD, side_effect=AssertionError("incomplete candidate escaped")):
         incomplete, _ = estimate(profile, image, expected_head_center_u_px=70.)
     assert incomplete.reason == "head_candidate_projection_incomplete"
+    with patch(COLD, side_effect=AssertionError("invalid candidate escaped")):
+        invalid, _ = estimate(profile, image, expected_head_center_u_px=float("nan"),
+            expected_head_center_v_px=70., expected_head_height_px=60.)
+    assert invalid.reason == "head_candidate_projection_invalid"
 
 
 def test_named_candidate_uses_associated_hint_and_refits_crop_adjusted_current_pixels(profile):
@@ -131,7 +138,7 @@ def test_named_candidate_uses_associated_hint_and_refits_crop_adjusted_current_p
     # An associated camera pose remains camera-relative across changed crops.
     # Both acquisition alternatives are prohibited on this bounded current fit.
     with patch(COLD, side_effect=AssertionError("candidate escaped globally")), \
-         patch("scripts.aufgabe04.perception.stand_axis.physical_head_pipeline.acquire_head_proposal",
+         patch("scripts.aufgabe04.perception.stand_axis.head_proposal.acquire_head_proposal",
                side_effect=AssertionError("candidate ignored associated pose")):
         fitted, debug = estimate(profile, current[y0:y1, x0:x1], pose_hint=initial_debug.model_pose,
             camera_cx_px=400.-x0, camera_cy_px=300.-y0,
@@ -148,18 +155,47 @@ def test_named_candidate_uses_associated_hint_and_refits_crop_adjusted_current_p
                        [(p.u_px, p.v_px) for p in uncropped.corners])
 
 
-def test_named_tracked_candidate_head_loss_does_not_retry_acquisition(profile):
+def test_named_tracked_candidate_head_loss_reacquires_current_bounded_pixels(profile):
+    from scripts.aufgabe04.perception.stand_axis.head_cold_acquisition import acquire_cold_head_proposal
     image, _ = head_image(profile)
     initial, debug = estimate(profile, image)
     assert initial.usable
-    with patch(COLD, side_effect=AssertionError("lost candidate escaped")), \
-         patch("scripts.aufgabe04.perception.stand_axis.physical_head_pipeline.acquire_head_proposal",
-               side_effect=AssertionError("lost candidate retried on same image")):
+    # The head moves farther than the small per-border refinement window, but
+    # remains inside the candidate association window. The original pose is a
+    # search hint only; the shifted current pixels must produce the new pose.
+    shifted = cv2.warpAffine(image, np.float32(((1, 0, 42), (0, 1, 0))), (800, 600))
+    with patch(COLD, wraps=acquire_cold_head_proposal) as locate:
+        current, current_debug = estimate(profile, shifted, pose_hint=debug.model_pose,
+            expected_head_center_u_px=400., expected_head_center_v_px=300., expected_head_height_px=145.)
+    locate.assert_called_once()
+    assert current.usable, current.reason
+    assert current_debug.head_acquisition_diagnostics["tracked_fit_reason"] != current.reason
+    assert sum(p.u_px for p in current.corners)/4 > sum(p.u_px for p in initial.corners)/4 + 35.
+    with patch(COLD, wraps=acquire_cold_head_proposal) as locate:
         missing, missing_debug = estimate(profile, np.zeros_like(image), pose_hint=debug.model_pose,
-            expected_head_center_u_px=400., expected_head_center_v_px=300., expected_head_height_px=140.)
+            expected_head_center_u_px=400., expected_head_center_v_px=300., expected_head_height_px=145.)
+    locate.assert_called_once()
     assert not missing.usable
     assert missing.yaw_deg is None
     assert missing_debug.model_pose is None
+
+
+def test_viewer_reacquisition_uses_only_bounded_old_pose_as_search_hint(profile):
+    from scripts.aufgabe04.perception.stand_axis.head_cold_acquisition import acquire_cold_head_proposal
+    image, corners = head_image(profile)
+    initial, old_debug = estimate(profile, image, current_head_proposal_corners=corners)
+    assert initial.usable
+    shifted = cv2.warpAffine(image, np.float32(((1, 0, 42), (0, 1, 0))), (800, 600))
+    with patch(COLD, wraps=acquire_cold_head_proposal) as locate:
+        current, debug = estimate(profile, shifted, pose_hint=old_debug.model_pose)
+    locate.assert_called_once()
+    options = locate.call_args.kwargs
+    assert options["expected_head_center_u_px"] == pytest.approx(400., abs=4.)
+    assert options["expected_head_height_px"] > 100.
+    assert options["max_center_offset_ratio"] == 1.5
+    assert current.usable, current.reason
+    assert debug.head_acquisition_diagnostics["source"] == "tracked_head_reacquisition"
+    assert sum(p.u_px for p in current.corners) / 4. > 430.
 
 
 def test_named_tracked_candidate_ambiguity_keeps_current_rejection(profile):
@@ -167,7 +203,7 @@ def test_named_tracked_candidate_ambiguity_keeps_current_rejection(profile):
     uncertain, debug = estimate(profile, image, current_head_proposal_corners=corners)
     assert not uncertain.usable
     with patch(COLD, side_effect=AssertionError("ambiguous candidate escaped")), \
-         patch("scripts.aufgabe04.perception.stand_axis.physical_head_pipeline.acquire_head_proposal",
+         patch("scripts.aufgabe04.perception.stand_axis.head_proposal.acquire_head_proposal",
                side_effect=AssertionError("ambiguous angle tried another locator")):
         tracked, _ = estimate(profile, image, pose_hint=debug.head_pose_hypotheses[0],
             expected_head_center_u_px=400., expected_head_center_v_px=300., expected_head_height_px=70.)
