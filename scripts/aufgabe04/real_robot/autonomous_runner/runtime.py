@@ -128,6 +128,9 @@ from scripts.aufgabe04.real_robot.configuration.profile import (
 from scripts.aufgabe04.real_robot.autonomous_runner.camera_inspection_binding import (
     load_bound_camera_inspection,
 )
+from scripts.aufgabe04.real_robot.observer.qr_observation_binding import (
+    load_bound_qr_observation_pose,
+)
 from scripts.aufgabe04.real_robot.configuration.site_contract import (
     validate_physical_site_contract,
 )
@@ -1440,6 +1443,7 @@ def _capture_camera_recommendation(
 ) -> (
     tuple[Path | None, str | None, Path | None]
     | tuple[None, str | None, None, Path]
+    | tuple[None, str, None, None, Path]
 ):
     if args.stand_model_profile is None:
         raise RuntimeError(
@@ -1458,6 +1462,7 @@ def _capture_camera_recommendation(
     recommendation_path = output_dir / "recommendation.json"
     axis_observation_path = output_dir / "axis_observation.json"
     inspection_observation_path = output_dir / "inspection_observation.json"
+    qr_observation_pose_path = output_dir / "qr_observation_pose.json"
     command = [
         sys.executable,
         "scripts/aufgabe04/real_robot/entrypoints/passive_viewpoint_node.py",
@@ -1503,6 +1508,8 @@ def _capture_camera_recommendation(
         str(axis_observation_path),
         "--inspection-observation-json",
         str(inspection_observation_path),
+        "--qr-observation-pose-json",
+        str(qr_observation_pose_path),
         "--debug-dir",
         str(output_dir / "perception_debug"),
         "--once",
@@ -1519,6 +1526,7 @@ def _capture_camera_recommendation(
         recommendation_path=recommendation_path,
         axis_observation_path=axis_observation_path,
         inspection_observation_path=inspection_observation_path,
+        qr_observation_pose_path=qr_observation_pose_path,
         timeout_sec=args.camera_timeout_sec,
     )
     write_content_hashed_json(
@@ -1526,6 +1534,37 @@ def _capture_camera_recommendation(
         process_evidence.to_dict(),
         hash_field="observer_process_evidence_sha256",
     )
+    if process_evidence.artifact_kind == "qr_verified_observation_pose":
+        # A saved QR must not mask a failed observer or forced cleanup. The
+        # passive child owns the bounded geometry grace period and commits
+        # this terminal receipt only while its source gates remain valid.
+        status_evidence = load_passive_observer_status(status_path)
+        if (process_evidence.returncode != 0
+                or status_evidence.load_error is not None
+                or status_evidence.state != "qr_observation_pose_committed"):
+            raise RuntimeError(
+                "QR observation pose was published without successful observer "
+                "completion: " + format_passive_observer_failure(
+                    candidate_uid=candidate.candidate_uid,
+                    process=process_evidence, status=status_evidence,
+                    process_evidence_path=process_evidence_path,
+                )
+            )
+        observation = load_bound_qr_observation_pose(
+            qr_observation_pose_path,
+            candidate_uid=candidate.candidate_uid,
+            stream_id=f"{args.session_id}_{candidate.candidate_uid}",
+            planning_frame=profile.map_frame,
+            stand_x_m=float(candidate.geometry.x_m),
+            stand_y_m=float(candidate.geometry.y_m),
+            stand_model_profile_sha256=stand_model.sha256,
+            robot_profile_sha256=real_robot_profile_sha256(profile),
+            calibration_profile_sha256=profile.calibration_profile_sha256,
+            base_frame=profile.base_frame,
+            scan_frame=profile.scan_frame,
+            camera_frame=profile.camera_optical_frame,
+        )
+        return None, observation["qr_id"], None, None, qr_observation_pose_path
     if process_evidence.artifact_kind == "inspection_observation":
         inspection = load_bound_camera_inspection(
             inspection_observation_path,

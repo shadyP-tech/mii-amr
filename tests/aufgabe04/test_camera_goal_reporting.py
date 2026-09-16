@@ -51,6 +51,29 @@ def coverage():
 
 
 class CameraGoalReportingTests(unittest.TestCase):
+    def test_qr_fallback_finishes_exploration_without_claiming_complete_geometry(self):
+        discovery = {**fields(), "facing_ready_stand_count": 3, "qr_only_stand_count": 2,
+                     "facing_complete": False, "qr_observation_pose_catalog": "qr_poses.json",
+                     "qr_observation_pose_catalog_sha256": "f" * 64}
+        result = build_completed_camera_mission_summary(
+            run_mode="execute-exact-two-camera", session_id="session_1",
+            snapshot_path=Path("full_pool.json"), snapshot_sha256="a" * 64,
+            survey_root=Path("survey"), stand_model_profile=Path("model.json"),
+            stand_model_profile_sha256="f" * 64,
+            candidate_population_admission_path=Path("admission.json"),
+            candidate_population_admission_sha256="d" * 64,
+            candidate_phase_fields=discovery, exact_two_coverage_summary=coverage(),
+            exact_two_camera_handoff_path=Path("handoff.json"),
+            exact_two_camera_handoff_sha256="e" * 64,
+        )
+        self.assertEqual(result["status"], "complete")
+        self.assertTrue(result["camera_exploration_complete"])
+        self.assertFalse(result["camera_geometry_complete"])
+        self.assertFalse(result["facing_complete"])
+        self.assertEqual(result["stand_count"], 5)
+        self.assertEqual(result["qr_only_stand_count"], 2)
+        self.assertFalse(result["motion_authorized"])
+
     def test_five_confirmed_from_six_pool_preserves_both_snapshots(self):
         result = build_completed_camera_mission_summary(
             run_mode="execute-exact-two-camera", session_id="session_1",

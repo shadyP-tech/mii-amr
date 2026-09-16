@@ -64,6 +64,34 @@ class _Process:
 
 
 class PassiveObserverProcessTests(unittest.TestCase):
+    def test_qr_pose_completion_wins_axis_and_advisory_but_not_recommendation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = {
+                "recommendation_path": root / "recommendation.json",
+                "qr_observation_pose_path": root / "qr_observation_pose.json",
+                "axis_observation_path": root / "axis.json",
+                "inspection_observation_path": root / "inspection.json",
+            }
+            for key in ("axis_observation_path", "inspection_observation_path",
+                        "qr_observation_pose_path", "recommendation_path"):
+                paths[key].write_text("{}")
+                if key not in {"qr_observation_pose_path", "recommendation_path"}:
+                    continue
+                clock = _Clock()
+                evidence = monitor_passive_observer_process(
+                    process=_Process(wait_outcomes=(0,)), timeout_sec=90,
+                    monotonic=clock.monotonic, sleep=clock.sleep, **paths,
+                )
+                self.assertEqual(evidence.artifact_path, paths[key])
+                self.assertEqual(
+                    evidence.artifact_kind,
+                    "recommendation" if key == "recommendation_path"
+                    else "qr_verified_observation_pose",
+                )
+                self.assertEqual(clock.sleeps, [])
+                self.assertEqual(evidence.returncode, 0)
+
     def test_recommendation_completion_reaps_child_gracefully(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

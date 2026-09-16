@@ -124,6 +124,23 @@ def promote_autonomous_arrival_catalog(
     facing = load_content_hashed_json(inputs.facing_catalog, hash_field="stand_facing_catalog_sha256")
     if facing.get("schema_version") != 1 or facing.get("catalog_kind") != "real_autonomous_stand_facing_poses":
         raise ValueError("unsupported autonomous facing catalog")
+    # QR discovery may complete before physical orientation is available. A
+    # viewing pose can support revisiting a stand, but is not a validated facing
+    # target for logistics. Legacy complete geometry catalogs omit these fields.
+    if "facing_complete" in facing and facing["facing_complete"] is not True:
+        raise ValueError("QR discovery catalog lacks complete geometry-backed facing poses")
+    if "qr_only_stand_count" in facing and (
+        type(facing["qr_only_stand_count"]) is not int or facing["qr_only_stand_count"] != 0
+    ):
+        raise ValueError("QR-only observation poses cannot be promoted as facing targets")
+    if facing.get("qr_only_candidate_uids"):
+        raise ValueError("QR-only observation poses cannot be promoted as facing targets")
+    records_for_readiness = facing.get("records")
+    if isinstance(records_for_readiness, list) and any(isinstance(record, dict) and (
+        record.get("evidence_kind") == "qr_verified_observation_pose"
+        or record.get("facing_ready") is False
+    ) for record in records_for_readiness):
+        raise ValueError("QR-only observation record cannot be promoted as a facing target")
     profile = load_real_robot_profile(inputs.robot_profile)
     calibration = load_camera_calibration(inputs.camera_calibration)
     calibration_sha = camera_calibration_sha256(calibration)

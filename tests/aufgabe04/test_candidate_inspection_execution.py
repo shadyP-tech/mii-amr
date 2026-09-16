@@ -18,6 +18,40 @@ from scripts.aufgabe04.real_robot.candidate.observation_deferral import Candidat
 
 
 class CandidateInspectionExecutionTest(unittest.TestCase):
+    def test_qr_observation_pose_completes_without_angle_or_another_move(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            observation = CandidateObservation(
+                None, "QR_003", None, None, root / "qr_observation_pose.json",
+            )
+            captures = []
+
+            def capture(frame, output, index):
+                captures.append(index)
+                return observation
+
+            result, frame = execute_candidate_inspection(
+                candidate_uid="candidate", candidate_root=root, initial_frame=0., max_views=8,
+                effects=CandidateInspectionEffects(
+                    capture=capture, canonical_normal=lambda frame: frame,
+                    move_view=lambda *args: self.fail("QR fallback requested another local move"),
+                    move_opposite=lambda *args: self.fail("QR fallback requested backside movement"),
+                    progress_evidence=lambda *args: self.fail("QR fallback became advisory"),
+                    distance_recovery=lambda *args: self.fail("QR fallback requested recovery"),
+                ),
+            )
+            self.assertIs(result, observation)
+            self.assertEqual(frame, 0.)
+            self.assertEqual(captures, [0])
+            progress = json.loads((root / "inspection_progress.json").read_text())
+            self.assertFalse(progress["joint_observation_ready"])
+            self.assertTrue(progress["qr_verified_observation_pose_ready"])
+            self.assertEqual(progress["termination_reason"], "qr_verified_observation_pose_ready")
+            self.assertEqual(progress["local_view_count"], 1)
+            evidence = progress["view_history"][0]["observation"]
+            self.assertIsNone(evidence["stand_axis_rad"])
+            self.assertFalse(evidence["facing_ready"])
+
     def test_joint_recommendation_at_first_view_never_requests_another_local_move(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

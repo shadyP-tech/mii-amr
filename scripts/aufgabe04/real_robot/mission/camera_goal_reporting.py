@@ -34,6 +34,19 @@ def validate_completed_qr_goal(
     confirmed = _uids(fields.get("confirmed_candidate_uids"), "confirmed candidates")
     if len(confirmed) != expected:
         raise ValueError("confirmed candidate count differs from the QR goal")
+    if any(key in fields for key in ("facing_ready_stand_count", "qr_only_stand_count", "facing_complete")):
+        facing_count = fields.get("facing_ready_stand_count")
+        qr_count = fields.get("qr_only_stand_count")
+        if (type(facing_count) is not int or type(qr_count) is not int
+                or min(facing_count, qr_count) < 0 or facing_count + qr_count != expected
+                or fields.get("facing_complete") is not (facing_count == expected)):
+            raise ValueError("QR discovery and facing completion counts disagree")
+        if qr_count:
+            path = fields.get("qr_observation_pose_catalog")
+            digest = fields.get("qr_observation_pose_catalog_sha256")
+            if (not isinstance(path, str) or not path or not isinstance(digest, str)
+                    or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest)):
+                raise ValueError("QR-only discovery is missing its observation pose catalog")
     for prefix in ("candidate_goal_progress", "confirmed_candidate_snapshot"):
         if not isinstance(fields.get(prefix), str) or not fields[prefix]:
             raise ValueError(f"completed camera mission is missing {prefix}")

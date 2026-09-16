@@ -40,10 +40,11 @@ def execute_candidate_inspection(
     *, candidate_uid: str, candidate_root: Path, initial_frame: Frame,
     max_views: int, effects: CandidateInspectionEffects[Frame, Observation],
 ) -> tuple[Observation, Frame]:
-    """Keep one candidate active until joint success or useful views exhaust.
+    """Keep one candidate active until verified discovery or useful views exhaust.
 
-    Intermediate QR and axis diagnostics are durable progress, never completion
-    authority. All live effects remain injected and all failures other than
+    Intermediate QR and axis diagnostics remain progress. A separately bound
+    QR observation pose completes discovery without claiming a stand angle.
+    All live effects remain injected and all failures other than
     explicitly local observation/no-motion feasibility failures propagate.
     """
 
@@ -81,6 +82,17 @@ def execute_candidate_inspection(
                              observation={"qr_id": observation.qr_id,
                                           "recommendation_path": str(observation.recommendation_path)})
                 state.termination_reason = "joint_observation_ready"
+            elif getattr(observation, "qr_observation_pose_path", None) is not None:
+                state.record(
+                    outcome="qr_verified_observation_pose", normal=normal,
+                    observation={
+                        "qr_id": observation.qr_id,
+                        "qr_observation_pose_path": str(observation.qr_observation_pose_path),
+                        "stand_axis_rad": None, "facing_ready": False,
+                        "completion_scope": "discovery_only",
+                    },
+                )
+                state.termination_reason = "qr_verified_observation_pose_ready"
             elif observation.axis_observation_path is not None:
                 progress = {"classification": "certified_backside",
                             "axis_observation_path": str(observation.axis_observation_path)}
@@ -88,7 +100,7 @@ def execute_candidate_inspection(
                 progress = effects.progress_evidence(frame, observation)
             else:
                 raise RuntimeError("observer returned no recommendation, certified axis, or inspection progress")
-            if observation.recommendation_path is None:
+            if state.termination_reason is None:
                 state.record(outcome="inspection_pending", normal=normal, observation=progress)
         except CandidateObservationUnavailableError as exc:
             last_error = exc
@@ -119,7 +131,9 @@ def execute_candidate_inspection(
                 raise exc from persistence_error
             raise
         persist()
-        if state.termination_reason == "joint_observation_ready":
+        if state.termination_reason in {
+            "joint_observation_ready", "qr_verified_observation_pose_ready",
+        }:
             return observation, frame
         if len(state.history) >= max_views:
             state.termination_reason = "view_budget_exhausted"

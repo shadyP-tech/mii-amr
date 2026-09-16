@@ -97,6 +97,7 @@ def build_completed_camera_mission_summary(
         "camera_approach_authorized": False,
         "camera_approach_executed": True,
         "camera_validation_complete": True,
+        "camera_geometry_complete": candidate_phase_fields.get("facing_complete", True),
         "camera_exploration_complete": True,
         "exploration_complete": True,
     }

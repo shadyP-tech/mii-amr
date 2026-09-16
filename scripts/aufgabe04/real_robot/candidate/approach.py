@@ -26,6 +26,9 @@ from scripts.aufgabe04.real_robot.candidate.qr_goal_progress import (
     CandidateQrGoalIncompleteError, CandidateQrGoalProgress, CandidateQrGoalProgressStore,
     resolve_candidate_qr_goal, validate_candidate_qr_goal_completion,
 )
+from scripts.aufgabe04.real_robot.candidate.qr_pose_discovery import (
+    bind_qr_pose_discovery, write_qr_pose_catalog, write_qr_pose_discovery,
+)
 from scripts.aufgabe04.real_robot.candidate.inspection_policy import (
     novel_view, validate_inspection_budget,
 )
@@ -308,6 +311,7 @@ class CandidateObservation:
     qr_id: str | None
     axis_observation_path: Path | None
     inspection_observation_path: Path | None = None
+    qr_observation_pose_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -360,10 +364,20 @@ class CandidateApproachComplete:
     observed_identities_path: Path | None = None
     observed_identities_sha256: str | None = None
     identity_binding_status: str = "server_binding_pending"
+    qr_observation_catalog_path: Path | None = None
+    qr_observation_catalog_sha256: str | None = None
+    qr_observation_records: tuple[Mapping[str, object], ...] = ()
 
     def to_mission_summary_fields(self) -> dict[str, object]:
         return {
             "stand_count": self.stand_count,
+            "candidate_completion_policy": "geometry_or_qr_verified_observation_pose",
+            "facing_ready_stand_count": len(self.facing_records),
+            "qr_only_stand_count": len(self.qr_observation_records),
+            "facing_complete": len(self.facing_records) == self.stand_count,
+            "qr_observation_pose_catalog": (None if self.qr_observation_catalog_path is None
+                                             else str(self.qr_observation_catalog_path)),
+            "qr_observation_pose_catalog_sha256": self.qr_observation_catalog_sha256,
             "stand_facing_catalog": str(self.stand_facing_catalog_path),
             "stand_facing_catalog_sha256": self.stand_facing_catalog_sha256,
             "station_identity_registry": (None if self.identity_registry_path is None
@@ -1979,6 +1993,7 @@ def execute_candidate_approach_phase(
     goal_store = CandidateQrGoalProgressStore(config.session_root)
     goal_store.write(goal)
     facing_records: list[Mapping[str, object]] = []
+    qr_observation_records: list[Mapping[str, object]] = []
     observed_qr_by_candidate: dict[str, str] = {}
     visit_order: list[str] = []
     candidate_index = 0
@@ -2355,36 +2370,54 @@ def execute_candidate_approach_phase(
         arrival_config = observation_frame.config
         candidate = observation_frame.candidate
         if observation.qr_id is None:
-            raise RuntimeError("camera recommendation has no QR identity")
-        stopped_pose = _read_finite_pose2d(
-            effects,
-            context="stopped_facing_validation",
-            candidate_uid=candidate.candidate_uid,
-        )
-        facing = dict(
-            effects.validate_facing(
-                FacingValidationRequest(
-                    config=arrival_config,
-                    candidate=candidate,
-                    recommendation_path=observation.recommendation_path,
-                    current_pose=stopped_pose,
-                    output_dir=candidate_root,
+            raise RuntimeError("completed camera observation has no QR identity")
+        qr_only = observation.qr_observation_pose_path is not None
+        discovery = None
+        facing = None
+        if qr_only:
+            discovery = bind_qr_pose_discovery(
+                observation=observation, observation_frame=observation_frame,
+                source_config=config, source_registry=source_registry,
+                source_registry_sha256=source_registry_sha256,
+            )
+            unique_identity = goal.record_observed_identity(
+                candidate.candidate_uid, observation.qr_id,
+                observation_pose_path=observation.qr_observation_pose_path,
+            )
+        else:
+            stopped_pose = _read_finite_pose2d(
+                effects,
+                context="stopped_facing_validation",
+                candidate_uid=candidate.candidate_uid,
+            )
+            facing = dict(
+                effects.validate_facing(
+                    FacingValidationRequest(
+                        config=arrival_config,
+                        candidate=candidate,
+                        recommendation_path=observation.recommendation_path,
+                        current_pose=stopped_pose,
+                        output_dir=candidate_root,
+                    )
                 )
             )
-        )
-        facing["qr_id"] = observation.qr_id
-        if observation_frame.decision_binding is not None:
-            facing.update(observation_frame.decision_binding.to_receipt_fields())
-        unique_identity = goal.record_validated_identity(
-            candidate.candidate_uid, observation.qr_id,
-            recommendation_path=observation.recommendation_path,
+            facing["qr_id"] = observation.qr_id
+            if observation_frame.decision_binding is not None:
+                facing.update(observation_frame.decision_binding.to_receipt_fields())
+            unique_identity = goal.record_validated_identity(
+                candidate.candidate_uid, observation.qr_id,
+                recommendation_path=observation.recommendation_path,
+            )
+        evidence_reference = (
+            {"qr_observation_pose_path": str(observation.qr_observation_pose_path)} if qr_only
+            else {"recommendation_path": str(observation.recommendation_path)}
         )
         if not unique_identity:
             ambiguity = CandidateObservationUnavailableError(
                 candidate_uid=candidate.candidate_uid,
                 observation_attempt_index=0,
                 reason="ambiguous_duplicate_qr",
-                process_evidence={"recommendation_path": str(observation.recommendation_path)},
+                process_evidence=evidence_reference,
                 status_evidence={"qr_id": observation.qr_id,
                                  "spatial_merge_authorized": False},
             )
@@ -2392,6 +2425,8 @@ def execute_candidate_approach_phase(
             confirmed_uids = set(goal.confirmed_candidate_uids)
             facing_records = [record for record in facing_records
                               if record["candidate_uid"] in confirmed_uids]
+            qr_observation_records = [record for record in qr_observation_records
+                                      if record["candidate_uid"] in confirmed_uids]
             observed_qr_by_candidate = {uid: qr for uid, qr in observed_qr_by_candidate.items()
                                         if uid in confirmed_uids}
             visit_order = [uid for uid in visit_order if uid in confirmed_uids]
@@ -2407,53 +2442,60 @@ def execute_candidate_approach_phase(
                 raise CandidateQrGoalIncompleteError(goal, attempt_evidence=observation_ledger.attempts)
             candidate_index += 1
             continue
-        receipt = candidate_root / "candidate_decision.json"
-        receipt_payload = build_camera_candidate_decision_receipt(
-            config=config,
-            candidate=candidate,
-            recommendation_path=observation.recommendation_path,
-            exact_two_support_by_uid=exact_two_support_by_uid,
-            camera_frame_binding=(
-                observation_frame.decision_binding
-                if exact_two_support_by_uid is not None
-                else None
-            ),
-        )
-        _write_json(receipt, receipt_payload)
-        effects.commit_decision(
-            CandidateDecisionRequest(
-                survey_root=config.survey_root,
-                receipt_path=receipt,
-                exact_two_camera_handoff_path=(
-                    config.exact_two_camera_handoff_path
-                ),
-                candidate_snapshot_path=(
-                    config.snapshot_path
+        if qr_only:
+            # This durable discovery receipt never enters the facing/axis
+            # decision path and never changes source candidate geometry.
+            write_qr_pose_discovery(candidate_root / "candidate_qr_discovery.json", discovery)
+            qr_observation_records.append(discovery)
+        else:
+            receipt = candidate_root / "candidate_decision.json"
+            receipt_payload = build_camera_candidate_decision_receipt(
+                config=config,
+                candidate=candidate,
+                recommendation_path=observation.recommendation_path,
+                exact_two_support_by_uid=exact_two_support_by_uid,
+                camera_frame_binding=(
+                    observation_frame.decision_binding
                     if exact_two_support_by_uid is not None
                     else None
                 ),
-                camera_candidate_snapshot_path=(
-                    None
-                    if exact_two_support_by_uid is None
-                    or observation_frame.decision_binding is None
-                    else observation_frame.decision_binding.camera_snapshot_path
-                ),
-                candidate_frame_projection_path=(
-                    None
-                    if exact_two_support_by_uid is None
-                    or observation_frame.decision_binding is None
-                    else observation_frame.decision_binding.projection_path
-                ),
             )
-        )
+            _write_json(receipt, receipt_payload)
+            effects.commit_decision(
+                CandidateDecisionRequest(
+                    survey_root=config.survey_root,
+                    receipt_path=receipt,
+                    exact_two_camera_handoff_path=(
+                        config.exact_two_camera_handoff_path
+                    ),
+                    candidate_snapshot_path=(
+                        config.snapshot_path
+                        if exact_two_support_by_uid is not None
+                        else None
+                    ),
+                    camera_candidate_snapshot_path=(
+                        None
+                        if exact_two_support_by_uid is None
+                        or observation_frame.decision_binding is None
+                        else observation_frame.decision_binding.camera_snapshot_path
+                    ),
+                    candidate_frame_projection_path=(
+                        None
+                        if exact_two_support_by_uid is None
+                        or observation_frame.decision_binding is None
+                        else observation_frame.decision_binding.projection_path
+                    ),
+                )
+            )
         resolved_attempt = observation_ledger.mark_resolved(
             {
                 "candidate_uid": candidate.candidate_uid,
                 "qr_id": observation.qr_id,
-                "recommendation_path": str(observation.recommendation_path),
+                **evidence_reference,
             }
         )
-        facing_records.append(facing)
+        if facing is not None:
+            facing_records.append(facing)
         observed_qr_by_candidate[candidate.candidate_uid] = observation.qr_id
         visit_order.append(candidate.candidate_uid)
         unresolved.discard(candidate.candidate_uid)
@@ -2463,6 +2505,9 @@ def execute_candidate_approach_phase(
             {
                 **resolved_attempt.to_dict(),
                 "event": "camera_candidate_observation_resolved",
+                "observation_kind": ("qr_verified_observation_pose" if qr_only
+                                     else "geometry_validated_facing_pose"),
+                "facing_ready": not qr_only,
                 "timestamp_unix_sec": effects.clock(),
                 "future_motion_requires_fresh_live_gates": True,
                 "motion_authorized": False,
@@ -2482,7 +2527,9 @@ def execute_candidate_approach_phase(
                 "candidate_goal_progress_sha256": goal_sha256,
                 "stop_after_camera_candidates": pilot_limit,
                 "observed_qr_by_candidate": dict(observed_qr_by_candidate),
-                "records": list(facing_records), "progress": goal.to_dict(),
+                "records": list(facing_records),
+                "qr_observation_records": list(qr_observation_records),
+                "progress": goal.to_dict(),
                 "calibration_profile_sha256": config.calibration_profile_sha256,
                 "robot_profile_sha256": config.robot_profile_sha256,
                 "source_registry_path": None if source_registry_path is None else str(source_registry_path),
@@ -2499,11 +2546,13 @@ def execute_candidate_approach_phase(
         raise CandidateQrGoalIncompleteError(goal, attempt_evidence=observation_ledger.attempts)
     confirmed_uids = set(goal.confirmed_candidate_uids)
     if (
-        len(facing_records) != expected_count
+        len(facing_records) + len(qr_observation_records) != expected_count
         or len(observed_qr_by_candidate) != expected_count
         or len(visit_order) != expected_count
         or set(observed_qr_by_candidate) != confirmed_uids
         or len(set(observed_qr_by_candidate.values())) != expected_count
+        or {record["candidate_uid"] for record in facing_records} != set(goal.facing_ready_candidate_uids)
+        or {record["candidate_uid"] for record in qr_observation_records} != set(goal.qr_only_candidate_uids)
     ):
         raise RuntimeError(
             "candidate approach completion invariant failed before final "
@@ -2563,6 +2612,9 @@ def execute_candidate_approach_phase(
         "source_registry_path": None if source_registry_path is None else str(source_registry_path),
         "source_registry_sha256": source_registry_sha256,
         "stand_count": len(facing_records),
+        "facing_complete": len(facing_records) == expected_count,
+        "qr_only_stand_count": len(qr_observation_records),
+        "discovered_stand_count": expected_count,
         "records": sorted(
             facing_records,
             key=lambda item: str(item["candidate_uid"]),
@@ -2573,6 +2625,13 @@ def execute_candidate_approach_phase(
         catalog_path,
         catalog,
         hash_field="stand_facing_catalog_sha256",
+    )
+    qr_catalog_path = config.session_root / "qr_observation_pose_catalog.json"
+    qr_catalog_sha256 = write_qr_pose_catalog(
+        qr_catalog_path,
+        metadata={key: value for key, value in catalog.items()
+                  if key not in {"catalog_kind", "records", "stand_count", "schema_version"}},
+        records=qr_observation_records,
     )
     written_confirmed_snapshot = load_candidate_snapshot(confirmed_snapshot_path)
     written_identity_registry = (None if identity_path is None else load_station_identity_registry(
@@ -2595,7 +2654,7 @@ def execute_candidate_approach_phase(
     if payload_sha256(written_progress) != goal_sha256:
         raise ValueError("written goal progress hash differs from completion evidence")
     return CandidateApproachComplete(
-        stand_count=len(facing_records),
+        stand_count=len(observed_qr_by_candidate),
         visit_order=tuple(visit_order),
         identity_registry_path=identity_path,
         identity_registry_sha256=identity_sha256,
@@ -2612,6 +2671,9 @@ def execute_candidate_approach_phase(
         observed_identities_path=observed_path,
         observed_identities_sha256=observed_sha256,
         identity_binding_status=binding_status,
+        qr_observation_catalog_path=qr_catalog_path,
+        qr_observation_catalog_sha256=qr_catalog_sha256,
+        qr_observation_records=tuple(qr_observation_records),
     )
 
 

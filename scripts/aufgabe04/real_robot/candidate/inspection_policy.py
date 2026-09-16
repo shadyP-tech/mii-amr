@@ -123,5 +123,8 @@ class CandidateInspectionState:
             "camera_distance_recovery_attempted": self.camera_distance_recovery_attempted,
             "joint_observation_ready": bool(self.history and
                                             self.history[-1]["outcome"] == "resolved"),
+            "qr_verified_observation_pose_ready": (
+                self.termination_reason == "qr_verified_observation_pose_ready"
+            ),
             "completion_authorized": False, "motion_authorized": False,
         }

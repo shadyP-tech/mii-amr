@@ -159,6 +159,7 @@ class AutonomousCameraCaptureTests(unittest.TestCase):
         for result in (
             (Path("recommendation.json"), "QR_004", None),
             (None, "QR_001", None, Path("inspection.json")),
+            (None, "QR_003", None, None, Path("qr_observation_pose.json")),
         ):
             with self.subTest(result=result):
                 capture.return_value = result
@@ -169,7 +170,11 @@ class AutonomousCameraCaptureTests(unittest.TestCase):
                 self.assertEqual(observation.qr_id, result[1])
                 self.assertEqual(
                     observation.inspection_observation_path,
-                    result[3] if len(result) == 4 else None,
+                    result[3] if len(result) >= 4 else None,
+                )
+                self.assertEqual(
+                    observation.qr_observation_pose_path,
+                    result[4] if len(result) == 5 else None,
                 )
 
     @patch.object(runtime.subprocess, "Popen")

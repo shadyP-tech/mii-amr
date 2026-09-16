@@ -1,7 +1,7 @@
 """Bounded hypothesis dispositions and distinct, validated QR mission progress.
 
 The immutable survey snapshot remains the obstacle/route authority. This ledger
-only selects which jointly validated identities may enter the final catalog;
+records QR discovery separately from geometry-backed facing readiness;
 rejected, exhausted, ambiguous, and unvisited hypotheses are never removed from
 that snapshot. A duplicate QR quarantines every claimant instead of choosing a
 spatial identity or counting the same message twice.
@@ -33,6 +33,8 @@ from scripts.aufgabe04.stations.candidate_snapshot import CandidateSnapshot
 
 
 GOAL_PROGRESS_HASH_FIELD = "candidate_goal_progress_sha256"
+GEOMETRY_FACING_EVIDENCE = "geometry_validated_facing_pose"
+QR_OBSERVATION_EVIDENCE = "qr_verified_observation_pose"
 
 
 def resolve_candidate_qr_goal(*, configured_count: int | None,
@@ -110,6 +112,20 @@ class CandidateQrGoalProgress:
     def complete(self) -> bool:
         return len(self.confirmed_candidate_uids) == self.expected_stand_count
 
+    @property
+    def facing_ready_candidate_uids(self) -> tuple[str, ...]:
+        return tuple(uid for uid in self.confirmed_candidate_uids
+                     if self._records[uid]["evidence_kind"] == GEOMETRY_FACING_EVIDENCE)
+
+    @property
+    def qr_only_candidate_uids(self) -> tuple[str, ...]:
+        return tuple(uid for uid in self.confirmed_candidate_uids
+                     if self._records[uid]["evidence_kind"] == QR_OBSERVATION_EVIDENCE)
+
+    @property
+    def facing_complete(self) -> bool:
+        return len(self.facing_ready_candidate_uids) == self.expected_stand_count
+
     def _record(self, uid: str) -> dict[str, object]:
         if uid not in self._records:
             raise ValueError(f"unknown goal candidate {uid!r}")
@@ -142,11 +158,36 @@ class CandidateQrGoalProgress:
         revokes the first claimant from the completion count, retaining both
         observations and all geometry as explicit duplicate ambiguity.
         """
+        return self._record_identity(
+            uid, qr_id, evidence_kind=GEOMETRY_FACING_EVIDENCE,
+            evidence_path_field="recommendation_path", evidence_path=recommendation_path,
+        )
+
+    def record_observed_identity(self, uid: str, qr_id: str, *,
+                                 observation_pose_path: Path) -> bool:
+        """Count a validated QR observation without asserting a stand angle.
+
+        The caller validates current, stopped, uniquely associated observation
+        evidence before recording it. The robot observation pose is not a stand
+        pose or a geometry-backed facing target. Duplicate quarantine is shared
+        with geometry-backed observations.
+        """
+        return self._record_identity(
+            uid, qr_id, evidence_kind=QR_OBSERVATION_EVIDENCE,
+            evidence_path_field="observation_pose_path", evidence_path=observation_pose_path,
+        )
+
+    def _record_identity(self, uid: str, qr_id: str, *, evidence_kind: str,
+                         evidence_path_field: str, evidence_path: Path) -> bool:
         record = self._record(uid)
         qr_id = canonical_qr_id(qr_id)
         if record["qr_id"] is not None:
             raise RuntimeError("candidate already has a validated QR claim")
-        record.update(qr_id=qr_id, recommendation_path=str(recommendation_path))
+        if not isinstance(evidence_path, Path) or str(evidence_path) == ".":
+            raise ValueError("validated QR claim requires an evidence artifact path")
+        record.update(qr_id=qr_id, evidence_kind=evidence_kind,
+                      facing_ready=evidence_kind == GEOMETRY_FACING_EVIDENCE)
+        record[evidence_path_field] = str(evidence_path)
         claimants = self._qr_claims.setdefault(qr_id, [])
         claimants.append(uid)
         if len(claimants) == 1:
@@ -155,6 +196,7 @@ class CandidateQrGoalProgress:
         for claimant in claimants:
             self._records[claimant].update(
                 disposition="ambiguous_duplicate_qr",
+                facing_ready=False,
                 conflicting_candidate_uids=sorted(claimants),
                 spatial_merge_authorized=False,
             )
@@ -183,6 +225,11 @@ class CandidateQrGoalProgress:
             "goal_completed": self.complete,
             "confirmed_stand_count": len(confirmed),
             "confirmed_candidate_uids": list(confirmed),
+            "facing_complete": self.facing_complete,
+            "facing_ready_stand_count": len(self.facing_ready_candidate_uids),
+            "facing_ready_candidate_uids": list(self.facing_ready_candidate_uids),
+            "qr_only_stand_count": len(self.qr_only_candidate_uids),
+            "qr_only_candidate_uids": list(self.qr_only_candidate_uids),
             "confirmed_qr_ids": sorted(str(self._records[uid]["qr_id"]) for uid in confirmed),
             "remaining_candidate_uids": sorted(set(self.candidate_uids) - set(confirmed)),
             "unvisited_candidate_uids": sorted(set(self.candidate_uids) - set(self._inspection_order)),
@@ -225,7 +272,7 @@ def validate_candidate_qr_goal_completion(
     """Verify final progress against both snapshots and the identity registry.
 
     This validates the resulting artifact graph; it does not grant motion or
-    manufacture the camera/pose evidence owned by the caller's facing validator.
+    manufacture camera/pose evidence owned by the caller's observation validator.
     """
     from dataclasses import replace
     from scripts.aufgabe04.stations.candidate_snapshot import candidate_snapshot_sha256
@@ -287,6 +334,9 @@ def validate_candidate_qr_goal_completion(
                "route_admission_deferred", "route_admission_exhausted",
                "ambiguous_duplicate_qr", "not_visited_goal_reached"}
     claims: dict[str, list[str]] = {}
+    facing_uids: list[str] = []
+    qr_only_uids: list[str] = []
+    modern_evidence = False
     for item in dispositions:
         uid = item["candidate_uid"]
         if item.get("disposition") not in allowed:
@@ -297,10 +347,39 @@ def validate_candidate_qr_goal_completion(
             raise ValueError("candidate disposition QR differs from final identity")
         if item.get("qr_id") is not None:
             claims.setdefault(str(item["qr_id"]), []).append(uid)
+            kind = item.get("evidence_kind", GEOMETRY_FACING_EVIDENCE)
+            modern_evidence = modern_evidence or "evidence_kind" in item
+            if kind not in {GEOMETRY_FACING_EVIDENCE, QR_OBSERVATION_EVIDENCE}:
+                raise ValueError("candidate QR claim has unsupported evidence kind")
+            has_facing_geometry = kind == GEOMETRY_FACING_EVIDENCE
+            facing_ready = has_facing_geometry and item["disposition"] == "confirmed_unique_qr"
+            if ("evidence_kind" in item or "facing_ready" in item) and item.get("facing_ready") is not facing_ready:
+                raise ValueError("candidate QR claim has untruthful facing readiness")
+            path_field = "recommendation_path" if has_facing_geometry else "observation_pose_path"
+            evidence_path = item.get(path_field)
+            if not isinstance(evidence_path, str) or not evidence_path.strip() or evidence_path == ".":
+                raise ValueError("candidate QR claim lacks its evidence artifact reference")
+            if not has_facing_geometry and item.get("recommendation_path") is not None:
+                raise ValueError("QR-only discovery must not claim a facing recommendation")
+            if uid in identities:
+                (facing_uids if facing_ready else qr_only_uids).append(uid)
         candidate = candidate_snapshot.candidate_for(uid)
         advisories = [advisory.to_dict() for advisory in candidate.source.perception_advisories]
         if item.get("perception_advisories") != advisories:
             raise ValueError("candidate goal dropped or changed perception advisories")
+    readiness_fields = {
+        "facing_complete": len(facing_uids) == expected_stand_count,
+        "facing_ready_stand_count": len(facing_uids),
+        "facing_ready_candidate_uids": facing_uids,
+        "qr_only_stand_count": len(qr_only_uids),
+        "qr_only_candidate_uids": qr_only_uids,
+    }
+    # Old geometry-only ledgers did not contain readiness metadata. Any new
+    # evidence or readiness field requires the whole internally consistent set.
+    if modern_evidence or any(field in payload for field in readiness_fields):
+        for field, expected in readiness_fields.items():
+            if type(payload.get(field)) is not type(expected) or payload[field] != expected:
+                raise ValueError(f"candidate QR goal readiness mismatch: {field}")
     for item in dispositions:
         if item["disposition"] == "ambiguous_duplicate_qr":
             claimants = claims.get(str(item.get("qr_id")), [])
