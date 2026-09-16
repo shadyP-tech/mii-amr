@@ -13,6 +13,7 @@ except ImportError:
     cv2 = np = None
 
 from scripts.aufgabe04.perception.stand_axis.head_model_fit import fit_current_measured_head
+from scripts.aufgabe04.perception.stand_axis.head_acquisition_budget import HeadAcquisitionDeadlineExceeded
 from scripts.aufgabe04.perception.stand_axis.head_outer_border import (
     check_current_head_marker_boundary, current_head_boundary_eligible,
     select_current_outer_head_border,
@@ -77,6 +78,25 @@ class HeadBoundaryIndependenceTest(unittest.TestCase):
         self.assertEqual(evidence.reason, "current_physical_head_boundary_unresolved")
         self.assertFalse(validated_current_head_boundary(evidence, corners=recovered.corners,
                                                         profile_sha256=self.profile.sha256))
+
+    def test_outer_fit_expiry_stops_before_the_next_raw_growth_fit(self):
+        corners, _camera = self.projection()
+        raw = self.raw(corners)
+        measured = refine_projected_head_border(cv2, raw, corners, corridor_half_width_px=4.)
+        self.assertTrue(measured.accepted)
+        clock = [0.]
+        def expire(*args, **kwargs):
+            clock[0] = 2.
+            return measured
+        with patch("scripts.aufgabe04.perception.stand_axis.head_acquisition_budget.time.monotonic",
+                   side_effect=lambda: clock[0]), \
+             patch("scripts.aufgabe04.perception.stand_axis.head_outer_border.refine_projected_head_border",
+                   side_effect=expire) as refine:
+            with self.assertRaises(HeadAcquisitionDeadlineExceeded):
+                select_current_outer_head_border(cv2, raw, model_profile=self.profile,
+                    refinement=measured, corridor_half_width_px=4.,
+                    neutral_proposal_corners=corners, deadline_monotonic_sec=1.)
+        refine.assert_called_once()
 
     def test_recovered_outer_angle_is_identical_under_qr_ratio_disagreement(self):
         outer, camera = self.projection()

@@ -130,7 +130,7 @@ class ScanTargetGeometryTests(unittest.TestCase):
                 "camera_info_mismatches": dict(return_value=()),
                 "transform_mismatches": dict(return_value=()),
                 "compressed_msg_to_bgr_frame": dict(return_value=numpy.zeros((600, 800, 3), dtype=numpy.uint8)),
-                "_rectify_bgr_frame": dict(side_effect=lambda value, *_: value),
+                "_rectify_bgr_frame": dict(side_effect=lambda value, *_, **_kwargs: value),
                 "detect_qr_observations_bgr": dict(return_value=()),
                 "detect_native_qr_observations_bgr": dict(return_value=()),
                 "estimate_stand_axis_from_metric_model": dict(side_effect=metric),

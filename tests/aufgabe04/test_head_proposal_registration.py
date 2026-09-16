@@ -145,6 +145,23 @@ class HeadProposalRegistrationTest(unittest.TestCase):
         commit.assert_called_once()
         self.assertTrue(result.registered)
         self.assertEqual(len(self.calls), 1)
+        timing = self.diagnostics["association_timing"]
+        self.assertEqual(timing["preview_count"], 2)
+        self.assertEqual(timing["resolution_count"], 1)
+        for name in ("bearing_ms", "current_scan_ms", "persistence_preview_ms",
+                     "persistence_resolution_ms"):
+            self.assertGreaterEqual(timing[name], 0.)
+
+    def test_association_diagnostics_survive_locator_timeout(self):
+        preview = Mock(side_effect=lambda association, _scan: association)
+        def locate(_cv2, _frame, **options):
+            self.assertTrue(options["proposal_filter"](self.proposal))
+            return None
+        self.assertIsNone(self.acquire(locator=locate, preview_lidar_association=preview))
+        self.assertEqual(self.diagnostics["association_timing"]["preview_count"], 1)
+        self.assertEqual(self.diagnostics["association_timing"]["resolution_count"], 0)
+        self.assertEqual(len(self.diagnostics["proposal_associations"]), 1)
+        self.assertTrue(self.diagnostics["proposal_associations"][0]["associated"])
 
     def test_stateful_resolver_without_preview_never_consumes_competing_proposals(self):
         commit = Mock(side_effect=lambda association, _scan: association)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 from types import SimpleNamespace
+from dataclasses import asdict
 
 from scripts.aufgabe04.perception.stand_axis.geometry import (
     _distance, _polygon_area, _well_formed_quadrilateral, order_corners,
@@ -22,6 +23,13 @@ from scripts.aufgabe04.perception.stand_axis.head_proposal_selection import (
     rank_current_head_hypotheses, select_verified_head, uncovered_head_hypotheses,
 )
 from scripts.aufgabe04.perception.stand_axis.model_refinement import refine_projected_head_border
+from scripts.aufgabe04.perception.stand_axis.current_head_refinement import refine_current_physical_head
+from scripts.aufgabe04.perception.stand_axis.current_head_refinement_proof import capture_current_head_refinement
+from scripts.aufgabe04.perception.stand_axis.head_frame_resolution import (
+    distinct_current_frames, resolved_current_frame, resolved_tested_head_hint,
+    resolve_measured_current_frames,
+    CurrentFrameResolutionRecord,
+)
 from scripts.aufgabe04.perception.stand_axis.models import ImagePoint
 from scripts.aufgabe04.perception.stand_axis.head_search_bounds import HeadSearchBounds
 from scripts.aufgabe04.perception.stand_axis.head_border_families import CurrentBorderFamilies
@@ -62,7 +70,7 @@ def _bounded_quad(points, shape):
 
 def _rail_endpoint_hints(cv2, gray, raw_edges, *, deadline_monotonic_sec=None,
                          search_bounds=None, rail_groups_out=None):
-    """Pair bounded opposite current line segments, independent of head scale."""
+    """Pair current line segments, using candidate scale only to order hints."""
     import numpy as np
 
     detected = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD).detect(gray)[0]
@@ -114,17 +122,23 @@ def _rail_endpoint_hints(cv2, gray, raw_edges, *, deadline_monotonic_sec=None,
             ):
                 continue
             distinct.append(item)
-        # Long room boundaries must not consume every slot before a small
-        # stand's rails are seen. Spread the fixed budget across measured line
-        # scales and horizontal image thirds, without favouring the centre.
-        strata = {}
-        for item in distinct:
-            length, a, b = item
-            key = (max(0, int(math.log2(length / MIN_HEAD_EDGE_PX))),
-                   min(2, int(3. * (a[0] + b[0]) / (2. * gray.shape[1]))))
-            strata.setdefault(key, []).append(item)
-        groups[direction][:] = [bucket[index] for index in range(max(map(len, strata.values()), default=0))
-                                for _key, bucket in sorted(strata.items()) if index < len(bucket)][:MAX_RAILS_PER_DIRECTION]
+        if search_bounds is not None:
+            # The projected physical size already bounds this candidate. Give
+            # its complete rails a slot before small printed-texture fragments;
+            # position/scale remain hints, not measured corners or an angle.
+            groups[direction][:] = sorted(distinct, key=lambda item: (
+                abs(math.log(item[0] / search_bounds.height)), item[1:]))[:MAX_RAILS_PER_DIRECTION]
+        else:
+            # Without a projected candidate, spread the fixed budget across
+            # line scales and image thirds so room boundaries cannot monopolize it.
+            strata = {}
+            for item in distinct:
+                length, a, b = item
+                key = (max(0, int(math.log2(length / MIN_HEAD_EDGE_PX))),
+                       min(2, int(3. * (a[0] + b[0]) / (2. * gray.shape[1]))))
+                strata.setdefault(key, []).append(item)
+            groups[direction][:] = [bucket[index] for index in range(max(map(len, strata.values()), default=0))
+                                    for _key, bucket in sorted(strata.items()) if index < len(bucket)][:MAX_RAILS_PER_DIRECTION]
         group = groups[direction]
         cross = 1 - direction
         for index, (length, first, last) in enumerate(group):
@@ -165,6 +179,7 @@ def acquire_cold_head_proposal(
     expected_head_center_u_px=None, expected_head_center_v_px=None,
     expected_head_height_px=None, max_center_offset_ratio=.70,
     expected_head_height_tolerance_ratio=.35, proposal_filter=None,
+    model_profile=None, refinement_out=None,
 ) -> HeadProposalResult:
     """Locate a unique complete head in a bounded image without a prior pose.
 
@@ -174,6 +189,9 @@ def acquire_cold_head_proposal(
     Unverified independent families remain unresolved on budget exhaustion.
     """
     import numpy as np
+
+    if refinement_out is not None:
+        refinement_out.clear()
 
     diagnostics = {
         "method": _LOCATOR, "max_image_pixels": MAX_IMAGE_PIXELS,
@@ -186,6 +204,8 @@ def acquire_cold_head_proposal(
         "selection": "unavailable", "strict_verifications": [],
         "candidate_bounds_rejections": 0, "candidate_association_rejections": 0,
         "candidate_association_previews": 0, "candidate_association_preview_rejections": 0,
+        "physical_frame_refinement": model_profile is not None,
+        "resolved_hint_aliases": 0, "raw_border_refinements": 0,
     }
 
     def result(reason, proposal=None):
@@ -260,9 +280,9 @@ def acquire_cold_head_proposal(
         if search_bounds is not None and not search_bounds.accepts(corners):
             diagnostics["candidate_bounds_rejections"] += 1
             _width, height, center = _extent(corners)
-            # Small closed texture boxes still explain cross-paired internal
+            # Small supported texture boxes still explain cross-paired internal
             # rails, but never spend a strict physical-head verification slot.
-            texture_only = (locator == "closed_contour" and height < .65 * search_bounds.height
+            texture_only = (height < .65 * search_bounds.height
                 and math.dist(center, search_bounds.center)
                     <= (search_bounds.center_offset_ratio + .5) * search_bounds.height)
             if not texture_only:
@@ -326,19 +346,48 @@ def acquire_cold_head_proposal(
     texture_pool = ordered + list(texture_hints.values())
     accepted = []
     verified_proposals = []
+    untested = []
+    tested_hints = set()
+    tested_frame_resolutions = []
+    measured_frames = {}
     def verify(items):
         for score, corners, locator in items:
             check_head_acquisition_deadline(deadline_monotonic_sec, "cold_strict_verification",
                 considered_proposals=len(hypotheses), raw_verifications=len(diagnostics["strict_verifications"]))
-            measured = refine_projected_head_border(cv2, raw_edges, corners, corridor_half_width_px=4.)
+            hint_key = tuple(corners)
+            if hint_key in tested_hints:
+                diagnostics["exact_duplicate_hints"] = diagnostics.get("exact_duplicate_hints", 0) + 1
+                continue
+            if model_profile is not None and resolved_current_frame(
+                    corners, verified_proposals, border_families) is not None:
+                diagnostics["resolved_hint_aliases"] += 1
+                continue
+            if model_profile is not None and resolved_tested_head_hint(
+                    corners, tested_frame_resolutions, border_families) is not None:
+                diagnostics["resolved_tested_hint_aliases"] = diagnostics.get("resolved_tested_hint_aliases", 0) + 1
+                continue
+            if len(diagnostics["strict_verifications"]) >= MAX_RAW_VERIFICATIONS:
+                untested.append((score, corners, locator))
+                continue
+            tested_hints.add(hint_key)
+            outer = None
+            if model_profile is None:
+                measured = refine_projected_head_border(cv2, raw_edges, corners, corridor_half_width_px=4.)
+                diagnostics["raw_border_refinements"] += 1
+            else:
+                measured, outer, _seed = refine_current_physical_head(
+                    cv2, raw_edges, model_profile=model_profile, proposal_corners=corners,
+                    deadline_monotonic_sec=deadline_monotonic_sec)
+                diagnostics["raw_border_refinements"] += 1 + outer.attempted_raw_refinements
             diagnostics["strict_verifications"].append({
                 "locator": locator, "score": score, "accepted": measured.accepted,
                 "reason": measured.reason,
                 "locator_corners": [(p.u_px, p.v_px) for p in corners],
                 "corners": None if measured.corners is None else
                     [(p.u_px, p.v_px) for p in measured.corners],
+                "physical_frame": None if outer is None else asdict(outer),
             })
-            if measured.accepted:
+            if measured.accepted and (outer is None or outer.accepted):
                 _width, height, center = _extent(measured.corners)
                 if search_bounds is not None and not search_bounds.accepts(measured.corners):
                     diagnostics["candidate_bounds_rejections"] += 1
@@ -347,11 +396,16 @@ def acquire_cold_head_proposal(
                     expected_height=height if search_bounds is None else search_bounds.height,
                     expected_center=center if search_bounds is None else search_bounds.center)
                 verified_proposals.append(proposal)
+                if outer is not None:
+                    tested_frame_resolutions.append(CurrentFrameResolutionRecord(
+                        tuple(corners), tuple(outer.original_corners), proposal, outer))
                 if proposal_filter is not None and not proposal_filter(proposal):
                     diagnostics["candidate_association_rejections"] += 1
                     continue
                 accepted.append(proposal)
-    verify(ordered[:MAX_RAW_VERIFICATIONS])
+                if outer is not None:
+                    measured_frames[proposal.corners] = (measured, outer, _seed)
+    verify(ordered)
     used = len(diagnostics["strict_verifications"])
     # Fragment rescue cannot replace an already accepted/ambiguous physical
     # head and shares the original twelve strict checks, never a fresh budget.
@@ -392,8 +446,21 @@ def acquire_cold_head_proposal(
         ordered.extend(rescue)
         texture_pool.extend(rescue)
         diagnostics["considered_proposals"] += len(rescue)
-        verify(rescue[:MAX_RAW_VERIFICATIONS-used])
-    uncovered = uncovered_head_hypotheses(ordered[MAX_RAW_VERIFICATIONS:], verified_proposals,
+        verify(rescue)
+    if model_profile is not None:
+        before_untested = len(untested)
+        untested = [item for item in untested if resolved_current_frame(
+            item[1], verified_proposals, border_families) is None
+            and resolved_tested_head_hint(item[1], tested_frame_resolutions, border_families) is None]
+        diagnostics["resolved_post_budget_hint_aliases"] = before_untested - len(untested)
+        before = len(accepted)
+        resolved = resolve_measured_current_frames(
+            accepted, tested_frame_resolutions, border_families)
+        diagnostics["resolved_measured_frame_recoveries"] = sum(
+            original is not replacement for original, replacement in zip(accepted, resolved))
+        accepted = distinct_current_frames(resolved, border_families)
+        diagnostics["resolved_physical_frame_aliases"] = before - len(accepted)
+    uncovered = uncovered_head_hypotheses(untested, verified_proposals,
         cv2=cv2, raw_edges=raw_edges, frame_bgr=frame_bgr, all_hypotheses=texture_pool,
         border_families=border_families, deadline_monotonic_sec=deadline_monotonic_sec)
     check_head_acquisition_deadline(deadline_monotonic_sec, "cold_head_selection",
@@ -409,4 +476,9 @@ def acquire_cold_head_proposal(
     diagnostics.update(selection)
     check_head_acquisition_deadline(deadline_monotonic_sec, "cold_complete_head_selection",
         considered_proposals=len(hypotheses), raw_verifications=len(diagnostics["strict_verifications"]))
+    if selected is not None and refinement_out is not None and model_profile is not None:
+        measured, outer, seed = measured_frames[selected.corners]
+        refinement_out["selected"] = capture_current_head_refinement(
+            frame_bgr, raw_edges, model_profile=model_profile,
+            refinement=measured, outer_recovery=outer, seed=seed)
     return result(reason, selected)

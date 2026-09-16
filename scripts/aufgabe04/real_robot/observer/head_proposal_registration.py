@@ -91,6 +91,7 @@ def acquire_registered_head_measurement(
     preview_lidar_association=None,
     deadline_monotonic_sec: float | None = None,
     current_ros_sec=None,
+    model_profile=None,
 ) -> CameraTargetRegistrationSelection | None:
     """At most one geometric retry, after unique candidate/LiDAR association."""
     import time
@@ -115,8 +116,16 @@ def acquire_registered_head_measurement(
 
     roi = search.roi
     associations = []
+    association_timing = dict(preview_count=0, resolution_count=0,
+        bearing_ms=0.0, current_scan_ms=0.0, persistence_preview_ms=0.0,
+        persistence_resolution_ms=0.0)
+    diagnostics["proposal_associations"] = associations
+    diagnostics["association_timing"] = association_timing
 
     def associate(proposal, *, preview=False):
+        count_key = "preview_count" if preview else "resolution_count"
+        association_timing[count_key] += 1
+        bearing_started = time.perf_counter()
         try:
             bearing = rectified_pixel_bearing_in_scan(
                 u_px=proposal.center_u_px + roi.x0, v_px=proposal.center_v_px + roi.y0,
@@ -125,6 +134,9 @@ def acquire_registered_head_measurement(
                 scan_from_camera=scan_from_camera)
         except ValueError:
             return None
+        finally:
+            association_timing["bearing_ms"] += (time.perf_counter() - bearing_started) * 1000.0
+        scan_started = time.perf_counter()
         association = associate_camera_registered_candidate_lidar_target(
             scan, map_bearing_rad=map_bearing_rad, observed_camera_bearing_rad=bearing,
             cone_half_angle_rad=cone_half_angle_rad, accepted_range_m=accepted_range_m,
@@ -132,9 +144,13 @@ def acquire_registered_head_measurement(
             max_scan_age_sec=max_scan_age_sec,
             min_cluster_sample_count=min_cluster_sample_count,
             max_camera_map_bearing_delta_rad=max_camera_map_bearing_delta_rad)
+        association_timing["current_scan_ms"] += (time.perf_counter() - scan_started) * 1000.0
         resolver = preview_lidar_association if preview else resolve_lidar_association
         if resolver is not None:
+            persistence_started = time.perf_counter()
             association = resolver(association, scan)
+            timing_key = "persistence_preview_ms" if preview else "persistence_resolution_ms"
+            association_timing[timing_key] += (time.perf_counter() - persistence_started) * 1000.0
         return association
 
     def eligible(proposal):
@@ -151,12 +167,15 @@ def acquire_registered_head_measurement(
 
     search_frame = frame[roi.y0:roi.y1, roi.x0:roi.x1]
     viewer_trial = {}
+    refinement_out = {}
     result = acquire_viewer_candidate_head(
         cv2, search_frame,
         expected_center=(search.expected_center_u_px - roi.x0, search.expected_center_v_px - roi.y0),
         expected_height=search.expected_head_height_px, max_center_offset_ratio=max_center_offset_ratio,
         edge_preprocess=edge_preprocess, canny_low=canny_low, canny_high=canny_high,
         proposal_filter=eligible,
+        model_profile=model_profile,
+        refinement_out=refinement_out,
         deadline_monotonic_sec=deadline_monotonic_sec, diagnostics=viewer_trial)
     diagnostics["viewer_candidate_trial"] = viewer_trial
     diagnostics["acquisition_policy"] = "shared_candidate_current_borders"
@@ -168,7 +187,6 @@ def acquire_registered_head_measurement(
                        raw_verifications=result.raw_verifications,
                        elapsed_ms=(time.monotonic() - start) * 1000.0,
                        candidate_associated=False)
-    diagnostics["proposal_associations"] = associations
     diagnostics["vertical_search_half_height_ratio"] = min(.75, max_center_offset_ratio)
     # The locator carries stage and comparison-completeness evidence even
     # when its cooperative deadline expires. Preserve that evidence before
@@ -204,9 +222,22 @@ def acquire_registered_head_measurement(
     if expired():
         diagnostics["reason"] = "head_acquisition_deadline_exceeded"
         return reject_proposal()
-    # The current-image proposal is only a raw-border seed. It is never used
-    # as a QR pose, temporal pose, accepted normal or cached angle.
-    strict = evaluate(registered.attempt, registered.corners)
+    # Carry the selected current boundary into the recentered view. It has no
+    # pose authority; the ordinary 3D solve measures this exact boundary once.
+    refinement = refinement_out.get("selected")
+    if refinement is None:
+        strict = evaluate(registered.attempt, registered.corners)
+    else:
+        target = registered.attempt.roi
+        try:
+            refinement = refinement.rebase(search_frame,
+                frame[target.y0:target.y1, target.x0:target.x1],
+                target.x0 - roi.x0, target.y0 - roi.y0)
+        except ValueError:
+            diagnostics["reason"] = "current_head_refinement_invalid"
+            return reject_proposal()
+        strict = evaluate(registered.attempt, registered.corners,
+                          current_head_refinement=refinement)
     measured_head = strict.estimate.source == MEASURED_HEAD_AXIS_SOURCE
     source = (REGISTERED_MEASURED_HEAD_REACQUISITION_SOURCE if measured_head else
               REGISTERED_QR_MODEL_REACQUISITION_SOURCE if strict.debug.qr_detected

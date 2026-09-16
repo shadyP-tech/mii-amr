@@ -10,6 +10,7 @@ from scripts.aufgabe04.perception.stand_axis.marker_work_schedule import (
 )
 
 from scripts.aufgabe04.perception.stand_axis.current_image_head_fit import CurrentImageHeadFit
+from scripts.aufgabe04.perception.stand_axis.current_head_refinement_proof import CurrentHeadRefinement
 from scripts.aufgabe04.perception.stand_axis.geometry_contract import (
     classify_joint_geometry_contract,
 )
@@ -88,6 +89,7 @@ def estimate_stand_axis_from_metric_model(
     input_cache_roi: RoiBounds | None = None,
     current_head_proposal_corners: tuple[ImagePoint, ...] | None = None,
     current_head_proposal_verified: bool = False,
+    current_head_refinement=None,
     current_image_head_fit: CurrentImageHeadFit | None = None,
     deadline_monotonic_sec: float | None = None,
     qr_marker_policy: str = "auto",
@@ -146,11 +148,23 @@ def estimate_stand_axis_from_metric_model(
     head_result = None
     if physical_head:
         def fit_current_head():
-            edges = current_edges()
+            edges = None
+            if isinstance(current_head_refinement, CurrentHeadRefinement):
+                try:
+                    edges = current_head_refinement.raw_edges_for(
+                        frame, model_profile=model_profile, proposal_corners=head_proposal)
+                    timing.mark("current_head_raw_edge_reuse")
+                except (AttributeError, TypeError, ValueError):
+                    # The fitter still receives the invalid proof and rejects
+                    # it through its normal diagnostic path, without a search.
+                    pass
+            if edges is None:
+                edges = current_edges()
             result = fit_physical_head_in_frame(
                 cv2, frame, edges, model_profile=model_profile, camera=camera, timing=timing,
                 current_head_proposal_corners=head_proposal,
                 current_head_proposal_verified=current_head_proposal_verified,
+                current_head_refinement=current_head_refinement,
                 pose_hint=pose_hint,
                 expected_head_center_u_px=expected_head_center_u_px,
                 expected_head_center_v_px=expected_head_center_v_px,
@@ -166,7 +180,7 @@ def estimate_stand_axis_from_metric_model(
             raw_edges, head_result = current_image_head_fit.compute(
                 frame, context=(
                     id(cv2), model_profile, camera, pose_hint, head_proposal, input_cache_roi,
-                    current_head_proposal_verified,
+                    current_head_proposal_verified, current_head_refinement,
                     edge_preprocess, blur_kernel, canny_low, canny_high,
                     expected_head_center_u_px, expected_head_center_v_px,
                     expected_head_height_px, max_reprojection_rmse_px, min_edge_height_px,

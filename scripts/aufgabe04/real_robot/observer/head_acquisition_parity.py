@@ -17,6 +17,7 @@ def acquire_viewer_candidate_head(
     cv2, frame, *, expected_center, expected_height, max_center_offset_ratio,
     edge_preprocess, canny_low, canny_high, deadline_monotonic_sec, diagnostics,
     proposal_filter=None,
+    model_profile=None, refinement_out=None,
 ):
     """Locate current complete borders using the viewer's candidate-aware path.
 
@@ -45,6 +46,8 @@ def acquire_viewer_candidate_head(
         expected_head_height_tolerance_ratio=.30,
         max_center_offset_ratio=max_center_offset_ratio,
         proposal_filter=proposal_filter,
+        model_profile=model_profile,
+        refinement_out=refinement_out,
         deadline_monotonic_sec=trial_deadline)
     diagnostics.update(performed=True, locator="shared_candidate_current_borders",
         crop_xyxy=(0, 0, width, height), reason=result.reason,

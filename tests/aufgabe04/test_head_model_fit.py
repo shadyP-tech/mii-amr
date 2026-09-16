@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import unittest
+from scripts.aufgabe04.perception.stand_axis.models import ImagePoint
 from unittest.mock import patch
 
 try:
@@ -95,9 +96,14 @@ class IndependentHeadFitTest(unittest.TestCase):
         self.assertEqual(acquisition["reason"], "head_cold_acquisition_verification_budget_exceeded")
         diagnostics = acquisition["joint_border_diagnostics"]
         self.assertGreater(diagnostics["unverified_independent_hypotheses"], 0)
-        lefts = [item["corners"][0][0] for item in diagnostics["strict_verifications"]
-                 if item["accepted"]]
-        self.assertGreater(max(lefts) - min(lefts), 5.)
+        # Canonical refinement may move an inset hint onto enclosing rails.
+        # The invariant is unresolved current families, not their old spacing.
+        from scripts.aufgabe04.perception.stand_axis.head_border_families import CurrentBorderFamilies
+        frames = [tuple(ImagePoint(*p) for p in item["corners"])
+                  for item in diagnostics["strict_verifications"] if item["accepted"]]
+        families = CurrentBorderFamilies(debug.raw_edges, self.fixture.crop)
+        self.assertTrue(any(not families.same(a, b)
+                            for i, a in enumerate(frames) for b in frames[i+1:]))
         self.assertIsNone(debug.refined_corners)
         self.assertFalse(estimate.usable)
         self.assertIsNone(debug.head_neck_junction)

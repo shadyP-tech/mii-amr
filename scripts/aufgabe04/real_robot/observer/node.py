@@ -103,6 +103,7 @@ from scripts.aufgabe04.real_robot.observer.contract import (
 from scripts.aufgabe04.real_robot.observer.backside_axis_observation import (
     build_backside_axis_observation,
 )
+from scripts.aufgabe04.real_robot.observer.camera_context import camera_context_signature
 from scripts.aufgabe04.real_robot.observer.axis_sample_policy import (
     DEFAULT_QR_BOUND_MODEL_MAX_OBLIQUENESS_DEG,
     admit_axis_sample,
@@ -794,6 +795,13 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 max_rotation_rad=math.radians(self.args.stationary_rotation_deg))
         return self._candidate_head_tracking
 
+    def _reject_invalid_camera_context(self, reason: str) -> None:
+        """An invalid calibration cannot retain any prior admission or search state."""
+        self._reset_observation_evidence()
+        self._reset_qr_marker_epoch()
+        self.model_pose_tracker.reset()
+        self._write_status("camera_context_invalid", reason=reason)
+
     def _reset_candidate_search(self, reason):
         tracking = getattr(self, "_candidate_head_tracking", None)
         if tracking is not None:
@@ -1175,10 +1183,15 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 transient_tf_retry=had_transient_tf_retry,
             )
             return
-        info_mismatches = camera_info_mismatches(
-            self.calibration,
-            camera_info.value,
-        )
+        try:
+            info_mismatches = camera_info_mismatches(
+                self.calibration,
+                camera_info.value,
+            )
+        except (TypeError, ValueError, ArithmeticError) as exc:
+            self._discard_sensor_tuple(sensor_tuple, reason="invalid CameraInfo calibration values")
+            self._reject_invalid_camera_context(str(exc))
+            return
         if info_mismatches:
             self._reset_observation_evidence()
             self._discard_sensor_tuple(
@@ -1298,7 +1311,18 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             )
             return
         self.last_pose = robot_pose
-        intrinsics = intrinsics_from_camera_info(camera_info.value)
+        try:
+            intrinsics = intrinsics_from_camera_info(camera_info.value)
+            scan_camera_translation, scan_camera_rotation = _transform_values(
+                scan_from_camera_transform)
+            calibrated_camera_signature = camera_context_signature(
+                camera_frame=self.profile.camera_optical_frame,
+                intrinsics=(intrinsics.fx_px, intrinsics.fy_px, intrinsics.cx_px, intrinsics.cy_px),
+                camera_info=camera_info.value, scan_translation=scan_camera_translation,
+                scan_rotation=scan_camera_rotation)
+        except (TypeError, ValueError, ArithmeticError) as exc:
+            self._reject_invalid_camera_context(str(exc))
+            return
         camera_translation, camera_rotation = _transform_values(camera_from_map)
         try:
             camera_point = transform_point(
@@ -1388,32 +1412,38 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         if getattr(self, "_scan_target_persistence", None) is None:
             self._scan_target_persistence = StoppedScanTargetPersistence()
 
+        # These transforms and this observation epoch are immutable for this
+        # image. Prepare them once; each proposal still supplies its own head
+        # bearing and gets a new clock/freshness check below.
+        try:
+            scan_pose = scan_pose_in_map(scan_translation, scan_rotation)
+            static_scan_pose = scan_pose_from_camera_extrinsics(
+                *_transform_values(base_from_camera),
+                *_transform_values(scan_from_camera_transform))
+            scan_persistence_context = ScanPersistenceContext(
+                target_key=self._target_evidence_key(),
+                epoch_key=str(0 if self.observation_evidence is None else
+                    self.observation_evidence.snapshot().motion_epoch),
+                robot_pose=robot_pose, scan_pose_map=scan_pose, image_stamp_sec=image.stamp_sec,
+                candidate_x_m=self.args.stand_x, candidate_y_m=self.args.stand_y,
+                stand_radius_m=self.args.stand_radius_m,
+                stand_uncertainty_m=self.args.stand_uncertainty_m,
+                lidar_range_tolerance_m=self.args.lidar_range_tolerance_m,
+                scan_pose_robot=static_scan_pose)
+        except (TypeError, ValueError, ArithmeticError):
+            scan_persistence_context = None
+
         def resolve_lidar_association(association, current_scan, *, preview=False):
             # Use the same exact scan<-map transform that projected this
             # candidate. A witness never supplies a current beam or a pose.
-            try:
-                scan_pose = scan_pose_in_map(scan_translation, scan_rotation)
-                static_scan_pose = scan_pose_from_camera_extrinsics(
-                    *_transform_values(base_from_camera),
-                    *_transform_values(scan_from_camera_transform))
-                context = ScanPersistenceContext(
-                    target_key=self._target_evidence_key(),
-                    epoch_key=str(0 if self.observation_evidence is None else
-                        self.observation_evidence.snapshot().motion_epoch),
-                    robot_pose=robot_pose, scan_pose_map=scan_pose, image_stamp_sec=image.stamp_sec,
-                    candidate_x_m=self.args.stand_x, candidate_y_m=self.args.stand_y,
-                    stand_radius_m=self.args.stand_radius_m,
-                    stand_uncertainty_m=self.args.stand_uncertainty_m,
-                    lidar_range_tolerance_m=self.args.lidar_range_tolerance_m,
-                    scan_pose_robot=static_scan_pose)
-            except (TypeError, ValueError, ArithmeticError):
+            if scan_persistence_context is None:
                 if not preview:
                     self._scan_target_persistence.reset()
                 return association
             resolver = (self._scan_target_persistence.preview if preview
                         else self._scan_target_persistence.resolve)
             return resolver(
-                association, current_scan, context=context,
+                association, current_scan, context=scan_persistence_context,
                 now_sec=self.node.get_clock().now().nanoseconds / 1e9,
                 max_scan_age_sec=self.args.max_sensor_age_sec)
 
@@ -1427,9 +1457,6 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             now_sec=now_sec,
             max_scan_age_sec=self.args.max_sensor_age_sec,
             min_cluster_sample_count=self.args.lidar_min_samples,
-        )
-        scan_camera_translation, scan_camera_rotation = _transform_values(
-            scan_from_camera_transform
         )
         scan_from_camera_geometry = RigidTransform(
             parent_frame=self.profile.scan_frame,
@@ -1506,6 +1533,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             attempt: HeadRoiAttempt,
             pose_hint,
             current_head_proposal_corners=None,
+            current_head_refinement=None,
         ) -> HeadRoiEvaluation:
             if not head_budget.allow("current_head_fit"):
                 return unavailable_head_evaluation(attempt, frame, self.stand_model_profile,
@@ -1548,6 +1576,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                     input_cache_roi=(attempt_roi.x0, attempt_roi.y0, attempt_roi.x1, attempt_roi.y1),
                     current_head_proposal_corners=current_head_proposal_corners,
                     current_head_proposal_verified=current_head_proposal_corners is not None,
+                    current_head_refinement=current_head_refinement,
                     current_image_head_fit=current_image_head_fit,
                     deadline_monotonic_sec=head_budget.deadline_monotonic_sec,
                 )
@@ -1600,8 +1629,10 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 edge_preprocess=resolved_stand_axis_profile.edge_preprocess,
                 canny_low=resolved_stand_axis_profile.canny_low,
                 canny_high=resolved_stand_axis_profile.canny_high,
-                evaluate=lambda selected, corners: evaluate_roi_attempt(selected, None, corners),
+                evaluate=lambda selected, corners, **kwargs:
+                    evaluate_roi_attempt(selected, None, corners, **kwargs),
                 diagnostics=head_acquisition_metadata,
+                model_profile=self.stand_model_profile,
                 primary=primary,
                 resolve_lidar_association=resolve_lidar_association,
                 preview_lidar_association=lambda association, current_scan:
@@ -1613,10 +1644,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         candidate_context = CandidateHeadContext(
             target_key=self._target_evidence_key(),
             model_sha256=self.stand_model_profile.sha256,
-            camera_signature=(self.profile.camera_optical_frame, *camera_signature,
-                *(tuple(getattr(camera_info.value, field, ())) for field in ("k", "d", "r", "p")),
-                str(getattr(camera_info.value, "distortion_model", "")),
-                scan_camera_translation, scan_camera_rotation),
+            camera_signature=calibrated_camera_signature,
             image_shape=tuple(frame.shape),
             stationary_epoch=(0 if self.observation_evidence is None else
                               self.observation_evidence.snapshot().motion_epoch))

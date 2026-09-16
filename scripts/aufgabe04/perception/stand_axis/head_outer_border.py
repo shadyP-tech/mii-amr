@@ -15,6 +15,7 @@ from scripts.aufgabe04.perception.stand_axis.geometry import (
 )
 from scripts.aufgabe04.perception.stand_axis.model_refinement import refine_projected_head_border
 from scripts.aufgabe04.perception.stand_axis.models import ImagePoint
+from scripts.aufgabe04.perception.stand_axis.head_acquisition_budget import check_head_acquisition_deadline
 
 
 # Search policy, independent of the presence, dimensions or corners of a QR.
@@ -144,7 +145,8 @@ def current_head_boundary_eligible(estimate, debug):
 
 
 def select_current_outer_head_border(cv2, raw_edges, *, model_profile, refinement,
-                                     corridor_half_width_px, neutral_proposal_corners=None):
+                                     corridor_half_width_px, neutral_proposal_corners=None,
+                                     deadline_monotonic_sec=None):
     """Prefer an enclosing complete border; missing outward pixels stay missing."""
     original = refinement.corners
     if not refinement.accepted or original is None:
@@ -167,10 +169,12 @@ def select_current_outer_head_border(cv2, raw_edges, *, model_profile, refinemen
     # raw corridor selects an inner paper rail. The reference only locates a
     # narrower current-pixel fit; it never supplies accepted corners itself.
     if inward > inward_allowance:
+        check_head_acquisition_deadline(deadline_monotonic_sec, "current_head_anchored_refinement")
         attempted += 1
         anchored = refine_projected_head_border(
             cv2, raw_edges, proposal,
             corridor_half_width_px=min(2., corridor_half_width_px))
+        check_head_acquisition_deadline(deadline_monotonic_sec, "current_head_anchored_refinement")
         if anchored.accepted and anchored.corners is not None:
             anchored_corners = tuple(order_corners(anchored.corners))
             if (_encloses(anchored_corners, original)
@@ -178,12 +182,14 @@ def select_current_outer_head_border(cv2, raw_edges, *, model_profile, refinemen
                 selected, area = anchored, _polygon_area(anchored_corners)
                 alternatives.append(anchored_corners)
     for growth in OUTER_HEAD_SEARCH_GROWTH_FACTORS:
+        check_head_acquisition_deadline(deadline_monotonic_sec, "current_head_outer_refinement")
         proposed = tuple(ImagePoint(center[0]+(p.u_px-center[0])*growth,
                                     center[1]+(p.v_px-center[1])*growth) for p in proposal)
         tried.append(growth)
         attempted += 1
         current = refine_projected_head_border(
             cv2, raw_edges, proposed, corridor_half_width_px=corridor_half_width_px)
+        check_head_acquisition_deadline(deadline_monotonic_sec, "current_head_outer_refinement")
         if not current.accepted or current.corners is None:
             continue
         corners = tuple(order_corners(current.corners))

@@ -8,16 +8,16 @@ from scripts.aufgabe04.perception.stand_axis.geometry import (
     estimate_stand_axis_from_corners,
 )
 from scripts.aufgabe04.perception.stand_axis.head_border_seed import (
-    select_head_border_seed, validate_current_head_proposal,
+    validate_current_head_proposal,
 )
+from scripts.aufgabe04.perception.stand_axis.current_head_refinement import refine_current_physical_head
+from scripts.aufgabe04.perception.stand_axis.current_head_refinement_proof import CurrentHeadRefinement
 from scripts.aufgabe04.perception.stand_axis.head_model_quality import (
     MEASURED_HEAD_AXIS_SOURCE, MAX_HEAD_REPROJECTION_RMSE_PX,
     evaluate_head_model_quality, validated_head_model_quality,
 )
-from scripts.aufgabe04.perception.stand_axis.head_outer_border import select_current_outer_head_border
 from scripts.aufgabe04.perception.stand_axis.head_orientation_bounds import evaluate_current_head_orientation_bounds
 from scripts.aufgabe04.perception.stand_axis.model_projection import project_stand_model
-from scripts.aufgabe04.perception.stand_axis.model_refinement import refine_projected_head_border
 from scripts.aufgabe04.perception.stand_axis.models import StandAxisEdgeDebugArtifacts
 from scripts.aufgabe04.perception.stand_axis.qr_pose_seed import estimate_planar_pose_ippe
 
@@ -25,6 +25,7 @@ from scripts.aufgabe04.perception.stand_axis.qr_pose_seed import estimate_planar
 def fit_current_measured_head(
     cv2, raw_edges, *, model_profile, camera, proposal_corners,
     max_reprojection_rmse_px=2.0, min_edge_height_px=8.0,
+    current_head_refinement=None, frame_bgr=None,
 ):
     """Recheck enclosing raw head rails/corners and solve without a pose seed.
 
@@ -33,14 +34,9 @@ def fit_current_measured_head(
     accepted pose, identity, side label, or historical ambiguity reference.
     """
 
-    camera.validate()
-    try:
-        proposal_corners = validate_current_head_proposal(proposal_corners, frame_shape=raw_edges.shape)
-    except ValueError:
-        proposal_corners = None
-    if proposal_corners is None:
+    def unavailable(reason):
         estimate = replace(
-            _unusable("head_model_proposal_invalid", source=MEASURED_HEAD_AXIS_SOURCE),
+            _unusable(reason, source=MEASURED_HEAD_AXIS_SOURCE),
             evidence_state="unobservable", model_profile_sha256=model_profile.sha256,
             model_measurement_status=model_profile.measurement_status,
         )
@@ -51,21 +47,29 @@ def fit_current_measured_head(
             model_measurement_status=model_profile.measurement_status,
             model_pose_fit_source=MEASURED_HEAD_AXIS_SOURCE,
         ), None
+    camera.validate()
+    try:
+        proposal_corners = validate_current_head_proposal(proposal_corners, frame_shape=raw_edges.shape)
+    except ValueError:
+        proposal_corners = None
+    if proposal_corners is None:
+        return unavailable("head_model_proposal_invalid")
     if (not math.isfinite(max_reprojection_rmse_px) or max_reprojection_rmse_px <= 0.0
             or not math.isfinite(min_edge_height_px) or min_edge_height_px <= 0.0):
         raise ValueError("head fit gates must be finite and positive")
-    seed = select_head_border_seed(
-        model_profile=model_profile, projected_corners=None,
-        pose_reprojection_rmse_px=None, current_head_proposal_corners=proposal_corners,
-    )
-    refinement = refine_projected_head_border(
-        cv2, raw_edges, seed.corners, corridor_half_width_px=seed.corridor_half_width_px,
-    )
-    refinement, outer_recovery = select_current_outer_head_border(
-        cv2, raw_edges, model_profile=model_profile, refinement=refinement,
-        corridor_half_width_px=seed.corridor_half_width_px,
-        neutral_proposal_corners=seed.corners,
-    )
+    if current_head_refinement is None:
+        refinement, outer_recovery, seed = refine_current_physical_head(
+            cv2, raw_edges, model_profile=model_profile, proposal_corners=proposal_corners,
+        )
+    else:
+        try:
+            if not isinstance(current_head_refinement, CurrentHeadRefinement):
+                raise ValueError("current head refinement proof is invalid")
+            refinement, outer_recovery, seed = current_head_refinement.resolve(
+                frame_bgr, raw_edges, model_profile=model_profile,
+                proposal_corners=proposal_corners)
+        except (AttributeError, TypeError, ValueError):
+            return unavailable("current_head_refinement_invalid")
     corners = refinement.corners
     pose = None
     if refinement.accepted and corners is not None and outer_recovery.accepted:

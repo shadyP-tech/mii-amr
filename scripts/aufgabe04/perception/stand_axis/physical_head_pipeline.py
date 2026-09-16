@@ -54,6 +54,7 @@ def classify_physical_head_in_frame(
 def fit_physical_head_in_frame(
     cv2, frame, raw_edges, *, model_profile, camera, timing,
     current_head_proposal_corners=None, current_head_proposal_verified=False, pose_hint=None,
+    current_head_refinement=None,
     expected_head_center_u_px=None, expected_head_center_v_px=None,
     expected_head_height_px=None, max_reprojection_rmse_px=2., min_edge_height_px=8.,
     deadline_monotonic_sec=None,
@@ -71,12 +72,15 @@ def fit_physical_head_in_frame(
                    "neck_required": False, "source": None, "acquisition": None,
                    "tracked_fit_reason": None}
 
-    def fitted(corners, *, selected_current_border=False):
+    def fitted(corners, *, selected_current_border=False, boundary=None):
         if expired():
             return unavailable("head_acquisition_deadline_exceeded")
         result = fit_current_measured_head(
             cv2, raw_edges, model_profile=model_profile, camera=camera, proposal_corners=corners,
-            max_reprojection_rmse_px=max_reprojection_rmse_px, min_edge_height_px=min_edge_height_px)
+            max_reprojection_rmse_px=max_reprojection_rmse_px, min_edge_height_px=min_edge_height_px,
+            frame_bgr=frame, current_head_refinement=boundary)
+        diagnostics["current_boundary_reused"] = bool(
+            boundary is not None and result[1].head_outer_recovery is not None)
         if selected_current_border:
             result, diagnostics["selected_border_binding"] = bind_selected_current_head(
                 result, corners, raw_edges=raw_edges, frame_bgr=frame)
@@ -104,10 +108,13 @@ def fit_physical_head_in_frame(
 
     if expired():
         return unavailable("head_acquisition_deadline_exceeded")
+    if current_head_refinement is not None and current_head_proposal_corners is None:
+        return unavailable("current_head_refinement_invalid")
     if current_head_proposal_corners is not None:
         diagnostics["source"] = "current_candidate_proposal"
         return finished(fitted(current_head_proposal_corners,
-            selected_current_border=current_head_proposal_verified is True))
+            selected_current_border=current_head_proposal_verified is True,
+            boundary=current_head_refinement))
     if any(value is not None for value in expected) and not all(value is not None for value in expected):
         return unavailable("head_candidate_projection_incomplete")
     if all(value is not None for value in expected) and (
@@ -133,11 +140,14 @@ def fit_physical_head_in_frame(
                 sum(p.u_px for p in corners) / 4., sum(p.v_px for p in corners) / 4.,
                 (math.dist((corners[0].u_px, corners[0].v_px), (corners[3].u_px, corners[3].v_px))
                  + math.dist((corners[1].u_px, corners[1].v_px), (corners[2].u_px, corners[2].v_px))) / 2.)
+    refinement_out = {}
     if all(value is not None for value in acquisition_expected):
         diagnostics["source"] = ("candidate_projection" if all(value is not None for value in expected)
                                  else "tracked_head_reacquisition")
         acquisition = acquire_cold_head_proposal(
             cv2, frame, raw_edges=raw_edges,
+            model_profile=model_profile,
+            refinement_out=refinement_out,
             expected_head_center_u_px=acquisition_expected[0],
             expected_head_center_v_px=acquisition_expected[1],
             expected_head_height_px=acquisition_expected[2],
@@ -146,6 +156,8 @@ def fit_physical_head_in_frame(
     else:
         diagnostics["source"] = "cold_current_head_search"
         acquisition = acquire_cold_head_proposal(cv2, frame, raw_edges=raw_edges,
+                                               model_profile=model_profile,
+                                               refinement_out=refinement_out,
                                                deadline_monotonic_sec=deadline_monotonic_sec)
     diagnostics["acquisition"] = asdict(acquisition)
     timing.mark("independent_head_acquisition")
@@ -155,4 +167,5 @@ def fit_physical_head_in_frame(
         # Keep the producer detail alongside the stable observer-facing reason.
         return unavailable("head_proposal_ambiguous" if "ambiguous" in acquisition.reason
                            else "model_current_head_border_unavailable")
-    return finished(fitted(acquisition.proposal.corners, selected_current_border=True))
+    return finished(fitted(acquisition.proposal.corners, selected_current_border=True,
+                           boundary=refinement_out.get("selected")))

@@ -383,6 +383,32 @@ def registered_target_metadata_is_unique(metadata):
         return False
 
 
+def _validated_current_entry(association, scan, *, context, now_sec,
+                             max_scan_age_sec, input_source=None):
+    """Recheck this head's current scan and exact-time context, without history."""
+    entry = _entry(association, scan, context, now_sec, max_scan_age_sec)
+    if input_source is not None:
+        entry["input_source"] = input_source
+    current_scan, robot, pose, recomputed, clusters = _read_entry(entry)
+    # The resolver's clock read may be slightly later than the raw
+    # association call. Re-evaluate freshness; compare every other gate.
+    same_age = replace(recomputed, search_association=replace(
+        recomputed.search_association, scan_age_sec=association.search_association.scan_age_sec))
+    if association != same_age:
+        raise ValueError("current scan association differs from recomputed inputs")
+    return entry, current_scan, robot, pose, clusters
+
+
+def _invalid_current_association(association):
+    search = association.search_association
+    if search is not None:
+        search = replace(lidar._association_rejected_as_ambiguous(search),
+                         rejection_reason="scan_persistence_current_input_invalid")
+    return replace(association, associated=False, distance_m=None,
+        rejection_reason="scan_persistence_current_input_invalid",
+        search_association=search, witnessed_fragmentation=None)
+
+
 class StoppedScanTargetPersistence:
     """One candidate/epoch, three recent unique real witnesses, no robot I/O."""
     def __init__(self):
@@ -406,6 +432,19 @@ class StoppedScanTargetPersistence:
         and new parameters. Copy the lists/deque rather than every raw beam for
         each competing proposal. Commit the final selected head through resolve.
         """
+        if (association.witnessed_fragmentation is None
+                and registered_target_is_unique(association)):
+            # A unique current cluster needs no historical connecting beams.
+            # Revalidate every current ray, scan, source age and exact-time
+            # context, but do not repeatedly register the pending witnesses
+            # for all competing image proposals. The selected head still goes
+            # through resolve, which consumes and updates the real history.
+            try:
+                _validated_current_entry(association, scan, context=context,
+                    now_sec=now_sec, max_scan_age_sec=max_scan_age_sec)
+                return association
+            except (TypeError, ValueError, ArithmeticError, KeyError, AttributeError):
+                return _invalid_current_association(association)
         candidate = copy.copy(self)
         candidate._history = list(self._history)
         candidate.last_metadata = dict(self.last_metadata)
@@ -495,16 +534,9 @@ class StoppedScanTargetPersistence:
     def _resolve(self, association, scan, *, context, now_sec, max_scan_age_sec, input_source=None):
         """Return unchanged raw evidence unless the narrow proof recomputes."""
         try:
-            entry = _entry(association, scan, context, now_sec, max_scan_age_sec)
-            if input_source is not None:
-                entry["input_source"] = input_source
-            current_scan, robot, pose, recomputed, clusters = _read_entry(entry)
-            # The resolver's clock read may be slightly later than the raw
-            # association call. Re-evaluate freshness; compare every other gate.
-            same_age = replace(recomputed, search_association=replace(
-                recomputed.search_association, scan_age_sec=association.search_association.scan_age_sec))
-            if association != same_age:
-                raise ValueError("current scan association differs from recomputed inputs")
+            entry, current_scan, robot, pose, clusters = _validated_current_entry(
+                association, scan, context=context, now_sec=now_sec,
+                max_scan_age_sec=max_scan_age_sec, input_source=input_source)
             key = (context.target_key, context.epoch_key, scan.scan_frame_id,
                    *(getattr(context, field) for field in _CANDIDATE_GEOMETRY_FIELDS))
             if (self._anchor is not None and (key != self._anchor[0]
@@ -544,10 +576,4 @@ class StoppedScanTargetPersistence:
         except (TypeError, ValueError, ArithmeticError, KeyError) as exc:
             self.reset()
             self.last_metadata = dict(accepted=False, reason=str(exc))
-            search = association.search_association
-            if search is not None:
-                search = replace(lidar._association_rejected_as_ambiguous(search),
-                                 rejection_reason="scan_persistence_current_input_invalid")
-            return replace(association, associated=False, distance_m=None,
-                rejection_reason="scan_persistence_current_input_invalid",
-                search_association=search, witnessed_fragmentation=None)
+            return _invalid_current_association(association)

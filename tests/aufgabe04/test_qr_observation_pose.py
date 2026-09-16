@@ -177,6 +177,14 @@ class QrObservationPoseTests(unittest.TestCase):
 
     def test_processing_head_acquisition_failure_still_commits_current_qr_pose(self):
         adapter = self.adapter
+        # ROS Humble supplies ndarray fields. Retain those live scalar types
+        # through the real producer path; a JSON fixture hides the type bug.
+        info = adapter._next_sensor_tuple.return_value.camera_info.value
+        info.k = numpy.array([400., 0., 400., 0., 400., 300., 0., 0., 1.])
+        info.d = numpy.zeros(5)
+        info.r = numpy.eye(3).ravel()
+        info.p = numpy.asarray(info.p)
+        info.distortion_model = "plumb_bob"
         adapter.profile.scan_frame = "scan"
         adapter.stand_model_profile.environment = "physical"
         adapter.stand_model_profile.committable = True

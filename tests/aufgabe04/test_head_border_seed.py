@@ -18,6 +18,7 @@ from scripts.aufgabe04.perception.stand_axis.model_pipeline import (
     estimate_stand_axis_from_metric_model,
 )
 from scripts.aufgabe04.perception.stand_axis.head_model_quality import validated_head_model_quality
+from scripts.aufgabe04.perception.stand_axis.metric_edge_association import metric_corner_arm_support
 from scripts.aufgabe04.perception.stand_axis.model_profile import stand_model_from_payload
 from scripts.aufgabe04.perception.stand_axis.model_projection import project_stand_model
 from scripts.aufgabe04.perception.stand_axis.models import ImagePoint
@@ -133,21 +134,28 @@ class CurrentHeadProposalPipelineTest(unittest.TestCase):
             ):
                 baseline, baseline_debug = self.evaluate(current_head_proposal_corners=proposal)
                 current, debug = self.evaluate(qr=wrong_qr, current_head_proposal_corners=proposal)
+                self.assertTrue(baseline.usable, baseline.reason)
+                self.assertTrue(current.usable, current.reason)
+                self.assertTrue(validated_head_model_quality(baseline_debug.head_model_quality))
+                self.assertTrue(validated_head_model_quality(debug.head_model_quality))
+                self.assertAlmostEqual(baseline.yaw_deg, -25., delta=3.)
                 if proposal is None:
-                    # The thick rendered rail supplies a mixed horizontal top
-                    # and a different oblique top; their current pixel families
-                    # do not agree. A shifted QR cannot settle this boundary.
-                    self.assertFalse(baseline.usable)
-                    self.assertEqual(baseline.reason, "head_proposal_ambiguous")
-                    self.assertEqual(current.reason, baseline.reason)
+                    # The shared physical-border refinement now resolves the
+                    # thick rendered rail before comparison. All measured top
+                    # rails agree; the 3D fit must preserve the selected current
+                    # boundary rather than choosing again after selection.
                     acquisition = baseline_debug.head_acquisition_diagnostics["acquisition"]
-                    records = acquisition["joint_border_diagnostics"]["strict_verifications"]
+                    diagnostics = acquisition["joint_border_diagnostics"]
+                    records = diagnostics["strict_verifications"]
                     top_slopes = [(record["corners"][1][1] - record["corners"][0][1])
                                   for record in records if record["accepted"]]
-                    self.assertGreater(max(top_slopes) - min(top_slopes), 5.)
-                else:
-                    self.assertTrue(baseline.usable, baseline.reason)
-                    self.assertTrue(current.usable, current.reason)
+                    self.assertLess(max(top_slopes) - min(top_slopes), 2.)
+                    self.assertEqual(diagnostics["unverified_independent_hypotheses"], 0)
+                    selected = tuple(ImagePoint(**point) for point in acquisition["proposal"]["corners"])
+                    self.assertEqual(baseline.corners, selected)
+                    self.assertTrue(baseline_debug.head_acquisition_diagnostics["current_boundary_reused"])
+                    self.assertTrue(metric_corner_arm_support(
+                        cv2, baseline_debug.raw_edges, selected).accepted)
                 self.assertEqual(current.corners, baseline.corners)
                 self.assertEqual(current.yaw_deg, baseline.yaw_deg)
                 self.assertEqual(debug.model_pose, baseline_debug.model_pose)

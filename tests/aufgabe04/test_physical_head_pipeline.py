@@ -232,7 +232,14 @@ def test_off_center_tracked_backside_classifies_using_current_verified_head_cent
     assert debug.head_acquisition_diagnostics["original_candidate_association_required"] is True
     assert debug.head_acquisition_diagnostics["side_projection_center_px"] == (
         sum(p.u_px for p in tracked.corners)/4, sum(p.v_px for p in tracked.corners)/4)
-    assert abs(tracked.yaw_deg-initial.yaw_deg) < .1
+    # Classification uses the current tracked pixels, independent of the
+    # candidate projection. Cold acquisition now solves its selected border
+    # once; it is not an extra refinement iteration for the tracked result.
+    centered, _ = estimate(profile, image, pose_hint=initial_debug.model_pose,
+        expected_head_center_u_px=400., expected_head_center_v_px=300.,
+        expected_head_height_px=145.)
+    assert tracked.corners == centered.corners
+    assert tracked.yaw_deg == centered.yaw_deg
 
 
 @pytest.mark.parametrize("decoded", (False, True))
@@ -274,7 +281,7 @@ def test_verified_current_borders_with_uncertain_angle_cannot_use_cold_retry(pro
     assert tracked.yaw_deg is None
 
 
-def test_recorded_backside_cold_acquires_but_preserves_angle_uncertainty_gate(profile):
+def test_recorded_backside_cold_solves_selected_physical_border_once(profile):
     fixtures = ROOT / "tests/aufgabe04/fixtures/qr_marker_validation"
     sample = json.loads((fixtures / "manifest.json").read_text())["samples"]["backside_000022"]
     data = (fixtures / sample["file"]).read_bytes()
@@ -288,28 +295,43 @@ def test_recorded_backside_cold_acquires_but_preserves_angle_uncertainty_gate(pr
     acquisition = debug.head_acquisition_diagnostics["acquisition"]
     assert acquisition["proposal"] is not None  # No QR/projection/previous fit required.
     assert debug.head_model_quality.outer_border_verified
-    # This original small frontal head is an acquisition fixture, not ground truth.
-    assert not fitted.usable
-    assert fitted.reason == "head_model_yaw_uncertainty_too_high"
-    assert debug.head_model_quality.yaw_std_deg > debug.head_model_quality.max_yaw_std_deg
-    assert not current_model_overlay_state(inputs_ready=True, estimate=fitted,
+    # This is a pixel-acquisition fixture, not angle ground truth. Selecting
+    # the physical border before solving changes the old inset-border angle;
+    # its new pose must still pass the unchanged three-degree uncertainty gate.
+    assert fitted.usable, fitted.reason
+    assert tuple((p.u_px, p.v_px) for p in fitted.corners) == tuple(
+        (p["u_px"], p["v_px"]) for p in acquisition["proposal"]["corners"])
+    assert debug.head_acquisition_diagnostics["current_boundary_reused"]
+    assert debug.head_model_quality.max_yaw_std_deg == 3.
+    assert debug.head_model_quality.yaw_std_deg < 3.
+    assert fitted.visible_face is None  # No candidate or side receipt in this replay.
+    assert current_model_overlay_state(inputs_ready=True, estimate=fitted,
         artifacts=debug, result_fresh=True).current_fit_accepted
 
 
-def test_recorded_backside_with_full_border_margin_reaches_purple_3d_overlay(profile):
+def test_recorded_backside_wider_crop_retains_competing_physical_borders(profile):
     # Original lossless rectified crop (260,260,435,390), not the tight nominal
     # crop above. The helper verifies its committed source-pixel hash.
     image = recorded_head_proposal_image(cv2, np, "back22")
     metadata = RECORDED_HEAD_PROPOSALS["back22"]
     fitted, debug = estimate(profile, image, blur_kernel=5,
         **{key: value for key, value in metadata.items() if key.startswith("camera_")})
-    assert fitted.usable, fitted.reason
-    assert -17. < fitted.yaw_deg < -12.  # Regression interval, not angle ground truth.
-    assert debug.head_model_quality.yaw_std_deg < 3.
-    assert debug.head_model_quality.reprojection_rmse_px < 2.
+    # Before physical refinement moved into comparison, cold selection hid a
+    # second left rail. Do not regain the old overlay by merging those frames.
+    from scripts.aufgabe04.perception.stand_axis.head_border_families import CurrentBorderFamilies
+    comparison = debug.head_acquisition_diagnostics["acquisition"]["joint_border_diagnostics"]
+    assert comparison["selection"] == "distinct_current_heads_ambiguous"
+    frames = [tuple(ImagePoint(*p) for p in item["corners"])
+              for item in comparison["strict_verifications"] if item["accepted"]]
+    families = CurrentBorderFamilies(debug.raw_edges, image)
+    assert any(not families.same(first, second)
+               for i, first in enumerate(frames) for second in frames[i+1:])
+    assert not fitted.usable
+    assert fitted.reason == "head_proposal_ambiguous"
+    assert fitted.yaw_deg is None
     assert debug.head_neck_junction is None
     assert not debug.qr_detected
     assert debug.head_acquisition_diagnostics["source"] == "cold_current_head_search"
-    assert debug.projected_landmarks is not None
-    assert current_model_overlay_state(inputs_ready=True, estimate=fitted,
-        artifacts=debug, result_fresh=True).geometry_color == (180, 0, 180)
+    assert debug.projected_landmarks is None
+    assert not current_model_overlay_state(inputs_ready=True, estimate=fitted,
+        artifacts=debug, result_fresh=True).current_fit_accepted

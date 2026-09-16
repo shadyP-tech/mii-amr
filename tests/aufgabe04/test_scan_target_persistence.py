@@ -6,6 +6,7 @@ import json
 import math
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.perception.candidate_lidar_association import associate_camera_registered_candidate_lidar_target
@@ -154,6 +155,59 @@ class ScanTargetPersistenceTest(unittest.TestCase):
         self.assertEqual(self.state._last_stamp, 10.4)
         self.assertTrue(self.state.preview(actual, scan, context=context,
             now_sec=10.7, max_scan_age_sec=.5).associated)
+
+    def test_unique_preview_validates_current_scan_without_rebinding_history(self):
+        for stamp in (10., 10.2, 10.4):
+            self.assertTrue(self.ingest(stamp))
+        _, raw, scan, context = self.observe(10.6, state=StoppedScanTargetPersistence())
+        pending = copy.deepcopy(list(self.state._pending_scans._entries))
+        with patch.object(self.state, "_register_scan_witness",
+                          wraps=self.state._register_scan_witness) as register:
+            for now in (10.7, 10.8):
+                result = self.state.preview(raw, scan, context=context,
+                    now_sec=now, max_scan_age_sec=.5)
+                self.assertTrue(registered_target_is_unique(result))
+                self.assertIsNone(result.witnessed_fragmentation)
+            register.assert_not_called()
+            self.assertEqual(list(self.state._pending_scans._entries), pending)
+            self.assertEqual(self.state._history, [])
+            self.assertIsNone(self.state._last_stamp)
+            self.assertTrue(self.state.resolve(raw, scan, context=context,
+                now_sec=10.8, max_scan_age_sec=.5).associated)
+            self.assertEqual(register.call_count, 3)
+        self.assertEqual(self.state._last_stamp, 10.6)
+        self.assertEqual(list(self.state._pending_scans._entries), [])
+
+    def test_unique_preview_rechecks_freshness_context_and_raw_evidence(self):
+        _, raw, scan, context = self.observe(10.6, state=StoppedScanTargetPersistence())
+        for candidate, current_scan, current_context, now in (
+            (raw, scan, context, 11.2),
+            (raw, scan, replace(context, image_stamp_sec=9.), 10.7),
+            (raw, replace(scan, receipt_sec=9.), context, 10.7),
+            (raw, scan, replace(context, candidate_x_m=.4), 10.7),
+            (raw, scan, replace(context, scan_pose_robot=Pose2D(.1, 0., 0.)), 10.7),
+            (replace(raw, distance_m=.59), scan, context, 10.7),
+        ):
+            with self.subTest(context=current_context, now=now, raw=candidate):
+                self.assertFalse(self.state.preview(candidate, current_scan,
+                    context=current_context, now_sec=now, max_scan_age_sec=.5).associated)
+        self.assertIsNone(self.state._last_stamp)
+        self.assertTrue(self.state.preview(raw, scan, context=context,
+            now_sec=10.7, max_scan_age_sec=.5).associated)
+        # A successful preview never renews the scan for final resolution.
+        self.assertFalse(self.state.resolve(raw, scan, context=context,
+            now_sec=11.2, max_scan_age_sec=.5).associated)
+
+    def test_unique_preview_never_reuses_another_head_bearing(self):
+        _, raw, scan, context = self.observe(10.6, state=StoppedScanTargetPersistence())
+        for bearing, expected in ((0., True), (.12, False), (.001, True)):
+            candidate = associate_camera_registered_candidate_lidar_target(
+                scan, map_bearing_rad=0., observed_camera_bearing_rad=bearing,
+                cone_half_angle_rad=math.radians(3), accepted_range_m=(.42, .64),
+                now_sec=10.7, max_scan_age_sec=.5, min_cluster_sample_count=1)
+            self.assertEqual(self.state.preview(candidate, scan, context=context,
+                now_sec=10.7, max_scan_age_sec=.5).associated, expected)
+        self.assertEqual(self.state._history, [])
 
     def test_scan_only_duplicate_and_camera_scan_cannot_double_count(self):
         for _ in range(4):
