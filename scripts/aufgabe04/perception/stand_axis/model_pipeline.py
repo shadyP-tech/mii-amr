@@ -92,6 +92,7 @@ def estimate_stand_axis_from_metric_model(
     current_head_refinement=None,
     current_image_head_fit: CurrentImageHeadFit | None = None,
     candidate_search=None,
+    proposal_filter=None,
     deadline_monotonic_sec: float | None = None,
     qr_marker_policy: str = "auto",
 ) -> tuple[StandAxisImageEstimate, StandAxisEdgeDebugArtifacts]:
@@ -105,6 +106,8 @@ def estimate_stand_axis_from_metric_model(
     An exact-image cache reuses preprocessing. The optional one-use physical
     fit holder lets QR recovery redecorate this exact crop's current geometry;
     it never retains a classified result or supplies an angle to another image.
+    Proposal callbacks bypass that holder so current scan/clock state is checked
+    again; exact-image edge preprocessing may still be reused.
     ``disabled``/``supplied_only`` avoid native marker work. Unchecked marker
     absence remains unknown and cannot label a backside. Positive supplied
     decoder observations never require a second native acquisition.
@@ -167,6 +170,7 @@ def estimate_stand_axis_from_metric_model(
                 current_head_proposal_verified=current_head_proposal_verified,
                 current_head_refinement=current_head_refinement,
                 candidate_search=candidate_search,
+                proposal_filter=proposal_filter,
                 pose_hint=pose_hint,
                 expected_head_center_u_px=expected_head_center_u_px,
                 expected_head_center_v_px=expected_head_center_v_px,
@@ -176,7 +180,9 @@ def estimate_stand_axis_from_metric_model(
                 deadline_monotonic_sec=deadline_monotonic_sec)
             return edges, result
 
-        if current_image_head_fit is None:
+        # A callback can depend on a changing scan, clock or persistence state.
+        # Even the same callable and image cannot certify that context again.
+        if current_image_head_fit is None or proposal_filter is not None:
             raw_edges, head_result = fit_current_head()
         else:
             raw_edges, head_result = current_image_head_fit.compute(

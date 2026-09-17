@@ -83,12 +83,23 @@ def test_geometry_uses_original_image_intrinsics_and_only_a_conservative_candida
     assert "current_head_proposal_corners" not in options
     assert options["candidate_search"].center == (340., 260.)
     assert options["candidate_search"].height == scene[3]
+    assert options["proposal_filter"] is None
+    assert result.qr_decode_metadata["current_scan_proposal_filter_applied"] is False
     assert result.qr_decode_metadata["candidate_screen"]["supplies_corners"] is False
     assert result.frame is scene[0]
     assert result.attempt.source == VIEWER_HEAD_SOURCE
     assert result.attempt.roi == ImageRoi(0, 0, 800, 600, scene[3])
     assert result.estimate is scene[4][0]
     assert result.debug.model_pose is scene[4][1].model_pose
+
+
+def test_optional_current_scan_filter_reaches_full_image_geometry_unchanged(scene):
+    scan_filter = lambda proposal: True
+    result, estimator = evaluate(scene, proposal_filter=scan_filter, native=lambda crop: (QR,))
+    assert estimator.call_args.args[1] is scene[0]
+    assert estimator.call_args.kwargs["proposal_filter"] is scan_filter
+    assert result.qr_decode_metadata["current_scan_proposal_filter_applied"] is True
+    assert result.estimate is scene[4][0]
 
 
 @pytest.mark.parametrize("projection", (None,

@@ -72,6 +72,7 @@ def evaluate_viewer_head(
     full_decoder, deadline_monotonic_sec, edge_preprocess="channel_union",
     canny_low=20, canny_high=60, estimator=None, now=None,
     max_center_offset_ratio=1.5,
+    proposal_filter=None,
 ):
     """Measure full-frame geometry once, returning neutral side classification.
 
@@ -98,6 +99,7 @@ def evaluate_viewer_head(
         canny_low=canny_low, canny_high=canny_high,
         deadline_monotonic_sec=deadline_monotonic_sec, estimator=estimator,
         candidate_search=candidate_search,
+        proposal_filter=proposal_filter,
     )
     geometry_completed = now()
     geometry_ms = (geometry_completed-started)*1000.
@@ -113,6 +115,7 @@ def evaluate_viewer_head(
     marker_reason = "head_unavailable_marker_unchecked" if not complete_head else "qr_marker_processing_budget_exhausted"
     metadata = dict(performed=False, geometry_first=True, geometry_scope="full_image",
         candidate_screen=None if candidate_search is None else candidate_search.diagnostics(),
+        current_scan_proposal_filter_applied=proposal_filter is not None,
         geometry_completed_monotonic_sec=geometry_completed,
         identity_scope=scope, identity_roi=None if bounds is None else list(bounds),
         current_image_geometry_refit=False, marker_refresh_performed=False,

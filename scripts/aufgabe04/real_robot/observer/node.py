@@ -176,6 +176,9 @@ from scripts.aufgabe04.real_robot.observer.roi_qr_evidence import summarize_roi_
 from scripts.aufgabe04.real_robot.observer.head_proposal_registration import (
     acquire_registered_head_measurement, unresolved_front_framing_hint,
 )
+from scripts.aufgabe04.real_robot.observer.current_scan_head_proposal_filter import (
+    CurrentScanHeadProposalFilter,
+)
 from scripts.aufgabe04.real_robot.observer.head_acquisition_schedule import (
     HeadProcessingDeadline, unavailable_head_evaluation,
 )
@@ -1681,6 +1684,20 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         search_metadata = dict(candidate_search.last_metadata)
         tracking_evaluation = None
         if viewer_geometry:
+            current_scan_proposal_filter = CurrentScanHeadProposalFilter(
+                intrinsics=intrinsics, scan_from_camera=scan_from_camera_geometry,
+                scan=plain_scan, map_bearing_rad=scan_bearing,
+                cone_half_angle_rad=math.radians(self.args.lidar_cone_half_angle_deg),
+                accepted_range_m=(lower_surface_bound, upper_surface_bound),
+                now_sec=self.node.get_clock().now().nanoseconds / 1e9,
+                max_scan_age_sec=self.args.max_sensor_age_sec,
+                min_cluster_sample_count=self.args.lidar_min_samples,
+                max_camera_map_bearing_delta_rad=math.radians(
+                    self.args.backside_registration_max_bearing_delta_deg),
+                preview_lidar_association=lambda association, current_scan:
+                    resolve_lidar_association(association, current_scan, preview=True),
+                current_ros_sec=lambda: self.node.get_clock().now().nanoseconds / 1e9,
+            )
             tracking_evaluation = evaluate_viewer_head(
                 self.cv2, frame, model_profile=self.stand_model_profile,
                 intrinsics=intrinsics, pose_hint=prediction.pose,
@@ -1696,6 +1713,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 edge_preprocess=resolved_stand_axis_profile.edge_preprocess,
                 canny_low=resolved_stand_axis_profile.canny_low,
                 canny_high=resolved_stand_axis_profile.canny_high,
+                proposal_filter=current_scan_proposal_filter,
                 estimator=estimate_stand_axis_from_metric_model)
             current_view = classify_viewer_head(
                 tracking_evaluation, model_profile=self.stand_model_profile,
@@ -1708,6 +1726,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 "acquisition_before_candidate_association": True,
                 "candidate_screen_before_cold_selection": bool(
                     (tracking_evaluation.qr_decode_metadata or {}).get("candidate_screen")),
+                "current_scan_preview_before_cold_selection": current_scan_proposal_filter.metadata(),
                 "current_scan_association_after_geometry": True,
                 "measurement_reused": False, "motion_authorized": False,
             }

@@ -424,6 +424,13 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
                             for item in adapter._test_metric_options))
         self.assertTrue(all(item["pose_hint"] is not None for item in tracked))
         self.assertTrue(all("current_head_proposal_corners" not in item for item in tracked))
+        filters = [item["proposal_filter"] for item in adapter._test_metric_options]
+        self.assertEqual(len({id(value) for value in filters}), 7)
+        self.assertEqual([value.scan.scan_stamp_sec for value in filters],
+                         [100. + index * .2 for index in range(7)])
+        self.assertTrue(all(callable(value.preview_lidar_association) for value in filters))
+        self.assertTrue(all(callable(value.current_ros_sec) for value in filters))
+        self.assertTrue(all(value.metadata()["persistence_read_only"] for value in filters))
         first_metadata = adapter._write_status.call_args_list[0].kwargs["stand_axis_debug"]
         self.assertTrue(first_metadata["current_head_candidate_association"]["accepted"])
         first_model = first_metadata["metric_model"]

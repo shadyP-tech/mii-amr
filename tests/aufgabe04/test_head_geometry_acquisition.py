@@ -43,17 +43,20 @@ def test_cold_and_tracked_calls_use_full_image_without_preselected_candidate(hin
     assert "current_head_proposal_verified" not in kwargs
     assert "current_head_refinement" not in kwargs
     assert kwargs["candidate_search"] is None
+    assert kwargs["proposal_filter"] is None
 
 
 def test_optional_candidate_screen_preserves_full_image_and_intrinsics():
     from scripts.aufgabe04.perception.stand_axis.candidate_head_search import CandidateHeadSearch
     frame = object()
     screen = CandidateHeadSearch((340., 260.), 100.)
+    proposal_filter = lambda proposal: True
     fit = Mock(return_value=(object(), object()))
     estimate_current_head_geometry(object(), frame, model_profile=object(),
-        candidate_search=screen, estimator=fit, **CAMERA)
+        candidate_search=screen, proposal_filter=proposal_filter, estimator=fit, **CAMERA)
     assert fit.call_args.args[1] is frame
     assert fit.call_args.kwargs["candidate_search"] is screen
+    assert fit.call_args.kwargs["proposal_filter"] is proposal_filter
     assert {key: fit.call_args.kwargs[key] for key in CAMERA} == CAMERA
     assert not any(key.startswith("expected_head_") for key in fit.call_args.kwargs)
 
@@ -92,6 +95,39 @@ def test_changed_candidate_screen_cannot_reuse_same_image_geometry_cache():
                 current_image_head_fit=holder, candidate_search=CandidateHeadSearch(center, 150.),
                 blur_kernel=1, **{**CAMERA, "camera_fy_px": 640.})
     assert physical.call_count == 2
+    assert not holder.reused
+
+
+def test_current_scan_filter_rechecks_same_image_instead_of_reusing_geometry():
+    cv2 = pytest.importorskip("cv2")
+    from scripts.aufgabe04.perception.stand_axis.current_image_head_fit import CurrentImageHeadFit
+    from scripts.aufgabe04.perception.stand_axis.physical_head_pipeline import fit_physical_head_in_frame
+    from tests.aufgabe04.test_physical_head_pipeline import head_image
+
+    class ScanFilter:
+        accepted = True
+
+        def preview(self, proposal):
+            return True
+
+        def __call__(self, proposal):
+            return self.accepted
+
+    profile = load_measured_physical_stand_model(
+        ROOT / "configs/aufgabe04/stand_models/physical_stand_measured_20260826_v2.json")
+    image, _ = head_image(profile, angle=45.)
+    holder, scan_filter = CurrentImageHeadFit(), ScanFilter()
+    options = dict(model_profile=profile, current_image_head_fit=holder,
+        proposal_filter=scan_filter, blur_kernel=1, **{**CAMERA, "camera_fy_px": 640.})
+    with patch(f"{PIPELINE}.fit_physical_head_in_frame", wraps=fit_physical_head_in_frame) as physical:
+        first, _ = estimate_current_head_geometry(cv2, image, **options)
+        scan_filter.accepted = False
+        second, debug = estimate_current_head_geometry(cv2, image, **options)
+    assert first.usable, first.reason
+    assert not second.usable
+    assert debug.head_acquisition_diagnostics["acquisition"]["proposal"] is None
+    assert physical.call_count == 2
+    assert all(call.kwargs["proposal_filter"] is scan_filter for call in physical.call_args_list)
     assert not holder.reused
 
 

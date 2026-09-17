@@ -51,16 +51,21 @@ def estimate_current_head_geometry(
     input_cache_roi: RoiBounds | None = None,
     current_image_head_fit: CurrentImageHeadFit | None = None,
     candidate_search=None,
+    proposal_filter=None,
     estimator=None,
 ):
     """Run the same full-image cold/tracked metric path in both consumers.
 
     The optional candidate screen rejects incompatible cold-search locations;
     it supplies no rectangle and does not crop or alter the input pixels.
+    A proposal filter may preview rough locators conservatively and associate
+    completed current borders before selection. It supplies no border pixels.
     Optional QR observations decorate the current physical geometry with marker
     evidence; they do not seed its pose. Exact-image caches may avoid repeating
-    work when decoding adds identity to this same image. ``estimator`` is an
-    injection seam for consumer tests; production uses the shared metric fitter.
+    work when decoding adds identity to this same image. A supplied proposal
+    filter disables geometry reuse because scan/clock context can change.
+    ``estimator`` is an injection seam for consumer tests; production uses the
+    shared metric fitter.
     """
 
     fit = estimate_stand_axis_from_metric_model if estimator is None else estimator
@@ -85,4 +90,5 @@ def estimate_current_head_geometry(
         input_cache_roi=input_cache_roi,
         current_image_head_fit=current_image_head_fit,
         candidate_search=candidate_search,
+        proposal_filter=proposal_filter,
     )

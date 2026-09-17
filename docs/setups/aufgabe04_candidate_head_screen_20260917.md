@@ -1,5 +1,11 @@
 # Full-image candidate screening — 2026-09-17
 
+This report records the implementation committed as `ebd73d8`. The subsequent
+[guided-hint implementation](aufgabe04_guided_head_hints_20260917.md) adds current
+scan filtering and a final bounded observed-pair fallback after both searches
+described here complete without a head or unresolved alternative. Results below
+retain their original baseline and experiment scope.
+
 Following the user's request to test early candidate association, camera
 exploration now supplies an optional conservative candidate screen to the
 shared full-image geometry pipeline. The debug viewer leaves this screen unset.
