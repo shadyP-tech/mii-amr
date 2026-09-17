@@ -42,6 +42,20 @@ def test_cold_and_tracked_calls_use_full_image_without_preselected_candidate(hin
     assert "current_head_proposal_corners" not in kwargs
     assert "current_head_proposal_verified" not in kwargs
     assert "current_head_refinement" not in kwargs
+    assert kwargs["candidate_search"] is None
+
+
+def test_optional_candidate_screen_preserves_full_image_and_intrinsics():
+    from scripts.aufgabe04.perception.stand_axis.candidate_head_search import CandidateHeadSearch
+    frame = object()
+    screen = CandidateHeadSearch((340., 260.), 100.)
+    fit = Mock(return_value=(object(), object()))
+    estimate_current_head_geometry(object(), frame, model_profile=object(),
+        candidate_search=screen, estimator=fit, **CAMERA)
+    assert fit.call_args.args[1] is frame
+    assert fit.call_args.kwargs["candidate_search"] is screen
+    assert {key: fit.call_args.kwargs[key] for key in CAMERA} == CAMERA
+    assert not any(key.startswith("expected_head_") for key in fit.call_args.kwargs)
 
 
 def test_same_image_qr_refresh_forwards_caches_and_optional_marker_policy():
@@ -60,6 +74,25 @@ def test_same_image_qr_refresh_forwards_caches_and_optional_marker_policy():
     assert kwargs["current_image_head_fit"] is holder
     assert kwargs["qr_observations"] is qr
     assert kwargs["qr_marker_policy"] == "supplied_only"
+
+
+def test_changed_candidate_screen_cannot_reuse_same_image_geometry_cache():
+    cv2 = pytest.importorskip("cv2")
+    from scripts.aufgabe04.perception.stand_axis.candidate_head_search import CandidateHeadSearch
+    from scripts.aufgabe04.perception.stand_axis.current_image_head_fit import CurrentImageHeadFit
+    from scripts.aufgabe04.perception.stand_axis.physical_head_pipeline import fit_physical_head_in_frame
+    from tests.aufgabe04.test_physical_head_pipeline import head_image
+    profile = load_measured_physical_stand_model(
+        ROOT / "configs/aufgabe04/stand_models/physical_stand_measured_20260826_v2.json")
+    image, _ = head_image(profile, angle=45.)
+    holder = CurrentImageHeadFit()
+    with patch(f"{PIPELINE}.fit_physical_head_in_frame", wraps=fit_physical_head_in_frame) as physical:
+        for center in ((400., 300.), (450., 300.)):
+            estimate_current_head_geometry(cv2, image, model_profile=profile,
+                current_image_head_fit=holder, candidate_search=CandidateHeadSearch(center, 150.),
+                blur_kernel=1, **{**CAMERA, "camera_fy_px": 640.})
+    assert physical.call_count == 2
+    assert not holder.reused
 
 
 def test_tracker_keeps_only_a_bounded_search_hint_and_clears_after_three_misses():

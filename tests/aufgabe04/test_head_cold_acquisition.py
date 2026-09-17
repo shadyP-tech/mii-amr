@@ -127,7 +127,8 @@ class ColdHeadAcquisitionTests(unittest.TestCase):
 
     def test_workload_exhaustion_cannot_choose_first_head(self):
         frame = frame_with_heads()
-        with mock.patch.object(cv2, "findContours", return_value=([np.zeros((4, 1, 2), np.int32)] * (MAX_CONTOURS + 1), None)):
+        viable = np.asarray(((20, 20), (100, 20), (100, 100), (20, 100)), np.int32).reshape(4, 1, 2)
+        with mock.patch.object(cv2, "findContours", return_value=([viable] * (MAX_CONTOURS + 1), None)):
             result = acquire_cold_head_proposal(cv2, frame)
         self.assertEqual(result.reason, "head_cold_acquisition_contour_budget_exceeded")
         self.assertEqual(result.raw_verifications, 0)
@@ -136,6 +137,21 @@ class ColdHeadAcquisitionTests(unittest.TestCase):
         self.assertGreater(oversized.shape[0] * oversized.shape[1], MAX_IMAGE_PIXELS)
         self.assertEqual(acquire_cold_head_proposal(cv2, oversized).reason,
                          "head_cold_acquisition_image_budget_exceeded")
+
+    def test_tiny_background_loops_do_not_exhaust_complete_head_contour_budget(self):
+        frame = np.zeros((500, 700, 3), np.uint8)
+        for row in range(34):
+            for column in range(33):
+                x, y = 10 + column * 10, 10 + row * 10
+                cv2.rectangle(frame, (x, y), (x + 2, y + 2), (255, 255, 255), -1)
+        cv2.rectangle(frame, (450, 200), (550, 300), (200, 200, 200), 2)
+        result = acquire_cold_head_proposal(cv2, frame)
+        details = result.joint_border_diagnostics
+        self.assertGreater(details["input_contours"], MAX_CONTOURS)
+        self.assertGreater(details["short_contours_rejected"], MAX_CONTOURS)
+        self.assertIsNotNone(result.proposal, result.reason)
+        self.assertAlmostEqual(result.proposal.center_u_px, 500., delta=3.)
+        self.assertAlmostEqual(result.proposal.center_v_px, 250., delta=3.)
 
     def test_expired_deadline_does_not_start_cold_contour_search(self):
         with mock.patch("scripts.aufgabe04.perception.stand_axis.head_acquisition_budget.time.monotonic", return_value=2.), \

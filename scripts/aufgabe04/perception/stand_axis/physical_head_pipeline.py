@@ -54,16 +54,16 @@ def classify_physical_head_in_frame(
 def fit_physical_head_in_frame(
     cv2, frame, raw_edges, *, model_profile, camera, timing,
     current_head_proposal_corners=None, current_head_proposal_verified=False, pose_hint=None,
-    current_head_refinement=None,
+    current_head_refinement=None, candidate_search=None,
     expected_head_center_u_px=None, expected_head_center_v_px=None,
     expected_head_height_px=None, max_reprojection_rmse_px=2., min_edge_height_px=8.,
     deadline_monotonic_sec=None,
 ):
     """Return a current head fit without consulting any QR observation.
 
-    A named mission candidate may use its associated prior to locate current
-    borders inside the caller's bounded crop. External projection/association
-    gates still apply. Only an unprojected viewer may use full-image cold search.
+    Callers may supply a full image with an optional conservative candidate
+    screen; that screen changes which locations need comparison, not pixels or
+    refinement. Legacy projected searches retain their existing bounded path.
     A missed search hint may reacquire within the same bounds and deadline.
     Verified pose ambiguity never retries another locator or borrows an angle.
     """
@@ -148,6 +148,7 @@ def fit_physical_head_in_frame(
             cv2, frame, raw_edges=raw_edges,
             model_profile=model_profile,
             refinement_out=refinement_out,
+            candidate_search=candidate_search,
             expected_head_center_u_px=acquisition_expected[0],
             expected_head_center_v_px=acquisition_expected[1],
             expected_head_height_px=acquisition_expected[2],
@@ -158,6 +159,7 @@ def fit_physical_head_in_frame(
         acquisition = acquire_cold_head_proposal(cv2, frame, raw_edges=raw_edges,
                                                model_profile=model_profile,
                                                refinement_out=refinement_out,
+                                               candidate_search=candidate_search,
                                                deadline_monotonic_sec=deadline_monotonic_sec)
     diagnostics["acquisition"] = asdict(acquisition)
     timing.mark("independent_head_acquisition")

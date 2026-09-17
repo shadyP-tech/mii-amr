@@ -51,10 +51,22 @@ def _quadrilateral_edge_support(
     if edge_mask is None or edge_mask.size == 0 or cv2.countNonZero(edge_mask) == 0:
         return _QuadrilateralEdgeSupport(0.0, 0.0, 0.0, 0.0, 0.0, tolerance_px)
 
-    edge_pixels = numpy.asarray(edge_mask) > 0
+    height, width = edge_mask.shape[:2]
+    x0, y0, x1, y1 = 0, 0, width, height
+    if (math.isfinite(tolerance_px) and tolerance_px >= 0.
+            and _corners_inside_image(ordered, edge_mask.shape)):
+        # Support only asks whether distance <= tolerance, not its exact value
+        # farther away. DIST_L2/mask3 has minimum step cost .955: any qualifying
+        # path fits inside this conservative margin, including sample rounding.
+        # Outside-image/invalid inputs retain the original full-image behavior.
+        margin = 2 * math.ceil(tolerance_px) + 2
+        x0 = max(0, math.floor(min(p.u_px for p in ordered)) - margin)
+        y0 = max(0, math.floor(min(p.v_px for p in ordered)) - margin)
+        x1 = min(width, math.ceil(max(p.u_px for p in ordered)) + margin + 1)
+        y1 = min(height, math.ceil(max(p.v_px for p in ordered)) + margin + 1)
+    edge_pixels = numpy.asarray(edge_mask[y0:y1, x0:x1]) > 0
     distance_input = numpy.where(edge_pixels, 0, 255).astype(numpy.uint8)
     distance = cv2.distanceTransform(distance_input, cv2.DIST_L2, 3)
-    height, width = distance.shape[:2]
 
     def segment_support(
         start: ImagePoint,
@@ -77,7 +89,7 @@ def _quadrilateral_edge_support(
         ).astype(numpy.int32)
         xs = numpy.clip(xs, 0, max(0, width - 1))
         ys = numpy.clip(ys, 0, max(0, height - 1))
-        return float(numpy.mean(distance[ys, xs] <= tolerance_px))
+        return float(numpy.mean(distance[ys - y0, xs - x0] <= tolerance_px))
 
     return _QuadrilateralEdgeSupport(
         top=segment_support(top_left, top_right, 0.08, 0.92),
@@ -694,6 +706,45 @@ def _parallel_side_lengths_comparable(
     return max(left_length, right_length) / shorter_length <= maximum_ratio
 
 
+def _raw_edge_points_in_side_bounds(
+    cv2, raw_edges, start, end, *, band_px, intervals, edge_points=None,
+):
+    """Keep an enclosing box of the unchanged finite side corridor.
+
+    This is only a workload filter. The fitter still applies its exact
+    tangent intervals and normal band to these original-coordinate pixels.
+    A one-pixel guard contains rounding at the rectangular envelope; disjoint
+    intervals retain their intervening gap until the original interval test.
+    """
+    import numpy
+
+    dx, dy = end.u_px - start.u_px, end.v_px - start.v_px
+    length = math.hypot(dx, dy)
+    if length <= 1e-6 or not intervals:
+        return numpy.empty((0, 2), dtype=numpy.float64)
+    fractions = [value for interval in intervals for value in interval]
+    first, last = min(fractions), max(fractions)
+    xs = (start.u_px + first * dx, start.u_px + last * dx)
+    ys = (start.v_px + first * dy, start.v_px + last * dy)
+    x_margin, y_margin = band_px * abs(dy) / length, band_px * abs(dx) / length
+    x0, x1 = math.floor(min(xs) - x_margin) - 1, math.ceil(max(xs) + x_margin) + 2
+    y0, y1 = math.floor(min(ys) - y_margin) - 1, math.ceil(max(ys) + y_margin) + 2
+    if edge_points is not None:
+        # Supplied points can have their own order/sub-pixel coordinates. A
+        # boolean subset preserves that order and does not clip to image size.
+        return edge_points[(edge_points[:, 0] >= x0) & (edge_points[:, 0] < x1)
+                           & (edge_points[:, 1] >= y0) & (edge_points[:, 1] < y1)]
+    rows, cols = raw_edges.shape[:2]
+    x0, y0, x1, y1 = max(0, x0), max(0, y0), min(cols, x1), min(rows, y1)
+    if x0 >= x1 or y0 >= y1:
+        return numpy.empty((0, 2), dtype=numpy.float64)
+    locations = cv2.findNonZero(raw_edges[y0:y1, x0:x1])
+    if locations is None:
+        return numpy.empty((0, 2), dtype=numpy.float64)
+    # findNonZero keeps the same row-major order as full-image extraction.
+    return locations.reshape(-1, 2).astype(numpy.float64) + (x0, y0)
+
+
 def _raw_side_evidence_and_corners(
     cv2,
     raw_edges,
@@ -718,11 +769,17 @@ def _raw_side_evidence_and_corners(
     import numpy
 
     evidence_mask = numpy.zeros(raw_edges.shape[:2], dtype=numpy.uint8)
-    if edge_points is None:
+    bounded_metric_sides = prefer_prediction and not recover_parallel_endpoints
+    supplied_edge_points = edge_points
+    if edge_points is None and not bounded_metric_sides:
         locations = cv2.findNonZero(raw_edges)
         if locations is None:
             return evidence_mask, None
         edge_points = locations.reshape(-1, 2).astype(numpy.float64)
+    elif edge_points is None:
+        # Metric intersection fitting has no later endpoint-extension search.
+        # Extract each finite side corridor below, not the whole room image.
+        edge_points = numpy.empty((0, 2), dtype=numpy.float64)
     elif len(edge_points) == 0:
         return evidence_mask, None
     top_left, top_right, bottom_right, bottom_left = order_corners(rough_corners)
@@ -786,6 +843,7 @@ def _raw_side_evidence_and_corners(
         ),
         "left": (top_left, bottom_left, ((0.08, 0.92),), 1.0, 0.55),
     }
+    side_points = {}
 
     def fit_side(name: str, *, fixed_direction=None):
         start, end, intervals, outward_sign, minimum_coverage = side_specs[name]
@@ -799,9 +857,13 @@ def _raw_side_evidence_and_corners(
             if name in ("left", "right")
             else band_px
         )
+        if bounded_metric_sides and name not in side_points:
+            side_points[name] = _raw_edge_points_in_side_bounds(
+                cv2, raw_edges, start, end, band_px=side_band_px, intervals=intervals,
+                edge_points=supplied_edge_points)
         return _fit_raw_edge_side_in_band(
             cv2,
-            edge_points,
+            side_points[name] if bounded_metric_sides else edge_points,
             start,
             end,
             band_px=side_band_px,

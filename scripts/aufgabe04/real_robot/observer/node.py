@@ -1685,6 +1685,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 self.cv2, frame, model_profile=self.stand_model_profile,
                 intrinsics=intrinsics, pose_hint=prediction.pose,
                 projection=projection, expected_head_height_px=expected_head_height_px,
+                max_center_offset_ratio=self.args.backside_registration_max_center_offset_ratio,
                 fallback_attempt=roi_attempts[-1] if roi_attempts else None,
                 cache=qr_decode_cache, budget=qr_acquisition_budget,
                 native_decoder=lambda crop: detect_native_qr_observations_bgr(crop, self.cv2),
@@ -1705,6 +1706,9 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 "policy": "shared_viewer_full_frame_geometry",
                 "hint_used": prediction.pose is not None,
                 "acquisition_before_candidate_association": True,
+                "candidate_screen_before_cold_selection": bool(
+                    (tracking_evaluation.qr_decode_metadata or {}).get("candidate_screen")),
+                "current_scan_association_after_geometry": True,
                 "measurement_reused": False, "motion_authorized": False,
             }
             head_acquisition_metadata = dict(current_view.debug.head_acquisition_diagnostics or {})

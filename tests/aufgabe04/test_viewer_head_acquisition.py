@@ -53,8 +53,8 @@ def evaluate(scene, *, native=None, full=None, available=2., clock=None, **chang
     budget = QrAcquisitionPolicy().begin_frame(target_key="candidate", image_stamp_sec=10.,
         started_ros_sec=10., started_monotonic_sec=10., max_sensor_age_sec=available)
     options = dict(model_profile=profile, intrinsics=intrinsics, pose_hint=None,
-        # Deliberately displaced projection: it must not crop or seed geometry.
-        projection=OpticalProjection(200., 200., .5, height, True),
+        # Displacement stays inside association bounds; it must not crop or seed geometry.
+        projection=OpticalProjection(340., 260., .5, height, True),
         expected_head_height_px=height, fallback_attempt=None, cache=RoiQrDecodeCache(),
         budget=budget, native_decoder=native or (lambda crop: ()),
         full_decoder=full or (lambda *args: ()), deadline_monotonic_sec=None,
@@ -70,7 +70,7 @@ def classified(scene, result, **changes):
     return classify_viewer_head(result, **options)
 
 
-def test_geometry_uses_original_image_intrinsics_and_no_candidate_hint(scene):
+def test_geometry_uses_original_image_intrinsics_and_only_a_conservative_candidate_screen(scene):
     result, estimator = evaluate(scene, native=lambda crop: (QR,))
     estimator.assert_called_once()
     assert estimator.call_args.args[1] is scene[0]
@@ -81,11 +81,24 @@ def test_geometry_uses_original_image_intrinsics_and_no_candidate_hint(scene):
     assert options["qr_marker_policy"] == "disabled"
     assert not any(key.startswith("expected_head_") for key in options)
     assert "current_head_proposal_corners" not in options
+    assert options["candidate_search"].center == (340., 260.)
+    assert options["candidate_search"].height == scene[3]
+    assert result.qr_decode_metadata["candidate_screen"]["supplies_corners"] is False
     assert result.frame is scene[0]
     assert result.attempt.source == VIEWER_HEAD_SOURCE
     assert result.attempt.roi == ImageRoi(0, 0, 800, 600, scene[3])
     assert result.estimate is scene[4][0]
     assert result.debug.model_pose is scene[4][1].model_pose
+
+
+@pytest.mark.parametrize("projection", (None,
+    OpticalProjection(math.nan, 260., .5, 100., False),
+    OpticalProjection(340., 260., -.5, 100., True)))
+def test_invalid_projection_keeps_unscreened_full_image_geometry(scene, projection):
+    result, estimator = evaluate(scene, projection=projection, native=lambda crop: (QR,))
+    assert estimator.call_args.args[1] is scene[0]
+    assert estimator.call_args.kwargs["candidate_search"] is None
+    assert result.qr_decode_metadata["candidate_screen"] is None
 
 
 def test_default_clock_resolves_current_monotonic_seam(scene):

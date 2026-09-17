@@ -91,6 +91,7 @@ def estimate_stand_axis_from_metric_model(
     current_head_proposal_verified: bool = False,
     current_head_refinement=None,
     current_image_head_fit: CurrentImageHeadFit | None = None,
+    candidate_search=None,
     deadline_monotonic_sec: float | None = None,
     qr_marker_policy: str = "auto",
 ) -> tuple[StandAxisImageEstimate, StandAxisEdgeDebugArtifacts]:
@@ -165,6 +166,7 @@ def estimate_stand_axis_from_metric_model(
                 current_head_proposal_corners=head_proposal,
                 current_head_proposal_verified=current_head_proposal_verified,
                 current_head_refinement=current_head_refinement,
+                candidate_search=candidate_search,
                 pose_hint=pose_hint,
                 expected_head_center_u_px=expected_head_center_u_px,
                 expected_head_center_v_px=expected_head_center_v_px,
@@ -181,6 +183,7 @@ def estimate_stand_axis_from_metric_model(
                 frame, context=(
                     id(cv2), model_profile, camera, pose_hint, head_proposal, input_cache_roi,
                     current_head_proposal_verified, current_head_refinement,
+                    candidate_search,
                     edge_preprocess, blur_kernel, canny_low, canny_high,
                     expected_head_center_u_px, expected_head_center_v_px,
                     expected_head_height_px, max_reprojection_rmse_px, min_edge_height_px,

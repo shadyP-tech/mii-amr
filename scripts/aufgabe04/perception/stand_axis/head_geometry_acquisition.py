@@ -2,8 +2,9 @@
 
 Callers supply the full rectified image and its corresponding intrinsics. A
 previous verified pose is only a bounded search hint; the metric pipeline fits
-every observation from current pixels. Candidate projection and QR identity
-binding belong after acquisition and cannot select a different input border.
+every observation from current pixels. An optional candidate screen excludes
+incompatible cold-search hints without changing the image or supplying corners.
+Current candidate association and QR identity binding remain separate gates.
 """
 
 from __future__ import annotations
@@ -49,11 +50,13 @@ def estimate_current_head_geometry(
     input_cache: MetricModelInputCache | None = None,
     input_cache_roi: RoiBounds | None = None,
     current_image_head_fit: CurrentImageHeadFit | None = None,
+    candidate_search=None,
     estimator=None,
 ):
     """Run the same full-image cold/tracked metric path in both consumers.
 
-    No candidate center, expected scale or preselected rectangle is supplied.
+    The optional candidate screen rejects incompatible cold-search locations;
+    it supplies no rectangle and does not crop or alter the input pixels.
     Optional QR observations decorate the current physical geometry with marker
     evidence; they do not seed its pose. Exact-image caches may avoid repeating
     work when decoding adds identity to this same image. ``estimator`` is an
@@ -81,4 +84,5 @@ def estimate_current_head_geometry(
         input_cache=input_cache,
         input_cache_roi=input_cache_roi,
         current_image_head_fit=current_image_head_fit,
+        candidate_search=candidate_search,
     )

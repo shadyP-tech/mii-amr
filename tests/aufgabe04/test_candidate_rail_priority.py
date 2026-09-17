@@ -32,12 +32,17 @@ class CandidateRailPriorityTests(unittest.TestCase):
         return frame, raw
 
     def test_complete_candidate_rail_hint_survives_the_fixed_clutter_quota(self):
+        self.assert_complete_candidate_rails(search_bounds=HeadSearchBounds.optional(250., 150., 100., 1.5, .3))
+
+    def test_full_image_scale_priority_keeps_complete_rails_without_crop(self):
+        self.assert_complete_candidate_rails(preferred_head_height_px=100.)
+
+    def assert_complete_candidate_rails(self, **search_options):
         frame, raw = self.scene()
-        bounds = HeadSearchBounds.optional(250., 150., 100., 1.5, .3)
         groups = []
         hints, counts = _rail_endpoint_hints(
             cv2, cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), raw,
-            search_bounds=bounds, rail_groups_out=groups)
+            rail_groups_out=groups, **search_options)
         self.assertEqual(counts, (MAX_RAILS_PER_DIRECTION, MAX_RAILS_PER_DIRECTION))
         # Check the actual detected geometry, without prescribing ordering or
         # a particular line detector. All four exterior rails must remain

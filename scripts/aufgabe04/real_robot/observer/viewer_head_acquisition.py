@@ -10,6 +10,7 @@ import math
 import time
 
 from scripts.aufgabe04.perception.stand_axis.head_geometry_acquisition import estimate_current_head_geometry
+from scripts.aufgabe04.perception.stand_axis.candidate_head_search import CandidateHeadSearch
 from scripts.aufgabe04.perception.stand_axis.head_backside_classification import classify_current_head_backside
 from scripts.aufgabe04.perception.stand_axis.marker_work_schedule import (
     MIN_NATIVE_MARKER_BUDGET_SEC, current_head_available_for_markers,
@@ -70,6 +71,7 @@ def evaluate_viewer_head(
     expected_head_height_px, fallback_attempt, cache, budget, native_decoder,
     full_decoder, deadline_monotonic_sec, edge_preprocess="channel_union",
     canny_low=20, canny_high=60, estimator=None, now=None,
+    max_center_offset_ratio=1.5,
 ):
     """Measure full-frame geometry once, returning neutral side classification.
 
@@ -82,6 +84,12 @@ def evaluate_viewer_head(
     if frame.shape[:2] != (intrinsics.height_px, intrinsics.width_px):
         raise ValueError("viewer head frame must match its full-image intrinsics")
     started = now()
+    candidate_search = CandidateHeadSearch.optional(
+        getattr(projection, "u_px", None), getattr(projection, "v_px", None),
+        expected_head_height_px, max_center_offset_ratio=max_center_offset_ratio)
+    depth = getattr(projection, "depth_m", None)
+    if depth is None or not math.isfinite(depth) or depth <= 0.:
+        candidate_search = None
     estimate, debug = estimate_current_head_geometry(
         cv2, frame, model_profile=model_profile,
         camera_fx_px=intrinsics.fx_px, camera_fy_px=intrinsics.fy_px,
@@ -89,6 +97,7 @@ def evaluate_viewer_head(
         pose_hint=pose_hint, edge_preprocess=edge_preprocess,
         canny_low=canny_low, canny_high=canny_high,
         deadline_monotonic_sec=deadline_monotonic_sec, estimator=estimator,
+        candidate_search=candidate_search,
     )
     geometry_completed = now()
     geometry_ms = (geometry_completed-started)*1000.
@@ -103,6 +112,7 @@ def evaluate_viewer_head(
     observations, qr_detected, marker_verified, detection_scale = None, None, None, None
     marker_reason = "head_unavailable_marker_unchecked" if not complete_head else "qr_marker_processing_budget_exhausted"
     metadata = dict(performed=False, geometry_first=True, geometry_scope="full_image",
+        candidate_screen=None if candidate_search is None else candidate_search.diagnostics(),
         geometry_completed_monotonic_sec=geometry_completed,
         identity_scope=scope, identity_roi=None if bounds is None else list(bounds),
         current_image_geometry_refit=False, marker_refresh_performed=False,

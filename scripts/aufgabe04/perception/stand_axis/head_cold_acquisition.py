@@ -50,6 +50,32 @@ MIN_LOCATOR_BORDER_SUPPORT = .80
 _LOCATOR = "cold_current_borders"
 
 
+def _distinct_rails(group, direction, *, deadline_monotonic_sec=None):
+    """Keep the same longest-first representatives using bounded array work."""
+    import numpy as np
+
+    ordered = sorted(group, key=lambda item: (-item[0], item[1:]))
+    kept = np.empty((len(ordered), 5), dtype=np.float64)
+    distinct = []
+    for item in ordered:
+        check_head_acquisition_deadline(deadline_monotonic_sec, "cold_rail_merge")
+        length, a, b = item
+        old = kept[:len(distinct)]
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        # Compare only retained representatives. A chain of overlapping
+        # fragments must not merge two rails that fail the original predicate.
+        parallel = (np.abs(dx * (old[:, 4] - old[:, 2])
+                           - dy * (old[:, 3] - old[:, 1])) / (length * old[:, 0])) < .02
+        nearby = np.maximum(np.abs(dx * (old[:, 2] - a[1]) - dy * (old[:, 1] - a[0])),
+                            np.abs(dx * (old[:, 4] - a[1]) - dy * (old[:, 3] - a[0]))) / length < 1.5
+        overlap = np.minimum(b[direction], old[:, 3 + direction]) - np.maximum(a[direction], old[:, 1 + direction])
+        if np.any(parallel & nearby & (overlap > .5 * np.minimum(length, old[:, 0]))):
+            continue
+        kept[len(distinct)] = (length, *a, *b)
+        distinct.append(item)
+    return distinct
+
+
 def _bounded_quad(points, shape):
     corners = order_corners(tuple(ImagePoint(float(x), float(y)) for x, y in points))
     if not _well_formed_quadrilateral(corners):
@@ -69,10 +95,13 @@ def _bounded_quad(points, shape):
 
 
 def _rail_endpoint_hints(cv2, gray, raw_edges, *, deadline_monotonic_sec=None,
-                         search_bounds=None, rail_groups_out=None):
+                         search_bounds=None, rail_groups_out=None,
+                         preferred_head_height_px=None):
     """Pair current line segments, using candidate scale only to order hints."""
     import numpy as np
 
+    preferred_height = (search_bounds.height if search_bounds is not None
+                        else preferred_head_height_px)
     detected = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD).detect(gray)[0]
     check_head_acquisition_deadline(deadline_monotonic_sec, "cold_hough")
     # Equal-luminance colour boundaries can be absent from grayscale LSD while
@@ -109,25 +138,14 @@ def _rail_endpoint_hints(cv2, gray, raw_edges, *, deadline_monotonic_sec=None,
         # LSD and Hough often locate the same rail with different endpoints.
         # Collapse those search duplicates before allocating the fixed budget;
         # the retained longest fragment still supplies only a locator line.
-        distinct = []
-        for item in sorted(group, key=lambda item: (-item[0], item[1:])):
-            check_head_acquisition_deadline(deadline_monotonic_sec, "cold_rail_merge")
-            length, a, b = item
-            delta = (b[0] - a[0], b[1] - a[1])
-            if any(
-                abs(delta[0] * (d[1] - c[1]) - delta[1] * (d[0] - c[0])) / (length * other_length) < .02
-                and max(abs(delta[0] * (p[1] - a[1]) - delta[1] * (p[0] - a[0])) / length for p in (c, d)) < 1.5
-                and min(b[direction], d[direction]) - max(a[direction], c[direction]) > .5 * min(length, other_length)
-                for other_length, c, d in distinct
-            ):
-                continue
-            distinct.append(item)
-        if search_bounds is not None:
+        distinct = _distinct_rails(group, direction,
+                                  deadline_monotonic_sec=deadline_monotonic_sec)
+        if preferred_height is not None:
             # The projected physical size already bounds this candidate. Give
             # its complete rails a slot before small printed-texture fragments;
             # position/scale remain hints, not measured corners or an angle.
             groups[direction][:] = sorted(distinct, key=lambda item: (
-                abs(math.log(item[0] / search_bounds.height)), item[1:]))[:MAX_RAILS_PER_DIRECTION]
+                abs(math.log(item[0] / preferred_height)), item[1:]))[:MAX_RAILS_PER_DIRECTION]
         else:
             # Without a projected candidate, spread the fixed budget across
             # line scales and image thirds so room boundaries cannot monopolize it.
@@ -179,7 +197,8 @@ def acquire_cold_head_proposal(
     expected_head_center_u_px=None, expected_head_center_v_px=None,
     expected_head_height_px=None, max_center_offset_ratio=.70,
     expected_head_height_tolerance_ratio=.35, proposal_filter=None,
-    model_profile=None, refinement_out=None,
+    model_profile=None, refinement_out=None, candidate_search=None,
+    _preferred_rail_height_px=None, _verification_limit=None, _attempt_diagnostics=None,
 ) -> HeadProposalResult:
     """Locate a unique complete head in a bounded image without a prior pose.
 
@@ -193,11 +212,15 @@ def acquire_cold_head_proposal(
     if refinement_out is not None:
         refinement_out.clear()
 
-    diagnostics = {
+    verification_limit = MAX_RAW_VERIFICATIONS if _verification_limit is None else _verification_limit
+    if type(verification_limit) is not int or not 0 <= verification_limit <= MAX_RAW_VERIFICATIONS:
+        raise ValueError("head verification limit must remain within the original work budget")
+    diagnostics = {} if _attempt_diagnostics is None else _attempt_diagnostics
+    diagnostics.update({
         "method": _LOCATOR, "max_image_pixels": MAX_IMAGE_PIXELS,
         "max_contours": MAX_CONTOURS, "max_rails_per_direction": MAX_RAILS_PER_DIRECTION,
         "max_locator_hypotheses": MAX_LOCATOR_HYPOTHESES,
-        "max_raw_verifications": MAX_RAW_VERIFICATIONS,
+        "max_raw_verifications": verification_limit,
         "max_head_image_area_fraction": MAX_HEAD_IMAGE_AREA_FRACTION,
         "min_locator_border_support": MIN_LOCATOR_BORDER_SUPPORT,
         "angle_authorized": False, "motion_authorized": False,
@@ -206,7 +229,9 @@ def acquire_cold_head_proposal(
         "candidate_association_previews": 0, "candidate_association_preview_rejections": 0,
         "physical_frame_refinement": model_profile is not None,
         "resolved_hint_aliases": 0, "raw_border_refinements": 0,
-    }
+        "candidate_screen": None if candidate_search is None else candidate_search.diagnostics(),
+        "candidate_screen_hint_rejections": 0, "candidate_screen_measurement_rejections": 0,
+    })
 
     def result(reason, proposal=None):
         return HeadProposalResult(
@@ -245,15 +270,24 @@ def acquire_cold_head_proposal(
             x, y, width, height = cv2.boundingRect(contour)
             return x >= x0 and y >= y0 and x + width <= x1 and y + height <= y1
         contours = [contour for contour in contours if relevant(contour)]
-    diagnostics["contours"] = len(contours)
-    if len(contours) > MAX_CONTOURS:
-        return result("head_cold_acquisition_contour_budget_exceeded")
-    seeds = []
+    eligible_contours = []
     for contour in contours:
         check_head_acquisition_deadline(deadline_monotonic_sec, "cold_contour_hypotheses")
         perimeter = cv2.arcLength(contour, True)
         if perimeter < 4 * MIN_HEAD_EDGE_PX:
             continue
+        eligible_contours.append((contour, perimeter))
+        if len(eligible_contours) > MAX_CONTOURS:
+            diagnostics["contours"] = len(eligible_contours)
+            return result("head_cold_acquisition_contour_budget_exceeded")
+    # A contour shorter than the minimum four sides could never supply a
+    # valid quad. Tiny blind/radiator/printed-texture loops do not spend the
+    # bounded quadrilateral search budget, but remain in untouched raw edges.
+    diagnostics["short_contours_rejected"] = len(contours) - len(eligible_contours)
+    diagnostics["contours"] = len(eligible_contours)
+    seeds = []
+    for contour, perimeter in eligible_contours:
+        check_head_acquisition_deadline(deadline_monotonic_sec, "cold_contour_hypotheses")
         for fraction in (.015, .025, .04):
             quad = cv2.approxPolyDP(contour, fraction * perimeter, True)
             if len(quad) == 4 and cv2.isContourConvex(quad):
@@ -263,7 +297,8 @@ def acquire_cold_head_proposal(
     rail_groups = []
     hints, rail_counts = _rail_endpoint_hints(cv2, gray, raw_edges,
                                             deadline_monotonic_sec=deadline_monotonic_sec,
-                                            search_bounds=search_bounds, rail_groups_out=rail_groups)
+                                            search_bounds=search_bounds, rail_groups_out=rail_groups,
+                                            preferred_head_height_px=_preferred_rail_height_px)
     diagnostics["horizontal_rails"], diagnostics["vertical_rails"] = rail_counts
     seeds.extend((hint, "paired_current_rails") for hint in hints)
     distance = cv2.distanceTransform(np.where(raw_edges > 0, 0, 255).astype(np.uint8), cv2.DIST_L2, 3)
@@ -271,11 +306,16 @@ def acquire_cold_head_proposal(
     hypotheses = {}
     texture_hints = {}
     association_previews = {}
+    seen_exact_seeds = set()
     for points, locator in seeds:
         check_head_acquisition_deadline(deadline_monotonic_sec, "cold_hypothesis_support")
         corners = _bounded_quad(points, raw_edges.shape)
         if corners is None:
             continue
+        if corners in seen_exact_seeds:
+            diagnostics["exact_duplicate_seeds"] = diagnostics.get("exact_duplicate_seeds", 0) + 1
+            continue
+        seen_exact_seeds.add(corners)
         texture_only = False
         if search_bounds is not None and not search_bounds.accepts(corners):
             diagnostics["candidate_bounds_rejections"] += 1
@@ -298,6 +338,11 @@ def acquire_cold_head_proposal(
             continue
         key = tuple(round(float(value), 2) for value in points.ravel())
         score = .70 * float(min(support)) + .30 * float(np.mean(support))
+        if candidate_search is not None and not candidate_search.accepts_hint(corners):
+            # Keep current supported texture for the unchanged topology graph.
+            # Screening a head location cannot erase its smaller inset anchors.
+            texture_only = True
+            diagnostics["candidate_screen_hint_rejections"] += 1
         if proposal_filter is not None and not texture_only:
             if key not in association_previews:
                 if len(association_previews) >= MAX_LOCATOR_HYPOTHESES:
@@ -366,7 +411,7 @@ def acquire_cold_head_proposal(
                     corners, tested_frame_resolutions, border_families) is not None:
                 diagnostics["resolved_tested_hint_aliases"] = diagnostics.get("resolved_tested_hint_aliases", 0) + 1
                 continue
-            if len(diagnostics["strict_verifications"]) >= MAX_RAW_VERIFICATIONS:
+            if len(diagnostics["strict_verifications"]) >= verification_limit:
                 untested.append((score, corners, locator))
                 continue
             tested_hints.add(hint_key)
@@ -399,6 +444,9 @@ def acquire_cold_head_proposal(
                 if outer is not None:
                     tested_frame_resolutions.append(CurrentFrameResolutionRecord(
                         tuple(corners), tuple(outer.original_corners), proposal, outer))
+                if candidate_search is not None and not candidate_search.accepts_measurement(measured.corners):
+                    diagnostics["candidate_screen_measurement_rejections"] += 1
+                    continue
                 if proposal_filter is not None and not proposal_filter(proposal):
                     diagnostics["candidate_association_rejections"] += 1
                     continue
@@ -409,7 +457,7 @@ def acquire_cold_head_proposal(
     used = len(diagnostics["strict_verifications"])
     # Fragment rescue cannot replace an already accepted/ambiguous physical
     # head and shares the original twelve strict checks, never a fresh budget.
-    if not verified_proposals and search_bounds is not None and rail_groups and used < MAX_RAW_VERIFICATIONS:
+    if not verified_proposals and search_bounds is not None and rail_groups and used < verification_limit:
         rescue = []
         diagnostics["four_rail_rescue_attempted"] = True
         hints = candidate_rail_intersections(cv2, raw_edges, rail_groups, search_bounds,
@@ -481,4 +529,39 @@ def acquire_cold_head_proposal(
         refinement_out["selected"] = capture_current_head_refinement(
             frame_bgr, raw_edges, model_profile=model_profile,
             refinement=measured, outer_recovery=outer, seed=seed)
+    used = len(diagnostics["strict_verifications"])
+    if (reason == "head_proposal_unavailable" and selected is None and not accepted and not uncovered
+            and candidate_search is not None and search_bounds is None
+            and _preferred_rail_height_px is None and used < verification_limit):
+        # The original full-image distribution gets the first decision. Only a
+        # completed candidate miss can spend the *remaining* strict checks on
+        # a size-prioritized distribution; successes and unresolved ambiguity
+        # never retry, and the original deadline and pixels remain binding.
+        retry_diagnostics = {}
+        retried = acquire_cold_head_proposal(
+            cv2, frame_bgr, raw_edges=raw_edges, edge_preprocess=edge_preprocess,
+            canny_low=canny_low, canny_high=canny_high,
+            deadline_monotonic_sec=deadline_monotonic_sec, proposal_filter=proposal_filter,
+            model_profile=model_profile, refinement_out=refinement_out, candidate_search=candidate_search,
+            _preferred_rail_height_px=candidate_search.height,
+            _verification_limit=verification_limit-used, _attempt_diagnostics=retry_diagnostics)
+        # Retain completed checks even if a cooperative deadline interrupts the
+        # retry inside refinement before its decorator can return full details.
+        combined = {**retry_diagnostics, **(retried.joint_border_diagnostics or {})}
+        retry_checks = retry_diagnostics.get("strict_verifications", [])
+        combined.update(
+            max_raw_verifications=verification_limit,
+            strict_verifications=diagnostics["strict_verifications"] + retry_checks,
+            raw_border_refinements=diagnostics["raw_border_refinements"]
+                + retry_diagnostics.get("raw_border_refinements", 0),
+            candidate_size_retry={"performed": True, "initial_reason": reason,
+                "initial_raw_verifications": used, "remaining_raw_verifications": verification_limit-used,
+                "retry_raw_verifications": len(retry_checks),
+                "preferred_rail_height_px": candidate_search.height,
+                "same_raw_image": True, "deadline_extended": False})
+        considered = diagnostics.get("considered_proposals", 0) + retry_diagnostics.get(
+            "considered_proposals", retried.considered_proposals)
+        combined["considered_proposals"] = considered
+        return HeadProposalResult(retried.proposal, retried.reason, considered,
+                                  used + len(retry_checks), _LOCATOR, combined)
     return result(reason, selected)
